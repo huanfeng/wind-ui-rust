@@ -6,13 +6,17 @@ use std::path::PathBuf;
 
 use tiny_skia::Pixmap;
 
+use crate::core::Tree;
 use crate::geometry::{Color, Size};
 use crate::platform::win32::{self, RenderFn, WindowConfig};
+use crate::render::SkiaCanvas;
+use crate::ui::Element;
 
 /// 应用构建器。命令式 API 的根入口。
 pub struct App {
     cfg: WindowConfig,
     render: Option<RenderFn>,
+    content: Option<Element>,
 }
 
 impl App {
@@ -26,6 +30,7 @@ impl App {
                 screenshot: None,
             },
             render: None,
+            content: None,
         }
     }
 
@@ -51,14 +56,33 @@ impl App {
         self
     }
 
-    /// 设置自定义渲染回调（Phase 0）。Phase 1 起改为 `.content(node)`。
+    /// 设置自定义渲染回调（Phase 0 底层接口）。
     pub fn on_render(mut self, f: impl FnMut(&mut Pixmap, Size) + 'static) -> Self {
         self.render = Some(Box::new(f));
         self
     }
 
+    /// 设置控件树根（Phase 1 起的常规入口）。
+    pub fn content(mut self, root: Element) -> Self {
+        self.content = Some(root);
+        self
+    }
+
     pub fn run(self) {
-        let render = self.render.unwrap_or_else(|| Box::new(|_, _| {}));
+        // 优先级：显式 on_render > content 控件树 > 空。
+        let render: RenderFn = if let Some(render) = self.render {
+            render
+        } else if let Some(root) = self.content {
+            let mut tree = Tree::new();
+            tree.root = Some(root.build(&mut tree));
+            Box::new(move |pixmap: &mut Pixmap, size: Size| {
+                tree.layout_root(size);
+                let mut canvas = SkiaCanvas::new(pixmap);
+                tree.paint(&mut canvas);
+            })
+        } else {
+            Box::new(|_, _| {})
+        };
         win32::run(self.cfg, render);
     }
 }
