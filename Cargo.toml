@@ -1,0 +1,33 @@
+[package]
+name = "windui"
+version = "0.1.0"
+edition = "2021"
+description = "轻量 Windows 桌面 GUI：Win32 + GDI 呈现 + tiny-skia + DirectWrite"
+license = "MIT"
+
+[dependencies]
+tiny-skia = "0.11"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_DirectWrite",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[[example]]
+name = "fullshowcase"
+path = "examples/fullshowcase/main.rs"

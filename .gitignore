@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+# 截屏产物（按需保留，默认忽略临时输出）
+/artifacts
+*.tmp.png
