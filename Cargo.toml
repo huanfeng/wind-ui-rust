@@ -27,7 +27,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[[example]]
-name = "fullshowcase"
-path = "examples/fullshowcase/main.rs"
