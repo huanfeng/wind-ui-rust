@@ -47,6 +47,7 @@ fn main() {
     let notify = Rc::new(Cell::new(true));
     let beta = Rc::new(Cell::new(false));
     let quality = Rc::new(Cell::new(1usize));
+    let lang = Rc::new(Cell::new(0usize));
     let volume = Rc::new(Cell::new(0.7f32));
     let show_about = Rc::new(Cell::new(std::env::args().any(|a| a == "--dialog")));
 
@@ -61,6 +62,7 @@ fn main() {
                 .spacing(6)
                 .child(row("设备名称", Element::text_input(name.clone(), "输入名称").width_match()))
                 .child(row("访问密码", Element::text_input(pwd.clone(), "输入密码").password().width_match()))
+                .child(row("界面语言", Element::dropdown(vec!["简体中文", "English", "日本語"], lang.clone()).width_match()))
                 .child(row("深色主题", Element::switch(dark.clone())))
                 .child(row("接收通知", Element::checkbox("启用推送通知", notify.clone())))
                 .child(row("测试版", Element::checkbox("加入 Beta 通道", beta.clone()))),
