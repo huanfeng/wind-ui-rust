@@ -5,6 +5,7 @@
 
 pub mod containers;
 pub mod inputs;
+pub mod list;
 pub mod progress;
 pub mod select;
 pub mod stepper;
@@ -21,6 +22,7 @@ use crate::style::Style;
 use crate::text::TextEngine;
 
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
+pub use list::ListRow;
 pub use progress::ProgressBar;
 pub use select::Dropdown;
 pub use stepper::Stepper;
@@ -305,6 +307,20 @@ impl Element {
     /// 数字步进（绑定 `Rc<Cell<f64>>`，带范围与步长；小数位由步长推断）。
     pub fn stepper(value: Rc<Cell<f64>>, min: f64, max: f64, step: f64) -> Self {
         Self::base(Layout::None).widget(stepper::Stepper::new(value, min, max, step))
+    }
+
+    /// 单选列表（绑定 `Rc<Cell<usize>>` 选中索引 + 行标签）。可滚动；
+    /// 外观（背景/圆角/边框）由调用方在返回的滚动容器上设置。
+    ///
+    /// 已知限制：每行均可聚焦，长列表会拉长 Tab 焦点链（用户需多次 Tab 跨过）。
+    /// 后续可改为整列表单一 tab-stop + 方向键内部移动。
+    pub fn list(items: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+        let mut scroll = Self::scroll().fill();
+        for (i, it) in items.into_iter().enumerate() {
+            let row = list::ListRow::new(it.into(), selected.clone(), i);
+            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match().height(list::ROW_H));
+        }
+        scroll
     }
 
     /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。

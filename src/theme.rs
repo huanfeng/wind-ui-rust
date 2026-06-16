@@ -322,6 +322,31 @@ impl StepperTheme {
     }
 }
 
+/// 列表覆盖层。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ListTheme {
+    pub text: Option<Color>,
+    pub selected_bg: Option<Color>,
+    pub selected_text: Option<Color>,
+    pub hover_bg: Option<Color>,
+}
+
+impl ListTheme {
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(p.text)
+    }
+    pub fn selected_bg(&self, p: &Palette) -> Color {
+        self.selected_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+    }
+    pub fn selected_text(&self, p: &Palette) -> Color {
+        self.selected_text.unwrap_or(p.accent)
+    }
+    pub fn hover_bg(&self, p: &Palette) -> Color {
+        self.hover_bg.unwrap_or(p.surface_alt)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -336,6 +361,7 @@ pub struct Theme {
     pub tab: TabTheme,
     pub progress: ProgressTheme,
     pub stepper: StepperTheme,
+    pub list: ListTheme,
 }
 
 impl Theme {

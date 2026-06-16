@@ -125,6 +125,7 @@ fn main() {
     let prog = Rc::new(Cell::new(0.45f32));
     let qty = Rc::new(Cell::new(3.0f64));
     let zoom = Rc::new(Cell::new(1.0f64));
+    let picked = Rc::new(Cell::new(1usize));
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -145,6 +146,17 @@ fn main() {
                 .spacing(10)
                 .child(row("数量", Element::stepper(qty.clone(), 0.0, 99.0, 1.0).width(120)))
                 .child(row("缩放", Element::stepper(zoom.clone(), 0.5, 3.0, 0.25).width(120))),
+        ))
+        .child(card(
+            "列表",
+            Element::list(
+                vec!["收件箱", "已发送", "草稿箱", "垃圾邮件", "归档", "重要", "已加星标"],
+                picked.clone(),
+            )
+            .height(160)
+            .width_match()
+            .background(Color::hex(0xF6F8FA))
+            .corner(8.0),
         ));
     let components = Element::scroll().fill().child(components_body);
 

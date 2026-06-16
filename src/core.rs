@@ -1534,6 +1534,29 @@ mod tests {
     }
 
     #[test]
+    fn list_click_selects_row() {
+        let sel = Rc::new(Cell::new(0usize));
+        let root = Element::col().width(200).height(200).child(
+            Element::list(vec!["A", "B", "C"], sel.clone()).width_match().height(200),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 200), &mut te);
+        // list 是 children[0]=滚动容器，其子为各行。
+        let scroll = tree.get(id).unwrap().children[0];
+        let rows = tree.get(scroll).unwrap().children.clone();
+        assert_eq!(rows.len(), 3, "三行");
+        let b = tree.abs_bounds(rows[1]);
+        let c = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, c), &mut h, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, c), &mut h, &mut cap);
+        assert_eq!(sel.get(), 1, "点击第二行应选中索引 1");
+    }
+
+    #[test]
     fn stepper_buttons_adjust_and_clamp() {
         let v = Rc::new(Cell::new(2.0f64));
         let root = Element::col()
