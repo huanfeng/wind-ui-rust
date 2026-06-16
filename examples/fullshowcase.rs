@@ -121,10 +121,32 @@ fn main() {
                 .child(Element::button("打开对话框").on_click(move |_| about_show.set(true))),
         ));
 
+    // 控件页（新控件集中展示，内容可滚动便于后续扩充）。
+    let prog = Rc::new(Cell::new(0.45f32));
+    let components_body = Element::col()
+        .width_match()
+        .spacing(14)
+        .child(card(
+            "进度条",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(Element::label("确定 45%").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::progress(prog.clone()).width_match())
+                .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::progress_indeterminate().width_match()),
+        ));
+    let components = Element::scroll().fill().child(components_body);
+
     let tab = Rc::new(Cell::new(0usize));
     let tabs = Element::tabs(
         tab.clone(),
-        vec![("设置", settings), ("历史", Element::col().fill().child(list)), ("关于", about)],
+        vec![
+            ("设置", settings),
+            ("控件", components),
+            ("历史", Element::col().fill().child(list)),
+            ("关于", about),
+        ],
     );
 
     // 关于对话框
