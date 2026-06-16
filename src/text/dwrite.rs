@@ -1,10 +1,13 @@
-//! DirectWrite 文字引擎：排版 + 灰度 AA 字形位图，合成进 tiny-skia pixmap。
+//! DirectWrite 文字引擎：排版 + 真背景合成，绘制进 tiny-skia pixmap。
 //!
-//! 渲染路径（方案 A）：
+//! 渲染路径（真背景合成，gamma 由 DirectWrite 用系统校准参数自行处理）：
 //! 1. `IDWriteTextLayout` 排版，`GetMetrics` 取尺寸。
-//! 2. `IDWriteGdiInterop::CreateBitmapRenderTarget` 建离屏 GDI 位图（黑底）。
-//! 3. 自实现的 `IDWriteTextRenderer` 回调把字形以**纯白**、**灰度 AA**画到位图。
-//! 4. 读回位图，灰度值即覆盖率（alpha），用真正文字色 over-blend 进 pixmap。
+//! 2. 把目标区域的**真实背景**从 pixmap 拷入离屏 GDI 位图（BGRA）。
+//! 3. 自实现的 `IDWriteTextRenderer` 回调用**文字颜色**在该背景上 `DrawGlyphRun` 抗锯齿混合。
+//! 4. 读回位图，仅把 RGB 被字形改动的像素（含抗锯齿边缘）写回 pixmap，背景像素跳过。
+//!
+//! 注：背景拷入把预乘 RGBA 当直通使用，故仅在**不透明背景**（alpha=255）下颜色精确；
+//! 半透明背景区域的文字颜色为近似（当前 UI 以不透明为主）。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -20,8 +23,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-    DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_STRIKETHROUGH,
-    DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
+    DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
 };
 
 use super::TextEngine;
@@ -51,6 +53,10 @@ pub struct DWriteEngine {
     formats: HashMap<(String, u32), IDWriteTextFormat>,
     /// DPI 缩放因子（逻辑→物理）。
     scale: f32,
+    /// 复用的离屏位图渲染目标（按需扩容），避免每次绘字都创建 COM 对象。
+    bitmap_target: Option<IDWriteBitmapRenderTarget>,
+    bitmap_w: i32,
+    bitmap_h: i32,
 }
 
 impl DWriteEngine {
@@ -59,19 +65,10 @@ impl DWriteEngine {
             let factory: IDWriteFactory =
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).expect("DWriteCreateFactory 失败");
             let gdi_interop = factory.GetGdiInterop().expect("GetGdiInterop 失败");
-            // gamma=2.2(匹配 sRGB，使 AA 边缘过渡感知柔和)，对比度=0.5，
-            // ClearType level=0(纯灰度)，FLAT，NATURAL_SYMMETRIC(对称抗锯齿，最平滑)。
-            // 注：NATURAL_SYMMETRIC 在 GDI 位图路径需 Windows 10 1703+，旧版会回退到
-            // 兼容模式（边缘略硬但不报错）。本框架以 Win10+ 为目标。
-            let params = factory
-                .CreateCustomRenderingParams(
-                    2.2,
-                    0.5,
-                    0.0,
-                    DWRITE_PIXEL_GEOMETRY_FLAT,
-                    DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
-                )
-                .expect("CreateCustomRenderingParams 失败");
+            // 系统默认渲染参数：含用户 ClearType 校准的 gamma/对比度/渲染模式。
+            // 配合"真背景合成"（draw 中把真实背景拷入位图后让 DirectWrite 直接
+            // 在其上抗锯齿混合），gamma 由 DirectWrite 自己正确处理，文字不再发重。
+            let params = factory.CreateRenderingParams().expect("CreateRenderingParams 失败");
             let renderer: IDWriteTextRenderer = GlyphRenderer { params: params.clone() }.into();
             Self {
                 factory,
@@ -79,6 +76,9 @@ impl DWriteEngine {
                 renderer,
                 formats: HashMap::new(),
                 scale: 1.0,
+                bitmap_target: None,
+                bitmap_w: 0,
+                bitmap_h: 0,
             }
         }
     }
@@ -118,6 +118,22 @@ impl DWriteEngine {
         let format = self.format(family, size)?;
         let text_w = wide(text);
         unsafe { self.factory.CreateTextLayout(&text_w, &format, max_w, f32::MAX).ok() }
+    }
+
+    /// 返回复用的位图渲染目标，必要时按历史最大尺寸扩容（减少 COM 重建）。
+    fn ensure_bitmap(&mut self, w: i32, h: i32) -> Option<IDWriteBitmapRenderTarget> {
+        if self.bitmap_target.is_none() || w > self.bitmap_w || h > self.bitmap_h {
+            let nw = w.max(self.bitmap_w).max(1);
+            let nh = h.max(self.bitmap_h).max(1);
+            let brt =
+                unsafe { self.gdi_interop.CreateBitmapRenderTarget(None, nw as u32, nh as u32) }
+                    .ok()?;
+            unsafe { brt.SetPixelsPerDip(1.0).ok() };
+            self.bitmap_target = Some(brt);
+            self.bitmap_w = nw;
+            self.bitmap_h = nh;
+        }
+        self.bitmap_target.clone()
     }
 }
 
@@ -172,29 +188,19 @@ impl TextEngine for DWriteEngine {
             return;
         };
         let mut m = DWRITE_TEXT_METRICS::default();
-        unsafe { layout.GetMetrics(&mut m).ok() };
+        if unsafe { layout.GetMetrics(&mut m) }.is_err() {
+            return;
+        }
         // 位图尺寸钳制在 pixmap 内，省内存并防止超大文本分配失败。
         let tw = (m.width.ceil().max(1.0) as i32).min(pixmap.width() as i32);
         let th = (m.height.ceil().max(1.0) as i32).min(pixmap.height() as i32);
 
-        // 离屏位图渲染字形（白字黑底，灰度 AA）；失败则跳过该文字而非 panic。
-        let brt = match unsafe {
-            self.gdi_interop.CreateBitmapRenderTarget(None, tw as u32, th as u32)
-        } {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-        unsafe { brt.SetPixelsPerDip(1.0).ok() };
-
-        // 把目标位图传给回调，layout.Draw 同步触发 DrawGlyphRun（ctx 在调用期间存活）。
-        let ctx = BitmapCtx { target: brt.clone() };
-        unsafe {
-            layout
-                .Draw(Some(&ctx as *const _ as *const c_void), &self.renderer, 0.0, 0.0)
-                .ok()
+        // 复用的离屏位图渲染目标（按需扩容）；失败则跳过该文字。
+        let Some(brt) = self.ensure_bitmap(tw, th) else {
+            return;
         };
 
-        // 读回位图像素
+        // 取位图内存（DIBSection，BGRA top-down）。
         let dc = unsafe { brt.GetMemoryDC() };
         let hbm = unsafe { GetCurrentObject(dc, OBJ_BITMAP) };
         let mut ds = DIBSECTION::default();
@@ -208,100 +214,114 @@ impl TextEngine for DWriteEngine {
         if got == 0 || ds.dsBm.bmBits.is_null() {
             return;
         }
-        let stride = ds.dsBm.bmWidthBytes;
-        let bmw = ds.dsBm.bmWidth; // 实际分配宽（像素）
-        let bmh = ds.dsBm.bmHeight; // 实际分配高（像素，恒正）
-        let bits = ds.dsBm.bmBits as *const u8;
-        // 用实际位图尺寸钳制遍历上界，杜绝越界读。
+        let stride_px = ds.dsBm.bmWidthBytes / 4; // 每行像素数（含对齐 padding）
+        let bmw = ds.dsBm.bmWidth;
+        let bmh = ds.dsBm.bmHeight;
+        // BitmapRenderTarget 恒为 top-down（bmHeight 正）；防御性断言固化该假设。
+        debug_assert!(bmh > 0, "expected top-down bitmap render target");
+        let bits = ds.dsBm.bmBits as *mut u32;
         let cw = tw.min(bmw);
         let ch = th.min(bmh);
 
-        // 对齐：水平按 align，垂直居中（均在物理 prect 内）。
+        // 文字位图在 pixmap 中的目标位置（物理坐标）。
         let ox = match align {
             Align::Start | Align::Stretch => prect.x,
             Align::Center => prect.x + (prect.w - tw) / 2,
             Align::End => prect.x + prect.w - tw,
         };
-        // 多行文字高于 rect 时不产生负偏移（退化为顶对齐），避免顶部行被裁掉。
         let oy = prect.y + (prect.h - th).max(0) / 2;
+        let pw = pixmap.width() as i32;
+        let ph = pixmap.height() as i32;
 
-        composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color, pclip);
-    }
-}
-
-/// 把灰度覆盖率位图（白字黑底）按 `color` over-blend 进 pixmap（预乘）。
-#[allow(clippy::too_many_arguments)]
-fn composite_coverage(
-    pixmap: &mut Pixmap,
-    bits: *const u8,
-    bw: i32,
-    bh: i32,
-    stride: i32,
-    dst_x: i32,
-    dst_y: i32,
-    color: Color,
-    clip: Option<Rect>,
-) {
-    let pw = pixmap.width() as i32;
-    let ph = pixmap.height() as i32;
-    let px = pixmap.pixels_mut();
-    let ca = color.a as f32 / 255.0;
-    for ry in 0..bh {
-        let dy = dst_y + ry;
-        if dy < 0 || dy >= ph {
-            continue;
-        }
-        // 裁剪：视口外的行整体跳过。
-        if let Some(c) = clip {
-            if dy < c.y || dy >= c.y + c.h {
-                continue;
-            }
-        }
-        // IDWriteBitmapRenderTarget 的像素存储固定为 top-down（buffer 首行=图像顶行），
-        // 与 GetObjectW 报告的 biHeight 符号无关——故行序直接对应，不按 biHeight 翻转。
-        let sy = ry;
-        for rx in 0..bw {
-            let dx = dst_x + rx;
-            if dx < 0 || dx >= pw {
-                continue;
-            }
-            if let Some(c) = clip {
-                if dx < c.x || dx >= c.x + c.w {
-                    continue;
+        // 1. 把真实背景从 pixmap 拷入位图（BGRA）；DirectWrite 将在其上抗锯齿混合，
+        //    gamma 由 DirectWrite 自己正确处理（不再由我们反推覆盖率）。
+        {
+            let px = pixmap.pixels();
+            for y in 0..ch {
+                let sy = oy + y;
+                for x in 0..cw {
+                    let sx = ox + x;
+                    let off = (y * stride_px + x) as usize;
+                    let bgra = if sx >= 0 && sx < pw && sy >= 0 && sy < ph {
+                        let p = px[(sy * pw + sx) as usize];
+                        // 预乘 RGBA → BGRA（不透明像素预乘=直通；半透明近似）
+                        ((p.alpha() as u32) << 24)
+                            | ((p.red() as u32) << 16)
+                            | ((p.green() as u32) << 8)
+                            | (p.blue() as u32)
+                    } else {
+                        0
+                    };
+                    unsafe { bits.add(off).write_unaligned(bgra) };
                 }
             }
-            // BGRA：取 R 通道作灰度覆盖率（灰度 AA 下 R=G=B）
-            let cov = unsafe { *bits.add((sy * stride + rx * 4 + 2) as usize) };
-            if cov == 0 {
-                continue;
-            }
-            let a = (cov as f32 / 255.0) * ca;
-            if a <= 0.0 {
-                continue;
-            }
-            let idx = (dy * pw + dx) as usize;
-            let d = px[idx];
-            let inv = 1.0 - a;
-            // 预乘 over：out = src_premul + dst*(1-a)
-            let na = (a * 255.0 + d.alpha() as f32 * inv).round();
-            let nr = (color.r as f32 * a + d.red() as f32 * inv).round().min(na);
-            let ng = (color.g as f32 * a + d.green() as f32 * inv).round().min(na);
-            let nb = (color.b as f32 * a + d.blue() as f32 * inv).round().min(na);
-            if let Some(p) =
-                PremultipliedColorU8::from_rgba(nr as u8, ng as u8, nb as u8, na as u8)
-            {
-                px[idx] = p;
+        }
+
+        // 2. 用文字色在背景上 DrawGlyphRun（layout.Draw 同步执行，ctx 在调用期间存活）。
+        let colorref =
+            COLORREF(((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32));
+        let ctx = BitmapCtx { target: brt.clone(), color: colorref };
+        unsafe {
+            layout
+                .Draw(Some(&ctx as *const _ as *const c_void), &self.renderer, 0.0, 0.0)
+                .ok()
+        };
+
+        // 3. 读回：RGB 被字形改动的像素（含抗锯齿边缘）写回 pixmap；背景像素跳过。
+        {
+            let px = pixmap.pixels_mut();
+            for y in 0..ch {
+                let dy = oy + y;
+                if dy < 0 || dy >= ph {
+                    continue;
+                }
+                if let Some(c) = pclip {
+                    if dy < c.y || dy >= c.y + c.h {
+                        continue;
+                    }
+                }
+                for x in 0..cw {
+                    let dx = ox + x;
+                    if dx < 0 || dx >= pw {
+                        continue;
+                    }
+                    if let Some(c) = pclip {
+                        if dx < c.x || dx >= c.x + c.w {
+                            continue;
+                        }
+                    }
+                    let off = (y * stride_px + x) as usize;
+                    let new = unsafe { bits.add(off).read_unaligned() };
+                    let idx = (dy * pw + dx) as usize;
+                    let d = px[idx];
+                    let nb = (new & 0xFF) as u8;
+                    let ng = ((new >> 8) & 0xFF) as u8;
+                    let nr = ((new >> 16) & 0xFF) as u8;
+                    // RGB 未变 = 背景未被字形覆盖，保持原预乘值。
+                    if nr == d.red() && ng == d.green() && nb == d.blue() {
+                        continue;
+                    }
+                    // 文字像素：DirectWrite 输出的直通色按背景 alpha 预乘后写回。
+                    let a = d.alpha() as u32;
+                    let pr = (nr as u32 * a / 255) as u8;
+                    let pg = (ng as u32 * a / 255) as u8;
+                    let pb = (nb as u32 * a / 255) as u8;
+                    if let Some(p) = PremultipliedColorU8::from_rgba(pr, pg, pb, a as u8) {
+                        px[idx] = p;
+                    }
+                }
             }
         }
     }
 }
 
-/// 传给 layout.Draw 的客户端上下文：目标位图。
+/// 传给 layout.Draw 的客户端上下文：目标位图 + 文字颜色。
 struct BitmapCtx {
     target: IDWriteBitmapRenderTarget,
+    color: COLORREF,
 }
 
-/// 自实现的文字渲染回调：把字形转发到位图渲染目标（纯白）。
+/// 自实现的文字渲染回调：把字形以文字色转发到位图渲染目标。
 #[implement(IDWriteTextRenderer)]
 struct GlyphRenderer {
     params: IDWriteRenderingParams,
@@ -324,13 +344,14 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         }
         let ctx = unsafe { &*(clientdrawingcontext as *const BitmapCtx) };
         unsafe {
+            // 用文字颜色直接在已拷入真实背景的位图上抗锯齿混合。
             let _ = ctx.target.DrawGlyphRun(
                 baselineoriginx,
                 baselineoriginy,
                 measuringmode,
                 glyphrun,
                 &self.params,
-                COLORREF(0x00FF_FFFF), // 纯白
+                ctx.color,
                 None,
             );
         }
