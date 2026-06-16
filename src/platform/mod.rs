@@ -29,4 +29,9 @@ pub trait AppHandler {
     fn capture_active(&self) -> bool {
         false
     }
+    /// OS 抢走指针捕获（Alt+Tab 等）时调用，让逻辑捕获方收尾（如复位拖动态）。
+    /// 返回 true 表示需要重绘。
+    fn on_capture_lost(&mut self) -> bool {
+        false
+    }
 }

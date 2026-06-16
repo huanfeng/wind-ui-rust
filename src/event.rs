@@ -38,6 +38,10 @@ pub enum Key {
     Escape,
     Backspace,
     Space,
+    Left,
+    Right,
+    Up,
+    Down,
     Char(char),
     Other(u32),
 }

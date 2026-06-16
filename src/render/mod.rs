@@ -48,6 +48,8 @@ pub trait Canvas {
         family: Option<&str>,
         size: f32,
     );
+    /// 测量单行文字尺寸（用于光标定位等）。无文字引擎时返回粗略估算。
+    fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size;
 }
 
 /// 构造圆角矩形路径（cubic 贝塞尔逼近四角）。radius<=0 退化为直角矩形。

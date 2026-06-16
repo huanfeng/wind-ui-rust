@@ -28,9 +28,18 @@ pub trait Widget {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::ZERO
     }
-    /// 绘制内容。`bounds`=节点绝对全矩形，`content`=扣除 padding 后的内容矩形。
-    /// 背景/边框由核心层统一绘制；自绘控件（如 Button）可用 `bounds` 画全尺寸背景。
-    fn paint(&self, _bounds: Rect, _content: Rect, _canvas: &mut dyn Canvas, _style: &Style) {}
+    /// 绘制内容。`bounds`=节点绝对全矩形，`content`=扣除 padding 后的内容矩形，
+    /// `focused`=本节点是否持有键盘焦点。背景/边框由核心层统一绘制；
+    /// 自绘控件（如 Button）可用 `bounds` 画全尺寸背景。
+    fn paint(
+        &self,
+        _bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        _canvas: &mut dyn Canvas,
+        _style: &Style,
+    ) {
+    }
     /// 处理命中到本节点的事件，返回是否消费（消费则停止冒泡）。
     fn on_event(&mut self, _ctx: &mut EventCtx, _ev: &Event) -> bool {
         false
@@ -470,7 +479,7 @@ impl Tree {
         }
 
         let content = abs.inset(n.padding);
-        n.widget.paint(abs, content, canvas, &n.style);
+        n.widget.paint(abs, content, n.focused, canvas, &n.style);
 
         // 焦点环：在持焦节点外绘制强调色描边。
         if n.focused {
@@ -800,10 +809,10 @@ fn align_offset(a: Align, avail: i32, size: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{MouseButton, PointerEvent, PointerKind};
+    use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
     use crate::geometry::{Point, Size};
     use crate::ui::Element;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     fn layout(root: Element, w: i32, h: i32) -> Tree {
@@ -954,5 +963,94 @@ mod tests {
             .child(Element::button("B"));
         let tree = layout(root, 300, 50);
         assert_eq!(tree.focusable_order().len(), 2, "应收集到 2 个可聚焦按钮");
+    }
+
+    fn click(tree: &mut Tree, id: NodeId) {
+        let b = tree.abs_bounds(id);
+        let c = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, c), &mut h, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, c), &mut h, &mut cap);
+    }
+
+    #[test]
+    fn checkbox_binds_and_toggles() {
+        let st = Rc::new(Cell::new(false));
+        let root = Element::col()
+            .width(200)
+            .height(60)
+            .padding(5)
+            .child(Element::checkbox("启用", st.clone()));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 60), &mut te);
+        let cb = tree.get(id).unwrap().children[0];
+        click(&mut tree, cb);
+        assert!(st.get(), "点击应选中");
+        click(&mut tree, cb);
+        assert!(!st.get(), "再次点击应取消");
+    }
+
+    #[test]
+    fn radio_group_is_exclusive() {
+        let g = Rc::new(Cell::new(0usize));
+        let root = Element::row()
+            .width(360)
+            .height(40)
+            .padding(5)
+            .spacing(20)
+            .child(Element::radio("A", g.clone(), 0))
+            .child(Element::radio("B", g.clone(), 1));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(360, 40), &mut te);
+        let b1 = tree.get(id).unwrap().children[1];
+        click(&mut tree, b1);
+        assert_eq!(g.get(), 1, "点击第二项应使组值为 1");
+    }
+
+    #[test]
+    fn slider_sets_value_on_press() {
+        let v = Rc::new(Cell::new(0.0f32));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::slider(v.clone()).width(100));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let sl = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(sl);
+        let right = Point::new(b.x + b.w - 1, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, right), &mut h, &mut cap);
+        assert!(v.get() > 0.9, "在最右端按下应使值接近 1，实际 {}", v.get());
+    }
+
+    #[test]
+    fn text_input_edits_via_keys() {
+        let txt = Rc::new(RefCell::new(String::new()));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::text_input(txt.clone(), "ph"));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        let key = |k: Key| KeyEvent { key: k, pressed: true, shift: false };
+        tree.dispatch_key(key(Key::Char('a')), Some(input));
+        tree.dispatch_key(key(Key::Char('中')), Some(input));
+        assert_eq!(&*txt.borrow(), "a中", "应插入字符");
+        tree.dispatch_key(key(Key::Backspace), Some(input));
+        assert_eq!(&*txt.borrow(), "a", "退格应删除一个字符");
     }
 }

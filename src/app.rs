@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
-use crate::event::Key;
-use crate::geometry::{Color, Size};
+use crate::event::{Key, MouseButton, PointerEvent, PointerKind};
+use crate::geometry::{Color, Point, Size};
 use crate::platform::win32::{self, WindowConfig};
 use crate::platform::AppHandler;
 use crate::render::SkiaCanvas;
@@ -199,5 +199,24 @@ impl AppHandler for UiHost {
 
     fn capture_active(&self) -> bool {
         self.capture.is_some()
+    }
+
+    fn on_capture_lost(&mut self) -> bool {
+        // 给捕获节点派发一个远处坐标的合成 Up，复用 Up 语义让其收尾
+        // （Slider 复位拖动、Button 因 inside=false 不误触发），并清逻辑捕获。
+        if self.capture.is_none() {
+            return false;
+        }
+        let ev = PointerEvent {
+            kind: PointerKind::Up,
+            pos: Point::new(-1_000_000, -1_000_000),
+            button: MouseButton::Left,
+        };
+        let mut hover = self.hover;
+        let mut capture = self.capture;
+        let res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
+        self.hover = hover;
+        self.capture = capture;
+        res.repaint
     }
 }

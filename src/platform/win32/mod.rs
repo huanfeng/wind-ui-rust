@@ -22,15 +22,16 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE,
-    VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
+    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
     ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG,
-    SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -345,6 +346,14 @@ unsafe extern "system" fn wnd_proc(
             handle_key(hwnd, wparam);
             LRESULT(0)
         }
+        WM_CHAR => {
+            handle_char(hwnd, wparam);
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            handle_capture_changed(hwnd);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             // 回收 WindowState
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
@@ -360,32 +369,55 @@ unsafe extern "system" fn wnd_proc(
 }
 
 /// 从 lParam 解出客户区坐标，构造并分发指针事件。
+///
+/// 两段式：先借 state 分发事件并读取意图，**释放借用后**再调用会同步重入
+/// WndProc 的 OS API（SetCapture/ReleaseCapture/DestroyWindow），避免 &mut 别名 UB。
 unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
-    let Some(state) = state_from(hwnd) else { return };
     let x = (lparam.0 & 0xffff) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
     let ev = PointerEvent { kind, pos: Point::new(x, y), button };
-    if state.handler.on_pointer(ev) {
+    let (repaint, active, was_capturing, close) = {
+        let Some(state) = state_from(hwnd) else { return };
+        let repaint = state.handler.on_pointer(ev);
+        (repaint, state.handler.capture_active(), state.capturing, state.handler.wants_close())
+    };
+    if repaint {
         let _ = InvalidateRect(hwnd, None, false);
     }
-    // 同步 OS 指针捕获：逻辑捕获开启→SetCapture，关闭→ReleaseCapture，
-    // 确保按下后拖出窗口仍能收到移动/抬起消息。
-    let active = state.handler.capture_active();
-    if active && !state.capturing {
+    // 同步 OS 指针捕获（此处无 state 借用，重入安全）。
+    if active && !was_capturing {
         SetCapture(hwnd);
-        state.capturing = true;
-    } else if !active && state.capturing {
+        if let Some(s) = state_from(hwnd) {
+            s.capturing = true;
+        }
+    } else if !active && was_capturing {
         let _ = ReleaseCapture();
-        state.capturing = false;
+        if let Some(s) = state_from(hwnd) {
+            s.capturing = false;
+        }
     }
-    if state.handler.wants_close() {
+    if close {
         let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// OS 抢走指针捕获（如 Alt+Tab、WM_CAPTURECHANGED）：通知 handler 收尾。
+unsafe fn handle_capture_changed(hwnd: HWND) {
+    let repaint = {
+        let Some(state) = state_from(hwnd) else { return };
+        if !state.capturing {
+            return;
+        }
+        state.capturing = false;
+        state.handler.on_capture_lost()
+    };
+    if repaint {
+        let _ = InvalidateRect(hwnd, None, false);
     }
 }
 
 /// 把 VK 码翻译为框架键并分发。
 unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
-    let Some(state) = state_from(hwnd) else { return };
     let vk = wparam.0 as u16;
     let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
     let key = if vk == VK_TAB.0 {
@@ -398,14 +430,41 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
         Key::Space
     } else if vk == VK_BACK.0 {
         Key::Backspace
+    } else if vk == VK_LEFT.0 {
+        Key::Left
+    } else if vk == VK_RIGHT.0 {
+        Key::Right
+    } else if vk == VK_UP.0 {
+        Key::Up
+    } else if vk == VK_DOWN.0 {
+        Key::Down
     } else {
         Key::Other(vk as u32)
     };
     let ev = KeyEvent { key, pressed: true, shift };
-    if state.handler.on_key(ev) {
+    dispatch_key_event(hwnd, ev);
+}
+
+/// WM_CHAR：已翻译的字符（含 IME/CJK 输入）。控制字符跳过。
+unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
+    let Some(c) = char::from_u32(wparam.0 as u32) else { return };
+    if c.is_control() {
+        return;
+    }
+    let ev = KeyEvent { key: Key::Char(c), pressed: true, shift: false };
+    dispatch_key_event(hwnd, ev);
+}
+
+/// 分发键盘事件（两段式：先借 state 取意图，释放后再调可能重入的 DestroyWindow）。
+unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
+    let (repaint, close) = {
+        let Some(state) = state_from(hwnd) else { return };
+        (state.handler.on_key(ev), state.handler.wants_close())
+    };
+    if repaint {
         let _ = InvalidateRect(hwnd, None, false);
     }
-    if state.handler.wants_close() {
+    if close {
         let _ = DestroyWindow(hwnd);
     }
 }

@@ -3,6 +3,11 @@
 //! 容器（`col`/`row`/`stack`）与叶子（`leaf`、Phase 2 起的 `label` 等）都返回
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
+pub mod inputs;
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use crate::core::{ClickFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
@@ -10,6 +15,8 @@ use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
 use crate::text::TextEngine;
+
+pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 
 /// 文本叶子控件。
 pub struct Label {
@@ -26,7 +33,7 @@ impl Widget for Label {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         text.measure(&self.text, style.font_family.as_deref(), style.font_size)
     }
-    fn paint(&self, _bounds: Rect, content: Rect, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         canvas.draw_text(
             &self.text,
             content,
@@ -77,7 +84,7 @@ impl Widget for Button {
         // 内置左右 16 / 上下 9 的内边距
         Size::new(s.w + 32, s.h + 18)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let color = match self.state {
             BtnState::Normal => self.base,
             BtnState::Hover => self.hover,
@@ -226,6 +233,27 @@ impl Element {
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
         self
+    }
+
+    /// 复选框（绑定 `Rc<Cell<bool>>`）。
+    pub fn checkbox(label: impl Into<String>, state: Rc<Cell<bool>>) -> Self {
+        Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
+    }
+    /// 开关（绑定 `Rc<Cell<bool>>`）。
+    pub fn switch(state: Rc<Cell<bool>>) -> Self {
+        Self::base(Layout::None).widget(Switch::new(state))
+    }
+    /// 单选按钮（共享 `Rc<Cell<usize>>` 组状态 + 本项索引）。
+    pub fn radio(label: impl Into<String>, group: Rc<Cell<usize>>, index: usize) -> Self {
+        Self::base(Layout::None).widget(RadioButton::new(label.into(), group, index))
+    }
+    /// 滑块（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
+    pub fn slider(value: Rc<Cell<f32>>) -> Self {
+        Self::base(Layout::None).widget(Slider::new(value))
+    }
+    /// 单行文本输入（绑定 `Rc<RefCell<String>>`）。
+    pub fn text_input(text: Rc<RefCell<String>>, placeholder: impl Into<String>) -> Self {
+        Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
     }
 
     /// 设置自定义内容控件（叶子）。

@@ -108,6 +108,16 @@ impl Canvas for SkiaCanvas<'_> {
             engine.draw(self.pixmap, text, rect, color, align, family, size);
         }
     }
+
+    fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size {
+        match self.engine.as_deref_mut() {
+            Some(engine) => engine.measure(text, family, size),
+            None => crate::geometry::Size::new(
+                (text.chars().count() as f32 * size * 0.6).ceil() as i32,
+                size.ceil() as i32,
+            ),
+        }
+    }
 }
 
 fn to_sk_color(c: Color) -> tiny_skia::Color {
