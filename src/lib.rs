@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod core;
+pub mod event;
 pub mod geometry;
 pub mod platform;
 pub mod render;

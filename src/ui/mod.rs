@@ -3,9 +3,10 @@
 //! 容器（`col`/`row`/`stack`）与叶子（`leaf`、Phase 2 起的 `label` 等）都返回
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
-use crate::core::{EmptyWidget, Layout, Node, NodeId, Tree, Widget};
+use crate::core::{ClickFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
+use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
-use crate::render::Canvas;
+use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -25,7 +26,7 @@ impl Widget for Label {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         text.measure(&self.text, style.font_family.as_deref(), style.font_size)
     }
-    fn paint(&self, content: Rect, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, _bounds: Rect, content: Rect, canvas: &mut dyn Canvas, style: &Style) {
         canvas.draw_text(
             &self.text,
             content,
@@ -34,6 +35,129 @@ impl Widget for Label {
             style.font_family.as_deref(),
             style.font_size,
         );
+    }
+}
+
+/// 按钮三态。
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum BtnState {
+    Normal,
+    Hover,
+    Press,
+}
+
+/// 交互按钮：hover/press 三态 + 点击/回车回调。
+pub struct Button {
+    label: String,
+    state: BtnState,
+    base: Color,
+    hover: Color,
+    press: Color,
+    text_color: Color,
+    on_click: Option<ClickFn>,
+}
+
+impl Button {
+    pub fn new(label: String) -> Self {
+        Self {
+            label,
+            state: BtnState::Normal,
+            base: Color::hex(0x4C8BF5),
+            hover: Color::hex(0x6BA3FF),
+            press: Color::hex(0x3A6FD0),
+            text_color: Color::WHITE,
+            on_click: None,
+        }
+    }
+}
+
+impl Widget for Button {
+    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        let s = text.measure(&self.label, style.font_family.as_deref(), style.font_size);
+        // 内置左右 16 / 上下 9 的内边距
+        Size::new(s.w + 32, s.h + 18)
+    }
+    fn paint(&self, bounds: Rect, _content: Rect, canvas: &mut dyn Canvas, style: &Style) {
+        let color = match self.state {
+            BtnState::Normal => self.base,
+            BtnState::Hover => self.hover,
+            BtnState::Press => self.press,
+        };
+        let r = style.corner_radius.max(6.0);
+        canvas.fill_round_rect(
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+            r,
+            &Paint::fill(color),
+        );
+        canvas.draw_text(
+            &self.label,
+            bounds,
+            self.text_color,
+            Align::Center,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
+    }
+    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        match ev {
+            Event::Pointer(p) => match p.kind {
+                PointerKind::Enter => {
+                    if self.state == BtnState::Normal {
+                        self.state = BtnState::Hover;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Leave => {
+                    if self.state != BtnState::Press {
+                        self.state = BtnState::Normal;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Down => {
+                    self.state = BtnState::Press;
+                    ctx.capture();
+                    ctx.request_focus();
+                    ctx.mark_dirty();
+                    true
+                }
+                PointerKind::Up => {
+                    let was_press = self.state == BtnState::Press;
+                    let inside = ctx.bounds().contains(p.pos);
+                    self.state = if inside { BtnState::Hover } else { BtnState::Normal };
+                    ctx.release_capture();
+                    ctx.mark_dirty();
+                    if was_press && inside {
+                        if let Some(cb) = self.on_click.as_mut() {
+                            cb(ctx);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+            Event::Key(k) => {
+                if k.pressed && (k.key == Key::Enter || k.key == Key::Space) {
+                    if let Some(cb) = self.on_click.as_mut() {
+                        cb(ctx);
+                    }
+                    ctx.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    fn focusable(&self) -> bool {
+        true
+    }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
     }
 }
 
@@ -50,6 +174,7 @@ pub struct Element {
     widget: Box<dyn Widget>,
     children: Vec<Element>,
     visible: bool,
+    click: Option<ClickFn>,
 }
 
 impl Element {
@@ -66,6 +191,7 @@ impl Element {
             widget: Box::new(EmptyWidget),
             children: Vec::new(),
             visible: true,
+            click: None,
         }
     }
 
@@ -89,6 +215,17 @@ impl Element {
     /// 文本标签。
     pub fn label(text: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(Label::new(text.into()))
+    }
+
+    /// 交互按钮。配合 `.on_click(...)` 设置回调。
+    pub fn button(label: impl Into<String>) -> Self {
+        Self::base(Layout::None).widget(Button::new(label.into()))
+    }
+
+    /// 点击/激活回调（按钮等交互控件）。
+    pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        self.click = Some(Box::new(f));
+        self
     }
 
     /// 设置自定义内容控件（叶子）。
@@ -213,6 +350,11 @@ impl Element {
             _ => None,
         };
         let children = std::mem::take(&mut self.children);
+        // 把 Builder 上的点击回调注入控件（仅交互控件接收）。
+        let mut widget = self.widget;
+        if let Some(f) = self.click {
+            widget.take_click(f);
+        }
         let node = Node {
             parent: None,
             children: Vec::new(),
@@ -224,9 +366,10 @@ impl Element {
             margin: self.margin,
             align: self.align,
             layout: self.layout,
-            widget: self.widget,
+            widget,
             style: self.style,
             visible: self.visible,
+            focused: false,
         };
         let id = tree.insert(node);
         for mut ce in children {

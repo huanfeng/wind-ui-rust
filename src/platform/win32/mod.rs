@@ -14,25 +14,28 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-    GetDC, ReleaseDC, SelectObject, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    GetDC, InvalidateRect, ReleaseDC, SelectObject, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE,
+    VK_TAB,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_NCCREATE, WM_PAINT, WM_SIZE,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG,
+    SW_SHOW, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
-use crate::geometry::{Color, Size};
-
-/// 渲染回调：把当前帧绘制进 `pixmap`（尺寸为 `size`）。
-pub type RenderFn = Box<dyn FnMut(&mut Pixmap, Size)>;
+use super::AppHandler;
+use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+use crate::geometry::{Color, Point, Size};
 
 /// 窗口配置。
 pub struct WindowConfig {
@@ -57,20 +60,20 @@ impl Default for WindowConfig {
 }
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
-pub fn run(cfg: WindowConfig, mut render: RenderFn) {
+pub fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>) {
     if let Some(path) = cfg.screenshot.clone() {
-        run_offscreen(&cfg, &mut render, &path);
+        run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    unsafe { run_windowed(cfg, render) };
+    unsafe { run_windowed(cfg, handler) };
 }
 
 /// 离屏渲染一帧并保存 PNG。无需窗口，适合自动化验证。
-fn run_offscreen(cfg: &WindowConfig, render: &mut RenderFn, path: &PathBuf) {
+fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &PathBuf) {
     let size = Size::new(cfg.width.max(1), cfg.height.max(1));
     let mut pixmap = Pixmap::new(size.w as u32, size.h as u32).expect("分配 pixmap 失败");
     pixmap.fill(to_skia_color(cfg.bg));
-    render(&mut pixmap, size);
+    handler.render(&mut pixmap, size);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -80,8 +83,10 @@ fn run_offscreen(cfg: &WindowConfig, render: &mut RenderFn, path: &PathBuf) {
 
 /// 窗口端运行时状态，指针挂在 HWND 的 GWLP_USERDATA 上。
 struct WindowState {
-    render: RenderFn,
+    handler: Box<dyn AppHandler>,
     bg: Color,
+    /// 当前是否已对窗口调用 OS SetCapture（与 handler 逻辑捕获态同步）。
+    capturing: bool,
     pixmap: Option<Pixmap>,
     // GDI 呈现资源
     memdc: HDC,
@@ -93,10 +98,11 @@ struct WindowState {
 }
 
 impl WindowState {
-    fn new(render: RenderFn, bg: Color) -> Self {
+    fn new(handler: Box<dyn AppHandler>, bg: Color) -> Self {
         Self {
-            render,
+            handler,
             bg,
+            capturing: false,
             pixmap: None,
             memdc: HDC::default(),
             dib: HBITMAP::default(),
@@ -181,7 +187,7 @@ impl WindowState {
         let size = Size::new(self.dib_w, self.dib_h);
         let pixmap = self.pixmap.as_mut().unwrap();
         pixmap.fill(to_skia_color(self.bg));
-        (self.render)(pixmap, size);
+        self.handler.render(pixmap, size);
 
         // pixmap(RGBA 预乘) -> DIB(BGRA)，逐像素交换 R/B
         copy_rgba_to_bgra(pixmap.data(), self.dib_bits, (self.dib_w * self.dib_h) as usize);
@@ -216,7 +222,8 @@ fn copy_rgba_to_bgra(src: &[u8], dst: *mut u32, px_count: usize) {
     unsafe {
         for i in 0..px_count {
             // src 字节序 [R,G,B,A] => u32 = A<<24|B<<16|G<<8|R
-            let p = *src32.add(i);
+            // 用 read_unaligned 避免对 &[u8] 底层指针做未对齐 u32 解引用（规范 UB）。
+            let p = src32.add(i).read_unaligned();
             // 目标 [B,G,R,A] => 交换 byte0 与 byte2
             let swapped = (p & 0xFF00_FF00) | ((p & 0x0000_00FF) << 16) | ((p & 0x00FF_0000) >> 16);
             *dst.add(i) = swapped;
@@ -230,7 +237,7 @@ fn to_skia_color(c: Color) -> tiny_skia::Color {
 
 const CLASS_NAME: PCWSTR = w!("WindUiWindowClass");
 
-unsafe fn run_windowed(cfg: WindowConfig, render: RenderFn) {
+unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
@@ -249,7 +256,7 @@ unsafe fn run_windowed(cfg: WindowConfig, render: RenderFn) {
     debug_assert!(atom != 0, "RegisterClassExW 失败");
 
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
-    let state = Box::new(WindowState::new(render, cfg.bg));
+    let state = Box::new(WindowState::new(handler, cfg.bg));
     let state_ptr = Box::into_raw(state);
 
     let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -310,12 +317,32 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SIZE => {
-            // 标记需要重建缓冲并请求重绘（Phase 0 直接在 paint 内按客户区重建）
-            if let Some(_state) = state_from(hwnd) {
-                // 触发一次重绘
-                use windows::Win32::Graphics::Gdi::InvalidateRect;
-                let _ = InvalidateRect(hwnd, None, false);
-            }
+            // 客户区变化：请求重绘（paint 内按客户区重建缓冲）。
+            let _ = InvalidateRect(hwnd, None, false);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            handle_pointer(hwnd, PointerKind::Move, MouseButton::Left, lparam);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            handle_pointer(hwnd, PointerKind::Down, MouseButton::Left, lparam);
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            handle_pointer(hwnd, PointerKind::Up, MouseButton::Left, lparam);
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN => {
+            handle_pointer(hwnd, PointerKind::Down, MouseButton::Right, lparam);
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            handle_pointer(hwnd, PointerKind::Up, MouseButton::Right, lparam);
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            handle_key(hwnd, wparam);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -329,6 +356,57 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 从 lParam 解出客户区坐标，构造并分发指针事件。
+unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
+    let Some(state) = state_from(hwnd) else { return };
+    let x = (lparam.0 & 0xffff) as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+    let ev = PointerEvent { kind, pos: Point::new(x, y), button };
+    if state.handler.on_pointer(ev) {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    // 同步 OS 指针捕获：逻辑捕获开启→SetCapture，关闭→ReleaseCapture，
+    // 确保按下后拖出窗口仍能收到移动/抬起消息。
+    let active = state.handler.capture_active();
+    if active && !state.capturing {
+        SetCapture(hwnd);
+        state.capturing = true;
+    } else if !active && state.capturing {
+        let _ = ReleaseCapture();
+        state.capturing = false;
+    }
+    if state.handler.wants_close() {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// 把 VK 码翻译为框架键并分发。
+unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
+    let Some(state) = state_from(hwnd) else { return };
+    let vk = wparam.0 as u16;
+    let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+    let key = if vk == VK_TAB.0 {
+        Key::Tab
+    } else if vk == VK_RETURN.0 {
+        Key::Enter
+    } else if vk == VK_ESCAPE.0 {
+        Key::Escape
+    } else if vk == VK_SPACE.0 {
+        Key::Space
+    } else if vk == VK_BACK.0 {
+        Key::Backspace
+    } else {
+        Key::Other(vk as u32)
+    };
+    let ev = KeyEvent { key, pressed: true, shift };
+    if state.handler.on_key(ev) {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    if state.handler.wants_close() {
+        let _ = DestroyWindow(hwnd);
     }
 }
 

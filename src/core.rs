@@ -4,11 +4,15 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
-use crate::geometry::{Insets, Point, Rect, Size};
+use crate::event::{Event, KeyEvent, PointerEvent, PointerKind};
+use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension, MeasureMode, MeasureSpec};
 use crate::style::Style;
 use crate::text::TextEngine;
+
+/// 点击/激活回调类型。
+pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
 
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,8 +28,19 @@ pub trait Widget {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::ZERO
     }
-    /// 在已扣除 padding 的绝对矩形内绘制内容。背景/边框由核心层统一绘制。
-    fn paint(&self, _content: Rect, _canvas: &mut dyn Canvas, _style: &Style) {}
+    /// 绘制内容。`bounds`=节点绝对全矩形，`content`=扣除 padding 后的内容矩形。
+    /// 背景/边框由核心层统一绘制；自绘控件（如 Button）可用 `bounds` 画全尺寸背景。
+    fn paint(&self, _bounds: Rect, _content: Rect, _canvas: &mut dyn Canvas, _style: &Style) {}
+    /// 处理命中到本节点的事件，返回是否消费（消费则停止冒泡）。
+    fn on_event(&mut self, _ctx: &mut EventCtx, _ev: &Event) -> bool {
+        false
+    }
+    /// 是否可获得键盘焦点（参与 Tab 导航）。
+    fn focusable(&self) -> bool {
+        false
+    }
+    /// 接收 Builder 传入的点击回调（仅交互控件实现）。
+    fn take_click(&mut self, _f: ClickFn) {}
 }
 
 /// 容器/纯样式节点占位控件。
@@ -56,6 +71,8 @@ pub struct Node {
     pub widget: Box<dyn Widget>,
     pub style: Style,
     pub visible: bool,
+    /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
+    pub focused: bool,
 }
 
 struct Slot {
@@ -453,11 +470,282 @@ impl Tree {
         }
 
         let content = abs.inset(n.padding);
-        n.widget.paint(content, canvas, &n.style);
+        n.widget.paint(abs, content, canvas, &n.style);
+
+        // 焦点环：在持焦节点外绘制强调色描边。
+        if n.focused {
+            let ring = Color::hex(0x4C8BF5);
+            canvas.stroke_round_rect(fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0, radius + 1.0, 2.0, &Paint::fill(ring));
+        }
 
         let child_origin = Point::new(abs.x, abs.y);
         for &c in &n.children {
             self.paint_node(canvas, c, child_origin);
+        }
+    }
+}
+
+// ---- 事件分发 ----
+
+/// 一次事件处理累积的副作用指令。
+#[derive(Default)]
+pub(crate) struct EventOutcome {
+    repaint: bool,
+    /// Some(Some(id))=设置捕获；Some(None)=释放捕获。
+    capture: Option<Option<NodeId>>,
+    close: bool,
+    focus: Option<NodeId>,
+}
+
+/// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
+pub struct EventCtx<'a> {
+    tree: &'a mut Tree,
+    self_id: NodeId,
+    out: EventOutcome,
+}
+
+impl EventCtx<'_> {
+    pub fn id(&self) -> NodeId {
+        self.self_id
+    }
+    /// 请求重绘。
+    pub fn mark_dirty(&mut self) {
+        self.out.repaint = true;
+    }
+    /// 修改本节点背景色并重绘（交互态切换常用）。
+    pub fn set_bg(&mut self, c: Color) {
+        if let Some(n) = self.tree.get_mut(self.self_id) {
+            n.style.bg = Some(c);
+        }
+        self.out.repaint = true;
+    }
+    /// 捕获指针（后续指针事件锁定到本节点）。
+    pub fn capture(&mut self) {
+        self.out.capture = Some(Some(self.self_id));
+    }
+    /// 释放指针捕获。
+    pub fn release_capture(&mut self) {
+        self.out.capture = Some(None);
+    }
+    /// 请求关闭窗口。
+    pub fn request_close(&mut self) {
+        self.out.close = true;
+    }
+    /// 请求把焦点移到本节点。
+    pub fn request_focus(&mut self) {
+        self.out.focus = Some(self.self_id);
+    }
+    /// 本节点绝对矩形（判断指针是否仍在控件内）。
+    pub fn bounds(&self) -> Rect {
+        self.tree.abs_bounds(self.self_id)
+    }
+}
+
+/// 指针/键盘分发的对外结果。
+#[derive(Default, Debug, Clone, Copy)]
+pub struct DispatchResult {
+    pub repaint: bool,
+    pub close: bool,
+    pub focus: Option<NodeId>,
+    /// 事件是否被某个控件消费（供宿主决定是否回退到默认行为，如 Escape 关窗）。
+    pub consumed: bool,
+}
+
+impl Tree {
+    /// 节点绝对窗口矩形（累加各级父节点偏移）。
+    pub fn abs_bounds(&self, id: NodeId) -> Rect {
+        let mut r = match self.get(id) {
+            Some(n) => n.bounds,
+            None => return Rect::default(),
+        };
+        let mut cur = self.get(id).and_then(|n| n.parent);
+        while let Some(p) = cur {
+            match self.get(p) {
+                Some(pn) => {
+                    r.x += pn.bounds.x;
+                    r.y += pn.bounds.y;
+                    cur = pn.parent;
+                }
+                None => break,
+            }
+        }
+        r
+    }
+
+    /// 命中测试：返回包含该点的最深可见节点。
+    pub fn hit_test(&self, p: Point) -> Option<NodeId> {
+        let root = self.root?;
+        self.hit_node(root, p, Point::new(0, 0))
+    }
+
+    fn hit_node(&self, id: NodeId, p: Point, origin: Point) -> Option<NodeId> {
+        let n = self.get(id)?;
+        if !n.visible {
+            return None;
+        }
+        let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
+        if !abs.contains(p) {
+            return None;
+        }
+        // 倒序遍历子节点：后绘制者在上层，优先命中。
+        let child_origin = Point::new(abs.x, abs.y);
+        for &c in n.children.iter().rev() {
+            if let Some(hit) = self.hit_node(c, p, child_origin) {
+                return Some(hit);
+            }
+        }
+        Some(id)
+    }
+
+    /// 祖先链：从节点自身到根。
+    fn ancestor_chain(&self, id: NodeId) -> Vec<NodeId> {
+        let mut chain = vec![id];
+        let mut cur = self.get(id).and_then(|n| n.parent);
+        while let Some(p) = cur {
+            chain.push(p);
+            cur = self.get(p).and_then(|n| n.parent);
+        }
+        chain
+    }
+
+    /// 收集可聚焦节点（前序遍历顺序），供 Tab 导航。
+    pub fn focusable_order(&self) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root {
+            self.collect_focusable(root, &mut out);
+        }
+        out
+    }
+
+    fn collect_focusable(&self, id: NodeId, out: &mut Vec<NodeId>) {
+        if let Some(n) = self.get(id) {
+            if !n.visible {
+                return;
+            }
+            if n.widget.focusable() {
+                out.push(id);
+            }
+            for &c in &n.children {
+                self.collect_focusable(c, out);
+            }
+        }
+    }
+
+    /// 取出 widget 调用 on_event 再放回，打破 `&mut widget` 与 `&mut tree` 的借用环。
+    ///
+    /// Directive（契约，供未来修改者遵守）：`on_event`/`on_click` 回调内**不得**
+    /// 删除本节点（self），也不得同步再分发触及 self 的事件。期间 self 的 widget 被
+    /// 临时换为 EmptyWidget：删除 self 会使末尾放回因 generation 不匹配而静默跳过，
+    /// 令该控件退化为哑控件；重入 self 则内层事件落到 EmptyWidget 被丢弃。
+    /// 需要这类操作时应改用命令队列在分发结束后统一执行。
+    fn call_on_event(&mut self, id: NodeId, ev: &Event) -> (bool, EventOutcome) {
+        let mut widget = match self.get_mut(id) {
+            Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
+            None => return (false, EventOutcome::default()),
+        };
+        let mut ctx = EventCtx { tree: self, self_id: id, out: EventOutcome::default() };
+        let consumed = widget.on_event(&mut ctx, ev);
+        let out = ctx.out;
+        match self.get_mut(id) {
+            Some(n) => n.widget = widget,
+            None => debug_assert!(false, "on_event 回调内删除了 self 节点，违反 call_on_event 契约"),
+        }
+        (consumed, out)
+    }
+
+    /// 分发指针事件：维护 hover/capture，冒泡处理，汇总副作用。
+    pub fn dispatch_pointer(
+        &mut self,
+        ev: PointerEvent,
+        hover: &mut Option<NodeId>,
+        capture: &mut Option<NodeId>,
+    ) -> DispatchResult {
+        let mut res = DispatchResult::default();
+
+        // hover 进出（仅 Move 且无捕获时）
+        if matches!(ev.kind, PointerKind::Move) && capture.is_none() {
+            let target = self.hit_test(ev.pos);
+            if *hover != target {
+                if let Some(old) = *hover {
+                    let (_, o) =
+                        self.call_on_event(old, &Event::Pointer(PointerEvent { kind: PointerKind::Leave, ..ev }));
+                    res.repaint |= o.repaint;
+                }
+                if let Some(new) = target {
+                    let (_, o) =
+                        self.call_on_event(new, &Event::Pointer(PointerEvent { kind: PointerKind::Enter, ..ev }));
+                    res.repaint |= o.repaint;
+                }
+                *hover = target;
+            }
+        }
+
+        // 主事件：捕获优先，否则命中目标，沿祖先链冒泡。
+        let had_capture = capture.is_some();
+        let target = capture.or_else(|| self.hit_test(ev.pos));
+        if let Some(t) = target {
+            for id in self.ancestor_chain(t) {
+                let (consumed, o) = self.call_on_event(id, &Event::Pointer(ev));
+                res.repaint |= o.repaint;
+                res.close |= o.close;
+                res.consumed |= consumed;
+                if o.focus.is_some() {
+                    res.focus = o.focus;
+                }
+                if let Some(cap) = o.capture {
+                    *capture = cap;
+                }
+                if consumed {
+                    break;
+                }
+            }
+        }
+
+        // 捕获在本次（如 Up）被释放后，按当前位置重算 hover 并补发 Enter/Leave，
+        // 修正"按下拖到另一控件上释放"后 hover 滞留在原控件的问题。
+        if had_capture && capture.is_none() {
+            let target = self.hit_test(ev.pos);
+            if *hover != target {
+                if let Some(old) = *hover {
+                    let (_, o) = self
+                        .call_on_event(old, &Event::Pointer(PointerEvent { kind: PointerKind::Leave, ..ev }));
+                    res.repaint |= o.repaint;
+                }
+                if let Some(new) = target {
+                    let (_, o) = self
+                        .call_on_event(new, &Event::Pointer(PointerEvent { kind: PointerKind::Enter, ..ev }));
+                    res.repaint |= o.repaint;
+                }
+                *hover = target;
+            }
+        }
+        res
+    }
+
+    /// 分发键盘事件到焦点节点。
+    pub fn dispatch_key(&mut self, ev: KeyEvent, focus: Option<NodeId>) -> DispatchResult {
+        let mut res = DispatchResult::default();
+        if let Some(f) = focus {
+            let (consumed, o) = self.call_on_event(f, &Event::Key(ev));
+            res.repaint = o.repaint;
+            res.close = o.close;
+            res.focus = o.focus;
+            res.consumed = consumed;
+        }
+        res
+    }
+
+    /// 设置焦点节点（清旧设新，返回是否变化）。
+    pub fn set_focused(&mut self, id: Option<NodeId>, old: Option<NodeId>) {
+        if let Some(o) = old {
+            if let Some(n) = self.get_mut(o) {
+                n.focused = false;
+            }
+        }
+        if let Some(i) = id {
+            if let Some(n) = self.get_mut(i) {
+                n.focused = true;
+            }
         }
     }
 }
@@ -512,8 +800,11 @@ fn align_offset(a: Align, avail: i32, size: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::Size;
+    use crate::event::{MouseButton, PointerEvent, PointerKind};
+    use crate::geometry::{Point, Size};
     use crate::ui::Element;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn layout(root: Element, w: i32, h: i32) -> Tree {
         let mut tree = Tree::new();
@@ -585,5 +876,83 @@ mod tests {
         let kid = tree.get(root).unwrap().children[0];
         let b = tree.get(kid).unwrap().bounds;
         assert_eq!(b.y, 0, "显式 Start 应贴顶，y=0");
+    }
+
+    fn ptr(kind: PointerKind, p: Point) -> PointerEvent {
+        PointerEvent { kind, pos: p, button: MouseButton::Left }
+    }
+
+    fn button_tree(clicks: Rc<Cell<i32>>) -> (Tree, NodeId) {
+        let c = clicks;
+        let root = Element::col()
+            .width(200)
+            .height(100)
+            .padding(10)
+            .child(Element::button("OK").on_click(move |_| c.set(c.get() + 1)));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 100), &mut te);
+        let btn = tree.get(id).unwrap().children[0];
+        (tree, btn)
+    }
+
+    #[test]
+    fn button_click_fires_callback_and_captures() {
+        let clicks = Rc::new(Cell::new(0));
+        let (mut tree, btn) = button_tree(clicks.clone());
+        let b = tree.abs_bounds(btn);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut hover, mut cap) = (None, None);
+
+        tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        assert_eq!(cap, Some(btn), "按下应捕获按钮");
+        assert_eq!(clicks.get(), 0, "按下不触发点击");
+
+        tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 1, "在按钮内释放应触发一次点击");
+        assert_eq!(cap, None, "释放应取消捕获");
+    }
+
+    #[test]
+    fn release_outside_does_not_click() {
+        let clicks = Rc::new(Cell::new(0));
+        let (mut tree, btn) = button_tree(clicks.clone());
+        let b = tree.abs_bounds(btn);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let outside = Point::new(b.x + b.w + 60, b.y);
+        let (mut hover, mut cap) = (None, None);
+
+        tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        // 捕获使 Up 仍路由到按钮，但位置在外 → 不触发
+        tree.dispatch_pointer(ptr(PointerKind::Up, outside), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 0, "按钮外释放不应触发点击");
+        assert_eq!(cap, None);
+    }
+
+    #[test]
+    fn hover_tracks_pointer() {
+        let clicks = Rc::new(Cell::new(0));
+        let (mut tree, btn) = button_tree(clicks);
+        let b = tree.abs_bounds(btn);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let outside = Point::new(b.x + b.w + 60, b.y + b.h + 60);
+        let (mut hover, mut cap) = (None, None);
+
+        tree.dispatch_pointer(ptr(PointerKind::Move, center), &mut hover, &mut cap);
+        assert_eq!(hover, Some(btn), "移入按钮应记录 hover");
+        tree.dispatch_pointer(ptr(PointerKind::Move, outside), &mut hover, &mut cap);
+        assert_eq!(hover, None, "移出按钮应清除 hover");
+    }
+
+    #[test]
+    fn focusable_order_collects_buttons() {
+        let root = Element::row()
+            .child(Element::label("x"))
+            .child(Element::button("A"))
+            .child(Element::button("B"));
+        let tree = layout(root, 300, 50);
+        assert_eq!(tree.focusable_order().len(), 2, "应收集到 2 个可聚焦按钮");
     }
 }
