@@ -8,13 +8,49 @@ use std::path::PathBuf;
 use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
-use crate::event::{Key, MouseButton, PointerEvent, PointerKind};
-use crate::geometry::{Color, Point, Size};
+use crate::event::{Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::win32::{self, WindowConfig};
 use crate::platform::AppHandler;
-use crate::render::SkiaCanvas;
+use crate::render::{Canvas, Paint, SkiaCanvas};
 use crate::text::{DWriteEngine, TextEngine};
 use crate::ui::Element;
+
+// ---- 上下文菜单（宿主层自绘浮层）----
+
+const MENU_ITEM_H: i32 = 30;
+const MENU_PAD_X: i32 = 14;
+const MENU_VPAD: i32 = 4;
+const MENU_MIN_W: i32 = 130;
+const MENU_FONT: f32 = 14.0;
+
+/// 宿主管理的上下文菜单浮层：在控件树之上自绘，拦截指针，项激活时向目标控件合成按键。
+struct ContextMenu {
+    items: Vec<MenuItem>,
+    rect: Rect,
+    hover: Option<usize>,
+    /// 发起菜单的控件（合成按键的派发目标）。
+    target: NodeId,
+}
+
+impl ContextMenu {
+    /// 项 i 在 y 轴的命中区间起点（逻辑坐标）。
+    fn item_y(&self, i: usize) -> i32 {
+        self.rect.y + MENU_VPAD + i as i32 * MENU_ITEM_H
+    }
+    /// 逻辑坐标 y → 菜单项下标（仅当落在某项区域内）。
+    fn item_at(&self, p: Point) -> Option<usize> {
+        if !self.rect.contains(p) {
+            return None;
+        }
+        let i = (p.y - self.rect.y - MENU_VPAD) / MENU_ITEM_H;
+        if i >= 0 && (i as usize) < self.items.len() {
+            Some(i as usize)
+        } else {
+            None
+        }
+    }
+}
 
 type RenderClosure = Box<dyn FnMut(&mut Pixmap, Size)>;
 
@@ -35,6 +71,7 @@ impl App {
                 bg: Color::hex(0xF3F3F3),
                 screenshot: None,
                 screenshot_scale: 1.0,
+                screenshot_rclick: None,
             },
             render: None,
             content: None,
@@ -63,6 +100,15 @@ impl App {
         if let Some(i) = args.iter().position(|a| a == "--scale") {
             if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f32>().ok()) {
                 self.cfg.screenshot_scale = v;
+            }
+        }
+        // --rclick X Y：截屏前在逻辑坐标 (X,Y) 合成右键，验证右键菜单等交互视觉。
+        if let Some(i) = args.iter().position(|a| a == "--rclick") {
+            if let (Some(x), Some(y)) = (
+                args.get(i + 1).and_then(|s| s.parse::<i32>().ok()),
+                args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
+            ) {
+                self.cfg.screenshot_rclick = Some((x, y));
             }
         }
         self
@@ -116,6 +162,10 @@ struct UiHost {
     scale: f32,
     /// 焦点环是否可见：键盘 Tab 导航时 true，鼠标聚焦时 false。
     focus_visible: bool,
+    /// 活动的上下文菜单浮层（None=无）。
+    menu: Option<ContextMenu>,
+    /// 最近一帧的逻辑窗口尺寸（菜单弹出位置钳制用）。
+    logical_size: Size,
 }
 
 impl UiHost {
@@ -133,6 +183,76 @@ impl UiHost {
             close: false,
             scale: 1.0,
             focus_visible: false,
+            menu: None,
+            logical_size: Size::new(0, 0),
+        }
+    }
+
+    /// 打开上下文菜单：用文字引擎测量项宽，计算并钳制到窗口内的菜单矩形。
+    fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
+        let mut max_w = 0;
+        for it in &req.items {
+            let w = self.engine.measure(&it.label, None, MENU_FONT, None).w;
+            max_w = max_w.max(w);
+        }
+        let menu_w = (max_w + 2 * MENU_PAD_X).max(MENU_MIN_W);
+        let menu_h = req.items.len() as i32 * MENU_ITEM_H + 2 * MENU_VPAD;
+        let ws = self.logical_size;
+        let mut x = req.pos.x;
+        let mut y = req.pos.y;
+        if ws.w > 0 && x + menu_w > ws.w {
+            x = (ws.w - menu_w).max(0);
+        }
+        if ws.h > 0 && y + menu_h > ws.h {
+            y = (ws.h - menu_h).max(0);
+        }
+        self.menu = Some(ContextMenu {
+            items: req.items,
+            rect: Rect::new(x, y, menu_w, menu_h),
+            hover: None,
+            target,
+        });
+    }
+
+    /// 菜单激活时处理指针；返回是否需重绘。
+    fn handle_menu_pointer(&mut self, ev: PointerEvent) -> bool {
+        match ev.kind {
+            PointerKind::Move => {
+                let h = self.menu.as_ref().and_then(|m| m.item_at(ev.pos));
+                if let Some(m) = self.menu.as_mut() {
+                    if m.hover != h {
+                        m.hover = h;
+                        return true;
+                    }
+                }
+                false
+            }
+            PointerKind::Down => {
+                let inside = self.menu.as_ref().is_some_and(|m| m.rect.contains(ev.pos));
+                if !inside {
+                    self.menu = None; // 点击菜单外：关闭
+                    return true;
+                }
+                // 命中可用项 → 合成按键回送目标控件并关闭。
+                let hit = self.menu.as_ref().and_then(|m| {
+                    m.item_at(ev.pos).filter(|&i| m.items[i].enabled).map(|i| {
+                        // 单变体析构：新增 MenuAction 变体时此处需改为 match 分别处理。
+                        let MenuAction::SendKey(k) = m.items[i].action.clone();
+                        (k, m.target)
+                    })
+                });
+                if let Some((key, target)) = hit {
+                    self.menu = None;
+                    // 刻意直达目标控件，绕过 on_key（不重跑 Tab/Escape 导航逻辑）；
+                    // 合成的是内容编辑键(Ctrl+X/C/V/A)，无需宿主级按键预处理。
+                    let res = self.tree.dispatch_key(key, Some(target));
+                    if res.close {
+                        self.close = true;
+                    }
+                }
+                true // 菜单内（含禁用项/间隙）始终吞掉
+            }
+            _ => true, // 吞掉 Up/Wheel 等，避免穿透到下层
         }
     }
 
@@ -165,6 +285,7 @@ impl AppHandler for UiHost {
             (size.w as f32 / s).round().max(1.0) as i32,
             (size.h as f32 / s).round().max(1.0) as i32,
         );
+        self.logical_size = logical;
         self.tree.layout_root(logical, &mut self.engine);
         // 布局后结构稳定，刷新 Tab 焦点顺序。
         self.focus_order = self.tree.focusable_order();
@@ -178,6 +299,21 @@ impl AppHandler for UiHost {
         self.tree.focus_ring_visible = self.focus_visible;
         let mut canvas = SkiaCanvas::with_text(pixmap, &mut self.engine, s);
         self.tree.paint(&mut canvas);
+        // 上下文菜单浮层绘制在控件树之上（self.menu 与 self.engine 为不相交字段，借用安全）。
+        if let Some(menu) = self.menu.as_ref() {
+            let r = menu.rect;
+            canvas.fill_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, &Paint::fill(Color::hex(0xFFFFFF)));
+            canvas.stroke_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, 1.0, &Paint::fill(Color::hex(0xD0D5DB)));
+            for (i, it) in menu.items.iter().enumerate() {
+                let iy = menu.item_y(i);
+                if menu.hover == Some(i) && it.enabled {
+                    canvas.fill_round_rect((r.x + 4) as f32, iy as f32, (r.w - 8) as f32, MENU_ITEM_H as f32, 5.0, &Paint::fill(Color::hex(0xEAF1FE)));
+                }
+                let color = if it.enabled { Color::hex(0x2D3436) } else { Color::hex(0xB0B6BD) };
+                let tr = Rect::new(r.x + MENU_PAD_X, iy, r.w - 2 * MENU_PAD_X, MENU_ITEM_H);
+                canvas.draw_text(&it.label, tr, color, crate::spec::Align::Start, None, MENU_FONT);
+            }
+        }
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
@@ -187,6 +323,10 @@ impl AppHandler for UiHost {
             (ev.pos.x as f32 / s).round() as i32,
             (ev.pos.y as f32 / s).round() as i32,
         );
+        // 菜单激活时独占指针：命中项/点外关闭，不下发到控件树。
+        if self.menu.is_some() {
+            return self.handle_menu_pointer(ev);
+        }
         let mut hover = self.hover;
         let mut capture = self.capture;
         let res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
@@ -202,10 +342,23 @@ impl AppHandler for UiHost {
         if res.close {
             self.close = true;
         }
+        // 控件请求弹出上下文菜单（目标为刚获焦的控件）。
+        if let Some(req) = res.menu {
+            if let Some(target) = self.focus {
+                self.open_menu(req, target);
+            }
+        }
         res.repaint
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
+        // 菜单激活时：Escape 关闭，其余键吞掉（避免在菜单后误编辑）。
+        if self.menu.is_some() {
+            if ev.key == Key::Escape {
+                self.menu = None;
+            }
+            return true;
+        }
         // Tab 由宿主独占用于焦点导航，并启用焦点环显示。
         if ev.key == Key::Tab {
             self.focus_visible = true;

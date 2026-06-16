@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
-use crate::event::{Event, Key, MouseButton, PointerKind};
+use crate::event::{Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -501,6 +501,19 @@ impl TextInput {
         self.anchor = Some(0);
         self.cursor = self.char_count();
     }
+    /// 构建右键上下文菜单项。动作经合成 Ctrl+X/C/V/A 回送到本控件，故无需感知"菜单"。
+    fn context_menu_items(&self) -> Vec<MenuItem> {
+        let has_sel = self.selection().is_some();
+        let has_text = self.char_count() > 0;
+        let pw = self.config.password;
+        let ctrl = |vk: u32| KeyEvent { key: Key::Other(vk), pressed: true, shift: false, ctrl: true };
+        vec![
+            MenuItem::key("剪切", ctrl(0x58), has_sel && !pw), // VK_X
+            MenuItem::key("复制", ctrl(0x43), has_sel && !pw), // VK_C
+            MenuItem::key("粘贴", ctrl(0x56), true),           // VK_V
+            MenuItem::key("全选", ctrl(0x41), has_text),       // VK_A
+        ]
+    }
     /// 选中 `idx` 所在逻辑行（两 '\n' 之间）。单行文本无 '\n' 即全选。
     fn select_para(&mut self, idx: usize) {
         let chars: Vec<char> = self.text.borrow().chars().collect();
@@ -943,7 +956,9 @@ impl Widget for TextInput {
                             self.cursor = idx;
                             self.anchor = None;
                         }
-                        ctx.mark_dirty();
+                        // 弹出上下文菜单（剪切/复制/粘贴/全选）。
+                        let items = self.context_menu_items();
+                        ctx.show_context_menu(p.pos, items);
                         return true;
                     }
                     // 双击选词 / 三击选段（单行无 \n 即全选，多行为当前逻辑行）。不进入拖选。

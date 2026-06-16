@@ -52,6 +52,8 @@ pub struct WindowConfig {
     pub screenshot: Option<PathBuf>,
     /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
     pub screenshot_scale: f32,
+    /// 截屏前合成一次右键按下（逻辑坐标），用于验证右键菜单等交互视觉。
+    pub screenshot_rclick: Option<(i32, i32)>,
 }
 
 impl Default for WindowConfig {
@@ -63,6 +65,7 @@ impl Default for WindowConfig {
             bg: Color::hex(0xF3F3F3),
             screenshot: None,
             screenshot_scale: 1.0,
+            screenshot_rclick: None,
         }
     }
 }
@@ -87,6 +90,13 @@ fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &P
     pixmap.fill(to_skia_color(cfg.bg));
     handler.set_scale(s);
     handler.render(&mut pixmap, size);
+    // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
+    if let Some((lx, ly)) = cfg.screenshot_rclick {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Right));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

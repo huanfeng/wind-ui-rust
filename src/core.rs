@@ -4,7 +4,7 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
-use crate::event::{Event, KeyEvent, PointerEvent, PointerKind};
+use crate::event::{Event, KeyEvent, MenuItem, MenuRequest, PointerEvent, PointerKind};
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension, MeasureMode, MeasureSpec};
@@ -615,6 +615,8 @@ pub(crate) struct EventOutcome {
     capture: Option<Option<NodeId>>,
     close: bool,
     focus: Option<NodeId>,
+    /// 控件请求弹出的上下文菜单（宿主接管渲染与命中）。
+    menu: Option<MenuRequest>,
 }
 
 /// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
@@ -692,16 +694,24 @@ impl EventCtx<'_> {
             c.set_text(text);
         }
     }
+    /// 请求在 `pos`（逻辑坐标）弹出上下文菜单。宿主接管渲染、命中与项激活
+    /// （项动作经合成按键回送到焦点控件）。
+    pub fn show_context_menu(&mut self, pos: Point, items: Vec<MenuItem>) {
+        self.out.menu = Some(MenuRequest { pos, items });
+        self.out.repaint = true;
+    }
 }
 
 /// 指针/键盘分发的对外结果。
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone)]
 pub struct DispatchResult {
     pub repaint: bool,
     pub close: bool,
     pub focus: Option<NodeId>,
     /// 事件是否被某个控件消费（供宿主决定是否回退到默认行为，如 Escape 关窗）。
     pub consumed: bool,
+    /// 控件请求弹出的上下文菜单（宿主接管）。
+    pub menu: Option<MenuRequest>,
 }
 
 impl Tree {
@@ -864,6 +874,9 @@ impl Tree {
                 if let Some(cap) = o.capture {
                     *capture = cap;
                 }
+                if o.menu.is_some() {
+                    res.menu = o.menu;
+                }
                 if consumed {
                     break;
                 }
@@ -900,6 +913,7 @@ impl Tree {
             res.close = o.close;
             res.focus = o.focus;
             res.consumed = consumed;
+            res.menu = o.menu;
         }
         res
     }
@@ -1458,6 +1472,48 @@ mod tests {
         );
         assert!(!res.consumed, "密码框 Enter 不应被消费");
         assert_eq!(&*txt.borrow(), "pw", "密码框 Enter 不得插入换行");
+    }
+
+    #[test]
+    fn right_click_requests_context_menu() {
+        let (mut tree, input, _txt) = input_tree("hello");
+        let b = tree.abs_bounds(input);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: center,
+            button: MouseButton::Right,
+            click_count: 1,
+        };
+        let res = tree.dispatch_pointer(down, &mut h, &mut cap);
+        let menu = res.menu.expect("右键应请求上下文菜单");
+        let labels: Vec<_> = menu.items.iter().map(|i| (i.label.as_str(), i.enabled)).collect();
+        // 无选区：剪切/复制禁用；有文本：全选启用；粘贴恒启用。
+        assert_eq!(
+            labels,
+            vec![("剪切", false), ("复制", false), ("粘贴", true), ("全选", true)]
+        );
+    }
+
+    #[test]
+    fn right_click_menu_enables_cut_copy_with_selection() {
+        let (mut tree, input, _txt) = input_tree("hello");
+        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // 全选
+        let b = tree.abs_bounds(input);
+        // 在选区内右键（idx=0 落在 [0,5) 内）→ 保留选区。
+        let pos = Point::new(b.x + 5, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos,
+            button: MouseButton::Right,
+            click_count: 1,
+        };
+        let res = tree.dispatch_pointer(down, &mut h, &mut cap);
+        let menu = res.menu.expect("右键应请求上下文菜单");
+        assert!(menu.items[0].enabled && menu.items[1].enabled, "有选区时剪切/复制应启用");
     }
 
     #[test]

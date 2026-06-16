@@ -76,3 +76,34 @@ pub enum Event {
     Pointer(PointerEvent),
     Key(KeyEvent),
 }
+
+/// 上下文菜单项的动作。当前仅"向焦点控件合成一个按键"——这样菜单对具体控件
+/// 零依赖（剪切/复制/粘贴/全选等复用控件已有的键盘处理），且天然可移植到其他平台。
+#[derive(Debug, Clone)]
+pub enum MenuAction {
+    SendKey(KeyEvent),
+}
+
+/// 一个上下文菜单项。
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub action: MenuAction,
+    /// 禁用项变灰且不可点击（如无选区时的"复制"）。
+    pub enabled: bool,
+}
+
+impl MenuItem {
+    /// 便捷构造：标签 + 合成按键。
+    pub fn key(label: impl Into<String>, key: KeyEvent, enabled: bool) -> Self {
+        Self { label: label.into(), action: MenuAction::SendKey(key), enabled }
+    }
+}
+
+/// 控件经 `EventCtx::show_context_menu` 发起的上下文菜单请求。
+#[derive(Debug, Clone)]
+pub struct MenuRequest {
+    /// 锚点（逻辑坐标，菜单左上角，宿主据窗口边界钳制）。
+    pub pos: Point,
+    pub items: Vec<MenuItem>,
+}
