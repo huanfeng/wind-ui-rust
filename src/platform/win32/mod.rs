@@ -33,13 +33,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    LoadCursorW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsIconic, LoadCursorW,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK,
+    SM_CYDOUBLECLK, SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
+    GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, MSG,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR,
+    WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -109,6 +110,12 @@ fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &P
         let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
         handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Left));
         handler.on_pointer(PointerEvent::single(PointerKind::Up, pos, MouseButton::Left));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 有动画时，前进一帧（让动画相位非零）以便不确定进度等可在截图中显现。
+    if handler.wants_animation() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }
@@ -332,10 +339,52 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
 
+    run_message_loop(hwnd);
+}
+
+/// 消息循环：无动画时阻塞至下一条消息（零 CPU）；有动画时按**帧截止时间**配速——
+/// 唤醒后只要距上帧 ≥ FRAME_MS 就重绘一帧，故连续输入下不会超 60fps 空转，
+/// 拖动时也不会饿死动画。最小化时强制阻塞避免空转。
+///
+/// 已知限制：OS 驱动的模态循环（窗口拖拽/缩放、系统菜单跟踪）期间本循环不执行，
+/// 动画会暂停至用户释放——单窗口小工具可接受；如需模态期间也动画，需补 WM_TIMER 兜底。
+unsafe fn run_message_loop(hwnd: HWND) {
+    /// 动画帧间隔（约 60fps）。
+    const FRAME_MS: u128 = 16;
     let mut msg = MSG::default();
-    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-        let _ = TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+    let mut last_frame = std::time::Instant::now();
+    loop {
+        let animating = !IsIconic(hwnd).as_bool()
+            && state_from(hwnd).map(|s| s.handler.wants_animation()).unwrap_or(false);
+        if animating {
+            // 等待输入，至多到下一帧截止；零句柄，仅作可被输入中断的定时等待。
+            let elapsed = last_frame.elapsed().as_millis();
+            let wait = FRAME_MS.saturating_sub(elapsed) as u32;
+            MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            // 非阻塞排空所有待处理消息。
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤60fps 且不冻结）。
+            if last_frame.elapsed().as_millis() >= FRAME_MS {
+                let _ = InvalidateRect(hwnd, None, false);
+                let _ = UpdateWindow(hwnd);
+                last_frame = std::time::Instant::now();
+            }
+        } else {
+            // 无动画：阻塞至下一条消息（零 CPU 空闲）。
+            let r = GetMessageW(&mut msg, None, 0, 0);
+            if !r.as_bool() {
+                return; // WM_QUIT(0) 或错误(-1)
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            last_frame = std::time::Instant::now(); // 进入动画时从此刻起算首帧
+        }
     }
 }
 

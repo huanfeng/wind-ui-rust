@@ -42,4 +42,9 @@ pub trait AppHandler {
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         None
     }
+
+    /// 本帧是否有控件请求持续动画。平台层据此在阻塞空闲与按帧驱动之间切换。
+    fn wants_animation(&self) -> bool {
+        false
+    }
 }

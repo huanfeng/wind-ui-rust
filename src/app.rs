@@ -190,6 +190,8 @@ struct UiHost {
     logical_size: Size,
     /// 活动主题（注入到线程局部供控件读取）。
     theme: Rc<Theme>,
+    /// 单调起点，用于动画相位时钟。
+    start: std::time::Instant,
 }
 
 impl UiHost {
@@ -212,6 +214,7 @@ impl UiHost {
             menu: None,
             logical_size: Size::new(0, 0),
             theme,
+            start: std::time::Instant::now(),
         }
     }
 
@@ -311,6 +314,9 @@ impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
         // 注入主题（离屏路径首帧、主题变更时均生效）。
         crate::theme::set_current(self.theme.clone());
+        // 动画：清上一帧请求并刷新帧时钟，绘制中控件可重新请求。
+        crate::anim::reset_request();
+        crate::anim::set_clock_ms(self.start.elapsed().as_millis() as u64);
         // pixmap 是物理像素；布局用逻辑坐标（物理 / scale），绘制时再 ×scale 放大。
         let s = self.scale;
         let logical = Size::new(
@@ -431,6 +437,10 @@ impl AppHandler for UiHost {
         self.scale = scale;
         // 文字引擎同步 scale，保证文字测量/绘制与图形缩放一致。
         self.engine.set_scale(scale);
+    }
+
+    fn wants_animation(&self) -> bool {
+        crate::anim::animation_requested()
     }
 
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {

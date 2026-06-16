@@ -274,6 +274,23 @@ impl TabTheme {
     }
 }
 
+/// 进度条覆盖层。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgressTheme {
+    pub track: Option<Color>,
+    pub fill: Option<Color>,
+}
+
+impl ProgressTheme {
+    pub fn track(&self, p: &Palette) -> Color {
+        self.track.unwrap_or(p.track)
+    }
+    pub fn fill(&self, p: &Palette) -> Color {
+        self.fill.unwrap_or(p.accent)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -286,6 +303,7 @@ pub struct Theme {
     pub dropdown: DropdownTheme,
     pub menu: MenuTheme,
     pub tab: TabTheme,
+    pub progress: ProgressTheme,
 }
 
 impl Theme {

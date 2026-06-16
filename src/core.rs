@@ -1526,6 +1526,43 @@ mod tests {
         assert!(tree.caret_of(btn).is_none(), "非文本控件 caret_of 应为 None");
     }
 
+    fn paint_once(tree: &Tree) {
+        let mut pm = tiny_skia::Pixmap::new(200, 60).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+    }
+
+    #[test]
+    fn indeterminate_progress_requests_animation() {
+        crate::anim::reset_request();
+        let root = Element::col()
+            .width(200)
+            .height(20)
+            .child(Element::progress_indeterminate().width_match());
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 20), &mut te);
+        paint_once(&tree);
+        assert!(crate::anim::animation_requested(), "不确定进度应请求动画");
+    }
+
+    #[test]
+    fn determinate_progress_no_animation() {
+        crate::anim::reset_request();
+        let v = Rc::new(Cell::new(0.5f32));
+        let root = Element::col().width(200).height(20).child(Element::progress(v).width_match());
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 20), &mut te);
+        paint_once(&tree);
+        assert!(!crate::anim::animation_requested(), "确定进度不应请求动画");
+    }
+
     #[test]
     fn dropdown_click_opens_menu_and_selects() {
         let sel = Rc::new(Cell::new(0usize));

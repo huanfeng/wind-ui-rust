@@ -5,6 +5,7 @@
 
 pub mod containers;
 pub mod inputs;
+pub mod progress;
 pub mod select;
 
 use std::cell::{Cell, RefCell};
@@ -19,6 +20,7 @@ use crate::style::Style;
 use crate::text::TextEngine;
 
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
+pub use progress::ProgressBar;
 pub use select::Dropdown;
 
 /// 文本叶子控件。
@@ -296,6 +298,15 @@ impl Element {
     pub fn dropdown(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
         let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
         Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
+    }
+
+    /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
+    pub fn progress(value: Rc<Cell<f32>>) -> Self {
+        Self::base(Layout::None).widget(progress::ProgressBar::determinate(value))
+    }
+    /// 不确定进度条（忙碌动画）。需要宿主按帧驱动（仅可见时消耗 CPU）。
+    pub fn progress_indeterminate() -> Self {
+        Self::base(Layout::None).widget(progress::ProgressBar::indeterminate())
     }
 
     /// 垂直滚动容器：内容超出视口时可滚轮滚动并裁剪。
