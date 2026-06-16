@@ -760,6 +760,27 @@ impl Tree {
         Some((Point::new(abs.x + lx, abs.y + ly), h))
     }
 
+    /// 触摸平移滚动：找 `p`（逻辑坐标）下最近的滚动容器，按 `dy`（逻辑 px）平移。
+    /// `dy>0`（手指下移）→ 内容下移（scroll_y 减小，自然跟手）。下一帧 arrange 钳制范围。
+    /// 返回是否命中可滚动容器。
+    pub fn pan_scroll(&mut self, p: Point, dy: i32) -> bool {
+        let mut cur = self.hit_test(p);
+        while let Some(id) = cur {
+            let (is_scroll, parent) = match self.get(id) {
+                Some(n) => (matches!(n.layout, Layout::Scroll), n.parent),
+                None => break,
+            };
+            if is_scroll {
+                if let Some(n) = self.get_mut(id) {
+                    n.scroll_y -= dy;
+                }
+                return true;
+            }
+            cur = parent;
+        }
+        false
+    }
+
     /// 命中测试：返回包含该点的最深可见节点。
     pub fn hit_test(&self, p: Point) -> Option<NodeId> {
         let root = self.root?;
@@ -1303,6 +1324,25 @@ mod tests {
         }
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
+    }
+
+    #[test]
+    fn pan_scroll_scrolls_container() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, max scroll 200
+        // 手指上滑(dy<0) → 内容上移 → scroll_y 增大。
+        assert!(tree.pan_scroll(Point::new(50, 50), -40), "命中滚动容器");
+        tree.layout_root(Size::new(100, 100), &mut te); // 钳制
+        assert_eq!(tree.get(id).unwrap().scroll_y, 40, "上滑 40px 应增加 scroll_y");
+        // 非滚动区域返回 false。
+        assert!(!tree.pan_scroll(Point::new(-100, -100), 10), "命中外返回 false");
     }
 
     #[test]

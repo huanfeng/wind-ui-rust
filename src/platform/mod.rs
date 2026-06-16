@@ -9,7 +9,7 @@ pub use win32::{run, WindowConfig};
 use tiny_skia::Pixmap;
 
 use crate::event::{KeyEvent, PointerEvent};
-use crate::geometry::Size;
+use crate::geometry::{Point, Size};
 
 /// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
 pub trait AppHandler {
@@ -45,6 +45,12 @@ pub trait AppHandler {
 
     /// 本帧是否有控件请求持续动画。平台层据此在阻塞空闲与按帧驱动之间切换。
     fn wants_animation(&self) -> bool {
+        false
+    }
+
+    /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）按 `dy` 物理像素平移，
+    /// 滚动手指下的容器。返回 true 表示需要重绘。
+    fn on_pan(&mut self, _pos: Point, _dy: i32) -> bool {
         false
     }
 }

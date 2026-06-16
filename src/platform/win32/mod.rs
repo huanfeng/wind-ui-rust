@@ -26,6 +26,10 @@ use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, CANDIDATEFORM,
     CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
 };
+use windows::Win32::UI::Input::Touch::{
+    CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, HTOUCHINPUT,
+    REGISTER_TOUCH_WINDOW_FLAGS, TOUCHEVENTF_DOWN, TOUCHEVENTF_MOVE, TOUCHEVENTF_UP, TOUCHINPUT,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
@@ -33,14 +37,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsIconic, LoadCursorW,
+    GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsIconic,
+    LoadCursorW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK,
     SM_CYDOUBLECLK, SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
     GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, MSG,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR,
     WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -139,7 +144,23 @@ struct WindowState {
     buf_h: i32,
     /// 连续点击跟踪（用于双击/三击判定）。
     last_click: ClickTracker,
+    /// 触摸拖动滚动状态机（触摸提升为鼠标消息后据此区分点击/滑动）。
+    touch: Touch,
 }
+
+/// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
+#[derive(Default, Clone, Copy)]
+struct Touch {
+    down: bool,
+    /// 按下起点 + 上一帧位置（客户区物理像素）。
+    start: (i32, i32),
+    last: (i32, i32),
+    /// 是否已越过移动阈值进入滑动滚动。
+    scrolling: bool,
+}
+
+/// 触摸拖动判定阈值（物理像素）。
+const TOUCH_THRESHOLD: i32 = 12;
 
 /// 连续点击跟踪状态。在平台层把多次快速同位点击折算为 click_count。
 #[derive(Default, Clone, Copy)]
@@ -176,6 +197,7 @@ impl WindowState {
             buf_w: 0,
             buf_h: 0,
             last_click: ClickTracker::default(),
+            touch: Touch::default(),
         }
     }
 
@@ -336,6 +358,9 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
         s.handler.set_scale(scale);
     }
 
+    // 注册触摸窗口：触摸以 WM_TOUCH 原始点递送（禁用系统手势；消费后无重复鼠标提升）。
+    let _ = RegisterTouchWindow(hwnd, REGISTER_TOUCH_WINDOW_FLAGS(0));
+
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
 
@@ -455,6 +480,11 @@ unsafe extern "system" fn wnd_proc(
             handle_dpi_changed(hwnd, wparam, lparam);
             LRESULT(0)
         }
+        // 原始触摸输入（已 RegisterTouchWindow）：自实现点击/拖动滚动，消费后不交默认（无鼠标提升）。
+        WM_TOUCH => {
+            handle_touch_input(hwnd, wparam, lparam);
+            LRESULT(0)
+        }
         // 输入法开始合成 / 合成中：把候选窗定位到焦点控件的光标处，再交默认处理。
         // 合成期间光标不移动，重复定位到同一点是幂等的；兼顾"候选窗在合成中才出现"
         // 的输入法（仅 STARTCOMPOSITION 可能错过候选窗放置时机）。
@@ -490,6 +520,10 @@ unsafe fn frame_size_for_client(logical_w: i32, logical_h: i32, scale: f32, dpi:
 /// 两段式：先借 state 分发事件并读取意图，**释放借用后**再调用会同步重入
 /// WndProc 的 OS API（SetCapture/ReleaseCapture/DestroyWindow），避免 &mut 别名 UB。
 unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
+    // 触摸提升的鼠标消息：忽略（触摸已由 WM_TOUCH 完整处理，避免点击双重触发）。
+    if is_touch_event() {
+        return;
+    }
     let x = (lparam.0 & 0xffff) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
     // 仅按下时计算连续点击数；其余动作恒为单击。
@@ -576,6 +610,113 @@ unsafe fn handle_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         s.handler.set_scale(scale);
     }
     let _ = InvalidateRect(hwnd, None, false);
+}
+
+/// 当前消息是否来自触摸/笔（被提升为鼠标消息时附加信息带 0xFF515700 签名）。
+/// 用于在鼠标路径忽略触摸提升的重复消息——触摸统一由 WM_TOUCH 处理。
+unsafe fn is_touch_event() -> bool {
+    const SIGNATURE: usize = 0xFF51_5700;
+    const MASK: usize = 0xFFFF_FF00;
+    (GetMessageExtraInfo().0 as usize & MASK) == SIGNATURE
+}
+
+/// 解码 WM_TOUCH 原始触摸点，对主接触点跑触摸状态机。坐标为屏幕 1/100 像素。
+/// 调用方消费后返回 0（不交 DefWindowProc，故不会再有重复的鼠标提升消息）。
+unsafe fn handle_touch_input(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let count = wparam.0 & 0xffff;
+    if count == 0 {
+        return;
+    }
+    let hti = HTOUCHINPUT(lparam.0 as *mut c_void);
+    // 最多取 8 指；单指滚动只用主接触点。
+    let mut inputs = [TOUCHINPUT::default(); 8];
+    let n = count.min(inputs.len());
+    let ok = GetTouchInputInfo(hti, &mut inputs[..n], size_of::<TOUCHINPUT>() as i32).is_ok();
+    let _ = CloseTouchInputHandle(hti);
+    if !ok {
+        return;
+    }
+    // 主接触点（首个）。屏幕 1/100 像素 → 客户区物理像素。
+    let ti = inputs[0];
+    let mut pt = POINT { x: ti.x / 100, y: ti.y / 100 };
+    let _ = ScreenToClient(hwnd, &mut pt);
+    let kind = if ti.dwFlags.0 & TOUCHEVENTF_DOWN.0 != 0 {
+        PointerKind::Down
+    } else if ti.dwFlags.0 & TOUCHEVENTF_UP.0 != 0 {
+        PointerKind::Up
+    } else if ti.dwFlags.0 & TOUCHEVENTF_MOVE.0 != 0 {
+        PointerKind::Move
+    } else {
+        return;
+    };
+    handle_touch(hwnd, kind, pt.x, pt.y);
+}
+
+/// 触摸状态机：按下抬起未越阈值=点击（合成正常派发）；越阈值后拖动=滚动手指下的容器。
+/// 两段式：每次先借 state 读/写触摸态，释放后再调可能重入的分发。
+unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32) {
+    match kind {
+        PointerKind::Down => {
+            if let Some(s) = state_from(hwnd) {
+                s.touch = Touch { down: true, start: (x, y), last: (x, y), scrolling: false };
+            }
+        }
+        PointerKind::Move => {
+            let (down, start, last, scrolling) = match state_from(hwnd) {
+                Some(s) => (s.touch.down, s.touch.start, s.touch.last, s.touch.scrolling),
+                None => return,
+            };
+            if !down {
+                return;
+            }
+            let dy = y - last.1;
+            let past = scrolling
+                || (x - start.0).abs() >= TOUCH_THRESHOLD
+                || (y - start.1).abs() >= TOUCH_THRESHOLD;
+            if let Some(s) = state_from(hwnd) {
+                s.touch.last = (x, y);
+                if past {
+                    s.touch.scrolling = true;
+                }
+            }
+            if past {
+                dispatch_pan(hwnd, Point::new(x, y), dy);
+            }
+        }
+        PointerKind::Up => {
+            let (down, start, scrolling) = match state_from(hwnd) {
+                Some(s) => (s.touch.down, s.touch.start, s.touch.scrolling),
+                None => return,
+            };
+            if let Some(s) = state_from(hwnd) {
+                s.touch.down = false;
+                s.touch.scrolling = false;
+            }
+            // 未进入滚动 → 视为点击：在起点合成按下，抬起处合成抬起，走正常派发。
+            if down && !scrolling {
+                dispatch_pointer_event(
+                    hwnd,
+                    PointerEvent::single(PointerKind::Down, Point::new(start.0, start.1), MouseButton::Left),
+                );
+                dispatch_pointer_event(
+                    hwnd,
+                    PointerEvent::single(PointerKind::Up, Point::new(x, y), MouseButton::Left),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 触摸滚动：把 dy 注入手指下的滚动容器（两段式：借用读取后释放再 InvalidateRect）。
+unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
+    let repaint = {
+        let Some(state) = state_from(hwnd) else { return };
+        state.handler.on_pan(pos, dy)
+    };
+    if repaint {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
 }
 
 /// 把输入法合成窗 + 候选窗定位到焦点文本控件的光标处。

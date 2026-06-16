@@ -192,6 +192,8 @@ struct UiHost {
     theme: Rc<Theme>,
     /// 单调起点，用于动画相位时钟。
     start: std::time::Instant,
+    /// 触摸平移的亚像素残差（物理→逻辑取整丢失部分累积，避免高 DPI 细微平移发黏）。
+    pan_residual: f32,
 }
 
 impl UiHost {
@@ -215,6 +217,7 @@ impl UiHost {
             logical_size: Size::new(0, 0),
             theme,
             start: std::time::Instant::now(),
+            pan_residual: 0.0,
         }
     }
 
@@ -441,6 +444,24 @@ impl AppHandler for UiHost {
 
     fn wants_animation(&self) -> bool {
         crate::anim::animation_requested()
+    }
+
+    fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
+        // 菜单激活时忽略平移（并清残差，避免菜单关闭后跳变）。
+        if self.menu.is_some() {
+            self.pan_residual = 0.0;
+            return false;
+        }
+        // 物理 → 逻辑（命中与滚动均在逻辑空间）；亚像素残差累积，避免高 DPI 发黏。
+        let s = self.scale;
+        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let total = dy as f32 / s + self.pan_residual;
+        let dyl = total.trunc() as i32;
+        self.pan_residual = total - dyl as f32;
+        if dyl == 0 {
+            return false;
+        }
+        self.tree.pan_scroll(p, dyl)
     }
 
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
