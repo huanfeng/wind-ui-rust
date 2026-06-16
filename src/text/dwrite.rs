@@ -122,11 +122,12 @@ impl Default for DWriteEngine {
 }
 
 impl TextEngine for DWriteEngine {
-    fn measure(&mut self, text: &str, family: Option<&str>, size: f32) -> Size {
+    fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size {
         if text.is_empty() {
             return Size::new(0, size.ceil() as i32);
         }
-        let Some(layout) = self.layout(text, family, size, f32::MAX) else {
+        let mw = max_width.unwrap_or(f32::MAX);
+        let Some(layout) = self.layout(text, family, size, mw) else {
             return Size::new(0, size.ceil() as i32);
         };
         let mut m = DWRITE_TEXT_METRICS::default();
@@ -148,8 +149,8 @@ impl TextEngine for DWriteEngine {
         if text.is_empty() || rect.is_empty() {
             return;
         }
-        // Label 是单行控件：draw 与 measure 同用 f32::MAX 不换行，避免垂直裁剪。
-        let Some(layout) = self.layout(text, family, size, f32::MAX) else {
+        // 按 rect 宽度换行（与 Label measure 传入的可用宽度一致）。短文字不触发换行。
+        let Some(layout) = self.layout(text, family, size, rect.w as f32) else {
             return;
         };
         let mut m = DWRITE_TEXT_METRICS::default();
@@ -203,7 +204,8 @@ impl TextEngine for DWriteEngine {
             Align::Center => rect.x + (rect.w - tw) / 2,
             Align::End => rect.x + rect.w - tw,
         };
-        let oy = rect.y + (rect.h - th) / 2;
+        // 多行文字高于 rect 时不产生负偏移（退化为顶对齐），避免顶部行被裁掉。
+        let oy = rect.y + (rect.h - th).max(0) / 2;
 
         composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color, clip);
     }

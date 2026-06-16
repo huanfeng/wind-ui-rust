@@ -118,7 +118,7 @@ impl Canvas for SkiaCanvas<'_> {
 
     fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size {
         match self.engine.as_deref_mut() {
-            Some(engine) => engine.measure(text, family, size),
+            Some(engine) => engine.measure(text, family, size, None),
             None => crate::geometry::Size::new(
                 (text.chars().count() as f32 * size * 0.6).ceil() as i32,
                 size.ceil() as i32,

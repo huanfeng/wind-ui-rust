@@ -1,5 +1,8 @@
 # windui — 实施路线图（MVP）
 
+> **状态：MVP 完成（Phase 0–6 全部交付并经独立审查）。** 实测 release 二进制 0.49MB、
+> 私有内存 3.65MB（520×560 窗口）。详见 README。
+
 每个阶段都**必须能编译运行并产出一张可验证的截屏 PNG**，完成后做一次审查（code-reviewer）再 commit。
 
 截屏机制：demo 支持 `--screenshot <路径>` 模式 —— 启动 → 布局 → 渲染一帧 → `pixmap.save_png()` → 自动退出。CI/自动化与人工都可直接比对 PNG。

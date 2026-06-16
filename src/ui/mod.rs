@@ -31,8 +31,13 @@ impl Label {
 }
 
 impl Widget for Label {
-    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        text.measure(&self.text, style.font_family.as_deref(), style.font_size)
+    fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        // 在可用宽度内换行：宽度受限时折行，宽松时单行。
+        // 注意：avail/rect 均为 content-box（已扣 padding），measure 与 draw 同源故一致。
+        // 已知限制：换行准确仅保证于显式宽度的 Label（width/width_match/weight）；
+        // 纯 Wrap 宽度的多行 Label，draw 会在收敛后的窄宽重新换行，可能与 measure 行数不符。
+        let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
+        text.measure(&self.text, style.font_family.as_deref(), style.font_size, max_w)
     }
     fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         canvas.draw_text(
@@ -81,7 +86,7 @@ impl Button {
 
 impl Widget for Button {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let s = text.measure(&self.label, style.font_family.as_deref(), style.font_size);
+        let s = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
         // 内置左右 16 / 上下 9 的内边距
         Size::new(s.w + 32, s.h + 18)
     }

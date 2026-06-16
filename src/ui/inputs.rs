@@ -38,7 +38,7 @@ impl CheckBox {
 
 impl Widget for CheckBox {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size);
+        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
@@ -161,7 +161,7 @@ impl RadioButton {
 
 impl Widget for RadioButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size);
+        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
