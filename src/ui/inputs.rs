@@ -8,14 +8,12 @@ use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
 
-const ACCENT: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0xFF };
-const TRACK_OFF: Color = Color { r: 0xCF, g: 0xD4, b: 0xDC, a: 0xFF };
 const BOX_SIZE: i32 = 18;
 const GAP: i32 = 8;
 
@@ -42,18 +40,20 @@ impl Widget for CheckBox {
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let th = crate::theme::current();
+        let (p, tg) = (&th.palette, &th.toggle);
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
         let on = self.state.get();
         if on {
-            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(ACCENT));
+            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(tg.accent(p)));
             // 勾：两段线
-            let p = Paint::fill(Color::WHITE);
-            canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &p);
-            canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &p);
+            let paint = Paint::fill(p.on_accent);
+            canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
+            canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &paint);
         } else {
-            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(Color::WHITE));
-            canvas.stroke_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, 1.5, &Paint::fill(TRACK_OFF));
+            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(tg.knob(p)));
+            canvas.stroke_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, 1.5, &Paint::fill(tg.track(p)));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
         canvas.draw_text(&self.label, text_rect, style.fg, Align::Start, style.font_family.as_deref(), style.font_size);
@@ -108,11 +108,13 @@ impl Widget for Switch {
         let x = bounds.x as f32;
         let y = (bounds.y + (bounds.h - h) / 2) as f32;
         let on = self.state.get();
-        let track = if on { ACCENT } else { TRACK_OFF };
+        let th = crate::theme::current();
+        let (p, tg) = (&th.palette, &th.toggle);
+        let track = if on { tg.accent(p) } else { tg.track(p) };
         canvas.fill_round_rect(x, y, w as f32, h as f32, h as f32 / 2.0, &Paint::fill(track));
         let r = (h - 6) as f32 / 2.0;
         let knob_cx = if on { x + w as f32 - 3.0 - r } else { x + 3.0 + r };
-        canvas.fill_circle(knob_cx, y + h as f32 / 2.0, r, &Paint::fill(Color::WHITE));
+        canvas.fill_circle(knob_cx, y + h as f32 / 2.0, r, &Paint::fill(tg.knob(p)));
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -165,16 +167,18 @@ impl Widget for RadioButton {
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let th = crate::theme::current();
+        let (p, tg) = (&th.palette, &th.toggle);
         let cy = bounds.y + bounds.h / 2;
         let cx = bounds.x + BOX_SIZE / 2;
         let outer = BOX_SIZE as f32 / 2.0;
         if self.selected() {
-            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(ACCENT));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 5.0, &Paint::fill(Color::WHITE));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 8.0, &Paint::fill(ACCENT));
+            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(tg.accent(p)));
+            canvas.fill_circle(cx as f32, cy as f32, outer - 5.0, &Paint::fill(tg.knob(p)));
+            canvas.fill_circle(cx as f32, cy as f32, outer - 8.0, &Paint::fill(tg.accent(p)));
         } else {
-            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(TRACK_OFF));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 1.5, &Paint::fill(Color::WHITE));
+            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(tg.track(p)));
+            canvas.fill_circle(cx as f32, cy as f32, outer - 1.5, &Paint::fill(tg.knob(p)));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
         canvas.draw_text(&self.label, text_rect, style.fg, Align::Start, style.font_family.as_deref(), style.font_size);
@@ -238,12 +242,14 @@ impl Widget for Slider {
         let x1 = bounds.x as f32 + bounds.w as f32 - r;
         let knob_x = x0 + (x1 - x0) * v;
         // 轨道
-        canvas.fill_round_rect(x0, cy - 2.0, (x1 - x0).max(0.0), 4.0, 2.0, &Paint::fill(TRACK_OFF));
+        let th = crate::theme::current();
+        let (pal, tg) = (&th.palette, &th.toggle);
+        canvas.fill_round_rect(x0, cy - 2.0, (x1 - x0).max(0.0), 4.0, 2.0, &Paint::fill(tg.track(pal)));
         // 已填充
-        canvas.fill_round_rect(x0, cy - 2.0, (knob_x - x0).max(0.0), 4.0, 2.0, &Paint::fill(ACCENT));
+        canvas.fill_round_rect(x0, cy - 2.0, (knob_x - x0).max(0.0), 4.0, 2.0, &Paint::fill(tg.accent(pal)));
         // 钮
-        canvas.fill_circle(knob_x, cy, r, &Paint::fill(Color::WHITE));
-        canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(ACCENT));
+        canvas.fill_circle(knob_x, cy, r, &Paint::fill(tg.knob(pal)));
+        canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(tg.accent(pal)));
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -299,7 +305,6 @@ impl Widget for Slider {
 // ---------------- TextInput ----------------
 
 const TEXT_PAD: i32 = 10;
-const SEL_COLOR: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0x55 };
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -833,9 +838,13 @@ impl Widget for TextInput {
         Size::new(160, h)
     }
     fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let th = crate::theme::current();
+        let (pal, inp) = (&th.palette, &th.input);
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
-        canvas.fill_round_rect(x, y, w, h, 6.0, &Paint::fill(Color::WHITE));
-        canvas.stroke_round_rect(x, y, w, h, 6.0, 1.5, &Paint::fill(TRACK_OFF));
+        let corner = inp.corner(&th.metrics);
+        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(inp.bg(pal)));
+        let border = if focused { inp.border_focus(pal) } else { inp.border(pal) };
+        canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
         let disp = self.display_string();
@@ -913,7 +922,7 @@ impl Widget for TextInput {
                         (ly + 2) as f32,
                         (x2 - x1) as f32,
                         (line_h - 4) as f32,
-                        &Paint::fill(SEL_COLOR),
+                        &Paint::fill(inp.selection(pal)),
                     );
                 }
             }
@@ -921,7 +930,7 @@ impl Widget for TextInput {
 
         if is_empty {
             let pr = Rect::new(inner.x, first_line_y, inner.w, line_h);
-            canvas.draw_text(&self.placeholder, pr, Color::hex(0xAAB0B8), Align::Start, family, fsize);
+            canvas.draw_text(&self.placeholder, pr, inp.placeholder(pal), Align::Start, family, fsize);
         } else {
             let chars: Vec<char> = disp.chars().collect();
             for (i, ln) in lay.lines.iter().enumerate() {
@@ -948,7 +957,7 @@ impl Widget for TextInput {
                 cxx as f32,
                 (ly + line_h - 2) as f32,
                 1.0,
-                &Paint::fill(Color::hex(0x444444)),
+                &Paint::fill(inp.cursor(pal)),
             );
         }
         canvas.restore();

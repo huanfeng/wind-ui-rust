@@ -61,28 +61,16 @@ enum BtnState {
     Press,
 }
 
-/// 交互按钮：hover/press 三态 + 点击/回车回调。
+/// 交互按钮：hover/press 三态 + 点击/回车回调。颜色取自当前主题。
 pub struct Button {
     label: String,
     state: BtnState,
-    base: Color,
-    hover: Color,
-    press: Color,
-    text_color: Color,
     on_click: Option<ClickFn>,
 }
 
 impl Button {
     pub fn new(label: String) -> Self {
-        Self {
-            label,
-            state: BtnState::Normal,
-            base: Color::hex(0x4C8BF5),
-            hover: Color::hex(0x6BA3FF),
-            press: Color::hex(0x3A6FD0),
-            text_color: Color::WHITE,
-            on_click: None,
-        }
+        Self { label, state: BtnState::Normal, on_click: None }
     }
 }
 
@@ -93,12 +81,15 @@ impl Widget for Button {
         Size::new(s.w + 32, s.h + 18)
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let t = crate::theme::current();
+        let (pal, bt) = (&t.palette, &t.button);
         let color = match self.state {
-            BtnState::Normal => self.base,
-            BtnState::Hover => self.hover,
-            BtnState::Press => self.press,
+            BtnState::Normal => bt.bg(pal),
+            BtnState::Hover => bt.hover(pal),
+            BtnState::Press => bt.active(pal),
         };
-        let r = style.corner_radius.max(6.0);
+        // 每节点 corner 覆盖优先（>0），否则用主题。
+        let r = if style.corner_radius > 0.0 { style.corner_radius } else { bt.corner(&t.metrics) };
         canvas.fill_round_rect(
             bounds.x as f32,
             bounds.y as f32,
@@ -110,7 +101,7 @@ impl Widget for Button {
         canvas.draw_text(
             &self.label,
             bounds,
-            self.text_color,
+            bt.fg(pal),
             Align::Center,
             style.font_family.as_deref(),
             style.font_size,
@@ -314,9 +305,12 @@ impl Element {
         e
     }
 
-    /// 水平分隔线。
+    /// 水平分隔线。颜色取当前主题（构建发生在主题注入之后）。
+    /// Directive：颜色在构建期定格（非 paint 期），故若将来加运行期换主题 API，
+    /// divider 不会随之更新；届时应改为读主题的专用 widget。
     pub fn divider() -> Self {
-        Self::base(Layout::None).width_match().height(1).background(Color::hex(0xE2E6EA))
+        let c = crate::theme::current().palette.divider;
+        Self::base(Layout::None).width_match().height(1).background(c)
     }
 
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。

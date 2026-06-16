@@ -5,15 +5,12 @@ use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
 
-const TAB_ACCENT: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0xFF };
-const TAB_INACTIVE: Color = Color { r: 0x70, g: 0x76, b: 0x7E, a: 0xFF };
-const TAB_HOVER: Color = Color { r: 0x3A, g: 0x40, b: 0x48, a: 0xFF };
 /// 滚动条右缘可抓取宽度（与 core::hit_node 的命中区一致）。
 const SCROLLBAR_HIT_W: i32 = 10;
 /// 滚动条 thumb 最小高（与 core paint 一致）。
@@ -107,13 +104,15 @@ impl Widget for TabButton {
         Size::new(t.w + 24, t.h + 16)
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let th = crate::theme::current();
+        let (pal, tab) = (&th.palette, &th.tab);
         let sel = self.selected();
         let color = if sel {
-            TAB_ACCENT
+            tab.accent(pal)
         } else if self.hover {
-            TAB_HOVER
+            tab.hover(pal)
         } else {
-            TAB_INACTIVE
+            tab.inactive(pal)
         };
         canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
         if sel {
@@ -125,7 +124,7 @@ impl Widget for TabButton {
                 (bounds.w - 16) as f32,
                 3.0,
                 1.5,
-                &Paint::fill(TAB_ACCENT),
+                &Paint::fill(tab.accent(pal)),
             );
         }
     }

@@ -4,10 +4,12 @@
 //! （树、文字引擎、hover/capture/focus）并实现 `AppHandler` 供平台驱动。
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
+use crate::theme::Theme;
 use crate::event::{Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::win32::{self, WindowConfig};
@@ -59,6 +61,7 @@ pub struct App {
     cfg: WindowConfig,
     render: Option<RenderClosure>,
     content: Option<Element>,
+    theme: Option<Theme>,
 }
 
 impl App {
@@ -76,11 +79,19 @@ impl App {
             },
             render: None,
             content: None,
+            theme: None,
         }
     }
 
     pub fn background(mut self, c: Color) -> Self {
         self.cfg.bg = c;
+        self
+    }
+
+    /// 设置主题（默认使用内置默认主题）。窗口背景未显式设置时随主题 palette.bg。
+    pub fn theme(mut self, t: Theme) -> Self {
+        self.cfg.bg = t.palette.bg;
+        self.theme = Some(t);
         self
     }
 
@@ -137,10 +148,11 @@ impl App {
     }
 
     pub fn run(self) {
+        let theme = Rc::new(self.theme.unwrap_or_default());
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
-            Box::new(UiHost::new(root))
+            Box::new(UiHost::new(root, theme))
         } else {
             Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
         };
@@ -176,10 +188,14 @@ struct UiHost {
     menu: Option<ContextMenu>,
     /// 最近一帧的逻辑窗口尺寸（菜单弹出位置钳制用）。
     logical_size: Size,
+    /// 活动主题（注入到线程局部供控件读取）。
+    theme: Rc<Theme>,
 }
 
 impl UiHost {
-    fn new(root: Element) -> Self {
+    fn new(root: Element, theme: Rc<Theme>) -> Self {
+        // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
+        crate::theme::set_current(theme.clone());
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
         tree.clipboard = Some(Box::new(crate::platform::win32::clipboard::WinClipboard));
@@ -195,6 +211,7 @@ impl UiHost {
             focus_visible: false,
             menu: None,
             logical_size: Size::new(0, 0),
+            theme,
         }
     }
 
@@ -292,6 +309,8 @@ impl UiHost {
 
 impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
+        // 注入主题（离屏路径首帧、主题变更时均生效）。
+        crate::theme::set_current(self.theme.clone());
         // pixmap 是物理像素；布局用逻辑坐标（物理 / scale），绘制时再 ×scale 放大。
         let s = self.scale;
         let logical = Size::new(
@@ -314,27 +333,28 @@ impl AppHandler for UiHost {
         self.tree.paint(&mut canvas);
         // 上下文菜单浮层绘制在控件树之上（self.menu 与 self.engine 为不相交字段，借用安全）。
         if let Some(menu) = self.menu.as_ref() {
+            let (pal, mt) = (&self.theme.palette, &self.theme.menu);
             let r = menu.rect;
-            canvas.fill_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, &Paint::fill(Color::hex(0xFFFFFF)));
-            canvas.stroke_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, 1.0, &Paint::fill(Color::hex(0xD0D5DB)));
+            canvas.fill_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, &Paint::fill(mt.bg(pal)));
+            canvas.stroke_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, 1.0, &Paint::fill(mt.border(pal)));
             for (i, it) in menu.items.iter().enumerate() {
                 let iy = menu.item_y(i);
                 if menu.hover == Some(i) && it.enabled {
-                    canvas.fill_round_rect((r.x + 4) as f32, iy as f32, (r.w - 8) as f32, MENU_ITEM_H as f32, 5.0, &Paint::fill(Color::hex(0xEAF1FE)));
+                    canvas.fill_round_rect((r.x + 4) as f32, iy as f32, (r.w - 8) as f32, MENU_ITEM_H as f32, 5.0, &Paint::fill(mt.hover(pal)));
                 }
                 // 选中项用强调色 + 行尾勾选标记（下拉当前项）。
                 let color = if !it.enabled {
-                    Color::hex(0xB0B6BD)
+                    mt.text_disabled(pal)
                 } else if it.checked {
-                    Color::hex(0x4C8BF5)
+                    mt.accent(pal)
                 } else {
-                    Color::hex(0x2D3436)
+                    mt.text(pal)
                 };
                 let tr = Rect::new(r.x + MENU_PAD_X, iy, r.w - 2 * MENU_PAD_X, MENU_ITEM_H);
                 canvas.draw_text(&it.label, tr, color, crate::spec::Align::Start, None, MENU_FONT);
                 if it.checked {
                     let cr = Rect::new(r.x, iy, r.w - MENU_PAD_X, MENU_ITEM_H);
-                    canvas.draw_text("\u{2713}", cr, Color::hex(0x4C8BF5), crate::spec::Align::End, None, MENU_FONT);
+                    canvas.draw_text("\u{2713}", cr, mt.accent(pal), crate::spec::Align::End, None, MENU_FONT);
                 }
             }
         }

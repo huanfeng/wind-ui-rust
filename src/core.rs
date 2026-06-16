@@ -578,7 +578,7 @@ impl Tree {
 
         // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
         if n.focused && self.focus_ring_visible {
-            let ring = Color::hex(0x4C8BF5);
+            let ring = crate::theme::current().palette.accent;
             canvas.stroke_round_rect(fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0, radius + 1.0, 2.0, &Paint::fill(ring));
         }
 
@@ -606,7 +606,8 @@ impl Tree {
             let thumb_h = (th * ratio).max(24.0);
             let max_scroll = (n.content_h - content.h).max(1) as f32;
             let thumb_y = ty + (th - thumb_h) * (n.scroll_y as f32 / max_scroll);
-            canvas.fill_round_rect(tx, thumb_y, track_w, thumb_h, track_w / 2.0, &Paint::fill(Color::hex(0xBFC6CF)));
+            let thumb = crate::theme::current().palette.border;
+            canvas.fill_round_rect(tx, thumb_y, track_w, thumb_h, track_w / 2.0, &Paint::fill(thumb));
         }
     }
 }

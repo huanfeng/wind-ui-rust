@@ -14,6 +14,7 @@ pub mod render;
 pub mod spec;
 pub mod style;
 pub mod text;
+pub mod theme;
 pub mod ui;
 
 pub mod prelude {
@@ -21,5 +22,6 @@ pub mod prelude {
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::Style;
+    pub use crate::theme::Theme;
     pub use crate::ui::Element;
 }

@@ -141,6 +141,47 @@ impl Color {
     pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 };
     pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 255 };
+
+    /// 解析 `#RGB` / `#RRGGBB` / `#RRGGBBAA`（# 可省）。失败返回 None。
+    pub fn from_hex_str(s: &str) -> Option<Self> {
+        let h = s.trim().trim_start_matches('#');
+        // 必须为 ASCII：否则按字节切片可能落在多字节字符内部 panic（不可信 TOML 输入）。
+        if !h.is_ascii() {
+            return None;
+        }
+        let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+        match h.len() {
+            3 => {
+                let d = |c: char| c.to_digit(16).map(|v| (v * 17) as u8);
+                let mut it = h.chars();
+                Some(Self::rgb(d(it.next()?)?, d(it.next()?)?, d(it.next()?)?))
+            }
+            6 => Some(Self::rgba(p(0)?, p(2)?, p(4)?, 255)),
+            8 => Some(Self::rgba(p(0)?, p(2)?, p(4)?, p(6)?)),
+            _ => None,
+        }
+    }
+    /// 序列化为 `#RRGGBB`（alpha=255）或 `#RRGGBBAA`。
+    pub fn to_hex_string(&self) -> String {
+        if self.a == 255 {
+            format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+        } else {
+            format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
+        }
+    }
+}
+
+impl serde::Serialize for Color {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Color {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Color::from_hex_str(&s).ok_or_else(|| serde::de::Error::custom(format!("无效颜色: {s}")))
+    }
 }
 
 #[cfg(test)]
@@ -166,5 +207,29 @@ mod tests {
     #[test]
     fn color_hex() {
         assert_eq!(Color::hex(0x336699), Color::rgb(0x33, 0x66, 0x99));
+    }
+
+    #[test]
+    fn color_from_hex_str_forms() {
+        assert_eq!(Color::from_hex_str("#336699"), Some(Color::rgb(0x33, 0x66, 0x99)));
+        assert_eq!(Color::from_hex_str("336699"), Some(Color::rgb(0x33, 0x66, 0x99)));
+        assert_eq!(Color::from_hex_str("#369"), Some(Color::rgb(0x33, 0x66, 0x99)));
+        assert_eq!(Color::from_hex_str("#11223344"), Some(Color::rgba(0x11, 0x22, 0x33, 0x44)));
+    }
+
+    #[test]
+    fn color_from_hex_str_rejects_bad_input() {
+        // 多字节 UTF-8（字节长 6）不得 panic，返回 None。
+        assert_eq!(Color::from_hex_str("€abc"), None);
+        assert_eq!(Color::from_hex_str("aébcd"), None);
+        assert_eq!(Color::from_hex_str("xyz"), None);
+        assert_eq!(Color::from_hex_str("#12"), None);
+        assert_eq!(Color::from_hex_str(""), None);
+    }
+
+    #[test]
+    fn color_hex_string_omits_opaque_alpha() {
+        assert_eq!(Color::rgb(0x33, 0x66, 0x99).to_hex_string(), "#336699");
+        assert_eq!(Color::rgba(0x11, 0x22, 0x33, 0x44).to_hex_string(), "#11223344");
     }
 }

@@ -9,6 +9,9 @@ license = "MIT"
 tiny-skia = "0.11"
 # #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
 windows-core = "0.58"
+# 主题配置（TOML 映射）。
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [dependencies.windows]
 version = "0.58"
