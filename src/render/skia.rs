@@ -17,24 +17,29 @@ struct Clip {
     mask: Mask,
 }
 
-/// 直接绘制到借入的 `Pixmap`。坐标为绝对窗口坐标。
+/// 直接绘制到借入的 `Pixmap`。
+///
+/// 控件树用**逻辑坐标**（dp）；本 canvas 通过 `scale` 把逻辑坐标变换为物理像素：
+/// 图形走 tiny-skia `Transform::from_scale`，文字按物理字号交 DirectWrite 渲染。
 pub struct SkiaCanvas<'a> {
     pixmap: &'a mut Pixmap,
     engine: Option<&'a mut dyn TextEngine>,
     clips: Vec<Clip>,
     /// save() 记录的栈深度，restore() 据此回弹。
     saves: Vec<usize>,
+    /// 逻辑→物理缩放因子（DPI / 96）。
+    scale: f32,
 }
 
 impl<'a> SkiaCanvas<'a> {
-    /// 无文字能力（仅图形）。
+    /// 无文字能力（仅图形），scale=1。
     pub fn new(pixmap: &'a mut Pixmap) -> Self {
-        Self { pixmap, engine: None, clips: Vec::new(), saves: Vec::new() }
+        Self { pixmap, engine: None, clips: Vec::new(), saves: Vec::new(), scale: 1.0 }
     }
 
-    /// 带文字引擎。
-    pub fn with_text(pixmap: &'a mut Pixmap, engine: &'a mut dyn TextEngine) -> Self {
-        Self { pixmap, engine: Some(engine), clips: Vec::new(), saves: Vec::new() }
+    /// 带文字引擎与 DPI 缩放。
+    pub fn with_text(pixmap: &'a mut Pixmap, engine: &'a mut dyn TextEngine, scale: f32) -> Self {
+        Self { pixmap, engine: Some(engine), clips: Vec::new(), saves: Vec::new(), scale }
     }
 
     fn sk_paint(p: &Paint) -> SkPaint<'static> {
@@ -54,7 +59,7 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), mask);
+            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::from_scale(self.scale, self.scale), mask);
         }
     }
 
@@ -76,7 +81,7 @@ impl Canvas for SkiaCanvas<'_> {
             let sp = Self::sk_paint(paint);
             let stroke = Stroke { width, ..Default::default() };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::identity(), mask);
+            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::from_scale(self.scale, self.scale), mask);
         }
     }
 
@@ -88,7 +93,7 @@ impl Canvas for SkiaCanvas<'_> {
             let sp = Self::sk_paint(paint);
             let stroke = Stroke { width, line_cap: LineCap::Butt, ..Default::default() };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::identity(), mask);
+            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::from_scale(self.scale, self.scale), mask);
         }
     }
 
@@ -96,7 +101,7 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), mask);
+            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::from_scale(self.scale, self.scale), mask);
         }
     }
 
@@ -109,7 +114,7 @@ impl Canvas for SkiaCanvas<'_> {
         family: Option<&str>,
         size: f32,
     ) {
-        // DirectWrite 位图逐像素合成，不走 mask；把当前裁剪矩形传下去做像素级 scissor。
+        // 传逻辑 rect/size/clip；引擎内部持有 scale 自行物理化（与 measure 同源）。
         let clip = self.clips.last().map(|c| c.rect);
         if let Some(engine) = self.engine.as_deref_mut() {
             engine.draw(self.pixmap, text, rect, color, align, family, size, clip);
@@ -117,6 +122,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size {
+        // 逻辑入参；引擎内部物理测量后 /scale 回逻辑，与正文绘制度量同源。
         match self.engine.as_deref_mut() {
             Some(engine) => engine.measure(text, family, size, None),
             None => crate::geometry::Size::new(
@@ -150,10 +156,15 @@ impl Canvas for SkiaCanvas<'_> {
         };
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         if let Some(mut mask) = Mask::new(pw, ph) {
-            if !eff.is_empty() {
-                if let Some(rect) =
-                    tiny_skia::Rect::from_xywh(eff.x as f32, eff.y as f32, eff.w as f32, eff.h as f32)
-                {
+            // mask 用物理整数矩形（与文字 clip 的 rect.scaled 同源），消除取整分歧。
+            let peff = eff.scaled(self.scale);
+            if !peff.is_empty() {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(
+                    peff.x as f32,
+                    peff.y as f32,
+                    peff.w as f32,
+                    peff.h as f32,
+                ) {
                     let mut pb = PathBuilder::new();
                     pb.push_rect(rect);
                     if let Some(path) = pb.finish() {
@@ -161,6 +172,7 @@ impl Canvas for SkiaCanvas<'_> {
                     }
                 }
             }
+            // clips 存逻辑矩形（intersect 在逻辑空间）。
             self.clips.push(Clip { rect: eff, mask });
         }
     }

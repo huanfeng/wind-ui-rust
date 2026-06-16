@@ -10,7 +10,13 @@ use crate::geometry::{Color, Rect, Size};
 use crate::spec::Align;
 
 /// 文字测量与绘制接口。测量供布局阶段，绘制供 paint 阶段合成进 pixmap。
+///
+/// 坐标/字号约定：对外接口均为**逻辑单位**（dp）。引擎内部按 DPI scale 物理化
+/// （measure 物理排版后 /scale 回逻辑，draw 物理排版并按 rect×scale 合成），
+/// 使测量与绘制走同一物理字号路径——字体 hinting 非线性，绝不可线性外推。
 pub trait TextEngine {
+    /// 设置 DPI 缩放因子。
+    fn set_scale(&mut self, _scale: f32) {}
     /// 文字尺寸。`max_width=None` 单行不换行；`Some(w)` 在宽度 w 内换行并返回多行尺寸。
     fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size;
     /// 在 `rect` 内按 `align` 水平对齐、垂直居中绘制文字，合成进 `pixmap`。

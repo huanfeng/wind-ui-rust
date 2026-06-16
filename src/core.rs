@@ -112,7 +112,9 @@ pub struct Tree {
     slots: Vec<Slot>,
     free: Vec<u32>,
     pub root: Option<NodeId>,
-    pub scale: f32,
+    /// 是否绘制焦点环。仅在键盘（Tab）导航时为 true，纯鼠标操作时为 false，
+    /// 使纯鼠标交互更纯净。
+    pub focus_ring_visible: bool,
 }
 
 impl Default for Tree {
@@ -123,7 +125,12 @@ impl Default for Tree {
 
 impl Tree {
     pub fn new() -> Self {
-        Self { slots: Vec::new(), free: Vec::new(), root: None, scale: 1.0 }
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+            root: None,
+            focus_ring_visible: false,
+        }
     }
 
     // ---- arena ----
@@ -549,8 +556,8 @@ impl Tree {
         let content = abs.inset(n.padding);
         n.widget.paint(abs, content, n.focused, canvas, &n.style);
 
-        // 焦点环：在持焦节点外绘制强调色描边。
-        if n.focused {
+        // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
+        if n.focused && self.focus_ring_visible {
             let ring = Color::hex(0x4C8BF5);
             canvas.stroke_round_rect(fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0, radius + 1.0, 2.0, &Paint::fill(ring));
         }

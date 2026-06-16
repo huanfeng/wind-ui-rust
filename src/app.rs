@@ -13,7 +13,7 @@ use crate::geometry::{Color, Point, Size};
 use crate::platform::win32::{self, WindowConfig};
 use crate::platform::AppHandler;
 use crate::render::SkiaCanvas;
-use crate::text::DWriteEngine;
+use crate::text::{DWriteEngine, TextEngine};
 use crate::ui::Element;
 
 type RenderClosure = Box<dyn FnMut(&mut Pixmap, Size)>;
@@ -34,6 +34,7 @@ impl App {
                 height,
                 bg: Color::hex(0xF3F3F3),
                 screenshot: None,
+                screenshot_scale: 1.0,
             },
             render: None,
             content: None,
@@ -51,12 +52,17 @@ impl App {
         self
     }
 
-    /// 从命令行解析 `--screenshot <path>`。
+    /// 从命令行解析 `--screenshot <path>` 与可选 `--scale <f>`（高 DPI 截屏验证）。
     pub fn screenshot_from_args(mut self) -> Self {
         let args: Vec<String> = std::env::args().collect();
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             if let Some(p) = args.get(i + 1) {
                 self.cfg.screenshot = Some(PathBuf::from(p));
+            }
+        }
+        if let Some(i) = args.iter().position(|a| a == "--scale") {
+            if let Some(v) = args.get(i + 1).and_then(|s| s.parse::<f32>().ok()) {
+                self.cfg.screenshot_scale = v;
             }
         }
         self
@@ -106,6 +112,10 @@ struct UiHost {
     focus: Option<NodeId>,
     focus_order: Vec<NodeId>,
     close: bool,
+    /// DPI 缩放因子（逻辑→物理）。
+    scale: f32,
+    /// 焦点环是否可见：键盘 Tab 导航时 true，鼠标聚焦时 false。
+    focus_visible: bool,
 }
 
 impl UiHost {
@@ -120,6 +130,8 @@ impl UiHost {
             focus: None,
             focus_order: Vec::new(),
             close: false,
+            scale: 1.0,
+            focus_visible: false,
         }
     }
 
@@ -146,7 +158,13 @@ impl UiHost {
 
 impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
-        self.tree.layout_root(size, &mut self.engine);
+        // pixmap 是物理像素；布局用逻辑坐标（物理 / scale），绘制时再 ×scale 放大。
+        let s = self.scale;
+        let logical = Size::new(
+            (size.w as f32 / s).round().max(1.0) as i32,
+            (size.h as f32 / s).round().max(1.0) as i32,
+        );
+        self.tree.layout_root(logical, &mut self.engine);
         // 布局后结构稳定，刷新 Tab 焦点顺序。
         self.focus_order = self.tree.focusable_order();
         // 若当前焦点已不在可聚焦集合中（结构变更），归一化为无焦点。
@@ -156,11 +174,18 @@ impl AppHandler for UiHost {
                 self.focus = None;
             }
         }
-        let mut canvas = SkiaCanvas::with_text(pixmap, &mut self.engine);
+        self.tree.focus_ring_visible = self.focus_visible;
+        let mut canvas = SkiaCanvas::with_text(pixmap, &mut self.engine, s);
         self.tree.paint(&mut canvas);
     }
 
-    fn on_pointer(&mut self, ev: crate::event::PointerEvent) -> bool {
+    fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
+        // 物理坐标 → 逻辑坐标（布局与命中均在逻辑空间）。
+        let s = self.scale;
+        ev.pos = Point::new(
+            (ev.pos.x as f32 / s).round() as i32,
+            (ev.pos.y as f32 / s).round() as i32,
+        );
         let mut hover = self.hover;
         let mut capture = self.capture;
         let res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
@@ -170,6 +195,8 @@ impl AppHandler for UiHost {
             let old = self.focus;
             self.tree.set_focused(Some(f), old);
             self.focus = Some(f);
+            // 鼠标聚焦：不显示焦点环，保持纯鼠标操作的纯净观感。
+            self.focus_visible = false;
         }
         if res.close {
             self.close = true;
@@ -178,8 +205,9 @@ impl AppHandler for UiHost {
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
-        // Tab 由宿主独占用于焦点导航。
+        // Tab 由宿主独占用于焦点导航，并启用焦点环显示。
         if ev.key == Key::Tab {
+            self.focus_visible = true;
             return self.move_focus(!ev.shift);
         }
         // 其余键先交给焦点控件；未被消费的 Escape 回退为关闭窗口。
@@ -199,6 +227,12 @@ impl AppHandler for UiHost {
 
     fn capture_active(&self) -> bool {
         self.capture.is_some()
+    }
+
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+        // 文字引擎同步 scale，保证文字测量/绘制与图形缩放一致。
+        self.engine.set_scale(scale);
     }
 
     fn on_capture_lost(&mut self) -> bool {

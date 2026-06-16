@@ -47,8 +47,10 @@ pub struct DWriteEngine {
     factory: IDWriteFactory,
     gdi_interop: IDWriteGdiInterop,
     renderer: IDWriteTextRenderer,
-    /// 缓存 TextFormat，按 (family,size) 复用。
+    /// 缓存 TextFormat，按 (family, 物理字号 bits) 复用。
     formats: HashMap<(String, u32), IDWriteTextFormat>,
+    /// DPI 缩放因子（逻辑→物理）。
+    scale: f32,
 }
 
 impl DWriteEngine {
@@ -73,6 +75,7 @@ impl DWriteEngine {
                 gdi_interop,
                 renderer,
                 formats: HashMap::new(),
+                scale: 1.0,
             }
         }
     }
@@ -122,17 +125,24 @@ impl Default for DWriteEngine {
 }
 
 impl TextEngine for DWriteEngine {
+    fn set_scale(&mut self, scale: f32) {
+        self.scale = scale.max(0.1);
+    }
+
     fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size {
         if text.is_empty() {
             return Size::new(0, size.ceil() as i32);
         }
-        let mw = max_width.unwrap_or(f32::MAX);
-        let Some(layout) = self.layout(text, family, size, mw) else {
+        // 物理字号排版（与 draw 同源），结果 /scale 回逻辑供布局使用。
+        let s = self.scale;
+        let psize = size * s;
+        let pmw = max_width.map(|w| w * s).unwrap_or(f32::MAX);
+        let Some(layout) = self.layout(text, family, psize, pmw) else {
             return Size::new(0, size.ceil() as i32);
         };
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m).ok() };
-        Size::new(m.width.ceil() as i32, m.height.ceil() as i32)
+        Size::new((m.width / s).ceil() as i32, (m.height / s).ceil() as i32)
     }
 
     fn draw(
@@ -149,8 +159,13 @@ impl TextEngine for DWriteEngine {
         if text.is_empty() || rect.is_empty() {
             return;
         }
-        // 按 rect 宽度换行（与 Label measure 传入的可用宽度一致）。短文字不触发换行。
-        let Some(layout) = self.layout(text, family, size, rect.w as f32) else {
+        // 逻辑 rect/size/clip 物理化（与 measure 同源物理字号排版）。
+        let s = self.scale;
+        let prect = rect.scaled(s);
+        let pclip = clip.map(|c| c.scaled(s));
+        let psize = size * s;
+        // 按物理 rect 宽度换行（与 measure 传入的物理 maxWidth 一致）。
+        let Some(layout) = self.layout(text, family, psize, prect.w as f32) else {
             return;
         };
         let mut m = DWRITE_TEXT_METRICS::default();
@@ -198,16 +213,16 @@ impl TextEngine for DWriteEngine {
         let cw = tw.min(bmw);
         let ch = th.min(bmh);
 
-        // 对齐：水平按 align，垂直居中
+        // 对齐：水平按 align，垂直居中（均在物理 prect 内）。
         let ox = match align {
-            Align::Start | Align::Stretch => rect.x,
-            Align::Center => rect.x + (rect.w - tw) / 2,
-            Align::End => rect.x + rect.w - tw,
+            Align::Start | Align::Stretch => prect.x,
+            Align::Center => prect.x + (prect.w - tw) / 2,
+            Align::End => prect.x + prect.w - tw,
         };
         // 多行文字高于 rect 时不产生负偏移（退化为顶对齐），避免顶部行被裁掉。
-        let oy = rect.y + (rect.h - th).max(0) / 2;
+        let oy = prect.y + (prect.h - th).max(0) / 2;
 
-        composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color, clip);
+        composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color, pclip);
     }
 }
 

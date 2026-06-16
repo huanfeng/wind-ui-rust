@@ -66,6 +66,15 @@ impl Rect {
     pub fn is_empty(&self) -> bool {
         self.w <= 0 || self.h <= 0
     }
+    /// 按缩放因子转为物理像素矩形。按边界（右/下）取整，避免四分量独立 round 漂移。
+    pub fn scaled(&self, s: f32) -> Rect {
+        let x0 = (self.x as f32 * s).round() as i32;
+        let y0 = (self.y as f32 * s).round() as i32;
+        let x1 = (self.right() as f32 * s).round() as i32;
+        let y1 = (self.bottom() as f32 * s).round() as i32;
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+
     /// 向内收缩四边（用于 padding）。
     pub fn inset(&self, i: Insets) -> Rect {
         Rect::new(

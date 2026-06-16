@@ -34,4 +34,6 @@ pub trait AppHandler {
     fn on_capture_lost(&mut self) -> bool {
         false
     }
+    /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
+    fn set_scale(&mut self, _scale: f32) {}
 }

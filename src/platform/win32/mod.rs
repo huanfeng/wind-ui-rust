@@ -19,7 +19,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
@@ -29,9 +30,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW,
     SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
-    IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -46,6 +48,8 @@ pub struct WindowConfig {
     pub bg: Color,
     /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
     pub screenshot: Option<PathBuf>,
+    /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
+    pub screenshot_scale: f32,
 }
 
 impl Default for WindowConfig {
@@ -56,6 +60,7 @@ impl Default for WindowConfig {
             height: 600,
             bg: Color::hex(0xF3F3F3),
             screenshot: None,
+            screenshot_scale: 1.0,
         }
     }
 }
@@ -71,9 +76,14 @@ pub fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>) {
 
 /// 离屏渲染一帧并保存 PNG。无需窗口，适合自动化验证。
 fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &PathBuf) {
-    let size = Size::new(cfg.width.max(1), cfg.height.max(1));
-    let mut pixmap = Pixmap::new(size.w as u32, size.h as u32).expect("分配 pixmap 失败");
+    // 物理像素 = 逻辑尺寸 × scale，供高 DPI 截屏验证。
+    let s = cfg.screenshot_scale.max(0.1);
+    let pw = (cfg.width as f32 * s).round().max(1.0) as i32;
+    let ph = (cfg.height as f32 * s).round().max(1.0) as i32;
+    let size = Size::new(pw, ph);
+    let mut pixmap = Pixmap::new(pw as u32, ph as u32).expect("分配 pixmap 失败");
     pixmap.fill(to_skia_color(cfg.bg));
+    handler.set_scale(s);
     handler.render(&mut pixmap, size);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -262,6 +272,12 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
 
     let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
 
+    // 用系统 DPI 估算初始物理尺寸（cfg 宽高为逻辑 dp）。
+    let sys_dpi = GetDpiForSystem();
+    let init_scale = if sys_dpi == 0 { 1.0 } else { sys_dpi as f32 / 96.0 };
+    let phys_w = (cfg.width as f32 * init_scale).round() as i32;
+    let phys_h = (cfg.height as f32 * init_scale).round() as i32;
+
     let hwnd = match CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         CLASS_NAME,
@@ -269,8 +285,8 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        cfg.width,
-        cfg.height,
+        phys_w,
+        phys_h,
         None,
         None,
         hinst,
@@ -284,6 +300,19 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
             panic!("CreateWindowExW 失败: {e:?}");
         }
     };
+
+    // 用实际窗口 DPI 设置内容缩放（可能与系统 DPI 不同，如多显示器）。
+    let dpi = GetDpiForWindow(hwnd);
+    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+    // 实际 DPI 与系统估算不一致时，按真实 scale 校正窗口物理尺寸（在显示前，无 state 借用）。
+    if (scale - init_scale).abs() > 0.01 {
+        let w = (cfg.width as f32 * scale).round() as i32;
+        let h = (cfg.height as f32 * scale).round() as i32;
+        let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+    }
+    if let Some(s) = state_from(hwnd) {
+        s.handler.set_scale(scale);
+    }
 
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
@@ -358,6 +387,10 @@ unsafe extern "system" fn wnd_proc(
             handle_capture_changed(hwnd);
             LRESULT(0)
         }
+        WM_DPICHANGED => {
+            handle_dpi_changed(hwnd, wparam, lparam);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             // 回收 WindowState
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
@@ -425,6 +458,30 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     if close {
         let _ = DestroyWindow(hwnd);
     }
+}
+
+/// WM_DPICHANGED：DPI 变化（拖到不同缩放显示器）。按建议矩形调窗口尺寸并更新内容缩放。
+unsafe fn handle_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let dpi = (wparam.0 & 0xffff) as u32;
+    let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+    // lParam 指向系统建议的新窗口矩形，先据此重定位/缩放窗口（无 state 借用，重入安全）。
+    let prc = lparam.0 as *const RECT;
+    if !prc.is_null() {
+        let r = &*prc;
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+    if let Some(s) = state_from(hwnd) {
+        s.handler.set_scale(scale);
+    }
+    let _ = InvalidateRect(hwnd, None, false);
 }
 
 /// OS 抢走指针捕获（如 Alt+Tab、WM_CAPTURECHANGED）：通知 handler 收尾。
