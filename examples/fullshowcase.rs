@@ -123,6 +123,8 @@ fn main() {
 
     // 控件页（新控件集中展示，内容可滚动便于后续扩充）。
     let prog = Rc::new(Cell::new(0.45f32));
+    let qty = Rc::new(Cell::new(3.0f64));
+    let zoom = Rc::new(Cell::new(1.0f64));
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -135,6 +137,14 @@ fn main() {
                 .child(Element::progress(prog.clone()).width_match())
                 .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
                 .child(Element::progress_indeterminate().width_match()),
+        ))
+        .child(card(
+            "数字步进",
+            Element::col()
+                .width_match()
+                .spacing(10)
+                .child(row("数量", Element::stepper(qty.clone(), 0.0, 99.0, 1.0).width(120)))
+                .child(row("缩放", Element::stepper(zoom.clone(), 0.5, 3.0, 0.25).width(120))),
         ));
     let components = Element::scroll().fill().child(components_body);
 

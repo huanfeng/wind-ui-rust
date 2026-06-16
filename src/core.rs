@@ -1534,6 +1534,58 @@ mod tests {
     }
 
     #[test]
+    fn stepper_buttons_adjust_and_clamp() {
+        let v = Rc::new(Cell::new(2.0f64));
+        let root = Element::col()
+            .width(120)
+            .height(40)
+            .child(Element::stepper(v.clone(), 0.0, 3.0, 1.0).width(120));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(120, 40), &mut te);
+        let st = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(st);
+        let cy = b.y + b.h / 2;
+        let plus = Point::new(b.right() - 5, cy);
+        let minus = Point::new(b.x + 5, cy);
+        let (mut h, mut cap) = (None, None);
+        // + → 3（达上限）
+        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        assert_eq!(v.get(), 3.0);
+        // 再 + 钳制在 3
+        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        assert_eq!(v.get(), 3.0, "上限钳制");
+        // − 三次到 0 并钳制
+        for _ in 0..4 {
+            tree.dispatch_pointer(ptr(PointerKind::Down, minus), &mut h, &mut cap);
+        }
+        assert_eq!(v.get(), 0.0, "下限钳制");
+    }
+
+    #[test]
+    fn stepper_degenerate_inputs_no_panic() {
+        // min>max 且 step=0：构造期归一(step→1, min/max 互换)，点击不得 panic。
+        let v = Rc::new(Cell::new(5.0f64));
+        let root = Element::col()
+            .width(120)
+            .height(40)
+            .child(Element::stepper(v.clone(), 10.0, 0.0, 0.0).width(120));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(120, 40), &mut te);
+        let st = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(st);
+        let plus = Point::new(b.right() - 5, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        assert_eq!(v.get(), 6.0, "归一后 step=1，5→6");
+    }
+
+    #[test]
     fn indeterminate_progress_requests_animation() {
         crate::anim::reset_request();
         let root = Element::col()

@@ -7,6 +7,7 @@ pub mod containers;
 pub mod inputs;
 pub mod progress;
 pub mod select;
+pub mod stepper;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -22,6 +23,7 @@ use crate::text::TextEngine;
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use progress::ProgressBar;
 pub use select::Dropdown;
+pub use stepper::Stepper;
 
 /// 文本叶子控件。
 pub struct Label {
@@ -298,6 +300,11 @@ impl Element {
     pub fn dropdown(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
         let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
         Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
+    }
+
+    /// 数字步进（绑定 `Rc<Cell<f64>>`，带范围与步长；小数位由步长推断）。
+    pub fn stepper(value: Rc<Cell<f64>>, min: f64, max: f64, step: f64) -> Self {
+        Self::base(Layout::None).widget(stepper::Stepper::new(value, min, max, step))
     }
 
     /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。

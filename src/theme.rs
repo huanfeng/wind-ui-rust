@@ -291,6 +291,37 @@ impl ProgressTheme {
     }
 }
 
+/// 数字步进覆盖层。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StepperTheme {
+    pub bg: Option<Color>,
+    pub border: Option<Color>,
+    pub text: Option<Color>,
+    /// +/- 按钮区前景。
+    pub button: Option<Color>,
+    /// +/- 按钮悬停底色。
+    pub button_hover: Option<Color>,
+}
+
+impl StepperTheme {
+    pub fn bg(&self, p: &Palette) -> Color {
+        self.bg.unwrap_or(p.surface)
+    }
+    pub fn border(&self, p: &Palette) -> Color {
+        self.border.unwrap_or(p.border)
+    }
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(p.text)
+    }
+    pub fn button(&self, p: &Palette) -> Color {
+        self.button.unwrap_or(p.accent)
+    }
+    pub fn button_hover(&self, p: &Palette) -> Color {
+        self.button_hover.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x18))
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -304,6 +335,7 @@ pub struct Theme {
     pub menu: MenuTheme,
     pub tab: TabTheme,
     pub progress: ProgressTheme,
+    pub stepper: StepperTheme,
 }
 
 impl Theme {
