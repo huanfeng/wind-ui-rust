@@ -155,7 +155,8 @@ fn main() {
                 .padding(18)
                 .spacing(12)
                 .child(Element::label("偏好设置").font_size(24.0).fg(Color::hex(0x1A1A2E)).height(34).width_match())
-                .child(tabs),
+                // tabs 用 weight 占据标题以下的剩余高度（纵向 Match 会降级为 Wrap，需 weight 才填充）。
+                .child(tabs.weight(1.0)),
         )
         .child(dialog);
 

@@ -353,6 +353,8 @@ pub struct TextInput {
     /// 上下移动时保持的目标列像素（粘性 goal column）；水平移动/编辑后清空。
     goal_x: Cell<Option<i32>>,
     layout: RefCell<TextLayout>, // paint 重建的视觉行缓存
+    /// 最近一帧绘制的光标局部位置 (x, y_top, height)（节点局部逻辑坐标），供输入法定位。
+    caret_local: Cell<Option<(i32, i32, i32)>>,
     dragging: bool,
 }
 
@@ -369,6 +371,7 @@ impl TextInput {
             scroll_y: Cell::new(0),
             goal_x: Cell::new(None),
             layout: RefCell::new(TextLayout::default()),
+            caret_local: Cell::new(None),
             dragging: false,
         }
     }
@@ -605,6 +608,9 @@ impl TextInput {
         }
         let b = ctx.bounds();
         let local_x = screen_x - (b.x + TEXT_PAD) + self.scroll_x.get();
+        // 垂直按多行内边距换算行号。单行只有一行、下方 clamp 恒为 0，故单行垂直
+        // 居中（vpad=0）与此处用 TEXT_PAD 的不一致不影响命中；若将来单行支持多视觉
+        // 行，需与 paint 的 first_line_y 同步。
         let local_y = screen_y - (b.y + TEXT_PAD) + self.scroll_y.get();
         let li = if lay.line_h > 0 {
             (local_y / lay.line_h).clamp(0, lay.lines.len() as i32 - 1) as usize
@@ -834,10 +840,13 @@ impl Widget for TextInput {
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
         let disp = self.display_string();
         let is_empty = self.text.borrow().is_empty();
-        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y + TEXT_PAD, bounds.w - 2 * TEXT_PAD, bounds.h - 2 * TEXT_PAD);
+        let multiline = self.is_multiline();
+        // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
+        // 多行：四周都留内边距，使多行文本不贴边。
+        let vpad = if multiline { TEXT_PAD } else { 0 };
+        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y + vpad, bounds.w - 2 * TEXT_PAD, bounds.h - 2 * vpad);
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
-        let multiline = self.is_multiline();
         let wrap = self.config.wrap && multiline;
         let cursor = self.cursor.min(disp.chars().count());
 
@@ -928,9 +937,11 @@ impl Widget for TextInput {
             }
         }
 
+        let ly = first_line_y + cl as i32 * line_h;
+        let cxx = base_x + cx_in;
+        // 记录光标局部位置（相对节点左上角）供输入法候选窗定位。
+        self.caret_local.set(Some((cxx - bounds.x, ly - bounds.y, line_h)));
         if focused {
-            let ly = first_line_y + cl as i32 * line_h;
-            let cxx = base_x + cx_in;
             canvas.draw_line(
                 cxx as f32,
                 (ly + 2) as f32,
@@ -1115,6 +1126,9 @@ impl Widget for TextInput {
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
+    }
+    fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        self.caret_local.get()
     }
 }
 
