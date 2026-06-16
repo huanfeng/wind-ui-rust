@@ -1139,6 +1139,9 @@ impl Widget for TextInput {
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         self.caret_local.get()
     }
+    fn wants_right_click(&self) -> bool {
+        true // 右键弹出上下文菜单（剪切/复制/粘贴/全选）
+    }
 }
 
 #[cfg(test)]

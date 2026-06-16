@@ -4,7 +4,7 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
-use crate::event::{Event, KeyEvent, MenuItem, MenuRequest, PointerEvent, PointerKind};
+use crate::event::{Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind};
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension, MeasureMode, MeasureSpec};
@@ -66,6 +66,11 @@ pub trait Widget {
     /// 依赖最近一帧 paint 记录的光标位置。
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         None
+    }
+    /// 是否接收非左键（右/中键）的按下/抬起。默认 false——右键**不**作为单击，
+    /// 符合桌面习惯。仅需右键交互的控件（如 TextInput 的上下文菜单）返回 true。
+    fn wants_right_click(&self) -> bool {
+        false
     }
 }
 
@@ -879,11 +884,19 @@ impl Tree {
             }
         }
 
+        // 非左键的按下/抬起：默认不当作单击。只投递给显式接收右键的控件
+        // （如 TextInput 上下文菜单），其余跳过——符合桌面右键不激活的习惯。
+        let secondary = matches!(ev.kind, PointerKind::Down | PointerKind::Up)
+            && ev.button != MouseButton::Left;
+
         // 主事件：捕获优先，否则命中目标，沿祖先链冒泡。
         let had_capture = capture.is_some();
         let target = capture.or_else(|| self.hit_test(ev.pos));
         if let Some(t) = target {
             for id in self.ancestor_chain(t) {
+                if secondary && !self.get(id).map(|n| n.widget.wants_right_click()).unwrap_or(false) {
+                    continue;
+                }
                 let (consumed, o) = self.call_on_event(id, &Event::Pointer(ev));
                 res.repaint |= o.repaint;
                 res.close |= o.close;
@@ -1083,6 +1096,42 @@ mod tests {
 
     fn ptr(kind: PointerKind, p: Point) -> PointerEvent {
         PointerEvent::single(kind, p, MouseButton::Left)
+    }
+    fn rptr(kind: PointerKind, p: Point) -> PointerEvent {
+        PointerEvent::single(kind, p, MouseButton::Right)
+    }
+
+    #[test]
+    fn right_click_does_not_activate_button() {
+        let clicks = Rc::new(Cell::new(0));
+        let (mut tree, btn) = button_tree(clicks.clone());
+        let b = tree.abs_bounds(btn);
+        let c = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(rptr(PointerKind::Down, c), &mut hover, &mut cap);
+        tree.dispatch_pointer(rptr(PointerKind::Up, c), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 0, "右键不应触发按钮点击");
+        assert_eq!(cap, None, "右键不应捕获指针");
+    }
+
+    #[test]
+    fn right_click_does_not_toggle_checkbox() {
+        let state = Rc::new(Cell::new(false));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::checkbox("x", state.clone()));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let cb = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(cb);
+        let c = Point::new(b.x + 5, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(rptr(PointerKind::Up, c), &mut h, &mut cap);
+        assert!(!state.get(), "右键不应切换复选框");
     }
 
     fn button_tree(clicks: Rc<Cell<i32>>) -> (Tree, NodeId) {
