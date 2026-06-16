@@ -302,14 +302,35 @@ const TEXT_PAD: i32 = 10;
 const SEL_COLOR: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0x55 };
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
+/// 密码掩码字符（U+2022 BULLET）。
+const PASSWORD_MASK: char = '\u{2022}';
+
+/// TextInput 行为配置。由 Builder 的 `.password()/.multiline()/.wrap()` 设置。
+#[derive(Clone, Copy)]
+pub struct TextConfig {
+    /// 多行模式（P4 实现编辑/换行；当前仅占位存储）。
+    pub multiline: bool,
+    /// 密码模式：显示为掩码圆点、禁止复制/剪切、强制单行。
+    pub password: bool,
+    /// 多行软换行（仅 multiline 生效）；false 时仅显式 \n 换行。
+    pub wrap: bool,
+}
+
+impl Default for TextConfig {
+    /// wrap 默认开启，使多行默认软换行；类型自带正确默认避免直接构造踩坑。
+    fn default() -> Self {
+        Self { multiline: false, password: false, wrap: true }
+    }
+}
 
 pub struct TextInput {
     text: Rc<RefCell<String>>,
     placeholder: String,
+    config: TextConfig,
     cursor: usize,            // 字符索引
     anchor: Option<usize>,    // 选区锚点（Some 且 != cursor 时有选区）
     scroll_x: Cell<i32>,      // 水平滚动偏移（逻辑 px），paint 时按光标更新
-    char_x: RefCell<Vec<i32>>, // paint 缓存：char_x[i] = text[..i] 宽度（逻辑 px）
+    char_x: RefCell<Vec<i32>>, // paint 缓存：char_x[i] = display[..i] 宽度（逻辑 px）
     dragging: bool,
 }
 
@@ -319,6 +340,7 @@ impl TextInput {
         Self {
             text,
             placeholder,
+            config: TextConfig::default(),
             cursor,
             anchor: None,
             scroll_x: Cell::new(0),
@@ -327,8 +349,24 @@ impl TextInput {
         }
     }
 
+    /// 可变访问配置（供 Builder 配置）。
+    pub fn config_mut(&mut self) -> &mut TextConfig {
+        &mut self.config
+    }
+
     fn char_count(&self) -> usize {
         self.text.borrow().chars().count()
+    }
+
+    /// 实际用于显示与测量的字符串：密码模式下逐字符替换为掩码圆点，
+    /// 字符数与真实文本一一对应，故光标/选区索引可直接复用。
+    fn display_string(&self) -> String {
+        let t = self.text.borrow();
+        if self.config.password {
+            t.chars().map(|_| PASSWORD_MASK).collect()
+        } else {
+            t.clone()
+        }
     }
     fn clamp_cursor(&mut self) {
         let n = self.char_count();
@@ -473,11 +511,13 @@ impl Widget for TextInput {
         canvas.fill_round_rect(x, y, w, h, 6.0, &Paint::fill(Color::WHITE));
         canvas.stroke_round_rect(x, y, w, h, 6.0, 1.5, &Paint::fill(TRACK_OFF));
 
-        let text = self.text.borrow();
+        // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
+        let disp = self.display_string();
+        let is_empty = self.text.borrow().is_empty();
         let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y, bounds.w - 2 * TEXT_PAD, bounds.h);
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
-        let cursor = self.cursor.min(text.chars().count());
+        let cursor = self.cursor.min(disp.chars().count());
 
         // 重建每字符边界 x 缓存（逻辑 px）。
         {
@@ -485,7 +525,7 @@ impl Widget for TextInput {
             cx.clear();
             cx.push(0);
             let mut acc = String::new();
-            for ch in text.chars() {
+            for ch in disp.chars() {
                 acc.push(ch);
                 cx.push(canvas.measure_text(&acc, family, fsize).w);
             }
@@ -521,12 +561,12 @@ impl Widget for TextInput {
             );
         }
 
-        if text.is_empty() {
+        if is_empty {
             canvas.draw_text(&self.placeholder, inner, Color::hex(0xAAB0B8), Align::Start, family, fsize);
         } else {
             // 从 base_x 起绘制整行（足够宽不换行），由 clip 裁到内框。
             let tr = Rect::new(base_x, inner.y, NO_WRAP_W, inner.h);
-            canvas.draw_text(&text, tr, style.fg, Align::Start, family, fsize);
+            canvas.draw_text(&disp, tr, style.fg, Align::Start, family, fsize);
         }
 
         if focused {
@@ -641,18 +681,22 @@ impl Widget for TextInput {
                         ctx.mark_dirty();
                         true
                     }
-                    // Ctrl+C 复制（VK_C=0x43）
+                    // Ctrl+C 复制（VK_C=0x43）。密码模式禁止复制明文。
                     Key::Other(0x43) if k.ctrl => {
-                        if let Some(sel) = self.selected_text() {
-                            ctx.clipboard_set(&sel);
+                        if !self.config.password {
+                            if let Some(sel) = self.selected_text() {
+                                ctx.clipboard_set(&sel);
+                            }
                         }
                         true
                     }
-                    // Ctrl+X 剪切（VK_X=0x58）
+                    // Ctrl+X 剪切（VK_X=0x58）。密码模式禁止剪切（不外泄明文）。
                     Key::Other(0x58) if k.ctrl => {
-                        if let Some(sel) = self.selected_text() {
-                            ctx.clipboard_set(&sel);
-                            self.delete_selection(ctx);
+                        if !self.config.password {
+                            if let Some(sel) = self.selected_text() {
+                                ctx.clipboard_set(&sel);
+                                self.delete_selection(ctx);
+                            }
                         }
                         true
                     }
@@ -671,5 +715,8 @@ impl Widget for TextInput {
     }
     fn focusable(&self) -> bool {
         true
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }

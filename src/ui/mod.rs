@@ -262,8 +262,32 @@ impl Element {
         Self::base(Layout::None).widget(Slider::new(value))
     }
     /// 单行文本输入（绑定 `Rc<RefCell<String>>`）。
+    /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` 配置行为。
     pub fn text_input(text: Rc<RefCell<String>>, placeholder: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
+    }
+
+    /// 配置内含的 TextInput（若本 Element 非 TextInput 则为空操作）。
+    fn config_text_input(mut self, f: impl FnOnce(&mut inputs::TextConfig)) -> Self {
+        if let Some(ti) = self.widget.as_any_mut().and_then(|a| a.downcast_mut::<TextInput>()) {
+            f(ti.config_mut());
+        }
+        self
+    }
+    /// 密码输入：显示掩码圆点、禁止复制/剪切明文。强制单行（密码不应多行）。
+    pub fn password(self) -> Self {
+        self.config_text_input(|c| {
+            c.password = true;
+            c.multiline = false;
+        })
+    }
+    /// 多行输入（编辑/换行行为见 P4）。
+    pub fn multiline(self) -> Self {
+        self.config_text_input(|c| c.multiline = true)
+    }
+    /// 多行软换行开关（仅 multiline 生效）。
+    pub fn wrap(self, on: bool) -> Self {
+        self.config_text_input(|c| c.wrap = on)
     }
 
     /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。

@@ -56,6 +56,11 @@ pub trait Widget {
     }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
     fn take_click(&mut self, _f: ClickFn) {}
+    /// 类型擦除下转钩子：供 Builder 对具体控件做类型化配置（如 TextInput 的
+    /// 多行/密码开关）。默认返回 None，需要的控件返回 `Some(self)`。
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// 容器/纯样式节点占位控件。
@@ -1341,5 +1346,29 @@ mod tests {
         tree.dispatch_key(k(Key::End, false), Some(input)); // 光标到末尾、清选区
         tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V 粘贴
         assert_eq!(&*txt.borrow(), "hellohello", "粘贴应在光标处插入剪贴板文本");
+    }
+
+    #[test]
+    fn password_input_blocks_copy_allows_paste() {
+        let clip = Rc::new(RefCell::new(String::from("seed")));
+        let txt = Rc::new(RefCell::new(String::from("secret")));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::text_input(txt.clone(), "ph").password());
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
+        tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C
+        assert_eq!(&*clip.borrow(), "seed", "密码模式 Ctrl+C 不得写出明文");
+        // 但粘贴仍可用：全选状态下粘贴替换内容。
+        tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V
+        assert_eq!(&*txt.borrow(), "seed", "密码模式仍允许粘贴");
     }
 }

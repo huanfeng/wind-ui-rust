@@ -39,6 +39,7 @@ fn card(title: &str, body: Element) -> Element {
 
 fn main() {
     let name = Rc::new(RefCell::new(String::from("我的设备")));
+    let pwd = Rc::new(RefCell::new(String::from("hunter2")));
     let dark = Rc::new(Cell::new(true));
     let notify = Rc::new(Cell::new(true));
     let beta = Rc::new(Cell::new(false));
@@ -56,6 +57,7 @@ fn main() {
                 .width_match()
                 .spacing(6)
                 .child(row("设备名称", Element::text_input(name.clone(), "输入名称").width_match()))
+                .child(row("访问密码", Element::text_input(pwd.clone(), "输入密码").password().width_match()))
                 .child(row("深色主题", Element::switch(dark.clone())))
                 .child(row("接收通知", Element::checkbox("启用推送通知", notify.clone())))
                 .child(row("测试版", Element::checkbox("加入 Beta 通道", beta.clone()))),
