@@ -302,6 +302,8 @@ const TEXT_PAD: i32 = 10;
 const SEL_COLOR: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0x55 };
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
+/// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
+const SEL_EOL_EXTRA: i32 = 6;
 /// 密码掩码字符（U+2022 BULLET）。
 const PASSWORD_MASK: char = '\u{2022}';
 
@@ -323,6 +325,23 @@ impl Default for TextConfig {
     }
 }
 
+/// 一个视觉行：全文字符区间 [start,end) + 行内每字符左边界 x（相对行首，逻辑 px）。
+/// `x` 长度 = end-start+1，`x[0]=0`。`hard` 表示该行以真实 '\n'（或文末）结束，
+/// 软换行为 false——用于光标换行归属与选区跨行延伸。
+struct VisLine {
+    start: usize,
+    end: usize,
+    x: Vec<i32>,
+    hard: bool,
+}
+
+/// 视觉行布局缓存。paint 时按显示串 + 内框宽度重建，事件（点击/上下/Home/End）复用。
+#[derive(Default)]
+struct TextLayout {
+    lines: Vec<VisLine>,
+    line_h: i32,
+}
+
 pub struct TextInput {
     text: Rc<RefCell<String>>,
     placeholder: String,
@@ -330,7 +349,10 @@ pub struct TextInput {
     cursor: usize,            // 字符索引
     anchor: Option<usize>,    // 选区锚点（Some 且 != cursor 时有选区）
     scroll_x: Cell<i32>,      // 水平滚动偏移（逻辑 px），paint 时按光标更新
-    char_x: RefCell<Vec<i32>>, // paint 缓存：char_x[i] = display[..i] 宽度（逻辑 px）
+    scroll_y: Cell<i32>,      // 垂直滚动偏移（逻辑 px，多行用），paint 时按光标更新
+    /// 上下移动时保持的目标列像素（粘性 goal column）；水平移动/编辑后清空。
+    goal_x: Cell<Option<i32>>,
+    layout: RefCell<TextLayout>, // paint 重建的视觉行缓存
     dragging: bool,
 }
 
@@ -344,7 +366,9 @@ impl TextInput {
             cursor,
             anchor: None,
             scroll_x: Cell::new(0),
-            char_x: RefCell::new(vec![0]),
+            scroll_y: Cell::new(0),
+            goal_x: Cell::new(None),
+            layout: RefCell::new(TextLayout::default()),
             dragging: false,
         }
     }
@@ -352,6 +376,11 @@ impl TextInput {
     /// 可变访问配置（供 Builder 配置）。
     pub fn config_mut(&mut self) -> &mut TextConfig {
         &mut self.config
+    }
+
+    /// 运行期是否多行：密码模式恒为单行（与 Builder 链式顺序无关，杜绝换行进入密码底层文本）。
+    fn is_multiline(&self) -> bool {
+        self.config.multiline && !self.config.password
     }
 
     fn char_count(&self) -> usize {
@@ -397,6 +426,7 @@ impl TextInput {
             drop(t);
             self.cursor = s;
             self.anchor = None;
+            self.goal_x.set(None);
             ctx.mark_dirty();
             true
         } else {
@@ -415,6 +445,7 @@ impl TextInput {
         self.cursor += 1;
         drop(s);
         self.anchor = None;
+        self.goal_x.set(None);
         ctx.mark_dirty();
     }
     fn backspace(&mut self, ctx: &mut EventCtx) {
@@ -428,6 +459,7 @@ impl TextInput {
         s.replace_range(start..end, "");
         self.cursor -= 1;
         drop(s);
+        self.goal_x.set(None);
         ctx.mark_dirty();
     }
     fn delete_forward(&mut self, ctx: &mut EventCtx) {
@@ -441,6 +473,7 @@ impl TextInput {
         let end = char_to_byte(&s, self.cursor + 1);
         s.replace_range(start..end, "");
         drop(s);
+        self.goal_x.set(None);
         ctx.mark_dirty();
     }
     /// 移动光标到 target；shift=true 时扩展选区，否则清选区。
@@ -453,6 +486,7 @@ impl TextInput {
             self.anchor = None;
         }
         self.cursor = target.min(self.char_count());
+        self.goal_x.set(None);
         ctx.mark_dirty();
     }
     /// 选中 `idx` 处的词（同类连续段）。
@@ -467,22 +501,187 @@ impl TextInput {
         self.anchor = Some(0);
         self.cursor = self.char_count();
     }
-    /// 屏幕 x（逻辑坐标）→ 字符索引（用 paint 缓存的 char_x 定位最近边界）。
-    /// 前置条件：依赖最近一帧 paint 重建的 char_x 缓存；首帧未绘制前会落到索引 0。
-    fn index_at(&self, ctx: &EventCtx, screen_x: i32) -> usize {
-        let b = ctx.bounds();
-        let local = screen_x - (b.x + TEXT_PAD) + self.scroll_x.get();
-        let cx = self.char_x.borrow();
-        let mut best = 0;
-        let mut best_d = i32::MAX;
-        for (i, &v) in cx.iter().enumerate() {
-            let d = (v - local).abs();
-            if d < best_d {
-                best_d = d;
-                best = i;
+    /// 选中 `idx` 所在逻辑行（两 '\n' 之间）。单行文本无 '\n' 即全选。
+    fn select_para(&mut self, idx: usize) {
+        let chars: Vec<char> = self.text.borrow().chars().collect();
+        let n = chars.len();
+        let i = idx.min(n);
+        let mut s = i;
+        while s > 0 && chars[s - 1] != '\n' {
+            s -= 1;
+        }
+        let mut e = i;
+        while e < n && chars[e] != '\n' {
+            e += 1;
+        }
+        self.anchor = Some(s);
+        self.cursor = e;
+    }
+    /// 按显示串与内框宽度重建视觉行布局缓存。paint 调用；点击/上下移动复用其结果。
+    fn rebuild_layout(&self, canvas: &mut dyn Canvas, disp: &str, family: Option<&str>, fsize: f32, inner_w: i32) {
+        let chars: Vec<char> = disp.chars().collect();
+        let n = chars.len();
+        let multiline = self.is_multiline();
+        let wrap = self.config.wrap && multiline;
+
+        let mut lay = self.layout.borrow_mut();
+        lay.lines.clear();
+        lay.line_h = canvas.measure_text("Ay", family, fsize).h.max(fsize as i32);
+
+        let mut p = 0usize;
+        loop {
+            // 段落 [p,q)：多行按 '\n' 切分；单行整体一段。
+            let q = if multiline {
+                (p..n).find(|&i| chars[i] == '\n').unwrap_or(n)
+            } else {
+                n
+            };
+            // 段内前缀宽度（相对段首，累计测量保证 kerning 准确）。
+            // TODO(perf): 每段 O(L²) 重测且每帧重建；超长段落可按 (文本版本,宽度,字体) 缓存复用。
+            let mut prefix = Vec::with_capacity(q - p + 1);
+            prefix.push(0);
+            let mut acc = String::new();
+            for &ch in &chars[p..q] {
+                acc.push(ch);
+                prefix.push(canvas.measure_text(&acc, family, fsize).w);
+            }
+            for (ls, le, hard) in wrap_paragraph(&chars, p, q, &prefix, inner_w, wrap) {
+                let base = prefix[ls - p];
+                let x: Vec<i32> = (ls..=le).map(|k| prefix[k - p] - base).collect();
+                lay.lines.push(VisLine { start: ls, end: le, x, hard });
+            }
+            if q < n {
+                p = q + 1; // 跳过 '\n'；若 p==n（文末换行）下轮产出空尾行后结束
+            } else {
+                break;
             }
         }
-        best.min(self.char_count())
+    }
+
+    /// 光标字符索引 → 所在视觉行下标。软换行边界归属下一行（caret 显示在折行后行首）。
+    fn cursor_line(&self, lay: &TextLayout, c: usize) -> usize {
+        let lines = &lay.lines;
+        for (i, ln) in lines.iter().enumerate() {
+            if c < ln.end {
+                return i;
+            }
+            if c == ln.end && (ln.hard || i + 1 == lines.len()) {
+                return i;
+            }
+        }
+        lines.len().saturating_sub(1)
+    }
+
+    /// 光标的 (视觉行下标, 行内 x 逻辑 px)。
+    fn caret_line_x(&self, lay: &TextLayout, c: usize) -> (usize, i32) {
+        if lay.lines.is_empty() {
+            return (0, 0);
+        }
+        let li = self.cursor_line(lay, c);
+        let ln = &lay.lines[li];
+        let col = c.saturating_sub(ln.start).min(ln.x.len().saturating_sub(1));
+        (li, ln.x.get(col).copied().unwrap_or(0))
+    }
+
+    /// 屏幕坐标（逻辑）→ 字符索引：先按 y 定位视觉行，再按 x 取行内最近边界。
+    /// 依赖最近一帧 paint 重建的布局；首帧前布局为空时落到索引 0。
+    fn pos_to_index(&self, ctx: &EventCtx, screen_x: i32, screen_y: i32) -> usize {
+        let lay = self.layout.borrow();
+        if lay.lines.is_empty() {
+            return 0;
+        }
+        let b = ctx.bounds();
+        let local_x = screen_x - (b.x + TEXT_PAD) + self.scroll_x.get();
+        let local_y = screen_y - (b.y + TEXT_PAD) + self.scroll_y.get();
+        let li = if lay.line_h > 0 {
+            (local_y / lay.line_h).clamp(0, lay.lines.len() as i32 - 1) as usize
+        } else {
+            0
+        };
+        let ln = &lay.lines[li];
+        let mut best = 0;
+        let mut best_d = i32::MAX;
+        for (j, &v) in ln.x.iter().enumerate() {
+            let d = (v - local_x).abs();
+            if d < best_d {
+                best_d = d;
+                best = j;
+            }
+        }
+        ln.start + best
+    }
+
+    /// 上/下移动光标到相邻视觉行的目标列（粘性 goal_x）。返回是否移动。
+    fn move_vertical(&mut self, ctx: &mut EventCtx, down: bool, shift: bool) {
+        let lay = self.layout.borrow();
+        if lay.lines.is_empty() {
+            return;
+        }
+        let (li, cur_x) = self.caret_line_x(&lay, self.cursor.min(self.char_count()));
+        let goal = self.goal_x.get().unwrap_or(cur_x);
+        let target_li = if down {
+            if li + 1 >= lay.lines.len() {
+                drop(lay);
+                self.goal_x.set(Some(goal));
+                return;
+            }
+            li + 1
+        } else {
+            if li == 0 {
+                drop(lay);
+                self.goal_x.set(Some(goal));
+                return;
+            }
+            li - 1
+        };
+        // 在目标行内取最接近 goal 的字符边界。
+        let ln = &lay.lines[target_li];
+        let mut best = 0;
+        let mut best_d = i32::MAX;
+        for (j, &v) in ln.x.iter().enumerate() {
+            let d = (v - goal).abs();
+            if d < best_d {
+                best_d = d;
+                best = j;
+            }
+        }
+        let target = ln.start + best;
+        drop(lay);
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.cursor = target.min(self.char_count());
+        self.goal_x.set(Some(goal)); // 保持粘性列
+        ctx.mark_dirty();
+    }
+
+    /// 当前视觉行的 [start, end) 字符区间（Home/End 用）。
+    fn cur_line_bounds(&self) -> (usize, usize) {
+        let lay = self.layout.borrow();
+        if lay.lines.is_empty() {
+            return (0, self.char_count());
+        }
+        let li = self.cursor_line(&lay, self.cursor.min(self.char_count()));
+        let ln = &lay.lines[li];
+        (ln.start, ln.end)
+    }
+
+    /// 在光标处插入换行（多行模式）。
+    fn insert_newline(&mut self, ctx: &mut EventCtx) {
+        self.delete_selection(ctx);
+        self.clamp_cursor();
+        let mut s = self.text.borrow_mut();
+        let byte = char_to_byte(&s, self.cursor);
+        s.insert(byte, '\n');
+        self.cursor += 1;
+        drop(s);
+        self.anchor = None;
+        self.goal_x.set(None);
+        ctx.mark_dirty();
     }
     /// 当前选区文本（无选区返回 None）。
     fn selected_text(&self) -> Option<String> {
@@ -492,11 +691,17 @@ impl TextInput {
         let be = char_to_byte(&t, e);
         Some(t[bs..be].to_string())
     }
-    /// 在光标处粘贴（先删选区）；单行控件过滤换行/控制字符。
+    /// 在光标处粘贴（先删选区）。单行控件过滤所有控制字符；多行保留 '\n'
+    /// （\r\n / \r 归一为 \n），仍过滤其他控制字符。
     fn paste(&mut self, ctx: &mut EventCtx, s: &str) {
         self.delete_selection(ctx);
         self.clamp_cursor();
-        let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+        let clean: String = if self.is_multiline() {
+            let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
+            normalized.chars().filter(|c| *c == '\n' || !c.is_control()).collect()
+        } else {
+            s.chars().filter(|c| !c.is_control()).collect()
+        };
         if clean.is_empty() {
             return;
         }
@@ -506,12 +711,58 @@ impl TextInput {
         drop(t);
         self.cursor += clean.chars().count();
         self.anchor = None;
+        self.goal_x.set(None);
         ctx.mark_dirty();
     }
 }
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// 把一个段落 [p,q)（不含换行符）按内框宽度切成视觉行，返回每行的
+/// `(start, end, hard)` 字符区间。`prefix[k-p]` 是 chars[p..k] 的累计宽度。
+/// `wrap=false` 时整段一行。优先在空格后断行（词换行），否则按字符断（含超宽单字符兜底）。
+/// 末行 `hard=true`（段落以真实换行/文末结束）；软换行行 `hard=false`。
+fn wrap_paragraph(
+    chars: &[char],
+    p: usize,
+    q: usize,
+    prefix: &[i32],
+    inner_w: i32,
+    wrap: bool,
+) -> Vec<(usize, usize, bool)> {
+    if p == q {
+        return vec![(p, p, true)]; // 空段落（如文末空行）仍占一视觉行
+    }
+    if !wrap || inner_w <= 0 {
+        return vec![(p, q, true)];
+    }
+    let mut out = Vec::new();
+    let mut ls = p;
+    while ls < q {
+        let base = prefix[ls - p];
+        // 在宽度内尽量多放字符（至少 1 个，超宽单字符兜底）。
+        let mut e = ls;
+        while e < q && prefix[e + 1 - p] - base <= inner_w {
+            e += 1;
+        }
+        if e == ls {
+            e = ls + 1;
+        }
+        // 词换行：若行后仍有内容，在最后一个空格后断开。
+        // sp∈[ls,e) ⇒ brk=sp+1∈[ls+1,e]，恒 > ls，保证单调推进、不死循环。
+        let mut brk = e;
+        if e < q {
+            if let Some(sp) = (ls..e).rev().find(|&k| chars[k] == ' ') {
+                brk = sp + 1;
+            }
+        }
+        let hard = brk == q;
+        out.push((ls, brk, hard));
+        ls = brk;
+    }
+    out
 }
 
 /// 字符类别，用于双击选词：把连续同类字符视为一个"词"。
@@ -553,8 +804,14 @@ fn word_run(chars: &[char], idx: usize) -> (usize, usize) {
 }
 
 impl Widget for TextInput {
-    fn measure(&self, _avail: Size, style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(160, (style.font_size as i32) + 16)
+    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        let lh = text
+            .measure("Ay", style.font_family.as_deref(), style.font_size, None)
+            .h
+            .max(style.font_size as i32);
+        // 多行默认约 5 行高（用户可 .height() 覆盖）；单行沿用紧凑高度。
+        let h = if self.is_multiline() { lh * 5 + 2 * TEXT_PAD } else { (style.font_size as i32) + 16 };
+        Size::new(160, h)
     }
     fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
@@ -564,68 +821,108 @@ impl Widget for TextInput {
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
         let disp = self.display_string();
         let is_empty = self.text.borrow().is_empty();
-        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y, bounds.w - 2 * TEXT_PAD, bounds.h);
+        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y + TEXT_PAD, bounds.w - 2 * TEXT_PAD, bounds.h - 2 * TEXT_PAD);
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
+        let multiline = self.is_multiline();
+        let wrap = self.config.wrap && multiline;
         let cursor = self.cursor.min(disp.chars().count());
 
-        // 重建每字符边界 x 缓存（逻辑 px）。
-        {
-            let mut cx = self.char_x.borrow_mut();
-            cx.clear();
-            cx.push(0);
-            let mut acc = String::new();
-            for ch in disp.chars() {
-                acc.push(ch);
-                cx.push(canvas.measure_text(&acc, family, fsize).w);
-            }
-        }
-        let cx = self.char_x.borrow();
+        // 重建视觉行布局缓存。
+        self.rebuild_layout(canvas, &disp, family, fsize, inner.w);
+        let lay = self.layout.borrow();
+        let line_h = lay.line_h.max(1);
+        let (cl, cx_in) = self.caret_line_x(&lay, cursor);
 
-        // 更新水平滚动使光标可见。
-        let cursor_x = cx.get(cursor).copied().unwrap_or(0);
+        // 垂直滚动（多行）：保证光标行可见并钳制到内容范围。
+        let mut sy = self.scroll_y.get();
+        if multiline {
+            let caret_top = cl as i32 * line_h;
+            if caret_top - sy < 0 {
+                sy = caret_top;
+            }
+            if caret_top + line_h - sy > inner.h {
+                sy = caret_top + line_h - inner.h;
+            }
+            let content_h = lay.lines.len() as i32 * line_h;
+            sy = sy.clamp(0, (content_h - inner.h).max(0));
+        } else {
+            sy = 0;
+        }
+        self.scroll_y.set(sy);
+
+        // 水平滚动：仅非软换行（单行 / 多行不换行）时按光标更新。
         let mut sx = self.scroll_x.get();
-        if cursor_x - sx > inner.w {
-            sx = cursor_x - inner.w;
+        if !wrap {
+            if cx_in - sx > inner.w {
+                sx = cx_in - inner.w;
+            }
+            if cx_in - sx < 0 {
+                sx = cx_in;
+            }
+            sx = sx.max(0);
+        } else {
+            sx = 0;
         }
-        if cursor_x - sx < 0 {
-            sx = cursor_x;
-        }
-        sx = sx.max(0);
         self.scroll_x.set(sx);
 
-        // 裁剪到内框，绘制选区 / 文字 / 光标。
-        canvas.save();
-        canvas.clip_rect(inner);
+        // 首行 y：多行从内框顶部减滚动；单行在内框内垂直居中。
+        let first_line_y = if multiline { inner.y - sy } else { inner.y + (inner.h - line_h) / 2 };
         let base_x = inner.x - sx;
 
+        canvas.save();
+        canvas.clip_rect(inner);
+
+        // 选区高亮（逐视觉行；跨行处延伸到行尾标示换行/折行被选中）。
         if let Some((s, e)) = self.selection() {
-            let x1 = base_x + cx.get(s).copied().unwrap_or(0);
-            let x2 = base_x + cx.get(e).copied().unwrap_or(0);
-            canvas.fill_rect(
-                x1 as f32,
-                (inner.y + 4) as f32,
-                (x2 - x1) as f32,
-                (inner.h - 8) as f32,
-                &Paint::fill(SEL_COLOR),
-            );
+            for (i, ln) in lay.lines.iter().enumerate() {
+                let ly = first_line_y + i as i32 * line_h;
+                if ly + line_h < inner.y || ly > inner.y + inner.h {
+                    continue;
+                }
+                let a = s.clamp(ln.start, ln.end);
+                let b = e.clamp(ln.start, ln.end);
+                let cont = e > ln.end && s <= ln.end; // 选区越过本行末尾继续到下一行
+                if b > a || cont {
+                    let x1 = ln.x[a - ln.start];
+                    let x2 = if cont { ln.x.last().copied().unwrap_or(0) + SEL_EOL_EXTRA } else { ln.x[b - ln.start] };
+                    canvas.fill_rect(
+                        (base_x + x1) as f32,
+                        (ly + 2) as f32,
+                        (x2 - x1) as f32,
+                        (line_h - 4) as f32,
+                        &Paint::fill(SEL_COLOR),
+                    );
+                }
+            }
         }
 
         if is_empty {
-            canvas.draw_text(&self.placeholder, inner, Color::hex(0xAAB0B8), Align::Start, family, fsize);
+            let pr = Rect::new(inner.x, first_line_y, inner.w, line_h);
+            canvas.draw_text(&self.placeholder, pr, Color::hex(0xAAB0B8), Align::Start, family, fsize);
         } else {
-            // 从 base_x 起绘制整行（足够宽不换行），由 clip 裁到内框。
-            let tr = Rect::new(base_x, inner.y, NO_WRAP_W, inner.h);
-            canvas.draw_text(&disp, tr, style.fg, Align::Start, family, fsize);
+            let chars: Vec<char> = disp.chars().collect();
+            for (i, ln) in lay.lines.iter().enumerate() {
+                let ly = first_line_y + i as i32 * line_h;
+                if ly + line_h < inner.y || ly > inner.y + inner.h {
+                    continue;
+                }
+                if ln.end > ln.start {
+                    let s: String = chars[ln.start..ln.end].iter().collect();
+                    let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
+                    canvas.draw_text(&s, tr, style.fg, Align::Start, family, fsize);
+                }
+            }
         }
 
         if focused {
-            let cxx = base_x + cursor_x;
+            let ly = first_line_y + cl as i32 * line_h;
+            let cxx = base_x + cx_in;
             canvas.draw_line(
                 cxx as f32,
-                bounds.y as f32 + 6.0,
+                (ly + 2) as f32,
                 cxx as f32,
-                bounds.y as f32 + bounds.h as f32 - 6.0,
+                (ly + line_h - 2) as f32,
                 1.0,
                 &Paint::fill(Color::hex(0x444444)),
             );
@@ -640,7 +937,7 @@ impl Widget for TextInput {
                     // 右键不启动拖选：仅聚焦，并在点击落在选区外时移动光标
                     // （为 P5 右键菜单预留——菜单针对当前选区/光标操作）。
                     if p.button == MouseButton::Right {
-                        let idx = self.index_at(ctx, p.pos.x);
+                        let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                         let in_sel = self.selection().is_some_and(|(s, e)| idx >= s && idx < e);
                         if !in_sel {
                             self.cursor = idx;
@@ -649,34 +946,35 @@ impl Widget for TextInput {
                         ctx.mark_dirty();
                         return true;
                     }
-                    // 双击选词 / 三击全选（不进入拖选）。
+                    // 双击选词 / 三击选段（单行无 \n 即全选，多行为当前逻辑行）。不进入拖选。
                     match p.click_count {
                         2 => {
-                            let idx = self.index_at(ctx, p.pos.x);
+                            let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                             self.select_word(idx);
                             self.dragging = false;
                             ctx.mark_dirty();
                             return true;
                         }
                         n if n >= 3 => {
-                            // TODO(P4): 多行时三击应选当前行而非全选。
-                            self.select_all();
+                            let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
+                            self.select_para(idx);
                             self.dragging = false;
                             ctx.mark_dirty();
                             return true;
                         }
                         _ => {}
                     }
-                    let idx = self.index_at(ctx, p.pos.x);
+                    let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                     self.cursor = idx;
                     self.anchor = Some(idx);
                     self.dragging = true;
+                    self.goal_x.set(None);
                     ctx.capture();
                     ctx.mark_dirty();
                     true
                 }
                 PointerKind::Move if self.dragging => {
-                    self.cursor = self.index_at(ctx, p.pos.x);
+                    self.cursor = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                     ctx.mark_dirty();
                     true
                 }
@@ -710,6 +1008,20 @@ impl Widget for TextInput {
                         }
                         true
                     }
+                    // 多行：Enter 插入换行。单行不处理（冒泡，留给默认行为）。
+                    Key::Enter if self.is_multiline() => {
+                        self.insert_newline(ctx);
+                        true
+                    }
+                    // 多行：上下移动到相邻视觉行。单行不消费（冒泡）。
+                    Key::Up if self.is_multiline() => {
+                        self.move_vertical(ctx, false, k.shift);
+                        true
+                    }
+                    Key::Down if self.is_multiline() => {
+                        self.move_vertical(ctx, true, k.shift);
+                        true
+                    }
                     Key::Left => {
                         if !k.shift {
                             if let Some((s, _)) = self.selection() {
@@ -735,17 +1047,19 @@ impl Widget for TextInput {
                         true
                     }
                     Key::Home => {
-                        self.move_to(ctx, 0, k.shift);
+                        // 多行：到当前视觉行首；单行：到文本首。
+                        let target = if self.is_multiline() { self.cur_line_bounds().0 } else { 0 };
+                        self.move_to(ctx, target, k.shift);
                         true
                     }
                     Key::End => {
-                        self.move_to(ctx, len, k.shift);
+                        let target = if self.is_multiline() { self.cur_line_bounds().1 } else { len };
+                        self.move_to(ctx, target, k.shift);
                         true
                     }
                     // Ctrl+A 全选（VK_A=0x41）
                     Key::Other(0x41) if k.ctrl => {
-                        self.anchor = Some(0);
-                        self.cursor = len;
+                        self.select_all();
                         ctx.mark_dirty();
                         true
                     }
@@ -791,11 +1105,84 @@ impl Widget for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::word_run;
+    use super::{word_run, wrap_paragraph, TextInput, TextLayout, VisLine};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();
         word_run(&chars, idx)
+    }
+
+    // 每字符宽 10 的合成前缀，用于纯函数换行测试。
+    fn prefix10(len: usize) -> Vec<i32> {
+        (0..=len).map(|i| i as i32 * 10).collect()
+    }
+
+    #[test]
+    fn wrap_paragraph_char_wrap() {
+        let chars: Vec<char> = "abcdef".chars().collect();
+        let pre = prefix10(6);
+        // inner_w=25 → 每行最多 2 字符（宽 20<=25，30>25）。
+        let lines = wrap_paragraph(&chars, 0, 6, &pre, 25, true);
+        assert_eq!(lines, vec![(0, 2, false), (2, 4, false), (4, 6, true)]);
+    }
+
+    #[test]
+    fn wrap_paragraph_word_break() {
+        let chars: Vec<char> = "ab cd ef".chars().collect();
+        let pre = prefix10(8);
+        // inner_w=45 → 在空格后断行（词换行）。
+        let lines = wrap_paragraph(&chars, 0, 8, &pre, 45, true);
+        assert_eq!(lines, vec![(0, 3, false), (3, 6, false), (6, 8, true)]);
+    }
+
+    #[test]
+    fn wrap_paragraph_nowrap_and_empty() {
+        let chars: Vec<char> = "abc".chars().collect();
+        let pre = prefix10(3);
+        // 不换行：整段一行。
+        assert_eq!(wrap_paragraph(&chars, 0, 3, &pre, 10, false), vec![(0, 3, true)]);
+        // 空段落：占一视觉行。
+        assert_eq!(wrap_paragraph(&chars, 3, 3, &[0], 50, true), vec![(3, 3, true)]);
+    }
+
+    fn dummy_input() -> TextInput {
+        TextInput::new(Rc::new(RefCell::new(String::new())), String::new())
+    }
+
+    #[test]
+    fn cursor_line_soft_break_affinity() {
+        let ti = dummy_input();
+        // 两视觉行 [0,3) 软换行 + [3,6)。
+        let lay = TextLayout {
+            lines: vec![
+                VisLine { start: 0, end: 3, x: vec![0, 10, 20, 30], hard: false },
+                VisLine { start: 3, end: 6, x: vec![0, 10, 20, 30], hard: true },
+            ],
+            line_h: 14,
+        };
+        assert_eq!(ti.cursor_line(&lay, 0), 0);
+        assert_eq!(ti.cursor_line(&lay, 2), 0);
+        // 软换行边界 c==3：归属下一行（折行后行首）。
+        assert_eq!(ti.cursor_line(&lay, 3), 1);
+        assert_eq!(ti.cursor_line(&lay, 6), 1);
+    }
+
+    #[test]
+    fn cursor_line_hard_break_stays() {
+        let ti = dummy_input();
+        // 硬换行行 [0,1)（"a\n"）+ [2,3)（"b"）。
+        let lay = TextLayout {
+            lines: vec![
+                VisLine { start: 0, end: 1, x: vec![0, 10], hard: true },
+                VisLine { start: 2, end: 3, x: vec![0, 10], hard: true },
+            ],
+            line_h: 14,
+        };
+        // c==1 在硬换行末尾：停在本行（光标在 \n 前）。
+        assert_eq!(ti.cursor_line(&lay, 1), 0);
+        assert_eq!(ti.cursor_line(&lay, 2), 1);
     }
 
     #[test]

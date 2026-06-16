@@ -40,6 +40,9 @@ fn card(title: &str, body: Element) -> Element {
 fn main() {
     let name = Rc::new(RefCell::new(String::from("我的设备")));
     let pwd = Rc::new(RefCell::new(String::from("hunter2")));
+    let notes = Rc::new(RefCell::new(String::from(
+        "这是一个多行文本框示例。\n超过宽度的长行会自动软换行，无需手动断行，体验接近现代编辑器。\n按 Enter 可换行。",
+    )));
     let dark = Rc::new(Cell::new(true));
     let notify = Rc::new(Cell::new(true));
     let beta = Rc::new(Cell::new(false));
@@ -47,9 +50,9 @@ fn main() {
     let volume = Rc::new(Cell::new(0.7f32));
     let show_about = Rc::new(Cell::new(std::env::args().any(|a| a == "--dialog")));
 
-    // 设置页
-    let settings = Element::col()
-        .fill()
+    // 设置页（内容较多，包进滚动容器）
+    let settings_body = Element::col()
+        .width_match()
         .spacing(14)
         .child(card(
             "常规",
@@ -76,7 +79,15 @@ fn main() {
                         .child(Element::radio("中", quality.clone(), 1))
                         .child(Element::radio("高", quality.clone(), 2)),
                 )),
+        ))
+        .child(card(
+            "备注",
+            Element::text_input(notes.clone(), "输入备注")
+                .multiline()
+                .width_match()
+                .height(96),
         ));
+    let settings = Element::scroll().fill().child(settings_body);
 
     // 列表页（滚动）
     let mut list = Element::scroll().fill().background(Color::hex(CARD)).corner(10.0);

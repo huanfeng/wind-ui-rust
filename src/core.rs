@@ -1391,6 +1391,75 @@ mod tests {
         assert_eq!(&*txt.borrow(), "Z", "三击全选后输入应替换全部");
     }
 
+    fn multiline_tree(initial: &str) -> (Tree, NodeId, Rc<RefCell<String>>) {
+        let txt = Rc::new(RefCell::new(String::from(initial)));
+        let root = Element::col()
+            .width(200)
+            .height(120)
+            .child(Element::text_input(txt.clone(), "ph").multiline().height(120));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 120), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        (tree, input, txt)
+    }
+
+    #[test]
+    fn multiline_enter_inserts_newline() {
+        let (mut tree, input, txt) = multiline_tree("ab");
+        // 光标在末尾(=2)，Enter 插入换行，再输入。
+        let k = |key| KeyEvent { key, pressed: true, shift: false, ctrl: false };
+        tree.dispatch_key(k(Key::Enter), Some(input));
+        tree.dispatch_key(k(Key::Char('c')), Some(input));
+        assert_eq!(&*txt.borrow(), "ab\nc", "多行 Enter 应插入换行符");
+    }
+
+    #[test]
+    fn singleline_enter_not_consumed() {
+        let (mut tree, input, txt) = input_tree("ab");
+        let res = tree.dispatch_key(
+            KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false },
+            Some(input),
+        );
+        assert!(!res.consumed, "单行 Enter 不应被消费(冒泡给默认行为)");
+        assert_eq!(&*txt.borrow(), "ab", "单行 Enter 不改文本");
+    }
+
+    #[test]
+    fn multiline_paste_preserves_newlines() {
+        let clip = Rc::new(RefCell::new(String::from("x\r\ny")));
+        let (mut tree, input, txt) = multiline_tree("");
+        tree.clipboard = Some(Box::new(SharedClip(clip)));
+        tree.dispatch_key(
+            KeyEvent { key: Key::Other(0x56), pressed: true, shift: false, ctrl: true },
+            Some(input),
+        );
+        assert_eq!(&*txt.borrow(), "x\ny", "多行粘贴应保留换行(\\r\\n 归一为 \\n)");
+    }
+
+    #[test]
+    fn password_multiline_order_still_single_line() {
+        // .password().multiline() 顺序也不能让换行进入密码底层文本。
+        let txt = Rc::new(RefCell::new(String::from("pw")));
+        let root = Element::col().width(200).height(40).child(
+            Element::text_input(txt.clone(), "ph").password().multiline(),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        let res = tree.dispatch_key(
+            KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false },
+            Some(input),
+        );
+        assert!(!res.consumed, "密码框 Enter 不应被消费");
+        assert_eq!(&*txt.borrow(), "pw", "密码框 Enter 不得插入换行");
+    }
+
     #[test]
     fn double_click_selects_word() {
         // 无 paint 时 index_at 落到 0，故双击选中首词 "hello"。
