@@ -389,6 +389,18 @@ impl AppHandler for UiHost {
         self.engine.set_scale(scale);
     }
 
+    fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        let focus = self.focus?;
+        let (p, h) = self.tree.caret_of(focus)?;
+        // 逻辑坐标 → 物理像素（与渲染缩放一致）。
+        let s = self.scale;
+        Some((
+            (p.x as f32 * s).round() as i32,
+            (p.y as f32 * s).round() as i32,
+            ((h as f32 * s).round() as i32).max(1),
+        ))
+    }
+
     fn on_capture_lost(&mut self) -> bool {
         // 给捕获节点派发一个远处坐标的合成 Up，复用 Up 语义让其收尾
         // （Slider 复位拖动、Button 因 inside=false 不误触发），并清逻辑捕获。

@@ -61,6 +61,12 @@ pub trait Widget {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+    /// 文本光标在**本节点局部坐标**（相对节点左上角，逻辑 px）的位置：
+    /// `(x, y_top, height)`。供宿主定位输入法候选窗。非文本控件返回 None。
+    /// 依赖最近一帧 paint 记录的光标位置。
+    fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        None
+    }
 }
 
 /// 容器/纯样式节点占位控件。
@@ -733,6 +739,15 @@ impl Tree {
             }
         }
         r
+    }
+
+    /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。
+    /// 用于宿主定位输入法候选窗。节点非文本控件或无光标时返回 None。
+    pub fn caret_of(&self, id: NodeId) -> Option<(Point, i32)> {
+        let n = self.get(id)?;
+        let (lx, ly, h) = n.widget.ime_caret()?;
+        let abs = self.abs_bounds(id);
+        Some((Point::new(abs.x + lx, abs.y + ly), h))
     }
 
     /// 命中测试：返回包含该点的最深可见节点。
@@ -1472,6 +1487,38 @@ mod tests {
         );
         assert!(!res.consumed, "密码框 Enter 不应被消费");
         assert_eq!(&*txt.borrow(), "pw", "密码框 Enter 不得插入换行");
+    }
+
+    #[test]
+    fn caret_of_tracks_cursor_after_paint() {
+        let (mut tree, input, _txt) = input_tree("hello");
+        let mut pm = tiny_skia::Pixmap::new(200, 40).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        // 末尾光标：paint 记录位置。
+        {
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        }
+        let end_caret = tree.caret_of(input).expect("paint 后应有光标位置");
+        // 移到行首再 paint。
+        tree.dispatch_key(
+            KeyEvent { key: Key::Home, pressed: true, shift: false, ctrl: false },
+            Some(input),
+        );
+        {
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        }
+        let home_caret = tree.caret_of(input).unwrap();
+        assert!(home_caret.0.x < end_caret.0.x, "行首光标应在末尾光标左侧");
+        assert!(home_caret.1 > 0, "光标高度应为正");
+    }
+
+    #[test]
+    fn caret_of_none_for_non_text() {
+        // 按钮等非文本控件无光标。
+        let (tree, btn) = button_tree(Rc::new(Cell::new(0)));
+        assert!(tree.caret_of(btn).is_none(), "非文本控件 caret_of 应为 None");
     }
 
     #[test]

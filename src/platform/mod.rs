@@ -36,4 +36,10 @@ pub trait AppHandler {
     }
     /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
     fn set_scale(&mut self, _scale: f32) {}
+
+    /// 焦点文本控件的光标位置（**物理像素**，相对客户区左上角）+ 高度：`(x, y_top, height)`。
+    /// 平台层据此定位输入法候选窗。无文本焦点时返回 None。
+    fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        None
+    }
 }

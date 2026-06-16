@@ -22,6 +22,10 @@ use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::UI::Input::Ime::{
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, CANDIDATEFORM,
+    CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
@@ -33,9 +37,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
     SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
     SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
-    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -391,6 +395,13 @@ unsafe extern "system" fn wnd_proc(
             handle_dpi_changed(hwnd, wparam, lparam);
             LRESULT(0)
         }
+        // 输入法开始合成 / 合成中：把候选窗定位到焦点控件的光标处，再交默认处理。
+        // 合成期间光标不移动，重复定位到同一点是幂等的；兼顾"候选窗在合成中才出现"
+        // 的输入法（仅 STARTCOMPOSITION 可能错过候选窗放置时机）。
+        WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
+            handle_ime_position(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DESTROY => {
             // 回收 WindowState
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
@@ -505,6 +516,36 @@ unsafe fn handle_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         s.handler.set_scale(scale);
     }
     let _ = InvalidateRect(hwnd, None, false);
+}
+
+/// 把输入法合成窗 + 候选窗定位到焦点文本控件的光标处。
+/// 光标位置由 handler 提供（物理像素、相对客户区），无文本焦点时不动作。
+unsafe fn handle_ime_position(hwnd: HWND) {
+    let caret = match state_from(hwnd) {
+        Some(s) => s.handler.ime_caret(),
+        None => return,
+    };
+    let Some((x, y, h)) = caret else { return };
+    let himc = ImmGetContext(hwnd);
+    if himc.0.is_null() {
+        return; // 无输入法上下文
+    }
+    // 合成串定位在光标处。
+    let cf = COMPOSITIONFORM {
+        dwStyle: CFS_POINT,
+        ptCurrentPos: POINT { x, y },
+        rcArea: RECT::default(),
+    };
+    let _ = ImmSetCompositionWindow(himc, &cf);
+    // 候选窗放在光标行下方，避免遮住输入处。
+    let cand = CANDIDATEFORM {
+        dwIndex: 0,
+        dwStyle: CFS_CANDIDATEPOS,
+        ptCurrentPos: POINT { x, y: y + h },
+        rcArea: RECT::default(),
+    };
+    let _ = ImmSetCandidateWindow(himc, &cand);
+    let _ = ImmReleaseContext(hwnd, himc);
 }
 
 /// OS 抢走指针捕获（如 Alt+Tab、WM_CAPTURECHANGED）：通知 handler 收尾。
