@@ -143,6 +143,7 @@ impl TextEngine for DWriteEngine {
         align: Align,
         family: Option<&str>,
         size: f32,
+        clip: Option<Rect>,
     ) {
         if text.is_empty() || rect.is_empty() {
             return;
@@ -204,11 +205,12 @@ impl TextEngine for DWriteEngine {
         };
         let oy = rect.y + (rect.h - th) / 2;
 
-        composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color);
+        composite_coverage(pixmap, bits, cw, ch, stride, ox, oy, color, clip);
     }
 }
 
 /// 把灰度覆盖率位图（白字黑底）按 `color` over-blend 进 pixmap（预乘）。
+#[allow(clippy::too_many_arguments)]
 fn composite_coverage(
     pixmap: &mut Pixmap,
     bits: *const u8,
@@ -218,6 +220,7 @@ fn composite_coverage(
     dst_x: i32,
     dst_y: i32,
     color: Color,
+    clip: Option<Rect>,
 ) {
     let pw = pixmap.width() as i32;
     let ph = pixmap.height() as i32;
@@ -228,6 +231,12 @@ fn composite_coverage(
         if dy < 0 || dy >= ph {
             continue;
         }
+        // 裁剪：视口外的行整体跳过。
+        if let Some(c) = clip {
+            if dy < c.y || dy >= c.y + c.h {
+                continue;
+            }
+        }
         // IDWriteBitmapRenderTarget 的像素存储固定为 top-down（buffer 首行=图像顶行），
         // 与 GetObjectW 报告的 biHeight 符号无关——故行序直接对应，不按 biHeight 翻转。
         let sy = ry;
@@ -235,6 +244,11 @@ fn composite_coverage(
             let dx = dst_x + rx;
             if dx < 0 || dx >= pw {
                 continue;
+            }
+            if let Some(c) = clip {
+                if dx < c.x || dx >= c.x + c.w {
+                    continue;
+                }
             }
             // BGRA：取 R 通道作灰度覆盖率（灰度 AA 下 R=G=B）
             let cov = unsafe { *bits.add((sy * stride + rx * 4 + 2) as usize) };

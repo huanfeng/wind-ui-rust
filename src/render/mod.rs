@@ -50,6 +50,13 @@ pub trait Canvas {
     );
     /// 测量单行文字尺寸（用于光标定位等）。无文字引擎时返回粗略估算。
     fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size;
+
+    /// 保存当前裁剪状态。
+    fn save(&mut self);
+    /// 恢复到最近一次 save 的裁剪状态。
+    fn restore(&mut self);
+    /// 将裁剪区与矩形 `r` 求交（后续绘制仅作用于交集内）。
+    fn clip_rect(&mut self, r: Rect);
 }
 
 /// 构造圆角矩形路径（cubic 贝塞尔逼近四角）。radius<=0 退化为直角矩形。

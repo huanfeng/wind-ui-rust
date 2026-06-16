@@ -3,6 +3,7 @@
 //! 容器（`col`/`row`/`stack`）与叶子（`leaf`、Phase 2 起的 `label` 等）都返回
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
+pub mod containers;
 pub mod inputs;
 
 use std::cell::{Cell, RefCell};
@@ -181,6 +182,8 @@ pub struct Element {
     widget: Box<dyn Widget>,
     children: Vec<Element>,
     visible: bool,
+    vis_cond: Option<Box<dyn Fn() -> bool>>,
+    clip_children: bool,
     click: Option<ClickFn>,
 }
 
@@ -198,6 +201,8 @@ impl Element {
             widget: Box::new(EmptyWidget),
             children: Vec::new(),
             visible: true,
+            vis_cond: None,
+            clip_children: false,
             click: None,
         }
     }
@@ -254,6 +259,52 @@ impl Element {
     /// 单行文本输入（绑定 `Rc<RefCell<String>>`）。
     pub fn text_input(text: Rc<RefCell<String>>, placeholder: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
+    }
+
+    /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。
+    ///
+    /// 契约：闭包**必须是纯函数**（仅读状态、无副作用）。它在每帧的
+    /// measure/arrange/paint/hit-test/焦点收集中被多次调用，且帧内值不应变化。
+    pub fn visible_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
+        self.vis_cond = Some(Box::new(f));
+        self
+    }
+
+    /// 垂直滚动容器：内容超出视口时可滚轮滚动并裁剪。
+    pub fn scroll() -> Self {
+        let mut e = Self::base(Layout::Scroll).widget(containers::ScrollWidget);
+        e.clip_children = true;
+        e
+    }
+
+    /// 水平分隔线。
+    pub fn divider() -> Self {
+        Self::base(Layout::None).width_match().height(1).background(Color::hex(0xE2E6EA))
+    }
+
+    /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
+    /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
+    pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(&str, Element)>) -> Self {
+        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Center);
+        let mut content = Element::stack().fill().weight(1.0);
+        for (i, (title, page)) in pages.into_iter().enumerate() {
+            let sel = selected.clone();
+            bar = bar.child(Element::button(title).on_click(move |_| sel.set(i)));
+            let sel2 = selected.clone();
+            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+        }
+        Element::col().fill().spacing(10).child(bar).child(content)
+    }
+
+    /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
+    /// `show` 绑定显示标志。
+    pub fn dialog(show: Rc<Cell<bool>>, content: Element) -> Self {
+        Element::stack()
+            .fill()
+            .widget(containers::ModalScrim)
+            .background(Color::rgba(0, 0, 0, 120))
+            .visible_when(move || show.get())
+            .child(content.align(Align::Center))
     }
 
     /// 设置自定义内容控件（叶子）。
@@ -397,7 +448,11 @@ impl Element {
             widget,
             style: self.style,
             visible: self.visible,
+            vis_cond: self.vis_cond,
             focused: false,
+            clip_children: self.clip_children,
+            scroll_y: 0,
+            content_h: 0,
         };
         let id = tree.insert(node);
         for mut ce in children {

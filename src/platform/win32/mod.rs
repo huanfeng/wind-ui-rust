@@ -11,11 +11,11 @@ use std::path::PathBuf;
 use tiny_skia::Pixmap;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-    GetDC, InvalidateRect, ReleaseDC, SelectObject, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    GetDC, InvalidateRect, ReleaseDC, ScreenToClient, SelectObject, UpdateWindow, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
@@ -27,11 +27,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG,
-    SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
+    IDC_ARROW, MSG, SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use super::AppHandler;
@@ -342,6 +342,10 @@ unsafe extern "system" fn wnd_proc(
             handle_pointer(hwnd, PointerKind::Up, MouseButton::Right, lparam);
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            handle_wheel(hwnd, wparam, lparam);
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
             handle_key(hwnd, wparam);
             LRESULT(0)
@@ -375,7 +379,29 @@ unsafe extern "system" fn wnd_proc(
 unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
     let x = (lparam.0 & 0xffff) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-    let ev = PointerEvent { kind, pos: Point::new(x, y), button };
+    dispatch_pointer_event(hwnd, PointerEvent { kind, pos: Point::new(x, y), button });
+}
+
+/// WM_MOUSEWHEEL：高位字为滚动量（±120/刻度），lParam 为屏幕坐标需转客户区。
+unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+    let mut pt = POINT {
+        x: (lparam.0 & 0xffff) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+    };
+    let _ = ScreenToClient(hwnd, &mut pt);
+    dispatch_pointer_event(
+        hwnd,
+        PointerEvent {
+            kind: PointerKind::Wheel(delta),
+            pos: Point::new(pt.x, pt.y),
+            button: MouseButton::Left,
+        },
+    );
+}
+
+/// 指针事件分发的公共两段式实现（事件分发 + OS 捕获同步 + 关闭）。
+unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     let (repaint, active, was_capturing, close) = {
         let Some(state) = state_from(hwnd) else { return };
         let repaint = state.handler.on_pointer(ev);

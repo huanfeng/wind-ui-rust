@@ -14,6 +14,7 @@ pub trait TextEngine {
     /// 单行固有尺寸（不换行）。
     fn measure(&mut self, text: &str, family: Option<&str>, size: f32) -> Size;
     /// 在 `rect` 内按 `align` 水平对齐、垂直居中绘制文字，合成进 `pixmap`。
+    /// `clip` 为可选裁剪矩形（滚动视口等），合成时仅写入该矩形内的像素。
     fn draw(
         &mut self,
         pixmap: &mut Pixmap,
@@ -23,6 +24,7 @@ pub trait TextEngine {
         align: Align,
         family: Option<&str>,
         size: f32,
+        clip: Option<Rect>,
     );
 }
 
@@ -43,6 +45,7 @@ impl TextEngine for NullTextEngine {
         _align: Align,
         _family: Option<&str>,
         _size: f32,
+        _clip: Option<Rect>,
     ) {
     }
 }

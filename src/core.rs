@@ -56,12 +56,21 @@ pub trait Widget {
 pub struct EmptyWidget;
 impl Widget for EmptyWidget {}
 
+impl Node {
+    /// 该帧是否有效可见（静态 visible 与可见条件取与）。
+    pub fn effective_visible(&self) -> bool {
+        self.visible && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
+    }
+}
+
 /// 容器布局算法。`None` 表示叶子。
 #[derive(Clone, Copy)]
 pub enum Layout {
     None,
     Linear { axis: Axis, spacing: i32, cross: Align },
     Frame,
+    /// 垂直滚动容器：子内容按无限高度测量，按 scroll_y 偏移并裁剪到视口。
+    Scroll,
 }
 
 /// 树节点。几何为物理像素，`bounds` 相对父节点。
@@ -80,8 +89,17 @@ pub struct Node {
     pub widget: Box<dyn Widget>,
     pub style: Style,
     pub visible: bool,
+    /// 运行期可见条件（如 Tab 页绑定选中项、Dialog 绑定显示标志）。
+    /// 与 `visible` 取与：返回 false 则该帧不参与测量/布局/绘制/命中。
+    pub vis_cond: Option<Box<dyn Fn() -> bool>>,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
+    /// 是否把子节点裁剪到自身内容区（滚动容器等）。
+    pub clip_children: bool,
+    /// 垂直滚动偏移（Scroll 容器）。
+    pub scroll_y: i32,
+    /// 内容总高（measure 记录，用于滚动钳制与滚动条）。
+    pub content_h: i32,
 }
 
 struct Slot {
@@ -173,7 +191,7 @@ impl Tree {
                 .children
                 .iter()
                 .copied()
-                .filter(|c| self.get(*c).map(|n| n.visible).unwrap_or(false))
+                .filter(|c| self.get(*c).map(|n| n.effective_visible()).unwrap_or(false))
                 .collect(),
             None => Vec::new(),
         }
@@ -206,7 +224,7 @@ impl Tree {
         text: &mut dyn TextEngine,
     ) -> Size {
         let (layout, padding, visible) = match self.get(id) {
-            Some(n) => (n.layout, n.padding, n.visible),
+            Some(n) => (n.layout, n.padding, n.effective_visible()),
             None => return Size::ZERO,
         };
         if !visible {
@@ -229,6 +247,7 @@ impl Tree {
                 self.measure_linear(id, axis, spacing, wspec, hspec, avail_w, avail_h, text)
             }
             Layout::Frame => self.measure_frame(id, wspec, hspec, avail_w, avail_h, text),
+            Layout::Scroll => self.measure_scroll(id, avail_w, text),
         };
 
         let desired_w = content.w + padding.horizontal();
@@ -336,6 +355,29 @@ impl Tree {
         }
     }
 
+    /// 垂直滚动容器：子按受限宽度、无限高度测量；记录内容总高。
+    fn measure_scroll(&mut self, id: NodeId, avail_w: i32, text: &mut dyn TextEngine) -> Size {
+        let children = self.visible_children(id);
+        let mut total_h = 0;
+        let mut max_w = 0;
+        for &c in &children {
+            let (cw, ch, cm) = {
+                let n = self.get(c).unwrap();
+                (n.width, n.height, n.margin)
+            };
+            let cwspec = child_spec(cw, avail_w, false);
+            // 高度方向视为无限：Px 固定其值，Wrap/Match 按内容展开。
+            let chspec = child_spec(ch, 0, true);
+            let s = self.measure(c, cwspec, chspec, text);
+            total_h += s.h + cm.vertical();
+            max_w = max_w.max(s.w + cm.horizontal());
+        }
+        if let Some(n) = self.get_mut(id) {
+            n.content_h = total_h;
+        }
+        Size::new(max_w, total_h)
+    }
+
     fn measure_frame(
         &mut self,
         id: NodeId,
@@ -366,7 +408,7 @@ impl Tree {
 
     fn arrange(&mut self, id: NodeId, bounds: Rect) {
         let (layout, padding, visible) = match self.get(id) {
-            Some(n) => (n.layout, n.padding, n.visible),
+            Some(n) => (n.layout, n.padding, n.effective_visible()),
             None => return,
         };
         if let Some(n) = self.get_mut(id) {
@@ -388,6 +430,32 @@ impl Tree {
                 self.arrange_linear(id, inner, axis, spacing, cross)
             }
             Layout::Frame => self.arrange_frame(id, inner),
+            Layout::Scroll => self.arrange_scroll(id, inner),
+        }
+    }
+
+    fn arrange_scroll(&mut self, id: NodeId, inner: Rect) {
+        // 钳制滚动量：[0, content_h - 视口高]。
+        let (content_h, mut scroll_y) = {
+            let n = self.get(id).unwrap();
+            (n.content_h, n.scroll_y)
+        };
+        let max_scroll = (content_h - inner.h).max(0);
+        scroll_y = scroll_y.clamp(0, max_scroll);
+        if let Some(n) = self.get_mut(id) {
+            n.scroll_y = scroll_y;
+        }
+        // 可滚动时为右侧滚动条预留宽度，避免内容被遮挡。
+        let scrollbar_w = if content_h > inner.h { 8 } else { 0 };
+        // 子节点从视口顶起按内容顺序堆叠，整体上移 scroll_y。
+        let children = self.visible_children(id);
+        let mut y = inner.y - scroll_y;
+        for c in children {
+            let (cs, cm) = (self.measured_of(c), self.margin_of(c));
+            let cw = (inner.w - scrollbar_w - cm.horizontal()).max(0);
+            let bounds = Rect::new(inner.x + cm.left, y + cm.top, cw, cs.h);
+            self.arrange(c, bounds);
+            y += cs.h + cm.vertical();
         }
     }
 
@@ -459,7 +527,7 @@ impl Tree {
 
     fn paint_node(&self, canvas: &mut dyn Canvas, id: NodeId, origin: Point) {
         let n = match self.get(id) {
-            Some(n) if n.visible => n,
+            Some(n) if n.effective_visible() => n,
             _ => return,
         };
         let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
@@ -488,8 +556,30 @@ impl Tree {
         }
 
         let child_origin = Point::new(abs.x, abs.y);
-        for &c in &n.children {
-            self.paint_node(canvas, c, child_origin);
+        if n.clip_children {
+            canvas.save();
+            canvas.clip_rect(content);
+            for &c in &n.children {
+                self.paint_node(canvas, c, child_origin);
+            }
+            canvas.restore();
+        } else {
+            for &c in &n.children {
+                self.paint_node(canvas, c, child_origin);
+            }
+        }
+
+        // 滚动条：内容高于视口时在右缘绘制纵向指示条。
+        if matches!(n.layout, Layout::Scroll) && n.content_h > content.h {
+            let track_w = 6.0;
+            let tx = (abs.right() - track_w as i32 - 2) as f32;
+            let ty = content.y as f32;
+            let th = content.h as f32;
+            let ratio = content.h as f32 / n.content_h as f32;
+            let thumb_h = (th * ratio).max(24.0);
+            let max_scroll = (n.content_h - content.h).max(1) as f32;
+            let thumb_y = ty + (th - thumb_h) * (n.scroll_y as f32 / max_scroll);
+            canvas.fill_round_rect(tx, thumb_y, track_w, thumb_h, track_w / 2.0, &Paint::fill(Color::hex(0xBFC6CF)));
         }
     }
 }
@@ -548,6 +638,13 @@ impl EventCtx<'_> {
     pub fn bounds(&self) -> Rect {
         self.tree.abs_bounds(self.self_id)
     }
+    /// 调整本节点滚动偏移（滚动容器），下一帧 arrange 会钳制范围。
+    pub fn scroll_by(&mut self, dy: i32) {
+        if let Some(n) = self.tree.get_mut(self.self_id) {
+            n.scroll_y += dy;
+        }
+        self.out.repaint = true;
+    }
 }
 
 /// 指针/键盘分发的对外结果。
@@ -589,18 +686,26 @@ impl Tree {
 
     fn hit_node(&self, id: NodeId, p: Point, origin: Point) -> Option<NodeId> {
         let n = self.get(id)?;
-        if !n.visible {
+        if !n.effective_visible() {
             return None;
         }
         let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
         if !abs.contains(p) {
             return None;
         }
-        // 倒序遍历子节点：后绘制者在上层，优先命中。
-        let child_origin = Point::new(abs.x, abs.y);
-        for &c in n.children.iter().rev() {
-            if let Some(hit) = self.hit_node(c, p, child_origin) {
-                return Some(hit);
+        // 裁剪容器：点不在内容区时不下探子节点（仍可命中容器自身处理滚轮）。
+        let in_content = if n.clip_children {
+            abs.inset(n.padding).contains(p)
+        } else {
+            true
+        };
+        if in_content {
+            // 倒序遍历子节点：后绘制者在上层，优先命中。
+            let child_origin = Point::new(abs.x, abs.y);
+            for &c in n.children.iter().rev() {
+                if let Some(hit) = self.hit_node(c, p, child_origin) {
+                    return Some(hit);
+                }
             }
         }
         Some(id)
@@ -628,7 +733,7 @@ impl Tree {
 
     fn collect_focusable(&self, id: NodeId, out: &mut Vec<NodeId>) {
         if let Some(n) = self.get(id) {
-            if !n.visible {
+            if !n.effective_visible() {
                 return;
             }
             if n.widget.focusable() {
@@ -1031,6 +1136,51 @@ mod tests {
         let (mut h, mut cap) = (None, None);
         tree.dispatch_pointer(ptr(PointerKind::Down, right), &mut h, &mut cap);
         assert!(v.get() > 0.9, "在最右端按下应使值接近 1，实际 {}", v.get());
+    }
+
+    #[test]
+    fn scroll_wheel_offsets_and_clamps() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        // 内容总高 300 > 视口 100，最大滚动量 200。
+        assert_eq!(tree.get(id).unwrap().content_h, 300);
+
+        let wheel = |d: i32| PointerEvent {
+            kind: PointerKind::Wheel(d),
+            pos: Point::new(50, 50),
+            button: MouseButton::Left,
+        };
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te); // 重排以应用钳制
+        assert!(tree.get(id).unwrap().scroll_y > 0, "向下滚应增加偏移");
+
+        for _ in 0..20 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
+    }
+
+    #[test]
+    fn vis_cond_toggles_visibility() {
+        let flag = Rc::new(Cell::new(false));
+        let f2 = flag.clone();
+        let root = Element::col()
+            .width(100)
+            .height(100)
+            .child(Element::button("X").visible_when(move || f2.get()));
+        let tree = layout(root, 100, 100);
+        assert_eq!(tree.focusable_order().len(), 0, "隐藏时不可聚焦");
+        flag.set(true);
+        assert_eq!(tree.focusable_order().len(), 1, "显示后可聚焦");
     }
 
     #[test]
