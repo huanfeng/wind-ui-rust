@@ -181,3 +181,48 @@ impl Canvas for SkiaCanvas<'_> {
 fn to_sk_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
+        let p = pm.pixel(x, y).unwrap();
+        (p.red(), p.green(), p.blue())
+    }
+
+    /// 在一个薄裁剪矩形内填充，验证裁剪内的像素确实被绘制（复现进度条隐患）。
+    #[test]
+    fn thin_clip_rect_does_not_drop_fill() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.save();
+            c.clip_rect(Rect::new(10, 40, 80, 6)); // 薄裁剪带
+            c.fill_round_rect(20.0, 40.0, 40.0, 6.0, 3.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.restore();
+        }
+        // 裁剪带中心应被红色填充。
+        let (r, g, b) = px(&pm, 35, 43);
+        assert!(r > 200 && g < 80 && b < 80, "薄裁剪带内应被填充，实得 ({r},{g},{b})");
+    }
+
+    /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。
+    #[test]
+    fn thin_clip_rect_with_engine_and_offset() {
+        let mut pm = Pixmap::new(320, 280).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        {
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            c.save();
+            c.clip_rect(Rect::new(22, 42, 276, 6));
+            // 进度滑块：x=22+6.37, y=42, w=96.6, h=6, r=3
+            c.fill_round_rect(28.37, 42.0, 96.6, 6.0, 3.0, &Paint::fill(Color::hex(0x4C8BF5)));
+            c.restore();
+        }
+        let (r, g, b) = px(&pm, 60, 44);
+        assert!(b > 180 && r < 140, "进度滑块应在裁剪带内显现，实得 ({r},{g},{b})");
+    }
+}

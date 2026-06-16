@@ -68,6 +68,7 @@ impl Widget for ProgressBar {
                 let t = phase * 2.0;
                 let tri = if t < 1.0 { t } else { 2.0 - t }; // 0→1→0
                 let sx = tri * travel;
+                // 滑块高度等于轨道、往复范围 [0, w-seg]，端点恰好与轨道圆角对齐，故无需裁剪。
                 canvas.fill_round_rect(x + sx, y, seg, h, r, &fill);
             }
         }
