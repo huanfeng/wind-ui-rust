@@ -23,12 +23,14 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END,
-    VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
+    VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassExW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    LoadCursorW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK,
     SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
     SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE,
     WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN,
@@ -103,11 +105,46 @@ struct WindowState {
     pixmap: Option<Pixmap>,
     buf_w: i32,
     buf_h: i32,
+    /// 连续点击跟踪（用于双击/三击判定）。
+    last_click: ClickTracker,
+}
+
+/// 连续点击跟踪状态。在平台层把多次快速同位点击折算为 click_count。
+#[derive(Default, Clone, Copy)]
+struct ClickTracker {
+    time_ms: u32,
+    x: i32,
+    y: i32,
+    button: i32,
+    count: u8,
+}
+
+impl ClickTracker {
+    /// 按 Down 事件更新连续点击计数：与上次同按键、在系统双击时限与漂移阈值内则递增
+    /// （封顶到 3 支持三击），否则重置为 1。返回本次点击的计数。
+    fn bump(&mut self, button: i32, x: i32, y: i32, now_ms: u32, dbl_ms: u32, dx: i32, dy: i32) -> u8 {
+        let continued = self.count > 0
+            && self.button == button
+            && now_ms.wrapping_sub(self.time_ms) <= dbl_ms
+            && (x - self.x).abs() <= dx
+            && (y - self.y).abs() <= dy;
+        let count = if continued { (self.count + 1).min(3) } else { 1 };
+        *self = ClickTracker { time_ms: now_ms, x, y, button, count };
+        count
+    }
 }
 
 impl WindowState {
     fn new(handler: Box<dyn AppHandler>, bg: Color) -> Self {
-        Self { handler, bg, capturing: false, pixmap: None, buf_w: 0, buf_h: 0 }
+        Self {
+            handler,
+            bg,
+            capturing: false,
+            pixmap: None,
+            buf_w: 0,
+            buf_h: 0,
+            last_click: ClickTracker::default(),
+        }
     }
 
     /// 确保后备缓冲匹配客户区；尺寸变化时重建。
@@ -374,7 +411,25 @@ unsafe fn frame_size_for_client(logical_w: i32, logical_h: i32, scale: f32, dpi:
 unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
     let x = (lparam.0 & 0xffff) as i16 as i32;
     let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-    dispatch_pointer_event(hwnd, PointerEvent { kind, pos: Point::new(x, y), button });
+    // 仅按下时计算连续点击数；其余动作恒为单击。
+    let click_count = if matches!(kind, PointerKind::Down) {
+        let btn = match button {
+            MouseButton::Left => 1,
+            MouseButton::Right => 2,
+            // Middle 当前不可达：无 WM_MBUTTONDOWN 分发；保留映射以备后续接入。
+            MouseButton::Middle => 3,
+        };
+        let now = GetMessageTime() as u32;
+        let dbl = GetDoubleClickTime();
+        // SM_CXDOUBLECLK/SM_CYDOUBLECLK 是双击矩形的**全宽/全高**，以首击为中心，
+        // 故每侧容差为其一半（与 |x-x0|<=dx 比较）。
+        let dx = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
+        let dy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+        state_from(hwnd).map(|s| s.last_click.bump(btn, x, y, now, dbl, dx, dy)).unwrap_or(1)
+    } else {
+        1
+    };
+    dispatch_pointer_event(hwnd, PointerEvent { kind, pos: Point::new(x, y), button, click_count });
 }
 
 /// WM_MOUSEWHEEL：高位字为滚动量（±120/刻度），lParam 为屏幕坐标需转客户区。
@@ -387,11 +442,7 @@ unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let _ = ScreenToClient(hwnd, &mut pt);
     dispatch_pointer_event(
         hwnd,
-        PointerEvent {
-            kind: PointerKind::Wheel(delta),
-            pos: Point::new(pt.x, pt.y),
-            button: MouseButton::Left,
-        },
+        PointerEvent::single(PointerKind::Wheel(delta), Point::new(pt.x, pt.y), MouseButton::Left),
     );
 }
 
@@ -532,5 +583,47 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
         None
     } else {
         Some(&mut *ptr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClickTracker;
+
+    // 双击时限 500ms，漂移阈值 ±4px，同左键。
+    const DBL: u32 = 500;
+    const DX: i32 = 4;
+    const DY: i32 = 4;
+
+    #[test]
+    fn double_then_triple_then_reset() {
+        let mut t = ClickTracker::default();
+        assert_eq!(t.bump(1, 10, 10, 1000, DBL, DX, DY), 1, "首击=单击");
+        assert_eq!(t.bump(1, 11, 11, 1100, DBL, DX, DY), 2, "时限内同位=双击");
+        assert_eq!(t.bump(1, 12, 12, 1200, DBL, DX, DY), 3, "继续=三击");
+        assert_eq!(t.bump(1, 12, 12, 1300, DBL, DX, DY), 3, "封顶于三击");
+        // 超出时限：重置。
+        assert_eq!(t.bump(1, 12, 12, 2000, DBL, DX, DY), 1, "超时重置为单击");
+    }
+
+    #[test]
+    fn continuation_across_u32_wraparound() {
+        // GetMessageTime 是 49.7 天回绕的 ms 计数；wrapping_sub 必须正确处理跨界连击。
+        let mut t = ClickTracker::default();
+        let near_max = u32::MAX - 100;
+        assert_eq!(t.bump(1, 10, 10, near_max, DBL, DX, DY), 1, "首击");
+        // 跨过 u32 边界 50ms：near_max + 150 回绕为 49。
+        let wrapped = near_max.wrapping_add(150);
+        assert_eq!(t.bump(1, 10, 10, wrapped, DBL, DX, DY), 2, "跨回绕仍判为双击");
+    }
+
+    #[test]
+    fn reset_on_far_move_or_other_button() {
+        let mut t = ClickTracker::default();
+        assert_eq!(t.bump(1, 10, 10, 1000, DBL, DX, DY), 1);
+        // 位移超阈值 → 重新计数。
+        assert_eq!(t.bump(1, 30, 10, 1100, DBL, DX, DY), 1, "漂移过大不算连击");
+        // 换按键 → 重新计数。
+        assert_eq!(t.bump(2, 30, 10, 1150, DBL, DX, DY), 1, "换按键不算连击");
     }
 }

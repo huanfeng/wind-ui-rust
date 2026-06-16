@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
-use crate::event::{Event, Key, PointerKind};
+use crate::event::{Event, Key, MouseButton, PointerKind};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -547,6 +547,18 @@ impl Widget for TextInput {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Down => {
                     ctx.request_focus();
+                    // 右键不启动拖选：仅聚焦，并在点击落在选区外时移动光标
+                    // （为 P5 右键菜单预留——菜单针对当前选区/光标操作）。
+                    if p.button == MouseButton::Right {
+                        let idx = self.index_at(ctx, p.pos.x);
+                        let in_sel = self.selection().is_some_and(|(s, e)| idx >= s && idx < e);
+                        if !in_sel {
+                            self.cursor = idx;
+                            self.anchor = None;
+                        }
+                        ctx.mark_dirty();
+                        return true;
+                    }
                     let idx = self.index_at(ctx, p.pos.x);
                     self.cursor = idx;
                     self.anchor = Some(idx);

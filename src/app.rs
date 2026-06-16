@@ -242,11 +242,11 @@ impl AppHandler for UiHost {
         if self.capture.is_none() {
             return false;
         }
-        let ev = PointerEvent {
-            kind: PointerKind::Up,
-            pos: Point::new(-1_000_000, -1_000_000),
-            button: MouseButton::Left,
-        };
+        let ev = PointerEvent::single(
+            PointerKind::Up,
+            Point::new(-1_000_000, -1_000_000),
+            MouseButton::Left,
+        );
         let mut hover = self.hover;
         let mut capture = self.capture;
         let res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);

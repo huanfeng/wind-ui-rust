@@ -29,6 +29,16 @@ pub struct PointerEvent {
     pub kind: PointerKind,
     pub pos: Point,
     pub button: MouseButton,
+    /// 连续点击计数（由平台层填充）：1=单击，2=双击，3=三击。
+    /// 仅 `Down` 有意义；其余动作恒为 1。控件据此实现双击选词/三击选行。
+    pub click_count: u8,
+}
+
+impl PointerEvent {
+    /// 构造一个单击事件（click_count=1）。便于测试与合成事件。
+    pub fn single(kind: PointerKind, pos: Point, button: MouseButton) -> Self {
+        Self { kind, pos, button, click_count: 1 }
+    }
 }
 
 /// 键。

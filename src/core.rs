@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     fn ptr(kind: PointerKind, p: Point) -> PointerEvent {
-        PointerEvent { kind, pos: p, button: MouseButton::Left }
+        PointerEvent::single(kind, p, MouseButton::Left)
     }
 
     fn button_tree(clicks: Rc<Cell<i32>>) -> (Tree, NodeId) {
@@ -1202,10 +1202,8 @@ mod tests {
         // 内容总高 300 > 视口 100，最大滚动量 200。
         assert_eq!(tree.get(id).unwrap().content_h, 300);
 
-        let wheel = |d: i32| PointerEvent {
-            kind: PointerKind::Wheel(d),
-            pos: Point::new(50, 50),
-            button: MouseButton::Left,
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
         };
         let (mut h, mut cap) = (None, None);
         tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
@@ -1232,19 +1230,11 @@ mod tests {
         tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, view=100
         let (mut h, mut cap) = (None, None);
         // 右缘滚动条区域按下（x>=88）→ 捕获滚动容器
-        let down = PointerEvent {
-            kind: PointerKind::Down,
-            pos: Point::new(95, 10),
-            button: MouseButton::Left,
-        };
+        let down = PointerEvent::single(PointerKind::Down, Point::new(95, 10), MouseButton::Left);
         tree.dispatch_pointer(down, &mut h, &mut cap);
         assert_eq!(cap, Some(id), "滚动条区域按下应捕获滚动容器");
         // 向下拖 30px → 内容按 content/view 比例移动
-        let mv = PointerEvent {
-            kind: PointerKind::Move,
-            pos: Point::new(95, 40),
-            button: MouseButton::Left,
-        };
+        let mv = PointerEvent::single(PointerKind::Move, Point::new(95, 40), MouseButton::Left);
         tree.dispatch_pointer(mv, &mut h, &mut cap);
         tree.layout_root(Size::new(100, 100), &mut te);
         assert!(tree.get(id).unwrap().scroll_y > 0, "拖动滚动条应增加偏移");
