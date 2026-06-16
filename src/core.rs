@@ -1203,11 +1203,55 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(200, 40), &mut te);
         let input = tree.get(id).unwrap().children[0];
-        let key = |k: Key| KeyEvent { key: k, pressed: true, shift: false };
+        let key = |k: Key| KeyEvent { key: k, pressed: true, shift: false, ctrl: false };
         tree.dispatch_key(key(Key::Char('a')), Some(input));
         tree.dispatch_key(key(Key::Char('中')), Some(input));
         assert_eq!(&*txt.borrow(), "a中", "应插入字符");
         tree.dispatch_key(key(Key::Backspace), Some(input));
         assert_eq!(&*txt.borrow(), "a", "退格应删除一个字符");
+    }
+
+    fn input_tree(initial: &str) -> (Tree, NodeId, Rc<RefCell<String>>) {
+        let txt = Rc::new(RefCell::new(String::from(initial)));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::text_input(txt.clone(), "ph"));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        (tree, input, txt)
+    }
+
+    #[test]
+    fn text_input_select_all_and_replace() {
+        let (mut tree, input, txt) = input_tree("hello");
+        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
+        tree.dispatch_key(k(Key::Char('X'), false), Some(input));
+        assert_eq!(&*txt.borrow(), "X", "全选后输入应替换全部");
+    }
+
+    #[test]
+    fn text_input_home_and_delete() {
+        let (mut tree, input, txt) = input_tree("abc");
+        let k = |key| KeyEvent { key, pressed: true, shift: false, ctrl: false };
+        tree.dispatch_key(k(Key::Home), Some(input)); // 光标到行首
+        tree.dispatch_key(k(Key::Delete), Some(input)); // 删首字符
+        assert_eq!(&*txt.borrow(), "bc", "Home 后 Delete 应删除首字符");
+    }
+
+    #[test]
+    fn text_input_shift_select_then_backspace() {
+        let (mut tree, input, txt) = input_tree("abc");
+        // 光标在末尾(=3)，Shift+Left 选中最后一个字符，退格删除选区
+        let shift_left = KeyEvent { key: Key::Left, pressed: true, shift: true, ctrl: false };
+        tree.dispatch_key(shift_left, Some(input));
+        let bs = KeyEvent { key: Key::Backspace, pressed: true, shift: false, ctrl: false };
+        tree.dispatch_key(bs, Some(input));
+        assert_eq!(&*txt.borrow(), "ab", "Shift 选区后退格应删除选区");
     }
 }

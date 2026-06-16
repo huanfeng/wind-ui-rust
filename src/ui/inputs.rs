@@ -298,34 +298,85 @@ impl Widget for Slider {
 
 // ---------------- TextInput ----------------
 
+const TEXT_PAD: i32 = 10;
+const SEL_COLOR: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0x55 };
+/// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
+const NO_WRAP_W: i32 = 100_000;
+
 pub struct TextInput {
     text: Rc<RefCell<String>>,
     placeholder: String,
-    cursor: usize, // 字符索引
+    cursor: usize,            // 字符索引
+    anchor: Option<usize>,    // 选区锚点（Some 且 != cursor 时有选区）
+    scroll_x: Cell<i32>,      // 水平滚动偏移（逻辑 px），paint 时按光标更新
+    char_x: RefCell<Vec<i32>>, // paint 缓存：char_x[i] = text[..i] 宽度（逻辑 px）
+    dragging: bool,
 }
 
 impl TextInput {
     pub fn new(text: Rc<RefCell<String>>, placeholder: String) -> Self {
         let cursor = text.borrow().chars().count();
-        Self { text, placeholder, cursor }
+        Self {
+            text,
+            placeholder,
+            cursor,
+            anchor: None,
+            scroll_x: Cell::new(0),
+            char_x: RefCell::new(vec![0]),
+            dragging: false,
+        }
     }
 
+    fn char_count(&self) -> usize {
+        self.text.borrow().chars().count()
+    }
     fn clamp_cursor(&mut self) {
-        let n = self.text.borrow().chars().count();
+        let n = self.char_count();
         if self.cursor > n {
             self.cursor = n;
         }
     }
-    fn insert_char(&mut self, ctx: &mut EventCtx, c: char) {
+    /// 规范化选区为 [start, end)；无选区返回 None。
+    /// cursor/anchor 在此夹紧到当前字符数——外部经 Rc<RefCell<String>> 改写文本后
+    /// 仍保证选区范围合法，下游 delete/paint 无需各自再夹。
+    fn selection(&self) -> Option<(usize, usize)> {
+        let n = self.char_count();
+        let a = self.anchor?.min(n);
+        let c = self.cursor.min(n);
+        if a == c {
+            None
+        } else {
+            Some((a.min(c), a.max(c)))
+        }
+    }
+    /// 删除选区文本，返回是否删除了。
+    fn delete_selection(&mut self, ctx: &mut EventCtx) -> bool {
+        if let Some((s, e)) = self.selection() {
+            let mut t = self.text.borrow_mut();
+            let bs = char_to_byte(&t, s);
+            let be = char_to_byte(&t, e);
+            t.replace_range(bs..be, "");
+            drop(t);
+            self.cursor = s;
+            self.anchor = None;
+            ctx.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+    fn type_char(&mut self, ctx: &mut EventCtx, c: char) {
         if c.is_control() {
             return;
         }
+        self.delete_selection(ctx);
         self.clamp_cursor();
         let mut s = self.text.borrow_mut();
         let byte = char_to_byte(&s, self.cursor);
         s.insert(byte, c);
         self.cursor += 1;
         drop(s);
+        self.anchor = None;
         ctx.mark_dirty();
     }
     fn backspace(&mut self, ctx: &mut EventCtx) {
@@ -341,13 +392,47 @@ impl TextInput {
         drop(s);
         ctx.mark_dirty();
     }
-    fn move_cursor(&mut self, ctx: &mut EventCtx, delta: isize) {
-        let len = self.text.borrow().chars().count();
-        let nc = (self.cursor as isize + delta).clamp(0, len as isize) as usize;
-        if nc != self.cursor {
-            self.cursor = nc;
-            ctx.mark_dirty();
+    fn delete_forward(&mut self, ctx: &mut EventCtx) {
+        self.clamp_cursor();
+        let len = self.char_count();
+        if self.cursor >= len {
+            return;
         }
+        let mut s = self.text.borrow_mut();
+        let start = char_to_byte(&s, self.cursor);
+        let end = char_to_byte(&s, self.cursor + 1);
+        s.replace_range(start..end, "");
+        drop(s);
+        ctx.mark_dirty();
+    }
+    /// 移动光标到 target；shift=true 时扩展选区，否则清选区。
+    fn move_to(&mut self, ctx: &mut EventCtx, target: usize, shift: bool) {
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.cursor = target.min(self.char_count());
+        ctx.mark_dirty();
+    }
+    /// 屏幕 x（逻辑坐标）→ 字符索引（用 paint 缓存的 char_x 定位最近边界）。
+    /// 前置条件：依赖最近一帧 paint 重建的 char_x 缓存；首帧未绘制前会落到索引 0。
+    fn index_at(&self, ctx: &EventCtx, screen_x: i32) -> usize {
+        let b = ctx.bounds();
+        let local = screen_x - (b.x + TEXT_PAD) + self.scroll_x.get();
+        let cx = self.char_x.borrow();
+        let mut best = 0;
+        let mut best_d = i32::MAX;
+        for (i, &v) in cx.iter().enumerate() {
+            let d = (v - local).abs();
+            if d < best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        best.min(self.char_count())
     }
 }
 
@@ -362,54 +447,167 @@ impl Widget for TextInput {
     fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
         canvas.fill_round_rect(x, y, w, h, 6.0, &Paint::fill(Color::WHITE));
-        // 边框用中性色；聚焦时由核心层的焦点环提示。
         canvas.stroke_round_rect(x, y, w, h, 6.0, 1.5, &Paint::fill(TRACK_OFF));
 
         let text = self.text.borrow();
-        let pad = 10;
-        let inner = Rect::new(bounds.x + pad, bounds.y, bounds.w - 2 * pad, bounds.h);
+        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y, bounds.w - 2 * TEXT_PAD, bounds.h);
+        let family = style.font_family.as_deref();
+        let fsize = style.font_size;
+        let cursor = self.cursor.min(text.chars().count());
+
+        // 重建每字符边界 x 缓存（逻辑 px）。
+        {
+            let mut cx = self.char_x.borrow_mut();
+            cx.clear();
+            cx.push(0);
+            let mut acc = String::new();
+            for ch in text.chars() {
+                acc.push(ch);
+                cx.push(canvas.measure_text(&acc, family, fsize).w);
+            }
+        }
+        let cx = self.char_x.borrow();
+
+        // 更新水平滚动使光标可见。
+        let cursor_x = cx.get(cursor).copied().unwrap_or(0);
+        let mut sx = self.scroll_x.get();
+        if cursor_x - sx > inner.w {
+            sx = cursor_x - inner.w;
+        }
+        if cursor_x - sx < 0 {
+            sx = cursor_x;
+        }
+        sx = sx.max(0);
+        self.scroll_x.set(sx);
+
+        // 裁剪到内框，绘制选区 / 文字 / 光标。
+        canvas.save();
+        canvas.clip_rect(inner);
+        let base_x = inner.x - sx;
+
+        if let Some((s, e)) = self.selection() {
+            let x1 = base_x + cx.get(s).copied().unwrap_or(0);
+            let x2 = base_x + cx.get(e).copied().unwrap_or(0);
+            canvas.fill_rect(
+                x1 as f32,
+                (inner.y + 4) as f32,
+                (x2 - x1) as f32,
+                (inner.h - 8) as f32,
+                &Paint::fill(SEL_COLOR),
+            );
+        }
+
         if text.is_empty() {
-            canvas.draw_text(&self.placeholder, inner, Color::hex(0xAAB0B8), Align::Start, style.font_family.as_deref(), style.font_size);
+            canvas.draw_text(&self.placeholder, inner, Color::hex(0xAAB0B8), Align::Start, family, fsize);
         } else {
-            canvas.draw_text(&text, inner, style.fg, Align::Start, style.font_family.as_deref(), style.font_size);
+            // 从 base_x 起绘制整行（足够宽不换行），由 clip 裁到内框。
+            let tr = Rect::new(base_x, inner.y, NO_WRAP_W, inner.h);
+            canvas.draw_text(&text, tr, style.fg, Align::Start, family, fsize);
         }
-        // 光标：仅在聚焦时绘制，避免多个文本框都显示光标。
+
         if focused {
-            let cursor = self.cursor.min(text.chars().count());
-            let prefix: String = text.chars().take(cursor).collect();
-            let cw = canvas.measure_text(&prefix, style.font_family.as_deref(), style.font_size).w;
-            let cx = (bounds.x + pad + cw) as f32;
-            let cyy = bounds.y as f32 + 6.0;
-            canvas.draw_line(cx, cyy, cx, bounds.y as f32 + bounds.h as f32 - 6.0, 1.0, &Paint::fill(Color::hex(0x444444)));
+            let cxx = base_x + cursor_x;
+            canvas.draw_line(
+                cxx as f32,
+                bounds.y as f32 + 6.0,
+                cxx as f32,
+                bounds.y as f32 + bounds.h as f32 - 6.0,
+                1.0,
+                &Paint::fill(Color::hex(0x444444)),
+            );
         }
+        canvas.restore();
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
-            Event::Pointer(p) if p.kind == PointerKind::Down => {
-                ctx.request_focus();
-                ctx.mark_dirty();
-                true
-            }
-            Event::Key(k) if k.pressed => match k.key {
-                Key::Char(c) => {
-                    self.insert_char(ctx, c);
+            Event::Pointer(p) => match p.kind {
+                PointerKind::Down => {
+                    ctx.request_focus();
+                    let idx = self.index_at(ctx, p.pos.x);
+                    self.cursor = idx;
+                    self.anchor = Some(idx);
+                    self.dragging = true;
+                    ctx.capture();
+                    ctx.mark_dirty();
                     true
                 }
-                // 空格经 WM_CHAR 以 Char(' ') 到达，这里不处理 Key::Space，避免双插入。
-                Key::Backspace => {
-                    self.backspace(ctx);
+                PointerKind::Move if self.dragging => {
+                    self.cursor = self.index_at(ctx, p.pos.x);
+                    ctx.mark_dirty();
                     true
                 }
-                Key::Left => {
-                    self.move_cursor(ctx, -1);
-                    true
-                }
-                Key::Right => {
-                    self.move_cursor(ctx, 1);
+                PointerKind::Up => {
+                    self.dragging = false;
+                    ctx.release_capture();
+                    if self.anchor == Some(self.cursor) {
+                        self.anchor = None; // 单击未拖动：无选区
+                    }
+                    ctx.mark_dirty();
                     true
                 }
                 _ => false,
             },
+            Event::Key(k) if k.pressed => {
+                let len = self.char_count();
+                match k.key {
+                    Key::Char(c) if !k.ctrl => {
+                        self.type_char(ctx, c);
+                        true
+                    }
+                    Key::Backspace => {
+                        if !self.delete_selection(ctx) {
+                            self.backspace(ctx);
+                        }
+                        true
+                    }
+                    Key::Delete => {
+                        if !self.delete_selection(ctx) {
+                            self.delete_forward(ctx);
+                        }
+                        true
+                    }
+                    Key::Left => {
+                        if !k.shift {
+                            if let Some((s, _)) = self.selection() {
+                                self.cursor = s;
+                                self.anchor = None;
+                                ctx.mark_dirty();
+                                return true;
+                            }
+                        }
+                        self.move_to(ctx, self.cursor.saturating_sub(1), k.shift);
+                        true
+                    }
+                    Key::Right => {
+                        if !k.shift {
+                            if let Some((_, e)) = self.selection() {
+                                self.cursor = e;
+                                self.anchor = None;
+                                ctx.mark_dirty();
+                                return true;
+                            }
+                        }
+                        self.move_to(ctx, (self.cursor + 1).min(len), k.shift);
+                        true
+                    }
+                    Key::Home => {
+                        self.move_to(ctx, 0, k.shift);
+                        true
+                    }
+                    Key::End => {
+                        self.move_to(ctx, len, k.shift);
+                        true
+                    }
+                    // Ctrl+A 全选（VK_A=0x41）
+                    Key::Other(0x41) if k.ctrl => {
+                        self.anchor = Some(0);
+                        self.cursor = len;
+                        ctx.mark_dirty();
+                        true
+                    }
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }

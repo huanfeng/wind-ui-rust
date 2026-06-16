@@ -22,8 +22,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END,
+    VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageW,
@@ -464,6 +464,7 @@ unsafe fn handle_capture_changed(hwnd: HWND) {
 unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
     let vk = wparam.0 as u16;
     let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+    let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
     let key = if vk == VK_TAB.0 {
         Key::Tab
     } else if vk == VK_RETURN.0 {
@@ -474,6 +475,8 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
         Key::Space
     } else if vk == VK_BACK.0 {
         Key::Backspace
+    } else if vk == VK_DELETE.0 {
+        Key::Delete
     } else if vk == VK_LEFT.0 {
         Key::Left
     } else if vk == VK_RIGHT.0 {
@@ -482,10 +485,14 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
         Key::Up
     } else if vk == VK_DOWN.0 {
         Key::Down
+    } else if vk == VK_HOME.0 {
+        Key::Home
+    } else if vk == VK_END.0 {
+        Key::End
     } else {
         Key::Other(vk as u32)
     };
-    let ev = KeyEvent { key, pressed: true, shift };
+    let ev = KeyEvent { key, pressed: true, shift, ctrl };
     dispatch_key_event(hwnd, ev);
 }
 
@@ -495,7 +502,7 @@ unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
     if c.is_control() {
         return;
     }
-    let ev = KeyEvent { key: Key::Char(c), pressed: true, shift: false };
+    let ev = KeyEvent { key: Key::Char(c), pressed: true, shift: false, ctrl: false };
     dispatch_key_event(hwnd, ev);
 }
 

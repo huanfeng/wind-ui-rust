@@ -1,4 +1,5 @@
-//! 输入事件类型。坐标为绝对窗口物理像素。
+//! 输入事件类型。平台层产生物理像素坐标，但 `UiHost::on_pointer` 在分发前
+//! 已 ÷scale 转为**逻辑坐标**——控件 `on_event` 收到的 pos 是逻辑坐标。
 
 use crate::geometry::Point;
 
@@ -37,11 +38,14 @@ pub enum Key {
     Enter,
     Escape,
     Backspace,
+    Delete,
     Space,
     Left,
     Right,
     Up,
     Down,
+    Home,
+    End,
     Char(char),
     Other(u32),
 }
@@ -50,8 +54,10 @@ pub enum Key {
 pub struct KeyEvent {
     pub key: Key,
     pub pressed: bool,
-    /// Shift 是否按下（用于 Shift+Tab 反向导航）。
+    /// Shift 是否按下（用于 Shift+Tab 反向导航、Shift+方向扩展选区）。
     pub shift: bool,
+    /// Ctrl 是否按下（用于 Ctrl+A/C/V/X 等）。
+    pub ctrl: bool,
 }
 
 /// 统一事件。
