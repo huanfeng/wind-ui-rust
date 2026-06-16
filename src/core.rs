@@ -661,6 +661,22 @@ impl EventCtx<'_> {
         }
         self.out.repaint = true;
     }
+    /// 读取本滚动节点的 (scroll_y, content_h, 视口高)。
+    pub fn scroll_metrics(&self) -> (i32, i32, i32) {
+        if let Some(n) = self.tree.get(self.self_id) {
+            let view_h = (n.bounds.h - n.padding.vertical()).max(0);
+            (n.scroll_y, n.content_h, view_h)
+        } else {
+            (0, 0, 0)
+        }
+    }
+    /// 直接设置滚动偏移（拖动滚动条用），下一帧 arrange 钳制范围。
+    pub fn set_scroll(&mut self, y: i32) {
+        if let Some(n) = self.tree.get_mut(self.self_id) {
+            n.scroll_y = y;
+        }
+        self.out.repaint = true;
+    }
     /// 读取剪贴板文本（无剪贴板实现时返回 None）。
     pub fn clipboard_get(&self) -> Option<String> {
         self.tree.clipboard.as_ref().and_then(|c| c.get_text())
@@ -718,6 +734,14 @@ impl Tree {
         let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
         if !abs.contains(p) {
             return None;
+        }
+        // 滚动条区域优先命中滚动容器自身（用于拖动滚动条，而非下方内容）。
+        // 命中区 10px 与 containers::SCROLLBAR_HIT_W 一致。
+        if matches!(n.layout, Layout::Scroll) {
+            let content = abs.inset(n.padding);
+            if n.content_h > content.h && p.x >= abs.right() - 10 {
+                return Some(id);
+            }
         }
         // 裁剪容器：点不在内容区时不下探子节点（仍可命中容器自身处理滚轮）。
         let in_content = if n.clip_children {
@@ -1193,6 +1217,37 @@ mod tests {
         }
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
+    }
+
+    #[test]
+    fn scrollbar_drag_changes_offset() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, view=100
+        let (mut h, mut cap) = (None, None);
+        // 右缘滚动条区域按下（x>=88）→ 捕获滚动容器
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(95, 10),
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        assert_eq!(cap, Some(id), "滚动条区域按下应捕获滚动容器");
+        // 向下拖 30px → 内容按 content/view 比例移动
+        let mv = PointerEvent {
+            kind: PointerKind::Move,
+            pos: Point::new(95, 40),
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer(mv, &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert!(tree.get(id).unwrap().scroll_y > 0, "拖动滚动条应增加偏移");
     }
 
     #[test]

@@ -14,20 +14,63 @@ use crate::text::TextEngine;
 const TAB_ACCENT: Color = Color { r: 0x4C, g: 0x8B, b: 0xF5, a: 0xFF };
 const TAB_INACTIVE: Color = Color { r: 0x70, g: 0x76, b: 0x7E, a: 0xFF };
 const TAB_HOVER: Color = Color { r: 0x3A, g: 0x40, b: 0x48, a: 0xFF };
+/// 滚动条右缘可抓取宽度（与 core::hit_node 的命中区一致）。
+const SCROLLBAR_HIT_W: i32 = 10;
+/// 滚动条 thumb 最小高（与 core paint 一致）。
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 
-/// 滚动容器内部 widget：处理滚轮，调整节点滚动偏移。
-pub struct ScrollWidget;
+/// 滚动容器内部 widget：处理滚轮 + 拖动滚动条。
+#[derive(Default)]
+pub struct ScrollWidget {
+    dragging: bool,
+    start_y: i32,
+    start_scroll: i32,
+}
 
 impl Widget for ScrollWidget {
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
-        if let Event::Pointer(p) = ev {
-            if let PointerKind::Wheel(delta) = p.kind {
+        let Event::Pointer(p) = ev else { return false };
+        match p.kind {
+            PointerKind::Wheel(delta) => {
                 // Windows 一刻度为 ±120；每刻度滚动 48px（delta>0 向上）。
                 ctx.scroll_by(-delta * 48 / 120);
-                return true;
+                true
             }
+            PointerKind::Down => {
+                // 命中到这里且在右缘滚动条区域时启动拖动（hit_node 已优先派发）。
+                let b = ctx.bounds();
+                let (scroll_y, content_h, view_h) = ctx.scroll_metrics();
+                if content_h > view_h && p.pos.x >= b.right() - SCROLLBAR_HIT_W {
+                    self.dragging = true;
+                    self.start_y = p.pos.y;
+                    self.start_scroll = scroll_y;
+                    ctx.capture();
+                    true
+                } else {
+                    false
+                }
+            }
+            PointerKind::Move if self.dragging => {
+                let (_, content_h, view_h) = ctx.scroll_metrics();
+                if view_h > 0 && content_h > view_h {
+                    let max_scroll = content_h - view_h;
+                    // 按 thumb 实际行程换算，精确反演绘制映射（thumb_h 与 core 同公式）。
+                    let thumb_h =
+                        (view_h as f32 * view_h as f32 / content_h as f32).max(SCROLLBAR_MIN_THUMB);
+                    let travel = (view_h as f32 - thumb_h).max(1.0);
+                    let dy = p.pos.y - self.start_y;
+                    let delta = (dy as f32 * max_scroll as f32 / travel) as i32;
+                    ctx.set_scroll((self.start_scroll + delta).clamp(0, max_scroll));
+                }
+                true
+            }
+            PointerKind::Up if self.dragging => {
+                self.dragging = false;
+                ctx.release_capture();
+                true
+            }
+            _ => false,
         }
-        false
     }
 }
 

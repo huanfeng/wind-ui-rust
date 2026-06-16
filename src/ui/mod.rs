@@ -277,7 +277,7 @@ impl Element {
 
     /// 垂直滚动容器：内容超出视口时可滚轮滚动并裁剪。
     pub fn scroll() -> Self {
-        let mut e = Self::base(Layout::Scroll).widget(containers::ScrollWidget);
+        let mut e = Self::base(Layout::Scroll).widget(containers::ScrollWidget::default());
         e.clip_children = true;
         e
     }
