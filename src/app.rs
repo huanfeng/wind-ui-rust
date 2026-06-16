@@ -122,6 +122,7 @@ impl UiHost {
     fn new(root: Element) -> Self {
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
+        tree.clipboard = Some(Box::new(crate::platform::win32::clipboard::WinClipboard));
         Self {
             tree,
             engine: DWriteEngine::new(),

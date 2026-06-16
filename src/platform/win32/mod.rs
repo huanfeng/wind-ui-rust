@@ -1,8 +1,9 @@
-//! Win32 窗口、消息循环与 GDI 呈现（Phase 0）。
+//! Win32 窗口、消息循环与 GDI 呈现。
 //!
-//! 渲染全在 CPU：tiny-skia `Pixmap`（RGBA 预乘）作后备缓冲；呈现时拷贝到
-//! GDI `CreateDIBSection`（BGRA）并 `BitBlt` 到窗口 DC。空闲时阻塞在
-//! `GetMessageW`，零 CPU。
+//! 渲染全在 CPU：单份 tiny-skia `Pixmap`（RGBA 预乘）作后备缓冲；呈现时原地
+//! R/B 交换为 BGRA 后 `SetDIBitsToDevice` 直接拷屏。空闲时阻塞在 `GetMessageW`，零 CPU。
+
+pub mod clipboard;
 
 use std::ffi::c_void;
 use std::mem::size_of;

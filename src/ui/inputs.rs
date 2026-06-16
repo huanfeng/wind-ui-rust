@@ -434,6 +434,30 @@ impl TextInput {
         }
         best.min(self.char_count())
     }
+    /// 当前选区文本（无选区返回 None）。
+    fn selected_text(&self) -> Option<String> {
+        let (s, e) = self.selection()?;
+        let t = self.text.borrow();
+        let bs = char_to_byte(&t, s);
+        let be = char_to_byte(&t, e);
+        Some(t[bs..be].to_string())
+    }
+    /// 在光标处粘贴（先删选区）；单行控件过滤换行/控制字符。
+    fn paste(&mut self, ctx: &mut EventCtx, s: &str) {
+        self.delete_selection(ctx);
+        self.clamp_cursor();
+        let clean: String = s.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        let mut t = self.text.borrow_mut();
+        let byte = char_to_byte(&t, self.cursor);
+        t.insert_str(byte, &clean);
+        drop(t);
+        self.cursor += clean.chars().count();
+        self.anchor = None;
+        ctx.mark_dirty();
+    }
 }
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
@@ -603,6 +627,28 @@ impl Widget for TextInput {
                         self.anchor = Some(0);
                         self.cursor = len;
                         ctx.mark_dirty();
+                        true
+                    }
+                    // Ctrl+C 复制（VK_C=0x43）
+                    Key::Other(0x43) if k.ctrl => {
+                        if let Some(sel) = self.selected_text() {
+                            ctx.clipboard_set(&sel);
+                        }
+                        true
+                    }
+                    // Ctrl+X 剪切（VK_X=0x58）
+                    Key::Other(0x58) if k.ctrl => {
+                        if let Some(sel) = self.selected_text() {
+                            ctx.clipboard_set(&sel);
+                            self.delete_selection(ctx);
+                        }
+                        true
+                    }
+                    // Ctrl+V 粘贴（VK_V=0x56）
+                    Key::Other(0x56) if k.ctrl => {
+                        if let Some(s) = ctx.clipboard_get() {
+                            self.paste(ctx, &s);
+                        }
                         true
                     }
                     _ => false,

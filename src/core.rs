@@ -14,6 +14,12 @@ use crate::text::TextEngine;
 /// 点击/激活回调类型。
 pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
 
+/// 剪贴板读写抽象。由平台层提供实现，UiHost 注入到 `Tree`，控件经 `EventCtx` 访问。
+pub trait ClipboardProvider {
+    fn get_text(&self) -> Option<String>;
+    fn set_text(&self, text: &str);
+}
+
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct NodeId {
@@ -115,6 +121,8 @@ pub struct Tree {
     /// 是否绘制焦点环。仅在键盘（Tab）导航时为 true，纯鼠标操作时为 false，
     /// 使纯鼠标交互更纯净。
     pub focus_ring_visible: bool,
+    /// 剪贴板实现（平台注入）；None 时复制粘贴为空操作。
+    pub clipboard: Option<Box<dyn ClipboardProvider>>,
 }
 
 impl Default for Tree {
@@ -130,6 +138,7 @@ impl Tree {
             free: Vec::new(),
             root: None,
             focus_ring_visible: false,
+            clipboard: None,
         }
     }
 
@@ -651,6 +660,16 @@ impl EventCtx<'_> {
             n.scroll_y += dy;
         }
         self.out.repaint = true;
+    }
+    /// 读取剪贴板文本（无剪贴板实现时返回 None）。
+    pub fn clipboard_get(&self) -> Option<String> {
+        self.tree.clipboard.as_ref().and_then(|c| c.get_text())
+    }
+    /// 写入剪贴板文本（无剪贴板实现时为空操作）。
+    pub fn clipboard_set(&self, text: &str) {
+        if let Some(c) = self.tree.clipboard.as_ref() {
+            c.set_text(text);
+        }
     }
 }
 
@@ -1253,5 +1272,29 @@ mod tests {
         let bs = KeyEvent { key: Key::Backspace, pressed: true, shift: false, ctrl: false };
         tree.dispatch_key(bs, Some(input));
         assert_eq!(&*txt.borrow(), "ab", "Shift 选区后退格应删除选区");
+    }
+
+    struct SharedClip(Rc<RefCell<String>>);
+    impl ClipboardProvider for SharedClip {
+        fn get_text(&self) -> Option<String> {
+            Some(self.0.borrow().clone())
+        }
+        fn set_text(&self, t: &str) {
+            *self.0.borrow_mut() = t.to_string();
+        }
+    }
+
+    #[test]
+    fn text_input_copy_and_paste() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, input, txt) = input_tree("hello");
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
+        tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C 复制
+        assert_eq!(&*clip.borrow(), "hello", "复制应写入剪贴板");
+        tree.dispatch_key(k(Key::End, false), Some(input)); // 光标到末尾、清选区
+        tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V 粘贴
+        assert_eq!(&*txt.borrow(), "hellohello", "粘贴应在光标处插入剪贴板文本");
     }
 }
