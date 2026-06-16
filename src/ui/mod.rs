@@ -4,9 +4,38 @@
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
 use crate::core::{EmptyWidget, Layout, Node, NodeId, Tree, Widget};
-use crate::geometry::{Color, Insets};
+use crate::geometry::{Color, Insets, Rect, Size};
+use crate::render::Canvas;
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
+use crate::text::TextEngine;
+
+/// 文本叶子控件。
+pub struct Label {
+    text: String,
+}
+
+impl Label {
+    pub fn new(text: String) -> Self {
+        Self { text }
+    }
+}
+
+impl Widget for Label {
+    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        text.measure(&self.text, style.font_family.as_deref(), style.font_size)
+    }
+    fn paint(&self, content: Rect, canvas: &mut dyn Canvas, style: &Style) {
+        canvas.draw_text(
+            &self.text,
+            content,
+            style.fg,
+            style.text_align,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
+    }
+}
 
 /// 控件构建器。可表达容器或叶子。
 pub struct Element {
@@ -55,6 +84,11 @@ impl Element {
     /// 叶子（无子布局）。配合 `.background()` + 固定尺寸即为色块。
     pub fn leaf() -> Self {
         Self::base(Layout::None)
+    }
+
+    /// 文本标签。
+    pub fn label(text: impl Into<String>) -> Self {
+        Self::base(Layout::None).widget(Label::new(text.into()))
     }
 
     /// 设置自定义内容控件（叶子）。
@@ -150,6 +184,11 @@ impl Element {
     }
     pub fn font_size(mut self, s: f32) -> Self {
         self.style.font_size = s;
+        self
+    }
+    /// 文字水平对齐。
+    pub fn text_align(mut self, a: Align) -> Self {
+        self.style.text_align = a;
         self
     }
 

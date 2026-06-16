@@ -6,7 +6,8 @@ pub mod skia;
 
 pub use skia::SkiaCanvas;
 
-use crate::geometry::Color;
+use crate::geometry::{Color, Rect};
+use crate::spec::Align;
 
 /// 绘制参数。
 #[derive(Debug, Clone, Copy)]
@@ -37,6 +38,16 @@ pub trait Canvas {
     );
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint);
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
+    /// 在 rect 内绘制文字（水平按 align、垂直居中）。无文字引擎时为空操作。
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        color: Color,
+        align: Align,
+        family: Option<&str>,
+        size: f32,
+    );
 }
 
 /// 构造圆角矩形路径（cubic 贝塞尔逼近四角）。radius<=0 退化为直角矩形。

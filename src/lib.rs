@@ -12,6 +12,7 @@ pub mod platform;
 pub mod render;
 pub mod spec;
 pub mod style;
+pub mod text;
 pub mod ui;
 
 pub mod prelude {

@@ -8,6 +8,7 @@ use crate::geometry::{Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension, MeasureMode, MeasureSpec};
 use crate::style::Style;
+use crate::text::TextEngine;
 
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -19,7 +20,8 @@ pub struct NodeId {
 /// 纯内容控件接口。不持有也不访问树。
 pub trait Widget {
     /// 内容固有尺寸（content box，不含 padding）。容器/空控件返回 ZERO。
-    fn measure(&self, _avail: Size) -> Size {
+    /// `text` 供需要测量文本的控件（如 Label）使用。
+    fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::ZERO
     }
     /// 在已扣除 padding 的绝对矩形内绘制内容。背景/边框由核心层统一绘制。
@@ -54,12 +56,6 @@ pub struct Node {
     pub widget: Box<dyn Widget>,
     pub style: Style,
     pub visible: bool,
-}
-
-impl Node {
-    fn intrinsic_leaf(&self, avail: Size) -> Size {
-        self.widget.measure(avail)
-    }
 }
 
 struct Slot {
@@ -167,16 +163,22 @@ impl Tree {
     // ---- 布局入口 ----
 
     /// 用窗口尺寸测量并排布整棵树。
-    pub fn layout_root(&mut self, size: Size) {
+    pub fn layout_root(&mut self, size: Size, text: &mut dyn TextEngine) {
         if let Some(root) = self.root {
-            self.measure(root, MeasureSpec::exactly(size.w), MeasureSpec::exactly(size.h));
+            self.measure(root, MeasureSpec::exactly(size.w), MeasureSpec::exactly(size.h), text);
             self.arrange(root, Rect::from_size(size));
         }
     }
 
     // ---- Measure ----
 
-    fn measure(&mut self, id: NodeId, wspec: MeasureSpec, hspec: MeasureSpec) -> Size {
+    fn measure(
+        &mut self,
+        id: NodeId,
+        wspec: MeasureSpec,
+        hspec: MeasureSpec,
+        text: &mut dyn TextEngine,
+    ) -> Size {
         let (layout, padding, visible) = match self.get(id) {
             Some(n) => (n.layout, n.padding, n.visible),
             None => return Size::ZERO,
@@ -193,14 +195,14 @@ impl Tree {
 
         let content = match layout {
             Layout::None => {
-                // 叶子：纯内容固有尺寸
+                // 叶子：纯内容固有尺寸（可能需要测量文本）
                 let n = self.get(id).unwrap();
-                n.intrinsic_leaf(Size::new(avail_w, avail_h))
+                n.widget.measure(Size::new(avail_w, avail_h), &n.style, text)
             }
             Layout::Linear { axis, spacing, .. } => {
-                self.measure_linear(id, axis, spacing, wspec, hspec, avail_w, avail_h)
+                self.measure_linear(id, axis, spacing, wspec, hspec, avail_w, avail_h, text)
             }
-            Layout::Frame => self.measure_frame(id, wspec, hspec, avail_w, avail_h),
+            Layout::Frame => self.measure_frame(id, wspec, hspec, avail_w, avail_h, text),
         };
 
         let desired_w = content.w + padding.horizontal();
@@ -222,6 +224,7 @@ impl Tree {
         hspec: MeasureSpec,
         avail_w: i32,
         avail_h: i32,
+        text: &mut dyn TextEngine,
     ) -> Size {
         let horizontal = axis == Axis::Horizontal;
         let (main_spec, cross_spec) = if horizontal { (wspec, hspec) } else { (hspec, wspec) };
@@ -258,7 +261,7 @@ impl Tree {
             let cross_child = child_spec(cross_dim, cross_avail, cross_unbounded);
             let (cwspec, chspec) =
                 if horizontal { (main_child, cross_child) } else { (cross_child, main_child) };
-            let s = self.measure(c, cwspec, chspec);
+            let s = self.measure(c, cwspec, chspec, text);
             let (s_main, s_cross) = main_cross(horizontal, s);
             used_main += s_main + cm_main;
             max_cross = max_cross.max(s_cross + cm_cross);
@@ -292,7 +295,7 @@ impl Tree {
                 );
                 let (cwspec, chspec) =
                     if horizontal { (main_child, cross_child) } else { (cross_child, main_child) };
-                let s = self.measure(c, cwspec, chspec);
+                let s = self.measure(c, cwspec, chspec, text);
                 let (_, cm_cross) = main_cross_insets(horizontal, cm);
                 let (s_main, s_cross) = main_cross(horizontal, s);
                 used_main += s_main; // margin 已预扣，此处只加 portion
@@ -314,6 +317,7 @@ impl Tree {
         hspec: MeasureSpec,
         avail_w: i32,
         avail_h: i32,
+        text: &mut dyn TextEngine,
     ) -> Size {
         let children = self.visible_children(id);
         let mut mw = 0;
@@ -325,7 +329,7 @@ impl Tree {
             };
             let cwspec = child_spec(cw, avail_w, wspec.mode == MeasureMode::Unbounded);
             let chspec = child_spec(ch, avail_h, hspec.mode == MeasureMode::Unbounded);
-            let s = self.measure(c, cwspec, chspec);
+            let s = self.measure(c, cwspec, chspec, text);
             mw = mw.max(s.w + cm.horizontal());
             mh = mh.max(s.h + cm.vertical());
         }
@@ -515,7 +519,8 @@ mod tests {
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
-        tree.layout_root(Size::new(w, h));
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(w, h), &mut te);
         tree
     }
 

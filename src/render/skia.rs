@@ -3,16 +3,25 @@
 use tiny_skia::{FillRule, LineCap, Paint as SkPaint, Pixmap, Stroke, Transform};
 
 use super::{rounded_rect_path, Canvas, Paint};
-use crate::geometry::Color;
+use crate::geometry::{Color, Rect};
+use crate::spec::Align;
+use crate::text::TextEngine;
 
 /// 直接绘制到借入的 `Pixmap`。坐标为绝对窗口坐标。
 pub struct SkiaCanvas<'a> {
     pixmap: &'a mut Pixmap,
+    engine: Option<&'a mut dyn TextEngine>,
 }
 
 impl<'a> SkiaCanvas<'a> {
+    /// 无文字能力（仅图形）。
     pub fn new(pixmap: &'a mut Pixmap) -> Self {
-        Self { pixmap }
+        Self { pixmap, engine: None }
+    }
+
+    /// 带文字引擎。
+    pub fn with_text(pixmap: &'a mut Pixmap, engine: &'a mut dyn TextEngine) -> Self {
+        Self { pixmap, engine: Some(engine) }
     }
 
     fn sk_paint(&self, p: &Paint) -> SkPaint<'static> {
@@ -82,6 +91,21 @@ impl Canvas for SkiaCanvas<'_> {
             let sp = self.sk_paint(paint);
             self.pixmap
                 .fill_path(&path, &sp, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        color: Color,
+        align: Align,
+        family: Option<&str>,
+        size: f32,
+    ) {
+        // self.engine 与 self.pixmap 为不相交字段，可同时可变借用。
+        if let Some(engine) = self.engine.as_deref_mut() {
+            engine.draw(self.pixmap, text, rect, color, align, family, size);
         }
     }
 }

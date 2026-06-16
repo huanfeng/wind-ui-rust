@@ -10,6 +10,7 @@ use crate::core::Tree;
 use crate::geometry::{Color, Size};
 use crate::platform::win32::{self, RenderFn, WindowConfig};
 use crate::render::SkiaCanvas;
+use crate::text::DWriteEngine;
 use crate::ui::Element;
 
 /// 应用构建器。命令式 API 的根入口。
@@ -75,9 +76,10 @@ impl App {
         } else if let Some(root) = self.content {
             let mut tree = Tree::new();
             tree.root = Some(root.build(&mut tree));
+            let mut engine = DWriteEngine::new();
             Box::new(move |pixmap: &mut Pixmap, size: Size| {
-                tree.layout_root(size);
-                let mut canvas = SkiaCanvas::new(pixmap);
+                tree.layout_root(size, &mut engine);
+                let mut canvas = SkiaCanvas::with_text(pixmap, &mut engine);
                 tree.paint(&mut canvas);
             })
         } else {
