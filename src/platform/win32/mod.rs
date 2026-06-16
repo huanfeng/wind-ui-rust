@@ -58,6 +58,8 @@ pub struct WindowConfig {
     pub screenshot_scale: f32,
     /// 截屏前合成一次右键按下（逻辑坐标），用于验证右键菜单等交互视觉。
     pub screenshot_rclick: Option<(i32, i32)>,
+    /// 截屏前合成一次左键单击（逻辑坐标，Down+Up），用于验证下拉展开等交互视觉。
+    pub screenshot_click: Option<(i32, i32)>,
 }
 
 impl Default for WindowConfig {
@@ -70,6 +72,7 @@ impl Default for WindowConfig {
             screenshot: None,
             screenshot_scale: 1.0,
             screenshot_rclick: None,
+            screenshot_click: None,
         }
     }
 }
@@ -98,6 +101,14 @@ fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &P
     if let Some((lx, ly)) = cfg.screenshot_rclick {
         let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
         handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Right));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 可选：合成一次左键单击（Down+Up），捕获下拉展开等。
+    if let Some((lx, ly)) = cfg.screenshot_click {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Left));
+        handler.on_pointer(PointerEvent::single(PointerKind::Up, pos, MouseButton::Left));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }

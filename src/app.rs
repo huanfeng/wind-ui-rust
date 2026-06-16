@@ -72,6 +72,7 @@ impl App {
                 screenshot: None,
                 screenshot_scale: 1.0,
                 screenshot_rclick: None,
+                screenshot_click: None,
             },
             render: None,
             content: None,
@@ -109,6 +110,15 @@ impl App {
                 args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
             ) {
                 self.cfg.screenshot_rclick = Some((x, y));
+            }
+        }
+        // --click X Y：截屏前合成左键单击，验证下拉展开等交互视觉。
+        if let Some(i) = args.iter().position(|a| a == "--click") {
+            if let (Some(x), Some(y)) = (
+                args.get(i + 1).and_then(|s| s.parse::<i32>().ok()),
+                args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
+            ) {
+                self.cfg.screenshot_click = Some((x, y));
             }
         }
         self
@@ -195,7 +205,7 @@ impl UiHost {
             let w = self.engine.measure(&it.label, None, MENU_FONT, None).w;
             max_w = max_w.max(w);
         }
-        let menu_w = (max_w + 2 * MENU_PAD_X).max(MENU_MIN_W);
+        let menu_w = (max_w + 2 * MENU_PAD_X).max(MENU_MIN_W).max(req.min_width);
         let menu_h = req.items.len() as i32 * MENU_ITEM_H + 2 * MENU_VPAD;
         let ws = self.logical_size;
         let mut x = req.pos.x;
@@ -233,21 +243,24 @@ impl UiHost {
                     self.menu = None; // 点击菜单外：关闭
                     return true;
                 }
-                // 命中可用项 → 合成按键回送目标控件并关闭。
+                // 命中可用项 → 执行动作并关闭。
                 let hit = self.menu.as_ref().and_then(|m| {
-                    m.item_at(ev.pos).filter(|&i| m.items[i].enabled).map(|i| {
-                        // 单变体析构：新增 MenuAction 变体时此处需改为 match 分别处理。
-                        let MenuAction::SendKey(k) = m.items[i].action.clone();
-                        (k, m.target)
-                    })
+                    m.item_at(ev.pos)
+                        .filter(|&i| m.items[i].enabled)
+                        .map(|i| (m.items[i].action.clone(), m.target))
                 });
-                if let Some((key, target)) = hit {
+                if let Some((action, target)) = hit {
                     self.menu = None;
-                    // 刻意直达目标控件，绕过 on_key（不重跑 Tab/Escape 导航逻辑）；
-                    // 合成的是内容编辑键(Ctrl+X/C/V/A)，无需宿主级按键预处理。
-                    let res = self.tree.dispatch_key(key, Some(target));
-                    if res.close {
-                        self.close = true;
+                    match action {
+                        // 合成按键直达目标控件，绕过 on_key（不重跑 Tab/Escape 导航）。
+                        MenuAction::SendKey(k) => {
+                            let res = self.tree.dispatch_key(k, Some(target));
+                            if res.close {
+                                self.close = true;
+                            }
+                        }
+                        // 运行闭包（下拉选择设置绑定值等）。
+                        MenuAction::Run(f) => f(),
                     }
                 }
                 true // 菜单内（含禁用项/间隙）始终吞掉
@@ -309,9 +322,20 @@ impl AppHandler for UiHost {
                 if menu.hover == Some(i) && it.enabled {
                     canvas.fill_round_rect((r.x + 4) as f32, iy as f32, (r.w - 8) as f32, MENU_ITEM_H as f32, 5.0, &Paint::fill(Color::hex(0xEAF1FE)));
                 }
-                let color = if it.enabled { Color::hex(0x2D3436) } else { Color::hex(0xB0B6BD) };
+                // 选中项用强调色 + 行尾勾选标记（下拉当前项）。
+                let color = if !it.enabled {
+                    Color::hex(0xB0B6BD)
+                } else if it.checked {
+                    Color::hex(0x4C8BF5)
+                } else {
+                    Color::hex(0x2D3436)
+                };
                 let tr = Rect::new(r.x + MENU_PAD_X, iy, r.w - 2 * MENU_PAD_X, MENU_ITEM_H);
                 canvas.draw_text(&it.label, tr, color, crate::spec::Align::Start, None, MENU_FONT);
+                if it.checked {
+                    let cr = Rect::new(r.x, iy, r.w - MENU_PAD_X, MENU_ITEM_H);
+                    canvas.draw_text("\u{2713}", cr, Color::hex(0x4C8BF5), crate::spec::Align::End, None, MENU_FONT);
+                }
             }
         }
     }

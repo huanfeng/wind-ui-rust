@@ -700,16 +700,20 @@ impl EventCtx<'_> {
             c.set_text(text);
         }
     }
-    /// 请求在 `pos`（逻辑坐标）弹出上下文菜单。宿主接管渲染、命中与项激活
-    /// （项动作经合成按键回送到焦点控件）。
-    pub fn show_context_menu(&mut self, pos: Point, items: Vec<MenuItem>) {
-        self.out.menu = Some(MenuRequest { pos, items });
+    /// 请求在 `pos`（逻辑坐标）弹出浮层菜单。宿主接管渲染、命中与项激活。
+    /// `min_width`：最小宽度（0=按内容；下拉传控件宽度对齐）。
+    pub fn show_menu(&mut self, pos: Point, items: Vec<MenuItem>, min_width: i32) {
+        self.out.menu = Some(MenuRequest { pos, items, min_width });
         self.out.repaint = true;
+    }
+    /// 请求在 `pos` 弹出上下文菜单（内容宽度）。
+    pub fn show_context_menu(&mut self, pos: Point, items: Vec<MenuItem>) {
+        self.show_menu(pos, items, 0);
     }
 }
 
 /// 指针/键盘分发的对外结果。
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct DispatchResult {
     pub repaint: bool,
     pub close: bool,
@@ -1519,6 +1523,37 @@ mod tests {
         // 按钮等非文本控件无光标。
         let (tree, btn) = button_tree(Rc::new(Cell::new(0)));
         assert!(tree.caret_of(btn).is_none(), "非文本控件 caret_of 应为 None");
+    }
+
+    #[test]
+    fn dropdown_click_opens_menu_and_selects() {
+        let sel = Rc::new(Cell::new(0usize));
+        let root = Element::col().width(220).height(40).child(
+            Element::dropdown(vec!["A", "B", "C"], sel.clone()).width(220),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(220, 40), &mut te);
+        let dd = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(dd);
+        let pos = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        // 单击（Down+Up）展开：Up 产出菜单请求。
+        tree.dispatch_pointer(ptr(PointerKind::Down, pos), &mut h, &mut cap);
+        let res = tree.dispatch_pointer(ptr(PointerKind::Up, pos), &mut h, &mut cap);
+        let menu = res.menu.expect("下拉单击应弹出菜单");
+        assert_eq!(menu.items.len(), 3, "三个选项");
+        assert!(menu.items[0].checked, "当前项 A 应勾选");
+        assert!(!menu.items[1].checked);
+        // 运行第三项动作 → 选中索引变 2。
+        if let crate::event::MenuAction::Run(f) = &menu.items[2].action {
+            f();
+        } else {
+            panic!("下拉项应为 Run 动作");
+        }
+        assert_eq!(sel.get(), 2, "运行选项动作应设置选中索引");
     }
 
     #[test]

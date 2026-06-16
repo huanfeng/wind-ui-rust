@@ -5,6 +5,7 @@
 
 pub mod containers;
 pub mod inputs;
+pub mod select;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,6 +19,7 @@ use crate::style::Style;
 use crate::text::TextEngine;
 
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
+pub use select::Dropdown;
 
 /// 文本叶子控件。
 pub struct Label {
@@ -297,6 +299,12 @@ impl Element {
     pub fn visible_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
         self.vis_cond = Some(Box::new(f));
         self
+    }
+
+    /// 下拉选择（绑定 `Rc<Cell<usize>>` 选中索引 + 选项标签）。
+    pub fn dropdown(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+        let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
+        Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
     }
 
     /// 垂直滚动容器：内容超出视口时可滚轮滚动并裁剪。

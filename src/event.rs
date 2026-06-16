@@ -77,33 +77,47 @@ pub enum Event {
     Key(KeyEvent),
 }
 
-/// 上下文菜单项的动作。当前仅"向焦点控件合成一个按键"——这样菜单对具体控件
-/// 零依赖（剪切/复制/粘贴/全选等复用控件已有的键盘处理），且天然可移植到其他平台。
-#[derive(Debug, Clone)]
+/// 浮层菜单/下拉项的动作。两种：向焦点控件合成按键（右键菜单复用控件键盘处理、
+/// 可移植），或运行任意闭包（下拉选择设置绑定值等）。
+#[derive(Clone)]
 pub enum MenuAction {
     SendKey(KeyEvent),
+    Run(std::rc::Rc<dyn Fn()>),
 }
 
-/// 一个上下文菜单项。
-#[derive(Debug, Clone)]
+/// 一个浮层菜单/下拉项。
+#[derive(Clone)]
 pub struct MenuItem {
     pub label: String,
     pub action: MenuAction,
     /// 禁用项变灰且不可点击（如无选区时的"复制"）。
     pub enabled: bool,
+    /// 当前选中项（下拉用，渲染勾选标记）。
+    pub checked: bool,
 }
 
 impl MenuItem {
     /// 便捷构造：标签 + 合成按键。
     pub fn key(label: impl Into<String>, key: KeyEvent, enabled: bool) -> Self {
-        Self { label: label.into(), action: MenuAction::SendKey(key), enabled }
+        Self { label: label.into(), action: MenuAction::SendKey(key), enabled, checked: false }
+    }
+    /// 便捷构造：标签 + 闭包动作。
+    pub fn run(label: impl Into<String>, f: impl Fn() + 'static, checked: bool) -> Self {
+        Self {
+            label: label.into(),
+            action: MenuAction::Run(std::rc::Rc::new(f)),
+            enabled: true,
+            checked,
+        }
     }
 }
 
-/// 控件经 `EventCtx::show_context_menu` 发起的上下文菜单请求。
-#[derive(Debug, Clone)]
+/// 控件经 `EventCtx::show_context_menu` / `show_menu` 发起的浮层请求。
+#[derive(Clone)]
 pub struct MenuRequest {
     /// 锚点（逻辑坐标，菜单左上角，宿主据窗口边界钳制）。
     pub pos: Point,
     pub items: Vec<MenuItem>,
+    /// 最小宽度（逻辑 px，0=按内容）。下拉用控件宽度对齐。
+    pub min_width: i32,
 }
