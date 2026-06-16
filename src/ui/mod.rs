@@ -290,11 +290,11 @@ impl Element {
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
     pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(&str, Element)>) -> Self {
-        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Center);
+        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, page)) in pages.into_iter().enumerate() {
-            let sel = selected.clone();
-            bar = bar.child(Element::button(title).on_click(move |_| sel.set(i)));
+            let tab = containers::TabButton::new(title.to_string(), selected.clone(), i);
+            bar = bar.child(Element::base(Layout::None).widget(tab));
             let sel2 = selected.clone();
             content = content.child(page.fill().visible_when(move || sel2.get() == i));
         }
