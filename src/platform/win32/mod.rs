@@ -11,15 +11,14 @@ use std::path::PathBuf;
 use tiny_skia::Pixmap;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EndPaint,
-    GetDC, InvalidateRect, ReleaseDC, ScreenToClient, SelectObject, UpdateWindow, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, SRCCOPY,
+    BeginPaint, EndPaint, InvalidateRect, ScreenToClient, SetDIBitsToDevice, UpdateWindow,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -98,86 +97,28 @@ struct WindowState {
     bg: Color,
     /// 当前是否已对窗口调用 OS SetCapture（与 handler 逻辑捕获态同步）。
     capturing: bool,
+    /// 单一后备缓冲（tiny-skia 渲染目标）。呈现时原地交换 R/B 为 BGRA 后
+    /// 直接 SetDIBitsToDevice 拷屏——省去独立 DIB section，全屏内存减半。
     pixmap: Option<Pixmap>,
-    // GDI 呈现资源
-    memdc: HDC,
-    dib: HBITMAP,
-    old_bitmap: HGDIOBJ, // memdc 创建时默认选入的位图，销毁前需换回
-    dib_bits: *mut u32,
-    dib_w: i32,
-    dib_h: i32,
+    buf_w: i32,
+    buf_h: i32,
 }
 
 impl WindowState {
     fn new(handler: Box<dyn AppHandler>, bg: Color) -> Self {
-        Self {
-            handler,
-            bg,
-            capturing: false,
-            pixmap: None,
-            memdc: HDC::default(),
-            dib: HBITMAP::default(),
-            old_bitmap: HGDIOBJ::default(),
-            dib_bits: std::ptr::null_mut(),
-            dib_w: 0,
-            dib_h: 0,
-        }
+        Self { handler, bg, capturing: false, pixmap: None, buf_w: 0, buf_h: 0 }
     }
 
-    /// 确保后备缓冲与 DIB 尺寸匹配客户区；尺寸变化时重建。
-    unsafe fn ensure_buffers(&mut self, w: i32, h: i32) {
+    /// 确保后备缓冲匹配客户区；尺寸变化时重建。
+    fn ensure_pixmap(&mut self, w: i32, h: i32) {
         let w = w.max(1);
         let h = h.max(1);
-        if self.dib_w == w && self.dib_h == h && self.pixmap.is_some() {
+        if self.buf_w == w && self.buf_h == h && self.pixmap.is_some() {
             return;
         }
-        self.release_gdi();
-        // 新建 top-down 32bpp DIB
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: w,
-                biHeight: -h, // 负数 = top-down，与 pixmap 行序一致
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let screen = GetDC(None);
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(screen, &bmi as *const _, DIB_RGB_COLORS, &mut bits, None, 0)
-            .expect("CreateDIBSection 失败");
-        let memdc = CreateCompatibleDC(screen);
-        let old = SelectObject(memdc, HGDIOBJ(dib.0));
-        ReleaseDC(None, screen);
-
-        self.old_bitmap = old;
-        self.memdc = memdc;
-        self.dib = dib;
-        self.dib_bits = bits as *mut u32;
-        self.dib_w = w;
-        self.dib_h = h;
         self.pixmap = Some(Pixmap::new(w as u32, h as u32).expect("分配 pixmap 失败"));
-    }
-
-    unsafe fn release_gdi(&mut self) {
-        // 顺序很重要：先把 DIB 从 memdc 换出（恢复默认位图），
-        // 再删除 DIB 对象，最后删除 memdc。不能删除仍被 DC 选中的对象。
-        if !self.memdc.is_invalid() && !self.old_bitmap.is_invalid() {
-            let _ = SelectObject(self.memdc, self.old_bitmap);
-            self.old_bitmap = HGDIOBJ::default();
-        }
-        if !self.dib.is_invalid() {
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            self.dib = HBITMAP::default();
-        }
-        if !self.memdc.is_invalid() {
-            let _ = DeleteDC(self.memdc);
-            self.memdc = HDC::default();
-        }
-        self.dib_bits = std::ptr::null_mut();
+        self.buf_w = w;
+        self.buf_h = h;
     }
 
     /// 渲染并呈现到窗口。
@@ -193,51 +134,60 @@ impl WindowState {
             let _ = EndPaint(hwnd, &ps);
             return;
         }
-        self.ensure_buffers(w, h);
+        self.ensure_pixmap(w, h);
 
-        let size = Size::new(self.dib_w, self.dib_h);
+        let size = Size::new(self.buf_w, self.buf_h);
         let pixmap = self.pixmap.as_mut().unwrap();
         pixmap.fill(to_skia_color(self.bg));
         self.handler.render(pixmap, size);
+        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。
+        swap_rb_inplace(pixmap.data_mut());
+        let bits = pixmap.data().as_ptr() as *const c_void;
 
-        // pixmap(RGBA 预乘) -> DIB(BGRA)，逐像素交换 R/B
-        copy_rgba_to_bgra(pixmap.data(), self.dib_bits, (self.dib_w * self.dib_h) as usize);
-
+        // top-down DIB 描述：直接从缓冲拷到设备，无需独立 DIB section。
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: self.buf_w,
+                biHeight: -self.buf_h, // 负数 = top-down，与 pixmap 行序一致
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
-        let _ = BitBlt(
+        let scanlines = SetDIBitsToDevice(
             hdc,
             0,
             0,
-            self.dib_w,
-            self.dib_h,
-            self.memdc,
+            self.buf_w as u32,
+            self.buf_h as u32,
             0,
             0,
-            SRCCOPY,
+            0,
+            self.buf_h as u32,
+            bits,
+            &bmi,
+            DIB_RGB_COLORS,
         );
+        debug_assert!(scanlines != 0, "SetDIBitsToDevice 呈现失败");
         let _ = EndPaint(hwnd, &ps);
     }
 }
 
-impl Drop for WindowState {
-    fn drop(&mut self) {
-        unsafe { self.release_gdi() };
-    }
-}
-
-/// 把 RGBA 字节流逐像素交换 R/B 写入 BGRA 缓冲。
-fn copy_rgba_to_bgra(src: &[u8], dst: *mut u32, px_count: usize) {
-    debug_assert!(src.len() >= px_count * 4);
-    let src32 = src.as_ptr() as *const u32;
-    unsafe {
-        for i in 0..px_count {
-            // src 字节序 [R,G,B,A] => u32 = A<<24|B<<16|G<<8|R
-            // 用 read_unaligned 避免对 &[u8] 底层指针做未对齐 u32 解引用（规范 UB）。
-            let p = src32.add(i).read_unaligned();
-            // 目标 [B,G,R,A] => 交换 byte0 与 byte2
-            let swapped = (p & 0xFF00_FF00) | ((p & 0x0000_00FF) << 16) | ((p & 0x00FF_0000) >> 16);
-            *dst.add(i) = swapped;
+/// 原地把 RGBA 缓冲逐像素交换 R/B（→ BGRA），供 GDI 直接呈现。
+fn swap_rb_inplace(data: &mut [u8]) {
+    let n = data.len() / 4;
+    let p = data.as_mut_ptr() as *mut u32;
+    for i in 0..n {
+        unsafe {
+            // 字节 [R,G,B,A] → [B,G,R,A]：交换 byte0 与 byte2。
+            let v = p.add(i).read_unaligned();
+            let s = (v & 0xFF00_FF00) | ((v & 0x0000_00FF) << 16) | ((v & 0x00FF_0000) >> 16);
+            p.add(i).write_unaligned(s);
         }
     }
 }
@@ -272,11 +222,14 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
 
     let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
 
-    // 用系统 DPI 估算初始物理尺寸（cfg 宽高为逻辑 dp）。
-    let sys_dpi = GetDpiForSystem();
-    let init_scale = if sys_dpi == 0 { 1.0 } else { sys_dpi as f32 / 96.0 };
-    let phys_w = (cfg.width as f32 * init_scale).round() as i32;
-    let phys_h = (cfg.height as f32 * init_scale).round() as i32;
+    // cfg 宽高为逻辑 dp（期望客户区）。按系统 DPI 反算窗口外框物理尺寸，
+    // 使客户区 = cfg × scale，避免标题栏/边框吃掉内容空间导致超出。
+    let sys_dpi = {
+        let d = GetDpiForSystem();
+        if d == 0 { 96 } else { d }
+    };
+    let init_scale = sys_dpi as f32 / 96.0;
+    let (phys_w, phys_h) = frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi);
 
     let hwnd = match CreateWindowExW(
         WINDOW_EX_STYLE::default(),
@@ -306,8 +259,7 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     // 实际 DPI 与系统估算不一致时，按真实 scale 校正窗口物理尺寸（在显示前，无 state 借用）。
     if (scale - init_scale).abs() > 0.01 {
-        let w = (cfg.width as f32 * scale).round() as i32;
-        let h = (cfg.height as f32 * scale).round() as i32;
+        let (w, h) = frame_size_for_client(cfg.width, cfg.height, scale, dpi);
         let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
     }
     if let Some(s) = state_from(hwnd) {
@@ -403,6 +355,15 @@ unsafe extern "system" fn wnd_proc(
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// 由期望逻辑客户区尺寸 + scale + dpi 反算窗口外框物理尺寸（含标题栏/边框）。
+unsafe fn frame_size_for_client(logical_w: i32, logical_h: i32, scale: f32, dpi: u32) -> (i32, i32) {
+    let cw = (logical_w as f32 * scale).round() as i32;
+    let ch = (logical_h as f32 * scale).round() as i32;
+    let mut rc = RECT { left: 0, top: 0, right: cw, bottom: ch };
+    let _ = AdjustWindowRectExForDpi(&mut rc, WS_OVERLAPPEDWINDOW, FALSE, WINDOW_EX_STYLE::default(), dpi);
+    (rc.right - rc.left, rc.bottom - rc.top)
 }
 
 /// 从 lParam 解出客户区坐标，构造并分发指针事件。

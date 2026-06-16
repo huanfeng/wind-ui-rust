@@ -20,7 +20,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-    DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL, DWRITE_STRIKETHROUGH,
+    DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC, DWRITE_STRIKETHROUGH,
     DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
 };
 
@@ -59,14 +59,17 @@ impl DWriteEngine {
             let factory: IDWriteFactory =
                 DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).expect("DWriteCreateFactory 失败");
             let gdi_interop = factory.GetGdiInterop().expect("GetGdiInterop 失败");
-            // gamma=1.0, 对比度=0, ClearType level=0(纯灰度), FLAT, NATURAL
+            // gamma=2.2(匹配 sRGB，使 AA 边缘过渡感知柔和)，对比度=0.5，
+            // ClearType level=0(纯灰度)，FLAT，NATURAL_SYMMETRIC(对称抗锯齿，最平滑)。
+            // 注：NATURAL_SYMMETRIC 在 GDI 位图路径需 Windows 10 1703+，旧版会回退到
+            // 兼容模式（边缘略硬但不报错）。本框架以 Win10+ 为目标。
             let params = factory
                 .CreateCustomRenderingParams(
-                    1.0,
-                    0.0,
+                    2.2,
+                    0.5,
                     0.0,
                     DWRITE_PIXEL_GEOMETRY_FLAT,
-                    DWRITE_RENDERING_MODE_NATURAL,
+                    DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
                 )
                 .expect("CreateCustomRenderingParams 失败");
             let renderer: IDWriteTextRenderer = GlyphRenderer { params: params.clone() }.into();
