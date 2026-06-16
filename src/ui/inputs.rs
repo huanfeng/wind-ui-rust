@@ -455,6 +455,18 @@ impl TextInput {
         self.cursor = target.min(self.char_count());
         ctx.mark_dirty();
     }
+    /// 选中 `idx` 处的词（同类连续段）。
+    fn select_word(&mut self, idx: usize) {
+        let chars: Vec<char> = self.text.borrow().chars().collect();
+        let (s, e) = word_run(&chars, idx);
+        self.anchor = Some(s.min(chars.len()));
+        self.cursor = e.min(chars.len());
+    }
+    /// 全选。
+    fn select_all(&mut self) {
+        self.anchor = Some(0);
+        self.cursor = self.char_count();
+    }
     /// 屏幕 x（逻辑坐标）→ 字符索引（用 paint 缓存的 char_x 定位最近边界）。
     /// 前置条件：依赖最近一帧 paint 重建的 char_x 缓存；首帧未绘制前会落到索引 0。
     fn index_at(&self, ctx: &EventCtx, screen_x: i32) -> usize {
@@ -500,6 +512,44 @@ impl TextInput {
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// 字符类别，用于双击选词：把连续同类字符视为一个"词"。
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum CharClass {
+    Word,  // 字母/数字（含 Unicode 字母，如 CJK）
+    Space, // 空白
+    Other, // 标点/符号
+}
+
+fn classify(c: char) -> CharClass {
+    if c.is_alphanumeric() {
+        CharClass::Word
+    } else if c.is_whitespace() {
+        CharClass::Space
+    } else {
+        CharClass::Other
+    }
+}
+
+/// 返回包含/邻接 `idx` 处字符的同类连续区间 [start, end)（字符索引）。
+/// 双击选词用：在字母数字串上选整词，在空白/标点串上选该连续段。
+fn word_run(chars: &[char], idx: usize) -> (usize, usize) {
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    // idx 是光标间隙；取其右侧字符，末尾时取最后一个字符。
+    let i = idx.min(chars.len() - 1);
+    let class = classify(chars[i]);
+    let mut s = i;
+    while s > 0 && classify(chars[s - 1]) == class {
+        s -= 1;
+    }
+    let mut e = i + 1;
+    while e < chars.len() && classify(chars[e]) == class {
+        e += 1;
+    }
+    (s, e)
 }
 
 impl Widget for TextInput {
@@ -598,6 +648,24 @@ impl Widget for TextInput {
                         }
                         ctx.mark_dirty();
                         return true;
+                    }
+                    // 双击选词 / 三击全选（不进入拖选）。
+                    match p.click_count {
+                        2 => {
+                            let idx = self.index_at(ctx, p.pos.x);
+                            self.select_word(idx);
+                            self.dragging = false;
+                            ctx.mark_dirty();
+                            return true;
+                        }
+                        n if n >= 3 => {
+                            // TODO(P4): 多行时三击应选当前行而非全选。
+                            self.select_all();
+                            self.dragging = false;
+                            ctx.mark_dirty();
+                            return true;
+                        }
+                        _ => {}
                     }
                     let idx = self.index_at(ctx, p.pos.x);
                     self.cursor = idx;
@@ -718,5 +786,45 @@ impl Widget for TextInput {
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_run;
+
+    fn run(s: &str, idx: usize) -> (usize, usize) {
+        let chars: Vec<char> = s.chars().collect();
+        word_run(&chars, idx)
+    }
+
+    #[test]
+    fn word_run_selects_alnum_word() {
+        // "hello world"：在 "hello"(0..5) 内任意位置选中整词。
+        assert_eq!(run("hello world", 0), (0, 5));
+        assert_eq!(run("hello world", 3), (0, 5));
+        // 间隙 5 在 'h'..='o' 末尾右侧是空格，取右侧字符=空格 → 选空白段(5..6)。
+        assert_eq!(run("hello world", 5), (5, 6));
+        // "world" 内。
+        assert_eq!(run("hello world", 8), (6, 11));
+    }
+
+    #[test]
+    fn word_run_handles_punct_and_cjk() {
+        // 标点自成一类：连续 "!!" 作为一段。
+        assert_eq!(run("a!!b", 1), (1, 3));
+        // CJK 与拉丁同属 Word 类（均 alphanumeric），连续字母数字合并为一个词。
+        assert_eq!(run("你好world", 1), (0, 7));
+        assert_eq!(run("你好world", 3), (0, 7));
+        // 空白分隔则各自成词。
+        assert_eq!(run("你好 world", 1), (0, 2));
+        assert_eq!(run("你好 world", 4), (3, 8));
+    }
+
+    #[test]
+    fn word_run_empty_and_end() {
+        assert_eq!(run("", 0), (0, 0));
+        // idx 超界 → 取最后一个字符所在词。
+        assert_eq!(run("ab", 5), (0, 2));
     }
 }

@@ -1371,4 +1371,42 @@ mod tests {
         tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V
         assert_eq!(&*txt.borrow(), "seed", "密码模式仍允许粘贴");
     }
+
+    #[test]
+    fn triple_click_selects_all() {
+        let (mut tree, input, txt) = input_tree("hello world");
+        let b = tree.abs_bounds(input);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: center,
+            button: MouseButton::Left,
+            click_count: 3,
+        };
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        // 全选后输入替换全部内容。
+        let key = KeyEvent { key: Key::Char('Z'), pressed: true, shift: false, ctrl: false };
+        tree.dispatch_key(key, Some(input));
+        assert_eq!(&*txt.borrow(), "Z", "三击全选后输入应替换全部");
+    }
+
+    #[test]
+    fn double_click_selects_word() {
+        // 无 paint 时 index_at 落到 0，故双击选中首词 "hello"。
+        let (mut tree, input, txt) = input_tree("hello world");
+        let b = tree.abs_bounds(input);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: center,
+            button: MouseButton::Left,
+            click_count: 2,
+        };
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        let key = KeyEvent { key: Key::Char('Z'), pressed: true, shift: false, ctrl: false };
+        tree.dispatch_key(key, Some(input));
+        assert_eq!(&*txt.borrow(), "Z world", "双击应选中首词并被输入替换");
+    }
 }
