@@ -3,9 +3,11 @@
 //! 支持矩形裁剪栈：用 alpha `Mask` 表示当前裁剪区，所有绘制传入栈顶 mask。
 
 use tiny_skia::{
-    FillRule, LineCap, Mask, Paint as SkPaint, PathBuilder, Pixmap, Stroke, Transform,
+    FillRule, FilterQuality, LineCap, Mask, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint,
+    Stroke, Transform,
 };
 
+use super::image::{Fit, Image};
 use super::{rounded_rect_path, Canvas, Paint};
 use crate::geometry::{Color, Rect};
 use crate::spec::Align;
@@ -103,6 +105,66 @@ impl Canvas for SkiaCanvas<'_> {
             let mask = self.clips.last().map(|c| &c.mask);
             self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::from_scale(self.scale, self.scale), mask);
         }
+    }
+
+    fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32) {
+        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。
+        let pdst = dst.scaled(self.scale);
+        if pdst.is_empty() {
+            return;
+        }
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+        let (pw, ph) = (pdst.w as f32, pdst.h as f32);
+        let (px, py) = (pdst.x as f32, pdst.y as f32);
+
+        // 按 fit 求缩放因子与绘制原点（均在物理空间）。
+        let (sx, sy) = match fit {
+            Fit::Fill => (pw / iw, ph / ih),
+            Fit::Contain => {
+                let s = (pw / iw).min(ph / ih);
+                (s, s)
+            }
+            Fit::Cover => {
+                let s = (pw / iw).max(ph / ih);
+                (s, s)
+            }
+            // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
+            Fit::None => (self.scale, self.scale),
+        };
+        let (dw, dh) = (iw * sx, ih * sy);
+        // 在 dst 框内居中（Cover/None 的溢出由裁剪 mask 收口）。
+        let tx = px + (pw - dw) / 2.0;
+        let ty = py + (ph - dh) / 2.0;
+        let transform = Transform::from_scale(sx, sy).post_translate(tx, ty);
+
+        // 裁剪 mask：dst 圆角矩形 ∩ 当前裁剪区。radius<=0 时退化为矩形。
+        let (mw, mh) = (self.pixmap.width(), self.pixmap.height());
+        let Some(mut mask) = Mask::new(mw, mh) else { return };
+        let pr = (radius * self.scale).min(pw / 2.0).min(ph / 2.0).max(0.0);
+        let Some(path) = rounded_rect_path(px, py, pw, ph, pr) else { return };
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形。
+        if let Some(c) = self.clips.last() {
+            let cr = c.rect.scaled(self.scale);
+            if cr.is_empty() {
+                return;
+            }
+            if let Some(rect) =
+                tiny_skia::Rect::from_xywh(cr.x as f32, cr.y as f32, cr.w as f32, cr.h as f32)
+            {
+                let mut pb = PathBuilder::new();
+                pb.push_rect(rect);
+                if let Some(clip_path) = pb.finish() {
+                    mask.intersect_path(&clip_path, FillRule::Winding, false, Transform::identity());
+                }
+            }
+        }
+
+        let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
+        self.pixmap.draw_pixmap(0, 0, img.pixmap().as_ref(), &paint, transform, Some(&mask));
     }
 
     fn draw_text(
@@ -206,6 +268,52 @@ mod tests {
         // 裁剪带中心应被红色填充。
         let (r, g, b) = px(&pm, 35, 43);
         assert!(r > 200 && g < 80 && b < 80, "薄裁剪带内应被填充，实得 ({r},{g},{b})");
+    }
+
+    /// draw_image：Fill 模式铺满 dst，框内被图片色填充、框外保持原样。
+    #[test]
+    fn draw_image_fills_dst_and_respects_bounds() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 4×4 纯红图（非预乘 RGBA）。
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0);
+        }
+        // dst 中心应为红。
+        let (r, g, b) = px(&pm, 40, 40);
+        assert!(r > 200 && g < 60 && b < 60, "dst 内应被图片填充，实得 ({r},{g},{b})");
+        // dst 外应保持白。
+        let (r2, g2, b2) = px(&pm, 5, 5);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "dst 外不应被绘制，实得 ({r2},{g2},{b2})");
+    }
+
+    /// draw_image：大圆角半径把四角裁掉（角落像素保持背景白）。
+    #[test]
+    fn draw_image_rounded_clips_corners() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let red = [255u8, 0, 0, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // dst 40×40，圆角半径 20（=半边长，近圆）。
+            c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0);
+        }
+        // 左上角（dst 角点）应被圆角裁掉 → 仍为白。
+        let (r, g, b) = px(&pm, 11, 11);
+        assert!(r > 240 && g > 240 && b > 240, "圆角应裁掉角落，实得 ({r},{g},{b})");
+        // 中心仍为红。
+        let (rc, gc, bc) = px(&pm, 30, 30);
+        assert!(rc > 200 && gc < 60 && bc < 60, "中心应为图片色，实得 ({rc},{gc},{bc})");
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。

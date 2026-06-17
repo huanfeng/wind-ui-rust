@@ -149,6 +149,23 @@ Element::text_input(text, "占位符")               // text: Rc<RefCell<String>
 ```
 > ⚠️ `.password()` / `.multiline()` / `.wrap()` 是 **text_input 专属**。本库用单一 `Element` 类型承载所有控件（统一链式是核心一致性），故这几个修饰符链到别的控件**不会编译报错**；但 **debug 构建下会 `panic` 报错提示**误用，release 下静默忽略（无类型分裂代价）。
 
+### 图片
+```rust
+Element::image("logo.png")                        // 文件路径（按字节嗅探格式）
+Element::image_bytes(include_bytes!("logo.png"))  // 嵌入字节
+Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（len==w*h*4）
+    .fit(Fit::Cover)   // Contain（默认）/ Cover / Fill / None
+    .corner(8.0)       // 圆角裁剪：复用 Style.corner_radius，与背景/边框同源圆角
+```
+- **加载失败不 panic**：显示淡灰占位框（错误可见）；需严格处理可直接用 `Image::from_*` 拿 `Result`。
+- **`.fit()` 是图片专属**修饰符（误用检测同 text_input）。圆角直接用通用 `.corner()`，无需新方法。
+- **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
+  ```rust
+  Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon(path) / .icon_rgba(w,h,&rgba)
+  ```
+
+> **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
+
 ---
 
 ## 6. 布局系统
