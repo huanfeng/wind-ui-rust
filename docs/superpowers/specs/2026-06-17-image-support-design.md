@@ -120,19 +120,18 @@ pub enum ImageError {
 pub struct ImageContent {
     image: Option<Image>,   // None = 加载失败 / 空
     fit: Fit,
-    radius: f32,            // 圆角裁剪半径（0 = 直角）
 }
 
 impl ImageContent {
     pub fn new(image: Option<Image>) -> Self;       // 持有解码结果（失败传 None）
     pub fn fit(self, fit: Fit) -> Self;
-    pub fn corner(self, radius: f32) -> Self;
     pub fn intrinsic_size(&self) -> Size;            // 供控件 measure；None 时返回占位默认尺寸
     pub fn paint_into(&self, dst: Rect, canvas: &mut dyn Canvas, style: &Style); // 供控件 paint
 }
 ```
 
-- `paint_into`：有图 → `canvas.draw_image(img, dst, fit, radius)`；无图 → 画**淡灰底 + 边框占位框**（错误可见，而非静默消失）。
+- **圆角不另设字段**：`paint_into` 直接读 `style.corner_radius` 作裁剪半径，与核心层给背景/边框画圆角的同一个值——背景、边框、图片三者一起圆角，杜绝方角戳出圆角边框的视觉撕裂。
+- `paint_into`：有图 → `canvas.draw_image(img, dst, fit, style.corner_radius)`；无图 → 画**淡灰底 + 边框占位框**（错误可见，而非静默消失）。
 
 ### 5.2 Canvas 新图元
 
@@ -193,15 +192,14 @@ Element::image(path)                         // 文件路径
 Element::image_bytes(&[u8])                  // 嵌入字节（嗅探格式）
 Element::image_rgba(w, h, &[u8])             // 原始 RGBA
     .fit(Fit::Cover)                         // 缩放模式（默认 Contain）
-    .corner(8.0)                             // 圆角裁剪
+    .corner(8.0)                             // 复用现有 .corner()：写 Style.corner_radius
 
 Element::button("Save").icon_bytes(&[u8])    // Button 图标接入示范
 ```
 
 - 构造函数内部调 `Image::from_*`，失败时 `ImageContent::new(None)`（占位框可见），不 panic。
-- `.fit()` / `.corner()`：复用 `config_text_input` 的 downcast 误用检测 pattern（链到非图片控件 debug panic）。
-
-> 注：`.corner()` 与现有 `Element::corner()`（设置 `Style.corner_radius`）语义需区分——图片圆角作用于像素裁剪。实现时让图片控件的 `.corner()` 同时写入 `ImageContent.radius`；非图片控件维持原 `Style.corner_radius` 行为。
+- `.fit()`：图片专属修饰符，复用 `config_text_input` 的 downcast 误用检测 pattern（链到非图片控件 debug panic）。
+- **圆角直接复用现有 `Element::corner()`**（写 `Style.corner_radius`），语义不变、不重载：图片控件的 `paint_into` 读同一个值作裁剪半径，背景/边框/图片一致圆角。无需新增 `.corner()` 变体或新名字。
 
 ## 7. 测量约定
 
