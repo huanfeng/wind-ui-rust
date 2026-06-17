@@ -95,18 +95,26 @@ fn main() {
         )
         .child(demo("占位(加载失败)", Element::image("不存在的文件.png")));
 
-    let button_row = Element::row()
+    // 状态：正常 / 禁用（背景与图标自动置灰）；以及单色图标着色。
+    let state_row = Element::row()
         .spacing(12)
         .cross(Align::Center)
         .child(Element::button("新建").icon_rgba(32, 32, &icon))
-        .child(Element::button("无图标按钮"));
+        .child(Element::button("禁用").icon_rgba(32, 32, &icon).disabled(true))
+        .child(demo(
+            "着色(accent)",
+            // 白色加号模板 → 着成强调色（单色图标随主题/状态变色）。
+            Element::image_content(
+                ImageContent::from_rgba(32, 32, &icon).fit(Fit::Contain).tint(Color::hex(0x4C8BF5)),
+            ),
+        ));
 
     let body = Element::col()
         .width_match()
         .spacing(14)
         .child(card("适配模式（源图 4:3，框 96×72）", fit_row))
         .child(card("圆角裁剪 & 占位", corner_row))
-        .child(card("控件内嵌图标（Button）", button_row));
+        .child(card("状态：正常/禁用 + 单色图标着色", state_row));
 
     let ui = Element::stack().fill().bg(Color::hex(BG)).child(
         Element::col()
@@ -117,7 +125,7 @@ fn main() {
             .child(Element::scroll().fill().child(body)),
     );
 
-    App::new("windui — 图片示例", 480, 520)
+    App::new("windui — 图片示例", 480, 640)
         .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)

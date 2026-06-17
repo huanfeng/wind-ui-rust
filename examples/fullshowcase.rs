@@ -199,7 +199,8 @@ fn main() {
                 .cross(Align::Center)
                 .child(img_cell("圆角", Element::image_rgba(64, 48, &grad).fit(Fit::Cover).corner(12.0)))
                 .child(img_cell("占位", Element::image("不存在.png")))
-                .child(Element::button("新建").icon_rgba(64, 48, &grad)),
+                .child(Element::button("新建").icon_rgba(64, 48, &grad))
+                .child(Element::button("禁用").icon_rgba(64, 48, &grad).disabled(true)),
         ));
     let images = Element::scroll().fill().child(images_body);
 

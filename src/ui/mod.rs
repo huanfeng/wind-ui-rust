@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::core::{ClickFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
-use crate::render::image::{Fit, Image};
+use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
@@ -99,21 +99,46 @@ enum BtnState {
 
 /// 交互按钮：hover/press 三态 + 点击/回车回调。颜色取自当前主题。
 /// 可选前置图标（`ImageContent`），证明"其它控件低成本嵌入图片"的 pattern。
+/// 可选禁用标志（`Rc<Cell<bool>>`）：禁用时不响应交互、背景与图标置灰、不参与 Tab。
 pub struct Button {
     label: String,
     icon: Option<ImageContent>,
     state: BtnState,
+    /// 启用标志（None = 始终启用）。
+    enabled: Option<Rc<Cell<bool>>>,
     on_click: Option<ClickFn>,
 }
 
 impl Button {
     pub fn new(label: String) -> Self {
-        Self { label, icon: None, state: BtnState::Normal, on_click: None }
+        Self { label, icon: None, state: BtnState::Normal, enabled: None, on_click: None }
     }
 
     /// 设置前置图标（供 Builder 的 `.icon_*()` 调用）。
     pub fn set_icon(&mut self, icon: ImageContent) {
         self.icon = Some(icon);
+    }
+
+    /// 绑定启用标志（供 Builder 的 `.enabled()`/`.disabled()` 调用）。
+    pub fn set_enabled(&mut self, flag: Rc<Cell<bool>>) {
+        self.enabled = Some(flag);
+    }
+
+    /// 当前是否启用（无标志视为启用）。
+    fn is_enabled(&self) -> bool {
+        self.enabled.as_ref().is_none_or(|c| c.get())
+    }
+
+    /// 把内部三态 + 启用标志映射为通用视觉状态（供图标调制）。
+    fn visual_state(&self) -> VisualState {
+        if !self.is_enabled() {
+            return VisualState::Disabled;
+        }
+        match self.state {
+            BtnState::Normal => VisualState::Normal,
+            BtnState::Hover => VisualState::Hover,
+            BtnState::Press => VisualState::Pressed,
+        }
     }
 }
 
@@ -128,11 +153,18 @@ impl Widget for Button {
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
-        let color = match self.state {
-            BtnState::Normal => bt.bg(pal),
-            BtnState::Hover => bt.hover(pal),
-            BtnState::Press => bt.active(pal),
+        let vstate = self.visual_state();
+        // 背景：禁用用专用置灰底，否则按三态取主题色。
+        let color = match vstate {
+            VisualState::Disabled => bt.disabled(pal),
+            _ => match self.state {
+                BtnState::Normal => bt.bg(pal),
+                BtnState::Hover => bt.hover(pal),
+                BtnState::Press => bt.active(pal),
+            },
         };
+        // 文字色：禁用用 text_disabled，否则主题前景。
+        let fg = if vstate == VisualState::Disabled { pal.text_disabled } else { bt.fg(pal) };
         // 每节点 corner 覆盖优先（>0），否则用主题。
         let r = if style.corner_radius > 0.0 { style.corner_radius } else { bt.corner(&t.metrics) };
         canvas.fill_round_rect(
@@ -148,7 +180,7 @@ impl Widget for Button {
             canvas.draw_text(
                 &self.label,
                 bounds,
-                bt.fg(pal),
+                fg,
                 Align::Center,
                 style.font_family.as_deref(),
                 style.font_size,
@@ -163,19 +195,23 @@ impl Widget for Button {
         let icon_y = bounds.y + ((bounds.h - ih) / 2).max(0);
         // 图标圆角不跟随按钮圆角（按钮圆角作用于整框）；图标默认直角，由其自身 fit 决定。
         let icon_style = Style { corner_radius: 0.0, ..style.clone() };
-        icon.paint_into(Rect::new(start_x, icon_y, ih, ih), canvas, &icon_style);
+        icon.paint_into(Rect::new(start_x, icon_y, ih, ih), canvas, &icon_style, vstate);
         // 文字紧随图标右侧，垂直方向交给 draw_text 居中。
         let text_rect = Rect::new(start_x + ih + ICON_GAP, bounds.y, ts.w + 2, bounds.h);
         canvas.draw_text(
             &self.label,
             text_rect,
-            bt.fg(pal),
+            fg,
             Align::Start,
             style.font_family.as_deref(),
             style.font_size,
         );
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        // 禁用：不响应任何交互（不 hover/不点击），事件继续冒泡。
+        if !self.is_enabled() {
+            return false;
+        }
         match ev {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Enter => {
@@ -228,7 +264,8 @@ impl Widget for Button {
         }
     }
     fn focusable(&self) -> bool {
-        true
+        // 禁用按钮不参与 Tab 焦点导航。
+        self.is_enabled()
     }
     fn take_click(&mut self, f: ClickFn) {
         self.on_click = Some(f);
@@ -329,13 +366,17 @@ impl Element {
     pub fn image_rgba(w: u32, h: u32, rgba: &[u8]) -> Self {
         Self::base(Layout::None).widget(ImageView::new(Image::from_rgba(w, h, rgba).ok()))
     }
+    /// 图片控件：由预先组装的 `ImageContent` 构造（用于状态换图等高级用法）。
+    pub fn image_content(content: ImageContent) -> Self {
+        Self::base(Layout::None).widget(ImageView::from_content(content))
+    }
 
-    /// 配置内含的 ImageView。`fit()` 是图片专属修饰符，链到其他控件属误用——
+    /// 配置内含的 ImageView。`fit()`/`tint()` 是图片专属修饰符，链到其他控件属误用——
     /// debug 构建下 panic 提示，release 下静默忽略（与 text_input 的误用检测一致）。
     fn config_image(mut self, f: impl FnOnce(&mut ImageView)) -> Self {
         match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<ImageView>()) {
             Some(iv) => f(iv),
-            None => debug_assert!(false, "fit() 只能用于 Element::image*(..)"),
+            None => debug_assert!(false, "fit()/tint() 只能用于 Element::image*(..)"),
         }
         self
     }
@@ -343,26 +384,47 @@ impl Element {
     pub fn fit(self, fit: Fit) -> Self {
         self.config_image(|iv| iv.set_fit(fit))
     }
+    /// 图片模板着色（单色图标随颜色变色）。
+    pub fn tint(self, color: Color) -> Self {
+        self.config_image(|iv| iv.set_tint(color))
+    }
 
     /// 给按钮设置前置图标（嵌入字节）。链到非按钮属误用——debug panic，release 忽略。
     pub fn icon_bytes(self, bytes: &[u8]) -> Self {
-        let icon = ImageContent::new(Image::from_bytes(bytes).ok());
-        self.config_button_icon(icon)
+        self.config_button_icon(ImageContent::from_bytes(bytes))
     }
     /// 给按钮设置前置图标（文件路径）。
     pub fn icon(self, path: impl AsRef<Path>) -> Self {
-        let icon = ImageContent::new(Image::from_file(path).ok());
-        self.config_button_icon(icon)
+        self.config_button_icon(ImageContent::from_file(path))
     }
     /// 给按钮设置前置图标（原始非预乘 RGBA8）。
     pub fn icon_rgba(self, w: u32, h: u32, rgba: &[u8]) -> Self {
-        let icon = ImageContent::new(Image::from_rgba(w, h, rgba).ok());
+        self.config_button_icon(ImageContent::from_rgba(w, h, rgba))
+    }
+    /// 给按钮设置前置图标（预组装内容原语，支持状态换图/着色）。
+    pub fn icon_content(self, icon: ImageContent) -> Self {
         self.config_button_icon(icon)
     }
-    fn config_button_icon(mut self, icon: ImageContent) -> Self {
+    fn config_button_icon(self, icon: ImageContent) -> Self {
+        self.config_button(|b| b.set_icon(icon), "icon()/icon_bytes()")
+    }
+
+    /// 按钮启用标志（绑定 `Rc<Cell<bool>>`，运行期可切换）。链到非按钮属误用。
+    pub fn enabled(self, flag: Rc<Cell<bool>>) -> Self {
+        self.config_button(|b| b.set_enabled(flag), "enabled()")
+    }
+    /// 按钮静态禁用（`true`=禁用）。`false` 为默认启用、无操作。
+    pub fn disabled(self, on: bool) -> Self {
+        if on {
+            self.config_button(|b| b.set_enabled(Rc::new(Cell::new(false))), "disabled()")
+        } else {
+            self
+        }
+    }
+    fn config_button(mut self, f: impl FnOnce(&mut Button), who: &str) -> Self {
         match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Button>()) {
-            Some(b) => b.set_icon(icon),
-            None => debug_assert!(false, "icon()/icon_bytes() 只能用于 Element::button(..)"),
+            Some(b) => f(b),
+            None => debug_assert!(false, "{who} 只能用于 Element::button(..)"),
         }
         self
     }
