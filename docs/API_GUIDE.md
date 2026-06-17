@@ -162,7 +162,23 @@ Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（le
 - **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
   ```rust
   Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon(path) / .icon_rgba(w,h,&rgba)
+  Element::button("提交").icon(path).enabled(can_submit.clone())  // 禁用时背景/图标/文字一起置灰
+  Element::button("删除").icon(path).disabled(true)               // 静态禁用
   ```
+
+### 图片的状态处理
+图片原语与控件**状态解耦**：控件把自身状态映射成通用 `VisualState`（Normal/Hover/Pressed/Selected/Disabled）传给图片，原语据此调制。三种手段（可组合）：
+- **调制**：按状态调不透明度——禁用自动置灰（`VisualState::opacity`）。
+- **着色**：`.tint(color)` 把**单色图标**按颜色重着色（随主题/状态变色，用 alpha 作模板），结果按层缓存，不影响彩色图。
+- **换图**：`ImageContent::on_state(state, image)` 为特定状态备专图，命中用专图、否则回退基图。
+```rust
+// 高级用法：预组装内容原语，再交给控件
+let icon = ImageContent::from_bytes(base).tint(Color::WHITE)
+    .on_state(VisualState::Disabled, gray_png);
+Element::button("X").icon_content(icon);
+Element::image_content(icon);   // 也可作独立控件
+```
+> 按钮已内建：`.enabled(Rc<Cell<bool>>)` / `.disabled(bool)` 控制禁用——禁用按钮不响应交互、不参与 Tab，背景/图标/文字统一置灰。其它控件按此 pattern 接入。
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 

@@ -22,7 +22,7 @@ pub mod ui;
 pub mod prelude {
     pub use crate::app::App;
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
-    pub use crate::render::image::{Fit, Image, ImageError};
+    pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::Style;
     pub use crate::theme::Theme;

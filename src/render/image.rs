@@ -16,10 +16,32 @@ use std::rc::Rc;
 
 use tiny_skia::{ColorU8, IntSize, Pixmap};
 
-use crate::geometry::Size;
+use crate::geometry::{Color, Size};
 
 /// 加载失败时占位框的默认逻辑尺寸（dp），保证布局不塌陷。
 pub const PLACEHOLDER_SIZE: i32 = 48;
+
+/// 控件视觉状态。控件把自己的内部状态映射成它，传给图片原语决定调制（透明度/换图）。
+/// 与具体控件解耦——原语只认识这套通用词汇。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisualState {
+    #[default]
+    Normal,
+    Hover,
+    Pressed,
+    Selected,
+    Disabled,
+}
+
+impl VisualState {
+    /// 该状态下图片的默认不透明度（禁用置灰，其余不变）。可由消费方覆盖。
+    pub fn opacity(self) -> f32 {
+        match self {
+            VisualState::Disabled => 0.38,
+            _ => 1.0,
+        }
+    }
+}
 
 /// 图片在控件框内的适配缩放模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -198,6 +220,21 @@ impl Image {
         Size::new(self.w as i32, self.h as i32)
     }
 
+    /// 模板着色副本：rgb 替换为 `color`，alpha 乘以 `color.a`（保形）。
+    /// 用于单色图标随主题/状态变色（彩色图请勿用，会丢失原色）。
+    pub fn tinted(&self, color: Color) -> Image {
+        let size = IntSize::from_wh(self.w, self.h).expect("尺寸已在构造时校验");
+        let mut data = Vec::with_capacity((self.w as usize) * (self.h as usize) * 4);
+        for p in self.pixmap.pixels() {
+            // p 为预乘像素，alpha 即覆盖度；按模板着色重建直色后再预乘。
+            let a = ((p.alpha() as u16 * color.a as u16) / 255) as u8;
+            let c = ColorU8::from_rgba(color.r, color.g, color.b, a).premultiply();
+            data.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        }
+        let pm = Pixmap::from_vec(data, size).expect("着色 Pixmap 尺寸匹配");
+        Self { pixmap: Rc::new(pm), w: self.w, h: self.h }
+    }
+
     /// 像素宽。
     pub fn width(&self) -> u32 {
         self.w
@@ -259,6 +296,28 @@ mod tests {
     fn from_rgba_preserves_size() {
         let img = Image::from_rgba(5, 7, &[128u8; 5 * 7 * 4]).unwrap();
         assert_eq!(img.size(), Size::new(5, 7));
+    }
+
+    #[test]
+    fn tinted_recolors_keeping_alpha() {
+        // 白色不透明 + 半透明像素混合源。
+        let src = Image::from_rgba(2, 1, &[255, 255, 255, 255, 255, 255, 255, 128]).unwrap();
+        let red = src.tinted(Color::rgb(255, 0, 0));
+        assert_eq!(red.size(), Size::new(2, 1));
+        // 取回非预乘验证：第 1 像素红不透明，第 2 像素红半透明。
+        let pm = red.pixmap();
+        let p0 = pm.pixel(0, 0).unwrap().demultiply();
+        assert_eq!((p0.red(), p0.green(), p0.blue(), p0.alpha()), (255, 0, 0, 255));
+        let p1 = pm.pixel(1, 0).unwrap().demultiply();
+        assert_eq!((p1.red(), p1.green(), p1.blue()), (255, 0, 0));
+        assert!(p1.alpha() < 200, "半透明 alpha 应保留，实得 {}", p1.alpha());
+    }
+
+    #[test]
+    fn visual_state_opacity() {
+        assert_eq!(VisualState::Disabled.opacity(), 0.38);
+        assert_eq!(VisualState::Normal.opacity(), 1.0);
+        assert_eq!(VisualState::Hover.opacity(), 1.0);
     }
 
     #[test]

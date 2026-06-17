@@ -101,6 +101,8 @@ pub struct ButtonTheme {
     pub bg: Option<Color>,
     pub hover: Option<Color>,
     pub active: Option<Color>,
+    /// 禁用态背景（默认回退 palette.track 灰）。
+    pub disabled: Option<Color>,
     pub fg: Option<Color>,
     pub corner: Option<f32>,
 }
@@ -114,6 +116,9 @@ impl ButtonTheme {
     }
     pub fn active(&self, p: &Palette) -> Color {
         self.active.unwrap_or(p.accent_active)
+    }
+    pub fn disabled(&self, p: &Palette) -> Color {
+        self.disabled.unwrap_or(p.track)
     }
     pub fn fg(&self, p: &Palette) -> Color {
         self.fg.unwrap_or(p.on_accent)

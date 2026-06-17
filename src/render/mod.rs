@@ -5,7 +5,7 @@
 pub mod image;
 pub mod skia;
 
-pub use image::{DecodedImage, Fit, Image, ImageDecoder, ImageError};
+pub use image::{DecodedImage, Fit, Image, ImageDecoder, ImageError, VisualState};
 pub use skia::SkiaCanvas;
 
 use crate::geometry::{Color, Rect};
@@ -42,7 +42,8 @@ pub trait Canvas {
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
     /// 把图片按 `fit` 缩放绘制到逻辑矩形 `dst`，并始终裁剪到 `dst`（Cover 溢出、
     /// None 超框安全收口）。`radius>0` 时按圆角裁剪（与背景/边框同源圆角）。
-    fn draw_image(&mut self, img: &image::Image, dst: Rect, fit: image::Fit, radius: f32);
+    /// `opacity` 为整体不透明度（0..=1，用于禁用置灰等状态调制）。
+    fn draw_image(&mut self, img: &image::Image, dst: Rect, fit: image::Fit, radius: f32, opacity: f32);
     /// 在 rect 内绘制文字（水平按 align、垂直居中）。无文字引擎时为空操作。
     fn draw_text(
         &mut self,

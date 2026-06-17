@@ -107,7 +107,11 @@ impl Canvas for SkiaCanvas<'_> {
         }
     }
 
-    fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32) {
+    fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
         // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。
         let pdst = dst.scaled(self.scale);
         if pdst.is_empty() {
@@ -163,7 +167,7 @@ impl Canvas for SkiaCanvas<'_> {
             }
         }
 
-        let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
+        let paint = PixmapPaint { opacity, quality: FilterQuality::Bilinear, ..Default::default() };
         self.pixmap.draw_pixmap(0, 0, img.pixmap().as_ref(), &paint, transform, Some(&mask));
     }
 
@@ -286,7 +290,7 @@ mod tests {
         let img = Image::from_rgba(4, 4, &red).unwrap();
         {
             let mut c = SkiaCanvas::new(&mut pm);
-            c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0);
+            c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0, 1.0);
         }
         // dst 中心应为红。
         let (r, g, b) = px(&pm, 40, 40);
@@ -306,7 +310,7 @@ mod tests {
         {
             let mut c = SkiaCanvas::new(&mut pm);
             // dst 40×40，圆角半径 20（=半边长，近圆）。
-            c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0);
+            c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0, 1.0);
         }
         // 左上角（dst 角点）应被圆角裁掉 → 仍为白。
         let (r, g, b) = px(&pm, 11, 11);
@@ -314,6 +318,23 @@ mod tests {
         // 中心仍为红。
         let (rc, gc, bc) = px(&pm, 30, 30);
         assert!(rc > 200 && gc < 60 && bc < 60, "中心应为图片色，实得 ({rc},{gc},{bc})");
+    }
+
+    /// draw_image：低不透明度让红图与白底混出更浅的色（验证状态调制）。
+    #[test]
+    fn draw_image_opacity_blends_lighter() {
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let red = [255u8, 0, 0, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_image(&img, Rect::new(5, 5, 30, 30), Fit::Fill, 0.0, 0.4);
+        }
+        // 0.4 不透明红 over 白：r 仍高、g/b 被白底抬升（不再接近 0）。
+        let (r, g, b) = px(&pm, 20, 20);
+        assert!(r > 240, "红通道应仍高，实得 {r}");
+        assert!(g > 120 && b > 120, "低不透明应混入白底（g={g}, b={b}）");
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。
