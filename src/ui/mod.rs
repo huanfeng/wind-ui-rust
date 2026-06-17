@@ -518,6 +518,7 @@ impl Element {
             clip_children: self.clip_children,
             scroll_y: 0,
             content_h: 0,
+            over_scroll: 0,
         };
         let id = tree.insert(node);
         for mut ce in children {

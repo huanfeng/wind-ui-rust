@@ -14,9 +14,11 @@ use tiny_skia::Pixmap;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, InvalidateRect, ScreenToClient, SetDIBitsToDevice, UpdateWindow,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, PAINTSTRUCT,
+    BeginPaint, EndPaint, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC, ScreenToClient,
+    SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    PAINTSTRUCT, VREFRESH,
 };
+use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -157,10 +159,16 @@ struct Touch {
     last: (i32, i32),
     /// 是否已越过移动阈值进入滑动滚动。
     scrolling: bool,
+    /// 上一次移动的消息时间（ms，`GetMessageTime`）。
+    last_t: u32,
+    /// 平滑后的 y 速度（**物理像素/ms**），松手时据此启动惯性滑动。
+    vy: f32,
 }
 
 /// 触摸拖动判定阈值（物理像素）。
 const TOUCH_THRESHOLD: i32 = 12;
+/// 触摸速度平滑系数（新样本权重）：低通滤噪，又不过度滞后。
+const TOUCH_VEL_SMOOTH: f32 = 0.4;
 
 /// 连续点击跟踪状态。在平台层把多次快速同位点击折算为 click_count。
 #[derive(Default, Clone, Copy)]
@@ -373,35 +381,63 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
 ///
 /// 已知限制：OS 驱动的模态循环（窗口拖拽/缩放、系统菜单跟踪）期间本循环不执行，
 /// 动画会暂停至用户释放——单窗口小工具可接受；如需模态期间也动画，需补 WM_TIMER 兜底。
+/// 提升系统定时器分辨率到 1ms 的 RAII 守卫。Drop 时 `timeEndPeriod` 归还，
+/// 覆盖 panic 展开与所有 return 路径，避免进程级 1ms 分辨率泄漏（影响系统电源）。
+struct TimerResolution;
+impl TimerResolution {
+    fn raise() -> Self {
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+        TimerResolution
+    }
+}
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
+
 unsafe fn run_message_loop(hwnd: HWND) {
-    /// 动画帧间隔（约 60fps）。
-    const FRAME_MS: u128 = 16;
+    // 动画帧间隔按显示器刷新率取整（默认 60fps 上限，刷新率 <60 时回退到实际值）。
+    // 注：仅起始采样一次；跨刷新率不同的显示器移动后不更新（单窗口小工具可接受）。
+    let frame_ms = frame_interval_ms(hwnd);
     let mut msg = MSG::default();
     let mut last_frame = std::time::Instant::now();
+    // 仅动画期间持有（提升定时器分辨率），空闲时 None 由 Drop 归还，省电。
+    let mut hires: Option<TimerResolution> = None;
     loop {
         let animating = !IsIconic(hwnd).as_bool()
             && state_from(hwnd).map(|s| s.handler.wants_animation()).unwrap_or(false);
         if animating {
+            // 提升定时器分辨率到 1ms：否则 MsgWait 超时被默认 ~15.6ms tick 向上取整，
+            // 16ms 等待常变成 ~31ms → 实测掉到 ~30fps。
+            if hires.is_none() {
+                hires = Some(TimerResolution::raise());
+            }
             // 等待输入，至多到下一帧截止；零句柄，仅作可被输入中断的定时等待。
             let elapsed = last_frame.elapsed().as_millis();
-            let wait = FRAME_MS.saturating_sub(elapsed) as u32;
+            let wait = frame_ms.saturating_sub(elapsed) as u32;
             MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             // 非阻塞排空所有待处理消息。
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
                 if msg.message == WM_QUIT {
-                    return;
+                    return; // hires 的 Drop 归还定时器分辨率
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤60fps 且不冻结）。
-            if last_frame.elapsed().as_millis() >= FRAME_MS {
+            // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤刷新率且不冻结）。
+            if last_frame.elapsed().as_millis() >= frame_ms {
                 let _ = InvalidateRect(hwnd, None, false);
                 let _ = UpdateWindow(hwnd);
                 last_frame = std::time::Instant::now();
             }
         } else {
-            // 无动画：阻塞至下一条消息（零 CPU 空闲）。
+            // 无动画：归还定时器分辨率，阻塞至下一条消息（零 CPU 空闲）。
+            hires = None;
             let r = GetMessageW(&mut msg, None, 0, 0);
             if !r.as_bool() {
                 return; // WM_QUIT(0) 或错误(-1)
@@ -411,6 +447,22 @@ unsafe fn run_message_loop(hwnd: HWND) {
             last_frame = std::time::Instant::now(); // 进入动画时从此刻起算首帧
         }
     }
+}
+
+/// 动画帧间隔（ms）= 1000 / 目标帧率。目标帧率取窗口所在显示器刷新率，
+/// 上限 60（默认）；刷新率 <60（如 50Hz 面板）则回退到实际值；查询失败按 60 处理。
+unsafe fn frame_interval_ms(hwnd: HWND) -> u128 {
+    let hdc = GetDC(hwnd);
+    let hz = if hdc.is_invalid() {
+        0
+    } else {
+        let v = GetDeviceCaps(hdc, VREFRESH);
+        let _ = ReleaseDC(hwnd, hdc);
+        v
+    };
+    // VREFRESH 返回 0 或 1 表示"硬件默认"（未知）→ 视为 60。
+    let fps = if hz <= 1 { 60 } else { hz.min(60) };
+    (1000 / fps.max(1)) as u128
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -649,32 +701,59 @@ unsafe fn handle_touch_input(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     } else {
         return;
     };
-    handle_touch(hwnd, kind, pt.x, pt.y);
+    // 当前触摸消息时间（与移动采样同源），用于估算释放速度。
+    let t = GetMessageTime() as u32;
+    handle_touch(hwnd, kind, pt.x, pt.y, t);
 }
 
-/// 触摸状态机：按下抬起未越阈值=点击（合成正常派发）；越阈值后拖动=滚动手指下的容器。
-/// 两段式：每次先借 state 读/写触摸态，释放后再调可能重入的分发。
-unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32) {
+/// 触摸状态机：按下抬起未越阈值=点击（合成正常派发）；越阈值后拖动=滚动手指下的容器；
+/// 松手带速度=惯性滑动。两段式：每次先借 state 读/写触摸态，释放后再调可能重入的分发。
+unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32, t: u32) {
     match kind {
         PointerKind::Down => {
+            // 新触摸按下：打断进行中的惯性滑动（停住动量）。
+            cancel_fling(hwnd);
             if let Some(s) = state_from(hwnd) {
-                s.touch = Touch { down: true, start: (x, y), last: (x, y), scrolling: false };
+                s.touch = Touch {
+                    down: true,
+                    start: (x, y),
+                    last: (x, y),
+                    last_t: t,
+                    ..Touch::default()
+                };
             }
         }
         PointerKind::Move => {
-            let (down, start, last, scrolling) = match state_from(hwnd) {
-                Some(s) => (s.touch.down, s.touch.start, s.touch.last, s.touch.scrolling),
+            let (down, start, last, last_t, scrolling, vy) = match state_from(hwnd) {
+                Some(s) => (
+                    s.touch.down,
+                    s.touch.start,
+                    s.touch.last,
+                    s.touch.last_t,
+                    s.touch.scrolling,
+                    s.touch.vy,
+                ),
                 None => return,
             };
             if !down {
                 return;
             }
             let dy = y - last.1;
+            // 估算瞬时速度并低通平滑（dt=0 的重复样本跳过，避免除零）。
+            let dt = t.wrapping_sub(last_t) as i32;
+            let vy = if dt > 0 {
+                let inst = dy as f32 / dt as f32;
+                vy * (1.0 - TOUCH_VEL_SMOOTH) + inst * TOUCH_VEL_SMOOTH
+            } else {
+                vy
+            };
             let past = scrolling
                 || (x - start.0).abs() >= TOUCH_THRESHOLD
                 || (y - start.1).abs() >= TOUCH_THRESHOLD;
             if let Some(s) = state_from(hwnd) {
                 s.touch.last = (x, y);
+                s.touch.last_t = t;
+                s.touch.vy = vy;
                 if past {
                     s.touch.scrolling = true;
                 }
@@ -684,16 +763,19 @@ unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32) {
             }
         }
         PointerKind::Up => {
-            let (down, start, scrolling) = match state_from(hwnd) {
-                Some(s) => (s.touch.down, s.touch.start, s.touch.scrolling),
+            let (down, start, scrolling, vy) = match state_from(hwnd) {
+                Some(s) => (s.touch.down, s.touch.start, s.touch.scrolling, s.touch.vy),
                 None => return,
             };
             if let Some(s) = state_from(hwnd) {
                 s.touch.down = false;
                 s.touch.scrolling = false;
             }
-            // 未进入滚动 → 视为点击：在起点合成按下，抬起处合成抬起，走正常派发。
-            if down && !scrolling {
+            if down && scrolling {
+                // 拖动滚动后松手：按释放速度启动惯性滑动（速度过低时宿主会忽略）。
+                dispatch_fling(hwnd, Point::new(x, y), vy);
+            } else if down {
+                // 未进入滚动 → 视为点击：在起点合成按下，抬起处合成抬起，走正常派发。
                 dispatch_pointer_event(
                     hwnd,
                     PointerEvent::single(PointerKind::Down, Point::new(start.0, start.1), MouseButton::Left),
@@ -713,6 +795,28 @@ unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
     let repaint = {
         let Some(state) = state_from(hwnd) else { return };
         state.handler.on_pan(pos, dy)
+    };
+    if repaint {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+/// 触摸松手：按释放速度启动惯性滑动。启动后触发首帧，其余由动画循环按帧推进。
+unsafe fn dispatch_fling(hwnd: HWND, pos: Point, vy: f32) {
+    let started = {
+        let Some(state) = state_from(hwnd) else { return };
+        state.handler.start_fling(pos, vy)
+    };
+    if started {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+}
+
+/// 打断进行中的惯性滑动（新触摸按下时调用）。
+unsafe fn cancel_fling(hwnd: HWND) {
+    let repaint = {
+        let Some(state) = state_from(hwnd) else { return };
+        state.handler.cancel_fling()
     };
     if repaint {
         let _ = InvalidateRect(hwnd, None, false);

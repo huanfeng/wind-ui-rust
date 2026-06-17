@@ -53,4 +53,15 @@ pub trait AppHandler {
     fn on_pan(&mut self, _pos: Point, _dy: i32) -> bool {
         false
     }
+
+    /// 触摸抬起时按释放速度启动惯性滑动（fling）。`pos` 为**物理像素**（相对客户区）、
+    /// `vy` 为手指 y 速度（**物理像素/ms**）。返回 true 表示已启动（平台据此触发首帧）。
+    fn start_fling(&mut self, _pos: Point, _vy: f32) -> bool {
+        false
+    }
+
+    /// 取消进行中的惯性滑动（新触摸按下/点击/滚轮打断时）。返回 true 表示需要重绘。
+    fn cancel_fling(&mut self) -> bool {
+        false
+    }
 }

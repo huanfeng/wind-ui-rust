@@ -122,6 +122,9 @@ pub struct Node {
     pub scroll_y: i32,
     /// 内容总高（measure 记录，用于滚动钳制与滚动条）。
     pub content_h: i32,
+    /// 越界回弹的瞬时视觉偏移（不参与钳制，仅惯性撞界时短暂非零）。
+    /// 正=内容下移（顶部回弹），负=内容上移（底部回弹）。
+    pub over_scroll: i32,
 }
 
 struct Slot {
@@ -474,14 +477,15 @@ impl Tree {
         };
         let max_scroll = (content_h - inner.h).max(0);
         scroll_y = scroll_y.clamp(0, max_scroll);
+        let over = self.get(id).map(|n| n.over_scroll).unwrap_or(0);
         if let Some(n) = self.get_mut(id) {
             n.scroll_y = scroll_y;
         }
         // 可滚动时为右侧滚动条预留宽度，避免内容被遮挡。
         let scrollbar_w = if content_h > inner.h { 8 } else { 0 };
-        // 子节点从视口顶起按内容顺序堆叠，整体上移 scroll_y。
+        // 子节点从视口顶起按内容顺序堆叠，整体上移 scroll_y；over_scroll 为越界回弹瞬时偏移。
         let children = self.visible_children(id);
-        let mut y = inner.y - scroll_y;
+        let mut y = inner.y - scroll_y + over;
         for c in children {
             let (cs, cm) = (self.measured_of(c), self.margin_of(c));
             let cw = (inner.w - scrollbar_w - cm.horizontal()).max(0);
@@ -760,23 +764,58 @@ impl Tree {
         Some((Point::new(abs.x + lx, abs.y + ly), h))
     }
 
+    /// 找 `p`（逻辑坐标）下最近的滚动容器节点（命中点向上找首个 `Layout::Scroll`）。
+    pub fn scroll_node_at(&self, p: Point) -> Option<NodeId> {
+        let mut cur = self.hit_test(p);
+        while let Some(id) = cur {
+            let n = self.get(id)?;
+            if matches!(n.layout, Layout::Scroll) {
+                return Some(id);
+            }
+            cur = n.parent;
+        }
+        None
+    }
+
+    /// 滚动节点的 `(当前偏移, 最大偏移)`（基于上一帧布局的内容高/视口高）。
+    /// 非滚动节点返回 None。供惯性滑动按边界结算。
+    pub fn scroll_range(&self, id: NodeId) -> Option<(i32, i32)> {
+        let n = self.get(id)?;
+        if !matches!(n.layout, Layout::Scroll) {
+            return None;
+        }
+        let view_h = (n.bounds.h - n.padding.vertical()).max(0);
+        Some((n.scroll_y, (n.content_h - view_h).max(0)))
+    }
+
+    /// 直接设置滚动节点偏移（惯性滑动用，不钳制；下一帧 arrange 钳制）。
+    /// 节点不存在或非滚动容器时返回 false。
+    pub fn set_scroll_y(&mut self, id: NodeId, y: i32) -> bool {
+        match self.get_mut(id) {
+            Some(n) if matches!(n.layout, Layout::Scroll) => {
+                n.scroll_y = y;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 设置滚动节点的越界回弹偏移（不参与钳制；惯性撞界回弹用）。
+    pub fn set_over_scroll(&mut self, id: NodeId, over: i32) {
+        if let Some(n) = self.get_mut(id) {
+            n.over_scroll = over;
+        }
+    }
+
     /// 触摸平移滚动：找 `p`（逻辑坐标）下最近的滚动容器，按 `dy`（逻辑 px）平移。
     /// `dy>0`（手指下移）→ 内容下移（scroll_y 减小，自然跟手）。下一帧 arrange 钳制范围。
     /// 返回是否命中可滚动容器。
     pub fn pan_scroll(&mut self, p: Point, dy: i32) -> bool {
-        let mut cur = self.hit_test(p);
-        while let Some(id) = cur {
-            let (is_scroll, parent) = match self.get(id) {
-                Some(n) => (matches!(n.layout, Layout::Scroll), n.parent),
-                None => break,
-            };
-            if is_scroll {
-                if let Some(n) = self.get_mut(id) {
-                    n.scroll_y -= dy;
-                }
-                return true;
+        if let Some(id) = self.scroll_node_at(p) {
+            if let Some(n) = self.get_mut(id) {
+                n.scroll_y -= dy;
             }
-            cur = parent;
+            return true;
         }
         false
     }
@@ -1343,6 +1382,51 @@ mod tests {
         assert_eq!(tree.get(id).unwrap().scroll_y, 40, "上滑 40px 应增加 scroll_y");
         // 非滚动区域返回 false。
         assert!(!tree.pan_scroll(Point::new(-100, -100), 10), "命中外返回 false");
+    }
+
+    #[test]
+    fn scroll_range_and_set_for_fling() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, view=100 → max=200
+        // 惯性滑动定位到的滚动节点。
+        assert_eq!(tree.scroll_node_at(Point::new(50, 50)), Some(id));
+        let (cur, max) = tree.scroll_range(id).expect("滚动节点应有范围");
+        assert_eq!((cur, max), (0, 200), "初始偏移 0、最大 200");
+        // 惯性推进越界 → set 后 arrange 钳制；范围读数据反映撞底。
+        assert!(tree.set_scroll_y(id, 500), "设置滚动偏移成功");
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.scroll_range(id).unwrap().0, 200, "越界应钳制到 max");
+        // 非滚动节点 / 不存在节点：范围与设置均失败。
+        let leaf = tree.get(id).unwrap().children[0];
+        assert!(tree.scroll_range(leaf).is_none(), "非滚动节点无范围");
+        assert!(!tree.set_scroll_y(leaf, 10), "非滚动节点不可设置滚动");
+    }
+
+    #[test]
+    fn over_scroll_shifts_content_without_clamping() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let child0 = tree.get(id).unwrap().children[0];
+        let y0 = tree.abs_bounds(child0).y;
+        // 越界回弹偏移：内容整体下移 12px，且不被 arrange 钳掉（区别于 scroll_y）。
+        tree.set_over_scroll(id, 12);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().over_scroll, 12, "over_scroll 不参与钳制");
+        assert_eq!(tree.abs_bounds(child0).y, y0 + 12, "内容随 over_scroll 整体偏移");
     }
 
     #[test]
