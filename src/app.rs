@@ -72,6 +72,7 @@ impl App {
                 width,
                 height,
                 bg: Color::hex(0xF3F3F3),
+                centered: false,
                 screenshot: None,
                 screenshot_scale: 1.0,
                 screenshot_rclick: None,
@@ -86,6 +87,12 @@ impl App {
     /// 窗口背景色。命名与 `Element::bg` 统一。
     pub fn bg(mut self, c: Color) -> Self {
         self.cfg.bg = c;
+        self
+    }
+
+    /// 窗口居中显示。
+    pub fn centered(mut self) -> Self {
+        self.cfg.centered = true;
         self
     }
 

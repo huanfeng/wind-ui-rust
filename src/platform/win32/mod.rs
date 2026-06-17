@@ -39,12 +39,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsIconic,
-    LoadCursorW,
+    GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowRect, IsIconic, LoadCursorW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK,
-    SM_CYDOUBLECLK, SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
-    GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, MSG,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR,
+    SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYSCREEN, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
+    SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR,
     WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
@@ -60,6 +61,8 @@ pub struct WindowConfig {
     pub width: i32,
     pub height: i32,
     pub bg: Color,
+    /// 窗口居中显示。
+    pub centered: bool,
     /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
     pub screenshot: Option<PathBuf>,
     /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
@@ -77,6 +80,7 @@ impl Default for WindowConfig {
             width: 800,
             height: 600,
             bg: Color::hex(0xF3F3F3),
+            centered: false,
             screenshot: None,
             screenshot_scale: 1.0,
             screenshot_rclick: None,
@@ -364,6 +368,19 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     }
     if let Some(s) = state_from(hwnd) {
         s.handler.set_scale(scale);
+    }
+
+    // 居中窗口
+    if cfg.centered {
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        let mut rc = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rc);
+        let win_w = rc.right - rc.left;
+        let win_h = rc.bottom - rc.top;
+        let x = (screen_w - win_w) / 2;
+        let y = (screen_h - win_h) / 2;
+        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
     }
 
     // 注册触摸窗口：触摸以 WM_TOUCH 原始点递送（禁用系统手势；消费后无重复鼠标提升）。
