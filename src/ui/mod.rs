@@ -4,6 +4,7 @@
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
 pub mod containers;
+pub mod image;
 pub mod inputs;
 pub mod list;
 pub mod progress;
@@ -11,21 +12,27 @@ pub mod select;
 pub mod stepper;
 
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::core::{ClickFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
+use crate::render::image::{Fit, Image};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
 use crate::text::TextEngine;
 
+pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use list::ListRow;
 pub use progress::ProgressBar;
 pub use select::Dropdown;
 pub use stepper::Stepper;
+
+/// 图标与文字之间的间距（Button 等）。
+const ICON_GAP: i32 = 6;
 
 /// 文本叶子控件。
 pub struct Label {
@@ -59,6 +66,29 @@ impl Widget for Label {
     }
 }
 
+/// 动态文本标签：绑定 `Rc<RefCell<String>>`，只读显示，内容随绑定变化而更新。
+pub struct DynLabel {
+    text: Rc<RefCell<String>>,
+}
+
+impl DynLabel {
+    pub fn new(text: Rc<RefCell<String>>) -> Self {
+        Self { text }
+    }
+}
+
+impl Widget for DynLabel {
+    fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        let s = self.text.borrow();
+        let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
+        text.measure(&s, style.font_family.as_deref(), style.font_size, max_w)
+    }
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+        let s = self.text.borrow();
+        canvas.draw_text(&s, content, style.fg, style.text_align, style.font_family.as_deref(), style.font_size);
+    }
+}
+
 /// 按钮三态。
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum BtnState {
@@ -68,23 +98,32 @@ enum BtnState {
 }
 
 /// 交互按钮：hover/press 三态 + 点击/回车回调。颜色取自当前主题。
+/// 可选前置图标（`ImageContent`），证明"其它控件低成本嵌入图片"的 pattern。
 pub struct Button {
     label: String,
+    icon: Option<ImageContent>,
     state: BtnState,
     on_click: Option<ClickFn>,
 }
 
 impl Button {
     pub fn new(label: String) -> Self {
-        Self { label, state: BtnState::Normal, on_click: None }
+        Self { label, icon: None, state: BtnState::Normal, on_click: None }
+    }
+
+    /// 设置前置图标（供 Builder 的 `.icon_*()` 调用）。
+    pub fn set_icon(&mut self, icon: ImageContent) {
+        self.icon = Some(icon);
     }
 }
 
 impl Widget for Button {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let s = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
+        // 图标为正方形，边长取文字高度；加图标宽 + 间距。
+        let icon_extra = if self.icon.is_some() { s.h + ICON_GAP } else { 0 };
         // 内置左右 16 / 上下 9 的内边距
-        Size::new(s.w + 32, s.h + 18)
+        Size::new(s.w + 32 + icon_extra, s.h + 18)
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let t = crate::theme::current();
@@ -104,11 +143,34 @@ impl Widget for Button {
             r,
             &Paint::fill(color),
         );
+        // 无图标：文字整体居中（原行为）。
+        let Some(icon) = self.icon.as_ref() else {
+            canvas.draw_text(
+                &self.label,
+                bounds,
+                bt.fg(pal),
+                Align::Center,
+                style.font_family.as_deref(),
+                style.font_size,
+            );
+            return;
+        };
+        // 有图标：图标 + 文字作为整体水平居中，图标在左、垂直居中。
+        let ts = canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
+        let ih = ts.h; // 图标正方形边长 = 文字高
+        let total_w = ih + ICON_GAP + ts.w;
+        let start_x = bounds.x + ((bounds.w - total_w) / 2).max(0);
+        let icon_y = bounds.y + ((bounds.h - ih) / 2).max(0);
+        // 图标圆角不跟随按钮圆角（按钮圆角作用于整框）；图标默认直角，由其自身 fit 决定。
+        let icon_style = Style { corner_radius: 0.0, ..style.clone() };
+        icon.paint_into(Rect::new(start_x, icon_y, ih, ih), canvas, &icon_style);
+        // 文字紧随图标右侧，垂直方向交给 draw_text 居中。
+        let text_rect = Rect::new(start_x + ih + ICON_GAP, bounds.y, ts.w + 2, bounds.h);
         canvas.draw_text(
             &self.label,
-            bounds,
+            text_rect,
             bt.fg(pal),
-            Align::Center,
+            Align::Start,
             style.font_family.as_deref(),
             style.font_size,
         );
@@ -170,6 +232,9 @@ impl Widget for Button {
     }
     fn take_click(&mut self, f: ClickFn) {
         self.on_click = Some(f);
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -233,6 +298,11 @@ impl Element {
         Self::base(Layout::None).widget(Label::new(text.into()))
     }
 
+    /// 动态标签（绑定 `Rc<RefCell<String>>`，只读显示）。
+    pub fn label_rc(text: Rc<RefCell<String>>) -> Self {
+        Self::base(Layout::None).widget(DynLabel::new(text))
+    }
+
     /// 交互按钮。配合 `.on_click(...)` 设置回调。
     pub fn button(label: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(Button::new(label.into()))
@@ -241,6 +311,59 @@ impl Element {
     /// 点击/激活回调（按钮等交互控件）。
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
+        self
+    }
+
+    // ---- 图片 ----
+
+    /// 图片控件：从文件路径加载（按字节嗅探格式，自适配已注册解码器）。
+    /// 加载失败时显示占位框（不 panic）。默认 `Fit::Contain`，可链 `.fit()`/`.corner()`。
+    pub fn image(path: impl AsRef<Path>) -> Self {
+        Self::base(Layout::None).widget(ImageView::new(Image::from_file(path).ok()))
+    }
+    /// 图片控件：从嵌入字节加载（`include_bytes!`，按字节嗅探格式）。
+    pub fn image_bytes(bytes: &[u8]) -> Self {
+        Self::base(Layout::None).widget(ImageView::new(Image::from_bytes(bytes).ok()))
+    }
+    /// 图片控件：从原始非预乘 RGBA8 像素构造（`rgba.len()==w*h*4`）。
+    pub fn image_rgba(w: u32, h: u32, rgba: &[u8]) -> Self {
+        Self::base(Layout::None).widget(ImageView::new(Image::from_rgba(w, h, rgba).ok()))
+    }
+
+    /// 配置内含的 ImageView。`fit()` 是图片专属修饰符，链到其他控件属误用——
+    /// debug 构建下 panic 提示，release 下静默忽略（与 text_input 的误用检测一致）。
+    fn config_image(mut self, f: impl FnOnce(&mut ImageView)) -> Self {
+        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<ImageView>()) {
+            Some(iv) => f(iv),
+            None => debug_assert!(false, "fit() 只能用于 Element::image*(..)"),
+        }
+        self
+    }
+    /// 图片适配缩放模式（默认 Contain）。
+    pub fn fit(self, fit: Fit) -> Self {
+        self.config_image(|iv| iv.set_fit(fit))
+    }
+
+    /// 给按钮设置前置图标（嵌入字节）。链到非按钮属误用——debug panic，release 忽略。
+    pub fn icon_bytes(self, bytes: &[u8]) -> Self {
+        let icon = ImageContent::new(Image::from_bytes(bytes).ok());
+        self.config_button_icon(icon)
+    }
+    /// 给按钮设置前置图标（文件路径）。
+    pub fn icon(self, path: impl AsRef<Path>) -> Self {
+        let icon = ImageContent::new(Image::from_file(path).ok());
+        self.config_button_icon(icon)
+    }
+    /// 给按钮设置前置图标（原始非预乘 RGBA8）。
+    pub fn icon_rgba(self, w: u32, h: u32, rgba: &[u8]) -> Self {
+        let icon = ImageContent::new(Image::from_rgba(w, h, rgba).ok());
+        self.config_button_icon(icon)
+    }
+    fn config_button_icon(mut self, icon: ImageContent) -> Self {
+        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Button>()) {
+            Some(b) => b.set_icon(icon),
+            None => debug_assert!(false, "icon()/icon_bytes() 只能用于 Element::button(..)"),
+        }
         self
     }
 

@@ -14,6 +14,19 @@ const SUB: u32 = 0x636E72;
 const CARD: u32 = 0xFFFFFF;
 const BG: u32 = 0xEEF1F5;
 
+/// 生成 w×h 对角渐变 RGBA8（演示图，免捆绑资源）。
+fn gradient(w: u32, h: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32 / (w - 1).max(1) as f32;
+            let fy = y as f32 / (h - 1).max(1) as f32;
+            v.extend_from_slice(&[(220.0 * (1.0 - fx)) as u8, (200.0 * fy) as u8, (220.0 * fx + 40.0) as u8, 255]);
+        }
+    }
+    v
+}
+
 /// 一行设置项：左标签 + 右控件。
 fn row(label: &str, control: Element) -> Element {
     Element::row()
@@ -160,12 +173,43 @@ fn main() {
         ));
     let components = Element::scroll().fill().child(components_body);
 
+    // 图片页：适配模式 + 圆角 + 占位 + Button 图标。
+    let grad = gradient(64, 48);
+    let img_cell = |label: &str, e: Element| {
+        Element::col()
+            .spacing(4)
+            .child(e.width(84).height(60).bg(Color::hex(0xF6F8FA)).border(Color::hex(0xDDDDDD), 1))
+            .child(Element::label(label).font_size(12.0).fg(Color::hex(SUB)).height(16))
+    };
+    let images_body = Element::col()
+        .width_match()
+        .spacing(14)
+        .child(card(
+            "适配模式（源图 4:3）",
+            Element::row()
+                .spacing(10)
+                .child(img_cell("Contain", Element::image_rgba(64, 48, &grad).fit(Fit::Contain)))
+                .child(img_cell("Cover", Element::image_rgba(64, 48, &grad).fit(Fit::Cover)))
+                .child(img_cell("Fill", Element::image_rgba(64, 48, &grad).fit(Fit::Fill))),
+        ))
+        .child(card(
+            "圆角 & 占位 & 图标",
+            Element::row()
+                .spacing(12)
+                .cross(Align::Center)
+                .child(img_cell("圆角", Element::image_rgba(64, 48, &grad).fit(Fit::Cover).corner(12.0)))
+                .child(img_cell("占位", Element::image("不存在.png")))
+                .child(Element::button("新建").icon_rgba(64, 48, &grad)),
+        ));
+    let images = Element::scroll().fill().child(images_body);
+
     let tab = Rc::new(Cell::new(0usize));
     let tabs = Element::tabs(
         tab.clone(),
         vec![
             ("设置", settings),
             ("控件", components),
+            ("图片", images),
             ("历史", Element::col().fill().child(list)),
             ("关于", about),
         ],

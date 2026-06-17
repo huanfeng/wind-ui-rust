@@ -2,8 +2,10 @@
 //!
 //! 坐标用 f32（绝对窗口坐标）。布局层的 i32 `Rect` 在 paint 时转 f32。
 
+pub mod image;
 pub mod skia;
 
+pub use image::{DecodedImage, Fit, Image, ImageDecoder, ImageError};
 pub use skia::SkiaCanvas;
 
 use crate::geometry::{Color, Rect};
@@ -38,6 +40,9 @@ pub trait Canvas {
     );
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint);
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
+    /// 把图片按 `fit` 缩放绘制到逻辑矩形 `dst`，并始终裁剪到 `dst`（Cover 溢出、
+    /// None 超框安全收口）。`radius>0` 时按圆角裁剪（与背景/边框同源圆角）。
+    fn draw_image(&mut self, img: &image::Image, dst: Rect, fit: image::Fit, radius: f32);
     /// 在 rect 内绘制文字（水平按 align、垂直居中）。无文字引擎时为空操作。
     fn draw_text(
         &mut self,
