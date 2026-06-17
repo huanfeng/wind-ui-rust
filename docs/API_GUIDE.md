@@ -122,6 +122,7 @@ Element::leaf()                      // 叶子（自定义控件载体，见 §9
 Element::scroll()                    // 垂直滚动容器（支持鼠标滚轮 + 触摸滑动/惯性）
 Element::divider()                   // 分隔线
 Element::tabs(selected, vec![("标签", page_element), ...])
+Element::tabs_icons(selected, vec![("标签", icon, page), ...])  // 带图标的标签（icon: ImageContent）
 Element::dialog(show, content)       // 模态浮层（show: Rc<Cell<bool>>）
 ```
 

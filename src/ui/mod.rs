@@ -566,6 +566,23 @@ impl Element {
         Element::col().fill().spacing(10).child(bar).child(content)
     }
 
+    /// 带前置图标的标签页：`pages` 为 (标题, 图标内容, 页面) 列表。其余同 `tabs`。
+    /// 标签图标随选中/悬停状态调制。
+    pub fn tabs_icons(
+        selected: Rc<Cell<usize>>,
+        pages: Vec<(impl Into<String>, ImageContent, Element)>,
+    ) -> Self {
+        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Stretch);
+        let mut content = Element::stack().fill().weight(1.0);
+        for (i, (title, icon, page)) in pages.into_iter().enumerate() {
+            let tab = containers::TabButton::new(title.into(), selected.clone(), i).with_icon(icon);
+            bar = bar.child(Element::base(Layout::None).widget(tab));
+            let sel2 = selected.clone();
+            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+        }
+        Element::col().fill().spacing(10).child(bar).child(content)
+    }
+
     /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
     /// `show` 绑定显示标志。
     pub fn dialog(show: Rc<Cell<bool>>, content: Element) -> Self {

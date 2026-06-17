@@ -27,6 +27,12 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
     v
 }
 
+/// 生成 size×size 纯色图标（标签图标演示用）。
+fn solid(size: u32, hex: u32) -> Vec<u8> {
+    let (r, g, b) = (((hex >> 16) & 0xff) as u8, ((hex >> 8) & 0xff) as u8, (hex & 0xff) as u8);
+    [r, g, b, 255].repeat((size * size) as usize)
+}
+
 /// 一行设置项：左标签 + 右控件。
 fn row(label: &str, control: Element) -> Element {
     Element::row()
@@ -205,14 +211,15 @@ fn main() {
     let images = Element::scroll().fill().child(images_body);
 
     let tab = Rc::new(Cell::new(0usize));
-    let tabs = Element::tabs(
+    let dot = |hex: u32| ImageContent::from_rgba(16, 16, &solid(16, hex));
+    let tabs = Element::tabs_icons(
         tab.clone(),
         vec![
-            ("设置", settings),
-            ("控件", components),
-            ("图片", images),
-            ("历史", Element::col().fill().child(list)),
-            ("关于", about),
+            ("设置", dot(0x4C8BF5), settings),
+            ("控件", dot(0x2EC48B), components),
+            ("图片", dot(0xF5A623), images),
+            ("历史", dot(0x9B59B6), Element::col().fill().child(list)),
+            ("关于", dot(0xE5484D), about),
         ],
     );
 
