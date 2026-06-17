@@ -191,9 +191,34 @@ impl TextEngine for DWriteEngine {
         if unsafe { layout.GetMetrics(&mut m) }.is_err() {
             return;
         }
-        // 位图尺寸钳制在 pixmap 内，省内存并防止超大文本分配失败。
-        let tw = (m.width.ceil().max(1.0) as i32).min(pixmap.width() as i32);
-        let th = (m.height.ceil().max(1.0) as i32).min(pixmap.height() as i32);
+        let pw = pixmap.width() as i32;
+        let ph = pixmap.height() as i32;
+        // 文本完整物理宽度——单行横向超长时可远超 pixmap 宽。
+        let mw = m.width.ceil().max(1.0) as i32;
+        let th = (m.height.ceil().max(1.0) as i32).min(ph);
+
+        // 文本原点 X（pixmap 物理坐标）：按对齐用**完整**文本宽度推算，
+        // 故横向滚动后 prect.x 为负、或文本宽超窗口时定位仍正确。
+        let text_x0 = match align {
+            Align::Start | Align::Stretch => prect.x,
+            Align::Center => prect.x + (prect.w - mw) / 2,
+            Align::End => prect.x + prect.w - mw,
+        };
+
+        // 只为**可见切片**分配位图：与 pixmap 边界及裁剪矩形求交。横向超长文本
+        // 被滚到右侧时，靠把字形整体左移（glyph_dx）让可见部分（含行尾）落入位图，
+        // 不再因位图锚定文本起点而把右侧字形丢在位图之外。
+        let mut vis0 = text_x0.max(0);
+        let mut vis1 = (text_x0 + mw).min(pw);
+        if let Some(c) = pclip {
+            vis0 = vis0.max(c.x);
+            vis1 = vis1.min(c.x + c.w);
+        }
+        if vis1 <= vis0 {
+            return;
+        }
+        let tw = vis1 - vis0; // 可见宽度（恒 <= pixmap 宽）
+        let glyph_dx = (text_x0 - vis0) as f32; // 字形横向偏移：滚动右移时为负
 
         // 复用的离屏位图渲染目标（按需扩容）；失败则跳过该文字。
         let Some(brt) = self.ensure_bitmap(tw, th) else {
@@ -223,15 +248,9 @@ impl TextEngine for DWriteEngine {
         let cw = tw.min(bmw);
         let ch = th.min(bmh);
 
-        // 文字位图在 pixmap 中的目标位置（物理坐标）。
-        let ox = match align {
-            Align::Start | Align::Stretch => prect.x,
-            Align::Center => prect.x + (prect.w - tw) / 2,
-            Align::End => prect.x + prect.w - tw,
-        };
+        // 文字位图在 pixmap 中的目标位置（物理坐标）：可见切片起点。
+        let ox = vis0;
         let oy = prect.y + (prect.h - th).max(0) / 2;
-        let pw = pixmap.width() as i32;
-        let ph = pixmap.height() as i32;
 
         // 1. 把真实背景从 pixmap 拷入位图（BGRA）；DirectWrite 将在其上抗锯齿混合，
         //    gamma 由 DirectWrite 自己正确处理（不再由我们反推覆盖率）。
@@ -263,7 +282,7 @@ impl TextEngine for DWriteEngine {
         let ctx = BitmapCtx { target: brt.clone(), color: colorref };
         unsafe {
             layout
-                .Draw(Some(&ctx as *const _ as *const c_void), &self.renderer, 0.0, 0.0)
+                .Draw(Some(&ctx as *const _ as *const c_void), &self.renderer, glyph_dx, 0.0)
                 .ok()
         };
 
