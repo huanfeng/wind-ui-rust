@@ -176,6 +176,25 @@ fn main() {
             .width_match()
             .bg(Color::hex(0xF6F8FA))
             .corner(8.0),
+        ))
+        .child(card(
+            "禁用态（核心统一管理：不可交互 + 置灰 + 跳 Tab）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(row("按钮", Element::button("不可点").disabled(true)))
+                .child(row("开关", Element::switch(Rc::new(Cell::new(true))).disabled(true)))
+                .child(row("勾选", Element::checkbox("已禁用", Rc::new(Cell::new(true))).disabled(true)))
+                .child(row("滑块", Element::slider(Rc::new(Cell::new(0.5))).disabled(true).width_match()))
+                .child(row(
+                    "下拉",
+                    Element::dropdown(vec!["选项 A", "选项 B"], Rc::new(Cell::new(0))).disabled(true).width_match(),
+                ))
+                .child(row("步进", Element::stepper(Rc::new(Cell::new(3.0)), 0.0, 9.0, 1.0).disabled(true).width(120)))
+                .child(row(
+                    "输入",
+                    Element::text_input(Rc::new(RefCell::new("只读内容".into())), "").disabled(true).width_match(),
+                )),
         ));
     let components = Element::scroll().fill().child(components_body);
 

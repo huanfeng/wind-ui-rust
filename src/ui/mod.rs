@@ -54,7 +54,7 @@ impl Widget for Label {
         let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
         text.measure(&self.text, style.font_family.as_deref(), style.font_size, max_w)
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         canvas.draw_text(
             &self.text,
             content,
@@ -83,7 +83,7 @@ impl Widget for DynLabel {
         let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
         text.measure(&s, style.font_family.as_deref(), style.font_size, max_w)
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let s = self.text.borrow();
         canvas.draw_text(&s, content, style.fg, style.text_align, style.font_family.as_deref(), style.font_size);
     }
@@ -99,19 +99,18 @@ enum BtnState {
 
 /// 交互按钮：hover/press 三态 + 点击/回车回调。颜色取自当前主题。
 /// 可选前置图标（`ImageContent`），证明"其它控件低成本嵌入图片"的 pattern。
-/// 可选禁用标志（`Rc<Cell<bool>>`）：禁用时不响应交互、背景与图标置灰、不参与 Tab。
+/// 禁用态由核心层统一管理（`Element::enabled/disabled`）：禁用时核心拦事件、跳 Tab，
+/// 并把启用态传入 paint，按钮据此置灰。
 pub struct Button {
     label: String,
     icon: Option<ImageContent>,
     state: BtnState,
-    /// 启用标志（None = 始终启用）。
-    enabled: Option<Rc<Cell<bool>>>,
     on_click: Option<ClickFn>,
 }
 
 impl Button {
     pub fn new(label: String) -> Self {
-        Self { label, icon: None, state: BtnState::Normal, enabled: None, on_click: None }
+        Self { label, icon: None, state: BtnState::Normal, on_click: None }
     }
 
     /// 设置前置图标（供 Builder 的 `.icon_*()` 调用）。
@@ -119,19 +118,9 @@ impl Button {
         self.icon = Some(icon);
     }
 
-    /// 绑定启用标志（供 Builder 的 `.enabled()`/`.disabled()` 调用）。
-    pub fn set_enabled(&mut self, flag: Rc<Cell<bool>>) {
-        self.enabled = Some(flag);
-    }
-
-    /// 当前是否启用（无标志视为启用）。
-    fn is_enabled(&self) -> bool {
-        self.enabled.as_ref().is_none_or(|c| c.get())
-    }
-
-    /// 把内部三态 + 启用标志映射为通用视觉状态（供图标调制）。
-    fn visual_state(&self) -> VisualState {
-        if !self.is_enabled() {
+    /// 把内部三态 + 核心传入的启用态映射为通用视觉状态（供图标调制）。
+    fn visual_state(&self, enabled: bool) -> VisualState {
+        if !enabled {
             return VisualState::Disabled;
         }
         match self.state {
@@ -150,10 +139,10 @@ impl Widget for Button {
         // 内置左右 16 / 上下 9 的内边距
         Size::new(s.w + 32 + icon_extra, s.h + 18)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
-        let vstate = self.visual_state();
+        let vstate = self.visual_state(enabled);
         // 背景：禁用用专用置灰底，否则按三态取主题色。
         let color = match vstate {
             VisualState::Disabled => bt.disabled(pal),
@@ -208,10 +197,7 @@ impl Widget for Button {
         );
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
-        // 禁用：不响应任何交互（不 hover/不点击），事件继续冒泡。
-        if !self.is_enabled() {
-            return false;
-        }
+        // 禁用由核心层统一拦截（call_on_event 不会派发到禁用节点），此处无需判断。
         match ev {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Enter => {
@@ -264,8 +250,8 @@ impl Widget for Button {
         }
     }
     fn focusable(&self) -> bool {
-        // 禁用按钮不参与 Tab 焦点导航。
-        self.is_enabled()
+        // 禁用按钮的 Tab 跳过由核心层 collect_focusable 统一处理。
+        true
     }
     fn take_click(&mut self, f: ClickFn) {
         self.on_click = Some(f);
@@ -291,6 +277,7 @@ pub struct Element {
     vis_cond: Option<Box<dyn Fn() -> bool>>,
     clip_children: bool,
     click: Option<ClickFn>,
+    enabled: Option<Rc<Cell<bool>>>,
 }
 
 impl Element {
@@ -310,6 +297,7 @@ impl Element {
             vis_cond: None,
             clip_children: false,
             click: None,
+            enabled: None,
         }
     }
 
@@ -409,17 +397,18 @@ impl Element {
         self.config_button(|b| b.set_icon(icon), "icon()/icon_bytes()")
     }
 
-    /// 按钮启用标志（绑定 `Rc<Cell<bool>>`，运行期可切换）。链到非按钮属误用。
-    pub fn enabled(self, flag: Rc<Cell<bool>>) -> Self {
-        self.config_button(|b| b.set_enabled(flag), "enabled()")
+    /// 启用标志（绑定 `Rc<Cell<bool>>`，运行期可切换）。**适用于任意控件/容器**：
+    /// 核心据此拦事件、跳 Tab、令控件置灰；禁用沿父链继承（禁用容器即禁用其全部子节点）。
+    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+        self.enabled = Some(flag);
+        self
     }
-    /// 按钮静态禁用（`true`=禁用）。`false` 为默认启用、无操作。
-    pub fn disabled(self, on: bool) -> Self {
+    /// 静态禁用（`true`=禁用）。`false` 为默认启用、无操作。适用于任意控件/容器。
+    pub fn disabled(mut self, on: bool) -> Self {
         if on {
-            self.config_button(|b| b.set_enabled(Rc::new(Cell::new(false))), "disabled()")
-        } else {
-            self
+            self.enabled = Some(Rc::new(Cell::new(false)));
         }
+        self
     }
     fn config_button(mut self, f: impl FnOnce(&mut Button), who: &str) -> Self {
         match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Button>()) {
@@ -737,6 +726,7 @@ impl Element {
             style: self.style,
             visible: self.visible,
             vis_cond: self.vis_cond,
+            enabled: self.enabled,
             focused: false,
             clip_children: self.clip_children,
             scroll_y: 0,

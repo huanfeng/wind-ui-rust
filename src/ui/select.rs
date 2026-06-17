@@ -62,24 +62,28 @@ impl Widget for Dropdown {
         Size::new(w + 2 * PAD_X + CHEVRON_W, (style.font_size as i32) + 16)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, dd) = (&th.palette, &th.dropdown);
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
         let corner = dd.corner(&th.metrics);
-        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(dd.bg(pal)));
+        // 禁用：背景弱化、文字与箭头用 text_disabled。
+        let bg = if enabled { dd.bg(pal) } else { pal.surface_alt };
+        let text_color = if enabled { dd.text(pal) } else { pal.text_disabled };
+        let chevron = if enabled { dd.chevron(pal) } else { pal.text_disabled };
+        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused || self.hover { dd.border_focus(pal) } else { dd.border(pal) };
         let bw = if focused { 1.8 } else { 1.5 };
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         // 当前选项文本（左侧，留出右侧 chevron）。
         let tr = Rect::new(bounds.x + PAD_X, bounds.y, bounds.w - 2 * PAD_X - CHEVRON_W, bounds.h);
-        canvas.draw_text(self.current(), tr, dd.text(pal), Align::Start, style.font_family.as_deref(), style.font_size);
+        canvas.draw_text(self.current(), tr, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
 
         // 右侧下拉箭头 ▼（两段线）。
         let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
-        let p = Paint::fill(dd.chevron(pal));
+        let p = Paint::fill(chevron);
         canvas.draw_line(cx - 4.0, cy - 2.0, cx, cy + 3.0, 1.6, &p);
         canvas.draw_line(cx, cy + 3.0, cx + 4.0, cy - 2.0, 1.6, &p);
     }

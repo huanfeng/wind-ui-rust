@@ -180,7 +180,7 @@ let icon = ImageContent::from_bytes(base).tint(Color::WHITE)
 Element::button("X").icon_content(icon);
 Element::image_content(icon);   // 也可作独立控件
 ```
-> 按钮已内建：`.enabled(Rc<Cell<bool>>)` / `.disabled(bool)` 控制禁用——禁用按钮不响应交互、不参与 Tab，背景/图标/文字统一置灰。其它控件按此 pattern 接入。
+> **禁用是核心级通用能力**：`.enabled(Rc<Cell<bool>>)` / `.disabled(bool)` 可用于**任意控件或容器**。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 
