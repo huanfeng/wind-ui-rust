@@ -5,6 +5,9 @@
 //!
 //! 为免捆绑二进制资源，演示图均用 `image_rgba` 程序化生成。
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use windui::prelude::*;
 
 const FG: u32 = 0x2D3436;
@@ -43,6 +46,11 @@ fn plus_icon(size: u32) -> Vec<u8> {
         }
     }
     v
+}
+
+/// 生成 size×size 纯色圆角图标（用作列表行图标）。
+fn solid(size: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+    [r, g, b, 255].repeat((size * size) as usize)
 }
 
 fn card(title: &str, body: Element) -> Element {
@@ -109,12 +117,29 @@ fn main() {
             ),
         ));
 
+    // 列表行图标：list_icons 让每行带前置图标（图标随选中/悬停状态调制）。
+    let picked = Rc::new(Cell::new(0usize));
+    let icon_list = Element::list_icons(
+        vec![
+            ("收件箱", ImageContent::from_rgba(24, 24, &solid(24, 0x4C, 0x8B, 0xF5))),
+            ("已发送", ImageContent::from_rgba(24, 24, &solid(24, 0x2E, 0xC4, 0x8B))),
+            ("草稿箱", ImageContent::from_rgba(24, 24, &solid(24, 0xF5, 0xA6, 0x23))),
+            ("垃圾箱", ImageContent::from_rgba(24, 24, &solid(24, 0xE5, 0x48, 0x4D))),
+        ],
+        picked.clone(),
+    )
+    .height(150)
+    .width_match()
+    .bg(Color::hex(0xF6F8FA))
+    .corner(8.0);
+
     let body = Element::col()
         .width_match()
         .spacing(14)
         .child(card("适配模式（源图 4:3，框 96×72）", fit_row))
         .child(card("圆角裁剪 & 占位", corner_row))
-        .child(card("状态：正常/禁用 + 单色图标着色", state_row));
+        .child(card("状态：正常/禁用 + 单色图标着色", state_row))
+        .child(card("列表行图标（list_icons）", icon_list));
 
     let ui = Element::stack().fill().bg(Color::hex(BG)).child(
         Element::col()
@@ -125,7 +150,7 @@ fn main() {
             .child(Element::scroll().fill().child(body)),
     );
 
-    App::new("windui — 图片示例", 480, 640)
+    App::new("windui — 图片示例", 480, 760)
         .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)

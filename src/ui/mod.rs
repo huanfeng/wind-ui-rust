@@ -513,6 +513,20 @@ impl Element {
         scroll
     }
 
+    /// 带前置图标的单选列表：`items` 为 (标签, 图标内容) 列表。其余同 `list`。
+    /// 图标用 `ImageContent`，可链 `.fit()`/状态换图等；行图标随选中/悬停状态调制。
+    pub fn list_icons(
+        items: Vec<(impl Into<String>, ImageContent)>,
+        selected: Rc<Cell<usize>>,
+    ) -> Self {
+        let mut scroll = Self::scroll().fill();
+        for (i, (label, icon)) in items.into_iter().enumerate() {
+            let row = list::ListRow::new(label.into(), selected.clone(), i).with_icon(icon);
+            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match().height(list::ROW_H));
+        }
+        scroll
+    }
+
     /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
     pub fn progress(value: Rc<Cell<f32>>) -> Self {
         Self::base(Layout::None).widget(progress::ProgressBar::determinate(value))

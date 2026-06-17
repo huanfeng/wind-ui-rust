@@ -9,19 +9,24 @@ use std::rc::Rc;
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
+use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::ImageContent;
 
 /// 行高（逻辑 px）。
 pub const ROW_H: i32 = 36;
 const PAD_X: i32 = 12;
+/// 行内图标与文字间距。
+const ICON_GAP: i32 = 8;
 
-/// 单个列表行：点击设置共享选中索引，选中/悬停高亮。
+/// 单个列表行：点击设置共享选中索引，选中/悬停高亮。可选前置图标（复用 `ImageContent`）。
 /// 事件契约与 `containers::TabButton` 同构，两者应保持同步。
 pub struct ListRow {
     label: String,
+    icon: Option<ImageContent>,
     group: Rc<Cell<usize>>,
     index: usize,
     hover: bool,
@@ -29,10 +34,25 @@ pub struct ListRow {
 
 impl ListRow {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
-        Self { label, group, index, hover: false }
+        Self { label, icon: None, group, index, hover: false }
+    }
+    /// 附带前置图标。
+    pub fn with_icon(mut self, icon: ImageContent) -> Self {
+        self.icon = Some(icon);
+        self
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
+    }
+    /// 行的视觉状态（供图标调制）：选中 > 悬停 > 普通。
+    fn visual_state(&self) -> VisualState {
+        if self.selected() {
+            VisualState::Selected
+        } else if self.hover {
+            VisualState::Hover
+        } else {
+            VisualState::Normal
+        }
     }
 }
 
@@ -55,8 +75,18 @@ impl Widget for ListRow {
         if sel {
             canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent));
         }
+        // 前置图标：方形、垂直居中；文字相应右移。
+        let mut text_x = bounds.x + PAD_X;
+        if let Some(icon) = &self.icon {
+            let side = (bounds.h - 14).max(0);
+            let iy = bounds.y + (bounds.h - side) / 2;
+            let istyle = Style { corner_radius: 0.0, ..style.clone() };
+            icon.paint_into(Rect::new(bounds.x + PAD_X, iy, side, side), canvas, &istyle, self.visual_state());
+            text_x = bounds.x + PAD_X + side + ICON_GAP;
+        }
         let color = if sel { lt.selected_text(pal) } else { lt.text(pal) };
-        let tr = Rect::new(bounds.x + PAD_X, bounds.y, bounds.w - 2 * PAD_X, bounds.h);
+        let tw = (bounds.right() - PAD_X - text_x).max(0);
+        let tr = Rect::new(text_x, bounds.y, tw, bounds.h);
         canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
         // 键盘焦点时描边（仅当前焦点行）。
         let _ = focused;
@@ -99,5 +129,46 @@ impl Widget for ListRow {
 
     fn focusable(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::image::{Fit, Image};
+    use crate::render::SkiaCanvas;
+    use tiny_skia::Pixmap;
+
+    #[test]
+    fn row_with_icon_paints_icon_area() {
+        let group = Rc::new(Cell::new(0));
+        let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
+        let row = ListRow::new("Inbox".into(), group, 0)
+            .with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
+        let mut pm = Pixmap::new(200, ROW_H as u32).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            row.paint(
+                Rect::new(0, 0, 200, ROW_H),
+                Rect::new(0, 0, 200, ROW_H),
+                false,
+                &mut c,
+                &Style::default(),
+            );
+        }
+        // 图标方块中心（PAD_X 起、垂直居中）应为红色。
+        let side = ROW_H - 14;
+        let p = pm.pixel((PAD_X + side / 2) as u32, (ROW_H / 2) as u32).unwrap();
+        assert!(p.red() > 180 && p.green() < 90, "行图标应绘制红色，实得 ({},{},{})", p.red(), p.green(), p.blue());
+    }
+
+    #[test]
+    fn row_visual_state_tracks_selection() {
+        let group = Rc::new(Cell::new(1));
+        let selected = ListRow::new("A".into(), group.clone(), 1);
+        assert_eq!(selected.visual_state(), VisualState::Selected);
+        let other = ListRow::new("B".into(), group, 2);
+        assert_eq!(other.visual_state(), VisualState::Normal);
     }
 }
