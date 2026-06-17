@@ -124,7 +124,7 @@ impl Widget for TabButton {
         let icon_extra = if self.icon.is_some() { t.h + TAB_ICON_GAP } else { 0 };
         Size::new(t.w + 24 + icon_extra, t.h + 16)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, tab) = (&th.palette, &th.tab);
         let sel = self.selected();

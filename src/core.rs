@@ -4,6 +4,9 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::event::{Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind};
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
@@ -35,13 +38,14 @@ pub trait Widget {
         Size::ZERO
     }
     /// 绘制内容。`bounds`=节点绝对全矩形，`content`=扣除 padding 后的内容矩形，
-    /// `focused`=本节点是否持有键盘焦点。背景/边框由核心层统一绘制；
-    /// 自绘控件（如 Button）可用 `bounds` 画全尺寸背景。
+    /// `focused`=本节点是否持有键盘焦点，`enabled`=本节点有效启用态（已并入父链继承；
+    /// 交互控件据此置灰）。背景/边框由核心层统一绘制；自绘控件可用 `bounds` 画全尺寸背景。
     fn paint(
         &self,
         _bounds: Rect,
         _content: Rect,
         _focused: bool,
+        _enabled: bool,
         _canvas: &mut dyn Canvas,
         _style: &Style,
     ) {
@@ -83,6 +87,10 @@ impl Node {
     pub fn effective_visible(&self) -> bool {
         self.visible && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
+    /// 本节点自身启用态（不含父链继承）。
+    pub fn own_enabled(&self) -> bool {
+        self.enabled.as_ref().is_none_or(|c| c.get())
+    }
 }
 
 /// 容器布局算法。`None` 表示叶子。
@@ -114,6 +122,9 @@ pub struct Node {
     /// 运行期可见条件（如 Tab 页绑定选中项、Dialog 绑定显示标志）。
     /// 与 `visible` 取与：返回 false 则该帧不参与测量/布局/绘制/命中。
     pub vis_cond: Option<Box<dyn Fn() -> bool>>,
+    /// 自身启用标志（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
+    /// 跳焦点，并把启用态传入 `Widget::paint` 供控件置灰。
+    pub enabled: Option<Rc<Cell<bool>>>,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
@@ -557,15 +568,17 @@ impl Tree {
     /// 从根递归绘制到 canvas。
     pub fn paint(&self, canvas: &mut dyn Canvas) {
         if let Some(root) = self.root {
-            self.paint_node(canvas, root, Point::new(0, 0));
+            self.paint_node(canvas, root, Point::new(0, 0), true);
         }
     }
 
-    fn paint_node(&self, canvas: &mut dyn Canvas, id: NodeId, origin: Point) {
+    fn paint_node(&self, canvas: &mut dyn Canvas, id: NodeId, origin: Point, parent_enabled: bool) {
         let n = match self.get(id) {
             Some(n) if n.effective_visible() => n,
             _ => return,
         };
+        // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
+        let enabled = parent_enabled && n.own_enabled();
         let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
         if abs.is_empty() {
             return;
@@ -583,7 +596,7 @@ impl Tree {
         }
 
         let content = abs.inset(n.padding);
-        n.widget.paint(abs, content, n.focused, canvas, &n.style);
+        n.widget.paint(abs, content, n.focused, enabled, canvas, &n.style);
 
         // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
         if n.focused && self.focus_ring_visible {
@@ -596,12 +609,12 @@ impl Tree {
             canvas.save();
             canvas.clip_rect(content);
             for &c in &n.children {
-                self.paint_node(canvas, c, child_origin);
+                self.paint_node(canvas, c, child_origin, enabled);
             }
             canvas.restore();
         } else {
             for &c in &n.children {
-                self.paint_node(canvas, c, child_origin);
+                self.paint_node(canvas, c, child_origin, enabled);
             }
         }
 
@@ -735,6 +748,23 @@ pub struct DispatchResult {
 }
 
 impl Tree {
+    /// 节点有效启用态：自身与所有祖先均启用才为 true（父链继承）。
+    pub fn node_enabled(&self, id: NodeId) -> bool {
+        let mut cur = Some(id);
+        while let Some(i) = cur {
+            match self.get(i) {
+                Some(n) => {
+                    if !n.own_enabled() {
+                        return false;
+                    }
+                    cur = n.parent;
+                }
+                None => break,
+            }
+        }
+        true
+    }
+
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
     pub fn abs_bounds(&self, id: NodeId) -> Rect {
         let mut r = match self.get(id) {
@@ -883,7 +913,8 @@ impl Tree {
 
     fn collect_focusable(&self, id: NodeId, out: &mut Vec<NodeId>) {
         if let Some(n) = self.get(id) {
-            if !n.effective_visible() {
+            if !n.effective_visible() || !n.own_enabled() {
+                // 禁用子树整体退出 Tab 导航（own_enabled 在递归中实现父链继承）。
                 return;
             }
             if n.widget.focusable() {
@@ -903,6 +934,10 @@ impl Tree {
     /// 令该控件退化为哑控件；重入 self 则内层事件落到 EmptyWidget 被丢弃。
     /// 需要这类操作时应改用命令队列在分发结束后统一执行。
     fn call_on_event(&mut self, id: NodeId, ev: &Event) -> (bool, EventOutcome) {
+        // 禁用节点（含父链禁用）不接收任何事件：不消费 → 自然冒泡到祖先。
+        if !self.node_enabled(id) {
+            return (false, EventOutcome::default());
+        }
         let mut widget = match self.get_mut(id) {
             Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
             None => return (false, EventOutcome::default()),
@@ -1266,6 +1301,42 @@ mod tests {
             .child(Element::button("B"));
         let tree = layout(root, 300, 50);
         assert_eq!(tree.focusable_order().len(), 2, "应收集到 2 个可聚焦按钮");
+    }
+
+    #[test]
+    fn disabled_button_ignores_click_and_skips_focus() {
+        let clicks = Rc::new(Cell::new(0));
+        let c = clicks.clone();
+        let root = Element::col()
+            .width(200)
+            .height(100)
+            .padding(10)
+            .child(Element::button("OK").on_click(move |_| c.set(c.get() + 1)).disabled(true));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 100), &mut te);
+        let btn = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(btn);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 0, "禁用按钮不应触发点击");
+        assert!(!tree.focusable_order().contains(&btn), "禁用按钮不应进入焦点链");
+        assert!(!tree.node_enabled(btn), "node_enabled 应为 false");
+    }
+
+    #[test]
+    fn disabled_container_propagates_to_children() {
+        // 禁用容器 → 内部按钮均不可聚焦（父链继承）。
+        let root = Element::col()
+            .disabled(true)
+            .child(Element::button("A"))
+            .child(Element::button("B"));
+        let tree = layout(root, 200, 100);
+        assert_eq!(tree.focusable_order().len(), 0, "禁用容器内按钮均不可聚焦");
     }
 
     fn click(tree: &mut Tree, id: NodeId) {

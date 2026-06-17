@@ -39,14 +39,17 @@ impl Widget for CheckBox {
         let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
+        // 禁用：强调色降为灰轨道、文字用 text_disabled。
+        let accent = if enabled { tg.accent(p) } else { p.track };
+        let text_color = if enabled { style.fg } else { p.text_disabled };
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
         let on = self.state.get();
         if on {
-            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(tg.accent(p)));
+            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(accent));
             // 勾：两段线
             let paint = Paint::fill(p.on_accent);
             canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
@@ -56,7 +59,7 @@ impl Widget for CheckBox {
             canvas.stroke_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, 1.5, &Paint::fill(tg.track(p)));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
-        canvas.draw_text(&self.label, text_rect, style.fg, Align::Start, style.font_family.as_deref(), style.font_size);
+        canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -102,7 +105,7 @@ impl Widget for Switch {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::new(44, 24)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, _style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, _style: &Style) {
         let h = 24.min(bounds.h);
         let w = 44.min(bounds.w);
         let x = bounds.x as f32;
@@ -110,7 +113,8 @@ impl Widget for Switch {
         let on = self.state.get();
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
-        let track = if on { tg.accent(p) } else { tg.track(p) };
+        // 禁用：开态轨道也降为灰，整体弱化。
+        let track = if !enabled { p.track } else if on { tg.accent(p) } else { tg.track(p) };
         canvas.fill_round_rect(x, y, w as f32, h as f32, h as f32 / 2.0, &Paint::fill(track));
         let r = (h - 6) as f32 / 2.0;
         let knob_cx = if on { x + w as f32 - 3.0 - r } else { x + 3.0 + r };
@@ -166,22 +170,25 @@ impl Widget for RadioButton {
         let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
+        // 禁用：强调色降为灰、文字用 text_disabled。
+        let accent = if enabled { tg.accent(p) } else { p.track };
+        let text_color = if enabled { style.fg } else { p.text_disabled };
         let cy = bounds.y + bounds.h / 2;
         let cx = bounds.x + BOX_SIZE / 2;
         let outer = BOX_SIZE as f32 / 2.0;
         if self.selected() {
-            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(tg.accent(p)));
+            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(accent));
             canvas.fill_circle(cx as f32, cy as f32, outer - 5.0, &Paint::fill(tg.knob(p)));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 8.0, &Paint::fill(tg.accent(p)));
+            canvas.fill_circle(cx as f32, cy as f32, outer - 8.0, &Paint::fill(accent));
         } else {
             canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(tg.track(p)));
             canvas.fill_circle(cx as f32, cy as f32, outer - 1.5, &Paint::fill(tg.knob(p)));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
-        canvas.draw_text(&self.label, text_rect, style.fg, Align::Start, style.font_family.as_deref(), style.font_size);
+        canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -234,7 +241,7 @@ impl Widget for Slider {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::new(120, 2 * KNOB_R)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, _style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, _style: &Style) {
         let v = self.value.get().clamp(0.0, 1.0);
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
         let r = KNOB_R as f32;
@@ -244,12 +251,14 @@ impl Widget for Slider {
         // 轨道
         let th = crate::theme::current();
         let (pal, tg) = (&th.palette, &th.toggle);
+        // 禁用：已填充与钮芯的强调色降为灰。
+        let accent = if enabled { tg.accent(pal) } else { pal.track };
         canvas.fill_round_rect(x0, cy - 2.0, (x1 - x0).max(0.0), 4.0, 2.0, &Paint::fill(tg.track(pal)));
         // 已填充
-        canvas.fill_round_rect(x0, cy - 2.0, (knob_x - x0).max(0.0), 4.0, 2.0, &Paint::fill(tg.accent(pal)));
+        canvas.fill_round_rect(x0, cy - 2.0, (knob_x - x0).max(0.0), 4.0, 2.0, &Paint::fill(accent));
         // 钮
         canvas.fill_circle(knob_x, cy, r, &Paint::fill(tg.knob(pal)));
-        canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(tg.accent(pal)));
+        canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(accent));
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -837,12 +846,15 @@ impl Widget for TextInput {
         let h = if self.is_multiline() { lh * 5 + 2 * TEXT_PAD } else { (style.font_size as i32) + 16 };
         Size::new(160, h)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, inp) = (&th.palette, &th.input);
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
         let corner = inp.corner(&th.metrics);
-        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(inp.bg(pal)));
+        // 禁用：背景弱化、正文用 text_disabled。
+        let bg = if enabled { inp.bg(pal) } else { pal.surface_alt };
+        let text_color = if enabled { style.fg } else { pal.text_disabled };
+        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused { inp.border_focus(pal) } else { inp.border(pal) };
         canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
@@ -941,7 +953,7 @@ impl Widget for TextInput {
                 if ln.end > ln.start {
                     let s: String = chars[ln.start..ln.end].iter().collect();
                     let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
-                    canvas.draw_text(&s, tr, style.fg, Align::Start, family, fsize);
+                    canvas.draw_text(&s, tr, text_color, Align::Start, family, fsize);
                 }
             }
         }

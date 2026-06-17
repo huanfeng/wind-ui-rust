@@ -61,7 +61,7 @@ impl Widget for ListRow {
         Size::new(avail.w.max(0), ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, lt) = (&th.palette, &th.list);
         let sel = self.selected();
@@ -153,6 +153,7 @@ mod tests {
                 Rect::new(0, 0, 200, ROW_H),
                 Rect::new(0, 0, 200, ROW_H),
                 false,
+                true,
                 &mut c,
                 &Style::default(),
             );

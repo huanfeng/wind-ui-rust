@@ -184,7 +184,7 @@ impl Widget for ImageView {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         self.content.intrinsic_size()
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         // 独立图片控件无交互状态，按 Normal 绘制。
         self.content.paint_into(content, canvas, style, VisualState::Normal);
     }

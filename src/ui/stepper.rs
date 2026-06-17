@@ -69,12 +69,15 @@ impl Widget for Stepper {
         Size::new(120, (style.font_size as i32) + 16)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, st) = (&th.palette, &th.stepper);
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
         let corner = th.metrics.corner_md;
-        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(st.bg(pal)));
+        // 禁用：背景弱化、值与 +/- 全置灰。
+        let bg = if enabled { st.bg(pal) } else { pal.surface_alt };
+        let value_color = if enabled { st.text(pal) } else { pal.text_disabled };
+        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused { pal.accent } else { st.border(pal) };
         canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
@@ -95,8 +98,8 @@ impl Widget for Stepper {
         // − / + 字形（按钮色，禁用端变灰）。
         let at_min = self.value.get() <= self.min;
         let at_max = self.value.get() >= self.max;
-        let minus_c = if at_min { pal.text_disabled } else { st.button(pal) };
-        let plus_c = if at_max { pal.text_disabled } else { st.button(pal) };
+        let minus_c = if !enabled || at_min { pal.text_disabled } else { st.button(pal) };
+        let plus_c = if !enabled || at_max { pal.text_disabled } else { st.button(pal) };
         let minus_r = Rect::new(bounds.x, bounds.y, BTN_W, bounds.h);
         let plus_r = Rect::new(bounds.right() - BTN_W, bounds.y, BTN_W, bounds.h);
         canvas.draw_text("\u{2212}", minus_r, minus_c, Align::Center, family, fsize);
@@ -104,7 +107,7 @@ impl Widget for Stepper {
 
         // 中部值（窄控件下宽度兜底为非负）。
         let mid = Rect::new(bounds.x + BTN_W, bounds.y, (bounds.w - 2 * BTN_W).max(0), bounds.h);
-        canvas.draw_text(&self.display(), mid, st.text(pal), Align::Center, family, fsize);
+        canvas.draw_text(&self.display(), mid, value_color, Align::Center, family, fsize);
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
