@@ -6,15 +6,19 @@ use std::rc::Rc;
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
+use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::ImageContent;
 
 /// 滚动条右缘可抓取宽度（与 core::hit_node 的命中区一致）。
 const SCROLLBAR_HIT_W: i32 = 10;
 /// 滚动条 thumb 最小高（与 core paint 一致）。
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+/// 标签内图标与文字间距。
+const TAB_ICON_GAP: i32 = 6;
 
 /// 滚动容器内部 widget：处理滚轮 + 拖动滚动条。
 #[derive(Default)]
@@ -81,9 +85,10 @@ impl Widget for ModalScrim {
     }
 }
 
-/// 标签按钮：点击切换共享选中索引，选中时高亮 + 底部指示条。
+/// 标签按钮：点击切换共享选中索引，选中时高亮 + 底部指示条。可选前置图标。
 pub struct TabButton {
     label: String,
+    icon: Option<ImageContent>,
     group: Rc<Cell<usize>>,
     index: usize,
     hover: bool,
@@ -91,17 +96,33 @@ pub struct TabButton {
 
 impl TabButton {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
-        Self { label, group, index, hover: false }
+        Self { label, icon: None, group, index, hover: false }
+    }
+    /// 附带前置图标。
+    pub fn with_icon(mut self, icon: ImageContent) -> Self {
+        self.icon = Some(icon);
+        self
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
+    }
+    /// 标签视觉状态（供图标调制）：选中 > 悬停 > 普通。
+    fn visual_state(&self) -> VisualState {
+        if self.selected() {
+            VisualState::Selected
+        } else if self.hover {
+            VisualState::Hover
+        } else {
+            VisualState::Normal
+        }
     }
 }
 
 impl Widget for TabButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
-        Size::new(t.w + 24, t.h + 16)
+        let icon_extra = if self.icon.is_some() { t.h + TAB_ICON_GAP } else { 0 };
+        Size::new(t.w + 24 + icon_extra, t.h + 16)
     }
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
@@ -114,7 +135,20 @@ impl Widget for TabButton {
         } else {
             tab.inactive(pal)
         };
-        canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
+        // 有图标：图标 + 文字作为整体水平居中（图标在左）；否则文字整体居中。
+        if let Some(icon) = &self.icon {
+            let ts = canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
+            let ih = ts.h;
+            let total_w = ih + TAB_ICON_GAP + ts.w;
+            let sx = bounds.x + ((bounds.w - total_w) / 2).max(0);
+            let iy = bounds.y + ((bounds.h - ih) / 2).max(0);
+            let istyle = Style { corner_radius: 0.0, ..style.clone() };
+            icon.paint_into(Rect::new(sx, iy, ih, ih), canvas, &istyle, self.visual_state());
+            let tr = Rect::new(sx + ih + TAB_ICON_GAP, bounds.y, ts.w + 2, bounds.h);
+            canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
+        } else {
+            canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
+        }
         if sel {
             // 底部指示条
             let y = (bounds.y + bounds.h - 3) as f32;
@@ -164,5 +198,32 @@ impl Widget for TabButton {
     }
     fn focusable(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::image::{Fit, Image};
+    use crate::text::NullTextEngine;
+
+    #[test]
+    fn tab_icon_widens_measure() {
+        let g = Rc::new(Cell::new(0));
+        let style = Style::default();
+        let mut te = NullTextEngine;
+        let w0 = TabButton::new("Home".into(), g.clone(), 0).measure(Size::ZERO, &style, &mut te).w;
+        let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
+        let iconed =
+            TabButton::new("Home".into(), g, 0).with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
+        let w1 = iconed.measure(Size::ZERO, &style, &mut te).w;
+        assert!(w1 > w0, "带图标标签应更宽：w0={w0}, w1={w1}");
+    }
+
+    #[test]
+    fn tab_visual_state_tracks_selection() {
+        let g = Rc::new(Cell::new(2));
+        assert_eq!(TabButton::new("A".into(), g.clone(), 2).visual_state(), VisualState::Selected);
+        assert_eq!(TabButton::new("B".into(), g, 0).visual_state(), VisualState::Normal);
     }
 }
