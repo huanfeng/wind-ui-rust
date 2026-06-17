@@ -12,7 +12,7 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(16)
-        .background(Color::hex(0xF5F6FA))
+        .bg(Color::hex(0xF5F6FA))
         .child(
             Element::label("点击按钮 / Tab 切换焦点 / 回车激活")
                 .font_size(18.0)
@@ -33,7 +33,7 @@ fn main() {
             Element::col()
                 .width_match()
                 .weight(1.0)
-                .background(Color::WHITE)
+                .bg(Color::WHITE)
                 .corner(10.0)
                 .border(Color::hex(0xDFE6E9), 1)
                 .padding(20)
@@ -63,7 +63,7 @@ fn main() {
         );
 
     App::new("Phase 3 — 按钮与事件", 560, 360)
-        .background(Color::hex(0xF5F6FA))
+        .bg(Color::hex(0xF5F6FA))
         .screenshot_from_args()
         .content(ui)
         .run();

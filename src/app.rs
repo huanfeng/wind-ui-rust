@@ -83,7 +83,8 @@ impl App {
         }
     }
 
-    pub fn background(mut self, c: Color) -> Self {
+    /// 窗口背景色。命名与 `Element::bg` 统一。
+    pub fn bg(mut self, c: Color) -> Self {
         self.cfg.bg = c;
         self
     }

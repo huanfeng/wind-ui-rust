@@ -223,7 +223,7 @@ impl Element {
     pub fn stack() -> Self {
         Self::base(Layout::Frame)
     }
-    /// 叶子（无子布局）。配合 `.background()` + 固定尺寸即为色块。
+    /// 叶子（无子布局）。配合 `.bg()` + 固定尺寸即为色块。
     pub fn leaf() -> Self {
         Self::base(Layout::None)
     }
@@ -266,10 +266,15 @@ impl Element {
         Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
     }
 
-    /// 配置内含的 TextInput（若本 Element 非 TextInput 则为空操作）。
+    /// 配置内含的 TextInput。`password()/multiline()/wrap()` 是 text_input 专属修饰符；
+    /// 链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略（无类型分裂代价）。
     fn config_text_input(mut self, f: impl FnOnce(&mut inputs::TextConfig)) -> Self {
-        if let Some(ti) = self.widget.as_any_mut().and_then(|a| a.downcast_mut::<TextInput>()) {
-            f(ti.config_mut());
+        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<TextInput>()) {
+            Some(ti) => f(ti.config_mut()),
+            None => debug_assert!(
+                false,
+                "password()/multiline()/wrap() 只能用于 Element::text_input(..)"
+            ),
         }
         self
     }
@@ -344,16 +349,17 @@ impl Element {
     /// divider 不会随之更新；届时应改为读主题的专用 widget。
     pub fn divider() -> Self {
         let c = crate::theme::current().palette.divider;
-        Self::base(Layout::None).width_match().height(1).background(c)
+        Self::base(Layout::None).width_match().height(1).bg(c)
     }
 
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
-    pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(&str, Element)>) -> Self {
+    /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
+    pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(impl Into<String>, Element)>) -> Self {
         let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, page)) in pages.into_iter().enumerate() {
-            let tab = containers::TabButton::new(title.to_string(), selected.clone(), i);
+            let tab = containers::TabButton::new(title.into(), selected.clone(), i);
             bar = bar.child(Element::base(Layout::None).widget(tab));
             let sel2 = selected.clone();
             content = content.child(page.fill().visible_when(move || sel2.get() == i));
@@ -367,7 +373,7 @@ impl Element {
         Element::stack()
             .fill()
             .widget(containers::ModalScrim)
-            .background(Color::rgba(0, 0, 0, 120))
+            .bg(Color::rgba(0, 0, 0, 120))
             .visible_when(move || show.get())
             .child(content.align(Align::Center))
     }
@@ -447,7 +453,8 @@ impl Element {
     }
 
     // ---- 样式 ----
-    pub fn background(mut self, c: Color) -> Self {
+    /// 背景填充色。命名与 `Style.bg` / `EventCtx::set_bg` / `fg` 保持一致（统一缩写）。
+    pub fn bg(mut self, c: Color) -> Self {
         self.style.bg = Some(c);
         self
     }

@@ -1,6 +1,7 @@
 //! windui — 轻量 Windows 桌面 GUI 框架。
 //!
-//! 见 `docs/DESIGN.md` 架构设计与 `docs/ROADMAP.md` 实施路线图。
+//! - 第三方使用指南（API 风格/规范/扩展）：`docs/API_GUIDE.md`
+//! - 架构设计：`docs/DESIGN.md`；实施路线图：`docs/ROADMAP.md`
 
 // 图形绘制 API 以标量坐标传参（x,y,w,h,radius,width,paint）是有意设计，放宽该 lint。
 #![allow(clippy::too_many_arguments)]

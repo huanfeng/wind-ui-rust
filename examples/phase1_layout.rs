@@ -5,7 +5,7 @@
 use windui::prelude::*;
 
 fn card(bg: u32) -> Element {
-    Element::leaf().background(Color::hex(bg)).corner(8.0).fill()
+    Element::leaf().bg(Color::hex(bg)).corner(8.0).fill()
 }
 
 fn main() {
@@ -13,7 +13,7 @@ fn main() {
         .fill()
         .padding(16)
         .spacing(12)
-        .background(Color::hex(0x1E1E2E))
+        .bg(Color::hex(0x1E1E2E))
         // 顶部条：固定高度，水平排列三块等宽（weight）色卡
         .child(
             Element::row()
@@ -36,7 +36,7 @@ fn main() {
                         .fill()
                         .weight(1.0)
                         .spacing(12)
-                        .background(Color::hex(0x313244))
+                        .bg(Color::hex(0x313244))
                         .corner(8.0)
                         .padding(12)
                         .child(card(0xF9E2AF).height(40).width_match())
@@ -44,7 +44,7 @@ fn main() {
                         .child(
                             Element::leaf()
                                 .size(80, 80)
-                                .background(Color::hex(0xCBA6F7))
+                                .bg(Color::hex(0xCBA6F7))
                                 .corner(40.0)
                                 .align(Align::Center),
                         )
@@ -63,7 +63,7 @@ fn main() {
         );
 
     App::new("Phase 1 — 布局", 560, 420)
-        .background(Color::hex(0x1E1E2E))
+        .bg(Color::hex(0x1E1E2E))
         .screenshot_from_args()
         .content(ui)
         .run();

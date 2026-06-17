@@ -8,7 +8,7 @@ use windui::prelude::*;
 
 fn main() {
     App::new("Phase 0 — windui", 480, 320)
-        .background(Color::hex(0x2B2B3C))
+        .bg(Color::hex(0x2B2B3C))
         .screenshot_from_args()
         .on_render(|pixmap: &mut Pixmap, size: Size| {
             // 在中心画一个橙色圆角块，验证 tiny-skia 绘制 + 呈现链路。

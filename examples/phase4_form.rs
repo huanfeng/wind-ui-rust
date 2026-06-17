@@ -34,7 +34,7 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(14)
-        .background(Color::hex(0xF5F6FA))
+        .bg(Color::hex(0xF5F6FA))
         .child(
             Element::label("设置面板")
                 .font_size(22.0)
@@ -65,7 +65,7 @@ fn main() {
         );
 
     App::new("Phase 4 — 输入控件", 480, 420)
-        .background(Color::hex(0xF5F6FA))
+        .bg(Color::hex(0xF5F6FA))
         .screenshot_from_args()
         .content(ui)
         .run();

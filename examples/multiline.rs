@@ -27,7 +27,7 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .padding(18)
         .spacing(12)
         .child(Element::label("多行 / 密码 文本框").font_size(22.0).fg(Color::hex(0x1A1A2E)).height(30).width_match())
@@ -37,7 +37,7 @@ fn main() {
                 .multiline()
                 .width_match()
                 .height(96)
-                .background(Color::hex(CARD)),
+                .bg(Color::hex(CARD)),
         )
         .child(label("不换行多行（长行水平滚动）"))
         .child(
@@ -52,7 +52,7 @@ fn main() {
         .child(Element::text_input(pwd, "输入密码").password().width_match());
 
     App::new("windui — 多行/密码", 420, 360)
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

@@ -21,7 +21,7 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .padding(20)
         .spacing(10)
         .child(Element::label("下拉选择").font_size(22.0).fg(Color::hex(0x1A1A2E)).height(30).width_match())
@@ -31,7 +31,7 @@ fn main() {
         .child(Element::dropdown(vec!["低", "中", "高", "极致"], quality.clone()).width(220));
 
     App::new("windui — 下拉选择", 320, 280)
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

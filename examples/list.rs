@@ -19,7 +19,7 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .padding(20)
         .spacing(10)
         .child(Element::label("列表（单选）").font_size(22.0).fg(Color::hex(0x1A1A2E)).height(30).width_match())
@@ -27,13 +27,13 @@ fn main() {
             Element::list(items, sel)
                 .width_match()
                 .weight(1.0)
-                .background(Color::WHITE)
+                .bg(Color::WHITE)
                 .corner(10.0)
                 .border(Color::hex(0xE2E6EA), 1),
         );
 
     App::new("windui — 列表", 300, 360)
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

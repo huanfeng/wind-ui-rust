@@ -14,7 +14,7 @@ fn list_item(i: usize) -> Element {
         .height(40)
         .cross(Align::Center)
         .padding_xy(12, 0)
-        .background(if i.is_multiple_of(2) { Color::WHITE } else { Color::hex(0xF7F9FB) })
+        .bg(if i.is_multiple_of(2) { Color::WHITE } else { Color::hex(0xF7F9FB) })
         .child(
             Element::label(format!("列表项 #{i:02} — 可滚动内容"))
                 .font_size(15.0)
@@ -30,7 +30,7 @@ fn main() {
     let tab = Rc::new(Cell::new(0usize));
 
     // 列表页：滚动容器装入 20 个条目
-    let mut list = Element::scroll().fill().background(Color::WHITE).corner(8.0);
+    let mut list = Element::scroll().fill().bg(Color::WHITE).corner(8.0);
     for i in 0..20 {
         list = list.child(list_item(i));
     }
@@ -59,7 +59,7 @@ fn main() {
         show.clone(),
         Element::col()
             .width(300)
-            .background(Color::WHITE)
+            .bg(Color::WHITE)
             .corner(12.0)
             .padding(20)
             .spacing(14)
@@ -76,12 +76,12 @@ fn main() {
     // 根：主界面 + 叠加对话框
     let ui = Element::stack()
         .fill()
-        .background(Color::hex(0xEFF1F4))
+        .bg(Color::hex(0xEFF1F4))
         .child(Element::col().fill().padding(16).child(tabs))
         .child(dialog);
 
     App::new("Phase 5 — 容器与导航", 480, 440)
-        .background(Color::hex(0xEFF1F4))
+        .bg(Color::hex(0xEFF1F4))
         .screenshot_from_args()
         .content(ui)
         .run();

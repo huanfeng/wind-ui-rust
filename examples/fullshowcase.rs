@@ -28,7 +28,7 @@ fn row(label: &str, control: Element) -> Element {
 fn card(title: &str, body: Element) -> Element {
     Element::col()
         .width_match()
-        .background(Color::hex(CARD))
+        .bg(Color::hex(CARD))
         .corner(10.0)
         .padding(16)
         .spacing(8)
@@ -92,7 +92,7 @@ fn main() {
     let settings = Element::scroll().fill().child(settings_body);
 
     // 列表页（滚动）
-    let mut list = Element::scroll().fill().background(Color::hex(CARD)).corner(10.0);
+    let mut list = Element::scroll().fill().bg(Color::hex(CARD)).corner(10.0);
     for i in 0u32..24 {
         list = list.child(
             Element::row()
@@ -100,7 +100,7 @@ fn main() {
                 .height(38)
                 .cross(Align::Center)
                 .padding_xy(14, 0)
-                .background(if i.is_multiple_of(2) { Color::hex(CARD) } else { Color::hex(0xF6F8FA) })
+                .bg(if i.is_multiple_of(2) { Color::hex(CARD) } else { Color::hex(0xF6F8FA) })
                 .child(Element::label(format!("历史记录 {i:02}")).font_size(14.0).fg(Color::hex(FG)).weight(1.0))
                 .child(Element::label("查看").font_size(13.0).fg(Color::hex(0x4C8BF5))),
         );
@@ -155,7 +155,7 @@ fn main() {
             )
             .height(160)
             .width_match()
-            .background(Color::hex(0xF6F8FA))
+            .bg(Color::hex(0xF6F8FA))
             .corner(8.0),
         ));
     let components = Element::scroll().fill().child(components_body);
@@ -177,7 +177,7 @@ fn main() {
         show_about.clone(),
         Element::col()
             .width(320)
-            .background(Color::hex(CARD))
+            .bg(Color::hex(CARD))
             .corner(14.0)
             .padding(22)
             .spacing(14)
@@ -194,7 +194,7 @@ fn main() {
 
     let ui = Element::stack()
         .fill()
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .child(
             Element::col()
                 .fill()
@@ -207,7 +207,7 @@ fn main() {
         .child(dialog);
 
     App::new("windui — 综合示例", 520, 560)
-        .background(Color::hex(BG))
+        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

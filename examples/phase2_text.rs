@@ -16,7 +16,7 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(14)
-        .background(Color::hex(0xFFFFFF))
+        .bg(Color::hex(0xFFFFFF))
         .child(
             Element::label("windui 文字渲染")
                 .font_size(28.0)
@@ -39,7 +39,7 @@ fn main() {
             Element::col()
                 .width_match()
                 .height(64)
-                .background(Color::hex(0x6C5CE7))
+                .bg(Color::hex(0x6C5CE7))
                 .corner(8.0)
                 .padding_xy(16, 0)
                 .child(
@@ -58,28 +58,28 @@ fn main() {
                 .child(
                     Element::label("左对齐")
                         .text_align(Align::Start)
-                        .background(Color::hex(0xF0F0F0))
+                        .bg(Color::hex(0xF0F0F0))
                         .weight(1.0)
                         .height_match(),
                 )
                 .child(
                     Element::label("居中")
                         .text_align(Align::Center)
-                        .background(Color::hex(0xF0F0F0))
+                        .bg(Color::hex(0xF0F0F0))
                         .weight(1.0)
                         .height_match(),
                 )
                 .child(
                     Element::label("右对齐")
                         .text_align(Align::End)
-                        .background(Color::hex(0xF0F0F0))
+                        .bg(Color::hex(0xF0F0F0))
                         .weight(1.0)
                         .height_match(),
                 ),
         );
 
     App::new("Phase 2 — 文字", 600, 420)
-        .background(Color::hex(0xFFFFFF))
+        .bg(Color::hex(0xFFFFFF))
         .screenshot_from_args()
         .content(ui)
         .run();

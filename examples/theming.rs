@@ -43,7 +43,7 @@ fn main() {
 
     let card = Element::col()
         .width_match()
-        .background(Color::hex(0xFFFFFF))
+        .bg(Color::hex(0xFFFFFF))
         .corner(12.0)
         .padding(16)
         .spacing(8)

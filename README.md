@@ -40,7 +40,7 @@ fn main() {
         .fill()
         .padding(20)
         .spacing(12)
-        .background(Color::hex(0xF5F6FA))
+        .bg(Color::hex(0xF5F6FA))
         .child(Element::label("Hello, windui!").font_size(22.0).height(32).width_match())
         .child(Element::checkbox("启用功能", on.clone()))
         .child(Element::button("确定").on_click(|ctx| {
