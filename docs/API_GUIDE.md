@@ -136,6 +136,7 @@ Element::slider(value)                            // value: Rc<Cell<f32>> (0..=1
 Element::dropdown(vec!["A", "B"], selected)       // selected: Rc<Cell<usize>>
 Element::stepper(value, min, max, step)           // value: Rc<Cell<f64>>
 Element::list(vec!["行1", "行2"], selected)       // selected: Rc<Cell<usize>>
+Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
 Element::progress(value)                          // value: Rc<Cell<f32>> (确定进度)
 Element::progress_indeterminate()                 // 不确定进度（忙碌动画）
 ```
