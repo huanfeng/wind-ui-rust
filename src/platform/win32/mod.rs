@@ -51,15 +51,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_DROPFILES, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    WM_DROPFILES, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_THICKFRAME, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT,
+    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SWP_FRAMECHANGED, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
 };
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+use windows::Win32::UI::Controls::MARGINS;
 
 use super::AppHandler;
-use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 
 /// 窗口配置。
@@ -82,6 +86,8 @@ pub struct WindowConfig {
     pub screenshot_click: Option<(i32, i32)>,
     /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
     pub tray: Option<tray::Tray>,
+    /// 无标题栏窗口（自定义标题栏）：WM_NCCALCSIZE 让客户区铺满整窗，保留吸附/阴影/缩放。
+    pub frameless: bool,
 }
 
 impl Default for WindowConfig {
@@ -98,6 +104,7 @@ impl Default for WindowConfig {
             screenshot_rclick: None,
             screenshot_click: None,
             tray: None,
+            frameless: false,
         }
     }
 }
@@ -167,6 +174,8 @@ struct WindowState {
     touch: Touch,
     /// 系统托盘状态（None=无托盘）。drop 时自动清理图标。
     tray: Option<tray::TrayState>,
+    /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
+    frameless: bool,
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -226,6 +235,7 @@ impl WindowState {
             last_click: ClickTracker::default(),
             touch: Touch::default(),
             tray: None,
+            frameless: false,
         }
     }
 
@@ -427,6 +437,25 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
         }
     }
 
+    // 无边框窗口：标记状态，扩展 DWM 边框保留窗口投影，并触发非客户区重算
+    // （SWP_FRAMECHANGED → WM_NCCALCSIZE 让客户区铺满整窗）。
+    if cfg.frameless {
+        if let Some(s) = state_from(hwnd) {
+            s.frameless = true;
+        }
+        let margins = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
 
@@ -550,6 +579,17 @@ unsafe extern "system" fn wnd_proc(
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
+        // 无边框：非客户区计算 → 客户区铺满整窗（去系统标题栏/边框）。
+        // 最大化时用默认（含任务栏避让、正确插入边框），非最大化返回 0 即整窗。
+        WM_NCCALCSIZE if wparam.0 != 0 && is_frameless(hwnd) => {
+            if IsZoomed(hwnd).as_bool() {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            } else {
+                LRESULT(0)
+            }
+        }
+        // 无边框：自定义命中——边缘做缩放，拖动区做 HTCAPTION，其余 HTCLIENT。
+        WM_NCHITTEST if is_frameless(hwnd) => handle_nchittest(hwnd, lparam),
         // 客户区光标：按当前悬停控件期望形状设置（链接=手型、文本=I 形）。
         // 仅客户区由我们决定，非客户区（边框/标题栏）交默认处理。
         WM_SETCURSOR => {
@@ -690,6 +730,72 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
     }
 }
 
+/// 该窗口是否为无边框（自定义标题栏）模式。
+unsafe fn is_frameless(hwnd: HWND) -> bool {
+    state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
+}
+
+/// 无边框窗口自定义命中：窗口边缘 N px 内返回缩放命中；否则查拖动区
+/// （HTCAPTION）或普通客户区（HTCLIENT）。
+unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    // 屏幕坐标 → 客户区物理像素。
+    let sx = (lparam.0 & 0xffff) as i16 as i32;
+    let sy = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+    let mut pt = POINT { x: sx, y: sy };
+    let _ = ScreenToClient(hwnd, &mut pt);
+    let mut rc = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rc);
+    let (w, h) = (rc.right, rc.bottom);
+    // 缩放边框宽度（物理像素，按 DPI 放大）。
+    let dpi = GetDpiForWindow(hwnd).max(96);
+    let m = ((8.0 * dpi as f32 / 96.0) as i32).max(4);
+    let (left, right) = (pt.x < m, pt.x >= w - m);
+    let (top, bottom) = (pt.y < m, pt.y >= h - m);
+    let ht: i32 = if top && left {
+        HTTOPLEFT as i32
+    } else if top && right {
+        HTTOPRIGHT as i32
+    } else if bottom && left {
+        HTBOTTOMLEFT as i32
+    } else if bottom && right {
+        HTBOTTOMRIGHT as i32
+    } else if left {
+        HTLEFT as i32
+    } else if right {
+        HTRIGHT as i32
+    } else if top {
+        HTTOP as i32
+    } else if bottom {
+        HTBOTTOM as i32
+    } else {
+        // 非边缘：问宿主该点是否拖动区。
+        let drag = state_from(hwnd)
+            .map(|s| s.handler.window_drag_at(Point::new(pt.x, pt.y)))
+            .unwrap_or(false);
+        if drag {
+            HTCAPTION as i32
+        } else {
+            HTCLIENT as i32
+        }
+    };
+    LRESULT(ht as isize)
+}
+
+/// 事件分发后执行待处理的窗口操作（自定义标题栏按钮）。
+unsafe fn apply_window_op(hwnd: HWND) {
+    let op = state_from(hwnd).and_then(|s| s.handler.take_window_op());
+    match op {
+        Some(WindowOp::Minimize) => {
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        }
+        Some(WindowOp::ToggleMaximize) => {
+            let cmd = if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE };
+            let _ = ShowWindow(hwnd, cmd);
+        }
+        None => {}
+    }
+}
+
 /// 用系统默认程序打开 URL/路径（`ShellExecuteW` 的 "open" 动词）。fire-and-forget，忽略结果。
 pub fn open_url(url: &str) {
     let verb = w!("open");
@@ -783,6 +889,8 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
             s.capturing = false;
         }
     }
+    // 自定义标题栏按钮请求的窗口操作（最小化/最大化）；在可能的关窗之前执行。
+    apply_window_op(hwnd);
     if close {
         let _ = DestroyWindow(hwnd);
     }
@@ -1071,6 +1179,7 @@ unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
     if repaint {
         let _ = InvalidateRect(hwnd, None, false);
     }
+    apply_window_op(hwnd);
     if close {
         let _ = DestroyWindow(hwnd);
     }

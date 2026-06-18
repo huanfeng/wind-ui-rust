@@ -11,6 +11,7 @@ pub mod list;
 pub mod progress;
 pub mod select;
 pub mod stepper;
+pub mod window_buttons;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -29,6 +30,7 @@ pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use link::Link;
 pub use list::ListRow;
+pub use window_buttons::{WindowButton, WindowButtonKind};
 pub use progress::ProgressBar;
 pub use select::Dropdown;
 pub use stepper::Stepper;
@@ -289,6 +291,7 @@ pub struct Element {
     clip_children: bool,
     click: Option<ClickFn>,
     on_drop: Option<DropFn>,
+    window_drag: bool,
     enabled: Option<Rc<Cell<bool>>>,
 }
 
@@ -310,6 +313,7 @@ impl Element {
             clip_children: false,
             click: None,
             on_drop: None,
+            window_drag: false,
             enabled: None,
         }
     }
@@ -358,6 +362,20 @@ impl Element {
     pub fn on_drop_files(mut self, f: impl FnMut(&mut EventCtx, &[std::path::PathBuf]) + 'static) -> Self {
         self.on_drop = Some(Box::new(f));
         self
+    }
+
+    /// 标记为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
+    /// 命中沿父链生效——标记标题栏容器即其内非交互空白处都可拖；落在子按钮/输入等
+    /// 可聚焦控件上不拖（交控件处理）。仅在 `App::frameless()` 窗口有意义。
+    pub fn window_drag(mut self) -> Self {
+        self.window_drag = true;
+        self
+    }
+
+    /// 窗口控制按钮（自定义标题栏用）：最小化 / 最大化-还原 / 关闭。
+    /// 自绘标准图标 + hover/press（关闭键 hover 转红），点击调对应窗口操作。
+    pub fn window_button(kind: window_buttons::WindowButtonKind) -> Self {
+        Self::base(Layout::None).widget(window_buttons::WindowButton::new(kind))
     }
 
     // ---- 链接 ----
@@ -777,6 +795,7 @@ impl Element {
             vis_cond: self.vis_cond,
             enabled: self.enabled,
             on_drop: self.on_drop,
+            window_drag: self.window_drag,
             focused: false,
             clip_children: self.clip_children,
             scroll_y: 0,
@@ -839,6 +858,42 @@ mod tests {
         let mut tree = layout(Element::col().fill());
         let res = tree.dispatch_files(Point::new(50, 50), vec![PathBuf::from("a.txt")]);
         assert!(!res.consumed, "无回调时拖放不消费");
+    }
+
+    #[test]
+    fn window_drag_hits_caption_not_button() {
+        // 标题栏行（window_drag）：左半 Label（非交互）、右侧关闭按钮（可聚焦）。
+        let tree = layout(
+            Element::row()
+                .width_match()
+                .height(40)
+                .window_drag()
+                .child(Element::label("标题").width(120).height(40))
+                .child(Element::window_button(WindowButtonKind::Close).width(46).height(40)),
+        );
+        // Label 区域 → 可拖（拖动窗口）。
+        assert!(tree.drag_hit_at(Point::new(40, 20)), "标题文字区应为拖动区");
+        // 按钮区域 → 不拖（交按钮处理点击）。
+        assert!(!tree.drag_hit_at(Point::new(130, 20)), "按钮区不应拖动窗口");
+    }
+
+    #[test]
+    fn window_button_click_requests_op() {
+        let mut tree = layout(Element::window_button(WindowButtonKind::Minimize).width(46).height(40));
+        let mut hover = None;
+        let mut capture = None;
+        let at = Point::new(20, 20);
+        tree.dispatch_pointer(
+            crate::event::PointerEvent::single(PointerKind::Down, at, crate::event::MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        let res = tree.dispatch_pointer(
+            crate::event::PointerEvent::single(PointerKind::Up, at, crate::event::MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert_eq!(res.window_op, Some(crate::event::WindowOp::Minimize), "最小化按钮点击应请求 Minimize");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use crate::event::{
     CursorShape, Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind,
+    WindowOp,
 };
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
@@ -139,6 +140,9 @@ pub struct Node {
     /// 文件拖放回调（None=不接收拖放）。落点命中本节点或其子节点时，沿父链冒泡
     /// 到首个设了回调的节点触发；放在 fill 容器/根上即等价"全窗拖放"。
     pub on_drop: Option<DropFn>,
+    /// 是否为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
+    /// 命中沿父链继承（标记容器即其内非交互区均可拖），但落在子交互控件上不拖动。
+    pub window_drag: bool,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
@@ -662,6 +666,8 @@ pub(crate) struct EventOutcome {
     menu: Option<MenuRequest>,
     /// 控件请求宿主用系统默认程序打开的 URL/路径（链接点击等）。
     open_url: Option<String>,
+    /// 控件请求的窗口操作（最小化/最大化切换，自定义标题栏按钮触发）。
+    window_op: Option<WindowOp>,
 }
 
 /// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
@@ -754,6 +760,14 @@ impl EventCtx<'_> {
     pub fn open_url(&mut self, url: &str) {
         self.out.open_url = Some(url.to_string());
     }
+    /// 请求最小化窗口（自定义标题栏的最小化按钮）。
+    pub fn minimize(&mut self) {
+        self.out.window_op = Some(WindowOp::Minimize);
+    }
+    /// 请求最大化/还原切换（自定义标题栏的最大化按钮）。
+    pub fn toggle_maximize(&mut self) {
+        self.out.window_op = Some(WindowOp::ToggleMaximize);
+    }
 }
 
 /// 指针/键盘分发的对外结果。
@@ -768,6 +782,8 @@ pub struct DispatchResult {
     pub menu: Option<MenuRequest>,
     /// 控件请求宿主打开的 URL/路径（链接点击等）。
     pub open_url: Option<String>,
+    /// 控件请求的窗口操作（最小化/最大化切换）。
+    pub window_op: Option<WindowOp>,
 }
 
 impl Tree {
@@ -789,9 +805,19 @@ impl Tree {
     }
 
     /// 节点期望的光标形状（取其控件声明；节点缺失回退 Arrow）。
-    /// 禁用回退由宿主在查询前统一处理（见 `App` 的 `cursor()`）。
+    /// 禁用回退由宿主在查询前进行处理（见 `App` 的 `cursor()`）。
     pub fn cursor_at(&self, id: NodeId) -> CursorShape {
         self.get(id).map(|n| n.widget.cursor()).unwrap_or(CursorShape::Arrow)
+    }
+
+    /// `pos`（逻辑坐标）是否落在窗口拖动区（自定义标题栏）。命中的是可聚焦控件
+    /// （按钮等）则不拖动——交控件处理；否则自身或任一祖先标了 `window_drag` 即可拖。
+    pub fn drag_hit_at(&self, pos: Point) -> bool {
+        let Some(hit) = self.hit_test(pos) else { return false };
+        if self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false) {
+            return false;
+        }
+        self.ancestor_chain(hit).iter().any(|&id| self.get(id).map(|n| n.window_drag).unwrap_or(false))
     }
 
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
@@ -1037,6 +1063,9 @@ impl Tree {
                 if o.open_url.is_some() {
                     res.open_url = o.open_url;
                 }
+                if o.window_op.is_some() {
+                    res.window_op = o.window_op;
+                }
                 if consumed {
                     break;
                 }
@@ -1075,6 +1104,7 @@ impl Tree {
             res.consumed = consumed;
             res.menu = o.menu;
             res.open_url = o.open_url;
+            res.window_op = o.window_op;
         }
         res
     }

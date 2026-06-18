@@ -28,5 +28,5 @@ pub mod prelude {
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::Style;
     pub use crate::theme::Theme;
-    pub use crate::ui::{Element, ImageContent, ImageView, Link};
+    pub use crate::ui::{Element, ImageContent, ImageView, Link, WindowButton, WindowButtonKind};
 }
