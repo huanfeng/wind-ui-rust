@@ -5,9 +5,12 @@
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::event::{Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind};
+use crate::event::{
+    CursorShape, Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind,
+};
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension, MeasureMode, MeasureSpec};
@@ -16,6 +19,9 @@ use crate::text::TextEngine;
 
 /// 点击/激活回调类型。
 pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
+
+/// 文件拖放回调类型：收到落在本节点（或其子节点冒泡上来）的文件路径列表。
+pub type DropFn = Box<dyn FnMut(&mut EventCtx, &[PathBuf])>;
 
 /// 剪贴板读写抽象。由平台层提供实现，UiHost 注入到 `Tree`，控件经 `EventCtx` 访问。
 pub trait ClipboardProvider {
@@ -76,6 +82,11 @@ pub trait Widget {
     fn wants_right_click(&self) -> bool {
         false
     }
+    /// 指针悬停于本控件时期望的光标形状。默认箭头；链接返回 `Hand`、文本输入返回 `Text`。
+    /// 宿主取当前悬停节点的形状交平台应答；禁用节点由宿主统一回退 `Arrow`。
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Arrow
+    }
 }
 
 /// 容器/纯样式节点占位控件。
@@ -125,6 +136,9 @@ pub struct Node {
     /// 自身启用标志（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
     /// 跳焦点，并把启用态传入 `Widget::paint` 供控件置灰。
     pub enabled: Option<Rc<Cell<bool>>>,
+    /// 文件拖放回调（None=不接收拖放）。落点命中本节点或其子节点时，沿父链冒泡
+    /// 到首个设了回调的节点触发；放在 fill 容器/根上即等价"全窗拖放"。
+    pub on_drop: Option<DropFn>,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
@@ -646,6 +660,8 @@ pub(crate) struct EventOutcome {
     focus: Option<NodeId>,
     /// 控件请求弹出的上下文菜单（宿主接管渲染与命中）。
     menu: Option<MenuRequest>,
+    /// 控件请求宿主用系统默认程序打开的 URL/路径（链接点击等）。
+    open_url: Option<String>,
 }
 
 /// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
@@ -733,6 +749,11 @@ impl EventCtx<'_> {
     pub fn show_context_menu(&mut self, pos: Point, items: Vec<MenuItem>) {
         self.show_menu(pos, items, 0);
     }
+    /// 请求宿主用系统默认程序打开 URL/路径（链接点击等）。fire-and-forget：
+    /// 经 `DispatchResult` 上交宿主，由平台执行（win32 `ShellExecuteW`），核心保持平台无关。
+    pub fn open_url(&mut self, url: &str) {
+        self.out.open_url = Some(url.to_string());
+    }
 }
 
 /// 指针/键盘分发的对外结果。
@@ -745,6 +766,8 @@ pub struct DispatchResult {
     pub consumed: bool,
     /// 控件请求弹出的上下文菜单（宿主接管）。
     pub menu: Option<MenuRequest>,
+    /// 控件请求宿主打开的 URL/路径（链接点击等）。
+    pub open_url: Option<String>,
 }
 
 impl Tree {
@@ -763,6 +786,12 @@ impl Tree {
             }
         }
         true
+    }
+
+    /// 节点期望的光标形状（取其控件声明；节点缺失回退 Arrow）。
+    /// 禁用回退由宿主在查询前统一处理（见 `App` 的 `cursor()`）。
+    pub fn cursor_at(&self, id: NodeId) -> CursorShape {
+        self.get(id).map(|n| n.widget.cursor()).unwrap_or(CursorShape::Arrow)
     }
 
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
@@ -1005,6 +1034,9 @@ impl Tree {
                 if o.menu.is_some() {
                     res.menu = o.menu;
                 }
+                if o.open_url.is_some() {
+                    res.open_url = o.open_url;
+                }
                 if consumed {
                     break;
                 }
@@ -1042,6 +1074,41 @@ impl Tree {
             res.focus = o.focus;
             res.consumed = consumed;
             res.menu = o.menu;
+            res.open_url = o.open_url;
+        }
+        res
+    }
+
+    /// 分发文件拖放：命中 `pos`（逻辑坐标）下的节点，沿父链冒泡到首个设了
+    /// `on_drop` 的节点并触发（传入文件路径）。禁用子树不接收。返回副作用。
+    /// 借用拆解同 `call_on_event`：取出闭包→调用→放回（generation 不匹配则丢弃）。
+    pub fn dispatch_files(&mut self, pos: Point, paths: Vec<PathBuf>) -> DispatchResult {
+        let mut res = DispatchResult::default();
+        let Some(target) = self.hit_test(pos) else { return res };
+        for id in self.ancestor_chain(target) {
+            if !self.node_enabled(id) {
+                continue;
+            }
+            let mut cb = match self.get_mut(id).and_then(|n| n.on_drop.take()) {
+                Some(cb) => cb,
+                None => continue,
+            };
+            let mut ctx = EventCtx { tree: self, self_id: id, out: EventOutcome::default() };
+            cb(&mut ctx, &paths);
+            let out = ctx.out;
+            if let Some(n) = self.get_mut(id) {
+                n.on_drop = Some(cb); // 放回（节点仍在才放回，遵循 call_on_event 契约）
+            }
+            res.repaint |= out.repaint;
+            res.close |= out.close;
+            res.consumed = true;
+            if out.focus.is_some() {
+                res.focus = out.focus;
+            }
+            if out.open_url.is_some() {
+                res.open_url = out.open_url;
+            }
+            break; // 命中一个拖放处理者即止
         }
         res
     }

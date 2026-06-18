@@ -10,7 +10,7 @@ use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
 use crate::theme::Theme;
-use crate::event::{Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind};
+use crate::event::{CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::win32::{self, WindowConfig};
 use crate::platform::AppHandler;
@@ -73,10 +73,12 @@ impl App {
                 height,
                 bg: Color::hex(0xF3F3F3),
                 centered: false,
+                resizable: true,
                 screenshot: None,
                 screenshot_scale: 1.0,
                 screenshot_rclick: None,
                 screenshot_click: None,
+                tray: None,
             },
             render: None,
             content: None,
@@ -87,6 +89,12 @@ impl App {
     /// 窗口背景色。命名与 `Element::bg` 统一。
     pub fn bg(mut self, c: Color) -> Self {
         self.cfg.bg = c;
+        self
+    }
+
+    /// 禁止用户拖拽调整窗口大小（去掉 WS_THICKFRAME 和最大化按钮）。
+    pub fn resizable(mut self, v: bool) -> Self {
+        self.cfg.resizable = v;
         self
     }
 
@@ -152,6 +160,13 @@ impl App {
     /// 设置控件树根（常规入口）。
     pub fn content(mut self, root: Element) -> Self {
         self.content = Some(root);
+        self
+    }
+
+    /// 配置系统托盘图标（图标 + 提示 + 左键/双击 + 原生右键菜单）。
+    /// 窗口创建后安装，窗口销毁时自动清理。截屏模式下忽略。
+    pub fn tray(mut self, tray: win32::Tray) -> Self {
+        self.cfg.tray = Some(tray);
         self
     }
 
@@ -550,6 +565,10 @@ impl AppHandler for UiHost {
                 self.open_menu(req, target);
             }
         }
+        // 控件请求打开 URL/路径（链接点击）：交平台用默认程序打开。
+        if let Some(url) = res.open_url {
+            win32::open_url(&url);
+        }
         res.repaint
     }
 
@@ -570,6 +589,9 @@ impl AppHandler for UiHost {
         let res = self.tree.dispatch_key(ev, self.focus);
         if res.close {
             self.close = true;
+        }
+        if let Some(url) = res.open_url {
+            win32::open_url(&url);
         }
         if !res.consumed && ev.key == Key::Escape {
             self.close = true;
@@ -593,6 +615,32 @@ impl AppHandler for UiHost {
 
     fn wants_animation(&self) -> bool {
         crate::anim::animation_requested()
+    }
+
+    fn on_drop_files(&mut self, pos: Point, paths: Vec<std::path::PathBuf>) -> bool {
+        // 物理 → 逻辑（命中在逻辑空间），路由到落点下的控件。
+        let s = self.scale;
+        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let res = self.tree.dispatch_files(p, paths);
+        if res.close {
+            self.close = true;
+        }
+        if let Some(url) = res.open_url {
+            win32::open_url(&url);
+        }
+        res.repaint
+    }
+
+    fn cursor(&self) -> CursorShape {
+        // 菜单浮层激活时用箭头（菜单项自管悬停高亮）。
+        if self.menu.is_some() {
+            return CursorShape::Arrow;
+        }
+        // 取当前悬停节点的形状；禁用节点统一回退箭头（禁用链接不显示手型）。
+        match self.hover {
+            Some(h) if self.tree.node_enabled(h) => self.tree.cursor_at(h),
+            _ => CursorShape::Arrow,
+        }
     }
 
     fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
