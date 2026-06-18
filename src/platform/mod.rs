@@ -8,7 +8,7 @@ pub use win32::{run, WindowConfig};
 
 use tiny_skia::Pixmap;
 
-use crate::event::{CursorShape, KeyEvent, PointerEvent};
+use crate::event::{CursorShape, KeyEvent, PointerEvent, WindowOp};
 use crate::geometry::{Point, Size};
 
 /// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
@@ -75,5 +75,16 @@ pub trait AppHandler {
     /// 返回 true 表示需要重绘。
     fn on_drop_files(&mut self, _pos: Point, _paths: Vec<std::path::PathBuf>) -> bool {
         false
+    }
+
+    /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在窗口拖动区
+    /// （自定义标题栏）。平台据此在 `WM_NCHITTEST` 返回 HTCAPTION 实现拖动。
+    fn window_drag_at(&self, _pos: Point) -> bool {
+        false
+    }
+
+    /// 取出并清除待执行的窗口操作（自定义标题栏按钮触发）。平台在事件分发后轮询。
+    fn take_window_op(&mut self) -> Option<WindowOp> {
+        None
     }
 }

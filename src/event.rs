@@ -10,6 +10,15 @@ pub enum MouseButton {
     Middle,
 }
 
+/// 窗口操作请求（自定义标题栏按钮等触发，经 DispatchResult 上交宿主执行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowOp {
+    /// 最小化窗口。
+    Minimize,
+    /// 最大化 / 还原切换。
+    ToggleMaximize,
+}
+
 /// 控件期望的鼠标光标形状。`Widget::cursor()` 据交互语义声明，宿主取当前悬停
 /// 节点的形状交平台层应答（win32 `WM_SETCURSOR`）。禁用节点恒回退 `Arrow`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

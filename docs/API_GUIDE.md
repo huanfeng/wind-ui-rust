@@ -226,6 +226,22 @@ App::new("…", w, h).tray(
 - 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。
 - 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
 
+### 无标题栏窗口（自定义标题栏）
+```rust
+let title_bar = Element::row().width_match().height(36).cross(Align::Stretch)
+    .bg(Color::hex(0x2D3436))
+    .window_drag()                                   // 整条可拖（落在按钮上不拖）
+    .child(Element::label("  我的应用").fg(Color::WHITE).weight(1.0))
+    .child(Element::window_button(WindowButtonKind::Minimize).fg(Color::WHITE))
+    .child(Element::window_button(WindowButtonKind::Maximize).fg(Color::WHITE))
+    .child(Element::window_button(WindowButtonKind::Close).fg(Color::WHITE));
+App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar).child(body.weight(1.0))).run();
+```
+- `App::frameless()` 去掉系统标题栏，客户区铺满整窗，**保留 Aero 吸附/缩放/投影**（WM_NCCALCSIZE + WS_THICKFRAME + DwmExtendFrameIntoClientArea）。
+- `Element::window_drag()` 标记拖动区（自定义标题栏）：命中非交互区拖窗、命中可聚焦控件（按钮/输入）则不拖、交控件处理。
+- `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`。
+- 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
+
 ---
 
 ## 6. 布局系统

@@ -10,7 +10,9 @@ use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
 use crate::theme::Theme;
-use crate::event::{CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind};
+use crate::event::{
+    CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, WindowOp,
+};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::win32::{self, WindowConfig};
 use crate::platform::AppHandler;
@@ -79,6 +81,7 @@ impl App {
                 screenshot_rclick: None,
                 screenshot_click: None,
                 tray: None,
+                frameless: false,
             },
             render: None,
             content: None,
@@ -167,6 +170,14 @@ impl App {
     /// 窗口创建后安装，窗口销毁时自动清理。截屏模式下忽略。
     pub fn tray(mut self, tray: win32::Tray) -> Self {
         self.cfg.tray = Some(tray);
+        self
+    }
+
+    /// 无标题栏窗口（自定义标题栏）：去掉系统标题栏，客户区铺满整窗，
+    /// 保留 Aero 吸附/阴影/缩放。用 `Element::window_drag()` 标记拖动区、
+    /// `Element::window_button(...)` 放最小化/最大化/关闭按钮。
+    pub fn frameless(mut self) -> Self {
+        self.cfg.frameless = true;
         self
     }
 
@@ -263,6 +274,8 @@ struct UiHost {
     pan_residual: f32,
     /// 触摸惯性滑动状态（None=无）。
     fling: Option<Fling>,
+    /// 待执行的窗口操作（自定义标题栏按钮触发，平台分发后轮询执行）。
+    pending_window_op: Option<WindowOp>,
 }
 
 impl UiHost {
@@ -288,6 +301,7 @@ impl UiHost {
             start: std::time::Instant::now(),
             pan_residual: 0.0,
             fling: None,
+            pending_window_op: None,
         }
     }
 
@@ -569,6 +583,10 @@ impl AppHandler for UiHost {
         if let Some(url) = res.open_url {
             win32::open_url(&url);
         }
+        // 窗口操作（自定义标题栏按钮）：暂存，平台分发后轮询执行（需 hwnd）。
+        if res.window_op.is_some() {
+            self.pending_window_op = res.window_op;
+        }
         res.repaint
     }
 
@@ -592,6 +610,9 @@ impl AppHandler for UiHost {
         }
         if let Some(url) = res.open_url {
             win32::open_url(&url);
+        }
+        if res.window_op.is_some() {
+            self.pending_window_op = res.window_op;
         }
         if !res.consumed && ev.key == Key::Escape {
             self.close = true;
@@ -629,6 +650,20 @@ impl AppHandler for UiHost {
             win32::open_url(&url);
         }
         res.repaint
+    }
+
+    fn window_drag_at(&self, pos: Point) -> bool {
+        // 菜单浮层激活时不拖窗。物理 → 逻辑后查拖动区。
+        if self.menu.is_some() {
+            return false;
+        }
+        let s = self.scale;
+        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        self.tree.drag_hit_at(p)
+    }
+
+    fn take_window_op(&mut self) -> Option<WindowOp> {
+        self.pending_window_op.take()
     }
 
     fn cursor(&self) -> CursorShape {
