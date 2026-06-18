@@ -662,6 +662,13 @@ impl AppHandler for UiHost {
         self.tree.drag_hit_at(p)
     }
 
+    fn interactive_at(&self, pos: Point) -> bool {
+        // 物理 → 逻辑后查是否命中可聚焦控件（窗口按钮等）。
+        let s = self.scale;
+        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        self.tree.interactive_hit_at(p)
+    }
+
     fn take_window_op(&mut self) -> Option<WindowOp> {
         self.pending_window_op.take()
     }

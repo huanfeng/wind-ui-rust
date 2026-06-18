@@ -875,6 +875,9 @@ mod tests {
         assert!(tree.drag_hit_at(Point::new(40, 20)), "标题文字区应为拖动区");
         // 按钮区域 → 不拖（交按钮处理点击）。
         assert!(!tree.drag_hit_at(Point::new(130, 20)), "按钮区不应拖动窗口");
+        // 交互命中：按钮区为交互控件（平台据此判 HTCLIENT），拖动区/文字区不是。
+        assert!(tree.interactive_hit_at(Point::new(130, 20)), "按钮区应判为交互控件");
+        assert!(!tree.interactive_hit_at(Point::new(40, 20)), "标题文字区不应判为交互控件");
     }
 
     #[test]

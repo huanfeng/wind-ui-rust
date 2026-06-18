@@ -36,7 +36,8 @@ use windows::Win32::UI::Input::Touch::{
     REGISTER_TOUCH_WINDOW_FLAGS, TOUCHEVENTF_DOWN, TOUCHEVENTF_MOVE, TOUCHEVENTF_UP, TOUCHINPUT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_BACK, VK_CONTROL, VK_DELETE,
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
+    TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE,
     VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
     VK_UP,
 };
@@ -51,7 +52,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCMOUSEMOVE,
     WM_DROPFILES, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_THICKFRAME, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT,
@@ -61,7 +63,7 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
 };
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
-use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 
 use super::AppHandler;
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
@@ -177,6 +179,8 @@ struct WindowState {
     tray: Option<tray::TrayState>,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
+    /// 是否已向系统申请鼠标离开通知（TrackMouseEvent）。离开后系统清此标志需重新申请。
+    mouse_tracked: bool,
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -237,6 +241,7 @@ impl WindowState {
             touch: Touch::default(),
             tray: None,
             frameless: false,
+            mouse_tracked: false,
         }
     }
 
@@ -597,7 +602,26 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEMOVE => {
+            // 申请离开通知：鼠标移出客户区（含移入标题栏等非客户区）时收到 WM_MOUSELEAVE，
+            // 以便补发 Leave、清除滞留的悬停态（如标题栏按钮）。
+            track_mouse_leave(hwnd);
             handle_pointer(hwnd, PointerKind::Move, MouseButton::Left, lparam);
+            LRESULT(0)
+        }
+        // 鼠标移入非客户区（无边框窗口的标题栏拖动区/缩放边框）：系统改发 NCMOUSEMOVE
+        // 而非 MOUSEMOVE。按真实位置补发一个 Move（NCMOUSEMOVE 的 lParam 是屏幕坐标）：
+        // 落在拖动区→命中非按钮→清除残留悬停（修最小化按钮卡 hover）；落在按钮顶部
+        // 的 HTTOP 缩放条上→仍命中该按钮→保留高亮（不误清）。
+        WM_NCMOUSEMOVE => {
+            handle_nc_mouse_move(hwnd, lparam);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // 鼠标离开客户区（移到非客户区或移出窗口）：清除悬停态。
+        WM_MOUSELEAVE => {
+            if let Some(s) = state_from(hwnd) {
+                s.mouse_tracked = false;
+            }
+            clear_hover(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -759,6 +783,14 @@ unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let mut rc = RECT::default();
     let _ = GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right, rc.bottom);
+    // 交互控件（窗口按钮等）优先判为客户区：使整个按钮都收普通鼠标移动、hover 稳定，
+    // 不被顶部缩放条夺走——优先级高于缩放边框与拖动区。
+    let interactive = state_from(hwnd)
+        .map(|s| s.handler.interactive_at(Point::new(pt.x, pt.y)))
+        .unwrap_or(false);
+    if interactive {
+        return LRESULT(HTCLIENT as isize);
+    }
     // 缩放边框宽度（物理像素，按 DPI 放大）。
     let dpi = GetDpiForWindow(hwnd).max(96);
     let m = ((8.0 * dpi as f32 / 96.0) as i32).max(4);
@@ -864,6 +896,48 @@ unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lpa
         1
     };
     dispatch_pointer_event(hwnd, PointerEvent { kind, pos: Point::new(x, y), button, click_count });
+}
+
+/// 向系统申请鼠标离开通知（含非客户区），离开时收到 WM_MOUSELEAVE / WM_NCMOUSELEAVE。
+/// 申请是一次性的，系统在投递离开消息后即注销，故离开后需重新申请（由下次 Move 触发）。
+unsafe fn track_mouse_leave(hwnd: HWND) {
+    let Some(state) = state_from(hwnd) else { return };
+    if state.mouse_tracked {
+        return;
+    }
+    state.mouse_tracked = true;
+    // 只追踪"离开客户区"（→ WM_MOUSELEAVE）。切勿加 TME_NONCLIENT：光标本在客户区时
+    // 它会让系统立刻投递 WM_NCMOUSELEAVE，把刚设置的 hover 瞬间清掉（表现为完全没高亮）。
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: core::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = TrackMouseEvent(&mut tme);
+}
+
+/// 清除悬停态：派发一个落在所有节点之外的 Move（命中 None → 原 hover 控件收到 Leave）。
+/// 用于鼠标离开窗口（WM_MOUSELEAVE / WM_NCMOUSELEAVE）——此时无有意义的位置可用。
+unsafe fn clear_hover(hwnd: HWND) {
+    dispatch_pointer_event(
+        hwnd,
+        PointerEvent::single(PointerKind::Move, Point::new(-1, -1), MouseButton::Left),
+    );
+}
+
+/// 非客户区鼠标移动（WM_NCMOUSEMOVE，lParam 为**屏幕坐标**）：转客户坐标后按真实位置补发 Move。
+/// 让 hover 随实际命中走——拖动区会清掉按钮残留高亮，而按钮顶部 HTTOP 缩放条仍命中按钮保留高亮。
+unsafe fn handle_nc_mouse_move(hwnd: HWND, lparam: LPARAM) {
+    let mut pt = POINT {
+        x: (lparam.0 & 0xffff) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+    };
+    let _ = ScreenToClient(hwnd, &mut pt);
+    dispatch_pointer_event(
+        hwnd,
+        PointerEvent::single(PointerKind::Move, Point::new(pt.x, pt.y), MouseButton::Left),
+    );
 }
 
 /// WM_MOUSEWHEEL：高位字为滚动量（±120/刻度），lParam 为屏幕坐标需转客户区。

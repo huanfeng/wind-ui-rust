@@ -83,6 +83,12 @@ pub trait AppHandler {
         false
     }
 
+    /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在交互控件（窗口按钮等）上。
+    /// 平台据此在 `WM_NCHITTEST` 把该点强制判为 HTCLIENT，优先于缩放边框/拖动区。
+    fn interactive_at(&self, _pos: Point) -> bool {
+        false
+    }
+
     /// 取出并清除待执行的窗口操作（自定义标题栏按钮触发）。平台在事件分发后轮询。
     fn take_window_op(&mut self) -> Option<WindowOp> {
         None

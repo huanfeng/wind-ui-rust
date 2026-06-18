@@ -810,6 +810,14 @@ impl Tree {
         self.get(id).map(|n| n.widget.cursor()).unwrap_or(CursorShape::Arrow)
     }
 
+    /// `pos`（逻辑坐标）是否落在交互控件上（可聚焦节点，如自定义标题栏的窗口按钮）。
+    /// 平台据此在 `WM_NCHITTEST` 把控件区强制判为 HTCLIENT——优先于缩放边框，
+    /// 使整个按钮都是客户区、普通鼠标移动全程覆盖，避免顶部缩放条夺走 hover。
+    pub fn interactive_hit_at(&self, pos: Point) -> bool {
+        let Some(hit) = self.hit_test(pos) else { return false };
+        self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false)
+    }
+
     /// `pos`（逻辑坐标）是否落在窗口拖动区（自定义标题栏）。命中的是可聚焦控件
     /// （按钮等）则不拖动——交控件处理；否则自身或任一祖先标了 `window_drag` 即可拖。
     pub fn drag_hit_at(&self, pos: Point) -> bool {
