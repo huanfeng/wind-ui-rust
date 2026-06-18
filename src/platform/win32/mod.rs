@@ -24,8 +24,8 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, CANDIDATEFORM,
@@ -44,8 +44,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, IsIconic, LoadCursorW,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK,
-    SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
+    MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
+    SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
     TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCLIENT, MWMO_INPUTAVAILABLE,
     PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
@@ -581,13 +582,7 @@ unsafe extern "system" fn wnd_proc(
         }
         // 无边框：非客户区计算 → 客户区铺满整窗（去系统标题栏/边框）。
         // 最大化时用默认（含任务栏避让、正确插入边框），非最大化返回 0 即整窗。
-        WM_NCCALCSIZE if wparam.0 != 0 && is_frameless(hwnd) => {
-            if IsZoomed(hwnd).as_bool() {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            } else {
-                LRESULT(0)
-            }
-        }
+        WM_NCCALCSIZE if wparam.0 != 0 && is_frameless(hwnd) => handle_nccalcsize(hwnd, lparam),
         // 无边框：自定义命中——边缘做缩放，拖动区做 HTCAPTION，其余 HTCLIENT。
         WM_NCHITTEST if is_frameless(hwnd) => handle_nchittest(hwnd, lparam),
         // 客户区光标：按当前悬停控件期望形状设置（链接=手型、文本=I 形）。
@@ -733,6 +728,24 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
 /// 该窗口是否为无边框（自定义标题栏）模式。
 unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
+}
+
+/// 无边框窗口非客户区计算：客户区铺满整窗（去系统标题栏/边框）。
+/// 最大化时窗口会超出工作区一个边框厚度——按 DPI 内缩客户区，避免内容溢出屏幕/盖任务栏，
+/// 但**不重新插入标题栏**（这正是此前最大化露出系统标题栏的根因：当时误调了 DefWindowProc）。
+unsafe fn handle_nccalcsize(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    if IsZoomed(hwnd).as_bool() {
+        let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let cx = GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        let cy = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        params.rgrc[0].left += cx;
+        params.rgrc[0].right -= cx;
+        params.rgrc[0].top += cy;
+        params.rgrc[0].bottom -= cy;
+    }
+    // 非最大化：rgrc[0] 不动 → 客户区 = 整窗。
+    LRESULT(0)
 }
 
 /// 无边框窗口自定义命中：窗口边缘 N px 内返回缩放命中；否则查拖动区
