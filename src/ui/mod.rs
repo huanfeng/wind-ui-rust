@@ -6,6 +6,7 @@
 pub mod containers;
 pub mod image;
 pub mod inputs;
+pub mod link;
 pub mod list;
 pub mod progress;
 pub mod select;
@@ -15,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::core::{ClickFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
+use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
 use crate::render::image::{Fit, Image, VisualState};
@@ -26,6 +27,7 @@ use crate::text::TextEngine;
 
 pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
+pub use link::Link;
 pub use list::ListRow;
 pub use progress::ProgressBar;
 pub use select::Dropdown;
@@ -143,17 +145,26 @@ impl Widget for Button {
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
         let vstate = self.visual_state(enabled);
-        // 背景：禁用用专用置灰底，否则按三态取主题色。
+        // 背景：禁用用专用置灰底；style.bg 有值时用自定义色；否则按三态取主题色。
         let color = match vstate {
             VisualState::Disabled => bt.disabled(pal),
-            _ => match self.state {
-                BtnState::Normal => bt.bg(pal),
-                BtnState::Hover => bt.hover(pal),
-                BtnState::Press => bt.active(pal),
+            _ => match style.bg {
+                Some(c) => c,
+                None => match self.state {
+                    BtnState::Normal => bt.bg(pal),
+                    BtnState::Hover => bt.hover(pal),
+                    BtnState::Press => bt.active(pal),
+                },
             },
         };
-        // 文字色：禁用用 text_disabled，否则主题前景。
-        let fg = if vstate == VisualState::Disabled { pal.text_disabled } else { bt.fg(pal) };
+        // 文字色：禁用用 text_disabled；style.bg 有值时用 style.fg；否则用主题前景。
+        let fg = if vstate == VisualState::Disabled {
+            pal.text_disabled
+        } else if style.bg.is_some() {
+            style.fg
+        } else {
+            bt.fg(pal)
+        };
         // 每节点 corner 覆盖优先（>0），否则用主题。
         let r = if style.corner_radius > 0.0 { style.corner_radius } else { bt.corner(&t.metrics) };
         canvas.fill_round_rect(
@@ -277,6 +288,7 @@ pub struct Element {
     vis_cond: Option<Box<dyn Fn() -> bool>>,
     clip_children: bool,
     click: Option<ClickFn>,
+    on_drop: Option<DropFn>,
     enabled: Option<Rc<Cell<bool>>>,
 }
 
@@ -297,6 +309,7 @@ impl Element {
             vis_cond: None,
             clip_children: false,
             click: None,
+            on_drop: None,
             enabled: None,
         }
     }
@@ -337,6 +350,42 @@ impl Element {
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
         self
+    }
+
+    /// 文件拖放回调：用户把文件拖放到本元素（或其子元素）时触发，收到文件路径列表。
+    /// **适用于任意控件/容器**——挂到 `.fill()` 的根容器即"全窗接收拖放"；
+    /// 落点命中后沿父链冒泡到首个设了回调的节点。回调签名 `FnMut(&mut EventCtx, &[PathBuf])`。
+    pub fn on_drop_files(mut self, f: impl FnMut(&mut EventCtx, &[std::path::PathBuf]) + 'static) -> Self {
+        self.on_drop = Some(Box::new(f));
+        self
+    }
+
+    // ---- 链接 ----
+
+    /// 可点击链接文本：链接色 + 下划线，hover/press 三态，点击/回车激活。
+    /// 链 `.url(...)` 设置点击打开的地址，或 `.on_click(...)` 自定义动作（两者皆设时回调优先）。
+    /// 悬停显示手型光标；禁用态由核心层统一管理（不可点 + 置灰 + 跳 Tab）。
+    pub fn link(text: impl Into<String>) -> Self {
+        Self::base(Layout::None).widget(link::Link::new(text.into()))
+    }
+
+    /// 配置内含的 Link。`url()/underline()` 是 link 专属修饰符，链到其他控件属误用——
+    /// debug 构建下 panic 提示，release 下静默忽略（与 text_input/image 的误用检测一致）。
+    fn config_link(mut self, f: impl FnOnce(&mut link::Link)) -> Self {
+        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<link::Link>()) {
+            Some(l) => f(l),
+            None => debug_assert!(false, "url()/underline() 只能用于 Element::link(..)"),
+        }
+        self
+    }
+    /// 链接点击时用系统默认程序打开的 URL/路径（未设 `on_click` 时生效）。
+    pub fn url(self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        self.config_link(move |l| l.set_url(url))
+    }
+    /// 是否绘制链接下划线（默认开）。
+    pub fn underline(self, on: bool) -> Self {
+        self.config_link(move |l| l.set_underline(on))
     }
 
     // ---- 图片 ----
@@ -727,6 +776,7 @@ impl Element {
             visible: self.visible,
             vis_cond: self.vis_cond,
             enabled: self.enabled,
+            on_drop: self.on_drop,
             focused: false,
             clip_children: self.clip_children,
             scroll_y: 0,
@@ -746,5 +796,64 @@ impl Element {
             tree.add_child(id, cid);
         }
         id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Point;
+    use std::path::PathBuf;
+
+    /// 在 200×200 窗口里布局并返回 (tree, root)。
+    fn layout(el: Element) -> Tree {
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        tree
+    }
+
+    #[test]
+    fn drop_routes_to_widget_under_point() {
+        let got: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = got.clone();
+        // 占满窗口的容器挂拖放回调（等价全窗接收）。
+        let tree = layout(
+            Element::col().fill().on_drop_files(move |_ctx, paths| {
+                sink.borrow_mut().extend_from_slice(paths);
+            }),
+        );
+        let mut tree = tree;
+        let res = tree.dispatch_files(
+            Point::new(50, 50),
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.png")],
+        );
+        assert!(res.consumed, "落点命中带回调的容器应消费");
+        assert_eq!(got.borrow().len(), 2, "回调应收到 2 个文件");
+        assert_eq!(got.borrow()[0], PathBuf::from("a.txt"));
+    }
+
+    #[test]
+    fn drop_ignored_when_no_handler() {
+        let mut tree = layout(Element::col().fill());
+        let res = tree.dispatch_files(Point::new(50, 50), vec![PathBuf::from("a.txt")]);
+        assert!(!res.consumed, "无回调时拖放不消费");
+    }
+
+    #[test]
+    fn drop_skips_disabled_subtree() {
+        let got = Rc::new(Cell::new(0u32));
+        let sink = got.clone();
+        // 回调挂在被禁用的容器上：核心拦截，不触发。
+        let mut tree = layout(
+            Element::col()
+                .fill()
+                .disabled(true)
+                .on_drop_files(move |_ctx, _paths| sink.set(sink.get() + 1)),
+        );
+        let res = tree.dispatch_files(Point::new(50, 50), vec![PathBuf::from("a.txt")]);
+        assert!(!res.consumed, "禁用子树不接收拖放");
+        assert_eq!(got.get(), 0);
     }
 }

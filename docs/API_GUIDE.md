@@ -184,6 +184,48 @@ Element::image_content(icon);   // 也可作独立控件
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 
+### 链接
+```rust
+Element::link("打开官网").url("https://example.com")  // 点击用系统默认程序打开
+Element::link("自定义").on_click(|_| { /* ... */ })    // 自定义动作（与 url 并存时回调优先）
+    .underline(false)                                  // 关闭下划线（默认开）
+Element::link("禁用").url("...").disabled(true)        // 核心级禁用：置灰 + 不可点 + 不显手型
+```
+- **链接色 + 下划线**文本，hover/press 三态（取主题 `link` 覆盖层，回退 accent 家族），点击或回车/空格激活。
+- **悬停手型光标**：链接 `Widget::cursor()` 返回 `CursorShape::Hand`；文本输入返回 `Text`（I 形）。宿主取当前悬停控件的形状交平台应答（win32 `WM_SETCURSOR`），**禁用节点统一回退箭头**。
+- **`.url()` / `.underline()` 是 link 专属**修饰符（误用检测同 text_input）；打开 URL 经 `EventCtx::open_url` → 平台 `ShellExecute`，控件层不碰平台。
+
+### 文件拖放
+```rust
+Element::col().fill().on_drop_files(|ctx, paths| {   // paths: &[PathBuf]
+    for p in paths { /* ... */ }
+    ctx.mark_dirty();                                // 改了状态记得请求重绘
+})
+```
+- **任意元素可接收**：`.on_drop_files(f)` 挂到 `.fill()` 根容器即"全窗接收"；落点会路由到落点下的元素，再沿父链冒泡到首个设了回调的节点（禁用子树不接收）。
+- 平台经 `WM_DROPFILES` 解出路径 + 落点交宿主路由（`Tree::dispatch_files`）；回调签名 `FnMut(&mut EventCtx, &[PathBuf])`，可读写共享状态、`mark_dirty`。完整示例见 `examples/file_drop.rs`。
+
+### 系统托盘
+```rust
+let notify_on = Rc::new(Cell::new(true));
+App::new("…", w, h).tray(
+    Tray::new()
+        .tooltip("后台运行中")
+        .icon_rgba(16, 16, &rgba)            // 可选；默认用系统应用图标
+        .on_left_click(|ctx| ctx.show_window())
+        .on_double_click(|ctx| ctx.show_window())
+        .menu(vec![
+            TrayMenuItem::item("显示窗口", |ctx| ctx.show_window()),
+            TrayMenuItem::separator(),       // 分隔线
+            TrayMenuItem::check("启用通知", notify_on.clone(), move |ctx| { /* 翻转状态 */ }),  // 勾选项
+            TrayMenuItem::item("退出", |ctx| ctx.quit()),
+        ]),
+).content(ui).run();
+```
+- **右键菜单走原生 `TrackPopupMenu`**（真 OS 弹出，显示在托盘旁）；支持**勾选项**（`check` 绑 `Rc<Cell<bool>>`，弹出时按当前值显示对勾）与**分隔线**。
+- 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。
+- 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
+
 ---
 
 ## 6. 布局系统

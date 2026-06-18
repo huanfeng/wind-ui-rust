@@ -145,6 +145,10 @@ fn main() {
     let qty = Rc::new(Cell::new(3.0f64));
     let zoom = Rc::new(Cell::new(1.0f64));
     let picked = Rc::new(Cell::new(1usize));
+    // 链接 on_click 演示：点击计数写入动态标签。
+    let link_msg = Rc::new(RefCell::new(String::from("（点下方“点我计数”试试）")));
+    let link_n = Rc::new(Cell::new(0u32));
+    let (lm, ln) = (link_msg.clone(), link_n.clone());
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -195,6 +199,25 @@ fn main() {
                     "输入",
                     Element::text_input(Rc::new(RefCell::new("只读内容".into())), "").disabled(true).width_match(),
                 )),
+        ))
+        .child(card(
+            "链接（链接色 + 下划线 + 悬停手型，点击/回车激活）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(Element::link("打开 windui 官网（用系统浏览器）").url("https://example.com").font_size(14.0).height(20))
+                .child(
+                    Element::row()
+                        .spacing(20)
+                        .cross(Align::Center)
+                        .child(Element::link("无下划线样式").underline(false).font_size(14.0).height(20))
+                        .child(Element::link("已禁用链接").url("https://example.com").disabled(true).font_size(14.0).height(20)),
+                )
+                .child(Element::link("点我计数（自定义 on_click）").font_size(14.0).height(20).on_click(move |_| {
+                    ln.set(ln.get() + 1);
+                    *lm.borrow_mut() = format!("已点击 {} 次", ln.get());
+                }))
+                .child(Element::label_rc(link_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
         ));
     let components = Element::scroll().fill().child(components_body);
 

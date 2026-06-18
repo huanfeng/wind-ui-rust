@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
-use crate::event::{Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
+use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -354,6 +354,10 @@ struct VisLine {
 struct TextLayout {
     lines: Vec<VisLine>,
     line_h: i32,
+    /// 重建缓存键：显示串 + 内框宽 + 字体族 + 字号 bits。命中则跳过整次重建
+    /// （含每段 O(L²) 累计测量），仅在文本/宽度/字体变化时才重排——光标移动/闪烁、
+    /// 悬停等无关重绘不再触发布局。
+    key: Option<(String, i32, Option<String>, u32)>,
 }
 
 pub struct TextInput {
@@ -549,12 +553,26 @@ impl TextInput {
     }
     /// 按显示串与内框宽度重建视觉行布局缓存。paint 调用；点击/上下移动复用其结果。
     fn rebuild_layout(&self, canvas: &mut dyn Canvas, disp: &str, family: Option<&str>, fsize: f32, inner_w: i32) {
+        // 缓存命中（文本/宽度/字体均未变）：跳过重建，沿用上次视觉行。
+        {
+            let lay = self.layout.borrow();
+            if let Some((k_disp, k_w, k_fam, k_size)) = lay.key.as_ref() {
+                if k_disp == disp
+                    && *k_w == inner_w
+                    && k_fam.as_deref() == family
+                    && *k_size == fsize.to_bits()
+                {
+                    return;
+                }
+            }
+        }
         let chars: Vec<char> = disp.chars().collect();
         let n = chars.len();
         let multiline = self.is_multiline();
         let wrap = self.config.wrap && multiline;
 
         let mut lay = self.layout.borrow_mut();
+        lay.key = Some((disp.to_string(), inner_w, family.map(str::to_string), fsize.to_bits()));
         lay.lines.clear();
         lay.line_h = canvas.measure_text("Ay", family, fsize).h.max(fsize as i32);
 
@@ -1154,6 +1172,9 @@ impl Widget for TextInput {
     fn wants_right_click(&self) -> bool {
         true // 右键弹出上下文菜单（剪切/复制/粘贴/全选）
     }
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Text // 文本输入区显示 I 形光标
+    }
 }
 
 #[cfg(test)]
@@ -1205,6 +1226,24 @@ mod tests {
     }
 
     #[test]
+    fn layout_cache_hit_then_invalidates_on_change() {
+        use crate::render::SkiaCanvas;
+        use tiny_skia::Pixmap;
+        let ti = dummy_input(); // 单行
+        let mut pm = Pixmap::new(200, 30).unwrap();
+        let mut c = SkiaCanvas::new(&mut pm); // 无引擎：measure 走确定性近似
+        ti.rebuild_layout(&mut c, "abc", None, 14.0, 200);
+        assert_eq!(ti.layout.borrow().lines.len(), 1);
+        assert_eq!(ti.layout.borrow().lines[0].end, 3);
+        // 同参再次：缓存命中，不破坏既有行集。
+        ti.rebuild_layout(&mut c, "abc", None, 14.0, 200);
+        assert_eq!(ti.layout.borrow().lines[0].end, 3, "缓存命中应沿用旧行");
+        // 文本变化：键失配 → 重建为新长度。
+        ti.rebuild_layout(&mut c, "abcdefghij", None, 14.0, 200);
+        assert_eq!(ti.layout.borrow().lines[0].end, 10, "文本变化后应重建");
+    }
+
+    #[test]
     fn cursor_line_soft_break_affinity() {
         let ti = dummy_input();
         // 两视觉行 [0,3) 软换行 + [3,6)。
@@ -1214,6 +1253,7 @@ mod tests {
                 VisLine { start: 3, end: 6, x: vec![0, 10, 20, 30], hard: true },
             ],
             line_h: 14,
+            key: None,
         };
         assert_eq!(ti.cursor_line(&lay, 0), 0);
         assert_eq!(ti.cursor_line(&lay, 2), 0);
@@ -1232,6 +1272,7 @@ mod tests {
                 VisLine { start: 2, end: 3, x: vec![0, 10], hard: true },
             ],
             line_h: 14,
+            key: None,
         };
         // c==1 在硬换行末尾：停在本行（光标在 \n 前）。
         assert_eq!(ti.cursor_line(&lay, 1), 0);

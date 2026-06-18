@@ -4,6 +4,9 @@
 //! R/B 交换为 BGRA 后 `SetDIBitsToDevice` 直接拷屏。空闲时阻塞在 `GetMessageW`，零 CPU。
 
 pub mod clipboard;
+pub mod tray;
+
+pub use tray::{Tray, TrayCtx, TrayMenuItem};
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -42,17 +45,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, IsIconic, LoadCursorW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK,
-    SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYSCREEN, SetWindowLongPtrW, ShowWindow, TranslateMessage,
-    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT,
-    SetWindowPos, IDC_ARROW, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
-    WINDOW_EX_STYLE, WM_CAPTURECHANGED, WM_CHAR,
-    WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCLIENT, MWMO_INPUTAVAILABLE,
+    PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_DROPFILES, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+};
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
 };
 
 use super::AppHandler;
-use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
 use crate::geometry::{Color, Point, Size};
 
 /// 窗口配置。
@@ -63,6 +70,8 @@ pub struct WindowConfig {
     pub bg: Color,
     /// 窗口居中显示。
     pub centered: bool,
+    /// 允许用户调整窗口大小（默认 true）。false 时移除 WS_THICKFRAME 和最大化按钮。
+    pub resizable: bool,
     /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
     pub screenshot: Option<PathBuf>,
     /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
@@ -71,6 +80,8 @@ pub struct WindowConfig {
     pub screenshot_rclick: Option<(i32, i32)>,
     /// 截屏前合成一次左键单击（逻辑坐标，Down+Up），用于验证下拉展开等交互视觉。
     pub screenshot_click: Option<(i32, i32)>,
+    /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
+    pub tray: Option<tray::Tray>,
 }
 
 impl Default for WindowConfig {
@@ -81,10 +92,12 @@ impl Default for WindowConfig {
             height: 600,
             bg: Color::hex(0xF3F3F3),
             centered: false,
+            resizable: true,
             screenshot: None,
             screenshot_scale: 1.0,
             screenshot_rclick: None,
             screenshot_click: None,
+            tray: None,
         }
     }
 }
@@ -152,6 +165,8 @@ struct WindowState {
     last_click: ClickTracker,
     /// 触摸拖动滚动状态机（触摸提升为鼠标消息后据此区分点击/滑动）。
     touch: Touch,
+    /// 系统托盘状态（None=无托盘）。drop 时自动清理图标。
+    tray: Option<tray::TrayState>,
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -210,6 +225,7 @@ impl WindowState {
             buf_h: 0,
             last_click: ClickTracker::default(),
             touch: Touch::default(),
+            tray: None,
         }
     }
 
@@ -302,19 +318,22 @@ fn to_skia_color(c: Color) -> tiny_skia::Color {
 
 const CLASS_NAME: PCWSTR = w!("WindUiWindowClass");
 
-unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
+unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
     let hinst = HINSTANCE(hmodule.0);
     let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
+    let hicon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(wnd_proc),
         hInstance: hinst,
         lpszClassName: CLASS_NAME,
         hCursor: cursor,
+        hIcon: hicon,
+        hIconSm: hicon,
         ..Default::default()
     };
     let atom = RegisterClassExW(&wc);
@@ -335,11 +354,21 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let init_scale = sys_dpi as f32 / 96.0;
     let (phys_w, phys_h) = frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi);
 
+    let win_style = if cfg.resizable {
+        WS_OVERLAPPEDWINDOW
+    } else {
+        // 固定大小：保留标题栏、系统菜单、最小化按钮，去掉拉伸边框和最大化按钮
+        WINDOW_STYLE(
+            WS_OVERLAPPEDWINDOW.0
+                & !(WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0)
+        )
+    };
+
     let hwnd = match CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         CLASS_NAME,
         PCWSTR(title.as_ptr()),
-        WS_OVERLAPPEDWINDOW,
+        win_style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         phys_w,
@@ -385,6 +414,18 @@ unsafe fn run_windowed(cfg: WindowConfig, handler: Box<dyn AppHandler>) {
 
     // 注册触摸窗口：触摸以 WM_TOUCH 原始点递送（禁用系统手势；消费后无重复鼠标提升）。
     let _ = RegisterTouchWindow(hwnd, REGISTER_TOUCH_WINDOW_FLAGS(0));
+
+    // 接收文件拖放：拖入文件后以 WM_DROPFILES 递送路径 + 落点。
+    DragAcceptFiles(hwnd, true);
+
+    // 系统托盘图标（若配置）：窗口创建后安装，状态存入 WindowState（drop 时清理）。
+    if let Some(t) = cfg.tray.take() {
+        if let Some(ts) = tray::install(hwnd, t) {
+            if let Some(s) = state_from(hwnd) {
+                s.tray = Some(ts);
+            }
+        }
+    }
 
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
@@ -509,6 +550,17 @@ unsafe extern "system" fn wnd_proc(
             let _ = InvalidateRect(hwnd, None, false);
             LRESULT(0)
         }
+        // 客户区光标：按当前悬停控件期望形状设置（链接=手型、文本=I 形）。
+        // 仅客户区由我们决定，非客户区（边框/标题栏）交默认处理。
+        WM_SETCURSOR => {
+            if (lparam.0 & 0xffff) as u32 == HTCLIENT {
+                if let Some(state) = state_from(hwnd) {
+                    apply_cursor(state.handler.cursor());
+                    return LRESULT(1); // TRUE：已处理，阻止默认覆盖为类光标
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_MOUSEMOVE => {
             handle_pointer(hwnd, PointerKind::Move, MouseButton::Left, lparam);
             LRESULT(0)
@@ -554,6 +606,20 @@ unsafe extern "system" fn wnd_proc(
             handle_touch_input(hwnd, wparam, lparam);
             LRESULT(0)
         }
+        // 文件拖放（已 DragAcceptFiles）：取路径 + 落点，路由到落点下的控件。
+        WM_DROPFILES => {
+            handle_drop_files(hwnd, wparam);
+            LRESULT(0)
+        }
+        // 托盘回调消息：左键/双击触发回调，右键弹原生菜单。
+        tray::WM_TRAYICON => {
+            if let Some(state) = state_from(hwnd) {
+                if let Some(ts) = state.tray.as_mut() {
+                    tray::handle_message(ts, lparam);
+                }
+            }
+            LRESULT(0)
+        }
         // 输入法开始合成 / 合成中：把候选窗定位到焦点控件的光标处，再交默认处理。
         // 合成期间光标不移动，重复定位到同一点是幂等的；兼顾"候选窗在合成中才出现"
         // 的输入法（仅 STARTCOMPOSITION 可能错过候选窗放置时机）。
@@ -572,6 +638,71 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 按形状加载并设置系统光标（应答 WM_SETCURSOR）。加载失败时静默退回类光标。
+unsafe fn apply_cursor(shape: CursorShape) {
+    let id = match shape {
+        CursorShape::Hand => IDC_HAND,
+        CursorShape::Text => IDC_IBEAM,
+        CursorShape::Arrow => IDC_ARROW,
+    };
+    if let Ok(cur) = LoadCursorW(None, id) {
+        let _ = SetCursor(cur);
+    }
+}
+
+/// 处理 WM_DROPFILES：解出拖入的文件路径与落点（客户区物理像素），交宿主路由。
+unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
+    let hdrop = HDROP(wparam.0 as *mut c_void);
+    // 落点（客户区物理像素）。
+    let mut pt = POINT::default();
+    let _ = DragQueryPoint(hdrop, &mut pt);
+    // ifile=0xFFFFFFFF + 空缓冲 → 返回文件总数。
+    let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+    let mut paths = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        // 空缓冲先查所需长度（字符数，不含 NUL），再按长度取内容。
+        let len = DragQueryFileW(hdrop, i, None);
+        if len == 0 {
+            continue;
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let got = DragQueryFileW(hdrop, i, Some(&mut buf));
+        if got > 0 {
+            paths.push(PathBuf::from(String::from_utf16_lossy(&buf[..got as usize])));
+        }
+    }
+    DragFinish(hdrop);
+    if paths.is_empty() {
+        return;
+    }
+    let repaint = {
+        let Some(state) = state_from(hwnd) else { return };
+        state.handler.on_drop_files(Point::new(pt.x, pt.y), paths)
+    };
+    if repaint {
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+    if state_from(hwnd).map(|s| s.handler.wants_close()).unwrap_or(false) {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+/// 用系统默认程序打开 URL/路径（`ShellExecuteW` 的 "open" 动词）。fire-and-forget，忽略结果。
+pub fn open_url(url: &str) {
+    let verb = w!("open");
+    let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(
+            None,
+            verb,
+            PCWSTR(target.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 

@@ -8,7 +8,7 @@ pub use win32::{run, WindowConfig};
 
 use tiny_skia::Pixmap;
 
-use crate::event::{KeyEvent, PointerEvent};
+use crate::event::{CursorShape, KeyEvent, PointerEvent};
 use crate::geometry::{Point, Size};
 
 /// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
@@ -48,6 +48,12 @@ pub trait AppHandler {
         false
     }
 
+    /// 当前指针悬停位置期望的光标形状。平台层据此应答 OS 光标查询
+    /// （win32 `WM_SETCURSOR`）。默认箭头。
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Arrow
+    }
+
     /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）按 `dy` 物理像素平移，
     /// 滚动手指下的容器。返回 true 表示需要重绘。
     fn on_pan(&mut self, _pos: Point, _dy: i32) -> bool {
@@ -62,6 +68,12 @@ pub trait AppHandler {
 
     /// 取消进行中的惯性滑动（新触摸按下/点击/滚轮打断时）。返回 true 表示需要重绘。
     fn cancel_fling(&mut self) -> bool {
+        false
+    }
+
+    /// 文件拖放到窗口：`pos` 为落点（**物理像素**，相对客户区），`paths` 为文件路径。
+    /// 返回 true 表示需要重绘。
+    fn on_drop_files(&mut self, _pos: Point, _paths: Vec<std::path::PathBuf>) -> bool {
         false
     }
 }

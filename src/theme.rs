@@ -352,6 +352,27 @@ impl ListTheme {
     }
 }
 
+/// 链接覆盖层（链接色三态，回退到 accent 家族）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LinkTheme {
+    pub color: Option<Color>,
+    pub hover: Option<Color>,
+    pub pressed: Option<Color>,
+}
+
+impl LinkTheme {
+    pub fn color(&self, p: &Palette) -> Color {
+        self.color.unwrap_or(p.accent)
+    }
+    pub fn hover(&self, p: &Palette) -> Color {
+        self.hover.unwrap_or(p.accent_hover)
+    }
+    pub fn pressed(&self, p: &Palette) -> Color {
+        self.pressed.unwrap_or(p.accent_active)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -367,6 +388,7 @@ pub struct Theme {
     pub progress: ProgressTheme,
     pub stepper: StepperTheme,
     pub list: ListTheme,
+    pub link: LinkTheme,
 }
 
 impl Theme {

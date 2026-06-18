@@ -10,6 +10,19 @@ pub enum MouseButton {
     Middle,
 }
 
+/// 控件期望的鼠标光标形状。`Widget::cursor()` 据交互语义声明，宿主取当前悬停
+/// 节点的形状交平台层应答（win32 `WM_SETCURSOR`）。禁用节点恒回退 `Arrow`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// 默认箭头。
+    #[default]
+    Arrow,
+    /// 手型（链接等可点击文本）。
+    Hand,
+    /// 文本 I 形（文本输入/可编辑区）。
+    Text,
+}
+
 /// 指针动作。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PointerKind {
