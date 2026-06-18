@@ -61,7 +61,7 @@ impl Widget for ListRow {
         Size::new(avail.w.max(0), ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, lt) = (&th.palette, &th.list);
         let sel = self.selected();
@@ -71,20 +71,27 @@ impl Widget for ListRow {
         } else if self.hover {
             canvas.fill_rect(x, y, w, h, &Paint::fill(lt.hover_bg(pal)));
         }
-        // 选中左缘强调条。
-        if sel {
+        // 选中左缘强调条（禁用时不强调）。
+        if sel && enabled {
             canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent));
         }
-        // 前置图标：方形、垂直居中；文字相应右移。
+        // 前置图标：方形、垂直居中；文字相应右移。禁用走 Disabled 调制。
+        let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
         let mut text_x = bounds.x + PAD_X;
         if let Some(icon) = &self.icon {
             let side = (bounds.h - 14).max(0);
             let iy = bounds.y + (bounds.h - side) / 2;
             let istyle = Style { corner_radius: 0.0, ..style.clone() };
-            icon.paint_into(Rect::new(bounds.x + PAD_X, iy, side, side), canvas, &istyle, self.visual_state());
+            icon.paint_into(Rect::new(bounds.x + PAD_X, iy, side, side), canvas, &istyle, vstate);
             text_x = bounds.x + PAD_X + side + ICON_GAP;
         }
-        let color = if sel { lt.selected_text(pal) } else { lt.text(pal) };
+        let color = if !enabled {
+            pal.text_disabled
+        } else if sel {
+            lt.selected_text(pal)
+        } else {
+            lt.text(pal)
+        };
         let tw = (bounds.right() - PAD_X - text_x).max(0);
         let tr = Rect::new(text_x, bounds.y, tw, bounds.h);
         canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
