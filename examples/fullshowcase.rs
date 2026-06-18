@@ -149,6 +149,9 @@ fn main() {
     let zh_form = Rc::new(Cell::new(0usize)); // 简体/繁体
     let width_mode = Rc::new(Cell::new(0usize)); // 半角/全角
     let pinyin = Rc::new(Cell::new(0usize)); // 全拼/双拼/笔画
+    // 可折叠分组 + 导航行演示。
+    let adv_expand = Rc::new(Cell::new(true));
+    let nav_msg = Rc::new(RefCell::new(String::from("（点下方导航行试试）")));
     // 链接 on_click 演示：点击计数写入动态标签。
     let link_msg = Rc::new(RefCell::new(String::from("（点下方“点我计数”试试）")));
     let link_n = Rc::new(Cell::new(0u32));
@@ -168,6 +171,28 @@ fn main() {
                     "禁用态",
                     Element::segmented(vec!["开", "关"], Rc::new(Cell::new(0usize))).disabled(true),
                 )),
+        ))
+        .child(card(
+            "可折叠分组 + 导航行（点标题展开/收起，行尾 > 钻入子页）",
+            Element::col().width_match().spacing(4).child(Element::collapsible(
+                "高级设置",
+                adv_expand.clone(),
+                Element::col()
+                    .width_match()
+                    .child({
+                        let m = nav_msg.clone();
+                        Element::nav_row("双拼方案设定").on_click(move |_| *m.borrow_mut() = "已进入：双拼方案设定".into())
+                    })
+                    .child({
+                        let m = nav_msg.clone();
+                        Element::nav_row("模糊音设置").on_click(move |_| *m.borrow_mut() = "已进入：模糊音设置".into())
+                    })
+                    .child({
+                        let m = nav_msg.clone();
+                        Element::nav_row("拼音纠错设置").on_click(move |_| *m.borrow_mut() = "已进入：拼音纠错设置".into())
+                    }),
+            ))
+            .child(Element::label_rc(nav_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
         ))
         .child(card(
             "进度条",

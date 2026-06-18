@@ -425,6 +425,29 @@ impl SegmentTheme {
     }
 }
 
+/// 导航覆盖层（NavRow 钻入行 + CollapsibleHeader 折叠头共用）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NavTheme {
+    pub text: Option<Color>,
+    /// 悬停/按下底色。
+    pub hover_bg: Option<Color>,
+    /// 右侧箭头色。
+    pub chevron: Option<Color>,
+}
+
+impl NavTheme {
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(p.text)
+    }
+    pub fn hover_bg(&self, p: &Palette) -> Color {
+        self.hover_bg.unwrap_or(p.surface_alt)
+    }
+    pub fn chevron(&self, p: &Palette) -> Color {
+        self.chevron.unwrap_or(p.text_muted)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -442,6 +465,7 @@ pub struct Theme {
     pub list: ListTheme,
     pub link: LinkTheme,
     pub segment: SegmentTheme,
+    pub nav: NavTheme,
 }
 
 impl Theme {
