@@ -8,6 +8,7 @@ pub mod image;
 pub mod inputs;
 pub mod link;
 pub mod list;
+pub mod nav;
 pub mod progress;
 pub mod segmented;
 pub mod select;
@@ -31,6 +32,7 @@ pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use link::Link;
 pub use list::ListRow;
+pub use nav::{CollapsibleHeader, NavRow};
 pub use window_buttons::{WindowButton, WindowButtonKind};
 pub use progress::ProgressBar;
 pub use segmented::SegmentedControl;
@@ -592,6 +594,30 @@ impl Element {
             scroll = scroll.child(Self::base(Layout::None).widget(row).width_match().height(list::ROW_H));
         }
         scroll
+    }
+
+    /// 带 chevron 的导航行：左标签 + 右侧 `>`，悬停高亮，点击/回车触发 `.on_click(...)`。
+    /// 适合"钻入子页 / 打开子设置"的设置行。无持久选中态——需要选中高亮的导航用 `list`。
+    pub fn nav_row(label: impl Into<String>) -> Self {
+        Self::base(Layout::None)
+            .widget(nav::NavRow::new(label.into()))
+            .width_match()
+            .height(nav::NAV_ROW_H)
+    }
+
+    /// 可折叠分组：点击标题行展开 / 收起 `body`。`expanded` 绑定展开状态，
+    /// body 经 `visible_when(expanded)` 显隐——收起时不占布局、不参与命中。
+    /// 标题行右侧三角随状态翻转（展开向下 / 收起向右）。
+    pub fn collapsible(title: impl Into<String>, expanded: Rc<Cell<bool>>, body: Element) -> Self {
+        let header = Self::base(Layout::None)
+            .widget(nav::CollapsibleHeader::new(title.into(), expanded.clone()))
+            .width_match()
+            .height(nav::NAV_ROW_H);
+        let show = expanded.clone();
+        Element::col()
+            .width_match()
+            .child(header)
+            .child(body.visible_when(move || show.get()))
     }
 
     /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
