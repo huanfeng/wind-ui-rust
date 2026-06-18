@@ -9,6 +9,7 @@ pub mod inputs;
 pub mod link;
 pub mod list;
 pub mod progress;
+pub mod segmented;
 pub mod select;
 pub mod stepper;
 pub mod window_buttons;
@@ -32,6 +33,7 @@ pub use link::Link;
 pub use list::ListRow;
 pub use window_buttons::{WindowButton, WindowButtonKind};
 pub use progress::ProgressBar;
+pub use segmented::SegmentedControl;
 pub use select::Dropdown;
 pub use stepper::Stepper;
 
@@ -542,6 +544,15 @@ impl Element {
     pub fn visible_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
         self.vis_cond = Some(Box::new(f));
         self
+    }
+
+    /// 分段控制器（绑定 `Rc<Cell<usize>>` 选中索引 + 段标签）：连体多段单选，
+    /// 选中段高亮。语义同 `radio` 组，外观更紧凑——适合"二/三选一"切换。
+    /// 点击选段、悬停逐段高亮、聚焦后左右方向键移动选中。
+    pub fn segmented(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+        let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
+        debug_assert!(!opts.is_empty(), "Element::segmented 至少需要一段");
+        Self::base(Layout::None).widget(segmented::SegmentedControl::new(opts, selected))
     }
 
     /// 下拉选择（绑定 `Rc<Cell<usize>>` 选中索引 + 选项标签）。

@@ -145,6 +145,10 @@ fn main() {
     let qty = Rc::new(Cell::new(3.0f64));
     let zoom = Rc::new(Cell::new(1.0f64));
     let picked = Rc::new(Cell::new(1usize));
+    // 分段控制器演示状态（输入法常见的二/三选一切换）。
+    let zh_form = Rc::new(Cell::new(0usize)); // 简体/繁体
+    let width_mode = Rc::new(Cell::new(0usize)); // 半角/全角
+    let pinyin = Rc::new(Cell::new(0usize)); // 全拼/双拼/笔画
     // 链接 on_click 演示：点击计数写入动态标签。
     let link_msg = Rc::new(RefCell::new(String::from("（点下方“点我计数”试试）")));
     let link_n = Rc::new(Cell::new(0u32));
@@ -152,6 +156,19 @@ fn main() {
     let components_body = Element::col()
         .width_match()
         .spacing(14)
+        .child(card(
+            "分段控制器（连体多段单选，点击/方向键切换）",
+            Element::col()
+                .width_match()
+                .spacing(6)
+                .child(row("简繁切换", Element::segmented(vec!["简体", "繁体"], zh_form.clone())))
+                .child(row("半全角", Element::segmented(vec!["半角", "全角"], width_mode.clone())))
+                .child(row("输入方案", Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin.clone())))
+                .child(row(
+                    "禁用态",
+                    Element::segmented(vec!["开", "关"], Rc::new(Cell::new(0usize))).disabled(true),
+                )),
+        ))
         .child(card(
             "进度条",
             Element::col()

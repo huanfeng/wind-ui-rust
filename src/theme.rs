@@ -373,6 +373,58 @@ impl LinkTheme {
     }
 }
 
+/// 分段控制器覆盖层（连体多段单选）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SegmentTheme {
+    /// 容器底色。
+    pub bg: Option<Color>,
+    pub border: Option<Color>,
+    /// 聚焦时边框（回退 accent）。
+    pub border_focus: Option<Color>,
+    /// 选中段底色（含 alpha）。
+    pub selected_bg: Option<Color>,
+    /// 选中段文字色。
+    pub selected_text: Option<Color>,
+    /// 未选中段文字色。
+    pub text: Option<Color>,
+    /// 悬停段浅底（含 alpha）。
+    pub hover_bg: Option<Color>,
+    /// 段间分隔线。
+    pub divider: Option<Color>,
+    pub corner: Option<f32>,
+}
+
+impl SegmentTheme {
+    pub fn bg(&self, p: &Palette) -> Color {
+        self.bg.unwrap_or(p.surface)
+    }
+    pub fn border(&self, p: &Palette) -> Color {
+        self.border.unwrap_or(p.border)
+    }
+    pub fn border_focus(&self, p: &Palette) -> Color {
+        self.border_focus.unwrap_or(p.accent)
+    }
+    pub fn selected_bg(&self, p: &Palette) -> Color {
+        self.selected_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+    }
+    pub fn selected_text(&self, p: &Palette) -> Color {
+        self.selected_text.unwrap_or(p.accent)
+    }
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(p.text_muted)
+    }
+    pub fn hover_bg(&self, p: &Palette) -> Color {
+        self.hover_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x12))
+    }
+    pub fn divider(&self, p: &Palette) -> Color {
+        self.divider.unwrap_or(p.divider)
+    }
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_md)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -389,6 +441,7 @@ pub struct Theme {
     pub stepper: StepperTheme,
     pub list: ListTheme,
     pub link: LinkTheme,
+    pub segment: SegmentTheme,
 }
 
 impl Theme {
