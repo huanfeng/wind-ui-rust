@@ -297,6 +297,7 @@ pub struct Element {
     on_drop: Option<DropFn>,
     window_drag: bool,
     enabled: Option<Rc<Cell<bool>>>,
+    tooltip: Option<String>,
 }
 
 impl Element {
@@ -319,6 +320,7 @@ impl Element {
             on_drop: None,
             window_drag: false,
             enabled: None,
+            tooltip: None,
         }
     }
 
@@ -474,6 +476,16 @@ impl Element {
         self.enabled = Some(flag);
         self
     }
+    /// 悬停提示：指针在本元素上停留片刻后，于指针附近弹出说明浮层。
+    /// **适用于任意控件/容器**（像 `enabled`，挂在节点上）；命中取最深节点的提示。
+    /// 仅支持单行文本（浮层按单行度量；含 `\n` 在 debug 下提示，release 忽略换行测量）。
+    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        debug_assert!(!text.contains('\n'), "tooltip 仅支持单行文本");
+        self.tooltip = Some(text);
+        self
+    }
+
     /// 静态禁用（`true`=禁用）。`false` 为默认启用、无操作。适用于任意控件/容器。
     pub fn disabled(mut self, on: bool) -> Self {
         if on {
@@ -833,6 +845,7 @@ impl Element {
             enabled: self.enabled,
             on_drop: self.on_drop,
             window_drag: self.window_drag,
+            tooltip: self.tooltip,
             focused: false,
             clip_children: self.clip_children,
             scroll_y: 0,
@@ -934,6 +947,20 @@ mod tests {
             &mut capture,
         );
         assert_eq!(res.window_op, Some(crate::event::WindowOp::Minimize), "最小化按钮点击应请求 Minimize");
+    }
+
+    #[test]
+    fn tooltip_attaches_to_node_and_resolves_by_hit() {
+        // .tooltip(..) 挂到节点上；命中最深节点即可取到其提示文本。
+        let tree = layout(
+            Element::col()
+                .fill()
+                .child(Element::label("帮助").width(100).height(30).tooltip("说明文本")),
+        );
+        let hit = tree.hit_test(Point::new(20, 15)).expect("应命中标签");
+        assert_eq!(tree.node_tooltip(hit).as_deref(), Some("说明文本"), "命中节点应取到 tooltip");
+        // 根容器未设 tooltip → None。
+        assert_eq!(tree.node_tooltip(tree.root.unwrap()), None, "未设 tooltip 的节点应为 None");
     }
 
     #[test]
