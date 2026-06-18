@@ -124,17 +124,21 @@ impl Widget for TabButton {
         let icon_extra = if self.icon.is_some() { t.h + TAB_ICON_GAP } else { 0 };
         Size::new(t.w + 24 + icon_extra, t.h + 16)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (pal, tab) = (&th.palette, &th.tab);
         let sel = self.selected();
-        let color = if sel {
+        // 禁用：文字置灰、图标走 Disabled 调制；否则按选中/悬停三态。
+        let color = if !enabled {
+            pal.text_disabled
+        } else if sel {
             tab.accent(pal)
         } else if self.hover {
             tab.hover(pal)
         } else {
             tab.inactive(pal)
         };
+        let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
         // 有图标：图标 + 文字作为整体水平居中（图标在左）；否则文字整体居中。
         if let Some(icon) = &self.icon {
             let ts = canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
@@ -143,13 +147,14 @@ impl Widget for TabButton {
             let sx = bounds.x + ((bounds.w - total_w) / 2).max(0);
             let iy = bounds.y + ((bounds.h - ih) / 2).max(0);
             let istyle = Style { corner_radius: 0.0, ..style.clone() };
-            icon.paint_into(Rect::new(sx, iy, ih, ih), canvas, &istyle, self.visual_state());
+            icon.paint_into(Rect::new(sx, iy, ih, ih), canvas, &istyle, vstate);
             let tr = Rect::new(sx + ih + TAB_ICON_GAP, bounds.y, ts.w + 2, bounds.h);
             canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
         } else {
             canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
         }
-        if sel {
+        // 禁用时不画选中指示条（避免给"不可用"标签强调色）。
+        if sel && enabled {
             // 底部指示条
             let y = (bounds.y + bounds.h - 3) as f32;
             canvas.fill_round_rect(
