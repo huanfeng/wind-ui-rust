@@ -28,6 +28,14 @@ const MENU_VPAD: i32 = 4;
 const MENU_MIN_W: i32 = 130;
 const MENU_FONT: f32 = 14.0;
 
+/// 悬停提示：触发延时（ms）、字号、内边距、相对指针的偏移。
+const TOOLTIP_DELAY_MS: u64 = 500;
+const TOOLTIP_FONT: f32 = 13.0;
+const TOOLTIP_PAD_X: i32 = 8;
+const TOOLTIP_PAD_Y: i32 = 4;
+const TOOLTIP_CURSOR_DX: i32 = 12;
+const TOOLTIP_CURSOR_DY: i32 = 20;
+
 /// 宿主管理的上下文菜单浮层：在控件树之上自绘，拦截指针，项激活时向目标控件合成按键。
 struct ContextMenu {
     items: Vec<MenuItem>,
@@ -80,6 +88,7 @@ impl App {
                 screenshot_scale: 1.0,
                 screenshot_rclick: None,
                 screenshot_click: None,
+                screenshot_hover: None,
                 tray: None,
                 frameless: false,
             },
@@ -149,6 +158,15 @@ impl App {
                 args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
             ) {
                 self.cfg.screenshot_click = Some((x, y));
+            }
+        }
+        // --hover X Y：截屏前在 (X,Y) 合成悬停并等待超过提示延时，验证 tooltip 等悬停视觉。
+        if let Some(i) = args.iter().position(|a| a == "--hover") {
+            if let (Some(x), Some(y)) = (
+                args.get(i + 1).and_then(|s| s.parse::<i32>().ok()),
+                args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
+            ) {
+                self.cfg.screenshot_hover = Some((x, y));
             }
         }
         self
@@ -276,6 +294,13 @@ struct UiHost {
     fling: Option<Fling>,
     /// 待执行的窗口操作（自定义标题栏按钮触发，平台分发后轮询执行）。
     pending_window_op: Option<WindowOp>,
+    /// 最近一次指针位置（逻辑坐标），用于悬停提示浮层定位。
+    hover_pos: Point,
+    /// 当前悬停起始时刻（ms，单调时钟）。悬停节点变化或点击时复位；
+    /// 渲染据 `now - hover_since >= TOOLTIP_DELAY_MS` 决定是否弹出提示。
+    hover_since_ms: u64,
+    /// 点击后抑制提示，直到指针再次移动（避免点完控件原地又弹出盖住它）。
+    tooltip_suppressed: bool,
 }
 
 impl UiHost {
@@ -302,6 +327,9 @@ impl UiHost {
             pan_residual: 0.0,
             fling: None,
             pending_window_op: None,
+            hover_pos: Point::new(0, 0),
+            hover_since_ms: 0,
+            tooltip_suppressed: false,
         }
     }
 
@@ -541,6 +569,32 @@ impl AppHandler for UiHost {
                 }
             }
         }
+        // 悬停提示浮层（菜单激活时不显示）：悬停节点带 tooltip 且停留超过延时则弹出；
+        // 未到延时则请求下一帧——鼠标静止后无事件，需靠 anim 续帧推进计时（与不确定进度条同源）。
+        if self.menu.is_none() && !self.tooltip_suppressed {
+            if let Some(text) = self.hover.and_then(|h| self.tree.node_tooltip(h)) {
+                if now_ms.saturating_sub(self.hover_since_ms) < TOOLTIP_DELAY_MS {
+                    crate::anim::request_repaint();
+                } else {
+                    let (pal, tt) = (&self.theme.palette, &self.theme.tooltip);
+                    let ts = canvas.measure_text(&text, None, TOOLTIP_FONT);
+                    let (w, h) = (ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);
+                    let ws = self.logical_size;
+                    let mut x = self.hover_pos.x + TOOLTIP_CURSOR_DX;
+                    let mut y = self.hover_pos.y + TOOLTIP_CURSOR_DY;
+                    if ws.w > 0 && x + w > ws.w {
+                        x = (ws.w - w).max(0);
+                    }
+                    if ws.h > 0 && y + h > ws.h {
+                        y = (self.hover_pos.y - h - 4).max(0); // 下方放不下则翻到指针上方
+                    }
+                    let corner = tt.corner(&self.theme.metrics);
+                    canvas.fill_round_rect(x as f32, y as f32, w as f32, h as f32, corner, &Paint::fill(tt.bg(pal)));
+                    let tr = Rect::new(x + TOOLTIP_PAD_X, y, w - 2 * TOOLTIP_PAD_X, h);
+                    canvas.draw_text(&text, tr, tt.text(pal), crate::spec::Align::Start, None, TOOLTIP_FONT);
+                }
+            }
+        }
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
@@ -558,11 +612,28 @@ impl AppHandler for UiHost {
         if self.menu.is_some() {
             return self.handle_menu_pointer(ev);
         }
+        let old_hover = self.hover;
         let mut hover = self.hover;
         let mut capture = self.capture;
         let res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
         self.hover = hover;
         self.capture = capture;
+        // 悬停提示：记录指针位置；悬停节点变化时重新计时（隐藏旧提示、对新节点计时）。
+        // 按下抑制提示（点完控件不原地弹出盖住它），指针再次移动后解除抑制并重新计时。
+        self.hover_pos = ev.pos;
+        let now_ms = self.start.elapsed().as_millis() as u64;
+        if hover != old_hover {
+            self.hover_since_ms = now_ms;
+            self.tooltip_suppressed = false;
+        }
+        match ev.kind {
+            PointerKind::Down => self.tooltip_suppressed = true,
+            PointerKind::Move if self.tooltip_suppressed => {
+                self.tooltip_suppressed = false;
+                self.hover_since_ms = now_ms;
+            }
+            _ => {}
+        }
         if let Some(f) = res.focus {
             let old = self.focus;
             self.tree.set_focused(Some(f), old);

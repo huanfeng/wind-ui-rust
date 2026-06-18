@@ -87,6 +87,8 @@ pub struct WindowConfig {
     pub screenshot_rclick: Option<(i32, i32)>,
     /// 截屏前合成一次左键单击（逻辑坐标，Down+Up），用于验证下拉展开等交互视觉。
     pub screenshot_click: Option<(i32, i32)>,
+    /// 截屏前合成一次悬停（逻辑坐标 Move）并等待超过提示延时，用于验证 tooltip 等悬停视觉。
+    pub screenshot_hover: Option<(i32, i32)>,
     /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
     pub tray: Option<tray::Tray>,
     /// 无标题栏窗口（自定义标题栏）：WM_NCCALCSIZE 让客户区铺满整窗，保留吸附/阴影/缩放。
@@ -106,6 +108,7 @@ impl Default for WindowConfig {
             screenshot_scale: 1.0,
             screenshot_rclick: None,
             screenshot_click: None,
+            screenshot_hover: None,
             tray: None,
             frameless: false,
         }
@@ -144,6 +147,15 @@ fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &P
         let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
         handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Left));
         handler.on_pointer(PointerEvent::single(PointerKind::Up, pos, MouseButton::Left));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
+    if let Some((lx, ly)) = cfg.screenshot_hover {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Move, pos, MouseButton::Left));
+        // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
+        std::thread::sleep(std::time::Duration::from_millis(650));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }

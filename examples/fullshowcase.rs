@@ -195,6 +195,17 @@ fn main() {
             .child(Element::label_rc(nav_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
         ))
         .child(card(
+            "悬停提示 Tooltip（任意元素 .tooltip(...)，停留约 0.5s 弹出）",
+            Element::col()
+                .width_match()
+                .spacing(10)
+                .child(row("按钮", Element::button("悬停我").tooltip("这是按钮的悬停说明")))
+                .child(row(
+                    "帮助图标",
+                    Element::label("(?)").font_size(14.0).fg(Color::hex(SUB)).tooltip("把鼠标停在元素上片刻即可看到提示"),
+                )),
+        ))
+        .child(card(
             "进度条",
             Element::col()
                 .width_match()

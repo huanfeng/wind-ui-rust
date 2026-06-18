@@ -143,6 +143,9 @@ pub struct Node {
     /// 是否为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
     /// 命中沿父链继承（标记容器即其内非交互区均可拖），但落在子交互控件上不拖动。
     pub window_drag: bool,
+    /// 悬停提示文本（None=无）。宿主在悬停延时后于指针附近绘制浮层；
+    /// 像 `enabled`/`window_drag` 一样挂在节点上，适用于任意控件/容器。
+    pub tooltip: Option<String>,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
@@ -808,6 +811,11 @@ impl Tree {
     /// 禁用回退由宿主在查询前进行处理（见 `App` 的 `cursor()`）。
     pub fn cursor_at(&self, id: NodeId) -> CursorShape {
         self.get(id).map(|n| n.widget.cursor()).unwrap_or(CursorShape::Arrow)
+    }
+
+    /// 节点的悬停提示文本（无则 None）。宿主据此在悬停延时后绘制浮层。
+    pub fn node_tooltip(&self, id: NodeId) -> Option<String> {
+        self.get(id).and_then(|n| n.tooltip.clone())
     }
 
     /// `pos`（逻辑坐标）是否落在交互控件上（可聚焦节点，如自定义标题栏的窗口按钮）。

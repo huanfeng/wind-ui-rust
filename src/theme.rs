@@ -448,6 +448,27 @@ impl NavTheme {
     }
 }
 
+/// 悬停提示浮层覆盖层（深底浅字）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TooltipTheme {
+    pub bg: Option<Color>,
+    pub text: Option<Color>,
+    pub corner: Option<f32>,
+}
+
+impl TooltipTheme {
+    pub fn bg(&self, _p: &Palette) -> Color {
+        self.bg.unwrap_or(Color::hex(0x303033))
+    }
+    pub fn text(&self, _p: &Palette) -> Color {
+        self.text.unwrap_or(Color::WHITE)
+    }
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_sm)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -466,6 +487,7 @@ pub struct Theme {
     pub link: LinkTheme,
     pub segment: SegmentTheme,
     pub nav: NavTheme,
+    pub tooltip: TooltipTheme,
 }
 
 impl Theme {

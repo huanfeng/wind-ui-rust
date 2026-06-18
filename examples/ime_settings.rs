@@ -82,7 +82,23 @@ fn main() {
             .child(setting_row("半角 / 全角", 0, Element::segmented(vec!["半角", "全角"], width_mode.clone())))
             .child(setting_row("中文 / 英文", 0, Element::segmented(vec!["中文", "英文"], cn_en.clone())))
             .child(setting_row("隐藏状态栏", 0, Element::switch(hide_bar.clone())))
-            .child(setting_row("显示输入指示器", 24, Element::switch(Rc::new(Cell::new(false))).disabled(true)))
+            // 带 (?) 悬停提示的禁用子项：还原原界面的帮助图标。
+            .child(
+                Element::row()
+                    .width_match()
+                    .height(44)
+                    .cross(Align::Center)
+                    .child(Element::label("显示输入指示器").font_size(14.0).fg(Color::hex(FG)).margin_xy(12, 0))
+                    .child(
+                        Element::label("(?)")
+                            .font_size(13.0)
+                            .fg(Color::hex(SUB))
+                            .height(20)
+                            .tooltip("开启后，输入时在光标附近显示当前输入状态（中/英、全/半角等）"),
+                    )
+                    .child(Element::label("").weight(1.0))
+                    .child(Element::switch(Rc::new(Cell::new(false))).disabled(true)),
+            )
             .child(setting_row("全屏隐藏状态栏", 0, Element::switch(fullscreen_hide.clone())))
             .child(Element::divider())
             .child(section_header("输入习惯"))
