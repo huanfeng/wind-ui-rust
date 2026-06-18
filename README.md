@@ -73,7 +73,7 @@ cargo test                                     # 运行单元测试
 powershell scripts/screenshots.ps1             # 一键生成所有示例截屏
 ```
 
-示例：`phase0_window` `phase1_layout` `phase2_text` `phase3_button` `phase4_form` `phase5_containers` `fullshowcase`。
+示例：`phase0_window` `phase1_layout` `phase2_text` `phase3_button` `phase4_form` `phase5_containers` `fullshowcase` `ime_settings`（输入法设置形状的主从布局演示）。
 
 ## 架构
 
