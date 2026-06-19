@@ -71,6 +71,12 @@ impl ImageContent {
     pub fn from_file(path: impl AsRef<Path>) -> Self {
         Self::new(Image::from_file(path).ok())
     }
+    /// 便捷构造：从 SVG 字节光栅化（`svg` feature）。`target_width=None` 用固有尺寸，
+    /// `Some(w)` 按该宽度等比光栅（HiDPI 求清晰）。失败画占位框。
+    #[cfg(feature = "svg")]
+    pub fn from_svg_bytes(bytes: &[u8], target_width: Option<u32>) -> Self {
+        Self::new(Image::from_svg_bytes(bytes, target_width).ok())
+    }
     /// 便捷构造：从原始 RGBA8。
     pub fn from_rgba(w: u32, h: u32, rgba: &[u8]) -> Self {
         Self::new(Image::from_rgba(w, h, rgba).ok())

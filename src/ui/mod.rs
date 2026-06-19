@@ -423,6 +423,12 @@ impl Element {
     pub fn image_bytes(bytes: &[u8]) -> Self {
         Self::base(Layout::None).widget(ImageView::new(Image::from_bytes(bytes).ok()))
     }
+    /// 图片控件：从 SVG 字节光栅化（`svg` feature）。`target_width=None` 用 SVG 固有尺寸，
+    /// `Some(w)` 按该宽度等比光栅——HiDPI 求清晰可传 2× 逻辑宽度。加载失败显示占位框。
+    #[cfg(feature = "svg")]
+    pub fn image_svg(bytes: &[u8], target_width: Option<u32>) -> Self {
+        Self::base(Layout::None).widget(ImageView::new(Image::from_svg_bytes(bytes, target_width).ok()))
+    }
     /// 图片控件：从原始非预乘 RGBA8 像素构造（`rgba.len()==w*h*4`）。
     pub fn image_rgba(w: u32, h: u32, rgba: &[u8]) -> Self {
         Self::base(Layout::None).widget(ImageView::new(Image::from_rgba(w, h, rgba).ok()))
@@ -461,6 +467,11 @@ impl Element {
     /// 给按钮设置前置图标（原始非预乘 RGBA8）。
     pub fn icon_rgba(self, w: u32, h: u32, rgba: &[u8]) -> Self {
         self.config_button_icon(ImageContent::from_rgba(w, h, rgba))
+    }
+    /// 给按钮设置前置图标（SVG 字节，`svg` feature）。`target_width` 同 [`Element::image_svg`]。
+    #[cfg(feature = "svg")]
+    pub fn icon_svg(self, bytes: &[u8], target_width: Option<u32>) -> Self {
+        self.config_button_icon(ImageContent::from_svg_bytes(bytes, target_width))
     }
     /// 给按钮设置前置图标（预组装内容原语，支持状态换图/着色）。
     pub fn icon_content(self, icon: ImageContent) -> Self {

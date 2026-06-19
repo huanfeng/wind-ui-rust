@@ -14,6 +14,10 @@ const SUB: u32 = 0x636E72;
 const CARD: u32 = 0xFFFFFF;
 const BG: u32 = 0xEEF1F5;
 
+/// 内联 SVG 演示资源（含 `#` 颜色值，故用 br##"..."## 定界）。渐变圆 + 单色对勾。
+const SVG_CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b9d"/><stop offset="1" stop-color="#4c8bf5"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="url(#g)"/></svg>"##;
+const SVG_CHECK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z" fill="#000000"/></svg>"##;
+
 /// 生成 w×h 对角渐变 RGBA8（演示图，免捆绑资源）。
 fn gradient(w: u32, h: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity((w * h * 4) as usize);
@@ -302,6 +306,15 @@ fn main() {
                 .child(img_cell("占位", Element::image("不存在.png")))
                 .child(Element::button("新建").icon_rgba(64, 48, &grad))
                 .child(Element::button("禁用").icon_rgba(64, 48, &grad).disabled(true)),
+        ))
+        .child(card(
+            "SVG 矢量（resvg）",
+            Element::row()
+                .spacing(12)
+                .cross(Align::Center)
+                .child(img_cell("渐变圆", Element::image_svg(SVG_CIRCLE, Some(120)).fit(Fit::Contain)))
+                .child(img_cell("着色对勾", Element::image_svg(SVG_CHECK, Some(64)).fit(Fit::Contain).tint(Color::hex(0x4C8BF5))))
+                .child(Element::button("SVG 图标").icon_svg(SVG_CHECK, Some(32))),
         ));
     let images = Element::scroll().fill().child(images_body);
 

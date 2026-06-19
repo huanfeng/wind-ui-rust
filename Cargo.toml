@@ -5,8 +5,20 @@ edition = "2021"
 description = "轻量 Windows 桌面 GUI：Win32 + GDI 呈现 + tiny-skia + DirectWrite"
 license = "MIT"
 
+[features]
+# SVG 支持默认开启；体积敏感可 `--no-default-features` 关掉以剔除 resvg/usvg 依赖树。
+default = ["svg"]
+svg = ["dep:resvg"]
+# SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
+# SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
+svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
+
 [dependencies]
-tiny-skia = "0.11"
+# 与 resvg 0.47 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
+tiny-skia = "0.12"
+# SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
+# 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
+resvg = { version = "0.47", optional = true, default-features = false }
 # #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
 windows-core = "0.58"
 # 主题配置（TOML 映射）。

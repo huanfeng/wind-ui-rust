@@ -133,12 +133,40 @@ fn main() {
     .bg(Color::hex(0xF6F8FA))
     .corner(8.0);
 
+    // SVG（矢量）：内联字面量含 `#` 颜色，故用 br##"..."## 定界。
+    // 彩色渐变圆 + 单色对勾（对勾用于着色演示）。
+    let svg_circle: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b9d"/><stop offset="1" stop-color="#4c8bf5"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="url(#g)"/></svg>"##;
+    let svg_check: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z" fill="#000000"/></svg>"##;
+
+    let svg_row = Element::row()
+        .spacing(12)
+        .cross(Align::Center)
+        // 固有尺寸光栅 vs 指定 2× 宽度光栅（矢量按需出清晰位图）。
+        .child(demo("SVG 固有", Element::image_svg(svg_circle, None).fit(Fit::Contain)))
+        .child(demo("SVG 192px 光栅", Element::image_svg(svg_circle, Some(192)).fit(Fit::Contain)))
+        // 单色 SVG 模板着色（rgb 替换为强调色，保留 alpha）。
+        .child(demo("SVG 着色", Element::image_svg(svg_check, Some(64)).fit(Fit::Contain).tint(Color::hex(0x4C8BF5))))
+        .child(Element::button("SVG 图标").icon_svg(svg_check, Some(32)));
+
+    // SVG 卡片内容；启用 svg-text feature 时追加一行内嵌文字演示（用系统字体渲染）。
+    #[allow(unused_mut)]
+    let mut svg_body = Element::col().spacing(10).child(svg_row);
+    #[cfg(feature = "svg-text")]
+    {
+        // 含中文故用 str + as_bytes（字节串字面量不容非 ASCII）。
+        let svg_text: &[u8] = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40"><text x="6" y="29" font-size="26" font-family="Segoe UI, Arial" fill="#4c8bf5">Hello, SVG 文字</text></svg>"##.as_bytes();
+        svg_body = svg_body
+            .child(Element::divider())
+            .child(Element::image_svg(svg_text, Some(440)).fit(Fit::Contain).height(40).width_match());
+    }
+
     let body = Element::col()
         .width_match()
         .spacing(14)
         .child(card("适配模式（源图 4:3，框 96×72）", fit_row))
         .child(card("圆角裁剪 & 占位", corner_row))
         .child(card("状态：正常/禁用 + 单色图标着色", state_row))
+        .child(card("SVG 矢量（resvg 光栅化 + 着色）", svg_body))
         .child(card("列表行图标（list_icons）", icon_list));
 
     let ui = Element::stack().fill().bg(Color::hex(BG)).child(
