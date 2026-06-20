@@ -19,6 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
@@ -114,11 +115,21 @@ pub struct Button {
     icon: Option<ImageContent>,
     state: BtnState,
     on_click: Option<ClickFn>,
+    /// 背景色补间（hover/press 淡入淡出）。retarget-in-paint；首帧靠 `primed` 直接落定。
+    bg_anim: Cell<Transition<Color>>,
+    primed: Cell<bool>,
 }
 
 impl Button {
     pub fn new(label: String) -> Self {
-        Self { label, icon: None, state: BtnState::Normal, on_click: None }
+        Self {
+            label,
+            icon: None,
+            state: BtnState::Normal,
+            on_click: None,
+            bg_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
+            primed: Cell::new(false),
+        }
     }
 
     /// 设置前置图标（供 Builder 的 `.icon_*()` 调用）。
@@ -152,7 +163,7 @@ impl Widget for Button {
         let (pal, bt) = (&t.palette, &t.button);
         let vstate = self.visual_state(enabled);
         // 背景：禁用用专用置灰底；style.bg 有值时用自定义色；否则按三态取主题色。
-        let color = match vstate {
+        let target = match vstate {
             VisualState::Disabled => bt.disabled(pal),
             _ => match style.bg {
                 Some(c) => c,
@@ -163,6 +174,16 @@ impl Widget for Button {
                 },
             },
         };
+        // 背景色补间：首帧直接落定（构造期无主题色），其后状态变化淡入淡出。
+        let mut anim = self.bg_anim.get();
+        if !self.primed.get() {
+            anim = Transition::new(target);
+            self.primed.set(true);
+        } else if anim.target() != target {
+            anim.retarget(target, t.anim.fast(), Easing::EaseOut);
+        }
+        let color = anim.animate();
+        self.bg_anim.set(anim);
         // 文字色：禁用用 text_disabled；style.bg 有值时用 style.fg；否则用主题前景。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled

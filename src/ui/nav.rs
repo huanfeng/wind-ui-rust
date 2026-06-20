@@ -11,6 +11,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
@@ -54,15 +55,18 @@ fn paint_panel_header(
     bounds: Rect,
     title: &str,
     expanded: bool,
-    hover: bool,
+    hover_amount: f32,
     enabled: bool,
     style: &Style,
 ) {
     let th = crate::theme::current();
     let (pal, nav) = (&th.palette, &th.nav);
     let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
-    if enabled && hover {
-        canvas.fill_rect(x, y, w, h, &Paint::fill(nav.hover_bg(pal)));
+    // hover 底色按补间量淡入：缩放其 alpha（hover_amount 0..1）。
+    if enabled && hover_amount > 0.0 {
+        let mut c = nav.hover_bg(pal);
+        c.a = (c.a as f32 * hover_amount).round().clamp(0.0, 255.0) as u8;
+        canvas.fill_rect(x, y, w, h, &Paint::fill(c));
     }
     let text_color = if enabled { nav.text(pal) } else { pal.text_disabled };
     let chevron = if enabled { nav.chevron(pal) } else { pal.text_disabled };
@@ -75,6 +79,19 @@ fn paint_panel_header(
     } else {
         chevron_right(canvas, cx, cy, chevron);
     }
+}
+
+/// 据 hover 状态推进 hover 淡入补间，返回当前淡入量（0..1）。retarget-in-paint，
+/// CollapsibleHeader / AccordionHeader 共用。仍活跃时自动请求续帧。
+fn hover_amount(anim: &Cell<Transition<f32>>, hover: bool) -> f32 {
+    let mut tr = anim.get();
+    let target = if hover { 1.0 } else { 0.0 };
+    if tr.target() != target {
+        tr.retarget(target, crate::theme::current().anim.fast(), Easing::EaseOut);
+    }
+    let v = tr.animate();
+    anim.set(tr);
+    v
 }
 
 // ---------------- NavRow ----------------
@@ -193,11 +210,12 @@ pub struct CollapsibleHeader {
     title: String,
     expanded: Rc<Cell<bool>>,
     hover: bool,
+    hover_anim: Cell<Transition<f32>>,
 }
 
 impl CollapsibleHeader {
     pub fn new(title: String, expanded: Rc<Cell<bool>>) -> Self {
-        Self { title, expanded, hover: false }
+        Self { title, expanded, hover: false, hover_anim: Cell::new(Transition::new(0.0)) }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.expanded.set(!self.expanded.get());
@@ -211,7 +229,8 @@ impl Widget for CollapsibleHeader {
     }
 
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
-        paint_panel_header(canvas, bounds, &self.title, self.expanded.get(), self.hover, enabled, style);
+        let amt = hover_amount(&self.hover_anim, self.hover);
+        paint_panel_header(canvas, bounds, &self.title, self.expanded.get(), amt, enabled, style);
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -294,11 +313,12 @@ pub struct AccordionHeader {
     title: String,
     state: ExpandState,
     hover: bool,
+    hover_anim: Cell<Transition<f32>>,
 }
 
 impl AccordionHeader {
     pub fn new(title: String, state: ExpandState) -> Self {
-        Self { title, state, hover: false }
+        Self { title, state, hover: false, hover_anim: Cell::new(Transition::new(0.0)) }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.toggle();
@@ -312,7 +332,8 @@ impl Widget for AccordionHeader {
     }
 
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
-        paint_panel_header(canvas, bounds, &self.title, self.state.is_expanded(), self.hover, enabled, style);
+        let amt = hover_amount(&self.hover_anim, self.hover);
+        paint_panel_header(canvas, bounds, &self.title, self.state.is_expanded(), amt, enabled, style);
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {

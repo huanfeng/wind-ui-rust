@@ -448,6 +448,30 @@ impl NavTheme {
     }
 }
 
+/// 动画时长覆盖层（毫秒）。控件按语义档位取时长，回退 120/200/300ms。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimTheme {
+    /// 快档（hover/press 等轻量反馈）。
+    pub fast: Option<u32>,
+    /// 常规档（开关滑块、展开等）。
+    pub normal: Option<u32>,
+    /// 慢档（大块过渡）。
+    pub slow: Option<u32>,
+}
+
+impl AnimTheme {
+    pub fn fast(&self) -> u32 {
+        self.fast.unwrap_or(120)
+    }
+    pub fn normal(&self) -> u32 {
+        self.normal.unwrap_or(200)
+    }
+    pub fn slow(&self) -> u32 {
+        self.slow.unwrap_or(300)
+    }
+}
+
 /// 手风琴覆盖层（Accordion 卡片外框 + 面板头背景）。chevron/text/hover 复用 [`NavTheme`]。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -517,6 +541,7 @@ pub struct Theme {
     pub segment: SegmentTheme,
     pub nav: NavTheme,
     pub accordion: AccordionTheme,
+    pub anim: AnimTheme,
     pub tooltip: TooltipTheme,
 }
 

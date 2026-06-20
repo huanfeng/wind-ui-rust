@@ -46,6 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, IsIconic, LoadCursorW,
     MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
     SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
     TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCLIENT, MWMO_INPUTAVAILABLE,
@@ -93,6 +94,8 @@ pub struct WindowConfig {
     pub tray: Option<tray::Tray>,
     /// 无标题栏窗口（自定义标题栏）：WM_NCCALCSIZE 让客户区铺满整窗，保留吸附/阴影/缩放。
     pub frameless: bool,
+    /// 动画全局开关：None=随系统"显示动画"设置；Some(b)=强制开/关。
+    pub animations: Option<bool>,
 }
 
 impl Default for WindowConfig {
@@ -111,12 +114,33 @@ impl Default for WindowConfig {
             screenshot_hover: None,
             tray: None,
             frameless: false,
+            animations: None,
         }
+    }
+}
+
+/// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
+unsafe fn os_animations_enabled() -> bool {
+    let mut on = windows::Win32::Foundation::BOOL(1);
+    let ok = SystemParametersInfoW(
+        SPI_GETCLIENTAREAANIMATION,
+        0,
+        Some(&mut on as *mut _ as *mut core::ffi::c_void),
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+    )
+    .is_ok();
+    if ok {
+        on.as_bool()
+    } else {
+        true
     }
 }
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
 pub fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>) {
+    // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
+    let os_default = if cfg.screenshot.is_some() { true } else { unsafe { os_animations_enabled() } };
+    crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
     if let Some(path) = cfg.screenshot.clone() {
         run_offscreen(&cfg, &mut handler, &path);
         return;
@@ -159,8 +183,13 @@ fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &P
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }
-    // 有动画时，前进一帧（让动画相位非零）以便不确定进度等可在截图中显现。
-    if handler.wants_animation() {
+    // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
+    // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
+    // 避免无限循环——末帧相位非零即可在截图显现。
+    for _ in 0..4 {
+        if !handler.wants_animation() {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(300));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
