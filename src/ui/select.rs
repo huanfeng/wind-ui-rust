@@ -6,9 +6,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, MenuItem, PointerKind};
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
@@ -21,11 +22,20 @@ pub struct Dropdown {
     options: Vec<String>,
     selected: Rc<Cell<usize>>,
     hover: bool,
+    /// 边框色补间（hover/focus 高亮淡变）；首帧靠 `primed` 落定。
+    border_anim: Cell<Transition<Color>>,
+    primed: Cell<bool>,
 }
 
 impl Dropdown {
     pub fn new(options: Vec<String>, selected: Rc<Cell<usize>>) -> Self {
-        Self { options, selected, hover: false }
+        Self {
+            options,
+            selected,
+            hover: false,
+            border_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
+            primed: Cell::new(false),
+        }
     }
 
     fn current(&self) -> &str {
@@ -72,7 +82,17 @@ impl Widget for Dropdown {
         let text_color = if enabled { dd.text(pal) } else { pal.text_disabled };
         let chevron = if enabled { dd.chevron(pal) } else { pal.text_disabled };
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
-        let border = if focused || self.hover { dd.border_focus(pal) } else { dd.border(pal) };
+        // 边框色补间：hover/focus 高亮淡变；首帧落定。
+        let target_border = if focused || self.hover { dd.border_focus(pal) } else { dd.border(pal) };
+        let mut ba = self.border_anim.get();
+        if !self.primed.get() {
+            ba = Transition::new(target_border);
+            self.primed.set(true);
+        } else if ba.target() != target_border {
+            ba.retarget(target_border, th.anim.fast(), Easing::EaseOut);
+        }
+        let border = ba.animate();
+        self.border_anim.set(ba);
         let bw = if focused { 1.8 } else { 1.5 };
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 

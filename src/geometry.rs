@@ -142,6 +142,11 @@ impl Color {
     pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 255 };
 
+    /// 按系数缩放 alpha（保 RGB），用于淡入淡出。`f` 钳到 `[0,1]`。
+    pub fn scale_alpha(self, f: f32) -> Color {
+        Color { a: (self.a as f32 * f.clamp(0.0, 1.0)).round() as u8, ..self }
+    }
+
     /// 解析 `#RGB` / `#RRGGBB` / `#RRGGBBAA`（# 可省）。失败返回 None。
     pub fn from_hex_str(s: &str) -> Option<Self> {
         let h = s.trim().trim_start_matches('#');

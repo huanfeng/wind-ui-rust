@@ -10,6 +10,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
@@ -27,11 +28,14 @@ pub struct SegmentedControl {
     selected: Rc<Cell<usize>>,
     /// 当前悬停段下标（仅视觉，不写绑定状态）。
     hover: Option<usize>,
+    /// 选中高亮位置补间：存动画中的选中下标(f32)，驱动胶囊跨段滑动。
+    sel_pos: Cell<Transition<f32>>,
 }
 
 impl SegmentedControl {
     pub fn new(options: Vec<String>, selected: Rc<Cell<usize>>) -> Self {
-        Self { options, selected, hover: None }
+        let init = selected.get().min(options.len().saturating_sub(1)) as f32;
+        Self { options, selected, hover: None, sel_pos: Cell::new(Transition::new(init)) }
     }
 
     fn len(&self) -> usize {
@@ -96,22 +100,20 @@ impl Widget for SegmentedControl {
         // 容器底。
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(sg.bg(pal)));
 
-        // 逐段：选中段填强调底，悬停段填浅底；文字居中。
+        // 选中高亮位置补间：跨段滑动。胶囊几何按动画中的浮点下标插值（等宽近似）。
+        let mut sp = self.sel_pos.get();
+        let sel_target = sel as f32;
+        if sp.target() != sel_target {
+            sp.retarget(sel_target, t.anim.normal(), Easing::EaseInOut);
+        }
+        let fi = sp.animate();
+        self.sel_pos.set(sp);
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
+        // 悬停浅底（非选中段；选中段由滑动胶囊覆盖）。
         for i in 0..n {
-            let (x0, x1) = self.seg_x(bounds, i);
-            if i == sel {
-                let bg = if enabled { sg.selected_bg(pal) } else { pal.surface_alt };
-                canvas.fill_round_rect(
-                    (x0 + 2) as f32,
-                    (bounds.y + 2) as f32,
-                    (x1 - x0 - 4) as f32,
-                    (bounds.h - 4) as f32,
-                    (corner - 2.0).max(0.0),
-                    &Paint::fill(bg),
-                );
-            } else if self.hover == Some(i) && enabled {
+            if self.hover == Some(i) && enabled && i != sel {
+                let (x0, x1) = self.seg_x(bounds, i);
                 canvas.fill_round_rect(
                     (x0 + 2) as f32,
                     (bounds.y + 2) as f32,
@@ -121,6 +123,30 @@ impl Widget for SegmentedControl {
                     &Paint::fill(sg.hover_bg(pal)),
                 );
             }
+        }
+        // 滑动选中胶囊（始终有选中项）。几何按相邻整数段的 seg_x 端点插值，
+        // 使落定态与文字/分隔线所用的整数分段逐像素对齐（段宽不整除时也不错位）。
+        if n > 0 {
+            let i0 = (fi.floor() as usize).min(n - 1);
+            let i1 = (i0 + 1).min(n - 1);
+            let frac = fi - i0 as f32;
+            let (a0, a1) = self.seg_x(bounds, i0);
+            let (b0, b1) = self.seg_x(bounds, i1);
+            let px0 = a0 as f32 + (b0 - a0) as f32 * frac;
+            let px1 = a1 as f32 + (b1 - a1) as f32 * frac;
+            let pill_bg = if enabled { sg.selected_bg(pal) } else { pal.surface_alt };
+            canvas.fill_round_rect(
+                px0 + 2.0,
+                (bounds.y + 2) as f32,
+                px1 - px0 - 4.0,
+                (bounds.h - 4) as f32,
+                (corner - 2.0).max(0.0),
+                &Paint::fill(pill_bg),
+            );
+        }
+        // 逐段文字（居中）。
+        for i in 0..n {
+            let (x0, x1) = self.seg_x(bounds, i);
             let tc = if i == sel {
                 if enabled { sg.selected_text(pal) } else { pal.text_disabled }
             } else if enabled {
@@ -281,6 +307,43 @@ mod tests {
         let left = crate::event::KeyEvent { key: Key::Left, pressed: true, shift: false, ctrl: false };
         tree.dispatch_key(left, focus);
         assert_eq!(sel.get(), 1, "左键应移回上一段");
+    }
+
+    /// 把分段控件按给定帧时钟绘制一帧（触发滑动胶囊的 retarget-in-paint）。
+    fn paint_at(sc: &SegmentedControl, clock: u64) {
+        use crate::render::SkiaCanvas;
+        use tiny_skia::Pixmap;
+        crate::anim::set_clock_ms(clock);
+        let mut pm = Pixmap::new(180, 32).unwrap();
+        let mut c = SkiaCanvas::new(&mut pm);
+        sc.paint(Rect::new(0, 0, 180, 32), Rect::new(0, 0, 180, 32), false, true, &mut c, &Style::default());
+    }
+
+    #[test]
+    fn selected_pill_slides_then_settles_when_animated() {
+        crate::anim::set_enabled(true);
+        let sel = Rc::new(Cell::new(0usize));
+        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel.clone());
+        paint_at(&sc, 0);
+        assert_eq!(sc.sel_pos.get().value(), 0.0, "初始胶囊在第 0 段");
+        sel.set(2); // 外部选到第 3 段
+        paint_at(&sc, 0); // paint 检测目标变化 → 改向 2.0
+        assert_eq!(sc.sel_pos.get().target(), 2.0, "选中变 2 后胶囊目标应为 2");
+        assert!(sc.sel_pos.get().is_active(), "动画开启时胶囊应在滑动中");
+        paint_at(&sc, 5000); // 远超时长 → 落定
+        assert_eq!(sc.sel_pos.get().value(), 2.0);
+    }
+
+    #[test]
+    fn selected_pill_snaps_when_animation_disabled() {
+        crate::anim::set_enabled(false);
+        let sel = Rc::new(Cell::new(0usize));
+        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel.clone());
+        sel.set(2);
+        paint_at(&sc, 0);
+        assert_eq!(sc.sel_pos.get().value(), 2.0, "关闭动画应瞬时到选中段");
+        assert!(!sc.sel_pos.get().is_active());
+        crate::anim::set_enabled(true);
     }
 
     #[test]

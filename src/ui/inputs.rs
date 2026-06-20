@@ -23,11 +23,14 @@ const GAP: i32 = 8;
 pub struct CheckBox {
     label: String,
     state: Rc<Cell<bool>>,
+    /// 勾选填充补间（0=未选、1=选中）：驱动方框底色 white↔accent + 对勾淡入。
+    fill: Cell<Transition<f32>>,
 }
 
 impl CheckBox {
     pub fn new(label: String, state: Rc<Cell<bool>>) -> Self {
-        Self { label, state }
+        let init = if state.get() { 1.0 } else { 0.0 };
+        Self { label, state, fill: Cell::new(Transition::new(init)) }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.set(!self.state.get());
@@ -48,16 +51,25 @@ impl Widget for CheckBox {
         let text_color = if enabled { style.fg } else { p.text_disabled };
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
-        let on = self.state.get();
-        if on {
-            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(accent));
-            // 勾：两段线
-            let paint = Paint::fill(p.on_accent);
+        // 勾选填充补间：据状态改向，amount 驱动底色渐变 + 边框淡出 + 对勾淡入。
+        let mut fill = self.fill.get();
+        let target = if self.state.get() { 1.0 } else { 0.0 };
+        if fill.target() != target {
+            fill.retarget(target, th.anim.fast(), Easing::EaseOut);
+        }
+        let amount = fill.animate();
+        self.fill.set(fill);
+        let sz = BOX_SIZE as f32;
+        // 底色 white→accent；边框（未选描边）随填充淡出。
+        canvas.fill_round_rect(bx, by, sz, sz, 4.0, &Paint::fill(tg.knob(p).lerp(accent, amount)));
+        if amount < 1.0 {
+            canvas.stroke_round_rect(bx, by, sz, sz, 4.0, 1.5, &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)));
+        }
+        if amount > 0.0 {
+            // 勾：两段线，按 amount 淡入。
+            let paint = Paint::fill(p.on_accent.scale_alpha(amount));
             canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
             canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &paint);
-        } else {
-            canvas.fill_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, &Paint::fill(tg.knob(p)));
-            canvas.stroke_round_rect(bx, by, BOX_SIZE as f32, BOX_SIZE as f32, 4.0, 1.5, &Paint::fill(tg.track(p)));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
         canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
@@ -163,11 +175,14 @@ pub struct RadioButton {
     label: String,
     group: Rc<Cell<usize>>,
     index: usize,
+    /// 选中补间（0=未选、1=选中）：驱动外环色 + 环厚 + 中心点半径。
+    sel: Cell<Transition<f32>>,
 }
 
 impl RadioButton {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
-        Self { label, group, index }
+        let init = if group.get() == index { 1.0 } else { 0.0 };
+        Self { label, group, index, sel: Cell::new(Transition::new(init)) }
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
@@ -192,13 +207,19 @@ impl Widget for RadioButton {
         let cy = bounds.y + bounds.h / 2;
         let cx = bounds.x + BOX_SIZE / 2;
         let outer = BOX_SIZE as f32 / 2.0;
-        if self.selected() {
-            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(accent));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 5.0, &Paint::fill(tg.knob(p)));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 8.0, &Paint::fill(accent));
-        } else {
-            canvas.fill_circle(cx as f32, cy as f32, outer, &Paint::fill(tg.track(p)));
-            canvas.fill_circle(cx as f32, cy as f32, outer - 1.5, &Paint::fill(tg.knob(p)));
+        // 选中补间：amount 驱动外环色(track→accent)、环厚(1.5→5)、中心点半径(0→outer-8)。
+        let mut sel = self.sel.get();
+        let target = if self.selected() { 1.0 } else { 0.0 };
+        if sel.target() != target {
+            sel.retarget(target, th.anim.fast(), Easing::EaseOut);
+        }
+        let amount = sel.animate();
+        self.sel.set(sel);
+        let (cxf, cyf) = (cx as f32, cy as f32);
+        canvas.fill_circle(cxf, cyf, outer, &Paint::fill(tg.track(p).lerp(accent, amount)));
+        canvas.fill_circle(cxf, cyf, outer - 1.5f32.lerp(5.0, amount), &Paint::fill(tg.knob(p)));
+        if amount > 0.0 {
+            canvas.fill_circle(cxf, cyf, (outer - 8.0) * amount, &Paint::fill(accent));
         }
         let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
         canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);

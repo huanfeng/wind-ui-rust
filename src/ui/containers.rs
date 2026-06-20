@@ -3,9 +3,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -92,11 +93,26 @@ pub struct TabButton {
     group: Rc<Cell<usize>>,
     index: usize,
     hover: bool,
+    /// 文字色补间（inactive/hover/accent 淡变）；首帧靠 `primed` 落定。
+    color_anim: Cell<Transition<Color>>,
+    primed: Cell<bool>,
+    /// 选中底部指示条补间（0..1）：从中心展宽 + 淡入。
+    ind: Cell<Transition<f32>>,
 }
 
 impl TabButton {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
-        Self { label, icon: None, group, index, hover: false }
+        let ind = if group.get() == index { 1.0 } else { 0.0 };
+        Self {
+            label,
+            icon: None,
+            group,
+            index,
+            hover: false,
+            color_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
+            primed: Cell::new(false),
+            ind: Cell::new(Transition::new(ind)),
+        }
     }
     /// 附带前置图标。
     pub fn with_icon(mut self, icon: ImageContent) -> Self {
@@ -129,7 +145,7 @@ impl Widget for TabButton {
         let (pal, tab) = (&th.palette, &th.tab);
         let sel = self.selected();
         // 禁用：文字置灰、图标走 Disabled 调制；否则按选中/悬停三态。
-        let color = if !enabled {
+        let target_color = if !enabled {
             pal.text_disabled
         } else if sel {
             tab.accent(pal)
@@ -138,6 +154,16 @@ impl Widget for TabButton {
         } else {
             tab.inactive(pal)
         };
+        // 文字色补间：首帧落定，其后三态淡变。
+        let mut canim = self.color_anim.get();
+        if !self.primed.get() {
+            canim = Transition::new(target_color);
+            self.primed.set(true);
+        } else if canim.target() != target_color {
+            canim.retarget(target_color, th.anim.fast(), Easing::EaseOut);
+        }
+        let color = canim.animate();
+        self.color_anim.set(canim);
         let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
         // 有图标：图标 + 文字作为整体水平居中（图标在左）；否则文字整体居中。
         if let Some(icon) = &self.icon {
@@ -153,18 +179,19 @@ impl Widget for TabButton {
         } else {
             canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
         }
-        // 禁用时不画选中指示条（避免给"不可用"标签强调色）。
-        if sel && enabled {
-            // 底部指示条
-            let y = (bounds.y + bounds.h - 3) as f32;
-            canvas.fill_round_rect(
-                (bounds.x + 8) as f32,
-                y,
-                (bounds.w - 16) as f32,
-                3.0,
-                1.5,
-                &Paint::fill(tab.accent(pal)),
-            );
+        // 底部指示条补间：选中(且启用)→1，否则→0；从中心展宽 + 淡入。禁用不显示。
+        let mut ind = self.ind.get();
+        let ind_target = if sel && enabled { 1.0 } else { 0.0 };
+        if ind.target() != ind_target {
+            ind.retarget(ind_target, th.anim.normal(), Easing::EaseOut);
+        }
+        let amount = ind.animate();
+        self.ind.set(ind);
+        if amount > 0.0 {
+            let full = (bounds.w - 16) as f32;
+            let bw = full * amount;
+            let cx = bounds.x as f32 + bounds.w as f32 / 2.0;
+            canvas.fill_round_rect(cx - bw / 2.0, (bounds.y + bounds.h - 3) as f32, bw, 3.0, 1.5, &Paint::fill(tab.accent(pal).scale_alpha(amount)));
         }
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {

@@ -6,9 +6,12 @@
 //! 禁用态由核心层统一管理：禁用时核心拦事件、跳 Tab，并把启用态传入 paint，
 //! 据此置灰且宿主不显示手型。
 
+use std::cell::Cell;
+
+use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, PointerKind};
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -30,11 +33,22 @@ pub struct Link {
     underline: bool,
     state: LinkState,
     on_click: Option<ClickFn>,
+    /// 链接色补间（hover/press 淡变）。retarget-in-paint；首帧靠 `primed` 落定。
+    color_anim: Cell<Transition<Color>>,
+    primed: Cell<bool>,
 }
 
 impl Link {
     pub fn new(text: String) -> Self {
-        Self { text, url: None, underline: true, state: LinkState::Normal, on_click: None }
+        Self {
+            text,
+            url: None,
+            underline: true,
+            state: LinkState::Normal,
+            on_click: None,
+            color_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
+            primed: Cell::new(false),
+        }
     }
     /// 设置激活时打开的 URL/路径（供 Builder 的 `.url()` 调用）。
     pub fn set_url(&mut self, url: String) {
@@ -63,7 +77,7 @@ impl Widget for Link {
         let th = crate::theme::current();
         let (pal, lk) = (&th.palette, &th.link);
         // 禁用：链接色降为 text_disabled；否则按三态取链接色。
-        let color = if !enabled {
+        let target = if !enabled {
             pal.text_disabled
         } else {
             match self.state {
@@ -72,6 +86,16 @@ impl Widget for Link {
                 LinkState::Press => lk.pressed(pal),
             }
         };
+        // 颜色补间：首帧落定，其后三态淡变。
+        let mut anim = self.color_anim.get();
+        if !self.primed.get() {
+            anim = Transition::new(target);
+            self.primed.set(true);
+        } else if anim.target() != target {
+            anim.retarget(target, th.anim.fast(), Easing::EaseOut);
+        }
+        let color = anim.animate();
+        self.color_anim.set(anim);
         canvas.draw_text(
             &self.text,
             content,

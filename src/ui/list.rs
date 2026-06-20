@@ -6,9 +6,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -30,11 +31,27 @@ pub struct ListRow {
     group: Rc<Cell<usize>>,
     index: usize,
     hover: bool,
+    /// 行底色"存在量"补间（0..1）：对固定目标色缩 alpha 淡入淡出，避免从透明黑 lerp 过黑。
+    bg_amt: Cell<Transition<f32>>,
+    /// 记住的底色（选中/悬停色），淡出期沿用以保 RGB 不变。
+    bg_color: Cell<Color>,
+    /// 选中左缘强调条补间（0..1）：淡入。
+    sel: Cell<Transition<f32>>,
 }
 
 impl ListRow {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
-        Self { label, icon: None, group, index, hover: false }
+        let on = if group.get() == index { 1.0 } else { 0.0 };
+        Self {
+            label,
+            icon: None,
+            group,
+            index,
+            hover: false,
+            bg_amt: Cell::new(Transition::new(on)),
+            bg_color: Cell::new(Color::TRANSPARENT),
+            sel: Cell::new(Transition::new(on)),
+        }
     }
     /// 附带前置图标。
     pub fn with_icon(mut self, icon: ImageContent) -> Self {
@@ -66,14 +83,38 @@ impl Widget for ListRow {
         let (pal, lt) = (&th.palette, &th.list);
         let sel = self.selected();
         let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
-        if sel {
-            canvas.fill_rect(x, y, w, h, &Paint::fill(lt.selected_bg(pal)));
+        // 底色：选中 > 悬停 > 无。用"存在量"补间对固定目标色缩 alpha 淡入淡出——
+        // 记住当前底色，淡出期沿用其 RGB（不从透明黑 lerp，避免中途变暗）。
+        let want = if sel {
+            Some(lt.selected_bg(pal))
         } else if self.hover {
-            canvas.fill_rect(x, y, w, h, &Paint::fill(lt.hover_bg(pal)));
+            Some(lt.hover_bg(pal))
+        } else {
+            None
+        };
+        if let Some(c) = want {
+            self.bg_color.set(c);
         }
-        // 选中左缘强调条（禁用时不强调）。
-        if sel && enabled {
-            canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent));
+        let mut bg = self.bg_amt.get();
+        let bg_target = if want.is_some() { 1.0 } else { 0.0 };
+        if bg.target() != bg_target {
+            bg.retarget(bg_target, th.anim.fast(), Easing::EaseOut);
+        }
+        let bg_amt = bg.animate();
+        self.bg_amt.set(bg);
+        if bg_amt > 0.0 {
+            canvas.fill_rect(x, y, w, h, &Paint::fill(self.bg_color.get().scale_alpha(bg_amt)));
+        }
+        // 选中左缘强调条补间（禁用时不强调）：淡入。
+        let mut selt = self.sel.get();
+        let sel_target = if sel && enabled { 1.0 } else { 0.0 };
+        if selt.target() != sel_target {
+            selt.retarget(sel_target, th.anim.normal(), Easing::EaseOut);
+        }
+        let sel_amt = selt.animate();
+        self.sel.set(selt);
+        if sel_amt > 0.0 {
+            canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent.scale_alpha(sel_amt)));
         }
         // 前置图标：方形、垂直居中；文字相应右移。禁用走 Disabled 调制。
         let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
