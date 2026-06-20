@@ -4,3 +4,5 @@ Cargo.lock.bak
 # 截屏产物（按需保留，默认忽略临时输出）
 /artifacts
 *.tmp.png
+# 临时验证输出（截图、草稿等）
+/temp
