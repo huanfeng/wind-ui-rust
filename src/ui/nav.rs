@@ -64,9 +64,7 @@ fn paint_panel_header(
     let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
     // hover 底色按补间量淡入：缩放其 alpha（hover_amount 0..1）。
     if enabled && hover_amount > 0.0 {
-        let mut c = nav.hover_bg(pal);
-        c.a = (c.a as f32 * hover_amount).round().clamp(0.0, 255.0) as u8;
-        canvas.fill_rect(x, y, w, h, &Paint::fill(c));
+        canvas.fill_rect(x, y, w, h, &Paint::fill(nav.hover_bg(pal).scale_alpha(hover_amount)));
     }
     let text_color = if enabled { nav.text(pal) } else { pal.text_disabled };
     let chevron = if enabled { nav.chevron(pal) } else { pal.text_disabled };
