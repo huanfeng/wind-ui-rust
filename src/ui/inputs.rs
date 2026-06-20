@@ -6,6 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Rect, Size};
@@ -89,11 +90,14 @@ impl Widget for CheckBox {
 
 pub struct Switch {
     state: Rc<Cell<bool>>,
+    /// 滑块位置补间（0=关、1=开）；同时驱动轨道色 off↔on 渐变。retarget-in-paint。
+    pos: Cell<Transition<f32>>,
 }
 
 impl Switch {
     pub fn new(state: Rc<Cell<bool>>) -> Self {
-        Self { state }
+        let init = if state.get() { 1.0 } else { 0.0 };
+        Self { state, pos: Cell::new(Transition::new(init)) }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.set(!self.state.get());
@@ -113,11 +117,20 @@ impl Widget for Switch {
         let on = self.state.get();
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
-        // 禁用：开态轨道也降为灰，整体弱化。
-        let track = if !enabled { p.track } else if on { tg.accent(p) } else { tg.track(p) };
+        // 滑块位置补间：据当前状态改向，取动画值（0..1）同时驱动 knob 平移与轨道色渐变。
+        let mut pos = self.pos.get();
+        let target = if on { 1.0 } else { 0.0 };
+        if pos.target() != target {
+            pos.retarget(target, th.anim.normal(), Easing::EaseInOut);
+        }
+        let amount = pos.animate();
+        self.pos.set(pos);
+        // 禁用：开态轨道也降为灰，整体弱化；否则按位置在 off↔on 轨道色间插值。
+        let track = if !enabled { p.track } else { tg.track(p).lerp(tg.accent(p), amount) };
         canvas.fill_round_rect(x, y, w as f32, h as f32, h as f32 / 2.0, &Paint::fill(track));
         let r = (h - 6) as f32 / 2.0;
-        let knob_cx = if on { x + w as f32 - 3.0 - r } else { x + 3.0 + r };
+        let (off_cx, on_cx) = (x + 3.0 + r, x + w as f32 - 3.0 - r);
+        let knob_cx = off_cx.lerp(on_cx, amount);
         canvas.fill_circle(knob_cx, y + h as f32 / 2.0, r, &Paint::fill(tg.knob(p)));
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -1307,5 +1320,59 @@ mod tests {
         assert_eq!(run("", 0), (0, 0));
         // idx 超界 → 取最后一个字符所在词。
         assert_eq!(run("ab", 5), (0, 2));
+    }
+}
+
+#[cfg(test)]
+mod anim_tests {
+    use super::Switch;
+    use crate::core::Widget;
+    use crate::geometry::Rect;
+    use crate::render::SkiaCanvas;
+    use crate::style::Style;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use tiny_skia::Pixmap;
+
+    /// 把 Switch 在给定帧时钟下绘制一帧（触发 retarget-in-paint）。
+    fn paint_at(sw: &Switch, clock: u64) {
+        crate::anim::set_clock_ms(clock);
+        let mut pm = Pixmap::new(60, 30).unwrap();
+        let mut c = SkiaCanvas::new(&mut pm);
+        sw.paint(Rect::new(0, 0, 44, 24), Rect::new(0, 0, 44, 24), false, true, &mut c, &Style::default());
+    }
+
+    #[test]
+    fn pos_initializes_to_state_no_first_frame_anim() {
+        // 构造期即按当前状态落定，避免首帧从 0 飞到 1 的突兀动画。
+        assert_eq!(Switch::new(Rc::new(Cell::new(true))).pos.get().value(), 1.0);
+        assert_eq!(Switch::new(Rc::new(Cell::new(false))).pos.get().value(), 0.0);
+    }
+
+    #[test]
+    fn retargets_and_settles_when_animated() {
+        crate::anim::set_enabled(true);
+        let state = Rc::new(Cell::new(false));
+        let sw = Switch::new(state.clone());
+        paint_at(&sw, 0);
+        state.set(true); // 外部切换
+        paint_at(&sw, 0); // paint 检测目标变化 → 改向 1
+        assert_eq!(sw.pos.get().target(), 1.0, "状态变 on 后 pos 目标应为 1");
+        assert!(sw.pos.get().is_active(), "动画开启时应在过渡中");
+        paint_at(&sw, 5000); // 远超时长 → 落定
+        assert_eq!(sw.pos.get().value(), 1.0);
+        assert!(!sw.pos.get().is_active());
+    }
+
+    #[test]
+    fn snaps_when_animation_disabled() {
+        crate::anim::set_enabled(false);
+        let state = Rc::new(Cell::new(false));
+        let sw = Switch::new(state.clone());
+        state.set(true);
+        paint_at(&sw, 0);
+        assert_eq!(sw.pos.get().value(), 1.0, "关闭动画应瞬时到 on");
+        assert!(!sw.pos.get().is_active());
+        crate::anim::set_enabled(true);
     }
 }

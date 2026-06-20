@@ -91,6 +91,7 @@ impl App {
                 screenshot_hover: None,
                 tray: None,
                 frameless: false,
+                animations: None,
             },
             render: None,
             content: None,
@@ -107,6 +108,13 @@ impl App {
     /// 禁止用户拖拽调整窗口大小（去掉 WS_THICKFRAME 和最大化按钮）。
     pub fn resizable(mut self, v: bool) -> Self {
         self.cfg.resizable = v;
+        self
+    }
+
+    /// 强制动画全局开关。默认（不调用）随系统"显示动画"设置；`true`/`false` 强制开/关。
+    /// 关闭时所有补间瞬时收敛到终态（运行期也可改用 `anim::set_enabled`）。
+    pub fn animations(mut self, on: bool) -> Self {
+        self.cfg.animations = Some(on);
         self
     }
 
