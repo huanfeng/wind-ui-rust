@@ -6,6 +6,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
@@ -17,6 +18,18 @@ use crate::text::TextEngine;
 /// 左右按钮区宽度。
 const BTN_W: i32 = 30;
 
+/// 据是否悬停推进按钮区淡入补间，返回淡入量（0..1）。retarget-in-paint。
+fn hover_amt(cell: &Cell<Transition<f32>>, on: bool) -> f32 {
+    let mut tr = cell.get();
+    let target = if on { 1.0 } else { 0.0 };
+    if tr.target() != target {
+        tr.retarget(target, crate::theme::current().anim.fast(), Easing::EaseOut);
+    }
+    let v = tr.animate();
+    cell.set(tr);
+    v
+}
+
 pub struct Stepper {
     value: Rc<Cell<f64>>,
     min: f64,
@@ -25,6 +38,9 @@ pub struct Stepper {
     decimals: usize,
     /// 悬停区：-1 无 / 0 减 / 1 加。
     hover: i8,
+    /// 左/右按钮区 hover 底色淡入补间。
+    hover_l: Cell<Transition<f32>>,
+    hover_r: Cell<Transition<f32>>,
 }
 
 impl Stepper {
@@ -39,7 +55,16 @@ impl Stepper {
             s *= 10.0;
             decimals += 1;
         }
-        Self { value, min, max, step, decimals, hover: -1 }
+        Self {
+            value,
+            min,
+            max,
+            step,
+            decimals,
+            hover: -1,
+            hover_l: Cell::new(Transition::new(0.0)),
+            hover_r: Cell::new(Transition::new(0.0)),
+        }
     }
 
     fn display(&self) -> String {
@@ -81,11 +106,13 @@ impl Widget for Stepper {
         let border = if focused { pal.accent } else { st.border(pal) };
         canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
-        // 按钮区悬停底色（左右对称内缩 1px 避让边框）。
-        if self.hover == 0 {
-            canvas.fill_round_rect(x + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal)));
-        } else if self.hover == 1 {
-            canvas.fill_round_rect(x + w - BTN_W as f32 + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal)));
+        // 按钮区悬停底色（左右对称内缩 1px 避让边框）；按补间量淡入淡出（禁用不画）。
+        let (amt_l, amt_r) = (hover_amt(&self.hover_l, enabled && self.hover == 0), hover_amt(&self.hover_r, enabled && self.hover == 1));
+        if amt_l > 0.0 {
+            canvas.fill_round_rect(x + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal).scale_alpha(amt_l)));
+        }
+        if amt_r > 0.0 {
+            canvas.fill_round_rect(x + w - BTN_W as f32 + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal).scale_alpha(amt_r)));
         }
 
         let family = style.font_family.as_deref();

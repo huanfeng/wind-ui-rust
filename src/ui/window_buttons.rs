@@ -5,6 +5,9 @@
 //! `EventCtx::minimize()` / `toggle_maximize()` / `request_close()`。
 //! 仅在 `App::frameless()` 自定义标题栏中有意义。
 
+use std::cell::Cell;
+
+use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, PointerKind};
 use crate::geometry::{Color, Rect, Size};
@@ -36,11 +39,19 @@ const GLYPH: i32 = 10;
 pub struct WindowButton {
     kind: WindowButtonKind,
     state: BtnState,
+    /// 底色补间（透明↔hover/press 底色淡入）。retarget-in-paint。
+    bg_anim: Cell<Transition<Color>>,
+    primed: Cell<bool>,
 }
 
 impl WindowButton {
     pub fn new(kind: WindowButtonKind) -> Self {
-        Self { kind, state: BtnState::Normal }
+        Self {
+            kind,
+            state: BtnState::Normal,
+            bg_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
+            primed: Cell::new(false),
+        }
     }
 
     fn activate(&self, ctx: &mut EventCtx) {
@@ -59,16 +70,26 @@ impl Widget for WindowButton {
 
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let is_close = self.kind == WindowButtonKind::Close;
-        // 悬停/按下底色：关闭键红，其余淡灰。
-        let bg = match self.state {
-            BtnState::Normal => None,
-            BtnState::Hover if is_close => Some(Color::hex(0xE81123)),
-            BtnState::Press if is_close => Some(Color::hex(0xC50F1F)),
-            BtnState::Hover => Some(Color::rgba(0, 0, 0, 0x14)),
-            BtnState::Press => Some(Color::rgba(0, 0, 0, 0x22)),
+        // 悬停/按下底色：关闭键红，其余淡灰；Normal 用全透明（淡入淡出的起止）。
+        let target_bg = match self.state {
+            BtnState::Normal => Color::rgba(0, 0, 0, 0),
+            BtnState::Hover if is_close => Color::hex(0xE81123),
+            BtnState::Press if is_close => Color::hex(0xC50F1F),
+            BtnState::Hover => Color::rgba(0, 0, 0, 0x14),
+            BtnState::Press => Color::rgba(0, 0, 0, 0x22),
         };
-        if let Some(c) = bg {
-            canvas.fill_rect(bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32, &Paint::fill(c));
+        // 底色补间：首帧落定，其后淡入淡出。
+        let mut anim = self.bg_anim.get();
+        if !self.primed.get() {
+            anim = Transition::new(target_bg);
+            self.primed.set(true);
+        } else if anim.target() != target_bg {
+            anim.retarget(target_bg, crate::theme::current().anim.fast(), Easing::EaseOut);
+        }
+        let bg = anim.animate();
+        self.bg_anim.set(anim);
+        if bg.a > 0 {
+            canvas.fill_rect(bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32, &Paint::fill(bg));
         }
         // 图标色：关闭键 hover/press 时白，否则取元素 fg（深色标题栏用 .fg(WHITE)）。
         let glyph = if is_close && self.state != BtnState::Normal { Color::WHITE } else { style.fg };
