@@ -32,7 +32,7 @@ pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use link::Link;
 pub use list::ListRow;
-pub use nav::{CollapsibleHeader, NavRow};
+pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use window_buttons::{WindowButton, WindowButtonKind};
 pub use progress::ProgressBar;
 pub use segmented::SegmentedControl;
@@ -641,6 +641,50 @@ impl Element {
             .width_match()
             .child(header)
             .child(body.visible_when(move || show.get()))
+    }
+
+    /// 手风琴（多面板折叠卡片）：带边框/圆角的卡片，逐面板「标题头 + 可折叠内容」，
+    /// 面板间分隔线。**单开互斥**版——`selected` 共享选中索引，`-1` = 全收起，初值即
+    /// 默认展开项（与 [`Element::tabs`] 的 `Rc<Cell<usize>>` 选中模型同构）。
+    /// 点击某面板头展开它会自动收起其它面板。
+    pub fn accordion(selected: Rc<Cell<i32>>, panels: Vec<(impl Into<String>, Element)>) -> Self {
+        Self::accordion_impl(panels, |i| nav::ExpandState::Single { sel: selected.clone(), index: i })
+    }
+
+    /// 手风琴**多开**版：各面板独立展开/收起、互不影响（初始全部收起）。
+    pub fn accordion_multi(panels: Vec<(impl Into<String>, Element)>) -> Self {
+        Self::accordion_impl(panels, |_| nav::ExpandState::Multi(Rc::new(Cell::new(false))))
+    }
+
+    /// 手风琴共用组装：外层卡片 + 逐面板（首面板前不加分隔线）头与显隐 body。
+    /// `make_state(i)` 决定第 i 个面板的展开模型（单开共享索引 / 多开独立布尔）。
+    fn accordion_impl(
+        panels: Vec<(impl Into<String>, Element)>,
+        make_state: impl Fn(usize) -> nav::ExpandState,
+    ) -> Self {
+        // 注意：四色在构建期从主题定格进 Element 树（与 `divider()` 同模式，构建发生在
+        // 主题注入之后故正确）。将来若加运行期换主题 API，此处不会自动刷新——届时需改为
+        // 读主题的专用 widget 绘制卡片外框/头背景/分隔线。
+        let th = crate::theme::current();
+        let border_c = th.accordion.border(&th.palette);
+        let corner = th.accordion.corner(&th.metrics);
+        let header_bg = th.accordion.header_bg(&th.palette);
+        let divider_c = th.accordion.divider(&th.palette);
+        let mut card = Element::col().width_match().bg(th.palette.surface).border(border_c, 1).corner(corner);
+        for (i, (title, body)) in panels.into_iter().enumerate() {
+            if i > 0 {
+                card = card.child(Element::base(Layout::None).width_match().height(1).bg(divider_c));
+            }
+            let state = make_state(i);
+            let header = Self::base(Layout::None)
+                .widget(nav::AccordionHeader::new(title.into(), state.clone()))
+                .width_match()
+                .height(nav::NAV_ROW_H)
+                .bg(header_bg);
+            let show = state.clone();
+            card = card.child(header).child(body.visible_when(move || show.is_expanded()));
+        }
+        card
     }
 
     /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。

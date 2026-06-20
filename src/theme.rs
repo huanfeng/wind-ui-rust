@@ -448,6 +448,35 @@ impl NavTheme {
     }
 }
 
+/// 手风琴覆盖层（Accordion 卡片外框 + 面板头背景）。chevron/text/hover 复用 [`NavTheme`]。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccordionTheme {
+    /// 卡片外框边框色。
+    pub border: Option<Color>,
+    /// 卡片圆角。
+    pub corner: Option<f32>,
+    /// 面板头背景（区别于内容区，营造卡片分层）。
+    pub header_bg: Option<Color>,
+    /// 面板间分隔线色。
+    pub divider: Option<Color>,
+}
+
+impl AccordionTheme {
+    pub fn border(&self, p: &Palette) -> Color {
+        self.border.unwrap_or(p.border)
+    }
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_md)
+    }
+    pub fn header_bg(&self, p: &Palette) -> Color {
+        self.header_bg.unwrap_or(p.surface_alt)
+    }
+    pub fn divider(&self, p: &Palette) -> Color {
+        self.divider.unwrap_or(p.divider)
+    }
+}
+
 /// 悬停提示浮层覆盖层（深底浅字）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -487,6 +516,7 @@ pub struct Theme {
     pub link: LinkTheme,
     pub segment: SegmentTheme,
     pub nav: NavTheme,
+    pub accordion: AccordionTheme,
     pub tooltip: TooltipTheme,
 }
 

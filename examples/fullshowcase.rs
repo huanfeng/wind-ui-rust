@@ -155,6 +155,8 @@ fn main() {
     let pinyin = Rc::new(Cell::new(0usize)); // 全拼/双拼/笔画
     // 可折叠分组 + 导航行演示。
     let adv_expand = Rc::new(Cell::new(true));
+    // 手风琴：单开互斥共享索引（初值 0 = 默认展开第一面板）。
+    let acc_sel = Rc::new(Cell::new(0i32));
     let nav_msg = Rc::new(RefCell::new(String::from("（点下方导航行试试）")));
     // 链接 on_click 演示：点击计数写入动态标签。
     let link_msg = Rc::new(RefCell::new(String::from("（点下方“点我计数”试试）")));
@@ -197,6 +199,26 @@ fn main() {
                     }),
             ))
             .child(Element::label_rc(nav_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+        ))
+        .child(card(
+            "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
+            Element::col()
+                .width_match()
+                .spacing(12)
+                .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::accordion(
+                    acc_sel.clone(),
+                    vec![
+                        ("什么是双拼？", Element::label("双拼用两键拼出一个音节，减少击键。").width_match().height(28).padding_xy(12, 0)),
+                        ("如何切换方案？", Element::label("在“高级设置 → 双拼方案设定”里选择。").width_match().height(28).padding_xy(12, 0)),
+                        ("支持自定义吗？", Element::label("支持，导入自定义码表即可。").width_match().height(28).padding_xy(12, 0)),
+                    ],
+                ))
+                .child(Element::label("多开独立（各面板互不影响）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::accordion_multi(vec![
+                    ("常规", Element::label("常规设置项……").width_match().height(28).padding_xy(12, 0)),
+                    ("外观", Element::label("外观设置项……").width_match().height(28).padding_xy(12, 0)),
+                ])),
         ))
         .child(card(
             "悬停提示 Tooltip（任意元素 .tooltip(...)，停留约 0.5s 弹出）",
