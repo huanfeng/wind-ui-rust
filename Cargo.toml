@@ -2,7 +2,7 @@
 name = "windui"
 version = "0.1.0"
 edition = "2021"
-description = "轻量 Windows 桌面 GUI：Win32 + GDI 呈现 + tiny-skia + DirectWrite"
+description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText）"
 license = "MIT"
 
 [features]
@@ -13,21 +13,22 @@ svg = ["dep:resvg"]
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
 
+# 跨平台依赖（所有目标平台共用）。
 [dependencies]
 # 与 resvg 0.47 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
 tiny-skia = "0.12"
 # SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
 # 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
 resvg = { version = "0.47", optional = true, default-features = false }
-# #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
-windows-core = "0.58"
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
-[dependencies.windows]
-version = "0.58"
-features = [
+# ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
+[target.'cfg(windows)'.dependencies]
+# #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
+windows-core = "0.58"
+windows = { version = "0.58", features = [
     "implement",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -46,7 +47,17 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
-]
+] }
+
+# ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
+# 缝合阶段：macOS 后端为纯 Rust 骨架（todo!()），暂不依赖以下 crate，故全部注释。
+# 实现窗口/事件/文字时取消注释（版本以届时 crates.io 最新稳定为准，需在 Mac 上确认）。
+[target.'cfg(target_os = "macos")'.dependencies]
+# objc2 = "0.5"
+# objc2-foundation = { version = "0.2", features = ["NSString", "NSURL", "NSData", "NSGeometry"] }
+# objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSWindow", "NSView", "NSEvent", "NSPasteboard", "NSStatusBar", "NSStatusItem", "NSWorkspace", "NSImage", "NSMenu"] }
+# objc2-core-text = "0.2"
+# objc2-core-graphics = "0.2"
 
 [profile.release]
 opt-level = "z"

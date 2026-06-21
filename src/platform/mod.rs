@@ -1,15 +1,85 @@
-//! 平台抽象层。目前仅 Windows（`win32`）。
+//! 平台抽象层。按目标平台分发到具体后端：Windows→`win32`，macOS→`macos`。
 //!
-//! 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
+//! 各后端对外暴露同形的 API（`run` / `open_url` / `Tray` 三件套 / `Clipboard`），
+//! 由本模块按 `cfg` 统一 re-export；上层（`app`/`lib::prelude`）只依赖 `crate::platform::*`，
+//! 不直接触碰任何具体后端，从而保持平台无关。
+//!
+//! 平台无关的窗口配置 `WindowConfig` 定义在本层（其 `tray` 字段类型按 `cfg` 解析到各后端的 `Tray`）。
+//! win32 模块名（而非 `windows`）以免与外部 `windows` crate 冲突。
 
+// 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
+#[cfg(windows)]
 pub mod win32;
+#[cfg(windows)]
+pub use win32::clipboard::WinClipboard as Clipboard;
+#[cfg(windows)]
+pub use win32::{open_url, run, Tray, TrayCtx, TrayMenuItem};
 
-pub use win32::{run, WindowConfig};
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::clipboard::MacClipboard as Clipboard;
+#[cfg(target_os = "macos")]
+pub use macos::{open_url, run, Tray, TrayCtx, TrayMenuItem};
+
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
+
+use std::path::PathBuf;
 
 use tiny_skia::Pixmap;
 
 use crate::event::{CursorShape, KeyEvent, PointerEvent, WindowOp};
-use crate::geometry::{Point, Size};
+use crate::geometry::{Color, Point, Size};
+
+/// 窗口配置（平台无关）。由 `App` 构建器组装，交各平台后端的 `run` 消费。
+pub struct WindowConfig {
+    pub title: String,
+    pub width: i32,
+    pub height: i32,
+    pub bg: Color,
+    /// 窗口居中显示。
+    pub centered: bool,
+    /// 允许用户调整窗口大小（默认 true）。
+    pub resizable: bool,
+    /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
+    pub screenshot: Option<PathBuf>,
+    /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
+    pub screenshot_scale: f32,
+    /// 截屏前合成一次右键按下（逻辑坐标），用于验证右键菜单等交互视觉。
+    pub screenshot_rclick: Option<(i32, i32)>,
+    /// 截屏前合成一次左键单击（逻辑坐标，Down+Up），用于验证下拉展开等交互视觉。
+    pub screenshot_click: Option<(i32, i32)>,
+    /// 截屏前合成一次悬停（逻辑坐标 Move）并等待超过提示延时，用于验证 tooltip 等悬停视觉。
+    pub screenshot_hover: Option<(i32, i32)>,
+    /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
+    pub tray: Option<Tray>,
+    /// 无标题栏窗口（自定义标题栏）：客户区铺满整窗，保留系统级吸附/阴影/缩放。
+    pub frameless: bool,
+    /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
+    pub animations: Option<bool>,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            title: "windui".into(),
+            width: 800,
+            height: 600,
+            bg: Color::hex(0xF3F3F3),
+            centered: false,
+            resizable: true,
+            screenshot: None,
+            screenshot_scale: 1.0,
+            screenshot_rclick: None,
+            screenshot_click: None,
+            screenshot_hover: None,
+            tray: None,
+            frameless: false,
+            animations: None,
+        }
+    }
+}
 
 /// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
 pub trait AppHandler {

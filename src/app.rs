@@ -14,10 +14,9 @@ use crate::event::{
     CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, WindowOp,
 };
 use crate::geometry::{Color, Point, Rect, Size};
-use crate::platform::win32::{self, WindowConfig};
-use crate::platform::AppHandler;
+use crate::platform::{self, AppHandler, WindowConfig};
 use crate::render::{Canvas, Paint, SkiaCanvas};
-use crate::text::{DWriteEngine, TextEngine};
+use crate::text::{PlatformTextEngine, TextEngine};
 use crate::ui::Element;
 
 // ---- 上下文菜单（宿主层自绘浮层）----
@@ -194,7 +193,7 @@ impl App {
 
     /// 配置系统托盘图标（图标 + 提示 + 左键/双击 + 原生右键菜单）。
     /// 窗口创建后安装，窗口销毁时自动清理。截屏模式下忽略。
-    pub fn tray(mut self, tray: win32::Tray) -> Self {
+    pub fn tray(mut self, tray: platform::Tray) -> Self {
         self.cfg.tray = Some(tray);
         self
     }
@@ -216,7 +215,7 @@ impl App {
         } else {
             Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
         };
-        win32::run(self.cfg, handler);
+        platform::run(self.cfg, handler);
     }
 }
 
@@ -278,7 +277,7 @@ struct Fling {
 /// 控件树交互宿主：渲染 + 事件分发 + 焦点管理。
 struct UiHost {
     tree: Tree,
-    engine: DWriteEngine,
+    engine: PlatformTextEngine,
     hover: Option<NodeId>,
     capture: Option<NodeId>,
     focus: Option<NodeId>,
@@ -317,10 +316,10 @@ impl UiHost {
         crate::theme::set_current(theme.clone());
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
-        tree.clipboard = Some(Box::new(crate::platform::win32::clipboard::WinClipboard));
+        tree.clipboard = Some(Box::new(crate::platform::Clipboard));
         Self {
             tree,
-            engine: DWriteEngine::new(),
+            engine: PlatformTextEngine::new(),
             hover: None,
             capture: None,
             focus: None,
@@ -660,7 +659,7 @@ impl AppHandler for UiHost {
         }
         // 控件请求打开 URL/路径（链接点击）：交平台用默认程序打开。
         if let Some(url) = res.open_url {
-            win32::open_url(&url);
+            platform::open_url(&url);
         }
         // 窗口操作（自定义标题栏按钮）：暂存，平台分发后轮询执行（需 hwnd）。
         if res.window_op.is_some() {
@@ -688,7 +687,7 @@ impl AppHandler for UiHost {
             self.close = true;
         }
         if let Some(url) = res.open_url {
-            win32::open_url(&url);
+            platform::open_url(&url);
         }
         if res.window_op.is_some() {
             self.pending_window_op = res.window_op;
@@ -726,7 +725,7 @@ impl AppHandler for UiHost {
             self.close = true;
         }
         if let Some(url) = res.open_url {
-            win32::open_url(&url);
+            platform::open_url(&url);
         }
         res.repaint
     }
