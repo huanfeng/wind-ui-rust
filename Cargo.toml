@@ -36,7 +36,7 @@ toml = "0.8"
 # ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
 [target.'cfg(windows)'.dependencies]
 # #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
-windows-core = "0.58"
+windows-core = "0.62"
 windows = { version = "0.58", features = [
     "implement",
     "Win32_Foundation",
