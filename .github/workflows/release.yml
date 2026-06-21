@@ -1,0 +1,41 @@
+name: Release
+
+# 推送 v* 标签时：发布到 crates.io 并创建 GitHub Release。
+# 前置：在仓库 Secrets 配置 CARGO_REGISTRY_TOKEN（crates.io 的 API Token）。
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    # 在受支持的 host 上发布，使 cargo publish 的校验构建能通过
+    # （平台后端仅 Windows/macOS 可编译；Linux host 会触发 compile_error!）。
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 校验标签与 Cargo 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json;print(json.load(sys.stdin)['packages'][0]['version'])")
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::标签 v$tag 与 Cargo.toml 版本 $crate 不一致"
+            exit 1
+          fi
+
+      - name: 发布到 crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 讨论 / Discussions
+    url: https://github.com/huanfeng/wind-ui-rust/discussions
+    about: 提问、想法、用法讨论请用 Discussions / For questions, ideas, and usage discussion

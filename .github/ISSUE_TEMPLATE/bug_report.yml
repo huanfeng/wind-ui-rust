@@ -1,0 +1,57 @@
+name: Bug 报告 / Bug report
+description: 报告一个缺陷 / Report a defect
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量提供**最小复现**，能极大加快定位。
+        Thanks! A **minimal reproduction** greatly speeds up diagnosis.
+  - type: checkboxes
+    attributes:
+      label: 前置检查 / Preflight
+      options:
+        - label: 我已搜索现有 issue，确认未重复 / I searched existing issues and found no duplicate
+          required: true
+  - type: textarea
+    attributes:
+      label: 问题描述 / Description
+      description: 发生了什么？/ What happened?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 最好附最小代码或示例命令 / Ideally minimal code or an example command
+      placeholder: |
+        1. cargo run --example ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 期望行为 / Expected
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 实际行为 / Actual
+      description: 有截图/报错可附上 / Attach screenshots or error output if any
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: 平台 / Platform
+      multiple: true
+      options:
+        - Windows
+        - macOS
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: 版本 / Versions
+      description: windui 版本、rustc 版本、系统版本 / windui version, rustc version, OS version
+      placeholder: "windui 0.1.0 · rustc 1.94.0 · Windows 11 / macOS 14"
+    validations:
+      required: true
