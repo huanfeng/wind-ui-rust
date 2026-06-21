@@ -304,14 +304,10 @@ impl Widget for Slider {
                     self.set_from_pos(ctx, p.pos.x);
                     true
                 }
-                PointerKind::Move => {
-                    // 仅拖动期间响应，避免悬停即改值。
-                    if self.dragging {
-                        self.set_from_pos(ctx, p.pos.x);
-                        true
-                    } else {
-                        false
-                    }
+                // 仅拖动期间响应，避免悬停即改值（非拖动的 Move 落到 `_ => false`）。
+                PointerKind::Move if self.dragging => {
+                    self.set_from_pos(ctx, p.pos.x);
+                    true
                 }
                 PointerKind::Up => {
                     self.dragging = false;
