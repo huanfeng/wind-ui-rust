@@ -1,8 +1,8 @@
-//! macOS 剪贴板（`NSPasteboard`）——**缝合骨架**。
-//!
-//! 当前为优雅降级占位：读返回 `None`、写为空操作（不 panic，便于早期联调）。
-//! 实现指引：`NSPasteboard::generalPasteboard()`，读 `stringForType(NSPasteboardTypeString)`，
-//! 写 `clearContents()` + `setString_forType(...)`。
+//! macOS 剪贴板（`NSPasteboard`）。读 `stringForType(NSPasteboardTypeString)`；
+//! 写 `clearContents()` + `setString_forType(...)`。对照 `win32/clipboard.rs`（`CF_UNICODETEXT`）。
+
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+use objc2_foundation::NSString;
 
 use crate::core::ClipboardProvider;
 
@@ -11,11 +11,15 @@ pub struct MacClipboard;
 
 impl ClipboardProvider for MacClipboard {
     fn get_text(&self) -> Option<String> {
-        // TODO(macos): NSPasteboard::generalPasteboard().stringForType(NSPasteboardTypeString)。
-        None
+        let pb = NSPasteboard::generalPasteboard();
+        // NSPasteboardTypeString 是 extern static（CFString 常量），取用需 unsafe。
+        let ty = unsafe { NSPasteboardTypeString };
+        pb.stringForType(ty).map(|s| s.to_string())
     }
     fn set_text(&self, text: &str) {
-        // TODO(macos): clearContents() + setString_forType(text, NSPasteboardTypeString)。
-        let _ = text;
+        let pb = NSPasteboard::generalPasteboard();
+        pb.clearContents();
+        let ty = unsafe { NSPasteboardTypeString };
+        pb.setString_forType(&NSString::from_str(text), ty);
     }
 }

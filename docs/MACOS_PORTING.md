@@ -3,8 +3,13 @@
 本文给在 macOS 上接续实现的开发者：说明跨平台架构、缝合层如何分发、每个待填实现点对照的
 Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落地顺序。
 
-> 当前状态：**缝合层重构已完成**。macOS 后端为纯 Rust 骨架（`todo!()`/`unimplemented!()`），
-> 不依赖 objc2，`cargo build` 在 macOS 上即可通过。Windows 侧构建/测试/clippy 全绿，不受影响。
+> 当前状态：**macOS 后端已落地**（objc2 0.6 + 框架 crates 0.3）。窗口/事件循环、Core Text 文字、
+> blit 呈现、HiDPI、光标、滚轮、剪贴板、open_url、文件拖放、无边框窗口、系统托盘、输入法
+> （`NSTextInputClient`）均已实现；`cargo build`/`cargo test`（122 通过）/`cargo clippy` 在 macOS 上全绿，
+> 截屏回归（`--screenshot`）渲染正确。Windows 侧不受影响（仅把平台无关的 `run_offscreen` 上移为共享函数）。
+>
+> 仍可改进：触控板用滚轮量映射（未接 `scrollWheel` 原生 momentum/惯性）；通知依赖
+> `NSUserNotification`（未打包 .app 时系统可能不展示）；动画驱动用 60Hz 定时器（非完全零唤醒空闲）。
 
 ---
 
