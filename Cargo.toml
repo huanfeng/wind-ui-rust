@@ -50,14 +50,89 @@ windows = { version = "0.58", features = [
 ] }
 
 # ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
-# 缝合阶段：macOS 后端为纯 Rust 骨架（todo!()），暂不依赖以下 crate，故全部注释。
-# 实现窗口/事件/文字时取消注释（版本以届时 crates.io 最新稳定为准，需在 Mac 上确认）。
+# objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
+# 缺哪个类型就在对应 features 里补哪个。
 [target.'cfg(target_os = "macos")'.dependencies]
-# objc2 = "0.5"
-# objc2-foundation = { version = "0.2", features = ["NSString", "NSURL", "NSData", "NSGeometry"] }
-# objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSWindow", "NSView", "NSEvent", "NSPasteboard", "NSStatusBar", "NSStatusItem", "NSWorkspace", "NSImage", "NSMenu"] }
-# objc2-core-text = "0.2"
-# objc2-core-graphics = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSURL",
+    "NSData",
+    "NSGeometry",
+    "NSValue",
+    "NSArray",
+    "NSDictionary",
+    "NSAttributedString",
+    "NSRange",
+    "NSObjCRuntime",
+    "NSNotification",
+    "NSThread",
+    "NSTimer",
+    "NSDate",
+    "NSUserNotification",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSResponder",
+    "NSWindow",
+    "NSView",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSColor",
+    "NSScreen",
+    "NSImage",
+    "NSImageRep",
+    "NSPasteboard",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSButton",
+    "NSControl",
+    "NSCell",
+    "NSMenu",
+    "NSMenuItem",
+    "NSWorkspace",
+    "NSCursor",
+    "NSTrackingArea",
+    "NSText",
+    "NSTextInputClient",
+    "NSTextInputContext",
+    "NSDragging",
+    "NSPasteboardItem",
+    "NSRunningApplication",
+    "NSWindowScripting",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFBase",
+    "CFString",
+    "CFAttributedString",
+    "CFDictionary",
+    "CFArray",
+    "CFData",
+    "CFCGTypes",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGContext",
+    "CGImage",
+    "CGColorSpace",
+    "CGColor",
+    "CGGeometry",
+    "CGAffineTransform",
+    "CGDataProvider",
+    "CGPath",
+] }
+objc2-core-text = { version = "0.3", features = [
+    "CTLine",
+    "CTFramesetter",
+    "CTFrame",
+    "CTTypesetter",
+    "CTRun",
+    "CTFont",
+    "CTFontDescriptor",
+    "CTParagraphStyle",
+    "CTStringAttributes",
+] }
 
 [profile.release]
 opt-level = "z"

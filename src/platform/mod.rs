@@ -25,12 +25,75 @@ pub use macos::{open_url, run, Tray, TrayCtx, TrayMenuItem};
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use tiny_skia::Pixmap;
 
-use crate::event::{CursorShape, KeyEvent, PointerEvent, WindowOp};
+use crate::event::{CursorShape, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
+
+/// `Color`（非预乘 RGBA8）→ tiny-skia 颜色。各后端清屏/填底共用。
+pub(crate) fn to_skia_color(c: Color) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+/// 离屏渲染一帧并保存 PNG——**平台无关**逻辑，Windows 与 macOS 的 `run` 在
+/// `cfg.screenshot.is_some()` 时共用。无需窗口，适合自动化视觉回归。
+///
+/// 与窗口路径走同一渲染管线：按 `screenshot_scale` 物理化尺寸、可选合成
+/// 右键/单击/悬停交互、收敛动画推进若干帧以捕获稳定终态。
+pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &Path) {
+    // 物理像素 = 逻辑尺寸 × scale，供高 DPI 截屏验证。
+    let s = cfg.screenshot_scale.max(0.1);
+    let pw = (cfg.width as f32 * s).round().max(1.0) as i32;
+    let ph = (cfg.height as f32 * s).round().max(1.0) as i32;
+    let size = Size::new(pw, ph);
+    let mut pixmap = Pixmap::new(pw as u32, ph as u32).expect("分配 pixmap 失败");
+    pixmap.fill(to_skia_color(cfg.bg));
+    handler.set_scale(s);
+    handler.render(&mut pixmap, size);
+    // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
+    if let Some((lx, ly)) = cfg.screenshot_rclick {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Right));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 可选：合成一次左键单击（Down+Up），捕获下拉展开等。
+    if let Some((lx, ly)) = cfg.screenshot_click {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Left));
+        handler.on_pointer(PointerEvent::single(PointerKind::Up, pos, MouseButton::Left));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
+    if let Some((lx, ly)) = cfg.screenshot_hover {
+        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
+        handler.on_pointer(PointerEvent::single(PointerKind::Move, pos, MouseButton::Left));
+        // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
+        std::thread::sleep(std::time::Duration::from_millis(650));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
+    // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
+    // 避免无限循环——末帧相位非零即可在截图显现。
+    for _ in 0..4 {
+        if !handler.wants_animation() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        pixmap.fill(to_skia_color(cfg.bg));
+        handler.render(&mut pixmap, size);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    pixmap.save_png(path).expect("保存 PNG 失败");
+    eprintln!("[windui] 截屏已保存: {}", path.display());
+}
 
 /// 窗口配置（平台无关）。由 `App` 构建器组装，交各平台后端的 `run` 消费。
 pub struct WindowConfig {
