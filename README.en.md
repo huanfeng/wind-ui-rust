@@ -2,6 +2,11 @@
 
 [简体中文](README.md) · **English**
 
+[![CI](https://github.com/huanfeng/wind-ui-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/huanfeng/wind-ui-rust/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/windui.svg)](https://crates.io/crates/windui)
+[![docs.rs](https://docs.rs/windui/badge.svg)](https://docs.rs/windui)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 > A lightweight, cross-platform desktop GUI framework — build memory-friendly tools in Rust.
 
 `Native platform windows` · `tiny-skia vector rendering` · `Native text shaping` · No runtime · No GC.

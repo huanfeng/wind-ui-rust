@@ -90,4 +90,4 @@ Signed-off-by: Your Name <your.email@example.com>
 
 ## 行为准则
 
-请保持友善、尊重与建设性。对事不对人，欢迎不同意见的理性讨论。
+参与本项目即表示你同意遵守 [行为准则](CODE_OF_CONDUCT.md)。请保持友善、尊重与建设性，对事不对人。
