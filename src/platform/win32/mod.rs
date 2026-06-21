@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use tiny_skia::Pixmap;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{FALSE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC, ScreenToClient,
     SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -72,7 +72,7 @@ use crate::geometry::{Color, Point, Size};
 
 /// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
 unsafe fn os_animations_enabled() -> bool {
-    let mut on = windows::Win32::Foundation::BOOL(1);
+    let mut on = windows::core::BOOL(1);
     let ok = SystemParametersInfoW(
         SPI_GETCLIENTAREAANIMATION,
         0,
@@ -282,7 +282,7 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     // MAKEINTRESOURCE(1)=IDI_APPLICATION：整数 1 当资源序号传入（低 64K 表示序号而非字符串指针）。
     // 这不是“悬垂指针”，故抑制 clippy；其自动建议 ptr::dangling() 会把序号改成 u16 对齐值(2)，是语义错误。
     #[allow(clippy::manual_dangling_ptr)]
-    let hicon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
+    let hicon = LoadIconW(Some(hinst), PCWSTR(1usize as *const u16)).unwrap_or_default();
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(wnd_proc),
@@ -332,7 +332,7 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
         phys_h,
         None,
         None,
-        hinst,
+        Some(hinst),
         Some(state_ptr as *const c_void),
     ) {
         Ok(h) => h,
@@ -465,7 +465,7 @@ unsafe fn run_message_loop(hwnd: HWND) {
             }
             // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤刷新率且不冻结）。
             if last_frame.elapsed().as_millis() >= frame_ms {
-                let _ = InvalidateRect(hwnd, None, false);
+                let _ = InvalidateRect(Some(hwnd), None, false);
                 let _ = UpdateWindow(hwnd);
                 last_frame = std::time::Instant::now();
             }
@@ -486,12 +486,12 @@ unsafe fn run_message_loop(hwnd: HWND) {
 /// 动画帧间隔（ms）= 1000 / 目标帧率。目标帧率取窗口所在显示器刷新率，
 /// 上限 60（默认）；刷新率 <60（如 50Hz 面板）则回退到实际值；查询失败按 60 处理。
 unsafe fn frame_interval_ms(hwnd: HWND) -> u128 {
-    let hdc = GetDC(hwnd);
+    let hdc = GetDC(Some(hwnd));
     let hz = if hdc.is_invalid() {
         0
     } else {
-        let v = GetDeviceCaps(hdc, VREFRESH);
-        let _ = ReleaseDC(hwnd, hdc);
+        let v = GetDeviceCaps(Some(hdc), VREFRESH);
+        let _ = ReleaseDC(Some(hwnd), hdc);
         v
     };
     // VREFRESH 返回 0 或 1 表示"硬件默认"（未知）→ 视为 60。
@@ -523,7 +523,7 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_SIZE => {
             // 客户区变化：请求重绘（paint 内按客户区重建缓冲）。
-            let _ = InvalidateRect(hwnd, None, false);
+            let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
         // 无边框：非客户区计算 → 客户区铺满整窗（去系统标题栏/边框）。
@@ -649,7 +649,7 @@ unsafe fn apply_cursor(shape: CursorShape) {
         CursorShape::Arrow => IDC_ARROW,
     };
     if let Ok(cur) = LoadCursorW(None, id) {
-        let _ = SetCursor(cur);
+        let _ = SetCursor(Some(cur));
     }
 }
 
@@ -683,7 +683,7 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
         state.handler.on_drop_files(Point::new(pt.x, pt.y), paths)
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
     if state_from(hwnd).map(|s| s.handler.wants_close()).unwrap_or(false) {
         let _ = DestroyWindow(hwnd);
@@ -803,7 +803,7 @@ unsafe fn frame_size_for_client(logical_w: i32, logical_h: i32, scale: f32, dpi:
     let cw = (logical_w as f32 * scale).round() as i32;
     let ch = (logical_h as f32 * scale).round() as i32;
     let mut rc = RECT { left: 0, top: 0, right: cw, bottom: ch };
-    let _ = AdjustWindowRectExForDpi(&mut rc, WS_OVERLAPPEDWINDOW, FALSE, WINDOW_EX_STYLE::default(), dpi);
+    let _ = AdjustWindowRectExForDpi(&mut rc, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default(), dpi);
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
@@ -903,7 +903,7 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
         (repaint, state.handler.capture_active(), state.capturing, state.handler.wants_close())
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
     // 同步 OS 指针捕获（此处无 state 借用，重入安全）。
     if active && !was_capturing {
@@ -945,7 +945,7 @@ unsafe fn handle_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     if let Some(s) = state_from(hwnd) {
         s.handler.set_scale(scale);
     }
-    let _ = InvalidateRect(hwnd, None, false);
+    let _ = InvalidateRect(Some(hwnd), None, false);
 }
 
 /// 当前消息是否来自触摸/笔（被提升为鼠标消息时附加信息带 0xFF515700 签名）。
@@ -1081,7 +1081,7 @@ unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
         state.handler.on_pan(pos, dy)
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -1092,7 +1092,7 @@ unsafe fn dispatch_fling(hwnd: HWND, pos: Point, vy: f32) {
         state.handler.start_fling(pos, vy)
     };
     if started {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -1103,7 +1103,7 @@ unsafe fn cancel_fling(hwnd: HWND) {
         state.handler.cancel_fling()
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -1148,7 +1148,7 @@ unsafe fn handle_capture_changed(hwnd: HWND) {
         state.handler.on_capture_lost()
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -1205,7 +1205,7 @@ unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
         (state.handler.on_key(ev), state.handler.wants_close())
     };
     if repaint {
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
     apply_window_op(hwnd);
     if close {

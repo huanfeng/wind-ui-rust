@@ -14,8 +14,8 @@ use std::ffi::c_void;
 
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
-use windows::core::{implement, IUnknown, Result, PCWSTR};
-use windows::Win32::Foundation::{BOOL, COLORREF, FALSE};
+use windows::core::{implement, BOOL, IUnknown, Ref, Result, PCWSTR};
+use windows::Win32::Foundation::{COLORREF, FALSE};
 use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteGdiInterop,
@@ -356,7 +356,7 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
         _glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
-        _clientdrawingeffect: Option<&IUnknown>,
+        _clientdrawingeffect: Ref<'_, IUnknown>,
     ) -> Result<()> {
         if clientdrawingcontext.is_null() {
             return Ok(());
@@ -383,7 +383,7 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         _x: f32,
         _y: f32,
         _underline: *const DWRITE_UNDERLINE,
-        _effect: Option<&IUnknown>,
+        _effect: Ref<'_, IUnknown>,
     ) -> Result<()> {
         Ok(())
     }
@@ -394,7 +394,7 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         _x: f32,
         _y: f32,
         _strikethrough: *const DWRITE_STRIKETHROUGH,
-        _effect: Option<&IUnknown>,
+        _effect: Ref<'_, IUnknown>,
     ) -> Result<()> {
         Ok(())
     }
@@ -404,10 +404,10 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         _ctx: *const c_void,
         _x: f32,
         _y: f32,
-        _inlineobject: Option<&IDWriteInlineObject>,
+        _inlineobject: Ref<'_, IDWriteInlineObject>,
         _issideways: BOOL,
         _isrtl: BOOL,
-        _effect: Option<&IUnknown>,
+        _effect: Ref<'_, IUnknown>,
     ) -> Result<()> {
         Ok(())
     }

@@ -240,7 +240,7 @@ unsafe fn show_menu(state: &mut TrayState) {
         TPM_RIGHTBUTTON | TPM_RETURNCMD,
         pt.x,
         pt.y,
-        0,
+        Some(0),
         state.hwnd,
         None,
     );

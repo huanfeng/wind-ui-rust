@@ -13,6 +13,9 @@
 ### Changed
 - 依赖按 target 门控：`windows` 仅 Windows、`objc2` 系列仅 macOS。
 - README 改为跨平台说明（中文主 + 英文副）。
+- 依赖更新：`toml` 0.8 → 1.1；CI actions（checkout v7、action-gh-release v3）。
+- **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
+  语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
 ## [0.1.0]
 

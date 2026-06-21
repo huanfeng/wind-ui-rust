@@ -67,7 +67,7 @@ unsafe fn set_text(text: &str) {
             let _ = EmptyClipboard();
             // 成功后系统接管 hmem 所有权。SetClipboardData 失败为极罕见路径，
             // 此时 hmem 未交系统、会泄漏一次；可忽略。
-            let _ = SetClipboardData(CF_UNICODETEXT, HANDLE(hmem.0));
+            let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hmem.0)));
         }
     }
     let _ = CloseClipboard();
