@@ -2,6 +2,11 @@
 
 **简体中文** · [English](README.en.md)
 
+[![CI](https://github.com/huanfeng/wind-ui-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/huanfeng/wind-ui-rust/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/windui.svg)](https://crates.io/crates/windui)
+[![docs.rs](https://docs.rs/windui/badge.svg)](https://docs.rs/windui)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
+
 > 轻量跨平台桌面 GUI 框架 — 用 Rust 构建内存友好的小工具。
 
 `平台原生窗口` · `tiny-skia 矢量渲染` · `平台原生文字排版` · 无运行时 · 无 GC。
