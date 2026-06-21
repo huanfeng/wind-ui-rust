@@ -26,7 +26,8 @@ use objc2_app_kit::{
 use objc2_app_kit::NSFilenamesPboardType;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImageAlphaInfo,
+    CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGContext, CGDataProvider, CGImage,
+    CGImageAlphaInfo,
 };
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound,
@@ -385,22 +386,30 @@ impl ContentView {
             let ptr = pixmap as *mut Pixmap;
             st.handler.render(unsafe { &mut *ptr }, size);
 
-            // 把缓冲包成位图上下文 → CGImage（CGImage 会复制数据，复用缓冲安全）。
+            // 直接把 pixmap 缓冲包成 CGImage：经 CGDataProvider **引用**缓冲（不拷贝像素），
+            // release 回调为 None（缓冲由 pixmap 拥有）。CGImage 在本帧 draw_image 后即析构，
+            // 期间缓冲不被改写，故无拷贝也安全——相较 CGBitmapContextCreateImage 省去每帧整窗拷贝。
             let bytes_per_row = pw as usize * 4;
-            let data = st.pixmap.as_mut().unwrap().data_mut().as_mut_ptr() as *mut c_void;
+            let pixmap = st.pixmap.as_ref().unwrap();
+            let data = pixmap.data().as_ptr() as *const c_void;
+            let size = bytes_per_row * ph as usize;
             let cs = st.color_space.clone();
-            let ctx = unsafe {
-                CGBitmapContextCreate(
-                    data,
+            let provider = unsafe { CGDataProvider::with_data(std::ptr::null_mut(), data, size, None) };
+            provider.and_then(|p| unsafe {
+                CGImage::new(
                     pw as usize,
                     ph as usize,
                     8,
+                    32,
                     bytes_per_row,
                     Some(&cs),
-                    CGImageAlphaInfo::PremultipliedLast.0,
+                    CGBitmapInfo(CGImageAlphaInfo::PremultipliedLast.0),
+                    Some(&p),
+                    std::ptr::null(),
+                    false,
+                    CGColorRenderingIntent::RenderingIntentDefault,
                 )
-            };
-            ctx.and_then(|c| CGBitmapContextCreateImage(Some(&c)))
+            })
         };
 
         let Some(image) = image else { return };
