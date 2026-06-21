@@ -31,7 +31,7 @@ tiny-skia = "0.12"
 resvg = { version = "0.47", optional = true, default-features = false }
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 
 # ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
 [target.'cfg(windows)'.dependencies]
