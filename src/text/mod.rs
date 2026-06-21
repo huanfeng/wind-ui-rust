@@ -1,8 +1,20 @@
-//! 文字引擎抽象。Windows 下由 DirectWrite 实现（`dwrite`）。
+//! 文字引擎抽象。Windows 下由 DirectWrite 实现（`dwrite`）；macOS 下由 Core Text 实现（`coretext`）。
 
+#[cfg(windows)]
 pub mod dwrite;
-
+#[cfg(windows)]
 pub use dwrite::DWriteEngine;
+
+#[cfg(target_os = "macos")]
+pub mod coretext;
+#[cfg(target_os = "macos")]
+pub use coretext::CoreTextEngine;
+
+/// 当前平台的具体文字引擎类型。`app` 层用此别名持有引擎，避免 `cfg` 散落到宿主逻辑里。
+#[cfg(windows)]
+pub type PlatformTextEngine = DWriteEngine;
+#[cfg(target_os = "macos")]
+pub type PlatformTextEngine = CoreTextEngine;
 
 use tiny_skia::Pixmap;
 

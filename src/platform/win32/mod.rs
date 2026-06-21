@@ -66,58 +66,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 
-use super::AppHandler;
+use super::{AppHandler, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
-
-/// 窗口配置。
-pub struct WindowConfig {
-    pub title: String,
-    pub width: i32,
-    pub height: i32,
-    pub bg: Color,
-    /// 窗口居中显示。
-    pub centered: bool,
-    /// 允许用户调整窗口大小（默认 true）。false 时移除 WS_THICKFRAME 和最大化按钮。
-    pub resizable: bool,
-    /// 截屏模式：渲染一帧离屏存 PNG 后立即退出，不创建窗口。
-    pub screenshot: Option<PathBuf>,
-    /// 截屏时的 DPI 缩放（默认 1.0），用于验证高 DPI 渲染。
-    pub screenshot_scale: f32,
-    /// 截屏前合成一次右键按下（逻辑坐标），用于验证右键菜单等交互视觉。
-    pub screenshot_rclick: Option<(i32, i32)>,
-    /// 截屏前合成一次左键单击（逻辑坐标，Down+Up），用于验证下拉展开等交互视觉。
-    pub screenshot_click: Option<(i32, i32)>,
-    /// 截屏前合成一次悬停（逻辑坐标 Move）并等待超过提示延时，用于验证 tooltip 等悬停视觉。
-    pub screenshot_hover: Option<(i32, i32)>,
-    /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
-    pub tray: Option<tray::Tray>,
-    /// 无标题栏窗口（自定义标题栏）：WM_NCCALCSIZE 让客户区铺满整窗，保留吸附/阴影/缩放。
-    pub frameless: bool,
-    /// 动画全局开关：None=随系统"显示动画"设置；Some(b)=强制开/关。
-    pub animations: Option<bool>,
-}
-
-impl Default for WindowConfig {
-    fn default() -> Self {
-        Self {
-            title: "windui".into(),
-            width: 800,
-            height: 600,
-            bg: Color::hex(0xF3F3F3),
-            centered: false,
-            resizable: true,
-            screenshot: None,
-            screenshot_scale: 1.0,
-            screenshot_rclick: None,
-            screenshot_click: None,
-            screenshot_hover: None,
-            tray: None,
-            frameless: false,
-            animations: None,
-        }
-    }
-}
 
 /// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
 unsafe fn os_animations_enabled() -> bool {
@@ -382,6 +333,9 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
     let hinst = HINSTANCE(hmodule.0);
     let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
+    // MAKEINTRESOURCE(1)=IDI_APPLICATION：整数 1 当资源序号传入（低 64K 表示序号而非字符串指针）。
+    // 这不是“悬垂指针”，故抑制 clippy；其自动建议 ptr::dangling() 会把序号改成 u16 对齐值(2)，是语义错误。
+    #[allow(clippy::manual_dangling_ptr)]
     let hicon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,

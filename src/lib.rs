@@ -1,4 +1,4 @@
-//! windui — 轻量 Windows 桌面 GUI 框架。
+//! windui — 轻量跨平台桌面 GUI 框架（Windows：Win32+DirectWrite；macOS：Cocoa+CoreText，开发中）。
 //!
 //! - 第三方使用指南（API 风格/规范/扩展）：`docs/API_GUIDE.md`
 //! - 架构设计：`docs/DESIGN.md`；实施路线图：`docs/ROADMAP.md`
@@ -22,7 +22,7 @@ pub mod ui;
 pub mod prelude {
     pub use crate::app::App;
     pub use crate::event::CursorShape;
-    pub use crate::platform::win32::{Tray, TrayCtx, TrayMenuItem};
+    pub use crate::platform::{Tray, TrayCtx, TrayMenuItem};
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::spec::{Align, Axis, Dimension};
