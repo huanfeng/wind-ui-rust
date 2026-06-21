@@ -3,7 +3,16 @@ name = "windui"
 version = "0.1.0"
 edition = "2021"
 description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText）"
-license = "MIT"
+authors = ["huanfeng <huanfengf@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/huanfeng/wind-ui-rust"
+homepage = "https://github.com/huanfeng/wind-ui-rust"
+documentation = "https://docs.rs/windui"
+readme = "README.md"
+keywords = ["gui", "ui", "desktop", "windows", "macos"]
+categories = ["gui", "rendering", "os::windows-apis", "os::macos-apis"]
+# 发布到 crates.io 时排除非源码资产，保持包精简。
+exclude = [".github/", ".remember/", "/temp", "/artifacts", "docs/superpowers"]
 
 [features]
 # SVG 支持默认开启；体积敏感可 `--no-default-features` 关掉以剔除 resvg/usvg 依赖树。
