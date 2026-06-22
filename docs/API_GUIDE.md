@@ -131,6 +131,8 @@ Element::dialog(show, content)       // 模态浮层（show: Rc<Cell<bool>>）
 Element::label("文本")
 Element::button("确定").on_click(|ctx| { /* ... */ })
 Element::checkbox("启用", state)                 // state: Rc<Cell<bool>>
+//  .danger() / .accent(color)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
+//  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）
 Element::switch(state)                            // state: Rc<Cell<bool>>
 Element::radio("选项", group, index)             // group: Rc<Cell<usize>>
 Element::slider(value)                            // value: Rc<Cell<f32>> (0..=1)
@@ -332,6 +334,13 @@ Element::button("保存").on_click(|ctx: &mut EventCtx| {
 });
 ```
 `on_click` 接 `FnMut + 'static`（可改捕获的状态）。`visible_when` 接 `Fn`（纯查询）。
+
+**受控复选框 `on_toggle`**：CheckBox 默认点击即翻转绑定的 `state`。需在翻转前介入（如弹确认对话框）时用 `.on_toggle(cb)`——设置后点击/键盘激活**不再自动翻转** `state`，改调回调，由你决定是否 `state.set(..)`。渲染始终跟随 `state` 当前值，确认前框不会勾上、零闪烁。
+```rust
+Element::checkbox("删除数据", state.clone()).on_toggle(move |_ctx| {
+    if confirm() { state.set(true); }   // 确认后才置真；否则保持不变
+})
+```
 
 ### 8.2 上下文菜单
 文本输入已内建右键菜单（剪切/复制/粘贴/全选）。自定义控件可在 `on_event` 里：
