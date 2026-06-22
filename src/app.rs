@@ -211,7 +211,7 @@ impl App {
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
-            Box::new(UiHost::new(root, theme))
+            Box::new(UiHost::new(root, theme, self.cfg.bg))
         } else {
             Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
         };
@@ -308,10 +308,21 @@ struct UiHost {
     hover_since_ms: u64,
     /// 点击后抑制提示，直到指针再次移动（避免点完控件原地又弹出盖住它）。
     tooltip_suppressed: bool,
+    /// 窗口背景色（与平台 fill 同色）：局部重绘的子缓冲按此填底，重建脏区与全窗一致。
+    bg: Color,
+    /// 持久后备缓冲（物理像素，整窗）：保留上一全窗帧，供局部帧重建未变区域。
+    back: Option<Pixmap>,
+    /// 上一帧累积的动画脏区（逻辑坐标）：下一动画帧据此局部重绘；None=下一帧需全窗。
+    pending_damage: Option<Rect>,
+    /// 强制本帧全窗重绘（输入/结构/尺寸变更触发）。
+    needs_full: bool,
 }
 
+/// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
+const DAMAGE_MARGIN: i32 = 2;
+
 impl UiHost {
-    fn new(root: Element, theme: Rc<Theme>) -> Self {
+    fn new(root: Element, theme: Rc<Theme>, bg: Color) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
         crate::theme::set_current(theme.clone());
         let mut tree = Tree::new();
@@ -337,6 +348,10 @@ impl UiHost {
             hover_pos: Point::new(0, 0),
             hover_since_ms: 0,
             tooltip_suppressed: false,
+            bg,
+            back: None,
+            pending_damage: None,
+            needs_full: true,
         }
     }
 
@@ -523,7 +538,7 @@ impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
         // 注入主题（离屏路径首帧、主题变更时均生效）。
         crate::theme::set_current(self.theme.clone());
-        // 动画：清上一帧请求并刷新帧时钟，绘制中控件可重新请求。
+        // 动画：清上一帧请求/脏区并刷新帧时钟，绘制中控件可重新请求。
         crate::anim::reset_request();
         let now_ms = self.start.elapsed().as_millis() as u64;
         crate::anim::set_clock_ms(now_ms);
@@ -536,6 +551,43 @@ impl AppHandler for UiHost {
             (size.h as f32 / s).round().max(1.0) as i32,
         );
         self.logical_size = logical;
+
+        // 全窗 vs 局部重绘决策：
+        // - needs_full（输入/结构/尺寸变更）、后备缓冲缺失/尺寸不符、有浮层、无脏区 → 全窗。
+        // - 否则用上一帧动画脏区做局部重绘（仅重画动的那一小块，高 DPI 也稳 60fps）。
+        let back_ok = self
+            .back
+            .as_ref()
+            .map(|b| b.width() == size.w as u32 && b.height() == size.h as u32)
+            .unwrap_or(false);
+        let overlay = self.menu.is_some()
+            || (!self.tooltip_suppressed
+                && self.hover.and_then(|h| self.tree.node_tooltip(h)).is_some());
+        let damage = self.pending_damage.take();
+        // 局部重绘前提：scale 为 0.25 的倍数——4 逻辑像素 ×scale 才为整数，子 pixmap 与全窗帧才
+        // 逐像素对齐（否则文字纵向 1px 抖动）。非 25% 倍数缩放（罕见的分数缩放）一律退全窗，
+        // 这也使「平台层零改动、各平台始终拿到完整 pixmap」的不变量在任何 scale 下都安全。
+        let scale_ok = {
+            let q = s * 4.0;
+            (q - q.round()).abs() < 1e-3
+        };
+        // 脏区超过窗口一半 → 退全窗：多控件并集过大时，局部重绘的子 pixmap 分配+合成反而净亏损。
+        let damage_small = damage
+            .map(|d| {
+                let win = self.logical_size.w as i64 * self.logical_size.h as i64;
+                win > 0 && (d.w as i64 * d.h as i64) * 2 <= win
+            })
+            .unwrap_or(false);
+        let do_full = self.needs_full || !back_ok || overlay || !scale_ok || !damage_small;
+        self.needs_full = false;
+
+        if !do_full {
+            self.render_partial(pixmap, size, s, damage.unwrap());
+            self.pending_damage = next_damage(&mut self.needs_full);
+            return;
+        }
+
+        // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果种入后备缓冲供后续局部帧复用。----
         self.tree.layout_root(logical, &mut self.engine);
         // 布局后结构稳定，刷新 Tab 焦点顺序。
         self.focus_order = self.tree.focusable_order();
@@ -602,9 +654,14 @@ impl AppHandler for UiHost {
                 }
             }
         }
+        drop(canvas);
+        // 种入后备缓冲（整窗），供后续局部帧重建未变区域。
+        self.seed_back(pixmap, size);
+        self.pending_damage = next_damage(&mut self.needs_full);
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
+        self.needs_full = true;
         // 物理坐标 → 逻辑坐标（布局与命中均在逻辑空间）。
         let s = self.scale;
         ev.pos = Point::new(
@@ -669,6 +726,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
+        self.needs_full = true;
         // 菜单激活时：Escape 关闭，其余键吞掉（避免在菜单后误编辑）。
         if self.menu.is_some() {
             if ev.key == Key::Escape {
@@ -707,6 +765,7 @@ impl AppHandler for UiHost {
     }
 
     fn set_scale(&mut self, scale: f32) {
+        self.needs_full = true;
         self.scale = scale;
         // 文字引擎同步 scale，保证文字测量/绘制与图形缩放一致。
         self.engine.set_scale(scale);
@@ -717,6 +776,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_drop_files(&mut self, pos: Point, paths: Vec<std::path::PathBuf>) -> bool {
+        self.needs_full = true;
         // 物理 → 逻辑（命中在逻辑空间），路由到落点下的控件。
         let s = self.scale;
         let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
@@ -764,6 +824,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
+        self.needs_full = true; // 滚动改变大片区域 → 全窗重绘。
         // 菜单激活时忽略平移（并清残差，避免菜单关闭后跳变）。
         if self.menu.is_some() {
             self.pan_residual = 0.0;
@@ -831,6 +892,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_capture_lost(&mut self) -> bool {
+        self.needs_full = true;
         // 给捕获节点派发一个远处坐标的合成 Up，复用 Up 语义让其收尾
         // （Slider 复位拖动、Button 因 inside=false 不误触发），并清逻辑捕获。
         if self.capture.is_none() {
@@ -847,5 +909,100 @@ impl AppHandler for UiHost {
         self.hover = hover;
         self.capture = capture;
         res.repaint
+    }
+}
+
+impl UiHost {
+    /// 局部重绘：把脏区渲染进脏区大小的子 pixmap（tiny-skia 按 pixmap 边界自动剔除框外
+    /// 图元，成本降到脏区面积），合成进后备缓冲，再整窗拷给平台 pixmap。复用上一全窗帧的
+    /// 布局（当前动画均为视觉位移、不改布局）。
+    fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {
+        // 脏区外扩 AA 余量并钳到窗口逻辑范围。
+        let raw = damage.inflate(DAMAGE_MARGIN).intersect(&Rect::from_size(self.logical_size));
+        // 原点对齐到 4 逻辑像素网格：Windows DPI 缩放恒为 25% 的倍数（scale=m/4），故 4 的倍数 ×scale
+        // 必为整数，子 pixmap 物理原点 dmg.origin×scale 精确无取整 → 文字定位与全窗帧逐像素一致，
+        // 消除局部帧的纵向 1px 抖动。
+        const GRID: i32 = 4;
+        let x0 = raw.x - raw.x.rem_euclid(GRID);
+        let y0 = raw.y - raw.y.rem_euclid(GRID);
+        let x1 = raw.right() + (GRID - raw.right().rem_euclid(GRID)) % GRID;
+        let y1 = raw.bottom() + (GRID - raw.bottom().rem_euclid(GRID)) % GRID;
+        let dmg = Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&Rect::from_size(self.logical_size));
+        // 物理化并钳到 pixmap 边界。
+        let pdmg = dmg.scaled(s).intersect(&Rect::new(0, 0, size.w, size.h));
+        if pdmg.is_empty() {
+            self.blit_back_to(pixmap);
+            return;
+        }
+        // 子 pixmap：脏区大小，按窗口背景填底（与全窗帧平台 fill 同色，重建一致）。
+        let Some(mut sub) = Pixmap::new(pdmg.w as u32, pdmg.h as u32) else {
+            self.blit_back_to(pixmap);
+            return;
+        };
+        sub.fill(tiny_skia::Color::from_rgba8(self.bg.r, self.bg.g, self.bg.b, self.bg.a));
+        // 以脏区左上角（逻辑）为偏移绘制整树：框外图元由 tiny-skia 廉价剔除。
+        {
+            let mut canvas =
+                SkiaCanvas::with_text_offset(&mut sub, &mut self.engine, s, Point::new(dmg.x, dmg.y));
+            self.tree.paint(&mut canvas);
+        }
+        // 合成进后备缓冲（脏区物理原点），再整窗拷给平台 pixmap。
+        if let Some(back) = self.back.as_mut() {
+            blit(&sub, back, pdmg.x, pdmg.y);
+        }
+        self.blit_back_to(pixmap);
+    }
+
+    /// 把后备缓冲整窗拷入 pixmap（两者同尺寸时）。
+    fn blit_back_to(&self, pixmap: &mut Pixmap) {
+        if let Some(back) = self.back.as_ref() {
+            if back.width() == pixmap.width() && back.height() == pixmap.height() {
+                pixmap.data_mut().copy_from_slice(back.data());
+            }
+        }
+    }
+
+    /// 全窗帧结束：把刚绘好的 pixmap 整窗种入后备缓冲，供后续局部帧复用（按需重建尺寸）。
+    fn seed_back(&mut self, pixmap: &Pixmap, size: Size) {
+        let need_new = self
+            .back
+            .as_ref()
+            .map(|b| b.width() != size.w as u32 || b.height() != size.h as u32)
+            .unwrap_or(true);
+        if need_new {
+            self.back = Pixmap::new(size.w as u32, size.h as u32);
+        }
+        if let Some(back) = self.back.as_mut() {
+            back.data_mut().copy_from_slice(pixmap.data());
+        }
+    }
+}
+
+/// 取本帧累积的动画脏区，映射为下一帧的局部脏区；Full（浮层/fling 等节点外请求）→
+/// 标记下一帧全窗、返回 None。
+fn next_damage(needs_full: &mut bool) -> Option<Rect> {
+    match crate::anim::take_damage() {
+        crate::anim::Damage::Rect(r) => Some(r),
+        crate::anim::Damage::Full => {
+            *needs_full = true;
+            None
+        }
+        crate::anim::Damage::None => None,
+    }
+}
+
+/// 把 src（RGBA8）整块覆盖拷入 dst 的 (x,y)（src 不超出 dst；不做 alpha 混合）。
+fn blit(src: &Pixmap, dst: &mut Pixmap, x: i32, y: i32) {
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (dw, dh) = (dst.width() as usize, dst.height() as usize);
+    let (x, y) = (x.max(0) as usize, y.max(0) as usize);
+    // 契约：src 必须完整落在 dst 内（调用方已把脏区钳到 pixmap 边界）。越界即逻辑错误。
+    debug_assert!(x + sw <= dw && y + sh <= dh, "blit 越界：({x},{y})+{sw}x{sh} 超出 {dw}x{dh}");
+    let sd = src.data();
+    let dd = dst.data_mut();
+    for row in 0..sh {
+        let s0 = row * sw * 4;
+        let d0 = ((y + row) * dw + x) * 4;
+        dd[d0..d0 + sw * 4].copy_from_slice(&sd[s0..s0 + sw * 4]);
     }
 }

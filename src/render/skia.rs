@@ -9,7 +9,7 @@ use tiny_skia::{
 
 use super::image::{Fit, Image};
 use super::{rounded_rect_path, Canvas, Paint};
-use crate::geometry::{Color, Rect};
+use crate::geometry::{Color, Point, Rect};
 use crate::spec::Align;
 use crate::text::TextEngine;
 
@@ -31,17 +31,30 @@ pub struct SkiaCanvas<'a> {
     saves: Vec<usize>,
     /// 逻辑→物理缩放因子（DPI / 96）。
     scale: f32,
+    /// 局部重绘原点（**逻辑坐标**）：pixmap 是脏区大小的子缓冲，其 (0,0) 对应世界 `offset`。
+    /// 所有图元绘制时减去此偏移，使世界坐标落入子 pixmap。全窗重绘时为 (0,0)。
+    offset: Point,
 }
 
 impl<'a> SkiaCanvas<'a> {
     /// 无文字能力（仅图形），scale=1。
     pub fn new(pixmap: &'a mut Pixmap) -> Self {
-        Self { pixmap, engine: None, clips: Vec::new(), saves: Vec::new(), scale: 1.0 }
+        Self { pixmap, engine: None, clips: Vec::new(), saves: Vec::new(), scale: 1.0, offset: Point::new(0, 0) }
     }
 
-    /// 带文字引擎与 DPI 缩放。
+    /// 带文字引擎与 DPI 缩放（全窗重绘，无偏移）。
     pub fn with_text(pixmap: &'a mut Pixmap, engine: &'a mut dyn TextEngine, scale: f32) -> Self {
-        Self { pixmap, engine: Some(engine), clips: Vec::new(), saves: Vec::new(), scale }
+        Self::with_text_offset(pixmap, engine, scale, Point::new(0, 0))
+    }
+
+    /// 局部重绘：`offset`（逻辑坐标）为子 pixmap 在世界中的左上角。
+    pub fn with_text_offset(
+        pixmap: &'a mut Pixmap,
+        engine: &'a mut dyn TextEngine,
+        scale: f32,
+        offset: Point,
+    ) -> Self {
+        Self { pixmap, engine: Some(engine), clips: Vec::new(), saves: Vec::new(), scale, offset }
     }
 
     fn sk_paint(p: &Paint) -> SkPaint<'static> {
@@ -49,6 +62,12 @@ impl<'a> SkiaCanvas<'a> {
         sp.set_color(to_sk_color(p.color));
         sp.anti_alias = p.anti_alias;
         sp
+    }
+
+    /// 逻辑→物理变换：缩放后平移 -offset（物理像素），把世界坐标映射进子 pixmap。
+    fn tf(&self) -> Transform {
+        Transform::from_scale(self.scale, self.scale)
+            .post_translate(-self.offset.x as f32 * self.scale, -self.offset.y as f32 * self.scale)
     }
 }
 
@@ -61,7 +80,7 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::from_scale(self.scale, self.scale), mask);
+            self.pixmap.fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
         }
     }
 
@@ -83,7 +102,7 @@ impl Canvas for SkiaCanvas<'_> {
             let sp = Self::sk_paint(paint);
             let stroke = Stroke { width, ..Default::default() };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::from_scale(self.scale, self.scale), mask);
+            self.pixmap.stroke_path(&path, &sp, &stroke, self.tf(), mask);
         }
     }
 
@@ -95,7 +114,7 @@ impl Canvas for SkiaCanvas<'_> {
             let sp = Self::sk_paint(paint);
             let stroke = Stroke { width, line_cap: LineCap::Butt, ..Default::default() };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, Transform::from_scale(self.scale, self.scale), mask);
+            self.pixmap.stroke_path(&path, &sp, &stroke, self.tf(), mask);
         }
     }
 
@@ -103,7 +122,7 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, Transform::from_scale(self.scale, self.scale), mask);
+            self.pixmap.fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
         }
     }
 
@@ -112,8 +131,8 @@ impl Canvas for SkiaCanvas<'_> {
         if opacity <= 0.0 {
             return;
         }
-        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。
-        let pdst = dst.scaled(self.scale);
+        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）；局部重绘减 offset 落入子 pixmap。
+        let pdst = dst.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
         if pdst.is_empty() {
             return;
         }
@@ -152,7 +171,7 @@ impl Canvas for SkiaCanvas<'_> {
         mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
         // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形。
         if let Some(c) = self.clips.last() {
-            let cr = c.rect.scaled(self.scale);
+            let cr = c.rect.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
             if cr.is_empty() {
                 return;
             }
@@ -181,7 +200,15 @@ impl Canvas for SkiaCanvas<'_> {
         size: f32,
     ) {
         // 传逻辑 rect/size/clip；引擎内部持有 scale 自行物理化（与 measure 同源）。
-        let clip = self.clips.last().map(|c| c.rect);
+        // 局部重绘时减去 offset（逻辑），使引擎物理化后落入子 pixmap（×scale 与图元同源）。
+        let off = self.offset;
+        let rect = rect.offset(-off.x, -off.y);
+        // 剔除：物理矩形与（子）pixmap 边界无交集则跳过引擎排版（局部重绘省去离屏文字的 COM 开销）。
+        let bounds = Rect::new(0, 0, self.pixmap.width() as i32, self.pixmap.height() as i32);
+        if rect.scaled(self.scale).intersect(&bounds).is_empty() {
+            return;
+        }
+        let clip = self.clips.last().map(|c| c.rect.offset(-off.x, -off.y));
         if let Some(engine) = self.engine.as_deref_mut() {
             engine.draw(self.pixmap, text, rect, color, align, family, size, clip);
         }
@@ -223,7 +250,8 @@ impl Canvas for SkiaCanvas<'_> {
         let (pw, ph) = (self.pixmap.width(), self.pixmap.height());
         if let Some(mut mask) = Mask::new(pw, ph) {
             // mask 用物理整数矩形（与文字 clip 的 rect.scaled 同源），消除取整分歧。
-            let peff = eff.scaled(self.scale);
+            // 局部重绘时减 offset（逻辑）再物理化，使 mask 落入子 pixmap。
+            let peff = eff.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
             if !peff.is_empty() {
                 if let Some(rect) = tiny_skia::Rect::from_xywh(
                     peff.x as f32,
@@ -335,6 +363,83 @@ mod tests {
         let (r, g, b) = px(&pm, 20, 20);
         assert!(r > 240, "红通道应仍高，实得 {r}");
         assert!(g > 120 && b > 120, "低不透明应混入白底（g={g}, b={b}）");
+    }
+
+    /// 局部重绘正确性：带 offset 的子 pixmap 渲染，应与全窗渲染的对应区域逐像素一致。
+    /// 验证图元偏移（图形变换 + 裁剪 mask）的几何正确，杜绝脏区合成错位/残影。
+    #[test]
+    fn offset_subpixmap_matches_full_region() {
+        // 全窗 100×100：白底 + 一个完全落在比较区内的蓝色圆角矩形 + 一层裁剪。
+        let draw = |c: &mut SkiaCanvas| {
+            c.save();
+            c.clip_rect(Rect::new(20, 20, 70, 70));
+            c.fill_round_rect(40.0, 40.0, 22.0, 18.0, 5.0, &Paint::fill(Color::hex(0x3366CC)));
+            c.fill_circle(70.0, 70.0, 8.0, &Paint::fill(Color::hex(0xCC3333)));
+            c.restore();
+        };
+        let mut full = Pixmap::new(100, 100).unwrap();
+        full.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut full);
+            draw(&mut c);
+        }
+        // 子 pixmap：脏区 (30,30,40,40)，offset=(30,30)，scale=1。
+        let mut sub = Pixmap::new(40, 40).unwrap();
+        sub.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, 1.0, Point::new(30, 30));
+            draw(&mut c);
+        }
+        // 逐像素比对 full[30..70, 30..70] 与 sub[0..40, 0..40]。
+        for y in 0..40u32 {
+            for x in 0..40u32 {
+                let f = full.pixel(30 + x, 30 + y).unwrap();
+                let s = sub.pixel(x, y).unwrap();
+                assert_eq!(
+                    (f.red(), f.green(), f.blue(), f.alpha()),
+                    (s.red(), s.green(), s.blue(), s.alpha()),
+                    "局部重绘像素 ({x},{y}) 应与全窗一致"
+                );
+            }
+        }
+    }
+
+    /// 局部重绘在分数缩放（1.5×）下的正确性：当 offset×scale 为整数（脏区对齐到 4px 网格保证）时，
+    /// 带 offset 的子 pixmap 渲染应与全窗对应区域逐像素一致（含抗锯齿边缘）。
+    #[test]
+    fn offset_subpixmap_exact_at_scale_1_5() {
+        let s = 1.5;
+        // 全窗 180×180 物理（= 120 逻辑 ×1.5）。
+        let draw = |c: &mut SkiaCanvas| {
+            c.fill_round_rect(40.0, 41.0, 23.0, 17.0, 5.0, &Paint::fill(Color::hex(0x3366CC)));
+        };
+        let mut full = Pixmap::new(180, 180).unwrap();
+        full.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut full, &mut eng, s);
+            draw(&mut c);
+        }
+        // 脏区逻辑原点 (12,12)（4 的倍数 → 12×1.5=18 整数），物理 (18,18)，大小 60×60。
+        let mut sub = Pixmap::new(60, 60).unwrap();
+        sub.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, s, Point::new(12, 12));
+            draw(&mut c);
+        }
+        for y in 0..60u32 {
+            for x in 0..60u32 {
+                let f = full.pixel(18 + x, 18 + y).unwrap();
+                let g = sub.pixel(x, y).unwrap();
+                assert_eq!(
+                    (f.red(), f.green(), f.blue(), f.alpha()),
+                    (g.red(), g.green(), g.blue(), g.alpha()),
+                    "1.5× 对齐 offset 下像素 ({x},{y}) 应逐像素一致"
+                );
+            }
+        }
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。

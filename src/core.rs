@@ -617,7 +617,10 @@ impl Tree {
         }
 
         let content = abs.inset(n.padding);
+        // 标记当前节点矩形：节点内的 anim::request_repaint 会把脏区归到此处（局部重绘用）。
+        crate::anim::set_paint_rect(Some(abs));
         n.widget.paint(abs, content, n.focused, enabled, canvas, &n.style);
+        crate::anim::set_paint_rect(None);
 
         // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
         if n.focused && self.focus_ring_visible {

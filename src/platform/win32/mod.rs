@@ -494,8 +494,9 @@ unsafe fn frame_interval_ms(hwnd: HWND) -> u128 {
         let _ = ReleaseDC(Some(hwnd), hdc);
         v
     };
-    // VREFRESH 返回 0 或 1 表示"硬件默认"（未知）→ 视为 60。
-    let fps = if hz <= 1 { 60 } else { hz.min(60) };
+    // VREFRESH 返回 0 或 1 表示"硬件默认"（未知）→ 视为 60；否则跟随显示器刷新率
+    // （高刷屏吃到 120/144Hz，局部重绘已让每帧足够廉价）。上限 240 兜底异常驱动值。
+    let fps = if hz <= 1 { 60 } else { hz.min(240) };
     (1000 / fps.max(1)) as u128
 }
 

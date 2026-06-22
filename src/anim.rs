@@ -11,18 +11,64 @@
 
 use std::cell::Cell;
 
-use crate::geometry::Color;
+use crate::geometry::{Color, Rect};
 
 thread_local! {
     static REQUEST: Cell<bool> = const { Cell::new(false) };
     static CLOCK_MS: Cell<u64> = const { Cell::new(0) };
     /// 全局动画开关：false 时所有补间瞬时收敛（尊重系统"显示动画"/省电/无障碍）。
     static ENABLED: Cell<bool> = const { Cell::new(true) };
+    /// 当前正在绘制的节点矩形（逻辑坐标），由 paint 遍历每节点设置。
+    /// `request_repaint` 据此把脏区归到该节点；为 None 时（节点外调用）标记整窗脏。
+    static PAINT_RECT: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// 本帧累积的脏区矩形（逻辑坐标，各动画节点并集）。
+    static DAMAGE: Cell<Option<Rect>> = const { Cell::new(None) };
+    /// 本帧是否需整窗重绘（节点外的 request_repaint，或无法局部化的情况）。
+    static DAMAGE_FULL: Cell<bool> = const { Cell::new(false) };
 }
 
-/// 控件请求持续动画（在 paint 内调用）。宿主据此驱动下一帧。
+/// 本帧动画脏区。`Full`=需整窗重绘；`Rect`=仅该区域；`None`=无动画脏区。
+pub(crate) enum Damage {
+    None,
+    Rect(Rect),
+    Full,
+}
+
+/// 控件请求持续动画（在 paint 内调用）。宿主据此驱动下一帧，并把脏区归到当前绘制节点。
 pub fn request_repaint() {
     REQUEST.with(|c| c.set(true));
+    match PAINT_RECT.with(|c| c.get()) {
+        Some(r) => DAMAGE.with(|d| {
+            let merged = match d.get() {
+                Some(cur) => cur.union(&r),
+                None => r,
+            };
+            d.set(Some(merged));
+        }),
+        None => DAMAGE_FULL.with(|c| c.set(true)),
+    }
+}
+
+/// 绘制遍历：进入某节点绘制前设置其矩形（逻辑坐标），使该节点内的 `request_repaint`
+/// 把脏区归到此处。传 None 清除（节点外）。
+pub(crate) fn set_paint_rect(r: Option<Rect>) {
+    PAINT_RECT.with(|c| {
+        // 契约：Some 必与后续 None 成对（core::paint_node 每节点 set(Some)→widget.paint→set(None)）。
+        // 嵌套未清除会让脏区错归到外层节点；此断言锁死该时序。
+        debug_assert!(r.is_none() || c.get().is_none(), "set_paint_rect 嵌套泄漏：上一节点未清除");
+        c.set(r);
+    });
+}
+
+/// 宿主：取出本帧累积的动画脏区。
+pub(crate) fn take_damage() -> Damage {
+    if DAMAGE_FULL.with(|c| c.get()) {
+        return Damage::Full;
+    }
+    match DAMAGE.with(|c| c.get()) {
+        Some(r) => Damage::Rect(r),
+        None => Damage::None,
+    }
 }
 
 /// 当前帧单调时钟（毫秒）。控件据此计算动画相位（与挂钟无关，仅用差值）。
@@ -40,9 +86,12 @@ pub fn set_enabled(on: bool) {
     ENABLED.with(|c| c.set(on));
 }
 
-/// 宿主：每帧绘制前清除动画请求。
+/// 宿主：每帧绘制前清除动画请求与脏区累积。
 pub(crate) fn reset_request() {
     REQUEST.with(|c| c.set(false));
+    DAMAGE.with(|c| c.set(None));
+    DAMAGE_FULL.with(|c| c.set(false));
+    PAINT_RECT.with(|c| c.set(None));
 }
 
 /// 宿主/平台：本帧是否有控件请求了动画。

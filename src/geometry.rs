@@ -75,6 +75,31 @@ impl Rect {
         Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
 
+    /// 包含两矩形的最小外接矩形（空矩形被忽略）。
+    pub fn union(&self, o: &Rect) -> Rect {
+        if self.is_empty() {
+            return *o;
+        }
+        if o.is_empty() {
+            return *self;
+        }
+        let x = self.x.min(o.x);
+        let y = self.y.min(o.y);
+        let r = self.right().max(o.right());
+        let b = self.bottom().max(o.bottom());
+        Rect::new(x, y, r - x, b - y)
+    }
+
+    /// 平移。
+    pub fn offset(&self, dx: i32, dy: i32) -> Rect {
+        Rect::new(self.x + dx, self.y + dy, self.w, self.h)
+    }
+
+    /// 四边各外扩 m 像素（脏区留抗锯齿余量用）。
+    pub fn inflate(&self, m: i32) -> Rect {
+        Rect::new(self.x - m, self.y - m, self.w + 2 * m, self.h + 2 * m)
+    }
+
     /// 向内收缩四边（用于 padding）。
     pub fn inset(&self, i: Insets) -> Rect {
         Rect::new(
