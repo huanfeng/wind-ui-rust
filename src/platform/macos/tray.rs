@@ -71,7 +71,13 @@ fn deliver_notification(title: &str, body: &str) {
 }
 
 enum ItemKind {
-    Action { label: String, checked: Option<Rc<Cell<bool>>>, cb: TrayFn },
+    Action {
+        label: String,
+        checked: Option<Rc<Cell<bool>>>,
+        /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
+        enabled: Option<Rc<Cell<bool>>>,
+        cb: TrayFn,
+    },
     Separator,
 }
 
@@ -83,7 +89,14 @@ pub struct TrayMenuItem {
 impl TrayMenuItem {
     /// 普通项：点击触发回调。
     pub fn item(label: impl Into<String>, cb: impl FnMut(&mut TrayCtx) + 'static) -> Self {
-        Self { kind: ItemKind::Action { label: label.into(), checked: None, cb: Box::new(cb) } }
+        Self {
+            kind: ItemKind::Action {
+                label: label.into(),
+                checked: None,
+                enabled: None,
+                cb: Box::new(cb),
+            },
+        }
     }
     /// 勾选项：`checked` 绑定状态，菜单弹出时按当前值显示对勾；点击触发回调
     /// （回调内自行翻转 `checked`，框架不自动改）。
@@ -93,8 +106,21 @@ impl TrayMenuItem {
         cb: impl FnMut(&mut TrayCtx) + 'static,
     ) -> Self {
         Self {
-            kind: ItemKind::Action { label: label.into(), checked: Some(checked), cb: Box::new(cb) },
+            kind: ItemKind::Action {
+                label: label.into(),
+                checked: Some(checked),
+                enabled: None,
+                cb: Box::new(cb),
+            },
         }
+    }
+    /// 绑定禁用态：`flag` 为 false 时该项灰显且不可点（菜单弹出时读当前值）。
+    /// 对分隔线无效。永久禁用可传 `Rc::new(Cell::new(false))`。
+    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+        if let ItemKind::Action { enabled, .. } = &mut self.kind {
+            *enabled = Some(flag);
+        }
+        self
     }
     /// 分隔线。
     pub fn separator() -> Self {
@@ -225,12 +251,15 @@ impl TrayTarget {
     #[allow(deprecated)]
     fn pop_menu(&self, mtm: MainThreadMarker) {
         let menu = NSMenu::new(mtm);
+        // 默认 autoenablesItems=YES 会按「target 是否响应 action」自动决定可用态，
+        // 覆盖我们的 setEnabled:；关掉以手动控制禁用态。
+        menu.setAutoenablesItems(false);
         {
             let tray = self.ivars().tray.borrow();
             for (i, it) in tray.items.iter().enumerate() {
                 match &it.kind {
                     ItemKind::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
-                    ItemKind::Action { label, checked, .. } => {
+                    ItemKind::Action { label, checked, enabled, .. } => {
                         let item = unsafe {
                             NSMenuItem::initWithTitle_action_keyEquivalent(
                                 NSMenuItem::alloc(mtm),
@@ -243,6 +272,9 @@ impl TrayTarget {
                         unsafe { item.setTarget(Some(self)) };
                         let on = checked.as_ref().is_some_and(|c| c.get());
                         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+                        // 禁用态：enabled 绑定为 false 则灰显不可点（默认可用）。
+                        let usable = enabled.as_ref().map(|e| e.get()).unwrap_or(true);
+                        item.setEnabled(usable);
                         menu.addItem(&item);
                     }
                 }

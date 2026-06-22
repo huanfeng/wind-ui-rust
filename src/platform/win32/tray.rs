@@ -25,7 +25,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, DestroyWindow,
     GetCursorPos, LoadIconW, SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, ICONINFO,
-    IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
+    IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
 };
 use windows::Win32::Foundation::POINT;
@@ -75,7 +75,13 @@ impl TrayCtx {
 type TrayFn = Box<dyn FnMut(&mut TrayCtx)>;
 
 enum ItemKind {
-    Action { label: String, checked: Option<Rc<Cell<bool>>>, cb: TrayFn },
+    Action {
+        label: String,
+        checked: Option<Rc<Cell<bool>>>,
+        /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
+        enabled: Option<Rc<Cell<bool>>>,
+        cb: TrayFn,
+    },
     Separator,
 }
 
@@ -87,7 +93,14 @@ pub struct TrayMenuItem {
 impl TrayMenuItem {
     /// 普通项：点击触发回调。
     pub fn item(label: impl Into<String>, cb: impl FnMut(&mut TrayCtx) + 'static) -> Self {
-        Self { kind: ItemKind::Action { label: label.into(), checked: None, cb: Box::new(cb) } }
+        Self {
+            kind: ItemKind::Action {
+                label: label.into(),
+                checked: None,
+                enabled: None,
+                cb: Box::new(cb),
+            },
+        }
     }
     /// 勾选项：`checked` 绑定状态，菜单弹出时按当前值显示对勾；点击触发回调
     /// （回调内自行翻转 `checked` 即可，框架不自动改）。
@@ -97,8 +110,21 @@ impl TrayMenuItem {
         cb: impl FnMut(&mut TrayCtx) + 'static,
     ) -> Self {
         Self {
-            kind: ItemKind::Action { label: label.into(), checked: Some(checked), cb: Box::new(cb) },
+            kind: ItemKind::Action {
+                label: label.into(),
+                checked: Some(checked),
+                enabled: None,
+                cb: Box::new(cb),
+            },
         }
+    }
+    /// 绑定禁用态：`flag` 为 false 时该项灰显且不可点（菜单弹出时读当前值）。
+    /// 对分隔线无效。永久禁用可传 `Rc::new(Cell::new(false))`。
+    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+        if let ItemKind::Action { enabled, .. } = &mut self.kind {
+            *enabled = Some(flag);
+        }
+        self
     }
     /// 分隔线。
     pub fn separator() -> Self {
@@ -220,10 +246,14 @@ unsafe fn show_menu(state: &mut TrayState) {
             ItemKind::Separator => {
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             }
-            ItemKind::Action { label, checked, .. } => {
+            ItemKind::Action { label, checked, enabled, .. } => {
                 let mut flags = MF_STRING;
                 if checked.as_ref().is_some_and(|c| c.get()) {
                     flags |= MF_CHECKED;
+                }
+                // 禁用：灰显且不可选（TPM_RETURNCMD 不会返回灰显项 id，故回调天然不触发）。
+                if enabled.as_ref().is_some_and(|e| !e.get()) {
+                    flags |= MF_GRAYED;
                 }
                 let w = wide_nul(label);
                 // 命令 id = 序号+1（分隔线不可选，故返回 id 必对应 Action）。

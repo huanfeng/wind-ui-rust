@@ -2,7 +2,7 @@
 //!
 //! 运行：cargo run --release --example tray
 //! - 左键单击托盘图标：显示并前置窗口；双击同。
-//! - 右键托盘图标：弹原生菜单（显示/隐藏、启用通知[勾选]、弹气泡、退出）。
+//! - 右键托盘图标：弹原生菜单（显示/隐藏、启用通知[勾选]、弹气泡[通知关时灰显]、退出）。
 //! - 关闭窗口即退出（托盘图标随之清理）。
 
 use std::cell::Cell;
@@ -36,7 +36,9 @@ fn main() {
                     ctx.notify("通知已开启", "右键菜单可再次切换");
                 }
             }),
-            TrayMenuItem::item("弹个气泡", |ctx| ctx.notify("你好", "这是来自托盘的气泡通知")),
+            // 禁用态演示：通知关闭时该项灰显不可点（enabled 绑定 notify_on，弹出时读当前值）。
+            TrayMenuItem::item("弹个气泡", |ctx| ctx.notify("你好", "这是来自托盘的气泡通知"))
+                .enabled(notify_on.clone()),
             TrayMenuItem::separator(),
             TrayMenuItem::item("退出", |ctx| ctx.quit()),
         ]);
