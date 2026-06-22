@@ -1484,6 +1484,36 @@ mod tests {
     }
 
     #[test]
+    fn checkbox_on_toggle_intercepts_and_is_controlled() {
+        // 设了 on_toggle 后：点击只触发回调、不自动翻转 state（受控），
+        // 渲染完全跟随外部 state——app 可在翻转前弹确认、确认后才置真。
+        let st = Rc::new(Cell::new(false));
+        let fired = Rc::new(Cell::new(0u32));
+        let f = fired.clone();
+        let root = Element::col()
+            .width(200)
+            .height(60)
+            .padding(5)
+            .child(Element::checkbox("启用", st.clone()).on_toggle(move |_| f.set(f.get() + 1)));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 60), &mut te);
+        let cb = tree.get(id).unwrap().children[0];
+
+        click(&mut tree, cb);
+        assert_eq!(fired.get(), 1, "点击应触发 on_toggle 回调");
+        assert!(!st.get(), "受控：设了 on_toggle 后点击不应自动翻转 state");
+
+        // app 决定置真后，state 完全由 app 控制，控件不覆盖它。
+        st.set(true);
+        click(&mut tree, cb);
+        assert_eq!(fired.get(), 2, "再次点击再次回调");
+        assert!(st.get(), "state 完全由 app 控制");
+    }
+
+    #[test]
     fn radio_group_is_exclusive() {
         let g = Rc::new(Cell::new(0usize));
         let root = Element::row()

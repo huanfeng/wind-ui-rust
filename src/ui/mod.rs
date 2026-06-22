@@ -383,6 +383,14 @@ impl Element {
         self
     }
 
+    /// 复选框受控点击回调：设置后 CheckBox 点击/键盘激活**不再自动翻转**绑定的 state，
+    /// 而是调用本回调，由 app 决定是否翻转（如先弹确认对话框、确认后再 `state.set(true)`）。
+    /// 渲染始终跟随 state 当前值——确认前框不会勾上、零闪烁。底层复用 on_click 管线。
+    pub fn on_toggle(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        self.click = Some(Box::new(f));
+        self
+    }
+
     /// 文件拖放回调：用户把文件拖放到本元素（或其子元素）时触发，收到文件路径列表。
     /// **适用于任意控件/容器**——挂到 `.fill()` 的根容器即"全窗接收拖放"；
     /// 落点命中后沿父链冒泡到首个设了回调的节点。回调签名 `FnMut(&mut EventCtx, &[PathBuf])`。
@@ -536,6 +544,22 @@ impl Element {
     /// 复选框（绑定 `Rc<Cell<bool>>`）。
     pub fn checkbox(label: impl Into<String>, state: Rc<Cell<bool>>) -> Self {
         Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
+    }
+    /// 把复选框标记为危险项：勾选框改用主题 danger 色（如"删除数据"标红）。
+    /// checkbox 专属修饰符，链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略。
+    pub fn danger(self) -> Self {
+        self.config_checkbox("danger()", |c| c.set_danger())
+    }
+    /// 自定义复选框勾选强调色，覆盖主题 accent。checkbox 专属修饰符（误用检测同 `danger()`）。
+    pub fn accent(self, color: crate::geometry::Color) -> Self {
+        self.config_checkbox("accent()", |c| c.set_accent(color))
+    }
+    fn config_checkbox(mut self, who: &str, f: impl FnOnce(&mut CheckBox)) -> Self {
+        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<CheckBox>()) {
+            Some(c) => f(c),
+            None => debug_assert!(false, "{who} 只能用于 Element::checkbox(..)"),
+        }
+        self
     }
     /// 开关（绑定 `Rc<Cell<bool>>`）。
     pub fn switch(state: Rc<Cell<bool>>) -> Self {

@@ -7,9 +7,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::anim::{Easing, Lerp, Transition};
-use crate::core::{EventCtx, Widget};
+use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
@@ -25,15 +25,49 @@ pub struct CheckBox {
     state: Rc<Cell<bool>>,
     /// 勾选填充补间（0=未选、1=选中）：驱动方框底色 white↔accent + 对勾淡入。
     fill: Cell<Transition<f32>>,
+    /// 点击拦截回调（受控模式）。设了它，点击/键盘激活只调回调、不自动翻转 `state`，
+    /// 渲染完全跟随 `state` 当前值——app 可在翻转前弹确认、确认后再 `state.set(..)`。
+    on_toggle: Option<ClickFn>,
+    /// 勾选强调色覆盖。`None`=主题 accent；`Danger`=主题 danger 色；`Fixed`=实例自定义色。
+    accent: AccentOverride,
+}
+
+/// CheckBox 勾选强调色来源。运行时在 paint 解析，故 danger 随主题切换而变。
+#[derive(Clone, Copy)]
+pub enum AccentOverride {
+    /// 跟随主题 toggle.accent。
+    Theme,
+    /// 主题 danger 色（危险项标红，如"删除数据"）。
+    Danger,
+    /// 实例自定义色。
+    Fixed(Color),
 }
 
 impl CheckBox {
     pub fn new(label: String, state: Rc<Cell<bool>>) -> Self {
         let init = if state.get() { 1.0 } else { 0.0 };
-        Self { label, state, fill: Cell::new(Transition::new(init)) }
+        Self {
+            label,
+            state,
+            fill: Cell::new(Transition::new(init)),
+            on_toggle: None,
+            accent: AccentOverride::Theme,
+        }
     }
-    fn toggle(&self, ctx: &mut EventCtx) {
-        self.state.set(!self.state.get());
+    /// 标记为危险项（勾选框用主题 danger 色）。
+    pub fn set_danger(&mut self) {
+        self.accent = AccentOverride::Danger;
+    }
+    /// 自定义勾选强调色。
+    pub fn set_accent(&mut self, color: Color) {
+        self.accent = AccentOverride::Fixed(color);
+    }
+    fn toggle(&mut self, ctx: &mut EventCtx) {
+        if let Some(cb) = self.on_toggle.as_mut() {
+            cb(ctx);
+        } else {
+            self.state.set(!self.state.get());
+        }
         ctx.mark_dirty();
     }
 }
@@ -46,8 +80,13 @@ impl Widget for CheckBox {
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
-        // 禁用：强调色降为灰轨道、文字用 text_disabled。
-        let accent = if enabled { tg.accent(p) } else { p.track };
+        // 禁用：强调色降为灰轨道、文字用 text_disabled。强调色支持实例覆盖（danger/自定义）。
+        let base_accent = match self.accent {
+            AccentOverride::Theme => tg.accent(p),
+            AccentOverride::Danger => p.danger,
+            AccentOverride::Fixed(c) => c,
+        };
+        let accent = if enabled { base_accent } else { p.track };
         let text_color = if enabled { style.fg } else { p.text_disabled };
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
@@ -66,8 +105,12 @@ impl Widget for CheckBox {
             canvas.stroke_round_rect(bx, by, sz, sz, 4.0, 1.5, &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)));
         }
         if amount > 0.0 {
+            // 勾色默认 on_accent；启用态下若填充色偏亮（自定义浅色 accent），改用深色文字色，
+            // 避免浅底白勾近乎不可见（danger/默认主题色亮度均低于阈值，行为不变）。
+            let luma = 0.299 * accent.r as f32 + 0.587 * accent.g as f32 + 0.114 * accent.b as f32;
+            let check = if enabled && luma > 153.0 { p.text } else { p.on_accent };
             // 勾：两段线，按 amount 淡入。
-            let paint = Paint::fill(p.on_accent.scale_alpha(amount));
+            let paint = Paint::fill(check.scale_alpha(amount));
             canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
             canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &paint);
         }
@@ -95,6 +138,12 @@ impl Widget for CheckBox {
     }
     fn focusable(&self) -> bool {
         true
+    }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_toggle = Some(f);
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 

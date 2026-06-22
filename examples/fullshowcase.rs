@@ -166,6 +166,30 @@ fn main() {
         .width_match()
         .spacing(14)
         .child(card(
+            "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(row("危险项", {
+                    let s = Rc::new(Cell::new(true));
+                    Element::checkbox("删除我的所有数据", s).danger()
+                }))
+                .child(row("自定义色", {
+                    let s = Rc::new(Cell::new(true));
+                    Element::checkbox("绿色强调（accent 覆盖）", s).accent(Color::hex(0x00A86B))
+                }))
+                .child(row("浅色自适应", {
+                    let s = Rc::new(Cell::new(true));
+                    Element::checkbox("浅色 accent（对勾自动转深）", s).accent(Color::hex(0xFFD54F))
+                }))
+                .child(row("受控", {
+                    let s = Rc::new(Cell::new(false));
+                    let s2 = s.clone();
+                    // 受控：点击不自动翻转，交回调决定（此处演示直接翻转；真实场景可先弹确认再 set）。
+                    Element::checkbox("点击交给 app 决定", s).on_toggle(move |_| s2.set(!s2.get()))
+                })),
+        ))
+        .child(card(
             "分段控制器（连体多段单选，点击/方向键切换）",
             Element::col()
                 .width_match()

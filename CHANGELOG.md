@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### Added
+- CheckBox 受控点击拦截：`Element::checkbox(..).on_toggle(cb)`——设回调后点击/键盘激活不自动翻转
+  绑定 state，交 app 决定是否翻转（可在翻转前弹确认、确认后再置真，渲染跟随 state，零闪烁）。
+- CheckBox 强调色覆盖：`.danger()`（主题 danger 色标红，如"删除数据"）/ `.accent(color)`（自定义色）；
+  浅色填充时对勾自动转深色，保证可见。
+
 ## [0.1.0] - 2026-06-22
 
 首个公开版本（Windows + macOS）。
