@@ -316,6 +316,9 @@ struct UiHost {
     pending_damage: Option<Rect>,
     /// 强制本帧全窗重绘（输入/结构/尺寸变更触发）。
     needs_full: bool,
+    /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
+    /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
+    swallow_up: bool,
 }
 
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
@@ -352,6 +355,7 @@ impl UiHost {
             back: None,
             pending_damage: None,
             needs_full: true,
+            swallow_up: false,
         }
     }
 
@@ -482,6 +486,9 @@ impl UiHost {
                 false
             }
             PointerKind::Down => {
+                // 本次 Down 必关闭菜单（命中项执行后关 / 点外关）；标记吞掉随后的 Up，
+                // 否则该 Up 会下发到控件树，把菜单下方控件再次激活（下拉点一下又弹一遍）。
+                self.swallow_up = true;
                 let inside = self.menu.as_ref().is_some_and(|m| m.rect.contains(ev.pos));
                 if !inside {
                     self.menu = None; // 点击菜单外：关闭
@@ -675,6 +682,16 @@ impl AppHandler for UiHost {
         // 菜单激活时独占指针：命中项/点外关闭，不下发到控件树。
         if self.menu.is_some() {
             return self.handle_menu_pointer(ev);
+        }
+        // 关闭浮层的那次点击：Down 已关菜单，配对的 Up 在此吞掉（不重新激活下方控件）。
+        // 新的一次按下（非关闭浮层）清掉标记，确保只吞紧随关闭的那一个 Up。
+        match ev.kind {
+            PointerKind::Up if self.swallow_up => {
+                self.swallow_up = false;
+                return false;
+            }
+            PointerKind::Down => self.swallow_up = false,
+            _ => {}
         }
         let old_hover = self.hover;
         let mut hover = self.hover;
