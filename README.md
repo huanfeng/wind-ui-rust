@@ -11,6 +11,10 @@
 
 `平台原生窗口` · `tiny-skia 矢量渲染` · `平台原生文字排版` · 无运行时 · 无 GC。
 
+<p align="center">
+  <img src="docs/images/fullshowcase.png" width="640" alt="windui 综合示例界面">
+</p>
+
 | 平台 | 窗口/呈现 | 文字 |
 |------|-----------|------|
 | **Windows** | Win32 + GDI（DIB 拷屏） | DirectWrite |
@@ -20,13 +24,13 @@
 
 ## 为什么
 
-做小工具时，Electron 动辄上百 MB，Go GUI 因 runtime/GC 也要 15–40MB。windui 没有运行时、没有垃圾回收，一个综合示例在 Windows 上的实测：
+做小工具时，Electron 动辄上百 MB，Go GUI 因 runtime/GC 也要 15–40MB。windui 没有运行时、没有垃圾回收，Windows 上的实测：
 
 | 指标 | 实测值 |
 |------|--------|
-| 二进制体积（release，LTO+strip） | **0.49 MB** |
+| 二进制体积（release，LTO+strip） | 最小窗口应用 **0.44 MB**；综合示例（含 SVG + 全控件）**1.07 MB** |
 | 私有内存（PrivateBytes，520×560 窗口） | **3.65 MB** |
-| 跨平台依赖 crate 数 | **1**（tiny-skia；平台后端各自的系统绑定按 target 引入） |
+| 跨平台直接依赖 | tiny-skia（渲染）· resvg（SVG，默认开，不用则被 LTO 裁掉）· serde + toml（主题）；平台系统绑定按 target 引入 |
 
 > 工作集约 14MB，其中大部分是 gdi32/dwrite 等**跨进程共享**的系统 DLL 映射；进程真正独占的私有内存仅约 3.6MB。
 
@@ -41,6 +45,33 @@
 - **完整控件集** — 布局、文本、按钮、表单输入、容器导航、列表、图片、托盘一应俱全。
 - **触摸/触控板** — 平移滚动 + 惯性滑动 + 撞界回弹。
 - **自动截屏** — `--screenshot` 离屏渲染存 PNG（`--scale 1.5` 验证高 DPI），适合自动化回归。
+
+## 界面预览
+
+下列截图全部由离屏渲染自动截取（`--screenshot`，见 [`scripts/screenshots.ps1`](scripts/screenshots.ps1)）。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/ime_settings.png" alt="输入法设置场景"></td>
+<td width="50%"><img src="docs/images/theming.png" alt="自定义主题"></td>
+</tr>
+<tr>
+<td><sub>真实场景：侧栏导航 + 分段控件 + 开关 + 钻入行</sub></td>
+<td><sub>TOML 主题覆盖：同一套控件一键换肤</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/image.png" alt="图片与 SVG 能力"></td>
+<td><img src="docs/images/list.png" alt="列表控件"></td>
+</tr>
+<tr>
+<td><sub>图片能力：PNG/SVG、Fit 模式、圆角裁剪、单色着色</sub></td>
+<td><sub>列表：单选 / 高亮 / 滚动 / 图标</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/dialog.png" alt="模态对话框"></td>
+<td valign="center"><sub>模态对话框 + 多标签页导航。<br>更多控件见下方「控件」表，或运行 <code>cargo run --release --example fullshowcase</code> 亲自体验。</sub></td>
+</tr>
+</table>
 
 ## 快速开始
 

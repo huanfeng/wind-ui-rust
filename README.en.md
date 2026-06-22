@@ -11,6 +11,10 @@
 
 `Native platform windows` · `tiny-skia vector rendering` · `Native text shaping` · No runtime · No GC.
 
+<p align="center">
+  <img src="docs/images/fullshowcase.png" width="640" alt="windui comprehensive demo">
+</p>
+
 | Platform | Window / Present | Text |
 |----------|------------------|------|
 | **Windows** | Win32 + GDI (DIB blit) | DirectWrite |
@@ -20,13 +24,13 @@ The rendering layer (`tiny-skia`) and all widget/layout/event logic are platform
 
 ## Why
 
-For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40MB due to runtime/GC. windui has no runtime and no garbage collector. Measured on Windows for a comprehensive demo:
+For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40MB due to runtime/GC. windui has no runtime and no garbage collector. Measured on Windows:
 
 | Metric | Measured |
 |--------|----------|
-| Binary size (release, LTO+strip) | **0.49 MB** |
+| Binary size (release, LTO+strip) | minimal window app **0.44 MB**; comprehensive demo (with SVG + full widget set) **1.07 MB** |
 | Private memory (PrivateBytes, 520×560 window) | **3.65 MB** |
-| Cross-platform crate deps | **1** (tiny-skia; per-platform system bindings pulled in by target) |
+| Cross-platform direct deps | tiny-skia (render) · resvg (SVG, on by default, stripped by LTO if unused) · serde + toml (theming); platform system bindings pulled in by target |
 
 > Working set is ~14MB, mostly **shared** system DLL mappings (gdi32/dwrite, etc.); the process's truly private memory is only ~3.6MB.
 
@@ -41,6 +45,33 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
 - **Touch / trackpad** — pan scrolling + fling inertia + edge bounce.
 - **Automatic screenshots** — `--screenshot` renders one frame off-screen to PNG (`--scale 1.5` for high-DPI), ideal for automated regression.
+
+## Preview
+
+All screenshots below are captured automatically via off-screen rendering (`--screenshot`, see [`scripts/screenshots.ps1`](scripts/screenshots.ps1)).
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/ime_settings.png" alt="IME settings scenario"></td>
+<td width="50%"><img src="docs/images/theming.png" alt="Custom theme"></td>
+</tr>
+<tr>
+<td><sub>Real scenario: sidebar nav + segmented control + switches + drill-in rows</sub></td>
+<td><sub>TOML theme override: reskin the same widget set in one shot</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/image.png" alt="Image and SVG support"></td>
+<td><img src="docs/images/list.png" alt="List widget"></td>
+</tr>
+<tr>
+<td><sub>Images: PNG/SVG, Fit modes, rounded clipping, monochrome tinting</sub></td>
+<td><sub>List: single-select / highlight / scroll / icons</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/dialog.png" alt="Modal dialog"></td>
+<td valign="center"><sub>Modal dialog + multi-tab navigation.<br>See the Widgets table below, or run <code>cargo run --release --example fullshowcase</code> to try it.</sub></td>
+</tr>
+</table>
 
 ## Quick start
 
