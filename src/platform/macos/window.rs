@@ -18,8 +18,8 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor,
     NSDraggingDestination, NSDraggingInfo, NSDragOperation, NSEvent, NSGraphicsContext,
-    NSPasteboardType, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -56,6 +56,8 @@ struct ViewState {
     frameless: bool,
     /// 输入法合成进行中（有未提交的 marked text）：此间所有按键交输入法处理。
     composing: bool,
+    /// 动画帧的一次性定时器（仅动画期间存在；空闲为 None → 零唤醒）。每帧续约前先废止旧的。
+    frame_timer: Option<Retained<NSTimer>>,
     /// 复用的 DeviceRGB 色彩空间。
     color_space: CFRetained<CGColorSpace>,
 }
@@ -162,13 +164,10 @@ define_class!(
             let _: () = unsafe { msg_send![super(self), updateTrackingAreas] };
         }
 
-        /// 动画帧驱动：有控件请求持续动画时按帧重绘（对应 win32 的帧配速循环）。
-        #[unsafe(method(tick:))]
-        fn tick(&self, _timer: &NSTimer) {
-            let animating = self.ivars().borrow().handler.wants_animation();
-            if animating {
-                self.setNeedsDisplay(true);
-            }
+        /// 动画帧定时器到点：请求重绘。下一帧 do_draw 若仍在动画则自行续约（见 schedule_next_frame）。
+        #[unsafe(method(frameTick:))]
+        fn frame_tick(&self, _timer: &NSTimer) {
+            self.setNeedsDisplay(true);
         }
     }
 
@@ -295,6 +294,7 @@ impl ContentView {
             scale: 1.0,
             frameless,
             composing: false,
+            frame_timer: None,
             color_space,
         };
         let this = Self::alloc(mtm).set_ivars(RefCell::new(state));
@@ -431,6 +431,46 @@ impl ContentView {
             Some(&image),
         );
         CGContext::restore_g_state(Some(&cg));
+
+        // 本帧画完后，若仍有控件请求持续动画，按显示器刷新率自调度下一帧。
+        self.schedule_next_frame();
+    }
+
+    /// 动画帧驱动：废止上一个待触发的帧定时器，若仍在动画则按刷新率调度下一次一次性重绘。
+    /// 仅在动画期间存在定时器，空闲时无定时器（零唤醒，优于常驻定时器）。对应 win32 消息循环的帧配速。
+    fn schedule_next_frame(&self) {
+        if let Some(t) = self.ivars().borrow_mut().frame_timer.take() {
+            t.invalidate();
+        }
+        if !self.ivars().borrow().handler.wants_animation() {
+            return;
+        }
+        let interval = self.display_frame_interval();
+        // repeats=false：一次性；下一帧 do_draw 再续约，故动画停止即自然停。
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                interval,
+                self,
+                sel!(frameTick:),
+                None,
+                false,
+            )
+        };
+        self.ivars().borrow_mut().frame_timer = Some(timer);
+    }
+
+    /// 帧间隔（秒）= 1 / 显示器最大刷新率。跟随窗口所在屏（高刷屏吃到 120/144Hz），
+    /// clamp 到 [60, 240]；取不到时回退 60。对应 win32 的 `frame_interval_ms`。
+    fn display_frame_interval(&self) -> f64 {
+        let mtm = MainThreadMarker::from(self);
+        let fps = self
+            .window()
+            .and_then(|w| w.screen())
+            .or_else(|| NSScreen::mainScreen(mtm))
+            .map(|s| s.maximumFramesPerSecond())
+            .unwrap_or(60)
+            .clamp(60, 240);
+        1.0 / fps as f64
     }
 
     /// 窗口坐标 → 客户区物理像素（左上原点）。
@@ -689,16 +729,8 @@ pub fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
         window.center();
     }
 
-    // 动画帧驱动：60Hz 定时器，仅在有动画请求时重绘（空闲为空操作）。
-    unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            1.0 / 60.0,
-            &view,
-            sel!(tick:),
-            None,
-            true,
-        );
-    }
+    // 动画帧驱动改为自调度的一次性定时器（见 ContentView::schedule_next_frame）：跟随显示器
+    // 刷新率、空闲零唤醒。首帧 drawRect 由 makeKeyAndOrderFront 触发，其后按需自续约。
 
     // 系统托盘（若配置）：窗口创建后安装；TrayState 须存活至退出（按钮 target 为弱引用）。
     let _tray = cfg.tray.take().and_then(|t| super::tray::install(mtm, window.clone(), t));
