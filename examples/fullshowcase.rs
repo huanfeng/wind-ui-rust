@@ -333,6 +333,16 @@ fn main() {
                     *lm.borrow_mut() = format!("已点击 {} 次", ln.get());
                 }))
                 .child(Element::label_rc(link_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+        ))
+        .child(card(
+            "标签省略（max_lines + truncate）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(row("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
+                .child(row("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
+                .child(row("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
+                .child(row("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg(Color::hex(FG)).weight(1.0))),
         ));
     let components = Element::scroll().fill().child(components_body);
 
