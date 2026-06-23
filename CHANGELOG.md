@@ -13,6 +13,9 @@
 - CheckBox 受控点击拦截：`Element::checkbox(..).on_toggle(cb)`——设回调后点击/键盘激活不自动翻转
   绑定 state，交 app 决定是否翻转（可在翻转前弹确认、确认后再置真，渲染跟随 state，零闪烁）。
 - `Color::lighten` / `darken` / `pick_fg`（对比自适应前景）颜色派生工具。
+- 彩色 emoji 渲染：DirectWrite 字形经 `IDWriteFactory2::TranslateColorGlyphRun`
+  拆成 COLR/CPAL 彩色层逐层着色（emoji、ZWJ 组合序列、肤色修饰均正确合成彩色），
+  字体无彩色数据时自动回退原单色路径。新增 `examples/emoji.rs` 演示。
 
 ### Fixed
 - 文本框无法输入 emoji：WM_CHAR 对补充平面字符（码点 > U+FFFF，如 emoji）

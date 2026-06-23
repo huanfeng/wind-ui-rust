@@ -14,16 +14,16 @@ use std::ffi::c_void;
 
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
-use windows::core::{implement, BOOL, IUnknown, Ref, Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, FALSE};
+use windows::core::{implement, BOOL, Interface, IUnknown, Ref, Result, PCWSTR};
+use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, FALSE};
 use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteGdiInterop,
-    IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat,
-    IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-    DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
+    DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteFactory2,
+    IDWriteGdiInterop, IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
+    IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
+    DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX,
+    DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
 };
 
 use super::TextEngine;
@@ -69,7 +69,10 @@ impl DWriteEngine {
             // 配合"真背景合成"（draw 中把真实背景拷入位图后让 DirectWrite 直接
             // 在其上抗锯齿混合），gamma 由 DirectWrite 自己正确处理，文字不再发重。
             let params = factory.CreateRenderingParams().expect("CreateRenderingParams 失败");
-            let renderer: IDWriteTextRenderer = GlyphRenderer { params: params.clone() }.into();
+            // IDWriteFactory2（Win8.1+）提供彩色字形拆层；取不到则 renderer 退化为单色绘制。
+            let factory2: Option<IDWriteFactory2> = factory.cast().ok();
+            let renderer: IDWriteTextRenderer =
+                GlyphRenderer { params: params.clone(), factory2 }.into();
             Self {
                 factory,
                 gdi_interop,
@@ -340,10 +343,20 @@ struct BitmapCtx {
     color: COLORREF,
 }
 
-/// 自实现的文字渲染回调：把字形以文字色转发到位图渲染目标。
+/// DWRITE_COLOR_F（直通 0..1 各通道）→ GDI COLORREF（0x00BBGGRR）。
+/// BitmapRenderTarget.DrawGlyphRun 只接受不含 alpha 的 COLORREF，半透明层 alpha 在此被丢弃
+/// （彩色 emoji 层通常 a=1.0，可接受）。
+fn color_f_to_colorref(c: DWRITE_COLOR_F) -> COLORREF {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    COLORREF((q(c.b) << 16) | (q(c.g) << 8) | q(c.r))
+}
+
+/// 自实现的文字渲染回调：优先把字形拆成彩色层逐层着色（emoji），否则以文字色单色绘制。
 #[implement(IDWriteTextRenderer)]
 struct GlyphRenderer {
     params: IDWriteRenderingParams,
+    /// 彩色字形拆层接口（IDWriteFactory2，Win8.1+）；None 时仅单色绘制。
+    factory2: Option<IDWriteFactory2>,
 }
 
 #[allow(non_snake_case)]
@@ -355,15 +368,68 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         baselineoriginy: f32,
         measuringmode: DWRITE_MEASURING_MODE,
         glyphrun: *const DWRITE_GLYPH_RUN,
-        _glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
+        glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
         _clientdrawingeffect: Ref<'_, IUnknown>,
     ) -> Result<()> {
         if clientdrawingcontext.is_null() {
             return Ok(());
         }
         let ctx = unsafe { &*(clientdrawingcontext as *const BitmapCtx) };
+
+        // 优先：把字形拆成彩色层（COLR/CPAL，如 emoji）逐层着色叠加。
+        // 字体无彩色数据时 TranslateColorGlyphRun 返回 DWRITE_E_NOCOLOR，落到下方单色路径。
+        if let Some(f2) = &self.factory2 {
+            let desc = if glyphrundescription.is_null() { None } else { Some(glyphrundescription) };
+            let enumr = unsafe {
+                f2.TranslateColorGlyphRun(
+                    baselineoriginx,
+                    baselineoriginy,
+                    glyphrun,
+                    desc,
+                    measuringmode,
+                    None, // 无世界变换（位图已按物理像素 1:1）
+                    0,    // 默认调色板
+                )
+            };
+            match enumr {
+                Ok(en) => {
+                    unsafe {
+                        // 逐层绘制；枚举出错则中止彩色路径（已绘层保留）。
+                        while let Ok(more) = en.MoveNext() {
+                            if !more.as_bool() {
+                                break;
+                            }
+                            let Ok(run_ptr) = en.GetCurrentRun() else { break };
+                            if run_ptr.is_null() {
+                                break;
+                            }
+                            let run = &*run_ptr;
+                            // paletteIndex == 0xFFFF 为规范哨兵：该层用文字前景色，runColor 未定义。
+                            let color = if run.paletteIndex == 0xFFFF {
+                                ctx.color
+                            } else {
+                                color_f_to_colorref(run.runColor)
+                            };
+                            let _ = ctx.target.DrawGlyphRun(
+                                run.baselineOriginX,
+                                run.baselineOriginY,
+                                measuringmode,
+                                &run.glyphRun,
+                                &self.params,
+                                color,
+                                None,
+                            );
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) if e.code() == DWRITE_E_NOCOLOR => {} // 无彩色数据：走单色
+                Err(_) => {}                                  // 其它失败：保守走单色
+            }
+        }
+
+        // 单色：用文字颜色直接在已拷入真实背景的位图上抗锯齿混合。
         unsafe {
-            // 用文字颜色直接在已拷入真实背景的位图上抗锯齿混合。
             let _ = ctx.target.DrawGlyphRun(
                 baselineoriginx,
                 baselineoriginy,
