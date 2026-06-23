@@ -55,7 +55,8 @@ fn card(title: &str, body: Element) -> Element {
         .corner(10.0)
         .padding(16)
         .spacing(8)
-        .child(Element::label(title).font_size(16.0).fg(Color::hex(FG)).height(24).width_match())
+        // 标题不固定高度，让 Label 在 width_match 宽度内自适应换行（长标题换行后分隔线随之下移）。
+        .child(Element::label(title).font_size(16.0).fg(Color::hex(FG)).width_match())
         .child(Element::divider())
         .child(body)
 }
@@ -165,6 +166,17 @@ fn main() {
     let components_body = Element::col()
         .width_match()
         .spacing(14)
+        .child(card(
+            "按钮风格（intent：primary / neutral / danger + accent 扩展）",
+            Element::row()
+                .spacing(10)
+                .cross(Align::Center)
+                .child(Element::button("主操作"))
+                .child(Element::button("次要").neutral())
+                .child(Element::button("删除").danger())
+                .child(Element::button("品牌").accent(Color::hex(0x2E9E5B)))
+                .child(Element::button("禁用").danger().disabled(true)),
+        ))
         .child(card(
             "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",
             Element::col()
