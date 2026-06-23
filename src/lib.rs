@@ -22,6 +22,7 @@ pub mod ui;
 
 pub mod prelude {
     pub use crate::app::App;
+    pub use crate::sync::Sender;
     pub use crate::event::CursorShape;
     pub use crate::platform::{Tray, TrayCtx, TrayMenuItem};
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};

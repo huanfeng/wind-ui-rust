@@ -5,6 +5,10 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::sync::{new_channel, Sender, WakerShared};
 
 use tiny_skia::Pixmap;
 
@@ -71,6 +75,9 @@ pub struct App {
     render: Option<RenderClosure>,
     content: Option<Element>,
     theme: Option<Theme>,
+    pumps: Vec<Box<dyn FnMut()>>,
+    intervals: Vec<(Duration, Box<dyn FnMut()>)>,
+    waker_shared: Option<Arc<WakerShared>>,
 }
 
 impl App {
@@ -95,6 +102,9 @@ impl App {
             render: None,
             content: None,
             theme: None,
+            pumps: Vec::new(),
+            intervals: Vec::new(),
+            waker_shared: None,
         }
     }
 
@@ -216,6 +226,28 @@ impl App {
             Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
         };
         platform::run(self.cfg, handler);
+    }
+
+    fn shared_waker(&mut self) -> crate::sync::Waker {
+        self.waker_shared.get_or_insert_with(WakerShared::new).waker()
+    }
+
+    /// 注册 typed 消息通道。`on_message` 在 UI 线程调用（可写 Rc 状态）。
+    /// 返回的 `Sender` 可 Clone 到任意后台线程；`send` 唤醒 UI 一帧。
+    pub fn channel<Msg: Send + 'static>(
+        &mut self,
+        on_message: impl FnMut(Msg) + 'static,
+    ) -> Sender<Msg> {
+        let waker = self.shared_waker();
+        let (tx, pump) = new_channel(waker, on_message);
+        self.pumps.push(pump);
+        tx
+    }
+
+    /// 注册 UI 线程定时回调（平台定时器，间隔内零 CPU）。可多次调用。
+    pub fn on_interval(mut self, every: Duration, cb: impl FnMut() + 'static) -> Self {
+        self.intervals.push((every, Box::new(cb)));
+        self
     }
 }
 
@@ -1021,5 +1053,26 @@ fn blit(src: &Pixmap, dst: &mut Pixmap, x: i32, y: i32) {
         let s0 = row * sw * 4;
         let d0 = ((y + row) * dw + x) * 4;
         dd[d0..d0 + sw * 4].copy_from_slice(&sd[s0..s0 + sw * 4]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_returns_sendable_sender() {
+        let mut app = App::new("t", 100, 100);
+        let tx = app.channel::<u32>(|_| {});
+        let h = std::thread::spawn(move || tx.send(5));
+        assert!(h.join().unwrap().is_ok());
+        assert_eq!(app.pumps.len(), 1);
+    }
+
+    #[test]
+    fn on_interval_registers() {
+        let app = App::new("t", 100, 100)
+            .on_interval(std::time::Duration::from_millis(100), || {});
+        assert_eq!(app.intervals.len(), 1);
     }
 }
