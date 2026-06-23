@@ -46,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, IsIconic, LoadCursorW,
     MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassExW,
+    RegisterClassExW, SetTimer,
     SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
     SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
@@ -58,7 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCMOUSEMOVE,
     WM_DROPFILES, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
     WS_THICKFRAME, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT,
     HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SWP_FRAMECHANGED, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
 };
@@ -412,6 +412,14 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
         w.bind(Box::new(Win32Wake { hwnd: hwnd.0 as isize }));
     }
 
+    // 注册周期定时器（on_interval）：timer id 从 1 起，靠 WM_TIMER 派发。
+    if let Some(s) = state_from(hwnd) {
+        for (i, d) in s.handler.intervals().iter().enumerate() {
+            let ms = (d.as_millis() as u32).max(1);
+            let _ = SetTimer(Some(hwnd), i + 1, ms, None);
+        }
+    }
+
     // 无边框窗口：标记状态，扩展 DWM 边框保留窗口投影，并触发非客户区重算
     // （SWP_FRAMECHANGED → WM_NCCALCSIZE 让客户区铺满整窗）。
     if cfg.frameless {
@@ -638,6 +646,17 @@ unsafe extern "system" fn wnd_proc(
         // 文件拖放（已 DragAcceptFiles）：取路径 + 落点，路由到落点下的控件。
         WM_DROPFILES => {
             handle_drop_files(hwnd, wparam);
+            LRESULT(0)
+        }
+        // 周期定时器回调：timer id = interval 索引 + 1。
+        WM_TIMER => {
+            let id = wparam.0;
+            let need = state_from(hwnd)
+                .map(|s| s.handler.on_interval_fired(id.saturating_sub(1)))
+                .unwrap_or(false);
+            if need {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
             LRESULT(0)
         }
         // 跨线程唤醒：触发一帧（render 前会排空消息通道）。
