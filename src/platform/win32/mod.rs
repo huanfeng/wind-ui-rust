@@ -45,14 +45,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowRect, IsIconic, LoadCursorW,
-    MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostQuitMessage, RegisterClassExW,
+    MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassExW,
     SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
     SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
     SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
     TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCLIENT, MWMO_INPUTAVAILABLE,
     PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_IME_COMPOSITION,
+    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED,
+    WM_IME_COMPOSITION,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCMOUSEMOVE,
     WM_DROPFILES, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
@@ -88,7 +90,7 @@ unsafe fn os_animations_enabled() -> bool {
 }
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
-pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, _waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
+pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() { true } else { unsafe { os_animations_enabled() } };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
@@ -97,7 +99,7 @@ pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, _waker: O
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    unsafe { run_windowed(cfg, handler) };
+    unsafe { run_windowed(cfg, handler, waker) };
 }
 
 /// 窗口端运行时状态，指针挂在 HWND 的 GWLP_USERDATA 上。
@@ -272,7 +274,28 @@ use super::to_skia_color;
 
 const CLASS_NAME: PCWSTR = w!("WindUiWindowClass");
 
-unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
+/// 跨线程唤醒消息（WM_APP+2；WM_APP+1 已用于托盘）。
+const WM_APP_WAKE: u32 = WM_APP + 2;
+
+/// 跨线程唤醒句柄：仅持 HWND 数值，PostMessage 线程安全。
+struct Win32Wake {
+    hwnd: isize,
+}
+unsafe impl Send for Win32Wake {}
+impl crate::sync::RawWakeSignal for Win32Wake {
+    fn signal(&self) {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(self.hwnd as *mut _)),
+                WM_APP_WAKE,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
+
+unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
@@ -382,6 +405,11 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
                 s.tray = Some(ts);
             }
         }
+    }
+
+    // 跨线程唤醒：绑定平台句柄（hwnd 数值 + PostMessage），此前积压的 wake 会立即补发。
+    if let Some(w) = &waker {
+        w.bind(Box::new(Win32Wake { hwnd: hwnd.0 as isize }));
     }
 
     // 无边框窗口：标记状态，扩展 DWM 边框保留窗口投影，并触发非客户区重算
@@ -610,6 +638,11 @@ unsafe extern "system" fn wnd_proc(
         // 文件拖放（已 DragAcceptFiles）：取路径 + 落点，路由到落点下的控件。
         WM_DROPFILES => {
             handle_drop_files(hwnd, wparam);
+            LRESULT(0)
+        }
+        // 跨线程唤醒：触发一帧（render 前会排空消息通道）。
+        WM_APP_WAKE => {
+            let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
         // 托盘回调消息：左键/双击触发回调，右键弹原生菜单。
