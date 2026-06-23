@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-23
+
 ### Added
 - 跨线程 UI 更新：`App::channel::<Msg>(on_message) -> Sender<Msg>`（后台 `send` 事件驱动唤醒 UI、`on_message` 在 UI 线程写状态）+ `App::on_interval(dur, cb)` 定时回调。有更新才重绘、空闲零 CPU。
 - 语义意图色（Intent）体系：Button / CheckBox 统一 `.intent()` / `.danger()` / `.neutral()` / `.accent(color)`；
@@ -41,5 +43,6 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/huanfeng/wind-ui-rust/releases/tag/v0.1.0

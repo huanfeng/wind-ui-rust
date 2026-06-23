@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "windui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "objc2",
  "objc2-app-kit",
