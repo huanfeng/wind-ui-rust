@@ -6,7 +6,7 @@ use std::rc::Rc;
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
@@ -20,6 +20,160 @@ const SCROLLBAR_HIT_W: i32 = 10;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
 /// 标签内图标与文字间距。
 const TAB_ICON_GAP: i32 = 6;
+
+/// 可嵌入任意控件的垂直滚动条辅助器（非独立 Widget）。
+/// 封装绘制样式与拖动状态，由宿主控件在 `paint` / `on_event` 中调用。
+pub struct VScrollbar {
+    pub dragging: bool,
+    start_y: i32,
+    start_scroll: i32,
+    /// 拖动开始时快照（on_move 无 canvas，用快照计算 thumb 行程）。
+    drag_bar_h: f32,
+    drag_content_h: i32,
+    drag_view_h: i32,
+}
+
+impl Default for VScrollbar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VScrollbar {
+    /// 轨道视觉宽度（px）。
+    pub const TRACK_W: f32 = 5.0;
+    /// 上下及右侧边距（px）。
+    pub const MARGIN: f32 = 3.0;
+    /// 滑块最小高度（px）。
+    pub const MIN_THUMB: f32 = 16.0;
+    /// 命中区宽度（比视觉宽，容易点到）。
+    pub const HIT_W: i32 = 12;
+
+    pub fn new() -> Self {
+        Self {
+            dragging: false,
+            start_y: 0,
+            start_scroll: 0,
+            drag_bar_h: 0.0,
+            drag_content_h: 0,
+            drag_view_h: 0,
+        }
+    }
+
+    fn bar_h(bounds: Rect) -> f32 {
+        (bounds.h as f32 - 2.0 * Self::MARGIN).max(0.0)
+    }
+
+    fn thumb_h(bar_h: f32, content_h: i32, view_h: i32) -> f32 {
+        let ratio = (view_h as f32 / content_h as f32).min(1.0);
+        (bar_h * ratio).max(Self::MIN_THUMB)
+    }
+
+    fn max_scroll(content_h: i32, view_h: i32) -> i32 {
+        (content_h - view_h).max(0)
+    }
+
+    /// 内容是否超出可见区域（需要显示滚动条）。
+    pub fn has_overflow(content_h: i32, view_h: i32) -> bool {
+        content_h > view_h
+    }
+
+    /// 命中判断：`pos` 是否在滚动条可点击区域内。`bounds` 为宿主控件绝对矩形。
+    pub fn hit_test(&self, pos: Point, bounds: Rect, content_h: i32, view_h: i32) -> bool {
+        Self::has_overflow(content_h, view_h)
+            && pos.x >= bounds.right() - Self::HIT_W
+            && pos.y >= bounds.y
+            && pos.y < bounds.y + bounds.h
+    }
+
+    /// 绘制轨道 + 滑块。`view_h` 为去掉 padding 后的可见高度。
+    pub fn paint(
+        &self,
+        canvas: &mut dyn Canvas,
+        bounds: Rect,
+        scroll_y: i32,
+        content_h: i32,
+        view_h: i32,
+    ) {
+        if !Self::has_overflow(content_h, view_h) {
+            return;
+        }
+        let bx = bounds.x as f32 + bounds.w as f32 - Self::TRACK_W - Self::MARGIN;
+        let by = bounds.y as f32;
+        let bh = Self::bar_h(bounds);
+        let th = Self::thumb_h(bh, content_h, view_h);
+        let max = Self::max_scroll(content_h, view_h).max(1) as f32;
+        let travel = (bh - th).max(1.0);
+        let ty = by + Self::MARGIN + travel * (scroll_y as f32 / max);
+        let r = Self::TRACK_W / 2.0;
+        // 轨道（几乎透明）
+        canvas.fill_round_rect(
+            bx,
+            by + Self::MARGIN,
+            Self::TRACK_W,
+            bh,
+            r,
+            &Paint::fill(Color::rgba(0, 0, 0, 0x14)),
+        );
+        // 滑块（拖动时加深）
+        let alpha = if self.dragging { 0x78u8 } else { 0x52u8 };
+        canvas.fill_round_rect(
+            bx,
+            ty,
+            Self::TRACK_W,
+            th,
+            r,
+            &Paint::fill(Color::rgba(0, 0, 0, alpha)),
+        );
+    }
+
+    /// 按下处理：命中则开始拖动，返回 `true`。
+    pub fn on_down(
+        &mut self,
+        pos: Point,
+        bounds: Rect,
+        scroll_y: i32,
+        content_h: i32,
+        view_h: i32,
+        ctx: &mut EventCtx,
+    ) -> bool {
+        if !self.hit_test(pos, bounds, content_h, view_h) {
+            return false;
+        }
+        self.dragging = true;
+        self.start_y = pos.y;
+        self.start_scroll = scroll_y;
+        self.drag_bar_h = Self::bar_h(bounds);
+        self.drag_content_h = content_h;
+        self.drag_view_h = view_h;
+        ctx.capture();
+        true
+    }
+
+    /// 移动处理（拖动中）：返回新的 `scroll_y`。
+    pub fn on_move(&self, pos: Point) -> Option<i32> {
+        if !self.dragging {
+            return None;
+        }
+        let th = Self::thumb_h(self.drag_bar_h, self.drag_content_h, self.drag_view_h);
+        let travel = (self.drag_bar_h - th).max(1.0);
+        let max = Self::max_scroll(self.drag_content_h, self.drag_view_h);
+        let dy = pos.y - self.start_y;
+        let delta = (dy as f32 * max as f32 / travel) as i32;
+        Some((self.start_scroll + delta).clamp(0, max))
+    }
+
+    /// 抬起处理：返回 `true` 表示释放了拖动。
+    pub fn on_up(&mut self, ctx: &mut EventCtx) -> bool {
+        if self.dragging {
+            self.dragging = false;
+            ctx.release_capture();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// 滚动容器内部 widget：处理滚轮 + 拖动滚动条。
 #[derive(Default)]

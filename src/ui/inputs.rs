@@ -10,6 +10,7 @@ use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Rect, Size};
+use crate::ui::containers::VScrollbar;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
@@ -441,6 +442,12 @@ pub struct TextInput {
     /// 最近一帧绘制的光标局部位置 (x, y_top, height)（节点局部逻辑坐标），供输入法定位。
     caret_local: Cell<Option<(i32, i32, i32)>>,
     dragging: bool,
+    scrollbar: VScrollbar,
+    /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
+    /// 滚轮滚动不设置，避免 paint 每帧重置 scroll_y。
+    follow_cursor: Cell<bool>,
+    /// 鼠标当前悬停在滚动条命中区内（影响光标形状）。
+    hover_in_scrollbar: Cell<bool>,
 }
 
 impl TextInput {
@@ -458,6 +465,9 @@ impl TextInput {
             layout: RefCell::new(TextLayout::default()),
             caret_local: Cell::new(None),
             dragging: false,
+            scrollbar: VScrollbar::new(),
+            follow_cursor: Cell::new(true),
+            hover_in_scrollbar: Cell::new(false),
         }
     }
 
@@ -962,17 +972,21 @@ impl Widget for TextInput {
         let line_h = lay.line_h.max(1);
         let (cl, cx_in) = self.caret_line_x(&lay, cursor);
 
-        // 垂直滚动（多行）：保证光标行可见并钳制到内容范围。
+        // 垂直滚动（多行）：仅在 follow_cursor 为 true 时追踪光标（键盘/点击触发）。
+        // 滚轮滚动不设 follow_cursor，避免 paint 每帧把视口重置到光标位置。
         let mut sy = self.scroll_y.get();
         if multiline {
-            let caret_top = cl as i32 * line_h;
-            if caret_top - sy < 0 {
-                sy = caret_top;
-            }
-            if caret_top + line_h - sy > inner.h {
-                sy = caret_top + line_h - inner.h;
-            }
             let content_h = lay.lines.len() as i32 * line_h;
+            if self.follow_cursor.get() {
+                let caret_top = cl as i32 * line_h;
+                if caret_top - sy < 0 {
+                    sy = caret_top;
+                }
+                if caret_top + line_h - sy > inner.h {
+                    sy = caret_top + line_h - inner.h;
+                }
+                self.follow_cursor.set(false);
+            }
             sy = sy.clamp(0, (content_h - inner.h).max(0));
         } else {
             sy = 0;
@@ -1058,14 +1072,33 @@ impl Widget for TextInput {
             );
         }
         canvas.restore();
+
+        // 垂直滚动条（复用 VScrollbar）：画在 restore() 之后，不受文本 clip_rect 限制。
+        if multiline {
+            let content_h = lay.lines.len() as i32 * line_h;
+            self.scrollbar.paint(canvas, bounds, sy, content_h, inner.h);
+        }
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Down => {
                     ctx.request_focus();
-                    // 右键不启动拖选：仅聚焦，并在点击落在选区外时移动光标
-                    // （为 P5 右键菜单预留——菜单针对当前选区/光标操作）。
+                    // 多行：滚动条命中优先于文字交互。右键跳过（不拖滚动条）。
+                    if self.is_multiline() && p.button != MouseButton::Right {
+                        let b = ctx.bounds();
+                        let view_h = b.h - 2 * TEXT_PAD;
+                        let (content_h, _) = {
+                            let lay = self.layout.borrow();
+                            let lh = lay.line_h.max(1);
+                            (lay.lines.len() as i32 * lh, lh)
+                        };
+                        if self.scrollbar.on_down(p.pos, b, self.scroll_y.get(), content_h, view_h, ctx) {
+                            ctx.mark_dirty();
+                            return true;
+                        }
+                    }
+                    // 右键不启动拖选：仅聚焦，并在点击落在选区外时移动光标。
                     if p.button == MouseButton::Right {
                         let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                         let in_sel = self.selection().is_some_and(|(s, e)| idx >= s && idx < e);
@@ -1073,17 +1106,17 @@ impl Widget for TextInput {
                             self.cursor = idx;
                             self.anchor = None;
                         }
-                        // 弹出上下文菜单（剪切/复制/粘贴/全选）。
                         let items = self.context_menu_items();
                         ctx.show_context_menu(p.pos, items);
                         return true;
                     }
-                    // 双击选词 / 三击选段（单行无 \n 即全选，多行为当前逻辑行）。不进入拖选。
+                    // 双击选词 / 三击选段。不进入拖选。
                     match p.click_count {
                         2 => {
                             let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                             self.select_word(idx);
                             self.dragging = false;
+                            self.follow_cursor.set(true);
                             ctx.mark_dirty();
                             return true;
                         }
@@ -1091,6 +1124,7 @@ impl Widget for TextInput {
                             let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                             self.select_para(idx);
                             self.dragging = false;
+                            self.follow_cursor.set(true);
                             ctx.mark_dirty();
                             return true;
                         }
@@ -1101,27 +1135,115 @@ impl Widget for TextInput {
                     self.anchor = Some(idx);
                     self.dragging = true;
                     self.goal_x.set(None);
+                    self.follow_cursor.set(true);
                     ctx.capture();
                     ctx.mark_dirty();
                     true
                 }
-                PointerKind::Move if self.dragging => {
-                    self.cursor = self.pos_to_index(ctx, p.pos.x, p.pos.y);
-                    ctx.mark_dirty();
-                    true
+                PointerKind::Move => {
+                    // 滚动条拖动优先。
+                    if self.scrollbar.dragging {
+                        if let Some(new_sy) = self.scrollbar.on_move(p.pos) {
+                            self.scroll_y.set(new_sy);
+                            ctx.mark_dirty();
+                        }
+                        return true;
+                    }
+                    // 文字拖选（含跨视口自动滚动）。
+                    if self.dragging {
+                        if self.is_multiline() {
+                            let b = ctx.bounds();
+                            let inner_h = b.h - 2 * TEXT_PAD;
+                            let (content_h, line_h) = {
+                                let lay = self.layout.borrow();
+                                let lh = lay.line_h.max(1);
+                                (lay.lines.len() as i32 * lh, lh)
+                            };
+                            let max_scroll = (content_h - inner_h).max(0);
+                            if max_scroll > 0 {
+                                let sy = self.scroll_y.get();
+                                let top_edge = b.y + TEXT_PAD;
+                                let bot_edge = b.y + b.h - TEXT_PAD;
+                                if p.pos.y < top_edge && sy > 0 {
+                                    // 鼠标在上边界外：按超出距离比例向上滚（最少 1px，最多一行）。
+                                    let step = ((top_edge - p.pos.y) / 5).clamp(1, line_h);
+                                    self.scroll_y.set((sy - step).max(0));
+                                } else if p.pos.y > bot_edge && sy < max_scroll {
+                                    // 鼠标在下边界外：向下滚。
+                                    let step = ((p.pos.y - bot_edge) / 5).clamp(1, line_h);
+                                    self.scroll_y.set((sy + step).min(max_scroll));
+                                }
+                            }
+                        }
+                        // scroll_y 已更新，pos_to_index 内部读最新值，天然指向滚入的行。
+                        self.cursor = self.pos_to_index(ctx, p.pos.x, p.pos.y);
+                        ctx.mark_dirty();
+                        return true;
+                    }
+                    // 普通悬停：更新滚动条命中标志（驱动光标形状切换）。
+                    if self.is_multiline() {
+                        let b = ctx.bounds();
+                        let in_sb = p.pos.x >= b.right() - VScrollbar::HIT_W;
+                        if in_sb != self.hover_in_scrollbar.get() {
+                            self.hover_in_scrollbar.set(in_sb);
+                            // 不需要 mark_dirty：光标形状由平台 WM_SETCURSOR 独立查询，
+                            // 无需触发整帧重绘。
+                        }
+                    }
+                    false
+                }
+                PointerKind::Leave => {
+                    if self.hover_in_scrollbar.get() {
+                        self.hover_in_scrollbar.set(false);
+                    }
+                    false
                 }
                 PointerKind::Up => {
+                    // 释放滚动条拖动。
+                    if self.scrollbar.on_up(ctx) {
+                        ctx.mark_dirty();
+                        return true;
+                    }
+                    // 释放文字拖选。
                     self.dragging = false;
                     ctx.release_capture();
                     if self.anchor == Some(self.cursor) {
-                        self.anchor = None; // 单击未拖动：无选区
+                        self.anchor = None;
                     }
+                    ctx.mark_dirty();
+                    true
+                }
+                PointerKind::Wheel(delta) if self.is_multiline() => {
+                    // 不设 follow_cursor，避免 paint 把视口重置到光标。
+                    let b = ctx.bounds();
+                    let inner_h = b.h - 2 * TEXT_PAD;
+                    let (content_h, line_h) = {
+                        let lay = self.layout.borrow();
+                        let lh = lay.line_h.max(1);
+                        (lay.lines.len() as i32 * lh, lh)
+                    };
+                    if content_h <= inner_h {
+                        return false; // 无溢出 → 冒泡给外层滚动容器
+                    }
+                    let max_scroll = (content_h - inner_h).max(0);
+                    let sy_old = self.scroll_y.get();
+                    // 每刻度 120，滚动约 3 行（与外层 ScrollWidget 步长对齐）。
+                    let step = (3 * line_h).max(48);
+                    let dy = -delta * step / 120;
+                    // 已到边界 → 冒泡让外层继续滚动。
+                    let at_boundary = (dy < 0 && sy_old == 0) || (dy > 0 && sy_old >= max_scroll);
+                    if at_boundary {
+                        return false;
+                    }
+                    self.scroll_y.set((sy_old + dy).clamp(0, max_scroll));
                     ctx.mark_dirty();
                     true
                 }
                 _ => false,
             },
             Event::Key(k) if k.pressed => {
+                // 任何按键都应将视口滚回光标位置（用户开始编辑/导航）。
+                self.follow_cursor.set(true);
                 let len = self.char_count();
                 match k.key {
                     Key::Char(c) if !k.ctrl => {
@@ -1240,7 +1362,12 @@ impl Widget for TextInput {
         true // 右键弹出上下文菜单（剪切/复制/粘贴/全选）
     }
     fn cursor(&self) -> CursorShape {
-        CursorShape::Text // 文本输入区显示 I 形光标
+        // 悬停在滚动条区域或正在拖动滚动条时，显示普通箭头。
+        if self.scrollbar.dragging || self.hover_in_scrollbar.get() {
+            CursorShape::Arrow
+        } else {
+            CursorShape::Text
+        }
     }
 }
 
