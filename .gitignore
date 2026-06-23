@@ -6,3 +6,6 @@ Cargo.lock.bak
 *.tmp.png
 # 临时验证输出（截图、草稿等）
 /temp
+
+# 工作流草稿
+.superpowers/
