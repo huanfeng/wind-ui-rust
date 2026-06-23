@@ -152,6 +152,7 @@ Element::text_input(text, "占位符")               // text: Rc<RefCell<String>
     .multiline()       // 多行
     .wrap(true)        // 多行时是否自动折行（默认 true）
 ```
+> 文本框支持输入 emoji 等补充平面字符（自动拼接 UTF-16 代理对），并以整个 emoji 为单位编辑（光标移动、删除按字符走）；emoji 彩色显示。
 > ⚠️ `.password()` / `.multiline()` / `.wrap()` 是 **text_input 专属**。本库用单一 `Element` 类型承载所有控件（统一链式是核心一致性），故这几个修饰符链到别的控件**不会编译报错**；但 **debug 构建下会 `panic` 报错提示**误用，release 下静默忽略（无类型分裂代价）。
 
 ### 图片

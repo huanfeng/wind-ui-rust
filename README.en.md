@@ -39,7 +39,7 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **Imperative Builder API** — pure-Rust method chaining, type-safe, zero parsing overhead.
 - **One codebase, two platforms** — widget tree, layout, events, animation, theming are all platform-agnostic; switching platforms requires zero changes.
 - **Retained mode + dirty triggering** — no redraw when idle, blocks on the event loop, zero CPU usage.
-- **High-quality text** — native shaping (DirectWrite / Core Text) + grayscale anti-aliasing, crisp CJK; auto line-wrapping labels.
+- **High-quality text** — native shaping (DirectWrite / Core Text) + grayscale anti-aliasing, crisp CJK; auto line-wrapping labels; **color emoji** (incl. ZWJ sequences and skin-tone modifiers), text fields accept emoji input.
 - **DPI / Retina aware** — widget tree in logical coordinates, paint layer uniformly scales to physical pixels, text rendered at physical font size (measure and draw share one path), staying sharp at high DPI (1.5x/2x/Retina).
 - **Clean focus ring** — the focus ring shows only during keyboard Tab navigation, never on mouse-only interaction.
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
@@ -124,7 +124,7 @@ cargo test                                                  # run unit tests
 cargo clippy --all-targets                                  # lint
 ```
 
-Examples: `fullshowcase` (comprehensive), `animation`, `theming`, `image`, `list`, `dropdown`, `progress`, `multiline`, `frameless`, `light_titlebar`, `tray`, `file_drop`, `ime_settings`, plus `phase0`–`phase5` staged demos.
+Examples: `fullshowcase` (comprehensive), `animation`, `theming`, `image`, `list`, `dropdown`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `file_drop`, `ime_settings`, plus `phase0`–`phase5` staged demos.
 
 ## Architecture
 

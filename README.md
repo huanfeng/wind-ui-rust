@@ -39,7 +39,7 @@
 - **命令式 Builder API** — 纯 Rust 链式构建，类型安全、零解析开销。
 - **一份代码，两个平台** — 控件树、布局、事件、动画、主题全平台无关；切换平台零改动。
 - **Retained 模式 + 脏触发** — 空闲不重绘、阻塞在事件循环，零 CPU 占用。
-- **高质量文字** — 平台原生排版（DirectWrite / Core Text）+ 灰度抗锯齿，CJK 清晰；Label 自动换行。
+- **高质量文字** — 平台原生排版（DirectWrite / Core Text）+ 灰度抗锯齿，CJK 清晰；Label 自动换行；**彩色 emoji**（含 ZWJ 组合序列、肤色修饰），文本框可输入 emoji。
 - **DPI / Retina 感知** — 控件树用逻辑坐标、绘制层统一缩放到物理像素，文字按物理字号渲染（测量与绘制同源），高 DPI（1.5x/2x/Retina）下依然锐利、不偏小。
 - **纯净焦点环** — 焦点环仅在键盘 Tab 导航时显示，纯鼠标操作不显示外框。
 - **完整控件集** — 布局、文本、按钮、表单输入、容器导航、列表、图片、托盘一应俱全。
@@ -124,7 +124,7 @@ cargo test                                                  # 运行单元测试
 cargo clippy --all-targets                                  # 静态检查
 ```
 
-示例一览：`fullshowcase`（综合）、`animation`、`theming`、`image`、`list`、`dropdown`、`progress`、`multiline`、`frameless`、`light_titlebar`、`tray`、`file_drop`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
+示例一览：`fullshowcase`（综合）、`animation`、`theming`、`image`、`list`、`dropdown`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`file_drop`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
 
 ## 架构
 
