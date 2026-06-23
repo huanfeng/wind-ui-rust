@@ -76,6 +76,7 @@ pub enum Intent {
 }
 
 /// `Intent` 解析出的一组语义色。控件各取所需（Button 用全部，CheckBox 取 bg+fg）。
+#[derive(Clone, Copy, Debug)]
 pub struct IntentColors {
     pub bg: Color,
     pub hover: Color,

@@ -562,6 +562,7 @@ impl Element {
         Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
     }
     /// 显式设置语义意图色。Button / CheckBox 通用。
+    /// 注意：非 Primary intent 接管整组视觉，此时 `.bg()` 单点覆盖不生效。
     pub fn intent(self, i: Intent) -> Self {
         self.config_intent("intent()", i)
     }
