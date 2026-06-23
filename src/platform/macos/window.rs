@@ -58,6 +58,9 @@ struct ViewState {
     composing: bool,
     /// 动画帧的一次性定时器（仅动画期间存在；空闲为 None → 零唤醒）。每帧续约前先废止旧的。
     frame_timer: Option<Retained<NSTimer>>,
+    /// `on_interval` 的周期定时器（按 handler.intervals() 顺序，下标即回调 idx）。
+    /// 随窗口存活；进程退出时连同 run loop 一并销毁（对照 win32 的 SetTimer）。
+    interval_timers: Vec<Retained<NSTimer>>,
     /// 复用的 DeviceRGB 色彩空间。
     color_space: CFRetained<CGColorSpace>,
 }
@@ -168,6 +171,23 @@ define_class!(
         #[unsafe(method(frameTick:))]
         fn frame_tick(&self, _timer: &NSTimer) {
             self.setNeedsDisplay(true);
+        }
+
+        /// `on_interval` 周期定时器到点：按定时器在 interval_timers 中的下标调对应回调，
+        /// 需重绘则标脏（对照 win32 的 WM_TIMER → on_interval_fired）。
+        #[unsafe(method(intervalTick:))]
+        fn interval_tick(&self, timer: &NSTimer) {
+            let idx = {
+                let st = self.ivars().borrow();
+                st.interval_timers
+                    .iter()
+                    .position(|t| std::ptr::eq(Retained::as_ptr(t), timer))
+            };
+            let Some(idx) = idx else { return };
+            let need = self.ivars().borrow_mut().handler.on_interval_fired(idx);
+            if need {
+                self.setNeedsDisplay(true);
+            }
         }
     }
 
@@ -295,6 +315,7 @@ impl ContentView {
             frameless,
             composing: false,
             frame_timer: None,
+            interval_timers: Vec::new(),
             color_space,
         };
         let this = Self::alloc(mtm).set_ivars(RefCell::new(state));
@@ -434,6 +455,28 @@ impl ContentView {
 
         // 本帧画完后，若仍有控件请求持续动画，按显示器刷新率自调度下一帧。
         self.schedule_next_frame();
+    }
+
+    /// 安装 `on_interval` 周期定时器：按 handler 注册的间隔各建一个重复 NSTimer，存入
+    /// interval_timers（下标即 on_interval_fired 的 idx）。窗口创建后调用一次。
+    fn install_interval_timers(&self) {
+        let durs = self.ivars().borrow().handler.intervals();
+        let mut timers = Vec::with_capacity(durs.len());
+        for d in durs {
+            // 间隔下限 1ms，避免 0 间隔空转。
+            let secs = d.as_secs_f64().max(0.001);
+            let timer = unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                    secs,
+                    self,
+                    sel!(intervalTick:),
+                    None,
+                    true, // repeats：周期触发
+                )
+            };
+            timers.push(timer);
+        }
+        self.ivars().borrow_mut().interval_timers = timers;
     }
 
     /// 动画帧驱动：废止上一个待触发的帧定时器，若仍在动画则按刷新率调度下一次一次性重绘。
@@ -667,8 +710,49 @@ fn map_special(key_code: u16) -> Option<Key> {
     })
 }
 
+// libdispatch FFI：跨线程把工作派回主线程。`_dispatch_main_q` 即 `dispatch_get_main_queue()`
+// 宏所取的全局主队列对象；`dispatch_async_f` 异步入队一个无捕获的 C 函数。
+extern "C" {
+    static _dispatch_main_q: c_void;
+    fn dispatch_async_f(
+        queue: *const c_void,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+/// 主线程蹦床：dispatch 回主线程后标脏一帧。此刻必在主线程，裸指针解引用安全；
+/// render 前会排空消息通道（UiHost::render 的 pump 排空），故唤醒即取到最新数据。
+extern "C" fn wake_on_main(ctx: *mut c_void) {
+    let view = ctx as *const ContentView;
+    // 视图随窗口存活至进程退出，指针在 run loop 期间始终有效（对照 win32 PostMessage 到 HWND）。
+    unsafe { (*view).setNeedsDisplay(true) };
+}
+
+/// 跨线程唤醒句柄：仅持视图裸指针（as usize 以满足 Send）。signal 经 dispatch 派回主线程，
+/// 线程安全。对照 win32 的 `Win32Wake`（持 HWND 数值 + PostMessage）。
+struct MacWake {
+    view: usize,
+}
+unsafe impl Send for MacWake {}
+impl crate::sync::RawWakeSignal for MacWake {
+    fn signal(&self) {
+        unsafe {
+            dispatch_async_f(
+                std::ptr::addr_of!(_dispatch_main_q),
+                self.view as *mut c_void,
+                wake_on_main,
+            );
+        }
+    }
+}
+
 /// 窗口端运行：创建 `NSApplication` + `NSWindow` + 自定义 `NSView`，进入事件循环（阻塞至退出）。
-pub fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
+pub(crate) fn run_windowed(
+    mut cfg: WindowConfig,
+    handler: Box<dyn AppHandler>,
+    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+) {
     let mtm = MainThreadMarker::new().expect("macOS GUI 必须在主线程运行");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
@@ -731,6 +815,14 @@ pub fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>) {
 
     // 动画帧驱动改为自调度的一次性定时器（见 ContentView::schedule_next_frame）：跟随显示器
     // 刷新率、空闲零唤醒。首帧 drawRect 由 makeKeyAndOrderFront 触发，其后按需自续约。
+
+    // 跨线程唤醒：把视图裸指针回填进 WakerShared；后台线程 send 经 dispatch 派回主线程标脏一帧。
+    // 窗口建好后再绑定，绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。
+    if let Some(w) = &waker {
+        w.bind(Box::new(MacWake { view: Retained::as_ptr(&view) as usize }));
+    }
+    // on_interval：按 handler 注册的间隔安装周期 NSTimer。
+    view.install_interval_timers();
 
     // 系统托盘（若配置）：窗口创建后安装；TrayState 须存活至退出（按钮 target 为弱引用）。
     let _tray = cfg.tray.take().and_then(|t| super::tray::install(mtm, window.clone(), t));

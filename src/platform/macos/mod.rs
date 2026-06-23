@@ -22,7 +22,7 @@ pub use tray::{Tray, TrayCtx, TrayMenuItem};
 use super::{AppHandler, WindowConfig};
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入事件循环。
-pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, _waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
+pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() { true } else { os_animations_enabled() };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
@@ -32,7 +32,7 @@ pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, _waker: O
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    window::run_windowed(cfg, handler);
+    window::run_windowed(cfg, handler, waker);
 }
 
 /// 查询系统“显示动画”偏好（减弱动态效果）。占位：默认开。
