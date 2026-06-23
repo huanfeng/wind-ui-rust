@@ -218,14 +218,22 @@ impl App {
 
     pub fn run(self) {
         let theme = Rc::new(self.theme.unwrap_or_default());
+        let waker = self.waker_shared.clone();
+        let cfg = self.cfg;
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
-            Box::new(UiHost::new(root, theme, self.cfg.bg))
+            Box::new(UiHost::new(root, theme, cfg.bg, self.pumps, self.intervals))
         } else {
             Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
         };
-        platform::run(self.cfg, handler);
+        platform::run(cfg, handler, waker);
+    }
+
+    #[cfg(test)]
+    fn into_handler_for_test(self) -> UiHost {
+        let theme = Rc::new(self.theme.unwrap_or_default());
+        UiHost::new(self.content.unwrap(), theme, self.cfg.bg, self.pumps, self.intervals)
     }
 
     fn shared_waker(&mut self) -> crate::sync::Waker {
@@ -351,18 +359,32 @@ struct UiHost {
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
+    /// 跨线程通道的排空回调：渲染前在 UI 线程依次调用，把后台数据写入控件状态。
+    pumps: Vec<Box<dyn FnMut()>>,
+    /// 定时器回调列表（与 interval_durs 下标对应）。
+    interval_cbs: Vec<Box<dyn FnMut()>>,
+    /// 定时器间隔列表（平台据此注册 SetTimer/NSTimer）。
+    interval_durs: Vec<std::time::Duration>,
 }
 
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
 const DAMAGE_MARGIN: i32 = 2;
 
 impl UiHost {
-    fn new(root: Element, theme: Rc<Theme>, bg: Color) -> Self {
+    fn new(
+        root: Element,
+        theme: Rc<Theme>,
+        bg: Color,
+        pumps: Vec<Box<dyn FnMut()>>,
+        intervals: Vec<(std::time::Duration, Box<dyn FnMut()>)>,
+    ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
         crate::theme::set_current(theme.clone());
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
         tree.clipboard = Some(Box::new(crate::platform::Clipboard));
+        let (interval_durs, interval_cbs): (Vec<_>, Vec<_>) =
+            intervals.into_iter().unzip();
         Self {
             tree,
             engine: PlatformTextEngine::new(),
@@ -388,6 +410,9 @@ impl UiHost {
             pending_damage: None,
             needs_full: true,
             swallow_up: false,
+            pumps,
+            interval_cbs,
+            interval_durs,
         }
     }
 
@@ -575,6 +600,10 @@ impl UiHost {
 
 impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
+        // 跨线程消息：渲染前在 UI 线程排空所有通道，把后台数据写入控件状态。
+        for pump in self.pumps.iter_mut() {
+            pump();
+        }
         // 注入主题（离屏路径首帧、主题变更时均生效）。
         crate::theme::set_current(self.theme.clone());
         // 动画：清上一帧请求/脏区并刷新帧时钟，绘制中控件可重新请求。
@@ -822,6 +851,19 @@ impl AppHandler for UiHost {
 
     fn wants_animation(&self) -> bool {
         crate::anim::animation_requested()
+    }
+
+    fn intervals(&self) -> Vec<std::time::Duration> {
+        self.interval_durs.clone()
+    }
+
+    fn on_interval_fired(&mut self, idx: usize) -> bool {
+        if let Some(cb) = self.interval_cbs.get_mut(idx) {
+            cb();
+            true
+        } else {
+            false
+        }
     }
 
     fn on_drop_files(&mut self, pos: Point, paths: Vec<std::path::PathBuf>) -> bool {
@@ -1074,5 +1116,22 @@ mod tests {
         let app = App::new("t", 100, 100)
             .on_interval(std::time::Duration::from_millis(100), || {});
         assert_eq!(app.intervals.len(), 1);
+    }
+
+    #[test]
+    fn render_drains_pending_messages() {
+        use crate::platform::AppHandler;
+        use tiny_skia::Pixmap;
+        let got = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let g2 = got.clone();
+        let mut app = App::new("t", 50, 50);
+        let tx = app.channel::<u32>(move |m| g2.set(m));
+        app = app.content(Element::col());
+        tx.send(7).unwrap();
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(50, 50).unwrap();
+        handler.render(&mut pm, Size::new(50, 50));
+        assert_eq!(got.get(), 7, "render 前排空 pump，消息写入状态");
     }
 }

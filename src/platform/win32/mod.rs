@@ -88,7 +88,7 @@ unsafe fn os_animations_enabled() -> bool {
 }
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
-pub fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>) {
+pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, _waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() { true } else { unsafe { os_animations_enabled() } };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));

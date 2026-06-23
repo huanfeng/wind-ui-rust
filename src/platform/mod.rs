@@ -13,14 +13,18 @@ pub mod win32;
 #[cfg(windows)]
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
-pub use win32::{open_url, run, Tray, TrayCtx, TrayMenuItem};
+pub use win32::{open_url, Tray, TrayCtx, TrayMenuItem};
+#[cfg(windows)]
+pub(crate) use win32::run;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::clipboard::MacClipboard as Clipboard;
 #[cfg(target_os = "macos")]
-pub use macos::{open_url, run, Tray, TrayCtx, TrayMenuItem};
+pub use macos::{open_url, Tray, TrayCtx, TrayMenuItem};
+#[cfg(target_os = "macos")]
+pub(crate) use macos::run;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
@@ -178,6 +182,16 @@ pub trait AppHandler {
 
     /// 本帧是否有控件请求持续动画。平台层据此在阻塞空闲与按帧驱动之间切换。
     fn wants_animation(&self) -> bool {
+        false
+    }
+
+    /// 注册的定时器间隔（平台据此 SetTimer/NSTimer）。无则空。
+    fn intervals(&self) -> Vec<std::time::Duration> {
+        Vec::new()
+    }
+
+    /// 第 `idx` 个定时器到点：调对应回调。返回 true 表示需重绘。
+    fn on_interval_fired(&mut self, _idx: usize) -> bool {
         false
     }
 
