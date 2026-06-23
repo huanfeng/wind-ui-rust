@@ -359,6 +359,31 @@ ctx.show_context_menu(pos, vec![
 ### 8.4 右键约定
 **右键默认不触发控件**（桌面习惯）。框架在分发层拦截非左键的 Down/Up；仅需右键的控件 override `Widget::wants_right_click() -> true`。新控件**默认即正确**。
 
+### 8.5 跨线程更新
+
+windui 的控件状态（`Rc<Cell<T>>`）只能在 UI 线程访问。需要从后台线程更新 UI 时，使用两种机制：
+
+**`App::channel`**：建立类型化消息通道。`on_message` 回调在 UI 线程执行，可安全写 `Rc` 状态；返回的 `Sender` 可 `Clone` 到任意后台线程，`send` 一次即唤醒 UI 渲染一帧。`Sender: Send + Sync + Clone`，无消息时不唤醒（事件驱动、空闲零 CPU）。
+
+**`App::on_interval`**：注册 UI 线程定时回调，间隔内不占 CPU（平台定时器驱动）。可多次调用注册多个定时器。
+
+注意：`channel` 需在 `on_interval`/`content`/`run` 之前调用（`channel` 签名为 `&mut self`，其余为 `self` 消费链）。
+
+```rust
+let mut app = App::new("示例", 360, 180);
+
+// 后台 send=唤醒一帧；on_message 在 UI 线程写 Rc 状态
+let tx = app.channel::<f32>(move |p| progress.set(p));
+std::thread::spawn(move || { let _ = tx.send(0.5); });
+
+// UI 线程定时回调（间隔内零 CPU）
+app.on_interval(Duration::from_millis(100), move || { /* 读写 Rc 状态 */ })
+   .content(ui)
+   .run();
+```
+
+UI 状态（`Rc<Cell<T>>`、`Rc<RefCell<String>>`）只在 `on_message` / `on_interval` 回调里写，框架自动在下一帧读取并渲染。完整示例见 `examples/background_task.rs`。
+
 ---
 
 ## 9. 扩展：自定义控件
