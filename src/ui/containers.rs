@@ -188,8 +188,20 @@ impl Widget for ScrollWidget {
         let Event::Pointer(p) = ev else { return false };
         match p.kind {
             PointerKind::Wheel(delta) => {
-                // Windows 一刻度为 ±120；每刻度滚动 48px（delta>0 向上）。
-                ctx.scroll_by(-delta * 48 / 120);
+                let (scroll_y, content_h, view_h) = ctx.scroll_metrics();
+                let max_scroll = (content_h - view_h).max(0);
+                // 无溢出内容 → 直接冒泡。
+                if max_scroll == 0 {
+                    return false;
+                }
+                // delta>0 向上（减小 scroll_y），delta<0 向下（增大 scroll_y）。
+                let dy = -delta * 48 / 120;
+                // 已到边界 → 冒泡给外层滚动容器，实现嵌套滚动。
+                let at_boundary = (dy < 0 && scroll_y <= 0) || (dy > 0 && scroll_y >= max_scroll);
+                if at_boundary {
+                    return false;
+                }
+                ctx.scroll_by(dy);
                 true
             }
             PointerKind::Down => {
