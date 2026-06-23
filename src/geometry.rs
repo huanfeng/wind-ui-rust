@@ -199,6 +199,30 @@ impl Color {
             format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
         }
     }
+
+    /// 向白色混合 f（0..=1）：变亮。保留 alpha。
+    pub fn lighten(self, f: f32) -> Color {
+        self.mix(Color::WHITE, f)
+    }
+    /// 向黑色混合 f（0..=1）：变暗。保留 alpha。
+    pub fn darken(self, f: f32) -> Color {
+        self.mix(Color::BLACK, f)
+    }
+    /// 与 other 按比例 t 混合 RGB（保留 self 的 alpha）。t 钳到 [0,1]。
+    fn mix(self, other: Color, t: f32) -> Color {
+        let t = t.clamp(0.0, 1.0);
+        let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        Color { r: m(self.r, other.r), g: m(self.g, other.g), b: m(self.b, other.b), a: self.a }
+    }
+    /// self 作背景时挑选可读前景：感知亮度 > 阈值返回 dark，否则 light。
+    pub fn pick_fg(self, dark: Color, light: Color) -> Color {
+        let luma = 0.299 * self.r as f32 + 0.587 * self.g as f32 + 0.114 * self.b as f32;
+        if luma > 153.0 {
+            dark
+        } else {
+            light
+        }
+    }
 }
 
 impl serde::Serialize for Color {
@@ -237,6 +261,24 @@ mod tests {
     #[test]
     fn color_hex() {
         assert_eq!(Color::hex(0x336699), Color::rgb(0x33, 0x66, 0x99));
+    }
+
+    #[test]
+    fn color_lighten_darken_bounds() {
+        let c = Color::rgb(100, 100, 100);
+        assert_eq!(c.lighten(0.0), c, "f=0 不变");
+        assert_eq!(c.darken(0.0), c, "f=0 不变");
+        assert_eq!(c.lighten(1.0), Color::WHITE, "f=1 趋白");
+        assert_eq!(c.darken(1.0), Color::BLACK, "f=1 趋黑");
+        assert!(c.lighten(0.5).r > c.r && c.darken(0.5).r < c.r, "中间值单调");
+        assert_eq!(c.lighten(0.5).a, c.a, "保留 alpha");
+    }
+
+    #[test]
+    fn color_pick_fg_by_luminance() {
+        // self 作背景：偏亮选 dark 前景、偏暗选 light 前景。
+        assert_eq!(Color::rgb(240, 240, 240).pick_fg(Color::BLACK, Color::WHITE), Color::BLACK);
+        assert_eq!(Color::rgb(20, 20, 20).pick_fg(Color::BLACK, Color::WHITE), Color::WHITE);
     }
 
     #[test]

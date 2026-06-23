@@ -61,6 +61,63 @@ impl Default for Palette {
     }
 }
 
+/// 控件语义意图色。内置三核心 + 开放扩展点 `Custom`——使用者传任意基色即可，
+/// 框架派生整组视觉（hover/active 变亮变暗、fg 按亮度自适应），零新增 palette 色槽。
+#[derive(Clone, Copy)]
+pub enum Intent {
+    /// 主操作：accent 家族（控件默认）。
+    Primary,
+    /// 次要操作：中性灰。
+    Neutral,
+    /// 危险操作：palette.danger。
+    Danger,
+    /// 扩展点：任意基色，派生整组视觉。
+    Custom(Color),
+}
+
+/// `Intent` 解析出的一组语义色。控件各取所需（Button 用全部，CheckBox 取 bg+fg）。
+pub struct IntentColors {
+    pub bg: Color,
+    pub hover: Color,
+    pub active: Color,
+    /// 对比自适应前景：在 bg 上始终可读（Button 文字 / CheckBox 对勾共用）。
+    pub fg: Color,
+}
+
+impl Intent {
+    /// 解析为一组语义色。`Primary` 用 palette 精调的 accent 家族；其余 intent 由基色派生。
+    pub fn colors(self, p: &Palette) -> IntentColors {
+        const L: f32 = 0.10; // hover 变亮系数
+        const D: f32 = 0.10; // active 变暗系数
+        match self {
+            Intent::Primary => IntentColors {
+                bg: p.accent,
+                hover: p.accent_hover,
+                active: p.accent_active,
+                fg: p.on_accent,
+            },
+            Intent::Neutral => IntentColors {
+                bg: p.border,
+                hover: p.border.darken(D),
+                active: p.border.darken(D * 2.0),
+                fg: p.text,
+            },
+            Intent::Danger => IntentColors {
+                bg: p.danger,
+                hover: p.danger.lighten(L),
+                active: p.danger.darken(D),
+                fg: p.danger.pick_fg(p.text, p.on_accent),
+            },
+            Intent::Custom(c) => IntentColors {
+                bg: c,
+                hover: c.lighten(L),
+                active: c.darken(D),
+                fg: c.pick_fg(p.text, p.on_accent),
+            },
+        }
+    }
+}
+
 /// 全局基础度量（间距 / 圆角 / 字号）。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -600,5 +657,18 @@ mod tests {
         assert_eq!(bt.bg(&p), p.accent, "无覆盖回退 palette.accent");
         bt.bg = Some(Color::hex(0x010203));
         assert_eq!(bt.bg(&p), Color::hex(0x010203), "有覆盖取覆盖值");
+    }
+
+    #[test]
+    fn intent_colors_maps_palette_and_derives_fg() {
+        let p = Palette::default();
+        assert_eq!(Intent::Primary.colors(&p).bg, p.accent);
+        assert_eq!(Intent::Primary.colors(&p).fg, p.on_accent);
+        assert_eq!(Intent::Neutral.colors(&p).bg, p.border);
+        assert_eq!(Intent::Danger.colors(&p).bg, p.danger);
+        let custom = Color::hex(0x2E9E5B);
+        assert_eq!(Intent::Custom(custom).colors(&p).bg, custom, "Custom 基色直用");
+        // Custom 浅基色 → fg 取深色(text) 保证对比。
+        assert_eq!(Intent::Custom(Color::hex(0xFFF0A0)).colors(&p).fg, p.text);
     }
 }

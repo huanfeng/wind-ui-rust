@@ -6,10 +6,12 @@
 ## [Unreleased]
 
 ### Added
+- 语义意图色（Intent）体系：Button / CheckBox 统一 `.intent()` / `.danger()` / `.neutral()` / `.accent(color)`；
+  内置 primary/neutral/danger，`Custom(Color)` 为扩展点——单基色自动派生 hover/active + 对比自适应前景。
+  Button 默认 Primary（现有代码零改动）；CheckBox 现有 `.danger()`/`.accent()` 收编进同一体系（API 不变）。
 - CheckBox 受控点击拦截：`Element::checkbox(..).on_toggle(cb)`——设回调后点击/键盘激活不自动翻转
   绑定 state，交 app 决定是否翻转（可在翻转前弹确认、确认后再置真，渲染跟随 state，零闪烁）。
-- CheckBox 强调色覆盖：`.danger()`（主题 danger 色标红，如"删除数据"）/ `.accent(color)`（自定义色）；
-  浅色填充时对勾自动转深色，保证可见。
+- `Color::lighten` / `darken` / `pick_fg`（对比自适应前景）颜色派生工具。
 
 ## [0.1.0] - 2026-06-22
 

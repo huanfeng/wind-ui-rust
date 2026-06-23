@@ -9,10 +9,11 @@ use std::rc::Rc;
 use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
+use crate::theme::Intent;
 use crate::text::TextEngine;
 
 const BOX_SIZE: i32 = 18;
@@ -28,19 +29,8 @@ pub struct CheckBox {
     /// 点击拦截回调（受控模式）。设了它，点击/键盘激活只调回调、不自动翻转 `state`，
     /// 渲染完全跟随 `state` 当前值——app 可在翻转前弹确认、确认后再 `state.set(..)`。
     on_toggle: Option<ClickFn>,
-    /// 勾选强调色覆盖。`None`=主题 accent；`Danger`=主题 danger 色；`Fixed`=实例自定义色。
-    accent: AccentOverride,
-}
-
-/// CheckBox 勾选强调色来源。运行时在 paint 解析，故 danger 随主题切换而变。
-#[derive(Clone, Copy)]
-pub enum AccentOverride {
-    /// 跟随主题 toggle.accent。
-    Theme,
-    /// 主题 danger 色（危险项标红，如"删除数据"）。
-    Danger,
-    /// 实例自定义色。
-    Fixed(Color),
+    /// 语义意图色（默认 Primary=主题 accent）。运行时在 paint 解析，故 danger/自定义随主题/实例而变。
+    intent: Intent,
 }
 
 impl CheckBox {
@@ -51,16 +41,12 @@ impl CheckBox {
             state,
             fill: Cell::new(Transition::new(init)),
             on_toggle: None,
-            accent: AccentOverride::Theme,
+            intent: Intent::Primary,
         }
     }
-    /// 标记为危险项（勾选框用主题 danger 色）。
-    pub fn set_danger(&mut self) {
-        self.accent = AccentOverride::Danger;
-    }
-    /// 自定义勾选强调色。
-    pub fn set_accent(&mut self, color: Color) {
-        self.accent = AccentOverride::Fixed(color);
+    /// 设置语义意图色（供 Builder 的 `.intent()/.danger()/.accent()` 调用）。
+    pub fn set_intent(&mut self, intent: Intent) {
+        self.intent = intent;
     }
     fn toggle(&mut self, ctx: &mut EventCtx) {
         if let Some(cb) = self.on_toggle.as_mut() {
@@ -80,12 +66,16 @@ impl Widget for CheckBox {
     fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
-        // 禁用：强调色降为灰轨道、文字用 text_disabled。强调色支持实例覆盖（danger/自定义）。
-        let base_accent = match self.accent {
-            AccentOverride::Theme => tg.accent(p),
-            AccentOverride::Danger => p.danger,
-            AccentOverride::Fixed(c) => c,
+        // intent 解析填充色与对勾色：Primary 走 ToggleTheme（保持换肤）；其余由 intent 派生，
+        // 对勾色用 IntentColors.fg 自适应对比（浅底自动转深）。
+        let (base_accent, check_fg) = match self.intent {
+            Intent::Primary => (tg.accent(p), p.on_accent),
+            other => {
+                let ic = other.colors(p);
+                (ic.bg, ic.fg)
+            }
         };
+        // 禁用：强调色降为灰轨道、文字用 text_disabled。
         let accent = if enabled { base_accent } else { p.track };
         let text_color = if enabled { style.fg } else { p.text_disabled };
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
@@ -105,10 +95,8 @@ impl Widget for CheckBox {
             canvas.stroke_round_rect(bx, by, sz, sz, 4.0, 1.5, &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)));
         }
         if amount > 0.0 {
-            // 勾色默认 on_accent；启用态下若填充色偏亮（自定义浅色 accent），改用深色文字色，
-            // 避免浅底白勾近乎不可见（danger/默认主题色亮度均低于阈值，行为不变）。
-            let luma = 0.299 * accent.r as f32 + 0.587 * accent.g as f32 + 0.114 * accent.b as f32;
-            let check = if enabled && luma > 153.0 { p.text } else { p.on_accent };
+            // 启用用 intent 解析的对比色（浅底自动转深）；禁用回退 on_accent。
+            let check = if enabled { check_fg } else { p.on_accent };
             // 勾：两段线，按 amount 淡入。
             let paint = Paint::fill(check.scale_alpha(amount));
             canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);

@@ -130,6 +130,7 @@ Element::dialog(show, content)       // 模态浮层（show: Rc<Cell<bool>>）
 ```rust
 Element::label("文本")
 Element::button("确定").on_click(|ctx| { /* ... */ })
+//  .danger() / .neutral() / .accent(color) / .intent(Intent::X)   语义意图色（Button/CheckBox 通用）
 Element::checkbox("启用", state)                 // state: Rc<Cell<bool>>
 //  .danger() / .accent(color)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
 //  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）

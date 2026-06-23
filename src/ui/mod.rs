@@ -23,6 +23,7 @@ use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
+use crate::theme::{Intent, IntentColors};
 use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
@@ -118,6 +119,8 @@ pub struct Button {
     /// 背景色补间（hover/press 淡入淡出）。retarget-in-paint；首帧靠 `primed` 直接落定。
     bg_anim: Cell<Transition<Color>>,
     primed: Cell<bool>,
+    /// 语义意图色（默认 Primary=accent，现有代码零改动）。
+    intent: Intent,
 }
 
 impl Button {
@@ -129,12 +132,18 @@ impl Button {
             on_click: None,
             bg_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
             primed: Cell::new(false),
+            intent: Intent::Primary,
         }
     }
 
     /// 设置前置图标（供 Builder 的 `.icon_*()` 调用）。
     pub fn set_icon(&mut self, icon: ImageContent) {
         self.icon = Some(icon);
+    }
+
+    /// 设置语义意图色（供 Builder 的 `.intent()/.danger()/.neutral()/.accent()` 调用）。
+    pub fn set_intent(&mut self, intent: Intent) {
+        self.intent = intent;
     }
 
     /// 把内部三态 + 核心传入的启用态映射为通用视觉状态（供图标调制）。
@@ -162,15 +171,22 @@ impl Widget for Button {
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
         let vstate = self.visual_state(enabled);
-        // 背景：禁用用专用置灰底；style.bg 有值时用自定义色；否则按三态取主题色。
+        // intent 解析：Primary 走 ButtonTheme（保持全局换肤 + style.bg 单点覆盖），其余由 palette 派生。
+        let is_primary = matches!(self.intent, Intent::Primary);
+        let ic = if is_primary {
+            IntentColors { bg: bt.bg(pal), hover: bt.hover(pal), active: bt.active(pal), fg: bt.fg(pal) }
+        } else {
+            self.intent.colors(pal)
+        };
+        // 背景：禁用用专用置灰底；Primary 下 style.bg 单点覆盖优先；否则按三态取 intent 色。
         let target = match vstate {
             VisualState::Disabled => bt.disabled(pal),
             _ => match style.bg {
-                Some(c) => c,
-                None => match self.state {
-                    BtnState::Normal => bt.bg(pal),
-                    BtnState::Hover => bt.hover(pal),
-                    BtnState::Press => bt.active(pal),
+                Some(c) if is_primary => c,
+                _ => match self.state {
+                    BtnState::Normal => ic.bg,
+                    BtnState::Hover => ic.hover,
+                    BtnState::Press => ic.active,
                 },
             },
         };
@@ -187,10 +203,10 @@ impl Widget for Button {
         // 文字色：禁用用 text_disabled；style.bg 有值时用 style.fg；否则用主题前景。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled
-        } else if style.bg.is_some() {
+        } else if is_primary && style.bg.is_some() {
             style.fg
         } else {
-            bt.fg(pal)
+            ic.fg
         };
         // 每节点 corner 覆盖优先（>0），否则用主题。
         let r = if style.corner_radius > 0.0 { style.corner_radius } else { bt.corner(&t.metrics) };
@@ -545,20 +561,35 @@ impl Element {
     pub fn checkbox(label: impl Into<String>, state: Rc<Cell<bool>>) -> Self {
         Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
     }
-    /// 把复选框标记为危险项：勾选框改用主题 danger 色（如"删除数据"标红）。
-    /// checkbox 专属修饰符，链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略。
+    /// 显式设置语义意图色。Button / CheckBox 通用。
+    pub fn intent(self, i: Intent) -> Self {
+        self.config_intent("intent()", i)
+    }
+    /// 危险意图（主题 danger 红，如"删除数据"）。Button / CheckBox 通用。
     pub fn danger(self) -> Self {
-        self.config_checkbox("danger()", |c| c.set_danger())
+        self.config_intent("danger()", Intent::Danger)
     }
-    /// 自定义复选框勾选强调色，覆盖主题 accent。checkbox 专属修饰符（误用检测同 `danger()`）。
-    pub fn accent(self, color: crate::geometry::Color) -> Self {
-        self.config_checkbox("accent()", |c| c.set_accent(color))
+    /// 次要意图（中性灰）。主要用于 Button 的次要按钮。
+    pub fn neutral(self) -> Self {
+        self.config_intent("neutral()", Intent::Neutral)
     }
-    fn config_checkbox(mut self, who: &str, f: impl FnOnce(&mut CheckBox)) -> Self {
-        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<CheckBox>()) {
-            Some(c) => f(c),
-            None => debug_assert!(false, "{who} 只能用于 Element::checkbox(..)"),
+    /// 自定义意图基色（扩展点）：框架派生整组视觉。Button / CheckBox 通用。
+    pub fn accent(self, color: Color) -> Self {
+        self.config_intent("accent()", Intent::Custom(color))
+    }
+    /// intent 修饰符落点：依次尝试 Button / CheckBox，命中即设；用于其他控件属误用。
+    fn config_intent(mut self, who: &str, i: Intent) -> Self {
+        if let Some(a) = self.widget.as_any_mut() {
+            if let Some(b) = a.downcast_mut::<Button>() {
+                b.set_intent(i);
+                return self;
+            }
+            if let Some(c) = a.downcast_mut::<CheckBox>() {
+                c.set_intent(i);
+                return self;
+            }
         }
+        debug_assert!(false, "{who} 只能用于 Button / CheckBox");
         self
     }
     /// 开关（绑定 `Rc<Cell<bool>>`）。
