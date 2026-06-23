@@ -8,6 +8,7 @@
 
 pub mod anim;
 pub mod app;
+pub(crate) mod sync;
 pub mod core;
 pub mod event;
 pub mod geometry;
