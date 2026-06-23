@@ -8,6 +8,43 @@ pub(crate) trait RawWakeSignal: Send {
 }
 pub(crate) type RawWake = Box<dyn RawWakeSignal>;
 
+pub use std::sync::mpsc::SendError;
+
+/// 跨线程消息发送端：Send + Sync + Clone。send = 入队 + 唤醒 UI 一帧。
+pub struct Sender<Msg> {
+    tx: std::sync::mpsc::Sender<Msg>,
+    waker: Waker,
+}
+
+impl<Msg> Clone for Sender<Msg> {
+    fn clone(&self) -> Self {
+        Self { tx: self.tx.clone(), waker: self.waker.clone() }
+    }
+}
+
+impl<Msg> Sender<Msg> {
+    /// 入队一条消息并唤醒 UI 一帧。接收端（窗口）已关闭时返回 Err。
+    pub fn send(&self, msg: Msg) -> Result<(), SendError<Msg>> {
+        self.tx.send(msg)?;
+        self.waker.wake();
+        Ok(())
+    }
+}
+
+/// 建一个 typed channel：返回发送端 + 类型擦除的排空 pump（供 UiHost 每帧调用）。
+pub(crate) fn new_channel<Msg: Send + 'static>(
+    waker: Waker,
+    mut on_message: impl FnMut(Msg) + 'static,
+) -> (Sender<Msg>, Box<dyn FnMut()>) {
+    let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+    let pump: Box<dyn FnMut()> = Box::new(move || {
+        while let Ok(m) = rx.try_recv() {
+            on_message(m);
+        }
+    });
+    (Sender { tx, waker }, pump)
+}
+
 pub(crate) struct WakerShared {
     raw: Mutex<Option<RawWake>>,
     pending: AtomicBool,
@@ -75,5 +112,29 @@ mod tests {
     fn waker_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Waker>();
+    }
+
+    #[test]
+    fn channel_pump_drains_in_order_across_thread() {
+        let shared = WakerShared::new();
+        let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u32>::new()));
+        let g2 = got.clone();
+        let (tx, mut pump) = new_channel::<u32>(shared.waker(), move |m| g2.borrow_mut().push(m));
+        let t = std::thread::spawn(move || {
+            tx.send(1).unwrap();
+            tx.send(2).unwrap();
+            tx.send(3).unwrap();
+        });
+        t.join().unwrap();
+        pump();
+        assert_eq!(*got.borrow(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn send_after_receiver_dropped_errs() {
+        let shared = WakerShared::new();
+        let (tx, pump) = new_channel::<u32>(shared.waker(), |_| {});
+        drop(pump); // 接收端 rx 随 pump 一起销毁
+        assert!(tx.send(9).is_err(), "接收端关闭后 send 返回 Err");
     }
 }
