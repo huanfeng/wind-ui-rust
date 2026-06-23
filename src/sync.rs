@@ -62,11 +62,12 @@ impl WakerShared {
     }
     /// 窗口建好后回填平台句柄；若此前有积压 wake，立即补发一次。
     pub(crate) fn bind(self: &Arc<Self>, raw: RawWake) {
-        let pending = self.pending.swap(false, Ordering::SeqCst);
-        if pending {
-            raw.signal();
+        // 全程持锁：与同样持锁的 wake() 串行化 raw 的读写，消除「pending 已读、raw 未装」的窗口。
+        let mut guard = self.raw.lock().unwrap();
+        *guard = Some(raw);
+        if self.pending.swap(false, Ordering::SeqCst) {
+            guard.as_ref().unwrap().signal();
         }
-        *self.raw.lock().unwrap() = Some(raw);
     }
     pub(crate) fn waker(self: &Arc<Self>) -> Waker {
         Waker { inner: self.clone() }

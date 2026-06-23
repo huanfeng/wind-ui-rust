@@ -600,7 +600,9 @@ impl UiHost {
 
 impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
-        // 跨线程消息：渲染前在 UI 线程排空所有通道，把后台数据写入控件状态。
+        // 跨线程消息：渲染前在 UI 线程一次性排空所有通道，把后台数据写入控件状态。
+        // 契约：一帧 render 消费所有 pump 的全部积压消息（唤醒合并/批处理）——
+        // 多个 channel 共享单一 Waker，勿改成每 pump 独立 wake/独立帧。
         for pump in self.pumps.iter_mut() {
             pump();
         }
