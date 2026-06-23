@@ -123,6 +123,8 @@ struct WindowState {
     frameless: bool,
     /// 是否已向系统申请鼠标离开通知（TrackMouseEvent）。离开后系统清此标志需重新申请。
     mouse_tracked: bool,
+    /// WM_CHAR 暂存的高代理项：补充平面字符（emoji 等）分两条 WM_CHAR 发来 UTF-16 代理对。
+    pending_surrogate: Option<u16>,
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -184,6 +186,7 @@ impl WindowState {
             tray: None,
             frameless: false,
             mouse_tracked: false,
+            pending_surrogate: None,
         }
     }
 
@@ -1241,9 +1244,37 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
     dispatch_key_event(hwnd, ev);
 }
 
-/// WM_CHAR：已翻译的字符（含 IME/CJK 输入）。控制字符跳过。
+/// 把 WM_CHAR 的 UTF-16 码元累积成完整 `char`。
+///
+/// 补充平面字符（emoji 等，码点 > U+FFFF）由系统分两条 WM_CHAR 发来 UTF-16
+/// 代理对：高代理项（`0xD800..=0xDBFF`）先到，暂存于 `pending`；低代理项
+/// （`0xDC00..=0xDFFF`）到达后与之合成。BMP 码元直接成 `char`。孤立或非法的
+/// 代理序列被丢弃并清空 `pending`，返回 `None`。
+fn accumulate_char(pending: &mut Option<u16>, unit: u16) -> Option<char> {
+    if (0xD800..=0xDBFF).contains(&unit) {
+        *pending = Some(unit); // 高代理项暂存（覆盖任何旧的悬挂高代理项）
+        return None;
+    }
+    if (0xDC00..=0xDFFF).contains(&unit) {
+        // 低代理项：须有配对高代理项，否则为孤立项丢弃。
+        let hi = pending.take()?;
+        let cp = 0x10000 + (((hi as u32 - 0xD800) << 10) | (unit as u32 - 0xDC00));
+        return char::from_u32(cp);
+    }
+    *pending = None; // BMP 码元：清掉任何悬挂高代理项（异常序列）
+    char::from_u32(unit as u32)
+}
+
+/// WM_CHAR：已翻译的字符（含 IME/CJK 输入与 emoji 代理对）。控制字符跳过。
 unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
-    let Some(c) = char::from_u32(wparam.0 as u32) else { return };
+    let unit = wparam.0 as u16;
+    // 先在独立借用作用域内累积代理对并释放 state 借用，再分发——避免与
+    // dispatch_key_event 内部的 state_from 形成 &mut 别名（见其两段式说明）。
+    let c = {
+        let Some(state) = state_from(hwnd) else { return };
+        accumulate_char(&mut state.pending_surrogate, unit)
+    };
+    let Some(c) = c else { return };
     if c.is_control() {
         return;
     }
@@ -1282,7 +1313,51 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
 
 #[cfg(test)]
 mod tests {
-    use super::ClickTracker;
+    use super::{accumulate_char, ClickTracker};
+
+    #[test]
+    fn bmp_char_passes_through() {
+        let mut pend = None;
+        assert_eq!(accumulate_char(&mut pend, b'A' as u16), Some('A'));
+        assert_eq!(accumulate_char(&mut pend, 0x4E16), Some('世'), "BMP 中文字符");
+        assert_eq!(pend, None, "BMP 字符不留挂起状态");
+    }
+
+    #[test]
+    fn surrogate_pair_combines_to_emoji() {
+        // 😀 U+1F600 = UTF-16 代理对 D83D DE00
+        let mut pend = None;
+        assert_eq!(accumulate_char(&mut pend, 0xD83D), None, "高代理项先暂存");
+        assert_eq!(pend, Some(0xD83D));
+        assert_eq!(accumulate_char(&mut pend, 0xDE00), Some('😀'), "低代理项合成 emoji");
+        assert_eq!(pend, None, "合成后清空挂起");
+    }
+
+    #[test]
+    fn lone_low_surrogate_is_dropped() {
+        let mut pend = None;
+        assert_eq!(accumulate_char(&mut pend, 0xDE00), None, "孤立低代理项丢弃");
+        assert_eq!(pend, None);
+    }
+
+    #[test]
+    fn dangling_high_surrogate_recovers_on_bmp() {
+        let mut pend = None;
+        assert_eq!(accumulate_char(&mut pend, 0xD83D), None);
+        // 异常序列：高代理后直接来 BMP —— 丢弃悬挂高代理项，BMP 正常返回。
+        assert_eq!(accumulate_char(&mut pend, b'X' as u16), Some('X'));
+        assert_eq!(pend, None, "悬挂高代理项被清除");
+    }
+
+    #[test]
+    fn second_high_surrogate_replaces_first() {
+        // 🌈 U+1F308 = D83C DF08
+        let mut pend = None;
+        assert_eq!(accumulate_char(&mut pend, 0xD83D), None);
+        assert_eq!(accumulate_char(&mut pend, 0xD83C), None, "第二个高代理项替换第一个");
+        assert_eq!(pend, Some(0xD83C));
+        assert_eq!(accumulate_char(&mut pend, 0xDF08), Some('🌈'));
+    }
 
     // 双击时限 500ms，漂移阈值 ±4px，同左键。
     const DBL: u32 = 500;
