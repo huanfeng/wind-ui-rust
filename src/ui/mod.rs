@@ -1185,18 +1185,17 @@ impl Element {
         panels: Vec<(impl Into<String>, Element)>,
         make_state: impl Fn(usize) -> nav::ExpandState,
     ) -> Self {
-        // 注意：四色在构建期从主题定格进 Element 树（与 `divider()` 同模式，构建发生在
-        // 主题注入之后故正确）。将来若加运行期换主题 API，此处不会自动刷新——届时需改为
-        // 读主题的专用 widget 绘制卡片外框/头背景/分隔线。
-        let th = crate::theme::current();
-        let border_c = th.accordion.border(&th.palette);
-        let corner = th.accordion.corner(&th.metrics);
-        let header_bg = th.accordion.header_bg(&th.palette);
-        let divider_c = th.accordion.divider(&th.palette);
+        // 四色改用主题角色延迟解析（运行期换主题自动跟随）；corner 为度量，构建期取值即可
+        // （换主题不改圆角，符合预期）。
+        use crate::style::Role;
+        let corner = {
+            let th = crate::theme::current();
+            th.accordion.corner(&th.metrics)
+        };
         let mut card = Element::col()
             .width_match()
-            .bg(th.palette.surface)
-            .border(border_c, 1)
+            .bg_role(Role::Surface)
+            .border_role(Role::AccordionBorder, 1)
             .corner(corner);
         for (i, (title, body)) in panels.into_iter().enumerate() {
             if i > 0 {
@@ -1204,7 +1203,7 @@ impl Element {
                     Element::base(Layout::None)
                         .width_match()
                         .height(1)
-                        .bg(divider_c),
+                        .bg_role(Role::Divider),
                 );
             }
             let state = make_state(i);
@@ -1212,7 +1211,7 @@ impl Element {
                 .widget(nav::AccordionHeader::new(title.into(), state.clone()))
                 .width_match()
                 .height(nav::NAV_ROW_H)
-                .bg(header_bg);
+                .bg_role(Role::AccordionHeaderBg);
             let show = state.clone();
             card = card
                 .child(header)
@@ -1237,12 +1236,12 @@ impl Element {
         e
     }
 
-    /// 水平分隔线。颜色取当前主题（构建发生在主题注入之后）。
-    /// Directive：颜色在构建期定格（非 paint 期），故若将来加运行期换主题 API，
-    /// divider 不会随之更新；届时应改为读主题的专用 widget。
+    /// 水平分隔线。背景用主题角色，运行期换主题自动跟随。
     pub fn divider() -> Self {
-        let c = crate::theme::current().palette.divider;
-        Self::base(Layout::None).width_match().height(1).bg(c)
+        Self::base(Layout::None)
+            .width_match()
+            .height(1)
+            .bg_role(crate::style::Role::Divider)
     }
 
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。

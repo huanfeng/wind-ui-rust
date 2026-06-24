@@ -349,12 +349,20 @@ impl TextEngine for DWriteEngine {
                     if nr == d.red() && ng == d.green() && nb == d.blue() {
                         continue;
                     }
-                    // 文字像素：DirectWrite 输出的直通色按背景 alpha 预乘后写回。
-                    let a = d.alpha() as u32;
-                    let pr = (nr as u32 * a / 255) as u8;
-                    let pg = (ng as u32 * a / 255) as u8;
-                    let pb = (nb as u32 * a / 255) as u8;
-                    if let Some(p) = PremultipliedColorU8::from_rgba(pr, pg, pb, a as u8) {
+                    // 文字像素：DirectWrite 已在背景上混出不透明文字色 (nr,ng,nb)；
+                    // 再按 fg.alpha 与原背景二次混合，使 fg.alpha 乘进有效覆盖率（半透明文字色）。
+                    // fg.alpha=255 时下式退化为 new，逐像素等同旧逻辑（不透明文字零回归）。
+                    let fa = color.a as u32;
+                    let bg_a = d.alpha() as u32;
+                    let mix = |n: u8, b: u8| ((n as u32 * fa + b as u32 * (255 - fa)) / 255) as u8;
+                    let fr = mix(nr, d.red());
+                    let fgc = mix(ng, d.green());
+                    let fb = mix(nb, d.blue());
+                    // 输出 alpha 取背景 alpha（文字混入不透明背景仍不透明），按其预乘写回。
+                    let pr = (fr as u32 * bg_a / 255) as u8;
+                    let pg = (fgc as u32 * bg_a / 255) as u8;
+                    let pb = (fb as u32 * bg_a / 255) as u8;
+                    if let Some(p) = PremultipliedColorU8::from_rgba(pr, pg, pb, bg_a as u8) {
                         px[idx] = p;
                     }
                 }
@@ -538,5 +546,68 @@ impl IDWritePixelSnapping_Impl for GlyphRenderer_Impl {
     }
     fn GetPixelsPerDip(&self, _ctx: *const c_void) -> Result<f32> {
         Ok(1.0)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod alpha_text_tests {
+    use super::*;
+    use crate::geometry::{Color, Rect};
+    use crate::spec::Align;
+    use crate::text::TextEngine;
+    use tiny_skia::Pixmap;
+
+    /// 扫描块体覆盖区最暗红通道（笔画中心 coverage≈1）。
+    fn darkest_red(pm: &Pixmap, x0: u32, x1: u32, y0: u32, y1: u32) -> u8 {
+        let mut d = 255u8;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                d = d.min(pm.pixel(x, y).unwrap().red());
+            }
+        }
+        d
+    }
+
+    /// 50% alpha 纯黑全块字符（█ U+2588，coverage=1）画在白底，块体中心应约中灰（96..160），
+    /// 而非纯黑（旧逻辑丢弃 fg.alpha 会得近黑）。
+    #[test]
+    fn half_alpha_text_blends_to_midtone() {
+        let mut eng = DWriteEngine::new();
+        eng.set_scale(1.0);
+        let mut pm = Pixmap::new(64, 48).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        eng.draw(
+            &mut pm,
+            "\u{2588}\u{2588}",
+            Rect::new(4, 4, 56, 40),
+            Color::rgba(0, 0, 0, 128),
+            Align::Start,
+            None,
+            32.0,
+            None,
+        );
+        let d = darkest_red(&pm, 6, 40, 8, 40);
+        assert!((96..=170).contains(&d), "50% 黑字块中心应为中灰，实得 {d}");
+    }
+
+    /// fg.alpha=255 时与不透明渲染一致：纯黑全块中心应近黑（无回归）。
+    #[test]
+    fn opaque_text_unchanged() {
+        let mut eng = DWriteEngine::new();
+        eng.set_scale(1.0);
+        let mut pm = Pixmap::new(64, 48).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        eng.draw(
+            &mut pm,
+            "\u{2588}\u{2588}",
+            Rect::new(4, 4, 56, 40),
+            Color::rgba(0, 0, 0, 255),
+            Align::Start,
+            None,
+            32.0,
+            None,
+        );
+        let d = darkest_red(&pm, 6, 40, 8, 40);
+        assert!(d < 40, "不透明黑字块中心应近黑(<40)，实得 {d}");
     }
 }
