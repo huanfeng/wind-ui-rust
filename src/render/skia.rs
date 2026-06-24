@@ -20,6 +20,12 @@ struct Clip {
     mask: Mask,
 }
 
+/// 离屏合成层：与主缓冲同尺寸的透明子缓冲 + 整体不透明度。
+struct Layer {
+    pixmap: Pixmap,
+    opacity: f32,
+}
+
 /// 直接绘制到借入的 `Pixmap`。
 ///
 /// 控件树用**逻辑坐标**（dp）；本 canvas 通过 `scale` 把逻辑坐标变换为物理像素：
@@ -35,6 +41,8 @@ pub struct SkiaCanvas<'a> {
     /// 局部重绘原点（**逻辑坐标**）：pixmap 是脏区大小的子缓冲，其 (0,0) 对应世界 `offset`。
     /// 所有图元绘制时减去此偏移，使世界坐标落入子 pixmap。全窗重绘时为 (0,0)。
     offset: Point,
+    /// 离屏合成层栈（子树 opacity 用）：非空时绘制重定向到栈顶层。
+    layers: Vec<Layer>,
 }
 
 impl<'a> SkiaCanvas<'a> {
@@ -47,6 +55,7 @@ impl<'a> SkiaCanvas<'a> {
             saves: Vec::new(),
             scale: 1.0,
             offset: Point::new(0, 0),
+            layers: Vec::new(),
         }
     }
 
@@ -69,6 +78,7 @@ impl<'a> SkiaCanvas<'a> {
             saves: Vec::new(),
             scale,
             offset,
+            layers: Vec::new(),
         }
     }
 
@@ -92,6 +102,39 @@ impl<'a> SkiaCanvas<'a> {
         sp
     }
 
+    /// 在当前绘制目标（栈顶离屏层，或主缓冲）上填充路径，带栈顶裁剪 mask。
+    fn fill_path_on_target(&mut self, path: &tiny_skia::Path, sp: &SkPaint, tf: Transform) {
+        let mask = self.clips.last().map(|c| &c.mask);
+        match self.layers.last_mut() {
+            Some(l) => l.pixmap.fill_path(path, sp, FillRule::Winding, tf, mask),
+            None => self.pixmap.fill_path(path, sp, FillRule::Winding, tf, mask),
+        };
+    }
+
+    /// 当前绘制目标缓冲（栈顶离屏层，或主缓冲）。仅用于无 self.clips/self.engine
+    /// 并发借用的场景（draw_image 自带局部 mask）；其余处内联 match 以满足借用拆分。
+    fn target_pixmap(&mut self) -> &mut Pixmap {
+        match self.layers.last_mut() {
+            Some(l) => &mut l.pixmap,
+            None => self.pixmap,
+        }
+    }
+
+    /// 在当前绘制目标上描边路径，带栈顶裁剪 mask。
+    fn stroke_path_on_target(
+        &mut self,
+        path: &tiny_skia::Path,
+        sp: &SkPaint,
+        stroke: &Stroke,
+        tf: Transform,
+    ) {
+        let mask = self.clips.last().map(|c| &c.mask);
+        match self.layers.last_mut() {
+            Some(l) => l.pixmap.stroke_path(path, sp, stroke, tf, mask),
+            None => self.pixmap.stroke_path(path, sp, stroke, tf, mask),
+        };
+    }
+
     /// 逻辑→物理变换：缩放后平移 -offset（物理像素），把世界坐标映射进子 pixmap。
     fn tf(&self) -> Transform {
         Transform::from_scale(self.scale, self.scale).post_translate(
@@ -109,9 +152,8 @@ impl Canvas for SkiaCanvas<'_> {
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::fill_paint(paint, x, y, w, h);
-            let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap
-                .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
+            let tf = self.tf();
+            self.fill_path_on_target(&path, &sp, tf);
         }
     }
 
@@ -139,9 +181,8 @@ impl Canvas for SkiaCanvas<'_> {
                 width,
                 ..Default::default()
             };
-            let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap
-                .stroke_path(&path, &sp, &stroke, self.tf(), mask);
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
         }
     }
 
@@ -156,19 +197,74 @@ impl Canvas for SkiaCanvas<'_> {
                 line_cap: LineCap::Butt,
                 ..Default::default()
             };
-            let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap
-                .stroke_path(&path, &sp, &stroke, self.tf(), mask);
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
         }
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             let sp = Self::fill_paint(paint, cx - r, cy - r, 2.0 * r, 2.0 * r);
-            let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap
-                .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
+            let tf = self.tf();
+            self.fill_path_on_target(&path, &sp, tf);
         }
+    }
+
+    fn draw_shadow(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        blur: f32,
+        color: Color,
+    ) {
+        if color.a == 0 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let s = self.scale;
+        // 逻辑→物理（含局部重绘 offset）。
+        let px = (x - self.offset.x as f32) * s;
+        let py = (y - self.offset.y as f32) * s;
+        let pw = w * s;
+        let ph = h * s;
+        let pr = (radius * s).max(0.0);
+        let pblur = (blur * s).max(0.0);
+        // 3 趟 box-blur ≈ 高斯，边缘扩散约 1.5×半径，留 3× 余量防截断。
+        let margin = (pblur * 3.0).ceil() as i32 + 1;
+        let tw = (pw.ceil() as i32 + 2 * margin).max(1);
+        let th = (ph.ceil() as i32 + 2 * margin).max(1);
+        // 体量保护：超大投影直接跳过（避免离屏分配爆炸）。
+        if tw > 8192 || th > 8192 {
+            return;
+        }
+        let Some(mut tmp) = Pixmap::new(tw as u32, th as u32) else {
+            return;
+        };
+        if let Some(path) = rounded_rect_path(margin as f32, margin as f32, pw, ph, pr) {
+            let mut sp = SkPaint::default();
+            sp.set_color(to_sk_color(color));
+            sp.anti_alias = true;
+            tmp.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), None);
+        }
+        let r = pblur.round() as usize;
+        if r > 0 {
+            box_blur(&mut tmp, r);
+        }
+        // 合成到主缓冲：左上角对齐投影矩形外扩 margin 处；受当前裁剪 mask 约束（滚动视口）。
+        let dx = px.floor() as i32 - margin;
+        let dy = py.floor() as i32 - margin;
+        let mask = self.clips.last().map(|c| &c.mask);
+        let pp = PixmapPaint::default();
+        match self.layers.last_mut() {
+            Some(l) => l
+                .pixmap
+                .draw_pixmap(dx, dy, tmp.as_ref(), &pp, Transform::identity(), mask),
+            None => self
+                .pixmap
+                .draw_pixmap(dx, dy, tmp.as_ref(), &pp, Transform::identity(), mask),
+        };
     }
 
     fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {
@@ -250,8 +346,9 @@ impl Canvas for SkiaCanvas<'_> {
             quality: FilterQuality::Bilinear,
             ..Default::default()
         };
-        self.pixmap
-            .draw_pixmap(0, 0, img.pixmap().as_ref(), &paint, transform, Some(&mask));
+        let img_ref = img.pixmap();
+        self.target_pixmap()
+            .draw_pixmap(0, 0, img_ref.as_ref(), &paint, transform, Some(&mask));
     }
 
     fn draw_text(
@@ -278,8 +375,13 @@ impl Canvas for SkiaCanvas<'_> {
             return;
         }
         let clip = self.clips.last().map(|c| c.rect.offset(-off.x, -off.y));
+        // 绘制目标：栈顶离屏层或主缓冲（与 engine 借用分属不同字段，可并存）。
+        let target: &mut Pixmap = match self.layers.last_mut() {
+            Some(l) => &mut l.pixmap,
+            None => self.pixmap,
+        };
         if let Some(engine) = self.engine.as_deref_mut() {
-            engine.draw(self.pixmap, text, rect, color, align, family, size, clip);
+            engine.draw(target, text, rect, color, align, family, size, clip);
         }
     }
 
@@ -296,6 +398,43 @@ impl Canvas for SkiaCanvas<'_> {
                 (text.chars().count() as f32 * size * 0.6).ceil() as i32,
                 size.ceil() as i32,
             ),
+        }
+    }
+
+    fn push_layer(&mut self, opacity: f32) {
+        let (w, h) = (self.pixmap.width(), self.pixmap.height());
+        // 与主缓冲同尺寸的透明层；分配失败时退化为 1×1/0 透明度（不可见但保持栈平衡）。
+        let layer = match Pixmap::new(w, h) {
+            Some(pm) => Layer {
+                pixmap: pm,
+                opacity: opacity.clamp(0.0, 1.0),
+            },
+            None => Layer {
+                pixmap: Pixmap::new(1, 1).unwrap(),
+                opacity: 0.0,
+            },
+        };
+        self.layers.push(layer);
+    }
+
+    fn pop_layer(&mut self) {
+        if let Some(layer) = self.layers.pop() {
+            let pp = PixmapPaint {
+                opacity: layer.opacity,
+                ..Default::default()
+            };
+            let src = layer.pixmap;
+            match self.layers.last_mut() {
+                Some(parent) => {
+                    parent
+                        .pixmap
+                        .draw_pixmap(0, 0, src.as_ref(), &pp, Transform::identity(), None)
+                }
+                None => {
+                    self.pixmap
+                        .draw_pixmap(0, 0, src.as_ref(), &pp, Transform::identity(), None)
+                }
+            };
         }
     }
 
@@ -350,6 +489,97 @@ impl Canvas for SkiaCanvas<'_> {
 
 fn to_sk_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+/// 对预乘 RGBA8 像素做 3 趟可分离 box-blur（≈高斯）。半径 0 时空操作。
+/// 用于浮层投影的离屏柔化；预乘空间内逐通道线性平均，足够投影用。
+fn box_blur(pm: &mut Pixmap, radius: usize) {
+    if radius == 0 {
+        return;
+    }
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    for _ in 0..3 {
+        let src = pm.data().to_vec();
+        blur_h(&src, pm.data_mut(), w, h, radius);
+        let src = pm.data().to_vec();
+        blur_v(&src, pm.data_mut(), w, h, radius);
+    }
+}
+
+/// 水平方向 box-blur（滑动窗口运行和，O(w)/行；边缘窗口收窄即边界 clamp 平均）。
+fn blur_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    for y in 0..h {
+        let base = y * w;
+        let mut acc = [0u32; 4];
+        let mut n = 0u32;
+        for xx in 0..=r.min(w - 1) {
+            let i = (base + xx) * 4;
+            for c in 0..4 {
+                acc[c] += src[i + c] as u32;
+            }
+            n += 1;
+        }
+        for x in 0..w {
+            let o = (base + x) * 4;
+            for c in 0..4 {
+                dst[o + c] = (acc[c] / n) as u8;
+            }
+            let add = x + r + 1;
+            if add < w {
+                let i = (base + add) * 4;
+                for c in 0..4 {
+                    acc[c] += src[i + c] as u32;
+                }
+                n += 1;
+            }
+            if x >= r {
+                let i = (base + (x - r)) * 4;
+                for c in 0..4 {
+                    acc[c] -= src[i + c] as u32;
+                }
+                n -= 1;
+            }
+        }
+    }
+}
+
+/// 垂直方向 box-blur（滑动窗口运行和，O(h)/列）。
+fn blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    for x in 0..w {
+        let mut acc = [0u32; 4];
+        let mut n = 0u32;
+        for yy in 0..=r.min(h - 1) {
+            let i = (yy * w + x) * 4;
+            for c in 0..4 {
+                acc[c] += src[i + c] as u32;
+            }
+            n += 1;
+        }
+        for y in 0..h {
+            let o = (y * w + x) * 4;
+            for c in 0..4 {
+                dst[o + c] = (acc[c] / n) as u8;
+            }
+            let add = y + r + 1;
+            if add < h {
+                let i = (add * w + x) * 4;
+                for c in 0..4 {
+                    acc[c] += src[i + c] as u32;
+                }
+                n += 1;
+            }
+            if y >= r {
+                let i = ((y - r) * w + x) * 4;
+                for c in 0..4 {
+                    acc[c] -= src[i + c] as u32;
+                }
+                n -= 1;
+            }
+        }
+    }
 }
 
 /// 把归一化渐变映射到逻辑矩形 (x,y,w,h) 并构造 tiny-skia shader。
@@ -640,6 +870,46 @@ mod tests {
         let (cr, _, _) = px(&pm, 30, 30);
         let (er, _, _) = px(&pm, 3, 3);
         assert!(cr > er + 80, "圆心应明显比边角亮，实得 中心={cr} 边角={er}");
+    }
+
+    /// 离屏层 opacity：50% 红块合成到白底 → 粉色（r 高、g/b 被抬升）。
+    #[test]
+    fn push_pop_layer_composites_with_opacity() {
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+        }
+        let (r, g, b) = px(&pm, 20, 20);
+        assert!(r > 240, "红通道应高，实得 {r}");
+        assert!(
+            g > 100 && g < 200,
+            "绿应被白底抬到中段（50% 合成），实得 {g}"
+        );
+        assert!(b > 100 && b < 200, "蓝应被白底抬到中段，实得 {b}");
+    }
+
+    /// 投影：矩形外有柔化渐隐（紧邻边缘变暗、远处保持白）。
+    #[test]
+    fn draw_shadow_produces_soft_halo() {
+        let mut pm = Pixmap::new(120, 120).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.draw_shadow(40.0, 40.0, 40.0, 40.0, 8.0, 10.0, Color::rgba(0, 0, 0, 180));
+        }
+        // 投影矩形中心应明显变暗。
+        let (cr, _, _) = px(&pm, 60, 60);
+        assert!(cr < 120, "投影中心应变暗，实得 {cr}");
+        // 紧邻矩形外缘（约 6px 外）应处于柔化过渡（介于暗与白之间）。
+        let (er, _, _) = px(&pm, 86, 60);
+        assert!(er > 130 && er < 252, "外缘应为柔化过渡，实得 {er}");
+        // 远角应保持纯白（未被投影波及）。
+        let (fr, _, _) = px(&pm, 4, 4);
+        assert!(fr > 250, "远角应保持白，实得 {fr}");
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。

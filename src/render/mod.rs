@@ -121,6 +121,10 @@ pub trait Canvas {
     );
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint);
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
+    /// 绘制圆角矩形投影（drop shadow）：投影矩形 (x,y,w,h)、`radius` 圆角、
+    /// `blur` 模糊半径（逻辑 px）、`color`（含 alpha）。绘制在节点背景之下；
+    /// 偏移/外扩(spread)由调用方算入 (x,y,w,h)。`blur<=0` 时退化为锐利圆角矩形。
+    fn draw_shadow(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, color: Color);
     /// 把图片按 `fit` 缩放绘制到逻辑矩形 `dst`，并始终裁剪到 `dst`（Cover 溢出、
     /// None 超框安全收口）。`radius>0` 时按圆角裁剪（与背景/边框同源圆角）。
     /// `opacity` 为整体不透明度（0..=1，用于禁用置灰等状态调制）。
@@ -149,6 +153,12 @@ pub trait Canvas {
         family: Option<&str>,
         size: f32,
     ) -> crate::geometry::Size;
+
+    /// 压入一层离屏合成层：后续绘制重定向到该层；`pop_layer` 时以 `opacity`
+    /// 整体合成回父层。用于子树统一不透明度（避免逐节点 alpha 导致的重叠错叠）。
+    fn push_layer(&mut self, opacity: f32);
+    /// 弹出最近的合成层并按其 opacity 合成回父层。
+    fn pop_layer(&mut self);
 
     /// 保存当前裁剪状态。
     fn save(&mut self);

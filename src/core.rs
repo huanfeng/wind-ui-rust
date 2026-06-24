@@ -655,7 +655,28 @@ impl Tree {
         let (fx, fy, fw, fh) = (abs.x as f32, abs.y as f32, abs.w as f32, abs.h as f32);
         let radius = n.style.corner_radius;
 
+        // 子树整体不透明度：<1 时入离屏层，绘完整棵子树后按 opacity 合成回父层。
+        let use_layer = n.style.opacity < 1.0;
+        if use_layer {
+            canvas.push_layer(n.style.opacity);
+        }
+
         let theme = crate::theme::current();
+        // 投影：在背景之下、按 spread 外扩并按 dx/dy 偏移后柔化绘制。
+        if let Some(sh) = &n.style.shadow {
+            if sh.color.a > 0 {
+                let sp = sh.spread;
+                canvas.draw_shadow(
+                    fx - sp + sh.dx,
+                    fy - sp + sh.dy,
+                    fw + 2.0 * sp,
+                    fh + 2.0 * sp,
+                    (radius + sp).max(0.0),
+                    sh.blur,
+                    sh.color,
+                );
+            }
+        }
         if let Some(bg) = &n.style.bg {
             canvas.fill_round_rect(fx, fy, fw, fh, radius, &bg.resolve_paint(&theme));
         }
@@ -720,6 +741,10 @@ impl Tree {
                 track_w / 2.0,
                 &Paint::fill(thumb),
             );
+        }
+
+        if use_layer {
+            canvas.pop_layer();
         }
     }
 }
