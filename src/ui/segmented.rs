@@ -13,7 +13,7 @@ use std::rc::Rc;
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
@@ -164,10 +164,7 @@ impl Widget for SegmentedControl {
                 (bounds.h - 4) as f32,
             );
             let pr = (corner - 2.0).max(0.0);
-            // 选中胶囊投影：raised 浮起感，增强与轨道底的对比（参考设计的高对比选中）。
-            if enabled {
-                canvas.draw_shadow(rx, ry + 1.0, rw, rh, pr, 5.0, Color::rgba(0, 0, 0, 70));
-            }
+            // 选中胶囊：实心强调色（文字反色由 selected_text 提供），无投影/渐变。
             canvas.fill_round_rect(rx, ry, rw, rh, pr, &Paint::fill(pill_bg));
         }
         // 逐段文字（居中）。

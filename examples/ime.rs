@@ -206,6 +206,7 @@ fn context_menu() -> Element {
     let l3 = panel()
         .width(160)
         .padding_xy(0, 6)
+        .corner(10.0)
         .child(menu_item("宋", "宋体风格", "", false, false))
         .child(menu_item("黑", "黑体风格", "✓", true, true))
         .child(menu_item("楷", "楷体风格", "", false, false));
@@ -214,6 +215,7 @@ fn context_menu() -> Element {
     let l2 = panel()
         .width(190)
         .padding_xy(0, 6)
+        .corner(10.0)
         .child(menu_item("简", "简体中文", "✓", false, false))
         .child(menu_item("繁", "繁体中文（台湾）", "", false, false))
         .child(menu_item("港", "繁体中文（香港）", "", false, false))
@@ -224,6 +226,7 @@ fn context_menu() -> Element {
     let l1 = panel()
         .width(220)
         .padding_xy(0, 6)
+        .corner(10.0)
         .child(menu_item("⌨", "输入方案", "›", false, false))
         .child(menu_item("文", "字符集与字形", "›", true, true))
         .child(menu_item("⌨", "标点符号", "›", false, false))
@@ -323,7 +326,7 @@ fn setting_row(label: &str, sub: Option<&str>, control: Element) -> Element {
     Element::row()
         .width_match()
         .cross(Align::Center)
-        .padding_xy(18, 10)
+        .padding_xy(22, 13)
         .spacing(12)
         .child(left)
         .child(control)
@@ -335,8 +338,8 @@ fn settings_section_header(title: &str) -> Element {
         .font_weight(600)
         .fg_role(Role::TextMuted)
         .height(16)
-        .padding_xy(18, 0)
-        .margin_xy(0, 6)
+        .padding_xy(22, 0)
+        .margin_xy(0, 9)
 }
 
 /// 主题预览卡（渐变填充 + 选中边框），展示 bg_gradient 能力。
@@ -412,7 +415,7 @@ fn build_settings(
     let dict_tool = Element::row()
         .width_match()
         .cross(Align::Center)
-        .padding_xy(14, 10)
+        .padding_xy(18, 12)
         .spacing(8)
         .child(
             Element::label("🔍 搜索词条")
@@ -427,12 +430,16 @@ fn build_settings(
         )
         .child(
             Element::button("+ 添加")
+                .small()
+                .font_size(12.5)
                 .accent(hex(ACCENT))
                 .on_click(move |_| open_add.set(true)),
         )
-        .child(Element::button("导入").neutral())
+        .child(Element::button("导入").small().font_size(12.5).neutral())
         .child(
             Element::button("导出")
+                .small()
+                .font_size(12.5)
                 .neutral()
                 .on_click(move |_| open_export.set(true)),
         );
@@ -455,7 +462,7 @@ fn build_settings(
     ];
     let mut dict_table = Element::col()
         .width_match()
-        .padding_xy(14, 0)
+        .padding_xy(18, 0)
         .child(dict_head);
     for (w, py, fr, src) in rows {
         dict_table = dict_table.child(
@@ -612,7 +619,7 @@ fn build_settings(
         .width_match()
         .cross(Align::Center)
         .spacing(10)
-        .padding_xy(18, 14)
+        .padding_xy(22, 16)
         .child(logo)
         .child(
             Element::col()

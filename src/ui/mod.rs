@@ -415,6 +415,23 @@ enum BtnState {
     Press,
 }
 
+/// 按钮尺寸变体：内边距大小。默认 `Medium`；`Small` 用于密集工具栏（添加/导入/导出等）。
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum ButtonSize {
+    Small,
+    Medium,
+}
+
+impl ButtonSize {
+    /// (横向总内边距, 纵向总内边距)（px）。
+    fn padding(self) -> (i32, i32) {
+        match self {
+            ButtonSize::Small => (20, 10),
+            ButtonSize::Medium => (32, 18),
+        }
+    }
+}
+
 /// 交互按钮：hover/press 三态 + 点击/回车回调。颜色取自当前主题。
 /// 可选前置图标（`ImageContent`），证明"其它控件低成本嵌入图片"的 pattern。
 /// 禁用态由核心层统一管理（`Element::enabled/disabled`）：禁用时核心拦事件、跳 Tab，
@@ -429,6 +446,8 @@ pub struct Button {
     primed: Cell<bool>,
     /// 语义意图色（默认 Primary=accent，现有代码零改动）。
     intent: Intent,
+    /// 尺寸变体（默认 Medium）。
+    size: ButtonSize,
 }
 
 impl Button {
@@ -441,6 +460,7 @@ impl Button {
             bg_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
             primed: Cell::new(false),
             intent: Intent::Primary,
+            size: ButtonSize::Medium,
         }
     }
 
@@ -481,8 +501,9 @@ impl Widget for Button {
         } else {
             0
         };
-        // 内置左右 16 / 上下 9 的内边距
-        Size::new(s.w + 32 + icon_extra, s.h + 18)
+        // 按尺寸变体取内边距（Medium 左右16/上下9，Small 左右10/上下5）。
+        let (pad_w, pad_h) = self.size.padding();
+        Size::new(s.w + pad_w + icon_extra, s.h + pad_h)
     }
     fn paint(
         &self,
@@ -960,6 +981,11 @@ impl Element {
     }
     fn config_button_icon(self, icon: ImageContent) -> Self {
         self.config_button(|b| b.set_icon(icon), "icon()/icon_bytes()")
+    }
+
+    /// 小号按钮（更紧凑的内边距，用于密集工具栏；默认为 Medium）。仅 `Element::button(..)` 可用。
+    pub fn small(self) -> Self {
+        self.config_button(|b| b.size = ButtonSize::Small, "small()")
     }
 
     /// 启用标志（绑定 `Rc<Cell<bool>>`，运行期可切换）。**适用于任意控件/容器**：

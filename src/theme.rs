@@ -491,12 +491,12 @@ impl SegmentTheme {
         self.border_focus.unwrap_or(p.accent)
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
-        // 选中段强调色底（含 alpha）：配合胶囊投影呈 raised 高对比（参考设计）。
-        self.selected_bg
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x40))
+        // 选中段为实心强调色（参考设计：高亮色 + 文字反色），无半透明渐变感。
+        self.selected_bg.unwrap_or(p.accent)
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
-        self.selected_text.unwrap_or(p.accent)
+        // 选中段文字反色（强调色底上的对比前景）。
+        self.selected_text.unwrap_or(p.on_accent)
     }
     pub fn text(&self, p: &Palette) -> Color {
         self.text.unwrap_or(p.text_muted)
