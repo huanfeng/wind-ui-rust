@@ -23,6 +23,8 @@ pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
 
 /// 文件拖放回调类型：收到落在本节点（或其子节点冒泡上来）的文件路径列表。
 pub type DropFn = Box<dyn FnMut(&mut EventCtx, &[PathBuf])>;
+/// 右键上下文菜单构建回调：返回该次菜单项（空 = 不弹）。
+pub type MenuFn = Box<dyn FnMut() -> Vec<crate::event::MenuItem>>;
 
 /// 剪贴板读写抽象。由平台层提供实现，UiHost 注入到 `Tree`，控件经 `EventCtx` 访问。
 pub trait ClipboardProvider {
@@ -144,6 +146,9 @@ pub struct Node {
     /// 文件拖放回调（None=不接收拖放）。落点命中本节点或其子节点时，沿父链冒泡
     /// 到首个设了回调的节点触发；放在 fill 容器/根上即等价"全窗拖放"。
     pub on_drop: Option<DropFn>,
+    /// 右键上下文菜单构建回调（None=不弹）。落点命中本节点或子节点时沿父链冒泡到
+    /// 首个设了回调的节点触发，返回的项交宿主以级联浮层呈现。
+    pub context_menu: Option<MenuFn>,
     /// 是否为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
     /// 命中沿父链继承（标记容器即其内非交互区均可拖），但落在子交互控件上不拖动。
     pub window_drag: bool,
@@ -1199,7 +1204,7 @@ impl Tree {
                 if secondary
                     && !self
                         .get(id)
-                        .map(|n| n.widget.wants_right_click())
+                        .map(|n| n.widget.wants_right_click() || n.context_menu.is_some())
                         .unwrap_or(false)
                 {
                     continue;
@@ -1223,7 +1228,25 @@ impl Tree {
                 if o.window_op.is_some() {
                     res.window_op = o.window_op;
                 }
-                if consumed {
+                // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
+                // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
+                if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
+                    if let Some(mut cb) = self.get_mut(id).and_then(|n| n.context_menu.take()) {
+                        let items = cb();
+                        if let Some(n) = self.get_mut(id) {
+                            n.context_menu = Some(cb);
+                        }
+                        if !items.is_empty() {
+                            res.menu = Some(crate::event::MenuRequest {
+                                pos: ev.pos,
+                                items,
+                                min_width: 0,
+                            });
+                            res.consumed = true;
+                        }
+                    }
+                }
+                if consumed || res.consumed {
                     break;
                 }
             }
@@ -2344,6 +2367,35 @@ mod tests {
                 ("全选", true)
             ]
         );
+    }
+
+    #[test]
+    fn on_context_menu_opens_cascading_menu_on_right_click() {
+        use crate::event::MenuItem;
+        use crate::ui::Element;
+        let tree_el = Element::col().fill().on_context_menu(|| {
+            vec![
+                MenuItem::run("剪切", || {}, false).with_icon("✂"),
+                MenuItem::separator(),
+                MenuItem::submenu("更多", vec![MenuItem::run("子项", || {}, false)]).with_icon("⋯"),
+            ]
+        });
+        let mut tree = layout(tree_el, 200, 200);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(100, 100),
+            button: MouseButton::Right,
+            click_count: 1,
+        };
+        let res = tree.dispatch_pointer(down, &mut h, &mut cap);
+        let menu = res.menu.expect("右键容器应请求上下文菜单");
+        assert_eq!(menu.pos, Point::new(100, 100));
+        assert_eq!(menu.items.len(), 3);
+        assert_eq!(menu.items[0].icon.as_deref(), Some("✂"));
+        assert!(menu.items[1].separator);
+        assert_eq!(menu.items[2].submenu.len(), 1, "子菜单项应携带级联项");
+        assert!(!menu.items[2].is_actionable(), "子菜单父项不可直接执行");
     }
 
     #[test]

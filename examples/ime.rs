@@ -246,6 +246,61 @@ fn context_menu() -> Element {
         .child(Element::col().child(Element::leaf().size(2, 200)).child(l3))
 }
 
+/// 真实右键菜单项树（图标 + 分隔 + 快捷键 + 三级级联），交框架级联浮层呈现。
+fn ime_menu_items() -> Vec<MenuItem> {
+    vec![
+        MenuItem::submenu(
+            "输入方案",
+            vec![
+                MenuItem::run("全拼", || {}, true).with_icon("拼"),
+                MenuItem::run("双拼", || {}, false).with_icon("双"),
+                MenuItem::run("五笔", || {}, false).with_icon("笔"),
+            ],
+        )
+        .with_icon("⌨"),
+        MenuItem::submenu(
+            "字符集与字形",
+            vec![
+                MenuItem::run("简体中文", || {}, true).with_icon("简"),
+                MenuItem::run("繁体中文（台湾）", || {}, false).with_icon("繁"),
+                MenuItem::run("繁体中文（香港）", || {}, false).with_icon("港"),
+                MenuItem::separator(),
+                MenuItem::submenu(
+                    "字形风格",
+                    vec![
+                        MenuItem::run("宋体风格", || {}, false).with_icon("宋"),
+                        MenuItem::run("黑体风格", || {}, true).with_icon("黑"),
+                        MenuItem::run("楷体风格", || {}, false).with_icon("楷"),
+                    ],
+                )
+                .with_icon("字"),
+            ],
+        )
+        .with_icon("文"),
+        MenuItem::submenu(
+            "标点符号",
+            vec![
+                MenuItem::run("中文标点", || {}, true),
+                MenuItem::run("英文标点", || {}, false),
+            ],
+        )
+        .with_icon("⌨"),
+        MenuItem::separator(),
+        MenuItem::run("模糊音", || {}, false).with_icon("✓"),
+        MenuItem::run("云输入", || {}, false).with_icon("✓"),
+        MenuItem::run("双拼模式", || {}, false).with_icon("○"),
+        MenuItem::separator(),
+        MenuItem::run("表情与符号", || {}, false)
+            .with_icon("😊")
+            .with_shortcut("⌃⌘Space"),
+        MenuItem::submenu("剪贴板历史", vec![MenuItem::run("清空历史", || {}, false)])
+            .with_icon("📋"),
+        MenuItem::submenu("工具箱", vec![MenuItem::run("截图取字", || {}, false)]).with_icon("🔧"),
+        MenuItem::separator(),
+        MenuItem::run("输入法设置…", || {}, false).with_icon("⚙"),
+    ]
+}
+
 // ============================ 3 · 设置界面 ============================
 
 /// 设置行：左标签（+可选副标题）+ 右控件。
@@ -708,8 +763,8 @@ fn main() {
             .padding(28)
             .child(section("1 · 状态工具栏", toolbar())),
         Some(1) => Element::col().width_match().padding(28).child(section(
-            "2 · 右键菜单（三级级联 · 最终展开态）",
-            context_menu(),
+            "2 · 右键菜单（右击区域弹出真实级联菜单 · 下方为最终态预览）",
+            context_menu().on_context_menu(ime_menu_items),
         )),
         Some(2) => Element::col()
             .width_match()
@@ -722,8 +777,8 @@ fn main() {
             .child(header_bar)
             .child(section("1 · 状态工具栏", toolbar()))
             .child(section(
-                "2 · 右键菜单（三级级联 · 最终展开态）",
-                context_menu(),
+                "2 · 右键菜单（右击区域弹出真实级联菜单 · 下方为最终态预览）",
+                context_menu().on_context_menu(ime_menu_items),
             ))
             .child(section("3 · 设置界面（多标签 · 可切换）", settings)),
     };

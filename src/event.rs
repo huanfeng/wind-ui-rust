@@ -112,7 +112,7 @@ pub enum MenuAction {
     Run(std::rc::Rc<dyn Fn()>),
 }
 
-/// 一个浮层菜单/下拉项。
+/// 一个浮层菜单/下拉项。支持图标、尾随快捷键、分隔线与级联子菜单。
 #[derive(Clone)]
 pub struct MenuItem {
     pub label: String,
@@ -121,6 +121,19 @@ pub struct MenuItem {
     pub enabled: bool,
     /// 当前选中项（下拉用，渲染勾选标记）。
     pub checked: bool,
+    /// 前置图标（字符/emoji，None=无图标列）。
+    pub icon: Option<String>,
+    /// 尾随快捷键文本（如 "⌘C"）。submenu 非空时显示右箭头优先。
+    pub shortcut: Option<String>,
+    /// 分隔线项（label/action 忽略，渲染为细线，不可命中）。
+    pub separator: bool,
+    /// 级联子菜单项（非空 → 悬停展开下一级，行尾显示 ›）。
+    pub submenu: Vec<MenuItem>,
+}
+
+/// 空动作（分隔线/子菜单父项占位，永不执行）。
+fn noop_action() -> MenuAction {
+    MenuAction::Run(std::rc::Rc::new(|| {}))
 }
 
 impl MenuItem {
@@ -131,6 +144,10 @@ impl MenuItem {
             action: MenuAction::SendKey(key),
             enabled,
             checked: false,
+            icon: None,
+            shortcut: None,
+            separator: false,
+            submenu: Vec::new(),
         }
     }
     /// 便捷构造：标签 + 闭包动作。
@@ -140,7 +157,56 @@ impl MenuItem {
             action: MenuAction::Run(std::rc::Rc::new(f)),
             enabled: true,
             checked,
+            icon: None,
+            shortcut: None,
+            separator: false,
+            submenu: Vec::new(),
         }
+    }
+    /// 分隔线项。
+    pub fn separator() -> Self {
+        Self {
+            label: String::new(),
+            action: noop_action(),
+            enabled: false,
+            checked: false,
+            icon: None,
+            shortcut: None,
+            separator: true,
+            submenu: Vec::new(),
+        }
+    }
+    /// 级联子菜单父项：悬停展开 `items`。
+    pub fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> Self {
+        Self {
+            label: label.into(),
+            action: noop_action(),
+            enabled: true,
+            checked: false,
+            icon: None,
+            shortcut: None,
+            separator: false,
+            submenu: items,
+        }
+    }
+    /// 设置前置图标（字符/emoji）。
+    pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+    /// 设置尾随快捷键文本。
+    pub fn with_shortcut(mut self, s: impl Into<String>) -> Self {
+        self.shortcut = Some(s.into());
+        self
+    }
+    /// 设置选中勾。
+    pub fn with_check(mut self, checked: bool) -> Self {
+        self.checked = checked;
+        self
+    }
+    /// 是否可点击执行（非分隔、无子菜单、启用）。
+    pub fn is_actionable(&self) -> bool {
+        !self.separator && self.submenu.is_empty() && self.enabled
     }
 }
 

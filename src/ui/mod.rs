@@ -681,6 +681,7 @@ pub struct Element {
     clip_children: bool,
     click: Option<ClickFn>,
     on_drop: Option<DropFn>,
+    context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
     enabled: Option<Rc<Cell<bool>>>,
     tooltip: Option<String>,
@@ -704,6 +705,7 @@ impl Element {
             clip_children: false,
             click: None,
             on_drop: None,
+            context_menu: None,
             window_drag: false,
             enabled: None,
             tooltip: None,
@@ -825,6 +827,17 @@ impl Element {
         f: impl FnMut(&mut EventCtx, &[std::path::PathBuf]) + 'static,
     ) -> Self {
         self.on_drop = Some(Box::new(f));
+        self
+    }
+
+    /// 右键上下文菜单：在本元素（或其子元素）上右击时，调用 `build` 取菜单项并以
+    /// 级联浮层弹出。**适用于任意控件/容器**——挂到面板容器即"在该区域右击弹菜单"；
+    /// 命中沿父链冒泡到首个设了回调的节点。项用 `MenuItem`（支持图标/分隔/快捷键/子菜单）。
+    pub fn on_context_menu(
+        mut self,
+        build: impl FnMut() -> Vec<crate::event::MenuItem> + 'static,
+    ) -> Self {
+        self.context_menu = Some(Box::new(build));
         self
     }
 
@@ -1476,6 +1489,7 @@ impl Element {
             vis_cond: self.vis_cond,
             enabled: self.enabled,
             on_drop: self.on_drop,
+            context_menu: self.context_menu,
             window_drag: self.window_drag,
             tooltip: self.tooltip,
             focused: false,

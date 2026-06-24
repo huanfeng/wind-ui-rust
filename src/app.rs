@@ -27,10 +27,17 @@ use crate::ui::Element;
 // ---- 上下文菜单（宿主层自绘浮层）----
 
 const MENU_ITEM_H: i32 = 30;
-const MENU_PAD_X: i32 = 14;
-const MENU_VPAD: i32 = 4;
-const MENU_MIN_W: i32 = 130;
-const MENU_FONT: f32 = 14.0;
+const MENU_SEP_H: i32 = 9;
+const MENU_PAD_X: i32 = 12;
+const MENU_VPAD: i32 = 6;
+const MENU_MIN_W: i32 = 140;
+const MENU_FONT: f32 = 13.5;
+/// 图标列宽（有图标项时预留）。
+const MENU_ICON_W: i32 = 18;
+/// 图标与标签间距。
+const MENU_GAP: i32 = 8;
+/// 标签与尾随（快捷键/箭头）间最小间距。
+const MENU_TRAIL_GAP: i32 = 18;
 
 /// 悬停提示：触发延时（ms）、字号、内边距、相对指针的偏移。
 const TOOLTIP_DELAY_MS: u64 = 500;
@@ -40,31 +47,63 @@ const TOOLTIP_PAD_Y: i32 = 4;
 const TOOLTIP_CURSOR_DX: i32 = 12;
 const TOOLTIP_CURSOR_DY: i32 = 20;
 
-/// 宿主管理的上下文菜单浮层：在控件树之上自绘，拦截指针，项激活时向目标控件合成按键。
-struct ContextMenu {
+/// 单级菜单面板：一组项 + 面板矩形 + 悬停项 + 是否含图标列。
+struct MenuLevel {
     items: Vec<MenuItem>,
     rect: Rect,
     hover: Option<usize>,
+    has_icons: bool,
+    /// 该级由父级哪一项展开（根级为 None）；用于避免同项重复重建子菜单。
+    spawn: Option<usize>,
+}
+
+impl MenuLevel {
+    /// 每项的 (顶部 y, 高度)（逻辑坐标，含分隔线的小高度）。
+    fn item_rows(&self) -> Vec<(i32, i32)> {
+        let mut y = self.rect.y + MENU_VPAD;
+        let mut rows = Vec::with_capacity(self.items.len());
+        for it in &self.items {
+            let h = if it.separator {
+                MENU_SEP_H
+            } else {
+                MENU_ITEM_H
+            };
+            rows.push((y, h));
+            y += h;
+        }
+        rows
+    }
+    /// 命中点 → 项下标（分隔线不可命中）。
+    fn item_at(&self, p: Point) -> Option<usize> {
+        if !self.rect.contains(p) {
+            return None;
+        }
+        for (i, (top, h)) in self.item_rows().into_iter().enumerate() {
+            if p.y >= top && p.y < top + h {
+                return if self.items[i].separator {
+                    None
+                } else {
+                    Some(i)
+                };
+            }
+        }
+        None
+    }
+}
+
+/// 宿主管理的上下文菜单浮层：可级联多级面板，在控件树之上自绘、拦截指针，
+/// 叶子项激活时向目标控件合成按键或运行闭包。
+struct ContextMenu {
+    /// 面板栈：levels[0]=根，其后为依次展开的子菜单。
+    levels: Vec<MenuLevel>,
     /// 发起菜单的控件（合成按键的派发目标）。
     target: NodeId,
 }
 
 impl ContextMenu {
-    /// 项 i 在 y 轴的命中区间起点（逻辑坐标）。
-    fn item_y(&self, i: usize) -> i32 {
-        self.rect.y + MENU_VPAD + i as i32 * MENU_ITEM_H
-    }
-    /// 逻辑坐标 y → 菜单项下标（仅当落在某项区域内）。
-    fn item_at(&self, p: Point) -> Option<usize> {
-        if !self.rect.contains(p) {
-            return None;
-        }
-        let i = (p.y - self.rect.y - MENU_VPAD) / MENU_ITEM_H;
-        if i >= 0 && (i as usize) < self.items.len() {
-            Some(i as usize)
-        } else {
-            None
-        }
+    /// 命中点落在最深（最上层）的哪一级面板内。
+    fn level_at(&self, p: Point) -> Option<usize> {
+        self.levels.iter().rposition(|l| l.rect.contains(p))
     }
 }
 
@@ -569,75 +608,191 @@ impl UiHost {
         }
     }
 
-    /// 打开上下文菜单：用文字引擎测量项宽，计算并钳制到窗口内的菜单矩形。
-    fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
-        let mut max_w = 0;
-        for it in &req.items {
-            let w = self.engine.measure(&it.label, None, MENU_FONT, None).w;
-            max_w = max_w.max(w);
+    /// 测量一组菜单项所需面板宽度（图标列 + 标签 + 尾随快捷键/箭头）及是否含图标列。
+    fn level_width(&mut self, items: &[MenuItem], min_width: i32) -> (i32, bool) {
+        let has_icons = items.iter().any(|it| it.icon.is_some());
+        let mut max_label = 0;
+        let mut max_trail = 0;
+        for it in items {
+            if it.separator {
+                continue;
+            }
+            max_label = max_label.max(self.engine.measure(&it.label, None, MENU_FONT, None).w);
+            let tw = if !it.submenu.is_empty() {
+                10
+            } else if let Some(s) = &it.shortcut {
+                self.engine.measure(s, None, MENU_FONT - 2.0, None).w
+            } else if it.checked {
+                12
+            } else {
+                0
+            };
+            max_trail = max_trail.max(tw);
         }
-        let menu_w = (max_w + 2 * MENU_PAD_X).max(MENU_MIN_W).max(req.min_width);
-        let menu_h = req.items.len() as i32 * MENU_ITEM_H + 2 * MENU_VPAD;
+        let icon_w = if has_icons { MENU_ICON_W + MENU_GAP } else { 0 };
+        let trail_w = if max_trail > 0 {
+            MENU_TRAIL_GAP + max_trail
+        } else {
+            0
+        };
+        let w = (MENU_PAD_X + icon_w + max_label + trail_w + MENU_PAD_X)
+            .max(MENU_MIN_W)
+            .max(min_width);
+        (w, has_icons)
+    }
+
+    /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻（贴父面板左缘），
+    /// 否则贴窗右；越窗下缘上移钳制。
+    fn build_level(
+        &mut self,
+        items: Vec<MenuItem>,
+        ax: i32,
+        ay: i32,
+        min_width: i32,
+        flip_right: Option<i32>,
+    ) -> MenuLevel {
+        let (w, has_icons) = self.level_width(&items, min_width);
+        let body: i32 = items
+            .iter()
+            .map(|it| {
+                if it.separator {
+                    MENU_SEP_H
+                } else {
+                    MENU_ITEM_H
+                }
+            })
+            .sum();
+        let h = body + 2 * MENU_VPAD;
         let ws = self.logical_size;
-        let mut x = req.pos.x;
-        let mut y = req.pos.y;
-        if ws.w > 0 && x + menu_w > ws.w {
-            x = (ws.w - menu_w).max(0);
+        let mut x = ax;
+        let mut y = ay;
+        if ws.w > 0 && x + w > ws.w {
+            x = match flip_right {
+                Some(parent_left) => (parent_left - w).max(0),
+                None => (ws.w - w).max(0),
+            };
         }
-        if ws.h > 0 && y + menu_h > ws.h {
-            y = (ws.h - menu_h).max(0);
+        x = x.max(0);
+        if ws.h > 0 && y + h > ws.h {
+            y = (ws.h - h).max(0);
         }
-        self.menu = Some(ContextMenu {
-            items: req.items,
-            rect: Rect::new(x, y, menu_w, menu_h),
+        y = y.max(0);
+        MenuLevel {
+            items,
+            rect: Rect::new(x, y, w, h),
             hover: None,
+            has_icons,
+            spawn: None,
+        }
+    }
+
+    /// 打开上下文菜单（根级）。
+    fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
+        let level = self.build_level(req.items, req.pos.x, req.pos.y, req.min_width, None);
+        self.menu = Some(ContextMenu {
+            levels: vec![level],
             target,
         });
+    }
+
+    /// 按指针位置更新悬停路径：设置所在层悬停项，并按需展开/收起其级联子菜单。
+    fn menu_hover_update(&mut self, pos: Point) -> bool {
+        let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(pos)) else {
+            return false;
+        };
+        let item_idx = self.menu.as_ref().unwrap().levels[k].item_at(pos);
+        let mut changed = false;
+        {
+            let m = self.menu.as_mut().unwrap();
+            if m.levels[k].hover != item_idx {
+                m.levels[k].hover = item_idx;
+                changed = true;
+            }
+        }
+        // 取出悬停项的子菜单（克隆）与展开锚点（父项右缘、该项顶部）。
+        let (submenu, anchor) = {
+            let lvl = &self.menu.as_ref().unwrap().levels[k];
+            match item_idx {
+                Some(i) if !lvl.items[i].submenu.is_empty() && lvl.items[i].enabled => {
+                    let (top, _) = lvl.item_rows()[i];
+                    (
+                        Some(lvl.items[i].submenu.clone()),
+                        Some((lvl.rect.right(), top - MENU_VPAD, lvl.rect.x, i)),
+                    )
+                }
+                _ => (None, None),
+            }
+        };
+        let existing_spawn = self
+            .menu
+            .as_ref()
+            .and_then(|m| m.levels.get(k + 1).map(|l| l.spawn));
+        match (submenu, anchor) {
+            (Some(items), Some((ax, ay, parent_left, i))) => {
+                if existing_spawn == Some(Some(i)) {
+                    // 该子菜单已展开：仅收起更深层。
+                    let m = self.menu.as_mut().unwrap();
+                    if m.levels.len() > k + 2 {
+                        m.levels.truncate(k + 2);
+                        changed = true;
+                    }
+                } else {
+                    if let Some(m) = self.menu.as_mut() {
+                        m.levels.truncate(k + 1);
+                    }
+                    let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2));
+                    child.spawn = Some(i);
+                    self.menu.as_mut().unwrap().levels.push(child);
+                    changed = true;
+                }
+            }
+            _ => {
+                // 悬停项无子菜单：收起本层之下的所有子菜单。
+                let m = self.menu.as_mut().unwrap();
+                if m.levels.len() > k + 1 {
+                    m.levels.truncate(k + 1);
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     /// 菜单激活时处理指针；返回是否需重绘。
     fn handle_menu_pointer(&mut self, ev: PointerEvent) -> bool {
         match ev.kind {
-            PointerKind::Move => {
-                let h = self.menu.as_ref().and_then(|m| m.item_at(ev.pos));
-                if let Some(m) = self.menu.as_mut() {
-                    if m.hover != h {
-                        m.hover = h;
-                        return true;
-                    }
-                }
-                false
-            }
+            PointerKind::Move => self.menu_hover_update(ev.pos),
             PointerKind::Down => {
-                // 本次 Down 必关闭菜单（命中项执行后关 / 点外关）；标记吞掉随后的 Up，
-                // 否则该 Up 会下发到控件树，把菜单下方控件再次激活（下拉点一下又弹一遍）。
+                // 本次 Down 关闭菜单（命中叶子项执行后关 / 点外关）；标记吞掉随后的 Up，
+                // 否则该 Up 会下发到控件树重新激活下方控件（下拉点一下又弹一遍）。
                 self.swallow_up = true;
-                let inside = self.menu.as_ref().is_some_and(|m| m.rect.contains(ev.pos));
-                if !inside {
-                    self.menu = None; // 点击菜单外：关闭
+                let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(ev.pos)) else {
+                    self.menu = None; // 点击所有面板之外：关闭
                     return true;
-                }
-                // 命中可用项 → 执行动作并关闭。
+                };
+                // 同步悬停路径（保证子菜单按当前指针展开）。
+                self.menu_hover_update(ev.pos);
+                // 命中项：叶子执行并关闭；子菜单父项/禁用项保持展开。
                 let hit = self.menu.as_ref().and_then(|m| {
-                    m.item_at(ev.pos)
-                        .filter(|&i| m.items[i].enabled)
-                        .map(|i| (m.items[i].action.clone(), m.target))
+                    let lvl = &m.levels[k];
+                    lvl.item_at(ev.pos).map(|i| lvl.items[i].clone())
                 });
-                if let Some((action, target)) = hit {
-                    self.menu = None;
-                    match action {
-                        // 合成按键直达目标控件，绕过 on_key（不重跑 Tab/Escape 导航）。
-                        MenuAction::SendKey(k) => {
-                            let res = self.tree.dispatch_key(k, Some(target));
-                            if res.close {
-                                self.close = true;
+                if let Some(item) = hit {
+                    if item.is_actionable() {
+                        let target = self.menu.as_ref().unwrap().target;
+                        self.menu = None;
+                        match item.action {
+                            MenuAction::SendKey(key) => {
+                                let res = self.tree.dispatch_key(key, Some(target));
+                                if res.close {
+                                    self.close = true;
+                                }
                             }
+                            MenuAction::Run(f) => f(),
                         }
-                        // 运行闭包（下拉选择设置绑定值等）。
-                        MenuAction::Run(f) => f(),
                     }
                 }
-                true // 菜单内（含禁用项/间隙）始终吞掉
+                true // 菜单内始终吞掉
             }
             _ => true, // 吞掉 Up/Wheel 等，避免穿透到下层
         }
@@ -741,65 +896,129 @@ impl AppHandler for UiHost {
         let mut canvas = SkiaCanvas::with_text(pixmap, &mut self.engine, s);
         self.tree.paint(&mut canvas);
         // 上下文菜单浮层绘制在控件树之上（self.menu 与 self.engine 为不相交字段，借用安全）。
+        // 级联：从根到子菜单逐级绘制（子菜单覆盖在上）。
         if let Some(menu) = self.menu.as_ref() {
             let (pal, mt) = (&self.theme.palette, &self.theme.menu);
-            let r = menu.rect;
-            canvas.fill_round_rect(
-                r.x as f32,
-                r.y as f32,
-                r.w as f32,
-                r.h as f32,
-                8.0,
-                &Paint::fill(mt.bg(pal)),
-            );
-            canvas.stroke_round_rect(
-                r.x as f32,
-                r.y as f32,
-                r.w as f32,
-                r.h as f32,
-                8.0,
-                1.0,
-                &Paint::fill(mt.border(pal)),
-            );
-            for (i, it) in menu.items.iter().enumerate() {
-                let iy = menu.item_y(i);
-                if menu.hover == Some(i) && it.enabled {
-                    canvas.fill_round_rect(
-                        (r.x + 4) as f32,
-                        iy as f32,
-                        (r.w - 8) as f32,
-                        MENU_ITEM_H as f32,
-                        5.0,
-                        &Paint::fill(mt.hover(pal)),
-                    );
-                }
-                // 选中项用强调色 + 行尾勾选标记（下拉当前项）。
-                let color = if !it.enabled {
-                    mt.text_disabled(pal)
-                } else if it.checked {
-                    mt.accent(pal)
-                } else {
-                    mt.text(pal)
-                };
-                let tr = Rect::new(r.x + MENU_PAD_X, iy, r.w - 2 * MENU_PAD_X, MENU_ITEM_H);
-                canvas.draw_text(
-                    &it.label,
-                    tr,
-                    color,
-                    crate::spec::Align::Start,
-                    None,
-                    MENU_FONT,
+            for (li, level) in menu.levels.iter().enumerate() {
+                let r = level.rect;
+                // 面板投影 + 圆角底 + 描边。
+                canvas.draw_shadow(
+                    r.x as f32,
+                    (r.y + 6) as f32,
+                    r.w as f32,
+                    r.h as f32,
+                    10.0,
+                    18.0,
+                    Color::rgba(0, 0, 0, 110),
                 );
-                if it.checked {
-                    let cr = Rect::new(r.x, iy, r.w - MENU_PAD_X, MENU_ITEM_H);
+                canvas.fill_round_rect(
+                    r.x as f32,
+                    r.y as f32,
+                    r.w as f32,
+                    r.h as f32,
+                    10.0,
+                    &Paint::fill(mt.bg(pal)),
+                );
+                canvas.stroke_round_rect(
+                    r.x as f32,
+                    r.y as f32,
+                    r.w as f32,
+                    r.h as f32,
+                    10.0,
+                    1.0,
+                    &Paint::fill(mt.border(pal)),
+                );
+                let child_spawn = menu.levels.get(li + 1).and_then(|l| l.spawn);
+                let label_x = r.x
+                    + MENU_PAD_X
+                    + if level.has_icons {
+                        MENU_ICON_W + MENU_GAP
+                    } else {
+                        0
+                    };
+                for (i, (top, h)) in level.item_rows().into_iter().enumerate() {
+                    let it = &level.items[i];
+                    if it.separator {
+                        canvas.fill_rect(
+                            (r.x + 8) as f32,
+                            (top + h / 2) as f32,
+                            (r.w - 16) as f32,
+                            1.0,
+                            &Paint::fill(mt.border(pal)),
+                        );
+                        continue;
+                    }
+                    // 激活：本层悬停项，或展开了子菜单的父项（指针深入子菜单时父项保持高亮）。
+                    let active = (level.hover == Some(i) || child_spawn == Some(i)) && it.enabled;
+                    if active {
+                        canvas.fill_round_rect(
+                            (r.x + 4) as f32,
+                            (top + 1) as f32,
+                            (r.w - 8) as f32,
+                            (h - 2) as f32,
+                            6.0,
+                            &Paint::fill(mt.hover(pal)),
+                        );
+                    }
+                    let color = if !it.enabled {
+                        mt.text_disabled(pal)
+                    } else if active || it.checked {
+                        mt.accent(pal)
+                    } else {
+                        mt.text(pal)
+                    };
+                    // 图标列。
+                    if let Some(icon) = &it.icon {
+                        let ir = Rect::new(r.x + MENU_PAD_X, top, MENU_ICON_W, h);
+                        canvas.draw_text(
+                            icon,
+                            ir,
+                            color,
+                            crate::spec::Align::Center,
+                            None,
+                            MENU_FONT,
+                        );
+                    }
+                    // 标签。
+                    let lr = Rect::new(label_x, top, (r.right() - MENU_PAD_X - label_x).max(0), h);
                     canvas.draw_text(
-                        "\u{2713}",
-                        cr,
-                        mt.accent(pal),
-                        crate::spec::Align::End,
+                        &it.label,
+                        lr,
+                        color,
+                        crate::spec::Align::Start,
                         None,
                         MENU_FONT,
                     );
+                    // 尾随：子菜单箭头 › / 快捷键 / 勾选。
+                    let tr = Rect::new(r.x, top, r.w - MENU_PAD_X, h);
+                    if !it.submenu.is_empty() {
+                        canvas.draw_text(
+                            "\u{203A}",
+                            tr,
+                            color,
+                            crate::spec::Align::End,
+                            None,
+                            MENU_FONT + 1.0,
+                        );
+                    } else if let Some(s) = &it.shortcut {
+                        canvas.draw_text(
+                            s,
+                            tr,
+                            mt.text_disabled(pal),
+                            crate::spec::Align::End,
+                            None,
+                            MENU_FONT - 2.0,
+                        );
+                    } else if it.checked {
+                        canvas.draw_text(
+                            "\u{2713}",
+                            tr,
+                            mt.accent(pal),
+                            crate::spec::Align::End,
+                            None,
+                            MENU_FONT,
+                        );
+                    }
                 }
             }
         }
@@ -907,9 +1126,11 @@ impl AppHandler for UiHost {
         if res.close {
             self.close = true;
         }
-        // 控件请求弹出上下文菜单（目标为刚获焦的控件）。
+        // 控件请求弹出上下文菜单。target 是 SendKey 动作的派发对象：优先刚获焦的控件
+        // （如 TextInput 右键剪贴板项），否则回退到根节点（on_context_menu 容器不可聚焦，
+        // 其菜单项多为 Run 闭包，不依赖 target）。
         if let Some(req) = res.menu {
-            if let Some(target) = self.focus {
+            if let Some(target) = self.focus.or(self.tree.root) {
                 self.open_menu(req, target);
             }
         }
