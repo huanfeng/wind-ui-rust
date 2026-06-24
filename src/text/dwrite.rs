@@ -21,7 +21,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteGdiInterop, IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
     DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
     DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH,
     DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
 };
@@ -51,7 +51,7 @@ pub struct DWriteEngine {
     gdi_interop: IDWriteGdiInterop,
     renderer: IDWriteTextRenderer,
     /// 缓存 TextFormat，按 (family, 物理字号 bits) 复用。
-    formats: HashMap<(String, u32), IDWriteTextFormat>,
+    formats: HashMap<(String, u32, u16), IDWriteTextFormat>,
     /// DPI 缩放因子（逻辑→物理）。
     scale: f32,
     /// 复用的离屏位图渲染目标（按需扩容），避免每次绘字都创建 COM 对象。
@@ -94,10 +94,17 @@ impl DWriteEngine {
 
     fn format(&mut self, family: Option<&str>, size: f32) -> Option<IDWriteTextFormat> {
         let fam = family.unwrap_or(DEFAULT_FAMILY).to_string();
-        let key = (fam.clone(), size.to_bits());
+        // 当前字重经线程局部注入（核心层按 Style.font_weight 设置）；400 时等同旧行为。
+        let weight = crate::text::current_weight();
+        let key = (fam.clone(), size.to_bits(), weight);
         if let Some(f) = self.formats.get(&key) {
             return Some(f.clone());
         }
+        let dw_weight = if weight == crate::text::WEIGHT_NORMAL {
+            DWRITE_FONT_WEIGHT_NORMAL
+        } else {
+            DWRITE_FONT_WEIGHT(weight as i32)
+        };
         let fam_w = wide_nul(&fam);
         let locale = wide_nul("zh-cn");
         let format = unsafe {
@@ -105,7 +112,7 @@ impl DWriteEngine {
                 .CreateTextFormat(
                     PCWSTR(fam_w.as_ptr()),
                     None,
-                    DWRITE_FONT_WEIGHT_NORMAL,
+                    dw_weight,
                     DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL,
                     size,

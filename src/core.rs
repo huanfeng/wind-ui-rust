@@ -324,10 +324,15 @@ impl Tree {
 
         let content = match layout {
             Layout::None => {
-                // 叶子：纯内容固有尺寸（可能需要测量文本）
+                // 叶子：纯内容固有尺寸（可能需要测量文本）。按节点字重注入线程局部，
+                // 使文本测量与绘制走同一字重（加粗标题宽度不被低估而误裁/误换行）。
                 let n = self.get(id).unwrap();
-                n.widget
-                    .measure(Size::new(avail_w, avail_h), &n.style, text)
+                crate::text::set_weight(n.style.font_weight);
+                let m = n
+                    .widget
+                    .measure(Size::new(avail_w, avail_h), &n.style, text);
+                crate::text::set_weight(crate::text::WEIGHT_NORMAL);
+                m
             }
             Layout::Linear { axis, spacing, .. } => {
                 self.measure_linear(id, axis, spacing, wspec, hspec, avail_w, avail_h, text)
@@ -690,8 +695,11 @@ impl Tree {
         let content = abs.inset(n.padding);
         // 标记当前节点矩形：节点内的 anim::request_repaint 会把脏区归到此处（局部重绘用）。
         crate::anim::set_paint_rect(Some(abs));
+        // 按节点字重注入线程局部，使 widget 内的文字绘制按 Style.font_weight 取字体格式。
+        crate::text::set_weight(n.style.font_weight);
         n.widget
             .paint(abs, content, n.focused, enabled, canvas, &n.style);
+        crate::text::set_weight(crate::text::WEIGHT_NORMAL);
         crate::anim::set_paint_rect(None);
 
         // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。

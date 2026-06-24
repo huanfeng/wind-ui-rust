@@ -118,6 +118,8 @@ pub struct Style {
     pub fg_role: Option<Role>,
     /// 字号 px。
     pub font_size: f32,
+    /// 字重（DirectWrite 数值：400=Normal、500=Medium、600=SemiBold、700=Bold）。
+    pub font_weight: u16,
     /// 字体族（None = 系统默认）。
     pub font_family: Option<String>,
     /// 文字水平对齐。
@@ -137,6 +139,7 @@ impl Default for Style {
             fg: Color::hex(0x1A1A1A),
             fg_role: None,
             font_size: 14.0,
+            font_weight: crate::text::WEIGHT_NORMAL,
             font_family: None,
             text_align: Align::Start,
             shadow: None,

@@ -491,8 +491,9 @@ impl SegmentTheme {
         self.border_focus.unwrap_or(p.accent)
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
+        // 选中段强调色底（含 alpha）：配合胶囊投影呈 raised 高对比（参考设计）。
         self.selected_bg
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x40))
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
         self.selected_text.unwrap_or(p.accent)

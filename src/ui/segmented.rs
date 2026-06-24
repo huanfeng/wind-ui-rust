@@ -13,7 +13,7 @@ use std::rc::Rc;
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
@@ -157,14 +157,18 @@ impl Widget for SegmentedControl {
             } else {
                 pal.surface_alt
             };
-            canvas.fill_round_rect(
+            let (rx, ry, rw, rh) = (
                 px0 + 2.0,
                 (bounds.y + 2) as f32,
                 px1 - px0 - 4.0,
                 (bounds.h - 4) as f32,
-                (corner - 2.0).max(0.0),
-                &Paint::fill(pill_bg),
             );
+            let pr = (corner - 2.0).max(0.0);
+            // 选中胶囊投影：raised 浮起感，增强与轨道底的对比（参考设计的高对比选中）。
+            if enabled {
+                canvas.draw_shadow(rx, ry + 1.0, rw, rh, pr, 5.0, Color::rgba(0, 0, 0, 70));
+            }
+            canvas.fill_round_rect(rx, ry, rw, rh, pr, &Paint::fill(pill_bg));
         }
         // 逐段文字（居中）。
         for i in 0..n {
@@ -201,12 +205,11 @@ impl Widget for SegmentedControl {
             );
         }
 
-        // 外边框最后描，盖住分隔线端点与选中底的圆角缝。聚焦时换强调色 + 加粗，
-        // 让键盘焦点可见（控件支持左右键切换，需可发现）——对齐 Dropdown 惯例。
+        // 外边框最后描，盖住分隔线端点与选中底的圆角缝。键盘焦点的可见性交由核心
+        // 焦点环（仅键盘导航时绘制），纯鼠标操作不再强制高亮框。
+        let _ = focused;
         let (border, bw) = if !enabled {
             (pal.track, 1.5)
-        } else if focused {
-            (sg.border_focus(pal), 1.8)
         } else {
             (sg.border(pal), 1.5)
         };

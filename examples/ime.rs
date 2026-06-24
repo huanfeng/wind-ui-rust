@@ -108,7 +108,7 @@ fn toolbar() -> Element {
             .height(28)
             .corner(7.0);
         if active {
-            e = e.bg(accent_a(48)).fg_role(Role::Accent);
+            e = e.bg(accent_a(48)).fg_role(Role::Accent).font_weight(600);
         } else if dim {
             e = e.fg_role(Role::TextMuted);
         } else {
@@ -173,6 +173,7 @@ fn menu_item(icon: &str, label: &str, trailing: &str, active: bool, accent_text:
         .child(
             Element::label(label)
                 .font_size(13.0)
+                .font_weight(if accent_text { 500 } else { 400 })
                 .fg_role(if accent_text {
                     Role::Accent
                 } else {
@@ -252,6 +253,7 @@ fn setting_row(label: &str, sub: Option<&str>, control: Element) -> Element {
     let mut left = Element::col().weight(1.0).spacing(2).child(
         Element::label(label)
             .font_size(13.0)
+            .font_weight(500)
             .fg_role(Role::Text)
             .height(18),
     );
@@ -275,6 +277,7 @@ fn setting_row(label: &str, sub: Option<&str>, control: Element) -> Element {
 fn settings_section_header(title: &str) -> Element {
     Element::label(title)
         .font_size(11.0)
+        .font_weight(600)
         .fg_role(Role::TextMuted)
         .height(16)
         .padding_xy(18, 0)
@@ -408,6 +411,7 @@ fn build_settings(
                 .child(
                     Element::label(w)
                         .font_size(13.0)
+                        .font_weight(500)
                         .fg_role(Role::Text)
                         .weight(1.6),
                 )
@@ -562,6 +566,7 @@ fn build_settings(
                 .child(
                     Element::label("云拼输入法")
                         .font_size(15.0)
+                        .font_weight(600)
                         .fg_role(Role::Text)
                         .height(20),
                 )
@@ -622,6 +627,7 @@ fn dialog_frame(title: &str, body: Element, footer: Element) -> Element {
         .child(
             Element::label(title)
                 .font_size(14.0)
+                .font_weight(600)
                 .fg_role(Role::Text)
                 .height(22)
                 .width_match()
@@ -677,6 +683,7 @@ fn main() {
         .child(
             Element::label("中文输入法界面复刻")
                 .font_size(22.0)
+                .font_weight(600)
                 .fg_role(Role::Text)
                 .height(30)
                 .weight(1.0),

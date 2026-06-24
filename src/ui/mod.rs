@@ -1422,6 +1422,11 @@ impl Element {
         self.style.font_size = s;
         self
     }
+    /// 字重（400=常规、500=中、600=半粗、700=粗）。标题/强调文字加粗更接近设计稿。
+    pub fn font_weight(mut self, w: u16) -> Self {
+        self.style.font_weight = w;
+        self
+    }
     /// 文字水平对齐。
     pub fn text_align(mut self, a: Align) -> Self {
         self.style.text_align = a;

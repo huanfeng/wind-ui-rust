@@ -393,7 +393,18 @@ impl Widget for TabButton {
         let amount = ind.animate();
         self.ind.set(ind);
         if amount > 0.0 {
-            let full = (bounds.w - 16) as f32;
+            // 指示条比文字略宽（参考设计：蓝条宽于标签文字），按文字宽 + 两侧外扩，
+            // 钳到 tab 宽内。有图标时把图标宽并入。
+            let ts =
+                canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
+            let content_w = if self.icon.is_some() {
+                ts.h + TAB_ICON_GAP + ts.w
+            } else {
+                ts.w
+            };
+            let full = ((content_w + 22) as f32)
+                .min(bounds.w as f32 - 4.0)
+                .max(0.0);
             let bw = full * amount;
             let cx = bounds.x as f32 + bounds.w as f32 / 2.0;
             canvas.fill_round_rect(
