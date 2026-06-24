@@ -61,6 +61,29 @@ impl Default for Palette {
     }
 }
 
+impl Palette {
+    /// 暗色调色板预设（与亮色 Default 语义角色一一对应，仅取暗色值）。
+    pub fn dark() -> Self {
+        Self {
+            accent: Color::hex(0x4C8BF5),
+            accent_hover: Color::hex(0x6BA3FF),
+            accent_active: Color::hex(0x3A6FD0),
+            on_accent: Color::WHITE,
+            bg: Color::hex(0x111827),
+            surface: Color::hex(0x1B2333),
+            surface_alt: Color::hex(0x232C3E),
+            text: Color::hex(0xE6E8EC),
+            text_muted: Color::hex(0x9AA3B2),
+            text_disabled: Color::hex(0x5A6172),
+            border: Color::hex(0x2C3650),
+            track: Color::hex(0x2B3344),
+            placeholder: Color::hex(0x6B7280),
+            divider: Color::hex(0x242C3C),
+            danger: Color::hex(0xE5484D),
+        }
+    }
+}
+
 /// 控件语义意图色。内置三核心 + 开放扩展点 `Custom`——使用者传任意基色即可，
 /// 框架派生整组视觉（hover/active 变亮变暗、fg 按亮度自适应），零新增 palette 色槽。
 #[derive(Clone, Copy)]
@@ -610,6 +633,13 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// 暗色主题（暗色 palette + 默认 metrics/控件覆盖层）。
+    pub fn dark() -> Self {
+        Self {
+            palette: Palette::dark(),
+            ..Theme::default()
+        }
+    }
     /// 从 TOML 字符串解析（缺省字段回退到默认，支持部分覆盖）。
     pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(s)
@@ -637,6 +667,16 @@ pub fn set_current(theme: Rc<Theme>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_theme_has_dark_bg_and_light_text() {
+        let d = Theme::dark();
+        let lum = |c: Color| c.r as u32 + c.g as u32 + c.b as u32;
+        assert!(lum(d.palette.bg) < 300, "暗色背景亮度应低");
+        assert!(lum(d.palette.text) > 500, "暗色文字应亮");
+        // metrics 沿用默认。
+        assert_eq!(d.metrics.corner_md, Metrics::default().corner_md);
+    }
 
     #[test]
     fn toml_roundtrip_preserves_palette() {

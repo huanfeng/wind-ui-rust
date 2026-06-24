@@ -3,6 +3,7 @@
 //! `App` 构建器组装窗口配置与控件树；`UiHost` 持有运行期交互状态
 //! （树、文字引擎、hover/capture/focus）并实现 `AppHandler` 供平台驱动。
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -70,11 +71,37 @@ impl ContextMenu {
 type RenderClosure = Box<dyn FnMut(&mut Pixmap, Size)>;
 
 /// 应用构建器。命令式 API 的根入口。
+/// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
+/// 控件 paint 期读 `theme::current()` 自动跟随；用 `Brush::Role`/`bg_role` 等
+/// 主题角色的背景/边框/文字也随之刷新，写死的 `bg(Color)` 定格色不变。
+#[derive(Clone)]
+pub struct ThemeHandle {
+    inner: Rc<RefCell<Rc<Theme>>>,
+}
+
+impl ThemeHandle {
+    fn new(t: Rc<Theme>) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(t)),
+        }
+    }
+    /// 替换当前主题并请求重绘。
+    pub fn set(&self, t: Theme) {
+        *self.inner.borrow_mut() = Rc::new(t);
+        crate::anim::request_repaint();
+    }
+    /// 当前主题快照。
+    pub fn current(&self) -> Rc<Theme> {
+        self.inner.borrow().clone()
+    }
+}
+
 pub struct App {
     cfg: WindowConfig,
     render: Option<RenderClosure>,
     content: Option<Element>,
     theme: Option<Theme>,
+    theme_src: Option<ThemeHandle>,
     pumps: Vec<Box<dyn FnMut()>>,
     intervals: Vec<(Duration, Box<dyn FnMut()>)>,
     waker_shared: Option<Arc<WakerShared>>,
@@ -102,6 +129,7 @@ impl App {
             render: None,
             content: None,
             theme: None,
+            theme_src: None,
             pumps: Vec::new(),
             intervals: Vec::new(),
             waker_shared: None,
@@ -136,8 +164,21 @@ impl App {
     /// 设置主题（默认使用内置默认主题）。窗口背景未显式设置时随主题 palette.bg。
     pub fn theme(mut self, t: Theme) -> Self {
         self.cfg.bg = t.palette.bg;
+        // 已有运行期句柄时同步初值，保证 theme()/theme_handle() 任意调用序结果一致。
+        if let Some(h) = &self.theme_src {
+            *h.inner.borrow_mut() = Rc::new(t.clone());
+        }
         self.theme = Some(t);
         self
+    }
+
+    /// 获取运行期主题句柄（多次调用返回同一共享源的克隆）。把它克隆进控件回调，
+    /// 调 `set(theme)` 即可在窗口内热切换暗/亮主题，下一帧整树跟随刷新。
+    pub fn theme_handle(&mut self) -> ThemeHandle {
+        let init = Rc::new(self.theme.clone().unwrap_or_default());
+        self.theme_src
+            .get_or_insert_with(|| ThemeHandle::new(init))
+            .clone()
     }
 
     /// 截屏模式：渲染一帧存 PNG 后退出。常用于自动化验证。
@@ -217,13 +258,22 @@ impl App {
     }
 
     pub fn run(self) {
-        let theme = Rc::new(self.theme.unwrap_or_default());
+        let theme_src = match self.theme_src {
+            Some(h) => h,
+            None => ThemeHandle::new(Rc::new(self.theme.unwrap_or_default())),
+        };
         let waker = self.waker_shared.clone();
         let cfg = self.cfg;
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
-            Box::new(UiHost::new(root, theme, cfg.bg, self.pumps, self.intervals))
+            Box::new(UiHost::new(
+                root,
+                theme_src,
+                cfg.bg,
+                self.pumps,
+                self.intervals,
+            ))
         } else {
             Box::new(ClosureHandler {
                 f: Box::new(|_, _| {}),
@@ -234,10 +284,13 @@ impl App {
 
     #[cfg(test)]
     fn into_handler_for_test(self) -> UiHost {
-        let theme = Rc::new(self.theme.unwrap_or_default());
+        let theme_src = match self.theme_src {
+            Some(h) => h,
+            None => ThemeHandle::new(Rc::new(self.theme.unwrap_or_default())),
+        };
         UiHost::new(
             self.content.unwrap(),
-            theme,
+            theme_src,
             self.cfg.bg,
             self.pumps,
             self.intervals,
@@ -341,8 +394,10 @@ struct UiHost {
     menu: Option<ContextMenu>,
     /// 最近一帧的逻辑窗口尺寸（菜单弹出位置钳制用）。
     logical_size: Size,
-    /// 活动主题（注入到线程局部供控件读取）。
+    /// 活动主题快照（每帧从 theme_src 刷新，注入到线程局部供控件读取）。
     theme: Rc<Theme>,
+    /// 运行期主题源：热切换时下一帧 render 据此刷新 theme。
+    theme_src: ThemeHandle,
     /// 单调起点，用于动画相位时钟。
     start: std::time::Instant,
     /// 触摸平移的亚像素残差（物理→逻辑取整丢失部分累积，避免高 DPI 细微平移发黏）。
@@ -383,12 +438,13 @@ const DAMAGE_MARGIN: i32 = 2;
 impl UiHost {
     fn new(
         root: Element,
-        theme: Rc<Theme>,
+        theme_src: ThemeHandle,
         bg: Color,
         pumps: Vec<Box<dyn FnMut()>>,
         intervals: Vec<(std::time::Duration, Box<dyn FnMut()>)>,
     ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
+        let theme = theme_src.current();
         crate::theme::set_current(theme.clone());
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
@@ -407,6 +463,7 @@ impl UiHost {
             menu: None,
             logical_size: Size::new(0, 0),
             theme,
+            theme_src,
             start: std::time::Instant::now(),
             pan_residual: 0.0,
             fling: None,
@@ -617,7 +674,8 @@ impl AppHandler for UiHost {
         for pump in self.pumps.iter_mut() {
             pump();
         }
-        // 注入主题（离屏路径首帧、主题变更时均生效）。
+        // 从运行期句柄刷新主题快照（热切换下一帧生效），注入线程局部供控件读取。
+        self.theme = self.theme_src.current();
         crate::theme::set_current(self.theme.clone());
         // 动画：清上一帧请求/脏区并刷新帧时钟，绘制中控件可重新请求。
         crate::anim::reset_request();
@@ -1205,6 +1263,28 @@ mod tests {
     fn on_interval_registers() {
         let app = App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), || {});
         assert_eq!(app.intervals.len(), 1);
+    }
+
+    #[test]
+    fn theme_handle_hot_swaps_into_host() {
+        use crate::platform::AppHandler;
+        use tiny_skia::Pixmap;
+        let mut app = App::new("t", 60, 60).theme(crate::theme::Theme::default());
+        let handle = app.theme_handle();
+        app = app.content(Element::col());
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        handler.render(&mut pm, Size::new(60, 60));
+        let lum = |c: Color| c.r as u32 + c.g as u32 + c.b as u32;
+        assert!(lum(handler.theme.palette.bg) > 500, "初始亮色背景");
+        // 句柄热切换为暗色 → 下一帧 render 后 host 主题快照应转暗。
+        handle.set(crate::theme::Theme::dark());
+        handler.render(&mut pm, Size::new(60, 60));
+        assert!(
+            lum(handler.theme.palette.bg) < 300,
+            "热切换后 host 应共享句柄的暗色主题"
+        );
     }
 
     #[test]
