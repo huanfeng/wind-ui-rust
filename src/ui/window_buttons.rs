@@ -68,7 +68,15 @@ impl Widget for WindowButton {
         Size::new(BTN_W, BTN_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let is_close = self.kind == WindowButtonKind::Close;
         // 悬停/按下底色：关闭键红，其余淡灰；Normal 用全透明（淡入淡出的起止）。
         let target_bg = match self.state {
@@ -84,15 +92,29 @@ impl Widget for WindowButton {
             anim = Transition::new(target_bg);
             self.primed.set(true);
         } else if anim.target() != target_bg {
-            anim.retarget(target_bg, crate::theme::current().anim.fast(), Easing::EaseOut);
+            anim.retarget(
+                target_bg,
+                crate::theme::current().anim.fast(),
+                Easing::EaseOut,
+            );
         }
         let bg = anim.animate();
         self.bg_anim.set(anim);
         if bg.a > 0 {
-            canvas.fill_rect(bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32, &Paint::fill(bg));
+            canvas.fill_rect(
+                bounds.x as f32,
+                bounds.y as f32,
+                bounds.w as f32,
+                bounds.h as f32,
+                &Paint::fill(bg),
+            );
         }
         // 图标色：关闭键 hover/press 时白，否则取元素 fg（深色标题栏用 .fg(WHITE)）。
-        let glyph = if is_close && self.state != BtnState::Normal { Color::WHITE } else { style.fg };
+        let glyph = if is_close && self.state != BtnState::Normal {
+            Color::WHITE
+        } else {
+            style.fg
+        };
         let paint = Paint::fill(glyph);
         // 居中的 GLYPH×GLYPH 区域。
         let cx = bounds.x + bounds.w / 2;
@@ -139,7 +161,11 @@ impl Widget for WindowButton {
                 PointerKind::Up => {
                     let was_press = self.state == BtnState::Press;
                     let inside = ctx.bounds().contains(p.pos);
-                    self.state = if inside { BtnState::Hover } else { BtnState::Normal };
+                    self.state = if inside {
+                        BtnState::Hover
+                    } else {
+                        BtnState::Normal
+                    };
                     ctx.release_capture();
                     ctx.mark_dirty();
                     if was_press && inside {

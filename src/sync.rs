@@ -18,7 +18,10 @@ pub struct Sender<Msg> {
 
 impl<Msg> Clone for Sender<Msg> {
     fn clone(&self) -> Self {
-        Self { tx: self.tx.clone(), waker: self.waker.clone() }
+        Self {
+            tx: self.tx.clone(),
+            waker: self.waker.clone(),
+        }
     }
 }
 
@@ -58,7 +61,10 @@ pub struct Waker {
 
 impl WakerShared {
     pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self { raw: Mutex::new(None), pending: AtomicBool::new(false) })
+        Arc::new(Self {
+            raw: Mutex::new(None),
+            pending: AtomicBool::new(false),
+        })
     }
     /// 窗口建好后回填平台句柄；若此前有积压 wake，立即补发一次。
     pub(crate) fn bind(self: &Arc<Self>, raw: RawWake) {
@@ -70,7 +76,9 @@ impl WakerShared {
         }
     }
     pub(crate) fn waker(self: &Arc<Self>) -> Waker {
-        Waker { inner: self.clone() }
+        Waker {
+            inner: self.clone(),
+        }
     }
 }
 

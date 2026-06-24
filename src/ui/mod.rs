@@ -23,23 +23,23 @@ use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
-use crate::theme::{Intent, IntentColors};
 use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::theme::{Intent, IntentColors};
 
 pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, RadioButton, Slider, Switch, TextInput};
 pub use link::Link;
 pub use list::ListRow;
 pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
-pub use window_buttons::{WindowButton, WindowButtonKind};
 pub use progress::ProgressBar;
 pub use segmented::SegmentedControl;
 pub use select::Dropdown;
 pub use stepper::Stepper;
+pub use window_buttons::{WindowButton, WindowButtonKind};
 
 /// 图标与文字之间的间距（Button 等）。
 const ICON_GAP: i32 = 6;
@@ -48,7 +48,7 @@ const ICON_GAP: i32 = 6;
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Truncate {
     #[default]
-    None,   // 裁剪（默认行为）
+    None, // 裁剪（默认行为）
     End,    // text…（最常用）
     Start,  // …text
     Middle, // te…xt
@@ -67,11 +67,22 @@ pub struct Label {
 
 impl Label {
     pub fn new(text: String) -> Self {
-        Self { text, max_lines: None, truncate: Truncate::None, trunc_cache: RefCell::new(None) }
+        Self {
+            text,
+            max_lines: None,
+            truncate: Truncate::None,
+            trunc_cache: RefCell::new(None),
+        }
     }
 
     /// 计算截断后显示串（含省略号）；结果会被 paint 缓存，通常只算一次。
-    fn compute_truncated(&self, canvas: &mut dyn Canvas, family: Option<&str>, fsize: f32, avail_w: i32) -> String {
+    fn compute_truncated(
+        &self,
+        canvas: &mut dyn Canvas,
+        family: Option<&str>,
+        fsize: f32,
+        avail_w: i32,
+    ) -> String {
         let total_w = canvas.measure_text(&self.text, family, fsize).w;
         if total_w <= avail_w {
             return self.text.clone();
@@ -91,7 +102,10 @@ impl Label {
             Truncate::End => {
                 // partition_point 返回第一个 > avail 的下标，该位置的字符本身已超宽，
                 // 需 -1 取最后一个能放下的字符数。
-                let cut = widths.partition_point(|&w| w <= avail).saturating_sub(1).min(n);
+                let cut = widths
+                    .partition_point(|&w| w <= avail)
+                    .saturating_sub(1)
+                    .min(n);
                 format!("{}…", chars[..cut].iter().collect::<String>())
             }
             Truncate::Start => {
@@ -102,7 +116,10 @@ impl Label {
                 format!("…{}", chars[cut..].iter().collect::<String>())
             }
             Truncate::Middle => {
-                let lcut = widths.partition_point(|&w| w <= avail / 2).saturating_sub(1).min(n);
+                let lcut = widths
+                    .partition_point(|&w| w <= avail / 2)
+                    .saturating_sub(1)
+                    .min(n);
                 let right_avail = (avail - widths[lcut]).max(0);
                 let threshold = total_w - right_avail;
                 let rcut = widths.partition_point(|&w| w < threshold).min(n);
@@ -120,23 +137,48 @@ impl Widget for Label {
         // 在可用宽度内换行：宽度受限时折行，宽松时单行。
         // 已知限制：换行准确仅保证于显式宽度的 Label（width/width_match/weight）；
         // 纯 Wrap 宽度的多行 Label，draw 会在收敛后的窄宽重新换行，可能与 measure 行数不符。
-        let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
-        let full = text.measure(&self.text, style.font_family.as_deref(), style.font_size, max_w);
+        let max_w = if avail.w > 0 {
+            Some(avail.w as f32)
+        } else {
+            None
+        };
+        let full = text.measure(
+            &self.text,
+            style.font_family.as_deref(),
+            style.font_size,
+            max_w,
+        );
         if let Some(max_n) = self.max_lines {
-            let line_h = text.measure("Ay", style.font_family.as_deref(), style.font_size, None).h.max(1);
+            let line_h = text
+                .measure("Ay", style.font_family.as_deref(), style.font_size, None)
+                .h
+                .max(1);
             Size::new(full.w, full.h.min(max_n as i32 * line_h))
         } else {
             full
         }
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        _bounds: Rect,
+        content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
 
         // max_lines：计算限高矩形；DirectWrite 高度始终为 f32::MAX，必须用 clip_rect 裁剪。
         let (paint_rect, need_clip) = if let Some(max_n) = self.max_lines {
             let line_h = canvas.measure_text("Ay", family, fsize).h.max(1);
-            let clipped = Rect::new(content.x, content.y, content.w, content.h.min(max_n as i32 * line_h));
+            let clipped = Rect::new(
+                content.x,
+                content.y,
+                content.w,
+                content.h.min(max_n as i32 * line_h),
+            );
             (clipped, true)
         } else {
             (content, false)
@@ -154,7 +196,11 @@ impl Widget for Label {
             let cached: Option<String> = {
                 let c = self.trunc_cache.borrow();
                 c.as_ref().and_then(|(cw, cf, s)| {
-                    if *cw == key_w && *cf == key_f { Some(s.clone()) } else { None }
+                    if *cw == key_w && *cf == key_f {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             let text_str = if let Some(s) = cached {
@@ -164,9 +210,23 @@ impl Widget for Label {
                 *self.trunc_cache.borrow_mut() = Some((key_w, key_f, s.clone()));
                 s
             };
-            canvas.draw_text(&text_str, paint_rect, style.fg, style.text_align, family, fsize);
+            canvas.draw_text(
+                &text_str,
+                paint_rect,
+                style.fg,
+                style.text_align,
+                family,
+                fsize,
+            );
         } else {
-            canvas.draw_text(&self.text, paint_rect, style.fg, style.text_align, family, fsize);
+            canvas.draw_text(
+                &self.text,
+                paint_rect,
+                style.fg,
+                style.text_align,
+                family,
+                fsize,
+            );
         }
 
         if need_clip {
@@ -189,10 +249,22 @@ pub struct DynLabel {
 
 impl DynLabel {
     pub fn new(text: Rc<RefCell<String>>) -> Self {
-        Self { text, max_lines: None, truncate: Truncate::None, trunc_cache: RefCell::new(None) }
+        Self {
+            text,
+            max_lines: None,
+            truncate: Truncate::None,
+            trunc_cache: RefCell::new(None),
+        }
     }
 
-    fn compute_truncated(&self, s: &str, canvas: &mut dyn Canvas, family: Option<&str>, fsize: f32, avail_w: i32) -> String {
+    fn compute_truncated(
+        &self,
+        s: &str,
+        canvas: &mut dyn Canvas,
+        family: Option<&str>,
+        fsize: f32,
+        avail_w: i32,
+    ) -> String {
         let total_w = canvas.measure_text(s, family, fsize).w;
         if total_w <= avail_w {
             return s.to_string();
@@ -209,7 +281,10 @@ impl DynLabel {
         }
         match self.truncate {
             Truncate::End => {
-                let cut = widths.partition_point(|&w| w <= avail).saturating_sub(1).min(n);
+                let cut = widths
+                    .partition_point(|&w| w <= avail)
+                    .saturating_sub(1)
+                    .min(n);
                 format!("{}…", chars[..cut].iter().collect::<String>())
             }
             Truncate::Start => {
@@ -218,7 +293,10 @@ impl DynLabel {
                 format!("…{}", chars[cut..].iter().collect::<String>())
             }
             Truncate::Middle => {
-                let lcut = widths.partition_point(|&w| w <= avail / 2).saturating_sub(1).min(n);
+                let lcut = widths
+                    .partition_point(|&w| w <= avail / 2)
+                    .saturating_sub(1)
+                    .min(n);
                 let right_avail = (avail - widths[lcut]).max(0);
                 let threshold = total_w - right_avail;
                 let rcut = widths.partition_point(|&w| w < threshold).min(n);
@@ -234,23 +312,43 @@ impl DynLabel {
 impl Widget for DynLabel {
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let s = self.text.borrow();
-        let max_w = if avail.w > 0 { Some(avail.w as f32) } else { None };
+        let max_w = if avail.w > 0 {
+            Some(avail.w as f32)
+        } else {
+            None
+        };
         let full = text.measure(&s, style.font_family.as_deref(), style.font_size, max_w);
         if let Some(max_n) = self.max_lines {
-            let line_h = text.measure("Ay", style.font_family.as_deref(), style.font_size, None).h.max(1);
+            let line_h = text
+                .measure("Ay", style.font_family.as_deref(), style.font_size, None)
+                .h
+                .max(1);
             Size::new(full.w, full.h.min(max_n as i32 * line_h))
         } else {
             full
         }
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        _bounds: Rect,
+        content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let s = self.text.borrow();
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
 
         let (paint_rect, need_clip) = if let Some(max_n) = self.max_lines {
             let line_h = canvas.measure_text("Ay", family, fsize).h.max(1);
-            let clipped = Rect::new(content.x, content.y, content.w, content.h.min(max_n as i32 * line_h));
+            let clipped = Rect::new(
+                content.x,
+                content.y,
+                content.w,
+                content.h.min(max_n as i32 * line_h),
+            );
             (clipped, true)
         } else {
             (content, false)
@@ -267,7 +365,11 @@ impl Widget for DynLabel {
             let cached: Option<String> = {
                 let c = self.trunc_cache.borrow();
                 c.as_ref().and_then(|(ks, cw, cf, out)| {
-                    if ks.as_str() == s.as_str() && *cw == key_w && *cf == key_f { Some(out.clone()) } else { None }
+                    if ks.as_str() == s.as_str() && *cw == key_w && *cf == key_f {
+                        Some(out.clone())
+                    } else {
+                        None
+                    }
                 })
             };
             let text_str = if let Some(out) = cached {
@@ -277,7 +379,14 @@ impl Widget for DynLabel {
                 *self.trunc_cache.borrow_mut() = Some((s.clone(), key_w, key_f, out.clone()));
                 out
             };
-            canvas.draw_text(&text_str, paint_rect, style.fg, style.text_align, family, fsize);
+            canvas.draw_text(
+                &text_str,
+                paint_rect,
+                style.fg,
+                style.text_align,
+                family,
+                fsize,
+            );
         } else {
             canvas.draw_text(&s, paint_rect, style.fg, style.text_align, family, fsize);
         }
@@ -353,20 +462,42 @@ impl Button {
 
 impl Widget for Button {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let s = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
+        let s = text.measure(
+            &self.label,
+            style.font_family.as_deref(),
+            style.font_size,
+            None,
+        );
         // 图标为正方形，边长取文字高度；加图标宽 + 间距。
-        let icon_extra = if self.icon.is_some() { s.h + ICON_GAP } else { 0 };
+        let icon_extra = if self.icon.is_some() {
+            s.h + ICON_GAP
+        } else {
+            0
+        };
         // 内置左右 16 / 上下 9 的内边距
         Size::new(s.w + 32 + icon_extra, s.h + 18)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
         let vstate = self.visual_state(enabled);
         // intent 解析：Primary 走 ButtonTheme（保持全局换肤 + style.bg 单点覆盖），其余由 palette 派生。
         let is_primary = matches!(self.intent, Intent::Primary);
         let ic = if is_primary {
-            IntentColors { bg: bt.bg(pal), hover: bt.hover(pal), active: bt.active(pal), fg: bt.fg(pal) }
+            IntentColors {
+                bg: bt.bg(pal),
+                hover: bt.hover(pal),
+                active: bt.active(pal),
+                fg: bt.fg(pal),
+            }
         } else {
             self.intent.colors(pal)
         };
@@ -401,7 +532,11 @@ impl Widget for Button {
             ic.fg
         };
         // 每节点 corner 覆盖优先（>0），否则用主题。
-        let r = if style.corner_radius > 0.0 { style.corner_radius } else { bt.corner(&t.metrics) };
+        let r = if style.corner_radius > 0.0 {
+            style.corner_radius
+        } else {
+            bt.corner(&t.metrics)
+        };
         canvas.fill_round_rect(
             bounds.x as f32,
             bounds.y as f32,
@@ -429,8 +564,16 @@ impl Widget for Button {
         let start_x = bounds.x + ((bounds.w - total_w) / 2).max(0);
         let icon_y = bounds.y + ((bounds.h - ih) / 2).max(0);
         // 图标圆角不跟随按钮圆角（按钮圆角作用于整框）；图标默认直角，由其自身 fit 决定。
-        let icon_style = Style { corner_radius: 0.0, ..style.clone() };
-        icon.paint_into(Rect::new(start_x, icon_y, ih, ih), canvas, &icon_style, vstate);
+        let icon_style = Style {
+            corner_radius: 0.0,
+            ..style.clone()
+        };
+        icon.paint_into(
+            Rect::new(start_x, icon_y, ih, ih),
+            canvas,
+            &icon_style,
+            vstate,
+        );
         // 文字紧随图标右侧，垂直方向交给 draw_text 居中。
         let text_rect = Rect::new(start_x + ih + ICON_GAP, bounds.y, ts.w + 2, bounds.h);
         canvas.draw_text(
@@ -470,7 +613,11 @@ impl Widget for Button {
                 PointerKind::Up => {
                     let was_press = self.state == BtnState::Press;
                     let inside = ctx.bounds().contains(p.pos);
-                    self.state = if inside { BtnState::Hover } else { BtnState::Normal };
+                    self.state = if inside {
+                        BtnState::Hover
+                    } else {
+                        BtnState::Normal
+                    };
                     ctx.release_capture();
                     ctx.mark_dirty();
                     if was_press && inside {
@@ -555,11 +702,19 @@ impl Element {
 
     /// 垂直线性容器。
     pub fn col() -> Self {
-        Self::base(Layout::Linear { axis: Axis::Vertical, spacing: 0, cross: Align::Start })
+        Self::base(Layout::Linear {
+            axis: Axis::Vertical,
+            spacing: 0,
+            cross: Align::Start,
+        })
     }
     /// 水平线性容器。
     pub fn row() -> Self {
-        Self::base(Layout::Linear { axis: Axis::Horizontal, spacing: 0, cross: Align::Start })
+        Self::base(Layout::Linear {
+            axis: Axis::Horizontal,
+            spacing: 0,
+            cross: Align::Start,
+        })
     }
     /// 叠层容器（FrameLayout）。
     pub fn stack() -> Self {
@@ -598,14 +753,22 @@ impl Element {
                 return self;
             }
         }
-        debug_assert!(false, "max_lines()/truncate() 只能用于 Element::label_rc(..)");
+        debug_assert!(
+            false,
+            "max_lines()/truncate() 只能用于 Element::label_rc(..)"
+        );
         self
     }
 
     /// 限制显示行数（超出高度裁剪；配合 `.truncate()` 可在末行加省略号）。
     /// 同时适用于 `label` 和 `label_rc`。
     pub fn max_lines(mut self, n: usize) -> Self {
-        if self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Label>()).is_some() {
+        if self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Label>())
+            .is_some()
+        {
             return self.config_label(|l| l.max_lines = Some(n));
         }
         self.config_dynlabel(|l| l.max_lines = Some(n))
@@ -614,7 +777,12 @@ impl Element {
     /// 文本溢出省略方式（`max_lines(1)` 时精确截断，多行仅高度裁剪）。
     /// 同时适用于 `label` 和 `label_rc`。
     pub fn truncate(mut self, mode: Truncate) -> Self {
-        if self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Label>()).is_some() {
+        if self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Label>())
+            .is_some()
+        {
             return self.config_label(|l| l.truncate = mode);
         }
         self.config_dynlabel(|l| l.truncate = mode)
@@ -642,7 +810,10 @@ impl Element {
     /// 文件拖放回调：用户把文件拖放到本元素（或其子元素）时触发，收到文件路径列表。
     /// **适用于任意控件/容器**——挂到 `.fill()` 的根容器即"全窗接收拖放"；
     /// 落点命中后沿父链冒泡到首个设了回调的节点。回调签名 `FnMut(&mut EventCtx, &[PathBuf])`。
-    pub fn on_drop_files(mut self, f: impl FnMut(&mut EventCtx, &[std::path::PathBuf]) + 'static) -> Self {
+    pub fn on_drop_files(
+        mut self,
+        f: impl FnMut(&mut EventCtx, &[std::path::PathBuf]) + 'static,
+    ) -> Self {
         self.on_drop = Some(Box::new(f));
         self
     }
@@ -673,7 +844,11 @@ impl Element {
     /// 配置内含的 Link。`url()/underline()` 是 link 专属修饰符，链到其他控件属误用——
     /// debug 构建下 panic 提示，release 下静默忽略（与 text_input/image 的误用检测一致）。
     fn config_link(mut self, f: impl FnOnce(&mut link::Link)) -> Self {
-        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<link::Link>()) {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<link::Link>())
+        {
             Some(l) => f(l),
             None => debug_assert!(false, "url()/underline() 只能用于 Element::link(..)"),
         }
@@ -704,7 +879,9 @@ impl Element {
     /// `Some(w)` 按该宽度等比光栅——HiDPI 求清晰可传 2× 逻辑宽度。加载失败显示占位框。
     #[cfg(feature = "svg")]
     pub fn image_svg(bytes: &[u8], target_width: Option<u32>) -> Self {
-        Self::base(Layout::None).widget(ImageView::new(Image::from_svg_bytes(bytes, target_width).ok()))
+        Self::base(Layout::None).widget(ImageView::new(
+            Image::from_svg_bytes(bytes, target_width).ok(),
+        ))
     }
     /// 图片控件：从原始非预乘 RGBA8 像素构造（`rgba.len()==w*h*4`）。
     pub fn image_rgba(w: u32, h: u32, rgba: &[u8]) -> Self {
@@ -718,7 +895,11 @@ impl Element {
     /// 配置内含的 ImageView。`fit()`/`tint()` 是图片专属修饰符，链到其他控件属误用——
     /// debug 构建下 panic 提示，release 下静默忽略（与 text_input 的误用检测一致）。
     fn config_image(mut self, f: impl FnOnce(&mut ImageView)) -> Self {
-        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<ImageView>()) {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<ImageView>())
+        {
             Some(iv) => f(iv),
             None => debug_assert!(false, "fit()/tint() 只能用于 Element::image*(..)"),
         }
@@ -782,7 +963,11 @@ impl Element {
         self
     }
     fn config_button(mut self, f: impl FnOnce(&mut Button), who: &str) -> Self {
-        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<Button>()) {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Button>())
+        {
             Some(b) => f(b),
             None => debug_assert!(false, "{who} 只能用于 Element::button(..)"),
         }
@@ -846,7 +1031,11 @@ impl Element {
     /// 配置内含的 TextInput。`password()/multiline()/wrap()` 是 text_input 专属修饰符；
     /// 链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略（无类型分裂代价）。
     fn config_text_input(mut self, f: impl FnOnce(&mut inputs::TextConfig)) -> Self {
-        match self.widget.as_any_mut().and_then(|a| a.downcast_mut::<TextInput>()) {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<TextInput>())
+        {
             Some(ti) => f(ti.config_mut()),
             None => debug_assert!(
                 false,
@@ -909,7 +1098,12 @@ impl Element {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
             let row = list::ListRow::new(it.into(), selected.clone(), i);
-            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match().height(list::ROW_H));
+            scroll = scroll.child(
+                Self::base(Layout::None)
+                    .widget(row)
+                    .width_match()
+                    .height(list::ROW_H),
+            );
         }
         scroll
     }
@@ -923,7 +1117,12 @@ impl Element {
         let mut scroll = Self::scroll().fill();
         for (i, (label, icon)) in items.into_iter().enumerate() {
             let row = list::ListRow::new(label.into(), selected.clone(), i).with_icon(icon);
-            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match().height(list::ROW_H));
+            scroll = scroll.child(
+                Self::base(Layout::None)
+                    .widget(row)
+                    .width_match()
+                    .height(list::ROW_H),
+            );
         }
         scroll
     }
@@ -957,12 +1156,17 @@ impl Element {
     /// 默认展开项（与 [`Element::tabs`] 的 `Rc<Cell<usize>>` 选中模型同构）。
     /// 点击某面板头展开它会自动收起其它面板。
     pub fn accordion(selected: Rc<Cell<i32>>, panels: Vec<(impl Into<String>, Element)>) -> Self {
-        Self::accordion_impl(panels, |i| nav::ExpandState::Single { sel: selected.clone(), index: i })
+        Self::accordion_impl(panels, |i| nav::ExpandState::Single {
+            sel: selected.clone(),
+            index: i,
+        })
     }
 
     /// 手风琴**多开**版：各面板独立展开/收起、互不影响（初始全部收起）。
     pub fn accordion_multi(panels: Vec<(impl Into<String>, Element)>) -> Self {
-        Self::accordion_impl(panels, |_| nav::ExpandState::Multi(Rc::new(Cell::new(false))))
+        Self::accordion_impl(panels, |_| {
+            nav::ExpandState::Multi(Rc::new(Cell::new(false)))
+        })
     }
 
     /// 手风琴共用组装：外层卡片 + 逐面板（首面板前不加分隔线）头与显隐 body。
@@ -979,10 +1183,19 @@ impl Element {
         let corner = th.accordion.corner(&th.metrics);
         let header_bg = th.accordion.header_bg(&th.palette);
         let divider_c = th.accordion.divider(&th.palette);
-        let mut card = Element::col().width_match().bg(th.palette.surface).border(border_c, 1).corner(corner);
+        let mut card = Element::col()
+            .width_match()
+            .bg(th.palette.surface)
+            .border(border_c, 1)
+            .corner(corner);
         for (i, (title, body)) in panels.into_iter().enumerate() {
             if i > 0 {
-                card = card.child(Element::base(Layout::None).width_match().height(1).bg(divider_c));
+                card = card.child(
+                    Element::base(Layout::None)
+                        .width_match()
+                        .height(1)
+                        .bg(divider_c),
+                );
             }
             let state = make_state(i);
             let header = Self::base(Layout::None)
@@ -991,7 +1204,9 @@ impl Element {
                 .height(nav::NAV_ROW_H)
                 .bg(header_bg);
             let show = state.clone();
-            card = card.child(header).child(body.visible_when(move || show.is_expanded()));
+            card = card
+                .child(header)
+                .child(body.visible_when(move || show.is_expanded()));
         }
         card
     }
@@ -1024,7 +1239,11 @@ impl Element {
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
     /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
     pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(impl Into<String>, Element)>) -> Self {
-        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Stretch);
+        let mut bar = Element::row()
+            .width_match()
+            .height(40)
+            .spacing(6)
+            .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, page)) in pages.into_iter().enumerate() {
             let tab = containers::TabButton::new(title.into(), selected.clone(), i);
@@ -1041,7 +1260,11 @@ impl Element {
         selected: Rc<Cell<usize>>,
         pages: Vec<(impl Into<String>, ImageContent, Element)>,
     ) -> Self {
-        let mut bar = Element::row().width_match().height(40).spacing(6).cross(Align::Stretch);
+        let mut bar = Element::row()
+            .width_match()
+            .height(40)
+            .spacing(6)
+            .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
             let tab = containers::TabButton::new(title.into(), selected.clone(), i).with_icon(icon);
@@ -1252,11 +1475,9 @@ mod tests {
         let got: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
         let sink = got.clone();
         // 占满窗口的容器挂拖放回调（等价全窗接收）。
-        let tree = layout(
-            Element::col().fill().on_drop_files(move |_ctx, paths| {
-                sink.borrow_mut().extend_from_slice(paths);
-            }),
-        );
+        let tree = layout(Element::col().fill().on_drop_files(move |_ctx, paths| {
+            sink.borrow_mut().extend_from_slice(paths);
+        }));
         let mut tree = tree;
         let res = tree.dispatch_files(
             Point::new(50, 50),
@@ -1283,48 +1504,85 @@ mod tests {
                 .height(40)
                 .window_drag()
                 .child(Element::label("标题").width(120).height(40))
-                .child(Element::window_button(WindowButtonKind::Close).width(46).height(40)),
+                .child(
+                    Element::window_button(WindowButtonKind::Close)
+                        .width(46)
+                        .height(40),
+                ),
         );
         // Label 区域 → 可拖（拖动窗口）。
         assert!(tree.drag_hit_at(Point::new(40, 20)), "标题文字区应为拖动区");
         // 按钮区域 → 不拖（交按钮处理点击）。
         assert!(!tree.drag_hit_at(Point::new(130, 20)), "按钮区不应拖动窗口");
         // 交互命中：按钮区为交互控件（平台据此判 HTCLIENT），拖动区/文字区不是。
-        assert!(tree.interactive_hit_at(Point::new(130, 20)), "按钮区应判为交互控件");
-        assert!(!tree.interactive_hit_at(Point::new(40, 20)), "标题文字区不应判为交互控件");
+        assert!(
+            tree.interactive_hit_at(Point::new(130, 20)),
+            "按钮区应判为交互控件"
+        );
+        assert!(
+            !tree.interactive_hit_at(Point::new(40, 20)),
+            "标题文字区不应判为交互控件"
+        );
     }
 
     #[test]
     fn window_button_click_requests_op() {
-        let mut tree = layout(Element::window_button(WindowButtonKind::Minimize).width(46).height(40));
+        let mut tree = layout(
+            Element::window_button(WindowButtonKind::Minimize)
+                .width(46)
+                .height(40),
+        );
         let mut hover = None;
         let mut capture = None;
         let at = Point::new(20, 20);
         tree.dispatch_pointer(
-            crate::event::PointerEvent::single(PointerKind::Down, at, crate::event::MouseButton::Left),
+            crate::event::PointerEvent::single(
+                PointerKind::Down,
+                at,
+                crate::event::MouseButton::Left,
+            ),
             &mut hover,
             &mut capture,
         );
         let res = tree.dispatch_pointer(
-            crate::event::PointerEvent::single(PointerKind::Up, at, crate::event::MouseButton::Left),
+            crate::event::PointerEvent::single(
+                PointerKind::Up,
+                at,
+                crate::event::MouseButton::Left,
+            ),
             &mut hover,
             &mut capture,
         );
-        assert_eq!(res.window_op, Some(crate::event::WindowOp::Minimize), "最小化按钮点击应请求 Minimize");
+        assert_eq!(
+            res.window_op,
+            Some(crate::event::WindowOp::Minimize),
+            "最小化按钮点击应请求 Minimize"
+        );
     }
 
     #[test]
     fn tooltip_attaches_to_node_and_resolves_by_hit() {
         // .tooltip(..) 挂到节点上；命中最深节点即可取到其提示文本。
         let tree = layout(
-            Element::col()
-                .fill()
-                .child(Element::label("帮助").width(100).height(30).tooltip("说明文本")),
+            Element::col().fill().child(
+                Element::label("帮助")
+                    .width(100)
+                    .height(30)
+                    .tooltip("说明文本"),
+            ),
         );
         let hit = tree.hit_test(Point::new(20, 15)).expect("应命中标签");
-        assert_eq!(tree.node_tooltip(hit).as_deref(), Some("说明文本"), "命中节点应取到 tooltip");
+        assert_eq!(
+            tree.node_tooltip(hit).as_deref(),
+            Some("说明文本"),
+            "命中节点应取到 tooltip"
+        );
         // 根容器未设 tooltip → None。
-        assert_eq!(tree.node_tooltip(tree.root.unwrap()), None, "未设 tooltip 的节点应为 None");
+        assert_eq!(
+            tree.node_tooltip(tree.root.unwrap()),
+            None,
+            "未设 tooltip 的节点应为 None"
+        );
     }
 
     #[test]

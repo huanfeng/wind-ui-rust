@@ -39,7 +39,10 @@ impl Dropdown {
     }
 
     fn current(&self) -> &str {
-        let i = self.selected.get().min(self.options.len().saturating_sub(1));
+        let i = self
+            .selected
+            .get()
+            .min(self.options.len().saturating_sub(1));
         self.options.get(i).map(|s| s.as_str()).unwrap_or("")
     }
 
@@ -67,23 +70,51 @@ impl Widget for Dropdown {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let mut w = 0;
         for o in &self.options {
-            w = w.max(text.measure(o, style.font_family.as_deref(), style.font_size, None).w);
+            w = w.max(
+                text.measure(o, style.font_family.as_deref(), style.font_size, None)
+                    .w,
+            );
         }
         Size::new(w + 2 * PAD_X + CHEVRON_W, (style.font_size as i32) + 16)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, dd) = (&th.palette, &th.dropdown);
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         let corner = dd.corner(&th.metrics);
         // 禁用：背景弱化、文字与箭头用 text_disabled。
         let bg = if enabled { dd.bg(pal) } else { pal.surface_alt };
-        let text_color = if enabled { dd.text(pal) } else { pal.text_disabled };
-        let chevron = if enabled { dd.chevron(pal) } else { pal.text_disabled };
+        let text_color = if enabled {
+            dd.text(pal)
+        } else {
+            pal.text_disabled
+        };
+        let chevron = if enabled {
+            dd.chevron(pal)
+        } else {
+            pal.text_disabled
+        };
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         // 边框色补间：hover/focus 高亮淡变；首帧落定。
-        let target_border = if focused || self.hover { dd.border_focus(pal) } else { dd.border(pal) };
+        let target_border = if focused || self.hover {
+            dd.border_focus(pal)
+        } else {
+            dd.border(pal)
+        };
         let mut ba = self.border_anim.get();
         if !self.primed.get() {
             ba = Transition::new(target_border);
@@ -97,8 +128,20 @@ impl Widget for Dropdown {
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         // 当前选项文本（左侧，留出右侧 chevron）。
-        let tr = Rect::new(bounds.x + PAD_X, bounds.y, bounds.w - 2 * PAD_X - CHEVRON_W, bounds.h);
-        canvas.draw_text(self.current(), tr, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
+        let tr = Rect::new(
+            bounds.x + PAD_X,
+            bounds.y,
+            bounds.w - 2 * PAD_X - CHEVRON_W,
+            bounds.h,
+        );
+        canvas.draw_text(
+            self.current(),
+            tr,
+            text_color,
+            Align::Start,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
 
         // 右侧下拉箭头 ▼（两段线）。
         let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;

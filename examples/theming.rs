@@ -28,7 +28,12 @@ fn row(label: &str, control: Element) -> Element {
         .height(40)
         .cross(Align::Center)
         .spacing(12)
-        .child(Element::label(label).font_size(14.0).fg(Color::hex(0x241B45)).width(96))
+        .child(
+            Element::label(label)
+                .font_size(14.0)
+                .fg(Color::hex(0x241B45))
+                .width(96),
+        )
         .child(control)
 }
 
@@ -51,7 +56,10 @@ fn main() {
         .child(row("开关", Element::switch(on)))
         .child(row("复选", Element::checkbox("启用功能", check)))
         .child(row("音量", Element::slider(vol).width_match()))
-        .child(row("模式", Element::dropdown(vec!["A", "B", "C"], mode).width(160)))
+        .child(row(
+            "模式",
+            Element::dropdown(vec!["A", "B", "C"], mode).width(160),
+        ))
         .child(
             Element::row()
                 .width_match()
@@ -64,7 +72,13 @@ fn main() {
         .fill()
         .padding(20)
         .spacing(12)
-        .child(Element::label("自定义主题（TOML 覆盖）").font_size(22.0).fg(Color::hex(0x241B45)).height(30).width_match())
+        .child(
+            Element::label("自定义主题（TOML 覆盖）")
+                .font_size(22.0)
+                .fg(Color::hex(0x241B45))
+                .height(30)
+                .width_match(),
+        )
         .child(card);
 
     App::new("windui — 主题", 380, 360)

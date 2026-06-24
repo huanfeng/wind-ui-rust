@@ -35,13 +35,20 @@ struct Layer {
 
 impl Layer {
     fn new(raw: Image) -> Self {
-        Self { raw, tinted: RefCell::new(None) }
+        Self {
+            raw,
+            tinted: RefCell::new(None),
+        }
     }
     /// 返回应绘制的图：无 tint 用原图；有 tint 取缓存（首次计算）。
     fn resolve(&self, tint: Option<Color>) -> Image {
         match tint {
             None => self.raw.clone(),
-            Some(c) => self.tinted.borrow_mut().get_or_insert_with(|| self.raw.tinted(c)).clone(),
+            Some(c) => self
+                .tinted
+                .borrow_mut()
+                .get_or_insert_with(|| self.raw.tinted(c))
+                .clone(),
         }
     }
 }
@@ -60,7 +67,12 @@ pub struct ImageContent {
 impl ImageContent {
     /// 持有解码结果（加载失败传 `None`，paint 时画占位框）。
     pub fn new(image: Option<Image>) -> Self {
-        Self { base: image.map(Layer::new), overrides: Vec::new(), fit: Fit::default(), tint: None }
+        Self {
+            base: image.map(Layer::new),
+            overrides: Vec::new(),
+            fit: Fit::default(),
+            tint: None,
+        }
     }
 
     /// 便捷构造：从嵌入字节加载（失败画占位框）。
@@ -142,7 +154,13 @@ impl ImageContent {
 
     /// 按状态把图片绘制进 `dst`；无图则画占位框。圆角取 `style.corner_radius`，
     /// 与核心层给背景/边框画圆角同源。禁用等状态按 `VisualState::opacity` 调制。
-    pub fn paint_into(&self, dst: Rect, canvas: &mut dyn Canvas, style: &Style, state: VisualState) {
+    pub fn paint_into(
+        &self,
+        dst: Rect,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+        state: VisualState,
+    ) {
         if dst.is_empty() {
             return;
         }
@@ -169,7 +187,9 @@ pub struct ImageView {
 impl ImageView {
     /// 由解码结果构造（失败传 `None`）。
     pub fn new(image: Option<Image>) -> Self {
-        Self { content: ImageContent::new(image) }
+        Self {
+            content: ImageContent::new(image),
+        }
     }
     /// 由预先组装好的内容原语构造（用于状态换图等高级用法）。
     pub fn from_content(content: ImageContent) -> Self {
@@ -190,9 +210,18 @@ impl Widget for ImageView {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         self.content.intrinsic_size()
     }
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        _bounds: Rect,
+        content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         // 独立图片控件无交互状态，按 Normal 绘制。
-        self.content.paint_into(content, canvas, style, VisualState::Normal);
+        self.content
+            .paint_into(content, canvas, style, VisualState::Normal);
     }
     fn on_event(&mut self, _ctx: &mut EventCtx, _ev: &Event) -> bool {
         false
@@ -220,7 +249,10 @@ mod tests {
     fn missing_content_uses_placeholder_size() {
         let c = ImageContent::new(None);
         assert!(!c.is_loaded());
-        assert_eq!(c.intrinsic_size(), Size::new(PLACEHOLDER_SIZE, PLACEHOLDER_SIZE));
+        assert_eq!(
+            c.intrinsic_size(),
+            Size::new(PLACEHOLDER_SIZE, PLACEHOLDER_SIZE)
+        );
     }
 
     #[test]
@@ -230,8 +262,14 @@ mod tests {
         let disabled = Image::from_rgba(8, 8, &[20u8; 8 * 8 * 4]).unwrap();
         let c = ImageContent::new(Some(base)).on_state(VisualState::Disabled, disabled);
         // layer_for 命中覆盖 → 8×8；其余状态回退 base 4×4。
-        assert_eq!(c.layer_for(VisualState::Disabled).unwrap().raw.size(), Size::new(8, 8));
-        assert_eq!(c.layer_for(VisualState::Hover).unwrap().raw.size(), Size::new(4, 4));
+        assert_eq!(
+            c.layer_for(VisualState::Disabled).unwrap().raw.size(),
+            Size::new(8, 8)
+        );
+        assert_eq!(
+            c.layer_for(VisualState::Hover).unwrap().raw.size(),
+            Size::new(4, 4)
+        );
     }
 
     #[test]
@@ -241,7 +279,12 @@ mod tests {
         let c = ImageContent::new(None);
         {
             let mut canvas = SkiaCanvas::new(&mut pm);
-            c.paint_into(Rect::new(10, 10, 40, 40), &mut canvas, &Style::default(), VisualState::Normal);
+            c.paint_into(
+                Rect::new(10, 10, 40, 40),
+                &mut canvas,
+                &Style::default(),
+                VisualState::Normal,
+            );
         }
         let p = pm.pixel(30, 30).unwrap();
         assert!(
@@ -262,10 +305,20 @@ mod tests {
         let c = ImageContent::new(Some(img)).fit(Fit::Fill);
         {
             let mut canvas = SkiaCanvas::new(&mut pm);
-            c.paint_into(Rect::new(5, 5, 30, 30), &mut canvas, &Style::default(), VisualState::Disabled);
+            c.paint_into(
+                Rect::new(5, 5, 30, 30),
+                &mut canvas,
+                &Style::default(),
+                VisualState::Disabled,
+            );
         }
         let p = pm.pixel(20, 20).unwrap();
-        assert!(p.green() > 120 && p.blue() > 120, "禁用应置灰混白，实得 g={} b={}", p.green(), p.blue());
+        assert!(
+            p.green() > 120 && p.blue() > 120,
+            "禁用应置灰混白，实得 g={} b={}",
+            p.green(),
+            p.blue()
+        );
     }
 
     #[test]

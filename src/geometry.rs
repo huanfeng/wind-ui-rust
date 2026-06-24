@@ -41,7 +41,12 @@ impl Rect {
         Self { x, y, w, h }
     }
     pub const fn from_size(s: Size) -> Self {
-        Self { x: 0, y: 0, w: s.w, h: s.h }
+        Self {
+            x: 0,
+            y: 0,
+            w: s.w,
+            h: s.h,
+        }
     }
     pub const fn right(&self) -> i32 {
         self.x + self.w
@@ -50,7 +55,10 @@ impl Rect {
         self.y + self.h
     }
     pub const fn size(&self) -> Size {
-        Size { w: self.w, h: self.h }
+        Size {
+            w: self.w,
+            h: self.h,
+        }
     }
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.x && p.x < self.right() && p.y >= self.y && p.y < self.bottom()
@@ -122,13 +130,28 @@ pub struct Insets {
 
 impl Insets {
     pub const fn all(v: i32) -> Self {
-        Self { left: v, top: v, right: v, bottom: v }
+        Self {
+            left: v,
+            top: v,
+            right: v,
+            bottom: v,
+        }
     }
     pub const fn symmetric(h: i32, v: i32) -> Self {
-        Self { left: h, top: v, right: h, bottom: v }
+        Self {
+            left: h,
+            top: v,
+            right: h,
+            bottom: v,
+        }
     }
     pub const fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
-        Self { left, top, right, bottom }
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
     pub const fn horizontal(&self) -> i32 {
         self.left + self.right
@@ -163,13 +186,31 @@ impl Color {
             a: 255,
         }
     }
-    pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 };
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
-    pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 255 };
+    pub const TRANSPARENT: Color = Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
+    pub const WHITE: Color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
+    pub const BLACK: Color = Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
 
     /// 按系数缩放 alpha（保 RGB），用于淡入淡出。`f` 钳到 `[0,1]`。
     pub fn scale_alpha(self, f: f32) -> Color {
-        Color { a: (self.a as f32 * f.clamp(0.0, 1.0)).round() as u8, ..self }
+        Color {
+            a: (self.a as f32 * f.clamp(0.0, 1.0)).round() as u8,
+            ..self
+        }
     }
 
     /// 解析 `#RGB` / `#RRGGBB` / `#RRGGBBAA`（# 可省）。失败返回 None。
@@ -212,7 +253,12 @@ impl Color {
     fn mix(self, other: Color, t: f32) -> Color {
         let t = t.clamp(0.0, 1.0);
         let m = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-        Color { r: m(self.r, other.r), g: m(self.g, other.g), b: m(self.b, other.b), a: self.a }
+        Color {
+            r: m(self.r, other.r),
+            g: m(self.g, other.g),
+            b: m(self.b, other.b),
+            a: self.a,
+        }
     }
     /// self 作背景时挑选可读前景：感知亮度 > 阈值返回 dark，否则 light。
     pub fn pick_fg(self, dark: Color, light: Color) -> Color {
@@ -270,23 +316,44 @@ mod tests {
         assert_eq!(c.darken(0.0), c, "f=0 不变");
         assert_eq!(c.lighten(1.0), Color::WHITE, "f=1 趋白");
         assert_eq!(c.darken(1.0), Color::BLACK, "f=1 趋黑");
-        assert!(c.lighten(0.5).r > c.r && c.darken(0.5).r < c.r, "中间值单调");
+        assert!(
+            c.lighten(0.5).r > c.r && c.darken(0.5).r < c.r,
+            "中间值单调"
+        );
         assert_eq!(c.lighten(0.5).a, c.a, "保留 alpha");
     }
 
     #[test]
     fn color_pick_fg_by_luminance() {
         // self 作背景：偏亮选 dark 前景、偏暗选 light 前景。
-        assert_eq!(Color::rgb(240, 240, 240).pick_fg(Color::BLACK, Color::WHITE), Color::BLACK);
-        assert_eq!(Color::rgb(20, 20, 20).pick_fg(Color::BLACK, Color::WHITE), Color::WHITE);
+        assert_eq!(
+            Color::rgb(240, 240, 240).pick_fg(Color::BLACK, Color::WHITE),
+            Color::BLACK
+        );
+        assert_eq!(
+            Color::rgb(20, 20, 20).pick_fg(Color::BLACK, Color::WHITE),
+            Color::WHITE
+        );
     }
 
     #[test]
     fn color_from_hex_str_forms() {
-        assert_eq!(Color::from_hex_str("#336699"), Some(Color::rgb(0x33, 0x66, 0x99)));
-        assert_eq!(Color::from_hex_str("336699"), Some(Color::rgb(0x33, 0x66, 0x99)));
-        assert_eq!(Color::from_hex_str("#369"), Some(Color::rgb(0x33, 0x66, 0x99)));
-        assert_eq!(Color::from_hex_str("#11223344"), Some(Color::rgba(0x11, 0x22, 0x33, 0x44)));
+        assert_eq!(
+            Color::from_hex_str("#336699"),
+            Some(Color::rgb(0x33, 0x66, 0x99))
+        );
+        assert_eq!(
+            Color::from_hex_str("336699"),
+            Some(Color::rgb(0x33, 0x66, 0x99))
+        );
+        assert_eq!(
+            Color::from_hex_str("#369"),
+            Some(Color::rgb(0x33, 0x66, 0x99))
+        );
+        assert_eq!(
+            Color::from_hex_str("#11223344"),
+            Some(Color::rgba(0x11, 0x22, 0x33, 0x44))
+        );
     }
 
     #[test]
@@ -302,6 +369,9 @@ mod tests {
     #[test]
     fn color_hex_string_omits_opaque_alpha() {
         assert_eq!(Color::rgb(0x33, 0x66, 0x99).to_hex_string(), "#336699");
-        assert_eq!(Color::rgba(0x11, 0x22, 0x33, 0x44).to_hex_string(), "#11223344");
+        assert_eq!(
+            Color::rgba(0x11, 0x22, 0x33, 0x44).to_hex_string(),
+            "#11223344"
+        );
     }
 }

@@ -59,7 +59,12 @@ pub struct PointerEvent {
 impl PointerEvent {
     /// 构造一个单击事件（click_count=1）。便于测试与合成事件。
     pub fn single(kind: PointerKind, pos: Point, button: MouseButton) -> Self {
-        Self { kind, pos, button, click_count: 1 }
+        Self {
+            kind,
+            pos,
+            button,
+            click_count: 1,
+        }
     }
 }
 
@@ -121,7 +126,12 @@ pub struct MenuItem {
 impl MenuItem {
     /// 便捷构造：标签 + 合成按键。
     pub fn key(label: impl Into<String>, key: KeyEvent, enabled: bool) -> Self {
-        Self { label: label.into(), action: MenuAction::SendKey(key), enabled, checked: false }
+        Self {
+            label: label.into(),
+            action: MenuAction::SendKey(key),
+            enabled,
+            checked: false,
+        }
     }
     /// 便捷构造：标签 + 闭包动作。
     pub fn run(label: impl Into<String>, f: impl Fn() + 'static, checked: bool) -> Self {

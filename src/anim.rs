@@ -55,7 +55,10 @@ pub(crate) fn set_paint_rect(r: Option<Rect>) {
     PAINT_RECT.with(|c| {
         // 契约：Some 必与后续 None 成对（core::paint_node 每节点 set(Some)→widget.paint→set(None)）。
         // 嵌套未清除会让脏区错归到外层节点；此断言锁死该时序。
-        debug_assert!(r.is_none() || c.get().is_none(), "set_paint_rect 嵌套泄漏：上一节点未清除");
+        debug_assert!(
+            r.is_none() || c.get().is_none(),
+            "set_paint_rect 嵌套泄漏：上一节点未清除"
+        );
         c.set(r);
     });
 }
@@ -156,7 +159,12 @@ impl Lerp for f32 {
 impl Lerp for Color {
     fn lerp(self, to: Color, t: f32) -> Color {
         let mix = |a: u8, b: u8| (a as f32).lerp(b as f32, t).round().clamp(0.0, 255.0) as u8;
-        Color::rgba(mix(self.r, to.r), mix(self.g, to.g), mix(self.b, to.b), mix(self.a, to.a))
+        Color::rgba(
+            mix(self.r, to.r),
+            mix(self.g, to.g),
+            mix(self.b, to.b),
+            mix(self.a, to.a),
+        )
     }
 }
 
@@ -177,7 +185,13 @@ pub struct Transition<T: Lerp> {
 impl<T: Lerp> Transition<T> {
     /// 构造一个静止于 `value` 的补间（无动画）。
     pub fn new(value: T) -> Self {
-        Self { from: value, to: value, start_ms: 0, duration_ms: 0, easing: Easing::default() }
+        Self {
+            from: value,
+            to: value,
+            start_ms: 0,
+            duration_ms: 0,
+            easing: Easing::default(),
+        }
     }
 
     /// 当前目标值。
@@ -238,7 +252,12 @@ mod tests {
 
     #[test]
     fn easing_endpoints_are_fixed() {
-        for e in [Easing::Linear, Easing::EaseIn, Easing::EaseOut, Easing::EaseInOut] {
+        for e in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+        ] {
             assert!((e.apply(0.0) - 0.0).abs() < 1e-6, "{e:?} 在 0 应为 0");
             assert!((e.apply(1.0) - 1.0).abs() < 1e-6, "{e:?} 在 1 应为 1");
             // 越界钳制。
@@ -249,7 +268,12 @@ mod tests {
 
     #[test]
     fn easing_is_monotonic_increasing() {
-        for e in [Easing::Linear, Easing::EaseIn, Easing::EaseOut, Easing::EaseInOut] {
+        for e in [
+            Easing::Linear,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+        ] {
             let mut prev = e.apply(0.0);
             for i in 1..=20 {
                 let v = e.apply(i as f32 / 20.0);
@@ -275,7 +299,11 @@ mod tests {
         set_clock(1000); // 起点
         assert_eq!(tr.value(), 0.0);
         set_clock(1100); // 半程，线性 → 50
-        assert!((tr.value() - 50.0).abs() < 1e-3, "半程应约 50，实得 {}", tr.value());
+        assert!(
+            (tr.value() - 50.0).abs() < 1e-3,
+            "半程应约 50，实得 {}",
+            tr.value()
+        );
         assert!(tr.is_active());
         set_clock(1200); // 终点
         assert_eq!(tr.value(), 100.0);
@@ -295,7 +323,11 @@ mod tests {
         tr.retarget(0.0, 200, Easing::Linear); // 从 50 改回 0
         assert!((tr.value() - 50.0).abs() < 1e-3, "改向瞬间应保持当前值 50");
         set_clock(200); // 新过渡半程：50 → 0 的一半 = 25
-        assert!((tr.value() - 25.0).abs() < 1e-3, "改向半程应约 25，实得 {}", tr.value());
+        assert!(
+            (tr.value() - 25.0).abs() < 1e-3,
+            "改向半程应约 25，实得 {}",
+            tr.value()
+        );
     }
 
     #[test]

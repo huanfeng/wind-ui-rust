@@ -231,13 +231,15 @@ Home/End 跳行首尾、Ctrl+A 全选，\
                 .width_match(),
         )
         .child(Element::divider())
-        .child(Element::scroll().fill().child(
-            Element::col()
-                .width_match()
-                .padding_xy(0, 14)
-                .spacing(0)
-                .child(body),
-        ));
+        .child(
+            Element::scroll().fill().child(
+                Element::col()
+                    .width_match()
+                    .padding_xy(0, 14)
+                    .spacing(0)
+                    .child(body),
+            ),
+        );
 
     App::new("multiline_demo — 多行滚动压测", 560, 700)
         .bg(Color::hex(BG))

@@ -25,7 +25,12 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
         for x in 0..w {
             let fx = x as f32 / (w - 1).max(1) as f32;
             let fy = y as f32 / (h - 1).max(1) as f32;
-            v.extend_from_slice(&[(220.0 * (1.0 - fx)) as u8, (200.0 * fy) as u8, (220.0 * fx + 40.0) as u8, 255]);
+            v.extend_from_slice(&[
+                (220.0 * (1.0 - fx)) as u8,
+                (200.0 * fy) as u8,
+                (220.0 * fx + 40.0) as u8,
+                255,
+            ]);
         }
     }
     v
@@ -33,7 +38,11 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
 
 /// 生成 size×size 纯色图标（标签图标演示用）。
 fn solid(size: u32, hex: u32) -> Vec<u8> {
-    let (r, g, b) = (((hex >> 16) & 0xff) as u8, ((hex >> 8) & 0xff) as u8, (hex & 0xff) as u8);
+    let (r, g, b) = (
+        ((hex >> 16) & 0xff) as u8,
+        ((hex >> 8) & 0xff) as u8,
+        (hex & 0xff) as u8,
+    );
     [r, g, b, 255].repeat((size * size) as usize)
 }
 
@@ -44,7 +53,12 @@ fn row(label: &str, control: Element) -> Element {
         .height(40)
         .cross(Align::Center)
         .spacing(12)
-        .child(Element::label(label).font_size(14.0).fg(Color::hex(FG)).width(110))
+        .child(
+            Element::label(label)
+                .font_size(14.0)
+                .fg(Color::hex(FG))
+                .width(110),
+        )
         .child(control)
 }
 
@@ -56,7 +70,12 @@ fn card(title: &str, body: Element) -> Element {
         .padding(16)
         .spacing(8)
         // 标题不固定高度，让 Label 在 width_match 宽度内自适应换行（长标题换行后分隔线随之下移）。
-        .child(Element::label(title).font_size(16.0).fg(Color::hex(FG)).width_match())
+        .child(
+            Element::label(title)
+                .font_size(16.0)
+                .fg(Color::hex(FG))
+                .width_match(),
+        )
         .child(Element::divider())
         .child(body)
 }
@@ -84,12 +103,30 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row("设备名称", Element::text_input(name.clone(), "输入名称").width_match()))
-                .child(row("访问密码", Element::text_input(pwd.clone(), "输入密码").password().width_match()))
-                .child(row("界面语言", Element::dropdown(vec!["简体中文", "English", "日本語"], lang.clone()).width_match()))
+                .child(row(
+                    "设备名称",
+                    Element::text_input(name.clone(), "输入名称").width_match(),
+                ))
+                .child(row(
+                    "访问密码",
+                    Element::text_input(pwd.clone(), "输入密码")
+                        .password()
+                        .width_match(),
+                ))
+                .child(row(
+                    "界面语言",
+                    Element::dropdown(vec!["简体中文", "English", "日本語"], lang.clone())
+                        .width_match(),
+                ))
                 .child(row("深色主题", Element::switch(dark.clone())))
-                .child(row("接收通知", Element::checkbox("启用推送通知", notify.clone())))
-                .child(row("测试版", Element::checkbox("加入 Beta 通道", beta.clone()))),
+                .child(row(
+                    "接收通知",
+                    Element::checkbox("启用推送通知", notify.clone()),
+                ))
+                .child(row(
+                    "测试版",
+                    Element::checkbox("加入 Beta 通道", beta.clone()),
+                )),
         ))
         .child(card(
             "渲染",
@@ -124,26 +161,54 @@ fn main() {
                 .height(38)
                 .cross(Align::Center)
                 .padding_xy(14, 0)
-                .bg(if i.is_multiple_of(2) { Color::hex(CARD) } else { Color::hex(0xF6F8FA) })
-                .child(Element::label(format!("历史记录 {i:02}")).font_size(14.0).fg(Color::hex(FG)).weight(1.0))
-                .child(Element::label("查看").font_size(13.0).fg(Color::hex(0x4C8BF5))),
+                .bg(if i.is_multiple_of(2) {
+                    Color::hex(CARD)
+                } else {
+                    Color::hex(0xF6F8FA)
+                })
+                .child(
+                    Element::label(format!("历史记录 {i:02}"))
+                        .font_size(14.0)
+                        .fg(Color::hex(FG))
+                        .weight(1.0),
+                )
+                .child(
+                    Element::label("查看")
+                        .font_size(13.0)
+                        .fg(Color::hex(0x4C8BF5)),
+                ),
         );
     }
 
     let about_show = show_about.clone();
-    let about = Element::col()
-        .fill()
-        .spacing(12)
-        .child(card(
-            "关于 windui",
-            Element::col()
-                .width_match()
-                .spacing(8)
-                .child(Element::label("轻量 Windows 桌面 GUI 框架").font_size(15.0).fg(Color::hex(FG)).height(22).width_match())
-                .child(Element::label("Win32 窗口 + GDI 呈现 + tiny-skia 图形 + DirectWrite 文字").font_size(13.0).fg(Color::hex(SUB)).height(20).width_match())
-                .child(Element::label("目标内存占用 2–5MB，无运行时、无 GC。").font_size(13.0).fg(Color::hex(SUB)).height(20).width_match())
-                .child(Element::button("打开对话框").on_click(move |_| about_show.set(true))),
-        ));
+    let about = Element::col().fill().spacing(12).child(card(
+        "关于 windui",
+        Element::col()
+            .width_match()
+            .spacing(8)
+            .child(
+                Element::label("轻量 Windows 桌面 GUI 框架")
+                    .font_size(15.0)
+                    .fg(Color::hex(FG))
+                    .height(22)
+                    .width_match(),
+            )
+            .child(
+                Element::label("Win32 窗口 + GDI 呈现 + tiny-skia 图形 + DirectWrite 文字")
+                    .font_size(13.0)
+                    .fg(Color::hex(SUB))
+                    .height(20)
+                    .width_match(),
+            )
+            .child(
+                Element::label("目标内存占用 2–5MB，无运行时、无 GC。")
+                    .font_size(13.0)
+                    .fg(Color::hex(SUB))
+                    .height(20)
+                    .width_match(),
+            )
+            .child(Element::button("打开对话框").on_click(move |_| about_show.set(true))),
+    ));
 
     // 控件页（新控件集中展示，内容可滚动便于后续扩充）。
     let prog = Rc::new(Cell::new(0.45f32));
@@ -154,7 +219,7 @@ fn main() {
     let zh_form = Rc::new(Cell::new(0usize)); // 简体/繁体
     let width_mode = Rc::new(Cell::new(0usize)); // 半角/全角
     let pinyin = Rc::new(Cell::new(0usize)); // 全拼/双拼/笔画
-    // 可折叠分组 + 导航行演示。
+                                             // 可折叠分组 + 导航行演示。
     let adv_expand = Rc::new(Cell::new(true));
     // 手风琴：单开互斥共享索引（初值 0 = 默认展开第一面板）。
     let acc_sel = Rc::new(Cell::new(0i32));
@@ -351,8 +416,18 @@ fn main() {
     let img_cell = |label: &str, e: Element| {
         Element::col()
             .spacing(4)
-            .child(e.width(84).height(60).bg(Color::hex(0xF6F8FA)).border(Color::hex(0xDDDDDD), 1))
-            .child(Element::label(label).font_size(12.0).fg(Color::hex(SUB)).height(16))
+            .child(
+                e.width(84)
+                    .height(60)
+                    .bg(Color::hex(0xF6F8FA))
+                    .border(Color::hex(0xDDDDDD), 1),
+            )
+            .child(
+                Element::label(label)
+                    .font_size(12.0)
+                    .fg(Color::hex(SUB))
+                    .height(16),
+            )
     };
     let images_body = Element::col()
         .width_match()
@@ -361,27 +436,53 @@ fn main() {
             "适配模式（源图 4:3）",
             Element::row()
                 .spacing(10)
-                .child(img_cell("Contain", Element::image_rgba(64, 48, &grad).fit(Fit::Contain)))
-                .child(img_cell("Cover", Element::image_rgba(64, 48, &grad).fit(Fit::Cover)))
-                .child(img_cell("Fill", Element::image_rgba(64, 48, &grad).fit(Fit::Fill))),
+                .child(img_cell(
+                    "Contain",
+                    Element::image_rgba(64, 48, &grad).fit(Fit::Contain),
+                ))
+                .child(img_cell(
+                    "Cover",
+                    Element::image_rgba(64, 48, &grad).fit(Fit::Cover),
+                ))
+                .child(img_cell(
+                    "Fill",
+                    Element::image_rgba(64, 48, &grad).fit(Fit::Fill),
+                )),
         ))
         .child(card(
             "圆角 & 占位 & 图标",
             Element::row()
                 .spacing(12)
                 .cross(Align::Center)
-                .child(img_cell("圆角", Element::image_rgba(64, 48, &grad).fit(Fit::Cover).corner(12.0)))
+                .child(img_cell(
+                    "圆角",
+                    Element::image_rgba(64, 48, &grad)
+                        .fit(Fit::Cover)
+                        .corner(12.0),
+                ))
                 .child(img_cell("占位", Element::image("不存在.png")))
                 .child(Element::button("新建").icon_rgba(64, 48, &grad))
-                .child(Element::button("禁用").icon_rgba(64, 48, &grad).disabled(true)),
+                .child(
+                    Element::button("禁用")
+                        .icon_rgba(64, 48, &grad)
+                        .disabled(true),
+                ),
         ))
         .child(card(
             "SVG 矢量（resvg）",
             Element::row()
                 .spacing(12)
                 .cross(Align::Center)
-                .child(img_cell("渐变圆", Element::image_svg(SVG_CIRCLE, Some(120)).fit(Fit::Contain)))
-                .child(img_cell("着色对勾", Element::image_svg(SVG_CHECK, Some(64)).fit(Fit::Contain).tint(Color::hex(0x4C8BF5))))
+                .child(img_cell(
+                    "渐变圆",
+                    Element::image_svg(SVG_CIRCLE, Some(120)).fit(Fit::Contain),
+                ))
+                .child(img_cell(
+                    "着色对勾",
+                    Element::image_svg(SVG_CHECK, Some(64))
+                        .fit(Fit::Contain)
+                        .tint(Color::hex(0x4C8BF5)),
+                ))
                 .child(Element::button("SVG 图标").icon_svg(SVG_CHECK, Some(32))),
         ));
     let images = Element::scroll().fill().child(images_body);
@@ -409,8 +510,20 @@ fn main() {
             .corner(14.0)
             .padding(22)
             .spacing(14)
-            .child(Element::label("windui v0.1").font_size(20.0).fg(Color::hex(FG)).height(28).width_match())
-            .child(Element::label("一个用 Rust 编写的轻量桌面 GUI 框架，适合做内存友好的小工具。").font_size(14.0).fg(Color::hex(SUB)).height(44).width_match())
+            .child(
+                Element::label("windui v0.1")
+                    .font_size(20.0)
+                    .fg(Color::hex(FG))
+                    .height(28)
+                    .width_match(),
+            )
+            .child(
+                Element::label("一个用 Rust 编写的轻量桌面 GUI 框架，适合做内存友好的小工具。")
+                    .font_size(14.0)
+                    .fg(Color::hex(SUB))
+                    .height(44)
+                    .width_match(),
+            )
             .child(
                 Element::row()
                     .width_match()
@@ -428,7 +541,13 @@ fn main() {
                 .fill()
                 .padding(18)
                 .spacing(12)
-                .child(Element::label("偏好设置").font_size(24.0).fg(Color::hex(0x1A1A2E)).height(34).width_match())
+                .child(
+                    Element::label("偏好设置")
+                        .font_size(24.0)
+                        .fg(Color::hex(0x1A1A2E))
+                        .height(34)
+                        .width_match(),
+                )
                 // tabs 用 weight 占据标题以下的剩余高度（纵向 Match 会降级为 Wrap，需 weight 才填充）。
                 .child(tabs.weight(1.0)),
         )

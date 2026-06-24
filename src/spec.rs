@@ -46,13 +46,22 @@ pub struct MeasureSpec {
 
 impl MeasureSpec {
     pub fn exactly(size: i32) -> Self {
-        Self { mode: MeasureMode::Exact, size }
+        Self {
+            mode: MeasureMode::Exact,
+            size,
+        }
     }
     pub fn at_most(size: i32) -> Self {
-        Self { mode: MeasureMode::AtMost, size }
+        Self {
+            mode: MeasureMode::AtMost,
+            size,
+        }
     }
     pub fn unbounded() -> Self {
-        Self { mode: MeasureMode::Unbounded, size: 0 }
+        Self {
+            mode: MeasureMode::Unbounded,
+            size: 0,
+        }
     }
     /// 可用尺寸（Unbounded 视为无限大，用一个大数表达上界）。
     pub fn avail(&self) -> i32 {

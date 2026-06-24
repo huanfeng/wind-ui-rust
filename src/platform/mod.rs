@@ -13,18 +13,18 @@ pub mod win32;
 #[cfg(windows)]
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
-pub use win32::{open_url, Tray, TrayCtx, TrayMenuItem};
-#[cfg(windows)]
 pub(crate) use win32::run;
+#[cfg(windows)]
+pub use win32::{open_url, Tray, TrayCtx, TrayMenuItem};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::clipboard::MacClipboard as Clipboard;
 #[cfg(target_os = "macos")]
-pub use macos::{open_url, Tray, TrayCtx, TrayMenuItem};
-#[cfg(target_os = "macos")]
 pub(crate) use macos::run;
+#[cfg(target_os = "macos")]
+pub use macos::{open_url, Tray, TrayCtx, TrayMenuItem};
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
@@ -59,23 +59,48 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     handler.render(&mut pixmap, size);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
-        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
-        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Right));
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pos,
+            MouseButton::Right,
+        ));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }
     // 可选：合成一次左键单击（Down+Up），捕获下拉展开等。
     if let Some((lx, ly)) = cfg.screenshot_click {
-        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
-        handler.on_pointer(PointerEvent::single(PointerKind::Down, pos, MouseButton::Left));
-        handler.on_pointer(PointerEvent::single(PointerKind::Up, pos, MouseButton::Left));
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pos,
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            pos,
+            MouseButton::Left,
+        ));
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }
     // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
     if let Some((lx, ly)) = cfg.screenshot_hover {
-        let pos = Point::new((lx as f32 * s).round() as i32, (ly as f32 * s).round() as i32);
-        handler.on_pointer(PointerEvent::single(PointerKind::Move, pos, MouseButton::Left));
+        let pos = Point::new(
+            (lx as f32 * s).round() as i32,
+            (ly as f32 * s).round() as i32,
+        );
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            pos,
+            MouseButton::Left,
+        ));
         // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
         std::thread::sleep(std::time::Duration::from_millis(650));
         pixmap.fill(to_skia_color(cfg.bg));

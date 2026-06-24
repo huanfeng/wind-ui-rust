@@ -16,10 +16,12 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
 
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventMask, NSEventType, NSImage,
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindow,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventMask, NSEventType,
+    NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindow,
 };
-use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
+};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSSize, NSString};
 
 type TrayFn = Box<dyn FnMut(&mut TrayCtx)>;
@@ -61,8 +63,12 @@ fn deliver_notification(title: &str, body: &str) {
     use objc2_foundation::{NSUserNotification, NSUserNotificationCenter};
     // 未打包为 .app 时 `defaultUserNotificationCenter` 可能为 nil；生成的绑定会对非空断言而崩溃，
     // 故用裸消息取可空值并提前返回（无 bundle 即静默跳过通知，不影响其余托盘功能）。
-    let center: Option<Retained<NSUserNotificationCenter>> =
-        unsafe { msg_send![NSUserNotificationCenter::class(), defaultUserNotificationCenter] };
+    let center: Option<Retained<NSUserNotificationCenter>> = unsafe {
+        msg_send![
+            NSUserNotificationCenter::class(),
+            defaultUserNotificationCenter
+        ]
+    };
     let Some(center) = center else { return };
     let note = NSUserNotification::new();
     note.setTitle(Some(&NSString::from_str(title)));
@@ -124,7 +130,9 @@ impl TrayMenuItem {
     }
     /// 分隔线。
     pub fn separator() -> Self {
-        Self { kind: ItemKind::Separator }
+        Self {
+            kind: ItemKind::Separator,
+        }
     }
 }
 
@@ -233,14 +241,21 @@ impl TrayTarget {
     /// 构造一次性回调上下文（克隆 window + status item 的强引用）。
     fn ctx(&self) -> TrayCtx {
         let status_item = self.ivars().status_item.borrow().as_ref().unwrap().clone();
-        TrayCtx { window: self.ivars().window.clone(), status_item }
+        TrayCtx {
+            window: self.ivars().window.clone(),
+            status_item,
+        }
     }
 
     /// 触发左键单/双击回调。
     fn invoke_click(&self, double: bool) {
         let mut ctx = self.ctx();
         let mut tray = self.ivars().tray.borrow_mut();
-        let cb = if double { tray.on_double_click.as_mut() } else { tray.on_left_click.as_mut() };
+        let cb = if double {
+            tray.on_double_click.as_mut()
+        } else {
+            tray.on_left_click.as_mut()
+        };
         if let Some(cb) = cb {
             cb(&mut ctx);
         }
@@ -259,7 +274,12 @@ impl TrayTarget {
             for (i, it) in tray.items.iter().enumerate() {
                 match &it.kind {
                     ItemKind::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
-                    ItemKind::Action { label, checked, enabled, .. } => {
+                    ItemKind::Action {
+                        label,
+                        checked,
+                        enabled,
+                        ..
+                    } => {
                         let item = unsafe {
                             NSMenuItem::initWithTitle_action_keyEquivalent(
                                 NSMenuItem::alloc(mtm),
@@ -271,7 +291,11 @@ impl TrayTarget {
                         item.setTag(i as isize);
                         unsafe { item.setTarget(Some(self)) };
                         let on = checked.as_ref().is_some_and(|c| c.get());
-                        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+                        item.setState(if on {
+                            NSControlStateValueOn
+                        } else {
+                            NSControlStateValueOff
+                        });
                         // 禁用态：enabled 绑定为 false 则灰显不可点（默认可用）。
                         let usable = enabled.as_ref().map(|e| e.get()).unwrap_or(true);
                         item.setEnabled(usable);
@@ -321,13 +345,18 @@ impl Drop for TrayState {
 }
 
 /// 安装托盘图标。窗口创建后调用，状态存入 `TrayState`（窗口销毁时清理）。
-pub(crate) fn install(mtm: MainThreadMarker, window: Retained<NSWindow>, tray: Tray) -> Option<TrayState> {
+pub(crate) fn install(
+    mtm: MainThreadMarker,
+    window: Retained<NSWindow>,
+    tray: Tray,
+) -> Option<TrayState> {
     let icon = tray.icon.clone();
     let tooltip = tray.tooltip.clone();
 
     let target = TrayTarget::new(mtm, tray, window);
 
-    let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    let status_item =
+        NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     let button = status_item.button(mtm)?;
 
     if let Some((w, h, rgba)) = icon {
@@ -347,7 +376,10 @@ pub(crate) fn install(mtm: MainThreadMarker, window: Retained<NSWindow>, tray: T
 
     *target.ivars().status_item.borrow_mut() = Some(status_item.clone());
 
-    Some(TrayState { status_item, _target: target })
+    Some(TrayState {
+        status_item,
+        _target: target,
+    })
 }
 
 /// 非预乘 RGBA8 → NSImage（预乘进位图上下文后转 CGImage）。
@@ -378,7 +410,10 @@ fn nsimage_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<Retained<NSImage>> {
         )?;
         CGBitmapContextCreateImage(Some(&ctx))?
     };
-    let size = NSSize { width: w as f64, height: h as f64 };
+    let size = NSSize {
+        width: w as f64,
+        height: h as f64,
+    };
     let nsimage = NSImage::initWithCGImage_size(NSImage::alloc(), &image, size);
     // 彩色图标（非模板），避免被渲染成单色。
     nsimage.setTemplate(false);

@@ -22,7 +22,11 @@ const HEAD: u32 = 0x9AA0A6;
 
 /// 分组小标题（灰色小号，左对齐）。
 fn section_header(text: &str) -> Element {
-    Element::label(text).font_size(12.0).fg(Color::hex(HEAD)).height(22).width_match()
+    Element::label(text)
+        .font_size(12.0)
+        .fg(Color::hex(HEAD))
+        .height(22)
+        .width_match()
 }
 
 /// 一行设置项：左标签 + 弹性留白 + 右侧控件（右对齐）。`indent` 为左缩进（子项用）。
@@ -31,7 +35,13 @@ fn setting_row(label: &str, indent: i32, control: Element) -> Element {
         .width_match()
         .height(44)
         .cross(Align::Center)
-        .child(Element::label(label).font_size(14.0).fg(Color::hex(FG)).width(180 - indent).margin_xy(indent / 2, 0))
+        .child(
+            Element::label(label)
+                .font_size(14.0)
+                .fg(Color::hex(FG))
+                .width(180 - indent)
+                .margin_xy(indent / 2, 0),
+        )
         .child(Element::label("").weight(1.0))
         .child(control)
 }
@@ -56,7 +66,13 @@ fn main() {
         .bg(Color::hex(SIDEBAR))
         .padding(10)
         .spacing(4)
-        .child(Element::label("输入法设置").font_size(15.0).fg(Color::hex(FG)).height(34).width_match())
+        .child(
+            Element::label("输入法设置")
+                .font_size(15.0)
+                .fg(Color::hex(FG))
+                .height(34)
+                .width_match(),
+        )
         .child(Element::divider())
         .child(Element::collapsible(
             "属性设置",
@@ -76,39 +92,91 @@ fn main() {
             .width_match()
             .padding(22)
             .spacing(6)
-            .child(Element::label("常用").font_size(20.0).fg(Color::hex(FG)).height(34).width_match())
+            .child(
+                Element::label("常用")
+                    .font_size(20.0)
+                    .fg(Color::hex(FG))
+                    .height(34)
+                    .width_match(),
+            )
             .child(section_header("默认状态"))
-            .child(setting_row("简体 / 繁体", 0, Element::segmented(vec!["简体", "繁体"], zh_form.clone())))
-            .child(setting_row("半角 / 全角", 0, Element::segmented(vec!["半角", "全角"], width_mode.clone())))
-            .child(setting_row("中文 / 英文", 0, Element::segmented(vec!["中文", "英文"], cn_en.clone())))
-            .child(setting_row("隐藏状态栏", 0, Element::switch(hide_bar.clone())))
+            .child(setting_row(
+                "简体 / 繁体",
+                0,
+                Element::segmented(vec!["简体", "繁体"], zh_form.clone()),
+            ))
+            .child(setting_row(
+                "半角 / 全角",
+                0,
+                Element::segmented(vec!["半角", "全角"], width_mode.clone()),
+            ))
+            .child(setting_row(
+                "中文 / 英文",
+                0,
+                Element::segmented(vec!["中文", "英文"], cn_en.clone()),
+            ))
+            .child(setting_row(
+                "隐藏状态栏",
+                0,
+                Element::switch(hide_bar.clone()),
+            ))
             // 带 (?) 悬停提示的禁用子项：还原原界面的帮助图标。
             .child(
                 Element::row()
                     .width_match()
                     .height(44)
                     .cross(Align::Center)
-                    .child(Element::label("显示输入指示器").font_size(14.0).fg(Color::hex(FG)).margin_xy(12, 0))
+                    .child(
+                        Element::label("显示输入指示器")
+                            .font_size(14.0)
+                            .fg(Color::hex(FG))
+                            .margin_xy(12, 0),
+                    )
                     .child(
                         Element::label("(?)")
                             .font_size(13.0)
                             .fg(Color::hex(SUB))
                             .height(20)
-                            .tooltip("开启后，输入时在光标附近显示当前输入状态（中/英、全/半角等）"),
+                            .tooltip(
+                                "开启后，输入时在光标附近显示当前输入状态（中/英、全/半角等）",
+                            ),
                     )
                     .child(Element::label("").weight(1.0))
                     .child(Element::switch(Rc::new(Cell::new(false))).disabled(true)),
             )
-            .child(setting_row("全屏隐藏状态栏", 0, Element::switch(fullscreen_hide.clone())))
+            .child(setting_row(
+                "全屏隐藏状态栏",
+                0,
+                Element::switch(fullscreen_hide.clone()),
+            ))
             .child(Element::divider())
             .child(section_header("输入习惯"))
-            .child(setting_row("输入方案", 0, Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin.clone())))
-            .child(Element::nav_row("双拼方案设定").on_click(move |_| *s1.borrow_mut() = "已进入：双拼方案设定".into()))
+            .child(setting_row(
+                "输入方案",
+                0,
+                Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin.clone()),
+            ))
+            .child(
+                Element::nav_row("双拼方案设定")
+                    .on_click(move |_| *s1.borrow_mut() = "已进入：双拼方案设定".into()),
+            )
             .child(setting_row("拼音纠错", 0, Element::switch(fuzzy.clone())))
-            .child(Element::nav_row("拼音纠错设置").on_click(move |_| *s2.borrow_mut() = "已进入：拼音纠错设置".into()))
-            .child(Element::nav_row("模糊音设置").on_click(move |_| *s3.borrow_mut() = "已进入：模糊音设置".into()))
+            .child(
+                Element::nav_row("拼音纠错设置")
+                    .on_click(move |_| *s2.borrow_mut() = "已进入：拼音纠错设置".into()),
+            )
+            .child(
+                Element::nav_row("模糊音设置")
+                    .on_click(move |_| *s3.borrow_mut() = "已进入：模糊音设置".into()),
+            )
             .child(Element::divider())
-            .child(Element::label_rc(status.clone()).font_size(13.0).fg(Color::hex(SUB)).height(20).width_match()),
+            .child(
+                Element::label_rc(status.clone())
+                    .font_size(13.0)
+                    .fg(Color::hex(SUB))
+                    .height(20)
+                    .width_match(),
+            ),
     );
 
     let ui = Element::row()

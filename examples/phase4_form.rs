@@ -42,8 +42,14 @@ fn main() {
                 .width_match()
                 .height(32),
         )
-        .child(field("名称", Element::text_input(name.clone(), "请输入名称").width(220)))
-        .child(field("启用功能", Element::checkbox("开启高级模式", enabled.clone())))
+        .child(field(
+            "名称",
+            Element::text_input(name.clone(), "请输入名称").width(220),
+        ))
+        .child(field(
+            "启用功能",
+            Element::checkbox("开启高级模式", enabled.clone()),
+        ))
         .child(field("深色主题", Element::switch(dark.clone())))
         .child(field(
             "渲染模式",

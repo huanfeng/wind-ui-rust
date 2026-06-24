@@ -29,7 +29,13 @@ fn card(title: &str, body: Element) -> Element {
         .corner(10.0)
         .padding(16)
         .spacing(10)
-        .child(Element::label(title).font_size(15.0).fg(Color::hex(FG)).height(22).width_match())
+        .child(
+            Element::label(title)
+                .font_size(15.0)
+                .fg(Color::hex(FG))
+                .height(22)
+                .width_match(),
+        )
         .child(Element::divider())
         .child(body)
 }
@@ -39,7 +45,13 @@ fn row(label: &str, control: Element) -> Element {
         .width_match()
         .height(40)
         .cross(Align::Center)
-        .child(Element::label(label).font_size(14.0).fg(Color::hex(FG)).width(96).height(20))
+        .child(
+            Element::label(label)
+                .font_size(14.0)
+                .fg(Color::hex(FG))
+                .width(96)
+                .height(20),
+        )
         .child(control)
 }
 
@@ -54,7 +66,11 @@ fn main() {
             let v = !flag.get();
             flag.set(v);
             windui::anim::set_enabled(v);
-            *lbl.borrow_mut() = if v { "动画：开（点击关闭）".into() } else { "动画：关（点击开启）".into() };
+            *lbl.borrow_mut() = if v {
+                "动画：开（点击关闭）".into()
+            } else {
+                "动画：关（点击开启）".into()
+            };
         })
     };
 
@@ -78,7 +94,13 @@ fn main() {
             .spacing(8)
             .child(row("Switch A", Element::switch(sw1.clone())))
             .child(row("Switch B", Element::switch(sw2.clone())))
-            .child(row("CheckBox", Element::row().spacing(16).child(Element::checkbox("自动更新", chk1.clone())).child(Element::checkbox("Beta", chk2.clone()))))
+            .child(row(
+                "CheckBox",
+                Element::row()
+                    .spacing(16)
+                    .child(Element::checkbox("自动更新", chk1.clone()))
+                    .child(Element::checkbox("Beta", chk2.clone())),
+            ))
             .child(row(
                 "Radio",
                 Element::row()
@@ -94,9 +116,20 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(10)
-            .child(row("分段", Element::segmented(vec!["简体", "繁体", "其它"], seg.clone()).height(32)))
-            .child(row("下拉", Element::dropdown(vec!["北京", "上海", "广州"], dd.clone()).width(140).height(32)))
-            .child(row("步进", Element::stepper(step.clone(), 0.0, 10.0, 1.0).width(120))),
+            .child(row(
+                "分段",
+                Element::segmented(vec!["简体", "繁体", "其它"], seg.clone()).height(32),
+            ))
+            .child(row(
+                "下拉",
+                Element::dropdown(vec!["北京", "上海", "广州"], dd.clone())
+                    .width(140)
+                    .height(32),
+            ))
+            .child(row(
+                "步进",
+                Element::stepper(step.clone(), 0.0, 10.0, 1.0).width(120),
+            )),
     );
 
     let buttons = card(
@@ -110,21 +143,38 @@ fn main() {
     );
 
     // 标签页（底部指示条滑动）。
-    let page = |s: &str| Element::col().padding(12).child(Element::label(s).font_size(13.0).fg(Color::hex(SUB)).height(20));
+    let page = |s: &str| {
+        Element::col().padding(12).child(
+            Element::label(s)
+                .font_size(13.0)
+                .fg(Color::hex(SUB))
+                .height(20),
+        )
+    };
     let tabs = card(
         "标签页（切换看指示条展宽滑动）",
-        Element::tabs(tab.clone(), vec![("常规", page("常规设置内容")), ("外观", page("外观设置内容")), ("高级", page("高级设置内容"))])
-            .width_match()
-            .height(96),
+        Element::tabs(
+            tab.clone(),
+            vec![
+                ("常规", page("常规设置内容")),
+                ("外观", page("外观设置内容")),
+                ("高级", page("高级设置内容")),
+            ],
+        )
+        .width_match()
+        .height(96),
     );
 
     let list = card(
         "列表（选中看底色 + 左缘条淡入）",
-        Element::list(vec!["收件箱", "已发送", "草稿箱", "垃圾箱"], listsel.clone())
-            .width_match()
-            .height(150)
-            .bg(Color::hex(0xF6F8FA))
-            .corner(8.0),
+        Element::list(
+            vec!["收件箱", "已发送", "草稿箱", "垃圾箱"],
+            listsel.clone(),
+        )
+        .width_match()
+        .height(150)
+        .bg(Color::hex(0xF6F8FA))
+        .corner(8.0),
     );
 
     let accordion = card(
@@ -132,8 +182,20 @@ fn main() {
         Element::accordion(
             acc.clone(),
             vec![
-                ("面板一", Element::label("内容一……").width_match().height(28).padding_xy(12, 0)),
-                ("面板二", Element::label("内容二……").width_match().height(28).padding_xy(12, 0)),
+                (
+                    "面板一",
+                    Element::label("内容一……")
+                        .width_match()
+                        .height(28)
+                        .padding_xy(12, 0),
+                ),
+                (
+                    "面板二",
+                    Element::label("内容二……")
+                        .width_match()
+                        .height(28)
+                        .padding_xy(12, 0),
+                ),
             ],
         ),
     );
@@ -142,9 +204,21 @@ fn main() {
         .width_match()
         .cross(Align::Center)
         .spacing(12)
-        .child(Element::label("动画总览").font_size(24.0).fg(Color::hex(0x1A1A2E)).height(34).weight(1.0))
+        .child(
+            Element::label("动画总览")
+                .font_size(24.0)
+                .fg(Color::hex(0x1A1A2E))
+                .height(34)
+                .weight(1.0),
+        )
         .child(toggle)
-        .child(Element::label_rc(anim_label.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width(150));
+        .child(
+            Element::label_rc(anim_label.clone())
+                .font_size(13.0)
+                .fg(Color::hex(SUB))
+                .height(18)
+                .width(150),
+        );
 
     let body = Element::col()
         .width_match()
@@ -158,7 +232,10 @@ fn main() {
         .child(accordion);
 
     let ui = Element::stack().fill().bg(Color::hex(BG)).child(
-        Element::col().fill().padding(18).child(Element::scroll().fill().child(body)),
+        Element::col()
+            .fill()
+            .padding(18)
+            .child(Element::scroll().fill().child(body)),
     );
 
     App::new("windui — 动画总览", 520, 820)

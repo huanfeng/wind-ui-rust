@@ -133,7 +133,11 @@ impl ImageDecoder for PngDecoder {
             let c = p.demultiply();
             rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
-        Ok(DecodedImage { width: w, height: h, rgba })
+        Ok(DecodedImage {
+            width: w,
+            height: h,
+            rgba,
+        })
     }
     fn name(&self) -> &'static str {
         "png"
@@ -195,7 +199,11 @@ impl SvgDecoder {
             let c = p.demultiply();
             rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
-        Ok(DecodedImage { width: w, height: h, rgba })
+        Ok(DecodedImage {
+            width: w,
+            height: h,
+            rgba,
+        })
     }
 }
 
@@ -208,7 +216,9 @@ impl ImageDecoder for SvgDecoder {
         }
         // 纯文本 SVG：前 1KB 内出现 `<svg`（容忍 BOM/XML 声明/注释/大小写）。
         let n = bytes.len().min(1024);
-        bytes[..n].windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg"))
+        bytes[..n]
+            .windows(4)
+            .any(|w| w.eq_ignore_ascii_case(b"<svg"))
     }
     fn decode(&self, bytes: &[u8]) -> Result<DecodedImage, ImageError> {
         Self::rasterize(bytes, None)
@@ -295,7 +305,11 @@ impl Image {
         if rgba.len() != expect {
             return Err(ImageError::InvalidRgba);
         }
-        Self::from_decoded(DecodedImage { width, height, rgba: rgba.to_vec() })
+        Self::from_decoded(DecodedImage {
+            width,
+            height,
+            rgba: rgba.to_vec(),
+        })
     }
 
     /// 把非预乘 RGBA8 转为 tiny-skia 预乘 Pixmap。
@@ -312,7 +326,11 @@ impl Image {
 
     fn from_pixmap(pm: Pixmap) -> Self {
         let (w, h) = (pm.width(), pm.height());
-        Self { pixmap: Rc::new(pm), w, h }
+        Self {
+            pixmap: Rc::new(pm),
+            w,
+            h,
+        }
     }
 
     /// 固有逻辑尺寸（1 图片像素 = 1 逻辑 dp，再由 DPI 缩放）。
@@ -332,7 +350,11 @@ impl Image {
             data.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
         let pm = Pixmap::from_vec(data, size).expect("着色 Pixmap 尺寸匹配");
-        Self { pixmap: Rc::new(pm), w: self.w, h: self.h }
+        Self {
+            pixmap: Rc::new(pm),
+            w: self.w,
+            h: self.h,
+        }
     }
 
     /// 像素宽。
@@ -378,7 +400,10 @@ mod tests {
     #[test]
     fn from_bytes_rejects_unknown_format() {
         let junk = [0u8, 1, 2, 3, 4, 5, 6, 7];
-        assert!(matches!(Image::from_bytes(&junk), Err(ImageError::UnsupportedFormat)));
+        assert!(matches!(
+            Image::from_bytes(&junk),
+            Err(ImageError::UnsupportedFormat)
+        ));
     }
 
     #[test]
@@ -387,9 +412,15 @@ mod tests {
         let ok = Image::from_rgba(2, 2, &[0u8; 16]);
         assert!(ok.is_ok());
         // 长度不符。
-        assert!(matches!(Image::from_rgba(2, 2, &[0u8; 15]), Err(ImageError::InvalidRgba)));
+        assert!(matches!(
+            Image::from_rgba(2, 2, &[0u8; 15]),
+            Err(ImageError::InvalidRgba)
+        ));
         // 零尺寸。
-        assert!(matches!(Image::from_rgba(0, 2, &[]), Err(ImageError::InvalidRgba)));
+        assert!(matches!(
+            Image::from_rgba(0, 2, &[]),
+            Err(ImageError::InvalidRgba)
+        ));
     }
 
     #[test]
@@ -407,7 +438,10 @@ mod tests {
         // 取回非预乘验证：第 1 像素红不透明，第 2 像素红半透明。
         let pm = red.pixmap();
         let p0 = pm.pixel(0, 0).unwrap().demultiply();
-        assert_eq!((p0.red(), p0.green(), p0.blue(), p0.alpha()), (255, 0, 0, 255));
+        assert_eq!(
+            (p0.red(), p0.green(), p0.blue(), p0.alpha()),
+            (255, 0, 0, 255)
+        );
         let p1 = pm.pixel(1, 0).unwrap().demultiply();
         assert_eq!((p1.red(), p1.green(), p1.blue()), (255, 0, 0));
         assert!(p1.alpha() < 200, "半透明 alpha 应保留，实得 {}", p1.alpha());
@@ -473,12 +507,21 @@ mod tests {
             // 光栅化后中心像素应为红色（验证确实渲染了内容，而非空白）。
             let img = Image::from_svg_bytes(RED_SVG, Some(20)).unwrap();
             let p = img.pixmap().pixel(10, 6).unwrap().demultiply();
-            assert!(p.red() > 200 && p.green() < 60 && p.blue() < 60, "中心应为红色，实得 ({},{},{})", p.red(), p.green(), p.blue());
+            assert!(
+                p.red() > 200 && p.green() < 60 && p.blue() < 60,
+                "中心应为红色，实得 ({},{},{})",
+                p.red(),
+                p.green(),
+                p.blue()
+            );
         }
 
         #[test]
         fn invalid_svg_is_decode_error() {
-            assert!(matches!(Image::from_svg_bytes(b"<svg not valid", None), Err(ImageError::Decode(_))));
+            assert!(matches!(
+                Image::from_svg_bytes(b"<svg not valid", None),
+                Err(ImageError::Decode(_))
+            ));
         }
 
         /// 文字 SVG 应渲染出字形（依赖系统字体；svg-text feature 才编译）。
@@ -488,7 +531,12 @@ mod tests {
             const TEXT_SVG: &[u8] =
                 br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><text x="4" y="30" font-size="30" font-family="Arial" fill="#000000">Hi</text></svg>"##;
             let img = Image::from_svg_bytes(TEXT_SVG, None).unwrap();
-            let opaque = img.pixmap().pixels().iter().filter(|p| p.alpha() > 0).count();
+            let opaque = img
+                .pixmap()
+                .pixels()
+                .iter()
+                .filter(|p| p.alpha() > 0)
+                .count();
             assert!(opaque > 0, "文字 SVG 应光栅出字形像素，实得 {opaque}");
         }
     }

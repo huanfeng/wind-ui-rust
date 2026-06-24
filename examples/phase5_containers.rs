@@ -14,7 +14,11 @@ fn list_item(i: usize) -> Element {
         .height(40)
         .cross(Align::Center)
         .padding_xy(12, 0)
-        .bg(if i.is_multiple_of(2) { Color::WHITE } else { Color::hex(0xF7F9FB) })
+        .bg(if i.is_multiple_of(2) {
+            Color::WHITE
+        } else {
+            Color::hex(0xF7F9FB)
+        })
         .child(
             Element::label(format!("列表项 #{i:02} — 可滚动内容"))
                 .font_size(15.0)
@@ -41,18 +45,24 @@ fn main() {
         .fill()
         .padding(16)
         .spacing(12)
-        .child(Element::label("windui").font_size(24.0).fg(Color::hex(0x1A1A2E)).height(32).width_match())
-        .child(Element::label("轻量 Windows GUI：Win32 + tiny-skia + DirectWrite").font_size(14.0).fg(Color::hex(0x636E72)).height(22).width_match())
+        .child(
+            Element::label("windui")
+                .font_size(24.0)
+                .fg(Color::hex(0x1A1A2E))
+                .height(32)
+                .width_match(),
+        )
+        .child(
+            Element::label("轻量 Windows GUI：Win32 + tiny-skia + DirectWrite")
+                .font_size(14.0)
+                .fg(Color::hex(0x636E72))
+                .height(22)
+                .width_match(),
+        )
         .child(Element::divider())
         .child(Element::button("打开对话框").on_click(move |_| show2.set(true)));
 
-    let tabs = Element::tabs(
-        tab.clone(),
-        vec![
-            ("列表", page_list),
-            ("关于", page_about),
-        ],
-    );
+    let tabs = Element::tabs(tab.clone(), vec![("列表", page_list), ("关于", page_about)]);
 
     let show3 = show.clone();
     let dialog = Element::dialog(
@@ -63,8 +73,20 @@ fn main() {
             .corner(12.0)
             .padding(20)
             .spacing(14)
-            .child(Element::label("提示").font_size(20.0).fg(Color::hex(0x1A1A2E)).height(28).width_match())
-            .child(Element::label("这是一个模态对话框，遮罩会吞掉下层点击。").font_size(14.0).fg(Color::hex(0x636E72)).height(40).width_match())
+            .child(
+                Element::label("提示")
+                    .font_size(20.0)
+                    .fg(Color::hex(0x1A1A2E))
+                    .height(28)
+                    .width_match(),
+            )
+            .child(
+                Element::label("这是一个模态对话框，遮罩会吞掉下层点击。")
+                    .font_size(14.0)
+                    .fg(Color::hex(0x636E72))
+                    .height(40)
+                    .width_match(),
+            )
             .child(
                 Element::row()
                     .width_match()

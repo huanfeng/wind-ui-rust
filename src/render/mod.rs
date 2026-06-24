@@ -20,7 +20,10 @@ pub struct Paint {
 
 impl Paint {
     pub fn fill(color: Color) -> Self {
-        Self { color, anti_alias: true }
+        Self {
+            color,
+            anti_alias: true,
+        }
     }
 }
 
@@ -43,7 +46,14 @@ pub trait Canvas {
     /// 把图片按 `fit` 缩放绘制到逻辑矩形 `dst`，并始终裁剪到 `dst`（Cover 溢出、
     /// None 超框安全收口）。`radius>0` 时按圆角裁剪（与背景/边框同源圆角）。
     /// `opacity` 为整体不透明度（0..=1，用于禁用置灰等状态调制）。
-    fn draw_image(&mut self, img: &image::Image, dst: Rect, fit: image::Fit, radius: f32, opacity: f32);
+    fn draw_image(
+        &mut self,
+        img: &image::Image,
+        dst: Rect,
+        fit: image::Fit,
+        radius: f32,
+        opacity: f32,
+    );
     /// 在 rect 内绘制文字（水平按 align、垂直居中）。无文字引擎时为空操作。
     fn draw_text(
         &mut self,
@@ -55,7 +65,12 @@ pub trait Canvas {
         size: f32,
     );
     /// 测量单行文字尺寸（用于光标定位等）。无文字引擎时返回粗略估算。
-    fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size;
+    fn measure_text(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+    ) -> crate::geometry::Size;
 
     /// 保存当前裁剪状态。
     fn save(&mut self);

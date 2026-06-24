@@ -46,11 +46,13 @@ fn main() {
                         .height(28),
                 )
                 .child(
-                    Element::label("按钮具备 normal / hover / pressed 三态与焦点环，事件经命中测试冒泡分发。")
-                        .font_size(14.0)
-                        .fg(Color::hex(0x636E72))
-                        .width_match()
-                        .height(22),
+                    Element::label(
+                        "按钮具备 normal / hover / pressed 三态与焦点环，事件经命中测试冒泡分发。",
+                    )
+                    .font_size(14.0)
+                    .fg(Color::hex(0x636E72))
+                    .width_match()
+                    .height(22),
                 )
                 .child(
                     Element::row()

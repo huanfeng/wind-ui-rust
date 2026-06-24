@@ -16,10 +16,10 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
 
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor,
-    NSDraggingDestination, NSDraggingInfo, NSDragOperation, NSEvent, NSGraphicsContext,
-    NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSDragOperation,
+    NSDraggingDestination, NSDraggingInfo, NSEvent, NSGraphicsContext, NSPasteboardType, NSScreen,
+    NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -332,9 +332,13 @@ impl ContentView {
     fn on_drop(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
         let pb = sender.draggingPasteboard();
         let ty: &NSPasteboardType = unsafe { NSFilenamesPboardType };
-        let Some(plist) = pb.propertyListForType(ty) else { return false };
+        let Some(plist) = pb.propertyListForType(ty) else {
+            return false;
+        };
         // 属性列表为 NSArray<NSString>（路径）；无参 NSArray 才是可降级目标，逐项再降为 NSString。
-        let Ok(arr) = plist.downcast::<NSArray>() else { return false };
+        let Ok(arr) = plist.downcast::<NSArray>() else {
+            return false;
+        };
         let mut paths: Vec<PathBuf> = Vec::new();
         for i in 0..arr.count() {
             if let Ok(s) = arr.objectAtIndex(i).downcast::<NSString>() {
@@ -347,7 +351,10 @@ impl ContentView {
         // 落点：窗口坐标 → 视图（翻转，点）→ 物理像素。
         let view_pt = self.convertPoint_fromView(sender.draggingLocation(), None);
         let scale = self.ivars().borrow().scale;
-        let pos = Point::new((view_pt.x as f32 * scale).round() as i32, (view_pt.y as f32 * scale).round() as i32);
+        let pos = Point::new(
+            (view_pt.x as f32 * scale).round() as i32,
+            (view_pt.y as f32 * scale).round() as i32,
+        );
         let repaint = self.ivars().borrow_mut().handler.on_drop_files(pos, paths);
         if repaint {
             self.setNeedsDisplay(true);
@@ -415,7 +422,8 @@ impl ContentView {
             let data = pixmap.data().as_ptr() as *const c_void;
             let size = bytes_per_row * ph as usize;
             let cs = st.color_space.clone();
-            let provider = unsafe { CGDataProvider::with_data(std::ptr::null_mut(), data, size, None) };
+            let provider =
+                unsafe { CGDataProvider::with_data(std::ptr::null_mut(), data, size, None) };
             provider.and_then(|p| unsafe {
                 CGImage::new(
                     pw as usize,
@@ -434,7 +442,9 @@ impl ContentView {
         };
 
         let Some(image) = image else { return };
-        let Some(gctx) = NSGraphicsContext::currentContext() else { return };
+        let Some(gctx) = NSGraphicsContext::currentContext() else {
+            return;
+        };
         let cg = gctx.CGContext();
 
         // 翻转视图的 drawRect 上下文里，自上而下缓冲派生的 CGImage 需再翻转一次才正立
@@ -447,7 +457,10 @@ impl ContentView {
             Some(&cg),
             CGRect {
                 origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize { width: bounds.size.width, height: bounds.size.height },
+                size: CGSize {
+                    width: bounds.size.width,
+                    height: bounds.size.height,
+                },
             },
             Some(&image),
         );
@@ -521,7 +534,10 @@ impl ContentView {
         let win_pt = ev.locationInWindow();
         let view_pt = self.convertPoint_fromView(win_pt, None);
         let scale = self.ivars().borrow().scale;
-        Point::new((view_pt.x as f32 * scale).round() as i32, (view_pt.y as f32 * scale).round() as i32)
+        Point::new(
+            (view_pt.x as f32 * scale).round() as i32,
+            (view_pt.y as f32 * scale).round() as i32,
+        )
     }
 
     /// 鼠标按下/抬起/移动 → PointerEvent。
@@ -532,7 +548,12 @@ impl ContentView {
         } else {
             1
         };
-        self.dispatch_pointer(PointerEvent { kind, pos, button, click_count });
+        self.dispatch_pointer(PointerEvent {
+            kind,
+            pos,
+            button,
+            click_count,
+        });
     }
 
     /// 滚轮 → Wheel 事件。框架约定一刻度 ±120（正=上滚）。
@@ -548,7 +569,11 @@ impl ContentView {
             return;
         }
         let pos = self.loc_phys(ev);
-        self.dispatch_pointer(PointerEvent::single(PointerKind::Wheel(delta), pos, MouseButton::Left));
+        self.dispatch_pointer(PointerEvent::single(
+            PointerKind::Wheel(delta),
+            pos,
+            MouseButton::Left,
+        ));
     }
 
     /// 键盘按下：特殊键直发；普通文本交输入法（IME 提交后经 `insertText:` 回到 Key::Char），
@@ -569,7 +594,12 @@ impl ContentView {
 
         let special = map_special(key_code);
         if let Some(k) = special {
-            self.dispatch_key(KeyEvent { key: k, pressed: true, shift, ctrl: modk });
+            self.dispatch_key(KeyEvent {
+                key: k,
+                pressed: true,
+                shift,
+                ctrl: modk,
+            });
             // 非空格特殊键到此为止；空格还需交输入法产出 Key::Char(' ')（文本框插入空格）。
             if k != Key::Space {
                 return;
@@ -612,7 +642,12 @@ impl ContentView {
             if c.is_control() {
                 continue;
             }
-            self.dispatch_key(KeyEvent { key: Key::Char(c), pressed: true, shift: false, ctrl: false });
+            self.dispatch_key(KeyEvent {
+                key: Key::Char(c),
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            });
         }
     }
 
@@ -623,13 +658,25 @@ impl ContentView {
             (st.handler.ime_caret(), st.scale)
         };
         let Some((x, y, h)) = caret else {
-            return NSRect { origin: NSPoint { x: 0.0, y: 0.0 }, size: NSSize { width: 0.0, height: 0.0 } };
+            return NSRect {
+                origin: NSPoint { x: 0.0, y: 0.0 },
+                size: NSSize {
+                    width: 0.0,
+                    height: 0.0,
+                },
+            };
         };
         // 物理像素 → 视图点（翻转视图：左上原点、y 向下）。
         let s = scale as f64;
         let view_rect = NSRect {
-            origin: NSPoint { x: x as f64 / s, y: y as f64 / s },
-            size: NSSize { width: 1.0, height: (h as f64 / s).max(1.0) },
+            origin: NSPoint {
+                x: x as f64 / s,
+                y: y as f64 / s,
+            },
+            size: NSSize {
+                width: 1.0,
+                height: (h as f64 / s).max(1.0),
+            },
         };
         // 视图 → 窗口 → 屏幕（AppKit 转换自动处理翻转与 y 轴朝向）。
         let win_rect = self.convertRect_toView(view_rect, None);
@@ -760,12 +807,14 @@ pub(crate) fn run_windowed(
     // 内容矩形为逻辑点尺寸（AppKit 在高 DPI 下自动按 backingScale 放大像素）。
     let content_rect = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
-        size: NSSize { width: cfg.width as f64, height: cfg.height as f64 },
+        size: NSSize {
+            width: cfg.width as f64,
+            height: cfg.height as f64,
+        },
     };
 
-    let mut style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable;
+    let mut style =
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
     if cfg.resizable {
         style |= NSWindowStyleMask::Resizable;
     }
@@ -787,7 +836,11 @@ pub(crate) fn run_windowed(
         window.setStyleMask(style | NSWindowStyleMask::FullSizeContentView);
         window.setTitlebarAppearsTransparent(true);
         window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
-        for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+        for b in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
             if let Some(btn) = window.standardWindowButton(b) {
                 btn.setHidden(true);
             }
@@ -819,13 +872,18 @@ pub(crate) fn run_windowed(
     // 跨线程唤醒：把视图裸指针回填进 WakerShared；后台线程 send 经 dispatch 派回主线程标脏一帧。
     // 窗口建好后再绑定，绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。
     if let Some(w) = &waker {
-        w.bind(Box::new(MacWake { view: Retained::as_ptr(&view) as usize }));
+        w.bind(Box::new(MacWake {
+            view: Retained::as_ptr(&view) as usize,
+        }));
     }
     // on_interval：按 handler 注册的间隔安装周期 NSTimer。
     view.install_interval_timers();
 
     // 系统托盘（若配置）：窗口创建后安装；TrayState 须存活至退出（按钮 target 为弱引用）。
-    let _tray = cfg.tray.take().and_then(|t| super::tray::install(mtm, window.clone(), t));
+    let _tray = cfg
+        .tray
+        .take()
+        .and_then(|t| super::tray::install(mtm, window.clone(), t));
 
     window.makeKeyAndOrderFront(None);
     app.activate();

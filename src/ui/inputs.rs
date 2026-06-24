@@ -10,12 +10,12 @@ use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Rect, Size};
-use crate::ui::containers::VScrollbar;
 use crate::render::{Canvas, Paint};
 use crate::spec::Align;
 use crate::style::Style;
-use crate::theme::Intent;
 use crate::text::TextEngine;
+use crate::theme::Intent;
+use crate::ui::containers::VScrollbar;
 
 const BOX_SIZE: i32 = 18;
 const GAP: i32 = 8;
@@ -61,10 +61,23 @@ impl CheckBox {
 
 impl Widget for CheckBox {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
+        let t = text.measure(
+            &self.label,
+            style.font_family.as_deref(),
+            style.font_size,
+            None,
+        );
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
         // intent 解析填充色与对勾色：Primary 走 ToggleTheme（保持换肤）；其余由 intent 派生，
@@ -91,9 +104,24 @@ impl Widget for CheckBox {
         self.fill.set(fill);
         let sz = BOX_SIZE as f32;
         // 底色 white→accent；边框（未选描边）随填充淡出。
-        canvas.fill_round_rect(bx, by, sz, sz, 4.0, &Paint::fill(tg.knob(p).lerp(accent, amount)));
+        canvas.fill_round_rect(
+            bx,
+            by,
+            sz,
+            sz,
+            4.0,
+            &Paint::fill(tg.knob(p).lerp(accent, amount)),
+        );
         if amount < 1.0 {
-            canvas.stroke_round_rect(bx, by, sz, sz, 4.0, 1.5, &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)));
+            canvas.stroke_round_rect(
+                bx,
+                by,
+                sz,
+                sz,
+                4.0,
+                1.5,
+                &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)),
+            );
         }
         if amount > 0.0 {
             // 启用用 intent 解析的对比色（浅底自动转深）；禁用回退 on_accent。
@@ -103,8 +131,20 @@ impl Widget for CheckBox {
             canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
             canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &paint);
         }
-        let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
-        canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
+        let text_rect = Rect::new(
+            bounds.x + BOX_SIZE + GAP,
+            bounds.y,
+            bounds.w - BOX_SIZE - GAP,
+            bounds.h,
+        );
+        canvas.draw_text(
+            &self.label,
+            text_rect,
+            text_color,
+            Align::Start,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -147,7 +187,10 @@ pub struct Switch {
 impl Switch {
     pub fn new(state: Rc<Cell<bool>>) -> Self {
         let init = if state.get() { 1.0 } else { 0.0 };
-        Self { state, pos: Cell::new(Transition::new(init)) }
+        Self {
+            state,
+            pos: Cell::new(Transition::new(init)),
+        }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.set(!self.state.get());
@@ -159,7 +202,15 @@ impl Widget for Switch {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::new(44, 24)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, _style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        _style: &Style,
+    ) {
         let h = 24.min(bounds.h);
         let w = 44.min(bounds.w);
         let x = bounds.x as f32;
@@ -176,8 +227,19 @@ impl Widget for Switch {
         let amount = pos.animate();
         self.pos.set(pos);
         // 禁用：开态轨道也降为灰，整体弱化；否则按位置在 off↔on 轨道色间插值。
-        let track = if !enabled { p.track } else { tg.track(p).lerp(tg.accent(p), amount) };
-        canvas.fill_round_rect(x, y, w as f32, h as f32, h as f32 / 2.0, &Paint::fill(track));
+        let track = if !enabled {
+            p.track
+        } else {
+            tg.track(p).lerp(tg.accent(p), amount)
+        };
+        canvas.fill_round_rect(
+            x,
+            y,
+            w as f32,
+            h as f32,
+            h as f32 / 2.0,
+            &Paint::fill(track),
+        );
         let r = (h - 6) as f32 / 2.0;
         let (off_cx, on_cx) = (x + 3.0 + r, x + w as f32 - 3.0 - r);
         let knob_cx = off_cx.lerp(on_cx, amount);
@@ -220,7 +282,12 @@ pub struct RadioButton {
 impl RadioButton {
     pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
         let init = if group.get() == index { 1.0 } else { 0.0 };
-        Self { label, group, index, sel: Cell::new(Transition::new(init)) }
+        Self {
+            label,
+            group,
+            index,
+            sel: Cell::new(Transition::new(init)),
+        }
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
@@ -233,10 +300,23 @@ impl RadioButton {
 
 impl Widget for RadioButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
+        let t = text.measure(
+            &self.label,
+            style.font_family.as_deref(),
+            style.font_size,
+            None,
+        );
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
         // 禁用：强调色降为灰、文字用 text_disabled。
@@ -254,13 +334,35 @@ impl Widget for RadioButton {
         let amount = sel.animate();
         self.sel.set(sel);
         let (cxf, cyf) = (cx as f32, cy as f32);
-        canvas.fill_circle(cxf, cyf, outer, &Paint::fill(tg.track(p).lerp(accent, amount)));
-        canvas.fill_circle(cxf, cyf, outer - 1.5f32.lerp(5.0, amount), &Paint::fill(tg.knob(p)));
+        canvas.fill_circle(
+            cxf,
+            cyf,
+            outer,
+            &Paint::fill(tg.track(p).lerp(accent, amount)),
+        );
+        canvas.fill_circle(
+            cxf,
+            cyf,
+            outer - 1.5f32.lerp(5.0, amount),
+            &Paint::fill(tg.knob(p)),
+        );
         if amount > 0.0 {
             canvas.fill_circle(cxf, cyf, (outer - 8.0) * amount, &Paint::fill(accent));
         }
-        let text_rect = Rect::new(bounds.x + BOX_SIZE + GAP, bounds.y, bounds.w - BOX_SIZE - GAP, bounds.h);
-        canvas.draw_text(&self.label, text_rect, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
+        let text_rect = Rect::new(
+            bounds.x + BOX_SIZE + GAP,
+            bounds.y,
+            bounds.w - BOX_SIZE - GAP,
+            bounds.h,
+        );
+        canvas.draw_text(
+            &self.label,
+            text_rect,
+            text_color,
+            Align::Start,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -295,7 +397,10 @@ pub struct Slider {
 
 impl Slider {
     pub fn new(value: Rc<Cell<f32>>) -> Self {
-        Self { value, dragging: false }
+        Self {
+            value,
+            dragging: false,
+        }
     }
     fn set_from_pos(&self, ctx: &mut EventCtx, x: i32) {
         let b = ctx.bounds();
@@ -313,7 +418,15 @@ impl Widget for Slider {
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         Size::new(120, 2 * KNOB_R)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, _style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        _style: &Style,
+    ) {
         let v = self.value.get().clamp(0.0, 1.0);
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
         let r = KNOB_R as f32;
@@ -325,9 +438,23 @@ impl Widget for Slider {
         let (pal, tg) = (&th.palette, &th.toggle);
         // 禁用：已填充与钮芯的强调色降为灰。
         let accent = if enabled { tg.accent(pal) } else { pal.track };
-        canvas.fill_round_rect(x0, cy - 2.0, (x1 - x0).max(0.0), 4.0, 2.0, &Paint::fill(tg.track(pal)));
+        canvas.fill_round_rect(
+            x0,
+            cy - 2.0,
+            (x1 - x0).max(0.0),
+            4.0,
+            2.0,
+            &Paint::fill(tg.track(pal)),
+        );
         // 已填充
-        canvas.fill_round_rect(x0, cy - 2.0, (knob_x - x0).max(0.0), 4.0, 2.0, &Paint::fill(accent));
+        canvas.fill_round_rect(
+            x0,
+            cy - 2.0,
+            (knob_x - x0).max(0.0),
+            4.0,
+            2.0,
+            &Paint::fill(accent),
+        );
         // 钮
         canvas.fill_circle(knob_x, cy, r, &Paint::fill(tg.knob(pal)));
         canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(accent));
@@ -403,7 +530,11 @@ pub struct TextConfig {
 impl Default for TextConfig {
     /// wrap 默认开启，使多行默认软换行；类型自带正确默认避免直接构造踩坑。
     fn default() -> Self {
-        Self { multiline: false, password: false, wrap: true }
+        Self {
+            multiline: false,
+            password: false,
+            wrap: true,
+        }
     }
 }
 
@@ -432,10 +563,10 @@ pub struct TextInput {
     text: Rc<RefCell<String>>,
     placeholder: String,
     config: TextConfig,
-    cursor: usize,            // 字符索引
-    anchor: Option<usize>,    // 选区锚点（Some 且 != cursor 时有选区）
-    scroll_x: Cell<i32>,      // 水平滚动偏移（逻辑 px），paint 时按光标更新
-    scroll_y: Cell<i32>,      // 垂直滚动偏移（逻辑 px，多行用），paint 时按光标更新
+    cursor: usize,         // 字符索引
+    anchor: Option<usize>, // 选区锚点（Some 且 != cursor 时有选区）
+    scroll_x: Cell<i32>,   // 水平滚动偏移（逻辑 px），paint 时按光标更新
+    scroll_y: Cell<i32>,   // 垂直滚动偏移（逻辑 px，多行用），paint 时按光标更新
     /// 上下移动时保持的目标列像素（粘性 goal column）；水平移动/编辑后清空。
     goal_x: Cell<Option<i32>>,
     layout: RefCell<TextLayout>, // paint 重建的视觉行缓存
@@ -604,7 +735,12 @@ impl TextInput {
         let has_sel = self.selection().is_some();
         let has_text = self.char_count() > 0;
         let pw = self.config.password;
-        let ctrl = |vk: u32| KeyEvent { key: Key::Other(vk), pressed: true, shift: false, ctrl: true };
+        let ctrl = |vk: u32| KeyEvent {
+            key: Key::Other(vk),
+            pressed: true,
+            shift: false,
+            ctrl: true,
+        };
         vec![
             MenuItem::key("剪切", ctrl(0x58), has_sel && !pw), // VK_X
             MenuItem::key("复制", ctrl(0x43), has_sel && !pw), // VK_C
@@ -629,7 +765,14 @@ impl TextInput {
         self.cursor = e;
     }
     /// 按显示串与内框宽度重建视觉行布局缓存。paint 调用；点击/上下移动复用其结果。
-    fn rebuild_layout(&self, canvas: &mut dyn Canvas, disp: &str, family: Option<&str>, fsize: f32, inner_w: i32) {
+    fn rebuild_layout(
+        &self,
+        canvas: &mut dyn Canvas,
+        disp: &str,
+        family: Option<&str>,
+        fsize: f32,
+        inner_w: i32,
+    ) {
         // 缓存命中（文本/宽度/字体均未变）：跳过重建，沿用上次视觉行。
         {
             let lay = self.layout.borrow();
@@ -649,7 +792,12 @@ impl TextInput {
         let wrap = self.config.wrap && multiline;
 
         let mut lay = self.layout.borrow_mut();
-        lay.key = Some((disp.to_string(), inner_w, family.map(str::to_string), fsize.to_bits()));
+        lay.key = Some((
+            disp.to_string(),
+            inner_w,
+            family.map(str::to_string),
+            fsize.to_bits(),
+        ));
         lay.lines.clear();
         lay.line_h = canvas.measure_text("Ay", family, fsize).h.max(fsize as i32);
 
@@ -673,7 +821,12 @@ impl TextInput {
             for (ls, le, hard) in wrap_paragraph(&chars, p, q, &prefix, inner_w, wrap) {
                 let base = prefix[ls - p];
                 let x: Vec<i32> = (ls..=le).map(|k| prefix[k - p] - base).collect();
-                lay.lines.push(VisLine { start: ls, end: le, x, hard });
+                lay.lines.push(VisLine {
+                    start: ls,
+                    end: le,
+                    x,
+                    hard,
+                });
             }
             if q < n {
                 p = q + 1; // 跳过 '\n'；若 p==n（文末换行）下轮产出空尾行后结束
@@ -826,7 +979,10 @@ impl TextInput {
         self.clamp_cursor();
         let clean: String = if self.is_multiline() {
             let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
-            normalized.chars().filter(|c| *c == '\n' || !c.is_control()).collect()
+            normalized
+                .chars()
+                .filter(|c| *c == '\n' || !c.is_control())
+                .collect()
         } else {
             s.chars().filter(|c| !c.is_control()).collect()
         };
@@ -845,7 +1001,10 @@ impl TextInput {
 }
 
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
-    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len())
 }
 
 /// 把一个段落 [p,q)（不含换行符）按内框宽度切成视觉行，返回每行的
@@ -938,19 +1097,44 @@ impl Widget for TextInput {
             .h
             .max(style.font_size as i32);
         // 多行默认约 5 行高（用户可 .height() 覆盖）；单行沿用紧凑高度。
-        let h = if self.is_multiline() { lh * 5 + 2 * TEXT_PAD } else { (style.font_size as i32) + 16 };
+        let h = if self.is_multiline() {
+            lh * 5 + 2 * TEXT_PAD
+        } else {
+            (style.font_size as i32) + 16
+        };
         Size::new(160, h)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, inp) = (&th.palette, &th.input);
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         let corner = inp.corner(&th.metrics);
         // 禁用：背景弱化、正文用 text_disabled。
-        let bg = if enabled { inp.bg(pal) } else { pal.surface_alt };
+        let bg = if enabled {
+            inp.bg(pal)
+        } else {
+            pal.surface_alt
+        };
         let text_color = if enabled { style.fg } else { pal.text_disabled };
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
-        let border = if focused { inp.border_focus(pal) } else { inp.border(pal) };
+        let border = if focused {
+            inp.border_focus(pal)
+        } else {
+            inp.border(pal)
+        };
         canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
@@ -960,7 +1144,12 @@ impl Widget for TextInput {
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
         let vpad = if multiline { TEXT_PAD } else { 0 };
-        let inner = Rect::new(bounds.x + TEXT_PAD, bounds.y + vpad, bounds.w - 2 * TEXT_PAD, bounds.h - 2 * vpad);
+        let inner = Rect::new(
+            bounds.x + TEXT_PAD,
+            bounds.y + vpad,
+            bounds.w - 2 * TEXT_PAD,
+            bounds.h - 2 * vpad,
+        );
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
         let wrap = self.config.wrap && multiline;
@@ -1009,7 +1198,11 @@ impl Widget for TextInput {
         self.scroll_x.set(sx);
 
         // 首行 y：多行从内框顶部减滚动；单行在内框内垂直居中。
-        let first_line_y = if multiline { inner.y - sy } else { inner.y + (inner.h - line_h) / 2 };
+        let first_line_y = if multiline {
+            inner.y - sy
+        } else {
+            inner.y + (inner.h - line_h) / 2
+        };
         let base_x = inner.x - sx;
 
         canvas.save();
@@ -1027,7 +1220,11 @@ impl Widget for TextInput {
                 let cont = e > ln.end && s <= ln.end; // 选区越过本行末尾继续到下一行
                 if b > a || cont {
                     let x1 = ln.x[a - ln.start];
-                    let x2 = if cont { ln.x.last().copied().unwrap_or(0) + SEL_EOL_EXTRA } else { ln.x[b - ln.start] };
+                    let x2 = if cont {
+                        ln.x.last().copied().unwrap_or(0) + SEL_EOL_EXTRA
+                    } else {
+                        ln.x[b - ln.start]
+                    };
                     canvas.fill_rect(
                         (base_x + x1) as f32,
                         (ly + 2) as f32,
@@ -1041,7 +1238,14 @@ impl Widget for TextInput {
 
         if is_empty {
             let pr = Rect::new(inner.x, first_line_y, inner.w, line_h);
-            canvas.draw_text(&self.placeholder, pr, inp.placeholder(pal), Align::Start, family, fsize);
+            canvas.draw_text(
+                &self.placeholder,
+                pr,
+                inp.placeholder(pal),
+                Align::Start,
+                family,
+                fsize,
+            );
         } else {
             let chars: Vec<char> = disp.chars().collect();
             for (i, ln) in lay.lines.iter().enumerate() {
@@ -1060,7 +1264,8 @@ impl Widget for TextInput {
         let ly = first_line_y + cl as i32 * line_h;
         let cxx = base_x + cx_in;
         // 记录光标局部位置（相对节点左上角）供输入法候选窗定位。
-        self.caret_local.set(Some((cxx - bounds.x, ly - bounds.y, line_h)));
+        self.caret_local
+            .set(Some((cxx - bounds.x, ly - bounds.y, line_h)));
         if focused {
             canvas.draw_line(
                 cxx as f32,
@@ -1093,7 +1298,14 @@ impl Widget for TextInput {
                             let lh = lay.line_h.max(1);
                             (lay.lines.len() as i32 * lh, lh)
                         };
-                        if self.scrollbar.on_down(p.pos, b, self.scroll_y.get(), content_h, view_h, ctx) {
+                        if self.scrollbar.on_down(
+                            p.pos,
+                            b,
+                            self.scroll_y.get(),
+                            content_h,
+                            view_h,
+                            ctx,
+                        ) {
                             ctx.mark_dirty();
                             return true;
                         }
@@ -1302,12 +1514,20 @@ impl Widget for TextInput {
                     }
                     Key::Home => {
                         // 多行：到当前视觉行首；单行：到文本首。
-                        let target = if self.is_multiline() { self.cur_line_bounds().0 } else { 0 };
+                        let target = if self.is_multiline() {
+                            self.cur_line_bounds().0
+                        } else {
+                            0
+                        };
                         self.move_to(ctx, target, k.shift);
                         true
                     }
                     Key::End => {
-                        let target = if self.is_multiline() { self.cur_line_bounds().1 } else { len };
+                        let target = if self.is_multiline() {
+                            self.cur_line_bounds().1
+                        } else {
+                            len
+                        };
                         self.move_to(ctx, target, k.shift);
                         true
                     }
@@ -1410,9 +1630,15 @@ mod tests {
         let chars: Vec<char> = "abc".chars().collect();
         let pre = prefix10(3);
         // 不换行：整段一行。
-        assert_eq!(wrap_paragraph(&chars, 0, 3, &pre, 10, false), vec![(0, 3, true)]);
+        assert_eq!(
+            wrap_paragraph(&chars, 0, 3, &pre, 10, false),
+            vec![(0, 3, true)]
+        );
         // 空段落：占一视觉行。
-        assert_eq!(wrap_paragraph(&chars, 3, 3, &[0], 50, true), vec![(3, 3, true)]);
+        assert_eq!(
+            wrap_paragraph(&chars, 3, 3, &[0], 50, true),
+            vec![(3, 3, true)]
+        );
     }
 
     fn dummy_input() -> TextInput {
@@ -1443,8 +1669,18 @@ mod tests {
         // 两视觉行 [0,3) 软换行 + [3,6)。
         let lay = TextLayout {
             lines: vec![
-                VisLine { start: 0, end: 3, x: vec![0, 10, 20, 30], hard: false },
-                VisLine { start: 3, end: 6, x: vec![0, 10, 20, 30], hard: true },
+                VisLine {
+                    start: 0,
+                    end: 3,
+                    x: vec![0, 10, 20, 30],
+                    hard: false,
+                },
+                VisLine {
+                    start: 3,
+                    end: 6,
+                    x: vec![0, 10, 20, 30],
+                    hard: true,
+                },
             ],
             line_h: 14,
             key: None,
@@ -1462,8 +1698,18 @@ mod tests {
         // 硬换行行 [0,1)（"a\n"）+ [2,3)（"b"）。
         let lay = TextLayout {
             lines: vec![
-                VisLine { start: 0, end: 1, x: vec![0, 10], hard: true },
-                VisLine { start: 2, end: 3, x: vec![0, 10], hard: true },
+                VisLine {
+                    start: 0,
+                    end: 1,
+                    x: vec![0, 10],
+                    hard: true,
+                },
+                VisLine {
+                    start: 2,
+                    end: 3,
+                    x: vec![0, 10],
+                    hard: true,
+                },
             ],
             line_h: 14,
             key: None,
@@ -1520,14 +1766,24 @@ mod anim_tests {
         crate::anim::set_clock_ms(clock);
         let mut pm = Pixmap::new(60, 30).unwrap();
         let mut c = SkiaCanvas::new(&mut pm);
-        sw.paint(Rect::new(0, 0, 44, 24), Rect::new(0, 0, 44, 24), false, true, &mut c, &Style::default());
+        sw.paint(
+            Rect::new(0, 0, 44, 24),
+            Rect::new(0, 0, 44, 24),
+            false,
+            true,
+            &mut c,
+            &Style::default(),
+        );
     }
 
     #[test]
     fn pos_initializes_to_state_no_first_frame_anim() {
         // 构造期即按当前状态落定，避免首帧从 0 飞到 1 的突兀动画。
         assert_eq!(Switch::new(Rc::new(Cell::new(true))).pos.get().value(), 1.0);
-        assert_eq!(Switch::new(Rc::new(Cell::new(false))).pos.get().value(), 0.0);
+        assert_eq!(
+            Switch::new(Rc::new(Cell::new(false))).pos.get().value(),
+            0.0
+        );
     }
 
     #[test]

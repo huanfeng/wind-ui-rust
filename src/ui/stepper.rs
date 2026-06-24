@@ -94,47 +94,115 @@ impl Widget for Stepper {
         Size::new(120, (style.font_size as i32) + 16)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, st) = (&th.palette, &th.stepper);
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         let corner = th.metrics.corner_md;
         // 禁用：背景弱化、值与 +/- 全置灰。
         let bg = if enabled { st.bg(pal) } else { pal.surface_alt };
-        let value_color = if enabled { st.text(pal) } else { pal.text_disabled };
+        let value_color = if enabled {
+            st.text(pal)
+        } else {
+            pal.text_disabled
+        };
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused { pal.accent } else { st.border(pal) };
         canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
 
         // 按钮区悬停底色（左右对称内缩 1px 避让边框）；按补间量淡入淡出（禁用不画）。
-        let (amt_l, amt_r) = (hover_amt(&self.hover_l, enabled && self.hover == 0), hover_amt(&self.hover_r, enabled && self.hover == 1));
+        let (amt_l, amt_r) = (
+            hover_amt(&self.hover_l, enabled && self.hover == 0),
+            hover_amt(&self.hover_r, enabled && self.hover == 1),
+        );
         if amt_l > 0.0 {
-            canvas.fill_round_rect(x + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal).scale_alpha(amt_l)));
+            canvas.fill_round_rect(
+                x + 1.0,
+                y + 1.0,
+                BTN_W as f32 - 2.0,
+                h - 2.0,
+                corner,
+                &Paint::fill(st.button_hover(pal).scale_alpha(amt_l)),
+            );
         }
         if amt_r > 0.0 {
-            canvas.fill_round_rect(x + w - BTN_W as f32 + 1.0, y + 1.0, BTN_W as f32 - 2.0, h - 2.0, corner, &Paint::fill(st.button_hover(pal).scale_alpha(amt_r)));
+            canvas.fill_round_rect(
+                x + w - BTN_W as f32 + 1.0,
+                y + 1.0,
+                BTN_W as f32 - 2.0,
+                h - 2.0,
+                corner,
+                &Paint::fill(st.button_hover(pal).scale_alpha(amt_r)),
+            );
         }
 
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
         // 左右分隔线。
         let div = Paint::fill(st.border(pal));
-        canvas.draw_line((bounds.x + BTN_W) as f32, y + 4.0, (bounds.x + BTN_W) as f32, y + h - 4.0, 1.0, &div);
-        canvas.draw_line((bounds.right() - BTN_W) as f32, y + 4.0, (bounds.right() - BTN_W) as f32, y + h - 4.0, 1.0, &div);
+        canvas.draw_line(
+            (bounds.x + BTN_W) as f32,
+            y + 4.0,
+            (bounds.x + BTN_W) as f32,
+            y + h - 4.0,
+            1.0,
+            &div,
+        );
+        canvas.draw_line(
+            (bounds.right() - BTN_W) as f32,
+            y + 4.0,
+            (bounds.right() - BTN_W) as f32,
+            y + h - 4.0,
+            1.0,
+            &div,
+        );
 
         // − / + 字形（按钮色，禁用端变灰）。
         let at_min = self.value.get() <= self.min;
         let at_max = self.value.get() >= self.max;
-        let minus_c = if !enabled || at_min { pal.text_disabled } else { st.button(pal) };
-        let plus_c = if !enabled || at_max { pal.text_disabled } else { st.button(pal) };
+        let minus_c = if !enabled || at_min {
+            pal.text_disabled
+        } else {
+            st.button(pal)
+        };
+        let plus_c = if !enabled || at_max {
+            pal.text_disabled
+        } else {
+            st.button(pal)
+        };
         let minus_r = Rect::new(bounds.x, bounds.y, BTN_W, bounds.h);
         let plus_r = Rect::new(bounds.right() - BTN_W, bounds.y, BTN_W, bounds.h);
         canvas.draw_text("\u{2212}", minus_r, minus_c, Align::Center, family, fsize);
         canvas.draw_text("+", plus_r, plus_c, Align::Center, family, fsize);
 
         // 中部值（窄控件下宽度兜底为非负）。
-        let mid = Rect::new(bounds.x + BTN_W, bounds.y, (bounds.w - 2 * BTN_W).max(0), bounds.h);
-        canvas.draw_text(&self.display(), mid, value_color, Align::Center, family, fsize);
+        let mid = Rect::new(
+            bounds.x + BTN_W,
+            bounds.y,
+            (bounds.w - 2 * BTN_W).max(0),
+            bounds.h,
+        );
+        canvas.draw_text(
+            &self.display(),
+            mid,
+            value_color,
+            Align::Center,
+            family,
+            fsize,
+        );
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {

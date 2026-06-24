@@ -60,7 +60,13 @@ fn card(title: &str, body: Element) -> Element {
         .corner(10.0)
         .padding(16)
         .spacing(10)
-        .child(Element::label(title).font_size(16.0).fg(Color::hex(FG)).height(24).width_match())
+        .child(
+            Element::label(title)
+                .font_size(16.0)
+                .fg(Color::hex(FG))
+                .height(24)
+                .width_match(),
+        )
         .child(Element::divider())
         .child(body)
 }
@@ -69,8 +75,18 @@ fn card(title: &str, body: Element) -> Element {
 fn demo(label: &str, img: Element) -> Element {
     Element::col()
         .spacing(4)
-        .child(img.width(96).height(72).bg(Color::hex(0xF6F8FA)).border(Color::hex(0xDDDDDD), 1))
-        .child(Element::label(label).font_size(12.0).fg(Color::hex(SUB)).height(16))
+        .child(
+            img.width(96)
+                .height(72)
+                .bg(Color::hex(0xF6F8FA))
+                .border(Color::hex(0xDDDDDD), 1),
+        )
+        .child(
+            Element::label(label)
+                .font_size(12.0)
+                .fg(Color::hex(SUB))
+                .height(16),
+        )
 }
 
 fn main() {
@@ -79,15 +95,32 @@ fn main() {
 
     let fit_row = Element::row()
         .spacing(12)
-        .child(demo("Contain", Element::image_rgba(64, 48, &grad).fit(Fit::Contain)))
-        .child(demo("Cover", Element::image_rgba(64, 48, &grad).fit(Fit::Cover)))
-        .child(demo("Fill", Element::image_rgba(64, 48, &grad).fit(Fit::Fill)))
-        .child(demo("None", Element::image_rgba(64, 48, &grad).fit(Fit::None)));
+        .child(demo(
+            "Contain",
+            Element::image_rgba(64, 48, &grad).fit(Fit::Contain),
+        ))
+        .child(demo(
+            "Cover",
+            Element::image_rgba(64, 48, &grad).fit(Fit::Cover),
+        ))
+        .child(demo(
+            "Fill",
+            Element::image_rgba(64, 48, &grad).fit(Fit::Fill),
+        ))
+        .child(demo(
+            "None",
+            Element::image_rgba(64, 48, &grad).fit(Fit::None),
+        ));
 
     let corner_row = Element::row()
         .spacing(12)
         .cross(Align::Center)
-        .child(demo("圆角 12", Element::image_rgba(64, 48, &grad).fit(Fit::Cover).corner(12.0)))
+        .child(demo(
+            "圆角 12",
+            Element::image_rgba(64, 48, &grad)
+                .fit(Fit::Cover)
+                .corner(12.0),
+        ))
         .child(
             // 圆形头像：正方形 + 半边长圆角。
             Element::col()
@@ -99,7 +132,12 @@ fn main() {
                         .width(72)
                         .height(72),
                 )
-                .child(Element::label("圆形").font_size(12.0).fg(Color::hex(SUB)).height(16)),
+                .child(
+                    Element::label("圆形")
+                        .font_size(12.0)
+                        .fg(Color::hex(SUB))
+                        .height(16),
+                ),
         )
         .child(demo("占位(加载失败)", Element::image("不存在的文件.png")));
 
@@ -108,12 +146,18 @@ fn main() {
         .spacing(12)
         .cross(Align::Center)
         .child(Element::button("新建").icon_rgba(32, 32, &icon))
-        .child(Element::button("禁用").icon_rgba(32, 32, &icon).disabled(true))
+        .child(
+            Element::button("禁用")
+                .icon_rgba(32, 32, &icon)
+                .disabled(true),
+        )
         .child(demo(
             "着色(accent)",
             // 白色加号模板 → 着成强调色（单色图标随主题/状态变色）。
             Element::image_content(
-                ImageContent::from_rgba(32, 32, &icon).fit(Fit::Contain).tint(Color::hex(0x4C8BF5)),
+                ImageContent::from_rgba(32, 32, &icon)
+                    .fit(Fit::Contain)
+                    .tint(Color::hex(0x4C8BF5)),
             ),
         ));
 
@@ -121,10 +165,22 @@ fn main() {
     let picked = Rc::new(Cell::new(0usize));
     let icon_list = Element::list_icons(
         vec![
-            ("收件箱", ImageContent::from_rgba(24, 24, &solid(24, 0x4C, 0x8B, 0xF5))),
-            ("已发送", ImageContent::from_rgba(24, 24, &solid(24, 0x2E, 0xC4, 0x8B))),
-            ("草稿箱", ImageContent::from_rgba(24, 24, &solid(24, 0xF5, 0xA6, 0x23))),
-            ("垃圾箱", ImageContent::from_rgba(24, 24, &solid(24, 0xE5, 0x48, 0x4D))),
+            (
+                "收件箱",
+                ImageContent::from_rgba(24, 24, &solid(24, 0x4C, 0x8B, 0xF5)),
+            ),
+            (
+                "已发送",
+                ImageContent::from_rgba(24, 24, &solid(24, 0x2E, 0xC4, 0x8B)),
+            ),
+            (
+                "草稿箱",
+                ImageContent::from_rgba(24, 24, &solid(24, 0xF5, 0xA6, 0x23)),
+            ),
+            (
+                "垃圾箱",
+                ImageContent::from_rgba(24, 24, &solid(24, 0xE5, 0x48, 0x4D)),
+            ),
         ],
         picked.clone(),
     )
@@ -142,10 +198,21 @@ fn main() {
         .spacing(12)
         .cross(Align::Center)
         // 固有尺寸光栅 vs 指定 2× 宽度光栅（矢量按需出清晰位图）。
-        .child(demo("SVG 固有", Element::image_svg(svg_circle, None).fit(Fit::Contain)))
-        .child(demo("SVG 192px 光栅", Element::image_svg(svg_circle, Some(192)).fit(Fit::Contain)))
+        .child(demo(
+            "SVG 固有",
+            Element::image_svg(svg_circle, None).fit(Fit::Contain),
+        ))
+        .child(demo(
+            "SVG 192px 光栅",
+            Element::image_svg(svg_circle, Some(192)).fit(Fit::Contain),
+        ))
         // 单色 SVG 模板着色（rgb 替换为强调色，保留 alpha）。
-        .child(demo("SVG 着色", Element::image_svg(svg_check, Some(64)).fit(Fit::Contain).tint(Color::hex(0x4C8BF5))))
+        .child(demo(
+            "SVG 着色",
+            Element::image_svg(svg_check, Some(64))
+                .fit(Fit::Contain)
+                .tint(Color::hex(0x4C8BF5)),
+        ))
         .child(Element::button("SVG 图标").icon_svg(svg_check, Some(32)));
 
     // SVG 卡片内容；启用 svg-text feature 时追加一行内嵌文字演示（用系统字体渲染）。
@@ -155,9 +222,12 @@ fn main() {
     {
         // 含中文故用 str + as_bytes（字节串字面量不容非 ASCII）。
         let svg_text: &[u8] = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40"><text x="6" y="29" font-size="26" font-family="Segoe UI, Arial" fill="#4c8bf5">Hello, SVG 文字</text></svg>"##.as_bytes();
-        svg_body = svg_body
-            .child(Element::divider())
-            .child(Element::image_svg(svg_text, Some(440)).fit(Fit::Contain).height(40).width_match());
+        svg_body = svg_body.child(Element::divider()).child(
+            Element::image_svg(svg_text, Some(440))
+                .fit(Fit::Contain)
+                .height(40)
+                .width_match(),
+        );
     }
 
     let body = Element::col()
@@ -174,7 +244,13 @@ fn main() {
             .fill()
             .padding(18)
             .spacing(12)
-            .child(Element::label("图片支持").font_size(24.0).fg(Color::hex(0x1A1A2E)).height(34).width_match())
+            .child(
+                Element::label("图片支持")
+                    .font_size(24.0)
+                    .fg(Color::hex(0x1A1A2E))
+                    .height(34)
+                    .width_match(),
+            )
             .child(Element::scroll().fill().child(body)),
     );
 

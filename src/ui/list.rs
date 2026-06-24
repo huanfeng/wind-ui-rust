@@ -78,11 +78,24 @@ impl Widget for ListRow {
         Size::new(avail.w.max(0), ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, lt) = (&th.palette, &th.list);
         let sel = self.selected();
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         // 底色：选中 > 悬停 > 无。用"存在量"补间对固定目标色缩 alpha 淡入淡出——
         // 记住当前底色，淡出期沿用其 RGB（不从透明黑 lerp，避免中途变暗）。
         let want = if sel {
@@ -103,7 +116,13 @@ impl Widget for ListRow {
         let bg_amt = bg.animate();
         self.bg_amt.set(bg);
         if bg_amt > 0.0 {
-            canvas.fill_rect(x, y, w, h, &Paint::fill(self.bg_color.get().scale_alpha(bg_amt)));
+            canvas.fill_rect(
+                x,
+                y,
+                w,
+                h,
+                &Paint::fill(self.bg_color.get().scale_alpha(bg_amt)),
+            );
         }
         // 选中左缘强调条补间（禁用时不强调）：淡入。
         let mut selt = self.sel.get();
@@ -117,13 +136,25 @@ impl Widget for ListRow {
             canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent.scale_alpha(sel_amt)));
         }
         // 前置图标：方形、垂直居中；文字相应右移。禁用走 Disabled 调制。
-        let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
+        let vstate = if !enabled {
+            VisualState::Disabled
+        } else {
+            self.visual_state()
+        };
         let mut text_x = bounds.x + PAD_X;
         if let Some(icon) = &self.icon {
             let side = (bounds.h - 14).max(0);
             let iy = bounds.y + (bounds.h - side) / 2;
-            let istyle = Style { corner_radius: 0.0, ..style.clone() };
-            icon.paint_into(Rect::new(bounds.x + PAD_X, iy, side, side), canvas, &istyle, vstate);
+            let istyle = Style {
+                corner_radius: 0.0,
+                ..style.clone()
+            };
+            icon.paint_into(
+                Rect::new(bounds.x + PAD_X, iy, side, side),
+                canvas,
+                &istyle,
+                vstate,
+            );
             text_x = bounds.x + PAD_X + side + ICON_GAP;
         }
         let color = if !enabled {
@@ -135,7 +166,14 @@ impl Widget for ListRow {
         };
         let tw = (bounds.right() - PAD_X - text_x).max(0);
         let tr = Rect::new(text_x, bounds.y, tw, bounds.h);
-        canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
+        canvas.draw_text(
+            &self.label,
+            tr,
+            color,
+            Align::Start,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
         // 键盘焦点时描边（仅当前焦点行）。
         let _ = focused;
     }
@@ -208,8 +246,16 @@ mod tests {
         }
         // 图标方块中心（PAD_X 起、垂直居中）应为红色。
         let side = ROW_H - 14;
-        let p = pm.pixel((PAD_X + side / 2) as u32, (ROW_H / 2) as u32).unwrap();
-        assert!(p.red() > 180 && p.green() < 90, "行图标应绘制红色，实得 ({},{},{})", p.red(), p.green(), p.blue());
+        let p = pm
+            .pixel((PAD_X + side / 2) as u32, (ROW_H / 2) as u32)
+            .unwrap();
+        assert!(
+            p.red() > 180 && p.green() < 90,
+            "行图标应绘制红色，实得 ({},{},{})",
+            p.red(),
+            p.green(),
+            p.blue()
+        );
     }
 
     #[test]

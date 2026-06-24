@@ -38,7 +38,15 @@ impl Widget for ProgressBar {
         Size::new(160, BAR_H + 4)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, _enabled: bool, canvas: &mut dyn Canvas, _style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn Canvas,
+        _style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, pr) = (&th.palette, &th.progress);
         let h = BAR_H.min(bounds.h) as f32;

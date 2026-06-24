@@ -218,7 +218,8 @@ impl InputTheme {
         self.placeholder.unwrap_or(p.placeholder)
     }
     pub fn selection(&self, p: &Palette) -> Color {
-        self.selection.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x55))
+        self.selection
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x55))
     }
     pub fn cursor(&self, p: &Palette) -> Color {
         self.cursor.unwrap_or(p.text)
@@ -309,7 +310,8 @@ impl MenuTheme {
         self.text_disabled.unwrap_or(p.text_disabled)
     }
     pub fn hover(&self, p: &Palette) -> Color {
-        self.hover.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+        self.hover
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
     }
     pub fn accent(&self, p: &Palette) -> Color {
         self.accent.unwrap_or(p.accent)
@@ -381,7 +383,8 @@ impl StepperTheme {
         self.button.unwrap_or(p.accent)
     }
     pub fn button_hover(&self, p: &Palette) -> Color {
-        self.button_hover.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x18))
+        self.button_hover
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x18))
     }
 }
 
@@ -400,7 +403,8 @@ impl ListTheme {
         self.text.unwrap_or(p.text)
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
-        self.selected_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+        self.selected_bg
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
         self.selected_text.unwrap_or(p.accent)
@@ -464,7 +468,8 @@ impl SegmentTheme {
         self.border_focus.unwrap_or(p.accent)
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
-        self.selected_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+        self.selected_bg
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
         self.selected_text.unwrap_or(p.accent)
@@ -473,7 +478,8 @@ impl SegmentTheme {
         self.text.unwrap_or(p.text_muted)
     }
     pub fn hover_bg(&self, p: &Palette) -> Color {
-        self.hover_bg.unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x12))
+        self.hover_bg
+            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x12))
     }
     pub fn divider(&self, p: &Palette) -> Color {
         self.divider.unwrap_or(p.divider)
@@ -647,7 +653,11 @@ mod tests {
         // 仅覆盖强调色，其余回退默认。
         let t = Theme::from_toml("[palette]\naccent = \"#112233\"\n").expect("部分 TOML");
         assert_eq!(t.palette.accent, Color::hex(0x112233));
-        assert_eq!(t.palette.text, Palette::default().text, "未指定字段回退默认");
+        assert_eq!(
+            t.palette.text,
+            Palette::default().text,
+            "未指定字段回退默认"
+        );
         assert!(t.button.bg.is_none(), "控件覆盖默认 None");
     }
 
@@ -668,7 +678,11 @@ mod tests {
         assert_eq!(Intent::Neutral.colors(&p).bg, p.border);
         assert_eq!(Intent::Danger.colors(&p).bg, p.danger);
         let custom = Color::hex(0x2E9E5B);
-        assert_eq!(Intent::Custom(custom).colors(&p).bg, custom, "Custom 基色直用");
+        assert_eq!(
+            Intent::Custom(custom).colors(&p).bg,
+            custom,
+            "Custom 基色直用"
+        );
         // Custom 浅基色 → fg 取深色(text) 保证对比。
         assert_eq!(Intent::Custom(Color::hex(0xFFF0A0)).colors(&p).fg, p.text);
     }

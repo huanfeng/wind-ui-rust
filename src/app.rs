@@ -13,7 +13,6 @@ use crate::sync::{new_channel, Sender, WakerShared};
 use tiny_skia::Pixmap;
 
 use crate::core::{NodeId, Tree};
-use crate::theme::Theme;
 use crate::event::{
     CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, WindowOp,
 };
@@ -21,6 +20,7 @@ use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, WindowConfig};
 use crate::render::{Canvas, Paint, SkiaCanvas};
 use crate::text::{PlatformTextEngine, TextEngine};
+use crate::theme::Theme;
 use crate::ui::Element;
 
 // ---- 上下文菜单（宿主层自绘浮层）----
@@ -225,7 +225,9 @@ impl App {
         } else if let Some(root) = self.content {
             Box::new(UiHost::new(root, theme, cfg.bg, self.pumps, self.intervals))
         } else {
-            Box::new(ClosureHandler { f: Box::new(|_, _| {}) })
+            Box::new(ClosureHandler {
+                f: Box::new(|_, _| {}),
+            })
         };
         platform::run(cfg, handler, waker);
     }
@@ -233,11 +235,19 @@ impl App {
     #[cfg(test)]
     fn into_handler_for_test(self) -> UiHost {
         let theme = Rc::new(self.theme.unwrap_or_default());
-        UiHost::new(self.content.unwrap(), theme, self.cfg.bg, self.pumps, self.intervals)
+        UiHost::new(
+            self.content.unwrap(),
+            theme,
+            self.cfg.bg,
+            self.pumps,
+            self.intervals,
+        )
     }
 
     fn shared_waker(&mut self) -> crate::sync::Waker {
-        self.waker_shared.get_or_insert_with(WakerShared::new).waker()
+        self.waker_shared
+            .get_or_insert_with(WakerShared::new)
+            .waker()
     }
 
     /// 注册 typed 消息通道。`on_message` 在 UI 线程调用（可写 Rc 状态）。
@@ -383,8 +393,7 @@ impl UiHost {
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
         tree.clipboard = Some(Box::new(crate::platform::Clipboard));
-        let (interval_durs, interval_cbs): (Vec<_>, Vec<_>) =
-            intervals.into_iter().unzip();
+        let (interval_durs, interval_cbs): (Vec<_>, Vec<_>) = intervals.into_iter().unzip();
         Self {
             tree,
             engine: PlatformTextEngine::new(),
@@ -583,7 +592,9 @@ impl UiHost {
             return false;
         }
         let n = self.focus_order.len();
-        let cur = self.focus.and_then(|f| self.focus_order.iter().position(|&x| x == f));
+        let cur = self
+            .focus
+            .and_then(|f| self.focus_order.iter().position(|&x| x == f));
         let next = match cur {
             Some(i) if forward => (i + 1) % n,
             Some(i) => (i + n - 1) % n,
@@ -675,12 +686,34 @@ impl AppHandler for UiHost {
         if let Some(menu) = self.menu.as_ref() {
             let (pal, mt) = (&self.theme.palette, &self.theme.menu);
             let r = menu.rect;
-            canvas.fill_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, &Paint::fill(mt.bg(pal)));
-            canvas.stroke_round_rect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 8.0, 1.0, &Paint::fill(mt.border(pal)));
+            canvas.fill_round_rect(
+                r.x as f32,
+                r.y as f32,
+                r.w as f32,
+                r.h as f32,
+                8.0,
+                &Paint::fill(mt.bg(pal)),
+            );
+            canvas.stroke_round_rect(
+                r.x as f32,
+                r.y as f32,
+                r.w as f32,
+                r.h as f32,
+                8.0,
+                1.0,
+                &Paint::fill(mt.border(pal)),
+            );
             for (i, it) in menu.items.iter().enumerate() {
                 let iy = menu.item_y(i);
                 if menu.hover == Some(i) && it.enabled {
-                    canvas.fill_round_rect((r.x + 4) as f32, iy as f32, (r.w - 8) as f32, MENU_ITEM_H as f32, 5.0, &Paint::fill(mt.hover(pal)));
+                    canvas.fill_round_rect(
+                        (r.x + 4) as f32,
+                        iy as f32,
+                        (r.w - 8) as f32,
+                        MENU_ITEM_H as f32,
+                        5.0,
+                        &Paint::fill(mt.hover(pal)),
+                    );
                 }
                 // 选中项用强调色 + 行尾勾选标记（下拉当前项）。
                 let color = if !it.enabled {
@@ -691,10 +724,24 @@ impl AppHandler for UiHost {
                     mt.text(pal)
                 };
                 let tr = Rect::new(r.x + MENU_PAD_X, iy, r.w - 2 * MENU_PAD_X, MENU_ITEM_H);
-                canvas.draw_text(&it.label, tr, color, crate::spec::Align::Start, None, MENU_FONT);
+                canvas.draw_text(
+                    &it.label,
+                    tr,
+                    color,
+                    crate::spec::Align::Start,
+                    None,
+                    MENU_FONT,
+                );
                 if it.checked {
                     let cr = Rect::new(r.x, iy, r.w - MENU_PAD_X, MENU_ITEM_H);
-                    canvas.draw_text("\u{2713}", cr, mt.accent(pal), crate::spec::Align::End, None, MENU_FONT);
+                    canvas.draw_text(
+                        "\u{2713}",
+                        cr,
+                        mt.accent(pal),
+                        crate::spec::Align::End,
+                        None,
+                        MENU_FONT,
+                    );
                 }
             }
         }
@@ -718,9 +765,23 @@ impl AppHandler for UiHost {
                         y = (self.hover_pos.y - h - 4).max(0); // 下方放不下则翻到指针上方
                     }
                     let corner = tt.corner(&self.theme.metrics);
-                    canvas.fill_round_rect(x as f32, y as f32, w as f32, h as f32, corner, &Paint::fill(tt.bg(pal)));
+                    canvas.fill_round_rect(
+                        x as f32,
+                        y as f32,
+                        w as f32,
+                        h as f32,
+                        corner,
+                        &Paint::fill(tt.bg(pal)),
+                    );
                     let tr = Rect::new(x + TOOLTIP_PAD_X, y, w - 2 * TOOLTIP_PAD_X, h);
-                    canvas.draw_text(&text, tr, tt.text(pal), crate::spec::Align::Start, None, TOOLTIP_FONT);
+                    canvas.draw_text(
+                        &text,
+                        tr,
+                        tt.text(pal),
+                        crate::spec::Align::Start,
+                        None,
+                        TOOLTIP_FONT,
+                    );
                 }
             }
         }
@@ -872,7 +933,10 @@ impl AppHandler for UiHost {
         self.needs_full = true;
         // 物理 → 逻辑（命中在逻辑空间），路由到落点下的控件。
         let s = self.scale;
-        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
         let res = self.tree.dispatch_files(p, paths);
         if res.close {
             self.close = true;
@@ -889,14 +953,20 @@ impl AppHandler for UiHost {
             return false;
         }
         let s = self.scale;
-        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
         self.tree.drag_hit_at(p)
     }
 
     fn interactive_at(&self, pos: Point) -> bool {
         // 物理 → 逻辑后查是否命中可聚焦控件（窗口按钮等）。
         let s = self.scale;
-        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
         self.tree.interactive_hit_at(p)
     }
 
@@ -918,14 +988,17 @@ impl AppHandler for UiHost {
 
     fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
         self.needs_full = true; // 滚动改变大片区域 → 全窗重绘。
-        // 菜单激活时忽略平移（并清残差，避免菜单关闭后跳变）。
+                                // 菜单激活时忽略平移（并清残差，避免菜单关闭后跳变）。
         if self.menu.is_some() {
             self.pan_residual = 0.0;
             return false;
         }
         // 物理 → 逻辑（命中与滚动均在逻辑空间）；亚像素残差累积，避免高 DPI 发黏。
         let s = self.scale;
-        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
         let total = dy as f32 / s + self.pan_residual;
         let dyl = total.trunc() as i32;
         self.pan_residual = total - dyl as f32;
@@ -949,7 +1022,10 @@ impl AppHandler for UiHost {
             return false;
         }
         let s = self.scale;
-        let p = Point::new((pos.x as f32 / s).round() as i32, (pos.y as f32 / s).round() as i32);
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
         let Some(node) = self.tree.scroll_node_at(p) else {
             return false;
         };
@@ -1011,7 +1087,9 @@ impl UiHost {
     /// 布局（当前动画均为视觉位移、不改布局）。
     fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {
         // 脏区外扩 AA 余量并钳到窗口逻辑范围。
-        let raw = damage.inflate(DAMAGE_MARGIN).intersect(&Rect::from_size(self.logical_size));
+        let raw = damage
+            .inflate(DAMAGE_MARGIN)
+            .intersect(&Rect::from_size(self.logical_size));
         // 原点对齐到 4 逻辑像素网格：Windows DPI 缩放恒为 25% 的倍数（scale=m/4），故 4 的倍数 ×scale
         // 必为整数，子 pixmap 物理原点 dmg.origin×scale 精确无取整 → 文字定位与全窗帧逐像素一致，
         // 消除局部帧的纵向 1px 抖动。
@@ -1020,7 +1098,8 @@ impl UiHost {
         let y0 = raw.y - raw.y.rem_euclid(GRID);
         let x1 = raw.right() + (GRID - raw.right().rem_euclid(GRID)) % GRID;
         let y1 = raw.bottom() + (GRID - raw.bottom().rem_euclid(GRID)) % GRID;
-        let dmg = Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&Rect::from_size(self.logical_size));
+        let dmg =
+            Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&Rect::from_size(self.logical_size));
         // 物理化并钳到 pixmap 边界。
         let pdmg = dmg.scaled(s).intersect(&Rect::new(0, 0, size.w, size.h));
         if pdmg.is_empty() {
@@ -1032,11 +1111,17 @@ impl UiHost {
             self.blit_back_to(pixmap);
             return;
         };
-        sub.fill(tiny_skia::Color::from_rgba8(self.bg.r, self.bg.g, self.bg.b, self.bg.a));
+        sub.fill(tiny_skia::Color::from_rgba8(
+            self.bg.r, self.bg.g, self.bg.b, self.bg.a,
+        ));
         // 以脏区左上角（逻辑）为偏移绘制整树：框外图元由 tiny-skia 廉价剔除。
         {
-            let mut canvas =
-                SkiaCanvas::with_text_offset(&mut sub, &mut self.engine, s, Point::new(dmg.x, dmg.y));
+            let mut canvas = SkiaCanvas::with_text_offset(
+                &mut sub,
+                &mut self.engine,
+                s,
+                Point::new(dmg.x, dmg.y),
+            );
             self.tree.paint(&mut canvas);
         }
         // 合成进后备缓冲（脏区物理原点），再整窗拷给平台 pixmap。
@@ -1090,7 +1175,10 @@ fn blit(src: &Pixmap, dst: &mut Pixmap, x: i32, y: i32) {
     let (dw, dh) = (dst.width() as usize, dst.height() as usize);
     let (x, y) = (x.max(0) as usize, y.max(0) as usize);
     // 契约：src 必须完整落在 dst 内（调用方已把脏区钳到 pixmap 边界）。越界即逻辑错误。
-    debug_assert!(x + sw <= dw && y + sh <= dh, "blit 越界：({x},{y})+{sw}x{sh} 超出 {dw}x{dh}");
+    debug_assert!(
+        x + sw <= dw && y + sh <= dh,
+        "blit 越界：({x},{y})+{sw}x{sh} 超出 {dw}x{dh}"
+    );
     let sd = src.data();
     let dd = dst.data_mut();
     for row in 0..sh {
@@ -1115,8 +1203,7 @@ mod tests {
 
     #[test]
     fn on_interval_registers() {
-        let app = App::new("t", 100, 100)
-            .on_interval(std::time::Duration::from_millis(100), || {});
+        let app = App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), || {});
         assert_eq!(app.intervals.len(), 1);
     }
 

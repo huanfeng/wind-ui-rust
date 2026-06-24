@@ -12,7 +12,11 @@ use windui::prelude::*;
 
 /// 生成 size×size 纯色 RGBA8（演示图标，免捆绑资源）。
 fn solid(size: u32, hex: u32) -> Vec<u8> {
-    let (r, g, b) = (((hex >> 16) & 0xff) as u8, ((hex >> 8) & 0xff) as u8, (hex & 0xff) as u8);
+    let (r, g, b) = (
+        ((hex >> 16) & 0xff) as u8,
+        ((hex >> 8) & 0xff) as u8,
+        (hex & 0xff) as u8,
+    );
     [r, g, b, 255].repeat((size * size) as usize)
 }
 
@@ -37,8 +41,10 @@ fn main() {
                 }
             }),
             // 禁用态演示：通知关闭时该项灰显不可点（enabled 绑定 notify_on，弹出时读当前值）。
-            TrayMenuItem::item("弹个气泡", |ctx| ctx.notify("你好", "这是来自托盘的气泡通知"))
-                .enabled(notify_on.clone()),
+            TrayMenuItem::item("弹个气泡", |ctx| {
+                ctx.notify("你好", "这是来自托盘的气泡通知")
+            })
+            .enabled(notify_on.clone()),
             TrayMenuItem::separator(),
             TrayMenuItem::item("退出", |ctx| ctx.quit()),
         ]);
@@ -48,7 +54,13 @@ fn main() {
         .bg(Color::hex(0xFFFFFF))
         .padding(24)
         .spacing(10)
-        .child(Element::label("系统托盘").font_size(22.0).fg(Color::hex(0x2D3436)).height(30).width_match())
+        .child(
+            Element::label("系统托盘")
+                .font_size(22.0)
+                .fg(Color::hex(0x2D3436))
+                .height(30)
+                .width_match(),
+        )
         .child(
             Element::label("左键托盘图标显示窗口；右键弹原生菜单（含勾选项、分隔线、气泡通知）。")
                 .font_size(13.0)
@@ -57,5 +69,9 @@ fn main() {
                 .weight(1.0),
         );
 
-    App::new("windui — 托盘", 420, 240).bg(Color::hex(0xFFFFFF)).tray(tray).content(ui).run();
+    App::new("windui — 托盘", 420, 240)
+        .bg(Color::hex(0xFFFFFF))
+        .tray(tray)
+        .content(ui)
+        .run();
 }

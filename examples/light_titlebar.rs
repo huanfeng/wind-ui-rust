@@ -41,10 +41,27 @@ fn main() {
     let agree_row = Element::row()
         .spacing(2)
         .align(Align::Center)
-        .child(Element::checkbox("我已阅读并同意", agreed).fg(Color::hex(SUB)).font_size(13.0))
-        .child(Element::link("《服务协议》").url("https://example.com/tos").font_size(13.0))
-        .child(Element::label("和").fg(Color::hex(SUB)).font_size(13.0).width(20))
-        .child(Element::link("《隐私协议》").url("https://example.com/privacy").font_size(13.0));
+        .child(
+            Element::checkbox("我已阅读并同意", agreed)
+                .fg(Color::hex(SUB))
+                .font_size(13.0),
+        )
+        .child(
+            Element::link("《服务协议》")
+                .url("https://example.com/tos")
+                .font_size(13.0),
+        )
+        .child(
+            Element::label("和")
+                .fg(Color::hex(SUB))
+                .font_size(13.0)
+                .width(20),
+        )
+        .child(
+            Element::link("《隐私协议》")
+                .url("https://example.com/privacy")
+                .font_size(13.0),
+        );
 
     let body = Element::col()
         .fill()
@@ -53,7 +70,13 @@ fn main() {
         .cross(Align::Center)
         .child(Element::col().weight(1.0)) // 顶部弹性留白
         .child(logo)
-        .child(Element::label("星尘输入法").font_size(26.0).fg(Color::hex(FG)).height(40).align(Align::Center))
+        .child(
+            Element::label("星尘输入法")
+                .font_size(26.0)
+                .fg(Color::hex(FG))
+                .height(40)
+                .align(Align::Center),
+        )
         .child(
             Element::label("适用于 Windows 7 及以上版本")
                 .font_size(14.0)
@@ -76,7 +99,11 @@ fn main() {
         .child(agree_row)
         .child(Element::col().weight(1.0)); // 底部弹性留白
 
-    let ui = Element::col().fill().bg(Color::hex(BG)).child(title_bar).child(body.weight(1.0));
+    let ui = Element::col()
+        .fill()
+        .bg(Color::hex(BG))
+        .child(title_bar)
+        .child(body.weight(1.0));
 
     App::new("星尘输入法", 600, 460)
         .frameless()

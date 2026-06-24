@@ -302,11 +302,28 @@ impl TabButton {
 
 impl Widget for TabButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, style.font_family.as_deref(), style.font_size, None);
-        let icon_extra = if self.icon.is_some() { t.h + TAB_ICON_GAP } else { 0 };
+        let t = text.measure(
+            &self.label,
+            style.font_family.as_deref(),
+            style.font_size,
+            None,
+        );
+        let icon_extra = if self.icon.is_some() {
+            t.h + TAB_ICON_GAP
+        } else {
+            0
+        };
         Size::new(t.w + 24 + icon_extra, t.h + 16)
     }
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, tab) = (&th.palette, &th.tab);
         let sel = self.selected();
@@ -330,20 +347,42 @@ impl Widget for TabButton {
         }
         let color = canim.animate();
         self.color_anim.set(canim);
-        let vstate = if !enabled { VisualState::Disabled } else { self.visual_state() };
+        let vstate = if !enabled {
+            VisualState::Disabled
+        } else {
+            self.visual_state()
+        };
         // 有图标：图标 + 文字作为整体水平居中（图标在左）；否则文字整体居中。
         if let Some(icon) = &self.icon {
-            let ts = canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
+            let ts =
+                canvas.measure_text(&self.label, style.font_family.as_deref(), style.font_size);
             let ih = ts.h;
             let total_w = ih + TAB_ICON_GAP + ts.w;
             let sx = bounds.x + ((bounds.w - total_w) / 2).max(0);
             let iy = bounds.y + ((bounds.h - ih) / 2).max(0);
-            let istyle = Style { corner_radius: 0.0, ..style.clone() };
+            let istyle = Style {
+                corner_radius: 0.0,
+                ..style.clone()
+            };
             icon.paint_into(Rect::new(sx, iy, ih, ih), canvas, &istyle, vstate);
             let tr = Rect::new(sx + ih + TAB_ICON_GAP, bounds.y, ts.w + 2, bounds.h);
-            canvas.draw_text(&self.label, tr, color, Align::Start, style.font_family.as_deref(), style.font_size);
+            canvas.draw_text(
+                &self.label,
+                tr,
+                color,
+                Align::Start,
+                style.font_family.as_deref(),
+                style.font_size,
+            );
         } else {
-            canvas.draw_text(&self.label, bounds, color, Align::Center, style.font_family.as_deref(), style.font_size);
+            canvas.draw_text(
+                &self.label,
+                bounds,
+                color,
+                Align::Center,
+                style.font_family.as_deref(),
+                style.font_size,
+            );
         }
         // 底部指示条补间：选中(且启用)→1，否则→0；从中心展宽 + 淡入。禁用不显示。
         let mut ind = self.ind.get();
@@ -357,7 +396,14 @@ impl Widget for TabButton {
             let full = (bounds.w - 16) as f32;
             let bw = full * amount;
             let cx = bounds.x as f32 + bounds.w as f32 / 2.0;
-            canvas.fill_round_rect(cx - bw / 2.0, (bounds.y + bounds.h - 3) as f32, bw, 3.0, 1.5, &Paint::fill(tab.accent(pal).scale_alpha(amount)));
+            canvas.fill_round_rect(
+                cx - bw / 2.0,
+                (bounds.y + bounds.h - 3) as f32,
+                bw,
+                3.0,
+                1.5,
+                &Paint::fill(tab.accent(pal).scale_alpha(amount)),
+            );
         }
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -410,10 +456,12 @@ mod tests {
         let g = Rc::new(Cell::new(0));
         let style = Style::default();
         let mut te = NullTextEngine;
-        let w0 = TabButton::new("Home".into(), g.clone(), 0).measure(Size::ZERO, &style, &mut te).w;
+        let w0 = TabButton::new("Home".into(), g.clone(), 0)
+            .measure(Size::ZERO, &style, &mut te)
+            .w;
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
-        let iconed =
-            TabButton::new("Home".into(), g, 0).with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
+        let iconed = TabButton::new("Home".into(), g, 0)
+            .with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
         let w1 = iconed.measure(Size::ZERO, &style, &mut te).w;
         assert!(w1 > w0, "带图标标签应更宽：w0={w0}, w1={w1}");
     }
@@ -421,7 +469,13 @@ mod tests {
     #[test]
     fn tab_visual_state_tracks_selection() {
         let g = Rc::new(Cell::new(2));
-        assert_eq!(TabButton::new("A".into(), g.clone(), 2).visual_state(), VisualState::Selected);
-        assert_eq!(TabButton::new("B".into(), g, 0).visual_state(), VisualState::Normal);
+        assert_eq!(
+            TabButton::new("A".into(), g.clone(), 2).visual_state(),
+            VisualState::Selected
+        );
+        assert_eq!(
+            TabButton::new("B".into(), g, 0).visual_state(),
+            VisualState::Normal
+        );
     }
 }

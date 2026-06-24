@@ -30,7 +30,13 @@ pub trait TextEngine {
     /// 设置 DPI 缩放因子。
     fn set_scale(&mut self, _scale: f32) {}
     /// 文字尺寸。`max_width=None` 单行不换行；`Some(w)` 在宽度 w 内换行并返回多行尺寸。
-    fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size;
+    fn measure(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+        max_width: Option<f32>,
+    ) -> Size;
     /// 在 `rect` 内按 `align` 水平对齐、垂直居中绘制文字，合成进 `pixmap`。
     /// `clip` 为可选裁剪矩形（滚动视口等），合成时仅写入该矩形内的像素。
     fn draw(
@@ -50,7 +56,13 @@ pub trait TextEngine {
 pub struct NullTextEngine;
 
 impl TextEngine for NullTextEngine {
-    fn measure(&mut self, text: &str, _family: Option<&str>, size: f32, _max_width: Option<f32>) -> Size {
+    fn measure(
+        &mut self,
+        text: &str,
+        _family: Option<&str>,
+        size: f32,
+        _max_width: Option<f32>,
+    ) -> Size {
         let w = (text.chars().count() as f32 * size * 0.6).ceil() as i32;
         Size::new(w, size.ceil() as i32)
     }

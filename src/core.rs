@@ -109,7 +109,11 @@ impl Node {
 #[derive(Clone, Copy)]
 pub enum Layout {
     None,
-    Linear { axis: Axis, spacing: i32, cross: Align },
+    Linear {
+        axis: Axis,
+        spacing: i32,
+        cross: Align,
+    },
     Frame,
     /// 垂直滚动容器：子内容按无限高度测量，按 scroll_y 偏移并裁剪到视口。
     Scroll,
@@ -199,11 +203,20 @@ impl Tree {
         if let Some(idx) = self.free.pop() {
             let slot = &mut self.slots[idx as usize];
             slot.node = Some(node);
-            NodeId { index: idx, generation: slot.generation }
+            NodeId {
+                index: idx,
+                generation: slot.generation,
+            }
         } else {
             let idx = self.slots.len() as u32;
-            self.slots.push(Slot { generation: 0, node: Some(node) });
-            NodeId { index: idx, generation: 0 }
+            self.slots.push(Slot {
+                generation: 0,
+                node: Some(node),
+            });
+            NodeId {
+                index: idx,
+                generation: 0,
+            }
         }
     }
 
@@ -276,7 +289,12 @@ impl Tree {
     /// 用窗口尺寸测量并排布整棵树。
     pub fn layout_root(&mut self, size: Size, text: &mut dyn TextEngine) {
         if let Some(root) = self.root {
-            self.measure(root, MeasureSpec::exactly(size.w), MeasureSpec::exactly(size.h), text);
+            self.measure(
+                root,
+                MeasureSpec::exactly(size.w),
+                MeasureSpec::exactly(size.h),
+                text,
+            );
             self.arrange(root, Rect::from_size(size));
         }
     }
@@ -308,7 +326,8 @@ impl Tree {
             Layout::None => {
                 // 叶子：纯内容固有尺寸（可能需要测量文本）
                 let n = self.get(id).unwrap();
-                n.widget.measure(Size::new(avail_w, avail_h), &n.style, text)
+                n.widget
+                    .measure(Size::new(avail_w, avail_h), &n.style, text)
             }
             Layout::Linear { axis, spacing, .. } => {
                 self.measure_linear(id, axis, spacing, wspec, hspec, avail_w, avail_h, text)
@@ -339,7 +358,11 @@ impl Tree {
         text: &mut dyn TextEngine,
     ) -> Size {
         let horizontal = axis == Axis::Horizontal;
-        let (main_spec, cross_spec) = if horizontal { (wspec, hspec) } else { (hspec, wspec) };
+        let (main_spec, cross_spec) = if horizontal {
+            (wspec, hspec)
+        } else {
+            (hspec, wspec)
+        };
         let main_avail = if horizontal { avail_w } else { avail_h };
         let cross_avail = if horizontal { avail_h } else { avail_w };
         let main_unbounded = main_spec.mode == MeasureMode::Unbounded;
@@ -368,11 +391,18 @@ impl Tree {
                 continue;
             }
             // 主轴上的 Match 降级为 Wrap，避免单个子独占整条主轴。
-            let main_eff = if matches!(main_dim, Dimension::Match) { Dimension::Wrap } else { main_dim };
+            let main_eff = if matches!(main_dim, Dimension::Match) {
+                Dimension::Wrap
+            } else {
+                main_dim
+            };
             let main_child = child_spec(main_eff, main_avail, main_unbounded);
             let cross_child = child_spec(cross_dim, cross_avail, cross_unbounded);
-            let (cwspec, chspec) =
-                if horizontal { (main_child, cross_child) } else { (cross_child, main_child) };
+            let (cwspec, chspec) = if horizontal {
+                (main_child, cross_child)
+            } else {
+                (cross_child, main_child)
+            };
             let s = self.measure(c, cwspec, chspec, text);
             let (s_main, s_cross) = main_cross(horizontal, s);
             used_main += s_main + cm_main;
@@ -405,8 +435,11 @@ impl Tree {
                     cross_avail,
                     cross_unbounded,
                 );
-                let (cwspec, chspec) =
-                    if horizontal { (main_child, cross_child) } else { (cross_child, main_child) };
+                let (cwspec, chspec) = if horizontal {
+                    (main_child, cross_child)
+                } else {
+                    (cross_child, main_child)
+                };
                 let s = self.measure(c, cwspec, chspec, text);
                 let (_, cm_cross) = main_cross_insets(horizontal, cm);
                 let (s_main, s_cross) = main_cross(horizontal, s);
@@ -493,9 +526,11 @@ impl Tree {
         );
         match layout {
             Layout::None => {}
-            Layout::Linear { axis, spacing, cross } => {
-                self.arrange_linear(id, inner, axis, spacing, cross)
-            }
+            Layout::Linear {
+                axis,
+                spacing,
+                cross,
+            } => self.arrange_linear(id, inner, axis, spacing, cross),
             Layout::Frame => self.arrange_frame(id, inner),
             Layout::Scroll => self.arrange_scroll(id, inner),
         }
@@ -543,13 +578,21 @@ impl Tree {
             } else {
                 (cm.top, cm.left)
             };
-            let cm_cross_total = if horizontal { cm.vertical() } else { cm.horizontal() };
+            let cm_cross_total = if horizontal {
+                cm.vertical()
+            } else {
+                cm.horizontal()
+            };
             let cm_main_end = if horizontal { cm.right } else { cm.bottom };
 
             let cross_avail = (cross_avail_full - cm_cross_total).max(0);
             // None=继承容器交叉轴对齐；Some=显式覆盖（含显式 Start）。
             let eff_align = self.get(c).and_then(|n| n.align).unwrap_or(cross);
-            let cross_size = if eff_align == Align::Stretch { cross_avail } else { s_cross };
+            let cross_size = if eff_align == Align::Stretch {
+                cross_avail
+            } else {
+                s_cross
+            };
             let cross_off = align_offset(eff_align, cross_avail, cross_size);
 
             let main_pos = cursor + cm_main_start;
@@ -600,7 +643,12 @@ impl Tree {
         };
         // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
         let enabled = parent_enabled && n.own_enabled();
-        let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
+        let abs = Rect::new(
+            origin.x + n.bounds.x,
+            origin.y + n.bounds.y,
+            n.bounds.w,
+            n.bounds.h,
+        );
         if abs.is_empty() {
             return;
         }
@@ -619,13 +667,22 @@ impl Tree {
         let content = abs.inset(n.padding);
         // 标记当前节点矩形：节点内的 anim::request_repaint 会把脏区归到此处（局部重绘用）。
         crate::anim::set_paint_rect(Some(abs));
-        n.widget.paint(abs, content, n.focused, enabled, canvas, &n.style);
+        n.widget
+            .paint(abs, content, n.focused, enabled, canvas, &n.style);
         crate::anim::set_paint_rect(None);
 
         // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
         if n.focused && self.focus_ring_visible {
             let ring = crate::theme::current().palette.accent;
-            canvas.stroke_round_rect(fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0, radius + 1.0, 2.0, &Paint::fill(ring));
+            canvas.stroke_round_rect(
+                fx - 1.0,
+                fy - 1.0,
+                fw + 2.0,
+                fh + 2.0,
+                radius + 1.0,
+                2.0,
+                &Paint::fill(ring),
+            );
         }
 
         let child_origin = Point::new(abs.x, abs.y);
@@ -653,7 +710,14 @@ impl Tree {
             let max_scroll = (n.content_h - content.h).max(1) as f32;
             let thumb_y = ty + (th - thumb_h) * (n.scroll_y as f32 / max_scroll);
             let thumb = crate::theme::current().palette.border;
-            canvas.fill_round_rect(tx, thumb_y, track_w, thumb_h, track_w / 2.0, &Paint::fill(thumb));
+            canvas.fill_round_rect(
+                tx,
+                thumb_y,
+                track_w,
+                thumb_h,
+                track_w / 2.0,
+                &Paint::fill(thumb),
+            );
         }
     }
 }
@@ -754,7 +818,11 @@ impl EventCtx<'_> {
     /// 请求在 `pos`（逻辑坐标）弹出浮层菜单。宿主接管渲染、命中与项激活。
     /// `min_width`：最小宽度（0=按内容；下拉传控件宽度对齐）。
     pub fn show_menu(&mut self, pos: Point, items: Vec<MenuItem>, min_width: i32) {
-        self.out.menu = Some(MenuRequest { pos, items, min_width });
+        self.out.menu = Some(MenuRequest {
+            pos,
+            items,
+            min_width,
+        });
         self.out.repaint = true;
     }
     /// 请求在 `pos` 弹出上下文菜单（内容宽度）。
@@ -813,7 +881,9 @@ impl Tree {
     /// 节点期望的光标形状（取其控件声明；节点缺失回退 Arrow）。
     /// 禁用回退由宿主在查询前进行处理（见 `App` 的 `cursor()`）。
     pub fn cursor_at(&self, id: NodeId) -> CursorShape {
-        self.get(id).map(|n| n.widget.cursor()).unwrap_or(CursorShape::Arrow)
+        self.get(id)
+            .map(|n| n.widget.cursor())
+            .unwrap_or(CursorShape::Arrow)
     }
 
     /// 节点的悬停提示文本（无则 None）。宿主据此在悬停延时后绘制浮层。
@@ -825,18 +895,24 @@ impl Tree {
     /// 平台据此在 `WM_NCHITTEST` 把控件区强制判为 HTCLIENT——优先于缩放边框，
     /// 使整个按钮都是客户区、普通鼠标移动全程覆盖，避免顶部缩放条夺走 hover。
     pub fn interactive_hit_at(&self, pos: Point) -> bool {
-        let Some(hit) = self.hit_test(pos) else { return false };
+        let Some(hit) = self.hit_test(pos) else {
+            return false;
+        };
         self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false)
     }
 
     /// `pos`（逻辑坐标）是否落在窗口拖动区（自定义标题栏）。命中的是可聚焦控件
     /// （按钮等）则不拖动——交控件处理；否则自身或任一祖先标了 `window_drag` 即可拖。
     pub fn drag_hit_at(&self, pos: Point) -> bool {
-        let Some(hit) = self.hit_test(pos) else { return false };
+        let Some(hit) = self.hit_test(pos) else {
+            return false;
+        };
         if self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false) {
             return false;
         }
-        self.ancestor_chain(hit).iter().any(|&id| self.get(id).map(|n| n.window_drag).unwrap_or(false))
+        self.ancestor_chain(hit)
+            .iter()
+            .any(|&id| self.get(id).map(|n| n.window_drag).unwrap_or(false))
     }
 
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
@@ -935,7 +1011,12 @@ impl Tree {
         if !n.effective_visible() {
             return None;
         }
-        let abs = Rect::new(origin.x + n.bounds.x, origin.y + n.bounds.y, n.bounds.w, n.bounds.h);
+        let abs = Rect::new(
+            origin.x + n.bounds.x,
+            origin.y + n.bounds.y,
+            n.bounds.w,
+            n.bounds.h,
+        );
         if !abs.contains(p) {
             return None;
         }
@@ -1016,12 +1097,19 @@ impl Tree {
             Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
             None => return (false, EventOutcome::default()),
         };
-        let mut ctx = EventCtx { tree: self, self_id: id, out: EventOutcome::default() };
+        let mut ctx = EventCtx {
+            tree: self,
+            self_id: id,
+            out: EventOutcome::default(),
+        };
         let consumed = widget.on_event(&mut ctx, ev);
         let out = ctx.out;
         match self.get_mut(id) {
             Some(n) => n.widget = widget,
-            None => debug_assert!(false, "on_event 回调内删除了 self 节点，违反 call_on_event 契约"),
+            None => debug_assert!(
+                false,
+                "on_event 回调内删除了 self 节点，违反 call_on_event 契约"
+            ),
         }
         (consumed, out)
     }
@@ -1040,13 +1128,23 @@ impl Tree {
             let target = self.hit_test(ev.pos);
             if *hover != target {
                 if let Some(old) = *hover {
-                    let (_, o) =
-                        self.call_on_event(old, &Event::Pointer(PointerEvent { kind: PointerKind::Leave, ..ev }));
+                    let (_, o) = self.call_on_event(
+                        old,
+                        &Event::Pointer(PointerEvent {
+                            kind: PointerKind::Leave,
+                            ..ev
+                        }),
+                    );
                     res.repaint |= o.repaint;
                 }
                 if let Some(new) = target {
-                    let (_, o) =
-                        self.call_on_event(new, &Event::Pointer(PointerEvent { kind: PointerKind::Enter, ..ev }));
+                    let (_, o) = self.call_on_event(
+                        new,
+                        &Event::Pointer(PointerEvent {
+                            kind: PointerKind::Enter,
+                            ..ev
+                        }),
+                    );
                     res.repaint |= o.repaint;
                 }
                 *hover = target;
@@ -1063,7 +1161,12 @@ impl Tree {
         let target = capture.or_else(|| self.hit_test(ev.pos));
         if let Some(t) = target {
             for id in self.ancestor_chain(t) {
-                if secondary && !self.get(id).map(|n| n.widget.wants_right_click()).unwrap_or(false) {
+                if secondary
+                    && !self
+                        .get(id)
+                        .map(|n| n.widget.wants_right_click())
+                        .unwrap_or(false)
+                {
                     continue;
                 }
                 let (consumed, o) = self.call_on_event(id, &Event::Pointer(ev));
@@ -1097,13 +1200,23 @@ impl Tree {
             let target = self.hit_test(ev.pos);
             if *hover != target {
                 if let Some(old) = *hover {
-                    let (_, o) = self
-                        .call_on_event(old, &Event::Pointer(PointerEvent { kind: PointerKind::Leave, ..ev }));
+                    let (_, o) = self.call_on_event(
+                        old,
+                        &Event::Pointer(PointerEvent {
+                            kind: PointerKind::Leave,
+                            ..ev
+                        }),
+                    );
                     res.repaint |= o.repaint;
                 }
                 if let Some(new) = target {
-                    let (_, o) = self
-                        .call_on_event(new, &Event::Pointer(PointerEvent { kind: PointerKind::Enter, ..ev }));
+                    let (_, o) = self.call_on_event(
+                        new,
+                        &Event::Pointer(PointerEvent {
+                            kind: PointerKind::Enter,
+                            ..ev
+                        }),
+                    );
                     res.repaint |= o.repaint;
                 }
                 *hover = target;
@@ -1133,7 +1246,9 @@ impl Tree {
     /// 借用拆解同 `call_on_event`：取出闭包→调用→放回（generation 不匹配则丢弃）。
     pub fn dispatch_files(&mut self, pos: Point, paths: Vec<PathBuf>) -> DispatchResult {
         let mut res = DispatchResult::default();
-        let Some(target) = self.hit_test(pos) else { return res };
+        let Some(target) = self.hit_test(pos) else {
+            return res;
+        };
         for id in self.ancestor_chain(target) {
             if !self.node_enabled(id) {
                 continue;
@@ -1142,7 +1257,11 @@ impl Tree {
                 Some(cb) => cb,
                 None => continue,
             };
-            let mut ctx = EventCtx { tree: self, self_id: id, out: EventOutcome::default() };
+            let mut ctx = EventCtx {
+                tree: self,
+                self_id: id,
+                out: EventOutcome::default(),
+            };
             cb(&mut ctx, &paths);
             let out = ctx.out;
             if let Some(n) = self.get_mut(id) {
@@ -1263,7 +1382,11 @@ mod tests {
         assert_eq!(b1.w, 80, "次个权重子宽应为 80");
         assert_eq!(b0.x, 10, "首子左边界=margin");
         // 末子右边界 + 右 margin 不超过容器宽（无超分）
-        assert!(b1.x + b1.w + 10 <= 200, "右边界 {} 超出 200", b1.x + b1.w + 10);
+        assert!(
+            b1.x + b1.w + 10 <= 200,
+            "右边界 {} 超出 200",
+            b1.x + b1.w + 10
+        );
     }
 
     #[test]
@@ -1423,11 +1546,11 @@ mod tests {
     fn disabled_button_ignores_click_and_skips_focus() {
         let clicks = Rc::new(Cell::new(0));
         let c = clicks.clone();
-        let root = Element::col()
-            .width(200)
-            .height(100)
-            .padding(10)
-            .child(Element::button("OK").on_click(move |_| c.set(c.get() + 1)).disabled(true));
+        let root = Element::col().width(200).height(100).padding(10).child(
+            Element::button("OK")
+                .on_click(move |_| c.set(c.get() + 1))
+                .disabled(true),
+        );
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1440,7 +1563,10 @@ mod tests {
         tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
         tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
         assert_eq!(clicks.get(), 0, "禁用按钮不应触发点击");
-        assert!(!tree.focusable_order().contains(&btn), "禁用按钮不应进入焦点链");
+        assert!(
+            !tree.focusable_order().contains(&btn),
+            "禁用按钮不应进入焦点链"
+        );
         assert!(!tree.node_enabled(btn), "node_enabled 应为 false");
     }
 
@@ -1490,11 +1616,10 @@ mod tests {
         let st = Rc::new(Cell::new(false));
         let fired = Rc::new(Cell::new(0u32));
         let f = fired.clone();
-        let root = Element::col()
-            .width(200)
-            .height(60)
-            .padding(5)
-            .child(Element::checkbox("启用", st.clone()).on_toggle(move |_| f.set(f.get() + 1)));
+        let root =
+            Element::col().width(200).height(60).padding(5).child(
+                Element::checkbox("启用", st.clone()).on_toggle(move |_| f.set(f.get() + 1)),
+            );
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1593,12 +1718,19 @@ mod tests {
         tree.root = Some(id);
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, max scroll 200
-        // 手指上滑(dy<0) → 内容上移 → scroll_y 增大。
+                                                        // 手指上滑(dy<0) → 内容上移 → scroll_y 增大。
         assert!(tree.pan_scroll(Point::new(50, 50), -40), "命中滚动容器");
         tree.layout_root(Size::new(100, 100), &mut te); // 钳制
-        assert_eq!(tree.get(id).unwrap().scroll_y, 40, "上滑 40px 应增加 scroll_y");
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            40,
+            "上滑 40px 应增加 scroll_y"
+        );
         // 非滚动区域返回 false。
-        assert!(!tree.pan_scroll(Point::new(-100, -100), 10), "命中外返回 false");
+        assert!(
+            !tree.pan_scroll(Point::new(-100, -100), 10),
+            "命中外返回 false"
+        );
     }
 
     #[test]
@@ -1612,7 +1744,7 @@ mod tests {
         tree.root = Some(id);
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, view=100 → max=200
-        // 惯性滑动定位到的滚动节点。
+                                                        // 惯性滑动定位到的滚动节点。
         assert_eq!(tree.scroll_node_at(Point::new(50, 50)), Some(id));
         let (cur, max) = tree.scroll_range(id).expect("滚动节点应有范围");
         assert_eq!((cur, max), (0, 200), "初始偏移 0、最大 200");
@@ -1642,8 +1774,16 @@ mod tests {
         // 越界回弹偏移：内容整体下移 12px，且不被 arrange 钳掉（区别于 scroll_y）。
         tree.set_over_scroll(id, 12);
         tree.layout_root(Size::new(100, 100), &mut te);
-        assert_eq!(tree.get(id).unwrap().over_scroll, 12, "over_scroll 不参与钳制");
-        assert_eq!(tree.abs_bounds(child0).y, y0 + 12, "内容随 over_scroll 整体偏移");
+        assert_eq!(
+            tree.get(id).unwrap().over_scroll,
+            12,
+            "over_scroll 不参与钳制"
+        );
+        assert_eq!(
+            tree.abs_bounds(child0).y,
+            y0 + 12,
+            "内容随 over_scroll 整体偏移"
+        );
     }
 
     #[test]
@@ -1696,7 +1836,12 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(200, 40), &mut te);
         let input = tree.get(id).unwrap().children[0];
-        let key = |k: Key| KeyEvent { key: k, pressed: true, shift: false, ctrl: false };
+        let key = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(key(Key::Char('a')), Some(input));
         tree.dispatch_key(key(Key::Char('中')), Some(input));
         assert_eq!(&*txt.borrow(), "a中", "应插入字符");
@@ -1722,7 +1867,12 @@ mod tests {
     #[test]
     fn text_input_select_all_and_replace() {
         let (mut tree, input, txt) = input_tree("hello");
-        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        let k = |key, ctrl| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+        };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Char('X'), false), Some(input));
         assert_eq!(&*txt.borrow(), "X", "全选后输入应替换全部");
@@ -1731,7 +1881,12 @@ mod tests {
     #[test]
     fn text_input_home_and_delete() {
         let (mut tree, input, txt) = input_tree("abc");
-        let k = |key| KeyEvent { key, pressed: true, shift: false, ctrl: false };
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(k(Key::Home), Some(input)); // 光标到行首
         tree.dispatch_key(k(Key::Delete), Some(input)); // 删首字符
         assert_eq!(&*txt.borrow(), "bc", "Home 后 Delete 应删除首字符");
@@ -1741,9 +1896,19 @@ mod tests {
     fn text_input_shift_select_then_backspace() {
         let (mut tree, input, txt) = input_tree("abc");
         // 光标在末尾(=3)，Shift+Left 选中最后一个字符，退格删除选区
-        let shift_left = KeyEvent { key: Key::Left, pressed: true, shift: true, ctrl: false };
+        let shift_left = KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            shift: true,
+            ctrl: false,
+        };
         tree.dispatch_key(shift_left, Some(input));
-        let bs = KeyEvent { key: Key::Backspace, pressed: true, shift: false, ctrl: false };
+        let bs = KeyEvent {
+            key: Key::Backspace,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(bs, Some(input));
         assert_eq!(&*txt.borrow(), "ab", "Shift 选区后退格应删除选区");
     }
@@ -1763,7 +1928,12 @@ mod tests {
         let clip = Rc::new(RefCell::new(String::new()));
         let (mut tree, input, txt) = input_tree("hello");
         tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
-        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        let k = |key, ctrl| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+        };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C 复制
         assert_eq!(&*clip.borrow(), "hello", "复制应写入剪贴板");
@@ -1787,7 +1957,12 @@ mod tests {
         tree.layout_root(Size::new(200, 40), &mut te);
         let input = tree.get(id).unwrap().children[0];
         tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
-        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        let k = |key, ctrl| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+        };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C
         assert_eq!(&*clip.borrow(), "seed", "密码模式 Ctrl+C 不得写出明文");
@@ -1810,17 +1985,23 @@ mod tests {
         };
         tree.dispatch_pointer(down, &mut h, &mut cap);
         // 全选后输入替换全部内容。
-        let key = KeyEvent { key: Key::Char('Z'), pressed: true, shift: false, ctrl: false };
+        let key = KeyEvent {
+            key: Key::Char('Z'),
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(key, Some(input));
         assert_eq!(&*txt.borrow(), "Z", "三击全选后输入应替换全部");
     }
 
     fn multiline_tree(initial: &str) -> (Tree, NodeId, Rc<RefCell<String>>) {
         let txt = Rc::new(RefCell::new(String::from(initial)));
-        let root = Element::col()
-            .width(200)
-            .height(120)
-            .child(Element::text_input(txt.clone(), "ph").multiline().height(120));
+        let root = Element::col().width(200).height(120).child(
+            Element::text_input(txt.clone(), "ph")
+                .multiline()
+                .height(120),
+        );
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1834,7 +2015,12 @@ mod tests {
     fn multiline_enter_inserts_newline() {
         let (mut tree, input, txt) = multiline_tree("ab");
         // 光标在末尾(=2)，Enter 插入换行，再输入。
-        let k = |key| KeyEvent { key, pressed: true, shift: false, ctrl: false };
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(k(Key::Enter), Some(input));
         tree.dispatch_key(k(Key::Char('c')), Some(input));
         assert_eq!(&*txt.borrow(), "ab\nc", "多行 Enter 应插入换行符");
@@ -1844,7 +2030,12 @@ mod tests {
     fn singleline_enter_not_consumed() {
         let (mut tree, input, txt) = input_tree("ab");
         let res = tree.dispatch_key(
-            KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false },
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
             Some(input),
         );
         assert!(!res.consumed, "单行 Enter 不应被消费(冒泡给默认行为)");
@@ -1857,10 +2048,19 @@ mod tests {
         let (mut tree, input, txt) = multiline_tree("");
         tree.clipboard = Some(Box::new(SharedClip(clip)));
         tree.dispatch_key(
-            KeyEvent { key: Key::Other(0x56), pressed: true, shift: false, ctrl: true },
+            KeyEvent {
+                key: Key::Other(0x56),
+                pressed: true,
+                shift: false,
+                ctrl: true,
+            },
             Some(input),
         );
-        assert_eq!(&*txt.borrow(), "x\ny", "多行粘贴应保留换行(\\r\\n 归一为 \\n)");
+        assert_eq!(
+            &*txt.borrow(),
+            "x\ny",
+            "多行粘贴应保留换行(\\r\\n 归一为 \\n)"
+        );
     }
 
     #[test]
@@ -1868,7 +2068,9 @@ mod tests {
         // .password().multiline() 顺序也不能让换行进入密码底层文本。
         let txt = Rc::new(RefCell::new(String::from("pw")));
         let root = Element::col().width(200).height(40).child(
-            Element::text_input(txt.clone(), "ph").password().multiline(),
+            Element::text_input(txt.clone(), "ph")
+                .password()
+                .multiline(),
         );
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
@@ -1877,7 +2079,12 @@ mod tests {
         tree.layout_root(Size::new(200, 40), &mut te);
         let input = tree.get(id).unwrap().children[0];
         let res = tree.dispatch_key(
-            KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false },
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
             Some(input),
         );
         assert!(!res.consumed, "密码框 Enter 不应被消费");
@@ -1897,7 +2104,12 @@ mod tests {
         let end_caret = tree.caret_of(input).expect("paint 后应有光标位置");
         // 移到行首再 paint。
         tree.dispatch_key(
-            KeyEvent { key: Key::Home, pressed: true, shift: false, ctrl: false },
+            KeyEvent {
+                key: Key::Home,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
             Some(input),
         );
         {
@@ -1913,7 +2125,10 @@ mod tests {
     fn caret_of_none_for_non_text() {
         // 按钮等非文本控件无光标。
         let (tree, btn) = button_tree(Rc::new(Cell::new(0)));
-        assert!(tree.caret_of(btn).is_none(), "非文本控件 caret_of 应为 None");
+        assert!(
+            tree.caret_of(btn).is_none(),
+            "非文本控件 caret_of 应为 None"
+        );
     }
 
     fn paint_once(tree: &Tree) {
@@ -1927,7 +2142,9 @@ mod tests {
     fn list_click_selects_row() {
         let sel = Rc::new(Cell::new(0usize));
         let root = Element::col().width(200).height(200).child(
-            Element::list(vec!["A", "B", "C"], sel.clone()).width_match().height(200),
+            Element::list(vec!["A", "B", "C"], sel.clone())
+                .width_match()
+                .height(200),
         );
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
@@ -2018,7 +2235,10 @@ mod tests {
     fn determinate_progress_no_animation() {
         crate::anim::reset_request();
         let v = Rc::new(Cell::new(0.5f32));
-        let root = Element::col().width(200).height(20).child(Element::progress(v).width_match());
+        let root = Element::col()
+            .width(200)
+            .height(20)
+            .child(Element::progress(v).width_match());
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2031,9 +2251,10 @@ mod tests {
     #[test]
     fn dropdown_click_opens_menu_and_selects() {
         let sel = Rc::new(Cell::new(0usize));
-        let root = Element::col().width(220).height(40).child(
-            Element::dropdown(vec!["A", "B", "C"], sel.clone()).width(220),
-        );
+        let root = Element::col()
+            .width(220)
+            .height(40)
+            .child(Element::dropdown(vec!["A", "B", "C"], sel.clone()).width(220));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2073,18 +2294,32 @@ mod tests {
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键应请求上下文菜单");
-        let labels: Vec<_> = menu.items.iter().map(|i| (i.label.as_str(), i.enabled)).collect();
+        let labels: Vec<_> = menu
+            .items
+            .iter()
+            .map(|i| (i.label.as_str(), i.enabled))
+            .collect();
         // 无选区：剪切/复制禁用；有文本：全选启用；粘贴恒启用。
         assert_eq!(
             labels,
-            vec![("剪切", false), ("复制", false), ("粘贴", true), ("全选", true)]
+            vec![
+                ("剪切", false),
+                ("复制", false),
+                ("粘贴", true),
+                ("全选", true)
+            ]
         );
     }
 
     #[test]
     fn right_click_menu_enables_cut_copy_with_selection() {
         let (mut tree, input, _txt) = input_tree("hello");
-        let k = |key, ctrl| KeyEvent { key, pressed: true, shift: false, ctrl };
+        let k = |key, ctrl| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+        };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // 全选
         let b = tree.abs_bounds(input);
         // 在选区内右键（idx=0 落在 [0,5) 内）→ 保留选区。
@@ -2098,7 +2333,10 @@ mod tests {
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键应请求上下文菜单");
-        assert!(menu.items[0].enabled && menu.items[1].enabled, "有选区时剪切/复制应启用");
+        assert!(
+            menu.items[0].enabled && menu.items[1].enabled,
+            "有选区时剪切/复制应启用"
+        );
     }
 
     #[test]
@@ -2115,7 +2353,12 @@ mod tests {
             click_count: 2,
         };
         tree.dispatch_pointer(down, &mut h, &mut cap);
-        let key = KeyEvent { key: Key::Char('Z'), pressed: true, shift: false, ctrl: false };
+        let key = KeyEvent {
+            key: Key::Char('Z'),
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(key, Some(input));
         assert_eq!(&*txt.borrow(), "Z world", "双击应选中首词并被输入替换");
     }

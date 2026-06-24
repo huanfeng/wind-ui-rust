@@ -14,9 +14,21 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: 格式检查
+        run: cargo fmt --check
+
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    needs: fmt
     strategy:
       fail-fast: false
       matrix:

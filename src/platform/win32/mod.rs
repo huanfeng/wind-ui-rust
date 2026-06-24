@@ -16,6 +16,7 @@ use tiny_skia::Pixmap;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC, ScreenToClient,
     SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
@@ -23,50 +24,46 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::Ime::{
-    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, CANDIDATEFORM,
-    CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
+    TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, HTOUCHINPUT,
     REGISTER_TOUCH_WINDOW_FLAGS, TOUCHEVENTF_DOWN, TOUCHEVENTF_MOVE, TOUCHEVENTF_UP, TOUCHINPUT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
-    TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE,
-    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB,
-    VK_UP,
+use windows::Win32::UI::Shell::{
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, LoadCursorW,
-    MsgWaitForMultipleObjectsEx, NCCALCSIZE_PARAMS, PeekMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SetTimer,
-    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
-    SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
-    SM_CYSCREEN, SetCursor, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTCLIENT, MWMO_INPUTAVAILABLE,
-    PM_REMOVE, QS_ALLINPUT, SetWindowPos, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW, SW_SHOWNORMAL, LoadIconW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED,
-    WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCMOUSEMOVE,
-    WM_DROPFILES, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_THICKFRAME, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTRIGHT,
-    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, SWP_FRAMECHANGED, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    GetWindowRect, IsIconic, IsZoomed, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+    HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG,
+    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXDOUBLECLK, SM_CXFRAME,
+    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
+    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_THICKFRAME,
 };
-use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
-};
-use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
-use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 
 use super::{AppHandler, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
@@ -90,9 +87,17 @@ unsafe fn os_animations_enabled() -> bool {
 }
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
-pub(crate) fn run(cfg: WindowConfig, mut handler: Box<dyn AppHandler>, waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
+pub(crate) fn run(
+    cfg: WindowConfig,
+    mut handler: Box<dyn AppHandler>,
+    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+) {
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
-    let os_default = if cfg.screenshot.is_some() { true } else { unsafe { os_animations_enabled() } };
+    let os_default = if cfg.screenshot.is_some() {
+        true
+    } else {
+        unsafe { os_animations_enabled() }
+    };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 macOS 后端共用）。
@@ -160,14 +165,33 @@ struct ClickTracker {
 impl ClickTracker {
     /// 按 Down 事件更新连续点击计数：与上次同按键、在系统双击时限与漂移阈值内则递增
     /// （封顶到 3 支持三击），否则重置为 1。返回本次点击的计数。
-    fn bump(&mut self, button: i32, x: i32, y: i32, now_ms: u32, dbl_ms: u32, dx: i32, dy: i32) -> u8 {
+    fn bump(
+        &mut self,
+        button: i32,
+        x: i32,
+        y: i32,
+        now_ms: u32,
+        dbl_ms: u32,
+        dx: i32,
+        dy: i32,
+    ) -> u8 {
         let continued = self.count > 0
             && self.button == button
             && now_ms.wrapping_sub(self.time_ms) <= dbl_ms
             && (x - self.x).abs() <= dx
             && (y - self.y).abs() <= dy;
-        let count = if continued { (self.count + 1).min(3) } else { 1 };
-        *self = ClickTracker { time_ms: now_ms, x, y, button, count };
+        let count = if continued {
+            (self.count + 1).min(3)
+        } else {
+            1
+        };
+        *self = ClickTracker {
+            time_ms: now_ms,
+            x,
+            y,
+            button,
+            count,
+        };
         count
     }
 }
@@ -298,7 +322,11 @@ impl crate::sync::RawWakeSignal for Win32Wake {
     }
 }
 
-unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, waker: Option<std::sync::Arc<crate::sync::WakerShared>>) {
+unsafe fn run_windowed(
+    mut cfg: WindowConfig,
+    handler: Box<dyn AppHandler>,
+    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+) {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
@@ -332,7 +360,11 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
     // 使客户区 = cfg × scale，避免标题栏/边框吃掉内容空间导致超出。
     let sys_dpi = {
         let d = GetDpiForSystem();
-        if d == 0 { 96 } else { d }
+        if d == 0 {
+            96
+        } else {
+            d
+        }
     };
     let init_scale = sys_dpi as f32 / 96.0;
     let (phys_w, phys_h) = frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi);
@@ -341,10 +373,7 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
         WS_OVERLAPPEDWINDOW
     } else {
         // 固定大小：保留标题栏、系统菜单、最小化按钮，去掉拉伸边框和最大化按钮
-        WINDOW_STYLE(
-            WS_OVERLAPPEDWINDOW.0
-                & !(WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0)
-        )
+        WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 & !(WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0))
     };
 
     let hwnd = match CreateWindowExW(
@@ -376,7 +405,15 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
     // 实际 DPI 与系统估算不一致时，按真实 scale 校正窗口物理尺寸（在显示前，无 state 借用）。
     if (scale - init_scale).abs() > 0.01 {
         let (w, h) = frame_size_for_client(cfg.width, cfg.height, scale, dpi);
-        let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE,
+        );
     }
     if let Some(s) = state_from(hwnd) {
         s.handler.set_scale(scale);
@@ -412,7 +449,9 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
 
     // 跨线程唤醒：绑定平台句柄（hwnd 数值 + PostMessage），此前积压的 wake 会立即补发。
     if let Some(w) = &waker {
-        w.bind(Box::new(Win32Wake { hwnd: hwnd.0 as isize }));
+        w.bind(Box::new(Win32Wake {
+            hwnd: hwnd.0 as isize,
+        }));
     }
 
     // 注册周期定时器（on_interval）：timer id 从 1 起，靠 WM_TIMER 派发。
@@ -429,7 +468,12 @@ unsafe fn run_windowed(mut cfg: WindowConfig, handler: Box<dyn AppHandler>, wake
         if let Some(s) = state_from(hwnd) {
             s.frameless = true;
         }
-        let margins = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 1, cyBottomHeight: 0 };
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 1,
+            cyBottomHeight: 0,
+        };
         let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
         let _ = SetWindowPos(
             hwnd,
@@ -483,7 +527,9 @@ unsafe fn run_message_loop(hwnd: HWND) {
     let mut hires: Option<TimerResolution> = None;
     loop {
         let animating = !IsIconic(hwnd).as_bool()
-            && state_from(hwnd).map(|s| s.handler.wants_animation()).unwrap_or(false);
+            && state_from(hwnd)
+                .map(|s| s.handler.wants_animation())
+                .unwrap_or(false);
         if animating {
             // 提升定时器分辨率到 1ms：否则 MsgWait 超时被默认 ~15.6ms tick 向上取整，
             // 16ms 等待常变成 ~31ms → 实测掉到 ~30fps。
@@ -727,7 +773,9 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
         let mut buf = vec![0u16; len as usize + 1];
         let got = DragQueryFileW(hdrop, i, Some(&mut buf));
         if got > 0 {
-            paths.push(PathBuf::from(String::from_utf16_lossy(&buf[..got as usize])));
+            paths.push(PathBuf::from(String::from_utf16_lossy(
+                &buf[..got as usize],
+            )));
         }
     }
     DragFinish(hdrop);
@@ -735,13 +783,18 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
         return;
     }
     let repaint = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         state.handler.on_drop_files(Point::new(pt.x, pt.y), paths)
     };
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
-    if state_from(hwnd).map(|s| s.handler.wants_close()).unwrap_or(false) {
+    if state_from(hwnd)
+        .map(|s| s.handler.wants_close())
+        .unwrap_or(false)
+    {
         let _ = DestroyWindow(hwnd);
     }
 }
@@ -758,8 +811,10 @@ unsafe fn handle_nccalcsize(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if IsZoomed(hwnd).as_bool() {
         let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
         let dpi = GetDpiForWindow(hwnd).max(96);
-        let cx = GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-        let cy = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        let cx = GetSystemMetricsForDpi(SM_CXFRAME, dpi)
+            + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+        let cy = GetSystemMetricsForDpi(SM_CYFRAME, dpi)
+            + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
         params.rgrc[0].left += cx;
         params.rgrc[0].right -= cx;
         params.rgrc[0].top += cy;
@@ -831,7 +886,11 @@ unsafe fn apply_window_op(hwnd: HWND) {
             let _ = ShowWindow(hwnd, SW_MINIMIZE);
         }
         Some(WindowOp::ToggleMaximize) => {
-            let cmd = if IsZoomed(hwnd).as_bool() { SW_RESTORE } else { SW_MAXIMIZE };
+            let cmd = if IsZoomed(hwnd).as_bool() {
+                SW_RESTORE
+            } else {
+                SW_MAXIMIZE
+            };
             let _ = ShowWindow(hwnd, cmd);
         }
         None => {}
@@ -855,11 +914,27 @@ pub fn open_url(url: &str) {
 }
 
 /// 由期望逻辑客户区尺寸 + scale + dpi 反算窗口外框物理尺寸（含标题栏/边框）。
-unsafe fn frame_size_for_client(logical_w: i32, logical_h: i32, scale: f32, dpi: u32) -> (i32, i32) {
+unsafe fn frame_size_for_client(
+    logical_w: i32,
+    logical_h: i32,
+    scale: f32,
+    dpi: u32,
+) -> (i32, i32) {
     let cw = (logical_w as f32 * scale).round() as i32;
     let ch = (logical_h as f32 * scale).round() as i32;
-    let mut rc = RECT { left: 0, top: 0, right: cw, bottom: ch };
-    let _ = AdjustWindowRectExForDpi(&mut rc, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE::default(), dpi);
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: cw,
+        bottom: ch,
+    };
+    let _ = AdjustWindowRectExForDpi(
+        &mut rc,
+        WS_OVERLAPPEDWINDOW,
+        false,
+        WINDOW_EX_STYLE::default(),
+        dpi,
+    );
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
@@ -888,17 +963,29 @@ unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lpa
         // 故每侧容差为其一半（与 |x-x0|<=dx 比较）。
         let dx = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
         let dy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
-        state_from(hwnd).map(|s| s.last_click.bump(btn, x, y, now, dbl, dx, dy)).unwrap_or(1)
+        state_from(hwnd)
+            .map(|s| s.last_click.bump(btn, x, y, now, dbl, dx, dy))
+            .unwrap_or(1)
     } else {
         1
     };
-    dispatch_pointer_event(hwnd, PointerEvent { kind, pos: Point::new(x, y), button, click_count });
+    dispatch_pointer_event(
+        hwnd,
+        PointerEvent {
+            kind,
+            pos: Point::new(x, y),
+            button,
+            click_count,
+        },
+    );
 }
 
 /// 向系统申请鼠标离开通知（含非客户区），离开时收到 WM_MOUSELEAVE / WM_NCMOUSELEAVE。
 /// 申请是一次性的，系统在投递离开消息后即注销，故离开后需重新申请（由下次 Move 触发）。
 unsafe fn track_mouse_leave(hwnd: HWND) {
-    let Some(state) = state_from(hwnd) else { return };
+    let Some(state) = state_from(hwnd) else {
+        return;
+    };
     if state.mouse_tracked {
         return;
     }
@@ -947,16 +1034,27 @@ unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let _ = ScreenToClient(hwnd, &mut pt);
     dispatch_pointer_event(
         hwnd,
-        PointerEvent::single(PointerKind::Wheel(delta), Point::new(pt.x, pt.y), MouseButton::Left),
+        PointerEvent::single(
+            PointerKind::Wheel(delta),
+            Point::new(pt.x, pt.y),
+            MouseButton::Left,
+        ),
     );
 }
 
 /// 指针事件分发的公共两段式实现（事件分发 + OS 捕获同步 + 关闭）。
 unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     let (repaint, active, was_capturing, close) = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         let repaint = state.handler.on_pointer(ev);
-        (repaint, state.handler.capture_active(), state.capturing, state.handler.wants_close())
+        (
+            repaint,
+            state.handler.capture_active(),
+            state.capturing,
+            state.handler.wants_close(),
+        )
     };
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1030,7 +1128,10 @@ unsafe fn handle_touch_input(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     }
     // 主接触点（首个）。屏幕 1/100 像素 → 客户区物理像素。
     let ti = inputs[0];
-    let mut pt = POINT { x: ti.x / 100, y: ti.y / 100 };
+    let mut pt = POINT {
+        x: ti.x / 100,
+        y: ti.y / 100,
+    };
     let _ = ScreenToClient(hwnd, &mut pt);
     let kind = if ti.dwFlags.0 & TOUCHEVENTF_DOWN.0 != 0 {
         PointerKind::Down
@@ -1118,7 +1219,11 @@ unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32, t: u32) {
                 // 未进入滚动 → 视为点击：在起点合成按下，抬起处合成抬起，走正常派发。
                 dispatch_pointer_event(
                     hwnd,
-                    PointerEvent::single(PointerKind::Down, Point::new(start.0, start.1), MouseButton::Left),
+                    PointerEvent::single(
+                        PointerKind::Down,
+                        Point::new(start.0, start.1),
+                        MouseButton::Left,
+                    ),
                 );
                 dispatch_pointer_event(
                     hwnd,
@@ -1133,7 +1238,9 @@ unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32, t: u32) {
 /// 触摸滚动：把 dy 注入手指下的滚动容器（两段式：借用读取后释放再 InvalidateRect）。
 unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
     let repaint = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         state.handler.on_pan(pos, dy)
     };
     if repaint {
@@ -1144,7 +1251,9 @@ unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
 /// 触摸松手：按释放速度启动惯性滑动。启动后触发首帧，其余由动画循环按帧推进。
 unsafe fn dispatch_fling(hwnd: HWND, pos: Point, vy: f32) {
     let started = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         state.handler.start_fling(pos, vy)
     };
     if started {
@@ -1155,7 +1264,9 @@ unsafe fn dispatch_fling(hwnd: HWND, pos: Point, vy: f32) {
 /// 打断进行中的惯性滑动（新触摸按下时调用）。
 unsafe fn cancel_fling(hwnd: HWND) {
     let repaint = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         state.handler.cancel_fling()
     };
     if repaint {
@@ -1196,7 +1307,9 @@ unsafe fn handle_ime_position(hwnd: HWND) {
 /// OS 抢走指针捕获（如 Alt+Tab、WM_CAPTURECHANGED）：通知 handler 收尾。
 unsafe fn handle_capture_changed(hwnd: HWND) {
     let repaint = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         if !state.capturing {
             return;
         }
@@ -1240,7 +1353,12 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
     } else {
         Key::Other(vk as u32)
     };
-    let ev = KeyEvent { key, pressed: true, shift, ctrl };
+    let ev = KeyEvent {
+        key,
+        pressed: true,
+        shift,
+        ctrl,
+    };
     dispatch_key_event(hwnd, ev);
 }
 
@@ -1271,21 +1389,30 @@ unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
     // 先在独立借用作用域内累积代理对并释放 state 借用，再分发——避免与
     // dispatch_key_event 内部的 state_from 形成 &mut 别名（见其两段式说明）。
     let c = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         accumulate_char(&mut state.pending_surrogate, unit)
     };
     let Some(c) = c else { return };
     if c.is_control() {
         return;
     }
-    let ev = KeyEvent { key: Key::Char(c), pressed: true, shift: false, ctrl: false };
+    let ev = KeyEvent {
+        key: Key::Char(c),
+        pressed: true,
+        shift: false,
+        ctrl: false,
+    };
     dispatch_key_event(hwnd, ev);
 }
 
 /// 分发键盘事件（两段式：先借 state 取意图，释放后再调可能重入的 DestroyWindow）。
 unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
     let (repaint, close) = {
-        let Some(state) = state_from(hwnd) else { return };
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
         (state.handler.on_key(ev), state.handler.wants_close())
     };
     if repaint {
@@ -1319,7 +1446,11 @@ mod tests {
     fn bmp_char_passes_through() {
         let mut pend = None;
         assert_eq!(accumulate_char(&mut pend, b'A' as u16), Some('A'));
-        assert_eq!(accumulate_char(&mut pend, 0x4E16), Some('世'), "BMP 中文字符");
+        assert_eq!(
+            accumulate_char(&mut pend, 0x4E16),
+            Some('世'),
+            "BMP 中文字符"
+        );
         assert_eq!(pend, None, "BMP 字符不留挂起状态");
     }
 
@@ -1329,7 +1460,11 @@ mod tests {
         let mut pend = None;
         assert_eq!(accumulate_char(&mut pend, 0xD83D), None, "高代理项先暂存");
         assert_eq!(pend, Some(0xD83D));
-        assert_eq!(accumulate_char(&mut pend, 0xDE00), Some('😀'), "低代理项合成 emoji");
+        assert_eq!(
+            accumulate_char(&mut pend, 0xDE00),
+            Some('😀'),
+            "低代理项合成 emoji"
+        );
         assert_eq!(pend, None, "合成后清空挂起");
     }
 
@@ -1354,7 +1489,11 @@ mod tests {
         // 🌈 U+1F308 = D83C DF08
         let mut pend = None;
         assert_eq!(accumulate_char(&mut pend, 0xD83D), None);
-        assert_eq!(accumulate_char(&mut pend, 0xD83C), None, "第二个高代理项替换第一个");
+        assert_eq!(
+            accumulate_char(&mut pend, 0xD83C),
+            None,
+            "第二个高代理项替换第一个"
+        );
         assert_eq!(pend, Some(0xD83C));
         assert_eq!(accumulate_char(&mut pend, 0xDF08), Some('🌈'));
     }
@@ -1383,7 +1522,11 @@ mod tests {
         assert_eq!(t.bump(1, 10, 10, near_max, DBL, DX, DY), 1, "首击");
         // 跨过 u32 边界 50ms：near_max + 150 回绕为 49。
         let wrapped = near_max.wrapping_add(150);
-        assert_eq!(t.bump(1, 10, 10, wrapped, DBL, DX, DY), 2, "跨回绕仍判为双击");
+        assert_eq!(
+            t.bump(1, 10, 10, wrapped, DBL, DX, DY),
+            2,
+            "跨回绕仍判为双击"
+        );
     }
 
     #[test]

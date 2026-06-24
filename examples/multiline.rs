@@ -13,7 +13,11 @@ const CARD: u32 = 0xFFFFFF;
 const BG: u32 = 0xEEF1F5;
 
 fn label(t: &str) -> Element {
-    Element::label(t).font_size(13.0).fg(Color::hex(0x636E72)).height(20).width_match()
+    Element::label(t)
+        .font_size(13.0)
+        .fg(Color::hex(0x636E72))
+        .height(20)
+        .width_match()
 }
 
 fn main() {
@@ -30,7 +34,13 @@ fn main() {
         .bg(Color::hex(BG))
         .padding(18)
         .spacing(12)
-        .child(Element::label("多行 / 密码 文本框").font_size(22.0).fg(Color::hex(0x1A1A2E)).height(30).width_match())
+        .child(
+            Element::label("多行 / 密码 文本框")
+                .font_size(22.0)
+                .fg(Color::hex(0x1A1A2E))
+                .height(30)
+                .width_match(),
+        )
         .child(label("软换行多行（默认）"))
         .child(
             Element::text_input(wrap_txt, "输入多行文本")
@@ -49,7 +59,11 @@ fn main() {
                 .fg(Color::hex(FG)),
         )
         .child(label("密码"))
-        .child(Element::text_input(pwd, "输入密码").password().width_match());
+        .child(
+            Element::text_input(pwd, "输入密码")
+                .password()
+                .width_match(),
+        );
 
     App::new("windui — 多行/密码", 420, 360)
         .bg(Color::hex(BG))

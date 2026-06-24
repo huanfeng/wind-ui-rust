@@ -13,6 +13,7 @@ use std::mem::size_of;
 use std::rc::Rc;
 
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
@@ -25,10 +26,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, DestroyWindow,
     GetCursorPos, LoadIconW, SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON, ICONINFO,
-    IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
 };
-use windows::Win32::Foundation::POINT;
 
 /// 托盘回调消息（WM_APP+1）：lParam 低位为鼠标动作（legacy v0 编码）。
 pub(crate) const WM_TRAYICON: u32 = WM_APP + 1;
@@ -128,7 +128,9 @@ impl TrayMenuItem {
     }
     /// 分隔线。
     pub fn separator() -> Self {
-        Self { kind: ItemKind::Separator }
+        Self {
+            kind: ItemKind::Separator,
+        }
     }
 }
 
@@ -218,7 +220,13 @@ pub(crate) fn install(hwnd: HWND, tray: Tray) -> Option<TrayState> {
         }
         return None;
     }
-    Some(TrayState { hwnd, uid, hicon, owns_icon, tray })
+    Some(TrayState {
+        hwnd,
+        uid,
+        hicon,
+        owns_icon,
+        tray,
+    })
 }
 
 /// 处理托盘回调消息：左键/双击触发回调，右键弹原生菜单。
@@ -246,7 +254,12 @@ unsafe fn show_menu(state: &mut TrayState) {
             ItemKind::Separator => {
                 let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             }
-            ItemKind::Action { label, checked, enabled, .. } => {
+            ItemKind::Action {
+                label,
+                checked,
+                enabled,
+                ..
+            } => {
                 let mut flags = MF_STRING;
                 if checked.as_ref().is_some_and(|c| c.get()) {
                     flags |= MF_CHECKED;
@@ -278,7 +291,10 @@ unsafe fn show_menu(state: &mut TrayState) {
     let id = cmd.0 as usize;
     if id >= 1 && id <= state.tray.items.len() {
         if let ItemKind::Action { cb, .. } = &mut state.tray.items[id - 1].kind {
-            let mut ctx = TrayCtx { hwnd: state.hwnd, uid: state.uid };
+            let mut ctx = TrayCtx {
+                hwnd: state.hwnd,
+                uid: state.uid,
+            };
             cb(&mut ctx);
         }
     }

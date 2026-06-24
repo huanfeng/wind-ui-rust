@@ -61,15 +61,46 @@ fn paint_panel_header(
 ) {
     let th = crate::theme::current();
     let (pal, nav) = (&th.palette, &th.nav);
-    let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+    let (x, y, w, h) = (
+        bounds.x as f32,
+        bounds.y as f32,
+        bounds.w as f32,
+        bounds.h as f32,
+    );
     // hover 底色按补间量淡入：缩放其 alpha（hover_amount 0..1）。
     if enabled && hover_amount > 0.0 {
-        canvas.fill_rect(x, y, w, h, &Paint::fill(nav.hover_bg(pal).scale_alpha(hover_amount)));
+        canvas.fill_rect(
+            x,
+            y,
+            w,
+            h,
+            &Paint::fill(nav.hover_bg(pal).scale_alpha(hover_amount)),
+        );
     }
-    let text_color = if enabled { nav.text(pal) } else { pal.text_disabled };
-    let chevron = if enabled { nav.chevron(pal) } else { pal.text_disabled };
-    let tr = Rect::new(bounds.x + PAD_X, bounds.y, bounds.w - 2 * PAD_X - CHEVRON_W, bounds.h);
-    canvas.draw_text(title, tr, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
+    let text_color = if enabled {
+        nav.text(pal)
+    } else {
+        pal.text_disabled
+    };
+    let chevron = if enabled {
+        nav.chevron(pal)
+    } else {
+        pal.text_disabled
+    };
+    let tr = Rect::new(
+        bounds.x + PAD_X,
+        bounds.y,
+        bounds.w - 2 * PAD_X - CHEVRON_W,
+        bounds.h,
+    );
+    canvas.draw_text(
+        title,
+        tr,
+        text_color,
+        Align::Start,
+        style.font_family.as_deref(),
+        style.font_size,
+    );
     let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
     let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
     if expanded {
@@ -104,7 +135,11 @@ pub struct NavRow {
 
 impl NavRow {
     pub fn new(label: String) -> Self {
-        Self { label, state: State::Normal, on_click: None }
+        Self {
+            label,
+            state: State::Normal,
+            on_click: None,
+        }
     }
     fn activate(&mut self, ctx: &mut EventCtx) {
         if let Some(cb) = self.on_click.as_mut() {
@@ -118,19 +153,52 @@ impl Widget for NavRow {
         Size::new(avail.w.max(0), NAV_ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, nav) = (&th.palette, &th.nav);
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         // 悬停/按下底色（禁用不画）。
         if enabled && self.state != State::Normal {
             canvas.fill_rect(x, y, w, h, &Paint::fill(nav.hover_bg(pal)));
         }
-        let text_color = if enabled { nav.text(pal) } else { pal.text_disabled };
-        let chevron = if enabled { nav.chevron(pal) } else { pal.text_disabled };
+        let text_color = if enabled {
+            nav.text(pal)
+        } else {
+            pal.text_disabled
+        };
+        let chevron = if enabled {
+            nav.chevron(pal)
+        } else {
+            pal.text_disabled
+        };
         // 标签（左，留出右侧箭头区）。
-        let tr = Rect::new(bounds.x + PAD_X, bounds.y, bounds.w - 2 * PAD_X - CHEVRON_W, bounds.h);
-        canvas.draw_text(&self.label, tr, text_color, Align::Start, style.font_family.as_deref(), style.font_size);
+        let tr = Rect::new(
+            bounds.x + PAD_X,
+            bounds.y,
+            bounds.w - 2 * PAD_X - CHEVRON_W,
+            bounds.h,
+        );
+        canvas.draw_text(
+            &self.label,
+            tr,
+            text_color,
+            Align::Start,
+            style.font_family.as_deref(),
+            style.font_size,
+        );
         // 右侧钻入箭头。
         let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
@@ -213,7 +281,12 @@ pub struct CollapsibleHeader {
 
 impl CollapsibleHeader {
     pub fn new(title: String, expanded: Rc<Cell<bool>>) -> Self {
-        Self { title, expanded, hover: false, hover_anim: Cell::new(Transition::new(0.0)) }
+        Self {
+            title,
+            expanded,
+            hover: false,
+            hover_anim: Cell::new(Transition::new(0.0)),
+        }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.expanded.set(!self.expanded.get());
@@ -226,9 +299,25 @@ impl Widget for CollapsibleHeader {
         Size::new(avail.w.max(0), NAV_ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let amt = hover_amount(&self.hover_anim, self.hover);
-        paint_panel_header(canvas, bounds, &self.title, self.expanded.get(), amt, enabled, style);
+        paint_panel_header(
+            canvas,
+            bounds,
+            &self.title,
+            self.expanded.get(),
+            amt,
+            enabled,
+            style,
+        );
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -316,7 +405,12 @@ pub struct AccordionHeader {
 
 impl AccordionHeader {
     pub fn new(title: String, state: ExpandState) -> Self {
-        Self { title, state, hover: false, hover_anim: Cell::new(Transition::new(0.0)) }
+        Self {
+            title,
+            state,
+            hover: false,
+            hover_anim: Cell::new(Transition::new(0.0)),
+        }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.toggle();
@@ -329,9 +423,25 @@ impl Widget for AccordionHeader {
         Size::new(avail.w.max(0), NAV_ROW_H)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let amt = hover_amount(&self.hover_anim, self.hover);
-        paint_panel_header(canvas, bounds, &self.title, self.state.is_expanded(), amt, enabled, style);
+        paint_panel_header(
+            canvas,
+            bounds,
+            &self.title,
+            self.state.is_expanded(),
+            amt,
+            enabled,
+            style,
+        );
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -394,19 +504,35 @@ mod tests {
     fn click(tree: &mut Tree, at: Point) {
         let mut hover = None;
         let mut capture = None;
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left), &mut hover, &mut capture);
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left), &mut hover, &mut capture);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
     }
 
     #[test]
     fn nav_row_click_fires_callback_and_hand_cursor() {
         let hit = Rc::new(Cell::new(0));
         let h2 = hit.clone();
-        let (mut tree, root) =
-            build(Element::nav_row("双拼方案设定").width(180).height(40).on_click(move |_| h2.set(h2.get() + 1)));
+        let (mut tree, root) = build(
+            Element::nav_row("双拼方案设定")
+                .width(180)
+                .height(40)
+                .on_click(move |_| h2.set(h2.get() + 1)),
+        );
         click(&mut tree, Point::new(40, 20));
         assert_eq!(hit.get(), 1, "点击导航行应触发回调");
-        assert_eq!(tree.cursor_at(root), CursorShape::Hand, "导航行应报告手型光标");
+        assert_eq!(
+            tree.cursor_at(root),
+            CursorShape::Hand,
+            "导航行应报告手型光标"
+        );
     }
 
     #[test]
@@ -414,7 +540,12 @@ mod tests {
         // 走公开构建器：header 在顶部 0..40，点击切换 expanded。
         let expanded = Rc::new(Cell::new(false));
         let (mut tree, _root) = build(
-            Element::collapsible("属性设置", expanded.clone(), Element::label("子项").height(30)).width(180),
+            Element::collapsible(
+                "属性设置",
+                expanded.clone(),
+                Element::label("子项").height(30),
+            )
+            .width(180),
         );
         click(&mut tree, Point::new(40, 20));
         assert!(expanded.get(), "首次点击 header 应展开");
@@ -447,9 +578,21 @@ mod tests {
     fn nav_key_enter_activates() {
         let hit = Rc::new(Cell::new(0));
         let h2 = hit.clone();
-        let (mut tree, root) =
-            build(Element::nav_row("钻入").width(180).height(40).on_click(move |_| h2.set(h2.get() + 1)));
-        tree.dispatch_key(KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false }, Some(root));
+        let (mut tree, root) = build(
+            Element::nav_row("钻入")
+                .width(180)
+                .height(40)
+                .on_click(move |_| h2.set(h2.get() + 1)),
+        );
+        tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
+            Some(root),
+        );
         assert_eq!(hit.get(), 1, "回车应激活导航行");
     }
 
@@ -513,7 +656,15 @@ mod tests {
         let sel = Rc::new(Cell::new(-1));
         let (mut tree, root) = build(three_panel_accordion(sel.clone()));
         let header0 = tree.get(root).unwrap().children[0];
-        tree.dispatch_key(KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false }, Some(header0));
+        tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
+            Some(header0),
+        );
         assert_eq!(sel.get(), 0, "回车应展开聚焦的面板头");
     }
 }

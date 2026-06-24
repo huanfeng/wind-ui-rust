@@ -70,10 +70,23 @@ impl Link {
 
 impl Widget for Link {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        text.measure(&self.text, style.font_family.as_deref(), style.font_size, None)
+        text.measure(
+            &self.text,
+            style.font_family.as_deref(),
+            style.font_size,
+            None,
+        )
     }
 
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        _bounds: Rect,
+        content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let th = crate::theme::current();
         let (pal, lk) = (&th.palette, &th.link);
         // 禁用：链接色降为 text_disabled；否则按三态取链接色。
@@ -106,7 +119,9 @@ impl Widget for Link {
         );
         if self.underline {
             // 下划线贴文字底缘；x 跟随文字（Start 对齐），长度取文字实测宽。
-            let tw = canvas.measure_text(&self.text, style.font_family.as_deref(), style.font_size).w;
+            let tw = canvas
+                .measure_text(&self.text, style.font_family.as_deref(), style.font_size)
+                .w;
             let y = (content.y + content.h - 1) as f32;
             let x0 = content.x as f32;
             canvas.draw_line(x0, y, x0 + tw as f32, y, 1.0, &Paint::fill(color));
@@ -141,7 +156,11 @@ impl Widget for Link {
                 PointerKind::Up => {
                     let was_press = self.state == LinkState::Press;
                     let inside = ctx.bounds().contains(p.pos);
-                    self.state = if inside { LinkState::Hover } else { LinkState::Normal };
+                    self.state = if inside {
+                        LinkState::Hover
+                    } else {
+                        LinkState::Normal
+                    };
                     ctx.release_capture();
                     ctx.mark_dirty();
                     if was_press && inside {
@@ -207,7 +226,11 @@ mod tests {
         let mut hover = None;
         let mut capture = None;
         let at = Point::new(10, 10);
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left), &mut hover, &mut capture);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
         let res = tree.dispatch_pointer(
             PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
             &mut hover,
@@ -223,23 +246,40 @@ mod tests {
         let mut hover = None;
         let mut capture = None;
         let at = Point::new(10, 10);
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left), &mut hover, &mut capture);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
         let res = tree.dispatch_pointer(
             PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
             &mut hover,
             &mut capture,
         );
-        assert_eq!(res.open_url.as_deref(), Some("https://example.com"), "无回调应请求打开 url");
+        assert_eq!(
+            res.open_url.as_deref(),
+            Some("https://example.com"),
+            "无回调应请求打开 url"
+        );
     }
 
     #[test]
     fn enter_key_activates() {
         let (mut tree, root) = link_tree(Element::link("官网").url("https://example.com"));
         let res = tree.dispatch_key(
-            KeyEvent { key: Key::Enter, pressed: true, shift: false, ctrl: false },
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
             Some(root),
         );
-        assert_eq!(res.open_url.as_deref(), Some("https://example.com"), "回车应激活链接");
+        assert_eq!(
+            res.open_url.as_deref(),
+            Some("https://example.com"),
+            "回车应激活链接"
+        );
     }
 
     #[test]
@@ -250,19 +290,29 @@ mod tests {
 
     #[test]
     fn disabled_link_skips_open_and_cursor() {
-        let (mut tree, root) =
-            link_tree(Element::link("官网").url("https://example.com").disabled(true));
+        let (mut tree, root) = link_tree(
+            Element::link("官网")
+                .url("https://example.com")
+                .disabled(true),
+        );
         // 核心拦截禁用节点：点击不产生 open_url。
         let mut hover = None;
         let mut capture = None;
         let at = Point::new(10, 10);
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left), &mut hover, &mut capture);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
         let res = tree.dispatch_pointer(
             PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
             &mut hover,
             &mut capture,
         );
         assert!(res.open_url.is_none(), "禁用链接点击不应打开");
-        assert!(!tree.node_enabled(root), "禁用态应被核心识别（宿主据此回退箭头光标）");
+        assert!(
+            !tree.node_enabled(root),
+            "禁用态应被核心识别（宿主据此回退箭头光标）"
+        );
     }
 }

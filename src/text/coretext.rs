@@ -20,8 +20,8 @@ use std::ptr::{self, NonNull};
 use tiny_skia::Pixmap;
 
 use objc2_core_foundation::{
-    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFAttributedString, CFDictionary,
-    CFRange, CFRetained, CFString, CGAffineTransform, CGPoint, CGRect, CGSize,
+    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFAttributedString,
+    CFDictionary, CFRange, CFRetained, CFString, CGAffineTransform, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColor, CGColorSpace, CGContext, CGImageAlphaInfo, CGPath,
@@ -39,8 +39,14 @@ use crate::spec::Align;
 const DEFAULT_FAMILY: &str = "PingFang SC"; // 中文友好的 macOS 系统字体
 
 /// 单位变换矩阵（绘制文字前复位文本矩阵，避免继承翻转）。
-const IDENTITY: CGAffineTransform =
-    CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 };
+const IDENTITY: CGAffineTransform = CGAffineTransform {
+    a: 1.0,
+    b: 0.0,
+    c: 0.0,
+    d: 1.0,
+    tx: 0.0,
+    ty: 0.0,
+};
 
 /// Core Text 文字引擎。
 ///
@@ -57,7 +63,11 @@ pub struct CoreTextEngine {
 impl CoreTextEngine {
     pub fn new() -> Self {
         let color_space = CGColorSpace::new_device_rgb().expect("CGColorSpaceCreateDeviceRGB 失败");
-        Self { scale: 1.0, fonts: HashMap::new(), color_space }
+        Self {
+            scale: 1.0,
+            fonts: HashMap::new(),
+            color_space,
+        }
     }
 
     /// 取（缓存的）指定字族与物理字号的 CTFont。
@@ -76,7 +86,13 @@ impl CoreTextEngine {
 
     /// 用 (font, color, align) 组装属性字典 → CFAttributedString。
     /// 段落样式仅折行路径用到；单行路径手动定位，故对其无影响（保留一条路径即可）。
-    fn attributed(&mut self, text: &str, font: &CTFont, color: &CGColor, align: Align) -> CFRetained<CFAttributedString> {
+    fn attributed(
+        &mut self,
+        text: &str,
+        font: &CTFont,
+        color: &CGColor,
+        align: Align,
+    ) -> CFRetained<CFAttributedString> {
         let ct_align = match align {
             Align::Start | Align::Stretch => CTTextAlignment::Natural,
             Align::Center => CTTextAlignment::Center,
@@ -139,7 +155,13 @@ impl TextEngine for CoreTextEngine {
         self.scale = scale.max(0.1);
     }
 
-    fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size {
+    fn measure(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+        max_width: Option<f32>,
+    ) -> Size {
         if text.is_empty() {
             return Size::new(0, size.ceil() as i32);
         }
@@ -154,23 +176,35 @@ impl TextEngine for CoreTextEngine {
             // 折行：用 framesetter 在宽度内排版，取建议尺寸。
             Some(w) if w > 0.0 => {
                 let fs = unsafe { CTFramesetter::with_attributed_string(&attr) };
-                let constraints = CGSize { width: (w * s) as f64, height: f64::MAX };
+                let constraints = CGSize {
+                    width: (w * s) as f64,
+                    height: f64::MAX,
+                };
                 let fit = unsafe {
                     fs.suggest_frame_size_with_constraints(
-                        CFRange { location: 0, length: 0 },
+                        CFRange {
+                            location: 0,
+                            length: 0,
+                        },
                         None,
                         constraints,
                         ptr::null_mut(),
                     )
                 };
-                Size::new((fit.width / s as f64).ceil() as i32, (fit.height / s as f64).ceil() as i32)
+                Size::new(
+                    (fit.width / s as f64).ceil() as i32,
+                    (fit.height / s as f64).ceil() as i32,
+                )
             }
             // 单行不换行：CTLine 排版宽 + 行高（ascent+descent+leading）。
             _ => {
                 let line = unsafe { CTLine::with_attributed_string(&attr) };
                 let (width, ascent, descent, leading) = line_metrics(&line);
                 let line_h = ascent + descent + leading;
-                Size::new((width / s as f64).ceil() as i32, (line_h / s as f64).ceil() as i32)
+                Size::new(
+                    (width / s as f64).ceil() as i32,
+                    (line_h / s as f64).ceil() as i32,
+                )
             }
         }
     }
@@ -235,8 +269,14 @@ impl TextEngine for CoreTextEngine {
         // 裁剪到可见矩形（滚动视口等）：距顶 → 距底换算。
         if let Some(c) = pclip {
             let cg = CGRect {
-                origin: CGPoint { x: c.x as f64, y: phf - (c.y + c.h) as f64 },
-                size: CGSize { width: c.w as f64, height: c.h as f64 },
+                origin: CGPoint {
+                    x: c.x as f64,
+                    y: phf - (c.y + c.h) as f64,
+                },
+                size: CGSize {
+                    width: c.w as f64,
+                    height: c.h as f64,
+                },
             };
             CGContext::clip_to_rect(Some(&ctx), cg);
         }
@@ -257,10 +297,16 @@ impl TextEngine for CoreTextEngine {
         } else {
             // 折行：framesetter 在 rect 宽内排版，段落样式负责水平对齐，整体垂直居中。
             let fs = unsafe { CTFramesetter::with_attributed_string(&attr) };
-            let constraints = CGSize { width: prect.w as f64, height: f64::MAX };
+            let constraints = CGSize {
+                width: prect.w as f64,
+                height: f64::MAX,
+            };
             let fit = unsafe {
                 fs.suggest_frame_size_with_constraints(
-                    CFRange { location: 0, length: 0 },
+                    CFRange {
+                        location: 0,
+                        length: 0,
+                    },
                     None,
                     constraints,
                     ptr::null_mut(),
@@ -269,13 +315,27 @@ impl TextEngine for CoreTextEngine {
             let text_h = fit.height;
             let top_from_top = prect.y as f64 + (prect.h as f64 - text_h) / 2.0;
             let path_rect = CGRect {
-                origin: CGPoint { x: prect.x as f64, y: phf - (top_from_top + text_h) },
+                origin: CGPoint {
+                    x: prect.x as f64,
+                    y: phf - (top_from_top + text_h),
+                },
                 // 高度多留 1px，避免末行被边界裁掉。
-                size: CGSize { width: prect.w as f64, height: text_h.ceil() + 1.0 },
+                size: CGSize {
+                    width: prect.w as f64,
+                    height: text_h.ceil() + 1.0,
+                },
             };
             let path = unsafe { CGPath::with_rect(path_rect, ptr::null()) };
-            let frame =
-                unsafe { fs.frame(CFRange { location: 0, length: 0 }, &path, None) };
+            let frame = unsafe {
+                fs.frame(
+                    CFRange {
+                        location: 0,
+                        length: 0,
+                    },
+                    &path,
+                    None,
+                )
+            };
             unsafe { frame.draw(&ctx) };
         }
 

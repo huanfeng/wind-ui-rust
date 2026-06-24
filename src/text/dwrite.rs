@@ -14,17 +14,18 @@ use std::ffi::c_void;
 
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
-use windows::core::{implement, BOOL, Interface, IUnknown, Ref, Result, PCWSTR};
+use windows::core::{implement, IUnknown, Interface, Ref, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, FALSE};
-use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteFactory2,
     IDWriteGdiInterop, IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
     IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
-    DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX,
-    DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
+    DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
+    DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH,
+    DWRITE_TEXT_METRICS, DWRITE_UNDERLINE,
 };
+use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 
 use super::TextEngine;
 use crate::geometry::{Color, Rect, Size};
@@ -68,11 +69,16 @@ impl DWriteEngine {
             // 系统默认渲染参数：含用户 ClearType 校准的 gamma/对比度/渲染模式。
             // 配合"真背景合成"（draw 中把真实背景拷入位图后让 DirectWrite 直接
             // 在其上抗锯齿混合），gamma 由 DirectWrite 自己正确处理，文字不再发重。
-            let params = factory.CreateRenderingParams().expect("CreateRenderingParams 失败");
+            let params = factory
+                .CreateRenderingParams()
+                .expect("CreateRenderingParams 失败");
             // IDWriteFactory2（Win8.1+）提供彩色字形拆层；取不到则 renderer 退化为单色绘制。
             let factory2: Option<IDWriteFactory2> = factory.cast().ok();
-            let renderer: IDWriteTextRenderer =
-                GlyphRenderer { params: params.clone(), factory2 }.into();
+            let renderer: IDWriteTextRenderer = GlyphRenderer {
+                params: params.clone(),
+                factory2,
+            }
+            .into();
             Self {
                 factory,
                 gdi_interop,
@@ -120,7 +126,11 @@ impl DWriteEngine {
     ) -> Option<IDWriteTextLayout> {
         let format = self.format(family, size)?;
         let text_w = wide(text);
-        unsafe { self.factory.CreateTextLayout(&text_w, &format, max_w, f32::MAX).ok() }
+        unsafe {
+            self.factory
+                .CreateTextLayout(&text_w, &format, max_w, f32::MAX)
+                .ok()
+        }
     }
 
     /// 返回复用的位图渲染目标，必要时按历史最大尺寸扩容（减少 COM 重建）。
@@ -128,9 +138,11 @@ impl DWriteEngine {
         if self.bitmap_target.is_none() || w > self.bitmap_w || h > self.bitmap_h {
             let nw = w.max(self.bitmap_w).max(1);
             let nh = h.max(self.bitmap_h).max(1);
-            let brt =
-                unsafe { self.gdi_interop.CreateBitmapRenderTarget(None, nw as u32, nh as u32) }
-                    .ok()?;
+            let brt = unsafe {
+                self.gdi_interop
+                    .CreateBitmapRenderTarget(None, nw as u32, nh as u32)
+            }
+            .ok()?;
             unsafe { brt.SetPixelsPerDip(1.0).ok() };
             self.bitmap_target = Some(brt);
             self.bitmap_w = nw;
@@ -151,7 +163,13 @@ impl TextEngine for DWriteEngine {
         self.scale = scale.max(0.1);
     }
 
-    fn measure(&mut self, text: &str, family: Option<&str>, size: f32, max_width: Option<f32>) -> Size {
+    fn measure(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+        max_width: Option<f32>,
+    ) -> Size {
         if text.is_empty() {
             return Size::new(0, size.ceil() as i32);
         }
@@ -282,10 +300,18 @@ impl TextEngine for DWriteEngine {
         // 2. 用文字色在背景上 DrawGlyphRun（layout.Draw 同步执行，ctx 在调用期间存活）。
         let colorref =
             COLORREF(((color.b as u32) << 16) | ((color.g as u32) << 8) | (color.r as u32));
-        let ctx = BitmapCtx { target: brt.clone(), color: colorref };
+        let ctx = BitmapCtx {
+            target: brt.clone(),
+            color: colorref,
+        };
         unsafe {
             layout
-                .Draw(Some(&ctx as *const _ as *const c_void), &self.renderer, glyph_dx, 0.0)
+                .Draw(
+                    Some(&ctx as *const _ as *const c_void),
+                    &self.renderer,
+                    glyph_dx,
+                    0.0,
+                )
                 .ok()
         };
 
@@ -379,7 +405,11 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
         // 优先：把字形拆成彩色层（COLR/CPAL，如 emoji）逐层着色叠加。
         // 字体无彩色数据时 TranslateColorGlyphRun 返回 DWRITE_E_NOCOLOR，落到下方单色路径。
         if let Some(f2) = &self.factory2 {
-            let desc = if glyphrundescription.is_null() { None } else { Some(glyphrundescription) };
+            let desc = if glyphrundescription.is_null() {
+                None
+            } else {
+                Some(glyphrundescription)
+            };
             let enumr = unsafe {
                 f2.TranslateColorGlyphRun(
                     baselineoriginx,
@@ -399,7 +429,9 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
                             if !more.as_bool() {
                                 break;
                             }
-                            let Ok(run_ptr) = en.GetCurrentRun() else { break };
+                            let Ok(run_ptr) = en.GetCurrentRun() else {
+                                break;
+                            };
                             if run_ptr.is_null() {
                                 break;
                             }
@@ -424,7 +456,7 @@ impl IDWriteTextRenderer_Impl for GlyphRenderer_Impl {
                     return Ok(());
                 }
                 Err(e) if e.code() == DWRITE_E_NOCOLOR => {} // 无彩色数据：走单色
-                Err(_) => {}                                  // 其它失败：保守走单色
+                Err(_) => {}                                 // 其它失败：保守走单色
             }
         }
 
@@ -484,12 +516,23 @@ impl IDWritePixelSnapping_Impl for GlyphRenderer_Impl {
     fn IsPixelSnappingDisabled(&self, _ctx: *const c_void) -> Result<BOOL> {
         Ok(FALSE)
     }
-    fn GetCurrentTransform(&self, _ctx: *const c_void, transform: *mut DWRITE_MATRIX) -> Result<()> {
+    fn GetCurrentTransform(
+        &self,
+        _ctx: *const c_void,
+        transform: *mut DWRITE_MATRIX,
+    ) -> Result<()> {
         if transform.is_null() {
             return Ok(());
         }
         unsafe {
-            *transform = DWRITE_MATRIX { m11: 1.0, m12: 0.0, m21: 0.0, m22: 1.0, dx: 0.0, dy: 0.0 };
+            *transform = DWRITE_MATRIX {
+                m11: 1.0,
+                m12: 0.0,
+                m21: 0.0,
+                m22: 1.0,
+                dx: 0.0,
+                dy: 0.0,
+            };
         }
         Ok(())
     }

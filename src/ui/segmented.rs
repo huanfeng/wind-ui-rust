@@ -35,7 +35,12 @@ pub struct SegmentedControl {
 impl SegmentedControl {
     pub fn new(options: Vec<String>, selected: Rc<Cell<usize>>) -> Self {
         let init = selected.get().min(options.len().saturating_sub(1)) as f32;
-        Self { options, selected, hover: None, sel_pos: Cell::new(Transition::new(init)) }
+        Self {
+            options,
+            selected,
+            hover: None,
+            sel_pos: Cell::new(Transition::new(init)),
+        }
     }
 
     fn len(&self) -> usize {
@@ -89,10 +94,23 @@ impl Widget for SegmentedControl {
         Size::new(seg_w * self.len().max(1) as i32, h)
     }
 
-    fn paint(&self, bounds: Rect, _content: Rect, focused: bool, enabled: bool, canvas: &mut dyn Canvas, style: &Style) {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
         let t = crate::theme::current();
         let (pal, sg) = (&t.palette, &t.segment);
-        let (x, y, w, h) = (bounds.x as f32, bounds.y as f32, bounds.w as f32, bounds.h as f32);
+        let (x, y, w, h) = (
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
         let corner = sg.corner(&t.metrics);
         let n = self.len();
         let sel = self.sel();
@@ -134,7 +152,11 @@ impl Widget for SegmentedControl {
             let (b0, b1) = self.seg_x(bounds, i1);
             let px0 = a0 as f32 + (b0 - a0) as f32 * frac;
             let px1 = a1 as f32 + (b1 - a1) as f32 * frac;
-            let pill_bg = if enabled { sg.selected_bg(pal) } else { pal.surface_alt };
+            let pill_bg = if enabled {
+                sg.selected_bg(pal)
+            } else {
+                pal.surface_alt
+            };
             canvas.fill_round_rect(
                 px0 + 2.0,
                 (bounds.y + 2) as f32,
@@ -148,7 +170,11 @@ impl Widget for SegmentedControl {
         for i in 0..n {
             let (x0, x1) = self.seg_x(bounds, i);
             let tc = if i == sel {
-                if enabled { sg.selected_text(pal) } else { pal.text_disabled }
+                if enabled {
+                    sg.selected_text(pal)
+                } else {
+                    pal.text_disabled
+                }
             } else if enabled {
                 sg.text(pal)
             } else {
@@ -266,8 +292,16 @@ mod tests {
     fn click(tree: &mut Tree, at: Point) -> crate::core::DispatchResult {
         let mut hover = None;
         let mut capture = None;
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left), &mut hover, &mut capture);
-        tree.dispatch_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left), &mut hover, &mut capture)
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        )
     }
 
     #[test]
@@ -275,7 +309,9 @@ mod tests {
         let sel = Rc::new(Cell::new(0usize));
         // 180 宽 3 段 → 每段 60：[0,60) [60,120) [120,180)。根布局落在 (0,0)。
         let mut tree = layout(
-            Element::segmented(vec!["简体", "繁体", "其它"], sel.clone()).width(180).height(32),
+            Element::segmented(vec!["简体", "繁体", "其它"], sel.clone())
+                .width(180)
+                .height(32),
         );
         click(&mut tree, Point::new(150, 16)); // 第三段
         assert_eq!(sel.get(), 2, "点击第三段应选中索引 2");
@@ -287,7 +323,9 @@ mod tests {
     fn arrow_keys_move_selection() {
         let sel = Rc::new(Cell::new(0usize));
         let mut tree = layout(
-            Element::segmented(vec!["A", "B", "C"], sel.clone()).width(180).height(32),
+            Element::segmented(vec!["A", "B", "C"], sel.clone())
+                .width(180)
+                .height(32),
         );
         // 先点击聚焦（Down 请求焦点），再用方向键移动。
         let root = tree.root;
@@ -299,12 +337,22 @@ mod tests {
             &mut capture,
         );
         let focus = res.focus.or(root);
-        let right = crate::event::KeyEvent { key: Key::Right, pressed: true, shift: false, ctrl: false };
+        let right = crate::event::KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(right, focus);
         assert_eq!(sel.get(), 1, "右键应移到下一段");
         tree.dispatch_key(right, focus);
         assert_eq!(sel.get(), 2);
-        let left = crate::event::KeyEvent { key: Key::Left, pressed: true, shift: false, ctrl: false };
+        let left = crate::event::KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
         tree.dispatch_key(left, focus);
         assert_eq!(sel.get(), 1, "左键应移回上一段");
     }
@@ -316,7 +364,14 @@ mod tests {
         crate::anim::set_clock_ms(clock);
         let mut pm = Pixmap::new(180, 32).unwrap();
         let mut c = SkiaCanvas::new(&mut pm);
-        sc.paint(Rect::new(0, 0, 180, 32), Rect::new(0, 0, 180, 32), false, true, &mut c, &Style::default());
+        sc.paint(
+            Rect::new(0, 0, 180, 32),
+            Rect::new(0, 0, 180, 32),
+            false,
+            true,
+            &mut c,
+            &Style::default(),
+        );
     }
 
     #[test]
@@ -348,7 +403,10 @@ mod tests {
 
     #[test]
     fn seg_at_maps_boundaries() {
-        let sc = SegmentedControl::new(vec!["a".into(), "b".into(), "c".into()], Rc::new(Cell::new(0)));
+        let sc = SegmentedControl::new(
+            vec!["a".into(), "b".into(), "c".into()],
+            Rc::new(Cell::new(0)),
+        );
         let b = Rect::new(0, 0, 180, 32);
         assert_eq!(sc.seg_at(b, 0), 0);
         assert_eq!(sc.seg_at(b, 59), 0);

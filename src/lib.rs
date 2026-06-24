@@ -8,7 +8,6 @@
 
 pub mod anim;
 pub mod app;
-pub(crate) mod sync;
 pub mod core;
 pub mod event;
 pub mod geometry;
@@ -16,19 +15,22 @@ pub mod platform;
 pub mod render;
 pub mod spec;
 pub mod style;
+pub(crate) mod sync;
 pub mod text;
 pub mod theme;
 pub mod ui;
 
 pub mod prelude {
     pub use crate::app::App;
-    pub use crate::sync::Sender;
     pub use crate::event::CursorShape;
-    pub use crate::platform::{Tray, TrayCtx, TrayMenuItem};
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
+    pub use crate::platform::{Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::Style;
+    pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Theme};
-    pub use crate::ui::{Element, ImageContent, ImageView, Link, Truncate, WindowButton, WindowButtonKind};
+    pub use crate::ui::{
+        Element, ImageContent, ImageView, Link, Truncate, WindowButton, WindowButtonKind,
+    };
 }

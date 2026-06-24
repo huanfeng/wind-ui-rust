@@ -11,7 +11,11 @@ use windui::prelude::*;
 const BG: u32 = 0xEEF1F5;
 
 fn label(t: &str) -> Element {
-    Element::label(t).font_size(13.0).fg(Color::hex(0x636E72)).height(20).width_match()
+    Element::label(t)
+        .font_size(13.0)
+        .fg(Color::hex(0x636E72))
+        .height(20)
+        .width_match()
 }
 
 fn main() {
@@ -24,7 +28,13 @@ fn main() {
         .bg(Color::hex(BG))
         .padding(22)
         .spacing(10)
-        .child(Element::label("进度条").font_size(22.0).fg(Color::hex(0x1A1A2E)).height(30).width_match())
+        .child(
+            Element::label("进度条")
+                .font_size(22.0)
+                .fg(Color::hex(0x1A1A2E))
+                .height(30)
+                .width_match(),
+        )
         .child(label("确定 25%"))
         .child(Element::progress(p25).width_match())
         .child(label("确定 60%"))

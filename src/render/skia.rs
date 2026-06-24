@@ -39,7 +39,14 @@ pub struct SkiaCanvas<'a> {
 impl<'a> SkiaCanvas<'a> {
     /// 无文字能力（仅图形），scale=1。
     pub fn new(pixmap: &'a mut Pixmap) -> Self {
-        Self { pixmap, engine: None, clips: Vec::new(), saves: Vec::new(), scale: 1.0, offset: Point::new(0, 0) }
+        Self {
+            pixmap,
+            engine: None,
+            clips: Vec::new(),
+            saves: Vec::new(),
+            scale: 1.0,
+            offset: Point::new(0, 0),
+        }
     }
 
     /// 带文字引擎与 DPI 缩放（全窗重绘，无偏移）。
@@ -54,7 +61,14 @@ impl<'a> SkiaCanvas<'a> {
         scale: f32,
         offset: Point,
     ) -> Self {
-        Self { pixmap, engine: Some(engine), clips: Vec::new(), saves: Vec::new(), scale, offset }
+        Self {
+            pixmap,
+            engine: Some(engine),
+            clips: Vec::new(),
+            saves: Vec::new(),
+            scale,
+            offset,
+        }
     }
 
     fn sk_paint(p: &Paint) -> SkPaint<'static> {
@@ -66,8 +80,10 @@ impl<'a> SkiaCanvas<'a> {
 
     /// 逻辑→物理变换：缩放后平移 -offset（物理像素），把世界坐标映射进子 pixmap。
     fn tf(&self) -> Transform {
-        Transform::from_scale(self.scale, self.scale)
-            .post_translate(-self.offset.x as f32 * self.scale, -self.offset.y as f32 * self.scale)
+        Transform::from_scale(self.scale, self.scale).post_translate(
+            -self.offset.x as f32 * self.scale,
+            -self.offset.y as f32 * self.scale,
+        )
     }
 }
 
@@ -80,7 +96,8 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
+            self.pixmap
+                .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
         }
     }
 
@@ -96,13 +113,21 @@ impl Canvas for SkiaCanvas<'_> {
     ) {
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
-        if let Some(path) =
-            rounded_rect_path(x + half, y + half, w - width, h - width, (radius - half).max(0.0))
-        {
+        if let Some(path) = rounded_rect_path(
+            x + half,
+            y + half,
+            w - width,
+            h - width,
+            (radius - half).max(0.0),
+        ) {
             let sp = Self::sk_paint(paint);
-            let stroke = Stroke { width, ..Default::default() };
+            let stroke = Stroke {
+                width,
+                ..Default::default()
+            };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, self.tf(), mask);
+            self.pixmap
+                .stroke_path(&path, &sp, &stroke, self.tf(), mask);
         }
     }
 
@@ -112,9 +137,14 @@ impl Canvas for SkiaCanvas<'_> {
         pb.line_to(x1, y1);
         if let Some(path) = pb.finish() {
             let sp = Self::sk_paint(paint);
-            let stroke = Stroke { width, line_cap: LineCap::Butt, ..Default::default() };
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Butt,
+                ..Default::default()
+            };
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.stroke_path(&path, &sp, &stroke, self.tf(), mask);
+            self.pixmap
+                .stroke_path(&path, &sp, &stroke, self.tf(), mask);
         }
     }
 
@@ -122,7 +152,8 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             let sp = Self::sk_paint(paint);
             let mask = self.clips.last().map(|c| &c.mask);
-            self.pixmap.fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
+            self.pixmap
+                .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
         }
     }
 
@@ -132,7 +163,9 @@ impl Canvas for SkiaCanvas<'_> {
             return;
         }
         // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）；局部重绘减 offset 落入子 pixmap。
-        let pdst = dst.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
+        let pdst = dst
+            .offset(-self.offset.x, -self.offset.y)
+            .scaled(self.scale);
         if pdst.is_empty() {
             return;
         }
@@ -165,13 +198,20 @@ impl Canvas for SkiaCanvas<'_> {
 
         // 裁剪 mask：dst 圆角矩形 ∩ 当前裁剪区。radius<=0 时退化为矩形。
         let (mw, mh) = (self.pixmap.width(), self.pixmap.height());
-        let Some(mut mask) = Mask::new(mw, mh) else { return };
+        let Some(mut mask) = Mask::new(mw, mh) else {
+            return;
+        };
         let pr = (radius * self.scale).min(pw / 2.0).min(ph / 2.0).max(0.0);
-        let Some(path) = rounded_rect_path(px, py, pw, ph, pr) else { return };
+        let Some(path) = rounded_rect_path(px, py, pw, ph, pr) else {
+            return;
+        };
         mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
         // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形。
         if let Some(c) = self.clips.last() {
-            let cr = c.rect.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
+            let cr = c
+                .rect
+                .offset(-self.offset.x, -self.offset.y)
+                .scaled(self.scale);
             if cr.is_empty() {
                 return;
             }
@@ -181,13 +221,23 @@ impl Canvas for SkiaCanvas<'_> {
                 let mut pb = PathBuilder::new();
                 pb.push_rect(rect);
                 if let Some(clip_path) = pb.finish() {
-                    mask.intersect_path(&clip_path, FillRule::Winding, false, Transform::identity());
+                    mask.intersect_path(
+                        &clip_path,
+                        FillRule::Winding,
+                        false,
+                        Transform::identity(),
+                    );
                 }
             }
         }
 
-        let paint = PixmapPaint { opacity, quality: FilterQuality::Bilinear, ..Default::default() };
-        self.pixmap.draw_pixmap(0, 0, img.pixmap().as_ref(), &paint, transform, Some(&mask));
+        let paint = PixmapPaint {
+            opacity,
+            quality: FilterQuality::Bilinear,
+            ..Default::default()
+        };
+        self.pixmap
+            .draw_pixmap(0, 0, img.pixmap().as_ref(), &paint, transform, Some(&mask));
     }
 
     fn draw_text(
@@ -204,7 +254,12 @@ impl Canvas for SkiaCanvas<'_> {
         let off = self.offset;
         let rect = rect.offset(-off.x, -off.y);
         // 剔除：物理矩形与（子）pixmap 边界无交集则跳过引擎排版（局部重绘省去离屏文字的 COM 开销）。
-        let bounds = Rect::new(0, 0, self.pixmap.width() as i32, self.pixmap.height() as i32);
+        let bounds = Rect::new(
+            0,
+            0,
+            self.pixmap.width() as i32,
+            self.pixmap.height() as i32,
+        );
         if rect.scaled(self.scale).intersect(&bounds).is_empty() {
             return;
         }
@@ -214,7 +269,12 @@ impl Canvas for SkiaCanvas<'_> {
         }
     }
 
-    fn measure_text(&mut self, text: &str, family: Option<&str>, size: f32) -> crate::geometry::Size {
+    fn measure_text(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+    ) -> crate::geometry::Size {
         // 逻辑入参；引擎内部物理测量后 /scale 回逻辑，与正文绘制度量同源。
         match self.engine.as_deref_mut() {
             Some(engine) => engine.measure(text, family, size, None),
@@ -251,7 +311,9 @@ impl Canvas for SkiaCanvas<'_> {
         if let Some(mut mask) = Mask::new(pw, ph) {
             // mask 用物理整数矩形（与文字 clip 的 rect.scaled 同源），消除取整分歧。
             // 局部重绘时减 offset（逻辑）再物理化，使 mask 落入子 pixmap。
-            let peff = eff.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
+            let peff = eff
+                .offset(-self.offset.x, -self.offset.y)
+                .scaled(self.scale);
             if !peff.is_empty() {
                 if let Some(rect) = tiny_skia::Rect::from_xywh(
                     peff.x as f32,
@@ -294,12 +356,22 @@ mod tests {
             let mut c = SkiaCanvas::new(&mut pm);
             c.save();
             c.clip_rect(Rect::new(10, 40, 80, 6)); // 薄裁剪带
-            c.fill_round_rect(20.0, 40.0, 40.0, 6.0, 3.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.fill_round_rect(
+                20.0,
+                40.0,
+                40.0,
+                6.0,
+                3.0,
+                &Paint::fill(Color::hex(0xFF0000)),
+            );
             c.restore();
         }
         // 裁剪带中心应被红色填充。
         let (r, g, b) = px(&pm, 35, 43);
-        assert!(r > 200 && g < 80 && b < 80, "薄裁剪带内应被填充，实得 ({r},{g},{b})");
+        assert!(
+            r > 200 && g < 80 && b < 80,
+            "薄裁剪带内应被填充，实得 ({r},{g},{b})"
+        );
     }
 
     /// draw_image：Fill 模式铺满 dst，框内被图片色填充、框外保持原样。
@@ -322,10 +394,16 @@ mod tests {
         }
         // dst 中心应为红。
         let (r, g, b) = px(&pm, 40, 40);
-        assert!(r > 200 && g < 60 && b < 60, "dst 内应被图片填充，实得 ({r},{g},{b})");
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "dst 内应被图片填充，实得 ({r},{g},{b})"
+        );
         // dst 外应保持白。
         let (r2, g2, b2) = px(&pm, 5, 5);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "dst 外不应被绘制，实得 ({r2},{g2},{b2})");
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "dst 外不应被绘制，实得 ({r2},{g2},{b2})"
+        );
     }
 
     /// draw_image：大圆角半径把四角裁掉（角落像素保持背景白）。
@@ -342,10 +420,16 @@ mod tests {
         }
         // 左上角（dst 角点）应被圆角裁掉 → 仍为白。
         let (r, g, b) = px(&pm, 11, 11);
-        assert!(r > 240 && g > 240 && b > 240, "圆角应裁掉角落，实得 ({r},{g},{b})");
+        assert!(
+            r > 240 && g > 240 && b > 240,
+            "圆角应裁掉角落，实得 ({r},{g},{b})"
+        );
         // 中心仍为红。
         let (rc, gc, bc) = px(&pm, 30, 30);
-        assert!(rc > 200 && gc < 60 && bc < 60, "中心应为图片色，实得 ({rc},{gc},{bc})");
+        assert!(
+            rc > 200 && gc < 60 && bc < 60,
+            "中心应为图片色，实得 ({rc},{gc},{bc})"
+        );
     }
 
     /// draw_image：低不透明度让红图与白底混出更浅的色（验证状态调制）。
@@ -373,7 +457,14 @@ mod tests {
         let draw = |c: &mut SkiaCanvas| {
             c.save();
             c.clip_rect(Rect::new(20, 20, 70, 70));
-            c.fill_round_rect(40.0, 40.0, 22.0, 18.0, 5.0, &Paint::fill(Color::hex(0x3366CC)));
+            c.fill_round_rect(
+                40.0,
+                40.0,
+                22.0,
+                18.0,
+                5.0,
+                &Paint::fill(Color::hex(0x3366CC)),
+            );
             c.fill_circle(70.0, 70.0, 8.0, &Paint::fill(Color::hex(0xCC3333)));
             c.restore();
         };
@@ -412,7 +503,14 @@ mod tests {
         let s = 1.5;
         // 全窗 180×180 物理（= 120 逻辑 ×1.5）。
         let draw = |c: &mut SkiaCanvas| {
-            c.fill_round_rect(40.0, 41.0, 23.0, 17.0, 5.0, &Paint::fill(Color::hex(0x3366CC)));
+            c.fill_round_rect(
+                40.0,
+                41.0,
+                23.0,
+                17.0,
+                5.0,
+                &Paint::fill(Color::hex(0x3366CC)),
+            );
         };
         let mut full = Pixmap::new(180, 180).unwrap();
         full.fill(tiny_skia::Color::WHITE);
@@ -453,10 +551,20 @@ mod tests {
             c.save();
             c.clip_rect(Rect::new(22, 42, 276, 6));
             // 进度滑块：x=22+6.37, y=42, w=96.6, h=6, r=3
-            c.fill_round_rect(28.37, 42.0, 96.6, 6.0, 3.0, &Paint::fill(Color::hex(0x4C8BF5)));
+            c.fill_round_rect(
+                28.37,
+                42.0,
+                96.6,
+                6.0,
+                3.0,
+                &Paint::fill(Color::hex(0x4C8BF5)),
+            );
             c.restore();
         }
         let (r, g, b) = px(&pm, 60, 44);
-        assert!(b > 180 && r < 140, "进度滑块应在裁剪带内显现，实得 ({r},{g},{b})");
+        assert!(
+            b > 180 && r < 140,
+            "进度滑块应在裁剪带内显现，实得 ({r},{g},{b})"
+        );
     }
 }
