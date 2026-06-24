@@ -655,12 +655,14 @@ impl Tree {
         let (fx, fy, fw, fh) = (abs.x as f32, abs.y as f32, abs.w as f32, abs.h as f32);
         let radius = n.style.corner_radius;
 
-        if let Some(bg) = n.style.bg {
-            canvas.fill_round_rect(fx, fy, fw, fh, radius, &Paint::fill(bg));
+        let theme = crate::theme::current();
+        if let Some(bg) = &n.style.bg {
+            canvas.fill_round_rect(fx, fy, fw, fh, radius, &bg.resolve_paint(&theme));
         }
-        if let Some((bc, bw)) = n.style.border {
-            if bw > 0 {
-                canvas.stroke_round_rect(fx, fy, fw, fh, radius, bw as f32, &Paint::fill(bc));
+        if let Some((bc, bw)) = &n.style.border {
+            if *bw > 0 {
+                let bp = Paint::fill(bc.solid_color(&theme));
+                canvas.stroke_round_rect(fx, fy, fw, fh, radius, *bw as f32, &bp);
             }
         }
 
@@ -758,7 +760,7 @@ impl EventCtx<'_> {
     /// 修改本节点背景色并重绘（交互态切换常用）。
     pub fn set_bg(&mut self, c: Color) {
         if let Some(n) = self.tree.get_mut(self.self_id) {
-            n.style.bg = Some(c);
+            n.style.bg = Some(crate::style::Brush::Solid(c));
         }
         self.out.repaint = true;
     }

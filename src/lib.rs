@@ -26,8 +26,9 @@ pub mod prelude {
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::platform::{PickDialog, Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
+    pub use crate::render::Gradient;
     pub use crate::spec::{Align, Axis, Dimension};
-    pub use crate::style::Style;
+    pub use crate::style::{Brush, Role, Shadow, Style};
     pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Theme};
     pub use crate::ui::{

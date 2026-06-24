@@ -213,7 +213,7 @@ impl Widget for Label {
             canvas.draw_text(
                 &text_str,
                 paint_rect,
-                style.fg,
+                style.resolved_fg(&crate::theme::current()),
                 style.text_align,
                 family,
                 fsize,
@@ -222,7 +222,7 @@ impl Widget for Label {
             canvas.draw_text(
                 &self.text,
                 paint_rect,
-                style.fg,
+                style.resolved_fg(&crate::theme::current()),
                 style.text_align,
                 family,
                 fsize,
@@ -382,13 +382,20 @@ impl Widget for DynLabel {
             canvas.draw_text(
                 &text_str,
                 paint_rect,
-                style.fg,
+                style.resolved_fg(&crate::theme::current()),
                 style.text_align,
                 family,
                 fsize,
             );
         } else {
-            canvas.draw_text(&s, paint_rect, style.fg, style.text_align, family, fsize);
+            canvas.draw_text(
+                &s,
+                paint_rect,
+                style.resolved_fg(&crate::theme::current()),
+                style.text_align,
+                family,
+                fsize,
+            );
         }
 
         if need_clip {
@@ -504,8 +511,8 @@ impl Widget for Button {
         // 背景：禁用用专用置灰底；Primary 下 style.bg 单点覆盖优先；否则按三态取 intent 色。
         let target = match vstate {
             VisualState::Disabled => bt.disabled(pal),
-            _ => match style.bg {
-                Some(c) if is_primary => c,
+            _ => match &style.bg {
+                Some(bc) if is_primary => bc.solid_color(&t),
                 _ => match self.state {
                     BtnState::Normal => ic.bg,
                     BtnState::Hover => ic.hover,
@@ -523,9 +530,12 @@ impl Widget for Button {
         }
         let color = anim.animate();
         self.bg_anim.set(anim);
-        // 文字色：禁用用 text_disabled；style.bg 有值时用 style.fg；否则用主题前景。
+        // 文字色：禁用用 text_disabled；fg_role 优先（运行期换主题跟随）；
+        // 否则 style.bg 有值时用显式 style.fg；再否则用意图前景。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled
+        } else if style.fg_role.is_some() {
+            style.resolved_fg(&t)
         } else if is_primary && style.bg.is_some() {
             style.fg
         } else {
@@ -1363,11 +1373,26 @@ impl Element {
     // ---- 样式 ----
     /// 背景填充色。命名与 `Style.bg` / `EventCtx::set_bg` / `fg` 保持一致（统一缩写）。
     pub fn bg(mut self, c: Color) -> Self {
-        self.style.bg = Some(c);
+        self.style.bg = Some(crate::style::Brush::Solid(c));
+        self
+    }
+    /// 渐变背景（线性/径向，圆角随 `.corner()`）。
+    pub fn bg_gradient(mut self, g: crate::render::Gradient) -> Self {
+        self.style.bg = Some(crate::style::Brush::Gradient(g));
+        self
+    }
+    /// 主题角色背景：运行期换主题时自动跟随刷新。
+    pub fn bg_role(mut self, role: crate::style::Role) -> Self {
+        self.style.bg = Some(crate::style::Brush::Role(role));
         self
     }
     pub fn border(mut self, c: Color, w: i32) -> Self {
-        self.style.border = Some((c, w));
+        self.style.border = Some((crate::style::Brush::Solid(c), w));
+        self
+    }
+    /// 主题角色边框（运行期换主题跟随）。
+    pub fn border_role(mut self, role: crate::style::Role, w: i32) -> Self {
+        self.style.border = Some((crate::style::Brush::Role(role), w));
         self
     }
     pub fn corner(mut self, r: f32) -> Self {
@@ -1376,6 +1401,22 @@ impl Element {
     }
     pub fn fg(mut self, c: Color) -> Self {
         self.style.fg = c;
+        self.style.fg_role = None;
+        self
+    }
+    /// 主题角色前景/文字色（运行期换主题跟随）。
+    pub fn fg_role(mut self, role: crate::style::Role) -> Self {
+        self.style.fg_role = Some(role);
+        self
+    }
+    /// 浮层投影（drop shadow）。
+    pub fn shadow(mut self, s: crate::style::Shadow) -> Self {
+        self.style.shadow = Some(s);
+        self
+    }
+    /// 子树整体不透明度（0..=1）。
+    pub fn opacity(mut self, o: f32) -> Self {
+        self.style.opacity = o.clamp(0.0, 1.0);
         self
     }
     pub fn font_size(mut self, s: f32) -> Self {

@@ -11,11 +11,74 @@ pub use skia::SkiaCanvas;
 use crate::geometry::{Color, Rect};
 use crate::spec::Align;
 
-/// 绘制参数。
+/// 渐变色标：位置 `offset`（0..=1）+ 颜色。
 #[derive(Debug, Clone, Copy)]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: Color,
+}
+
+/// 渐变填充。所有坐标均为**相对绘制矩形的归一化坐标**（0..1）：
+/// (0,0)=左上、(1,1)=右下、(0.5,0.5)=中心；由 SkiaCanvas 在填充时乘以
+/// rect 宽高映射到逻辑坐标，故同一渐变可复用于任意尺寸控件。
+#[derive(Debug, Clone)]
+pub enum Gradient {
+    /// 线性渐变：从 `start` 到 `end` 沿直线插值。
+    Linear {
+        start: (f32, f32),
+        end: (f32, f32),
+        stops: Vec<GradientStop>,
+    },
+    /// 径向渐变：以 `center` 为圆心、`radius`（相对 rect 短边的归一化半径）向外插值。
+    Radial {
+        center: (f32, f32),
+        radius: f32,
+        stops: Vec<GradientStop>,
+    },
+}
+
+impl Gradient {
+    fn to_stops(stops: Vec<(f32, Color)>) -> Vec<GradientStop> {
+        stops
+            .into_iter()
+            .map(|(offset, color)| GradientStop { offset, color })
+            .collect()
+    }
+
+    /// 构造线性渐变。`stops` 为 (offset, color) 列表（至少两项，offset 递增）。
+    pub fn linear(start: (f32, f32), end: (f32, f32), stops: Vec<(f32, Color)>) -> Self {
+        Gradient::Linear {
+            start,
+            end,
+            stops: Self::to_stops(stops),
+        }
+    }
+
+    /// 构造径向渐变。`radius` 为相对 rect 短边的归一化半径（1.0≈半个短边）。
+    pub fn radial(center: (f32, f32), radius: f32, stops: Vec<(f32, Color)>) -> Self {
+        Gradient::Radial {
+            center,
+            radius,
+            stops: Self::to_stops(stops),
+        }
+    }
+
+    /// 色标列表（两个变体共用）。
+    pub fn stops(&self) -> &[GradientStop] {
+        match self {
+            Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
+        }
+    }
+}
+
+/// 绘制参数。
+#[derive(Debug, Clone)]
 pub struct Paint {
+    /// 纯色，或渐变时作为 stroke/降级填充的回退色（取首个 stop）。
     pub color: Color,
     pub anti_alias: bool,
+    /// 渐变填充（None = 纯色）。仅 fill 类图元生效；stroke 退化用 `color`。
+    pub gradient: Option<Gradient>,
 }
 
 impl Paint {
@@ -23,6 +86,21 @@ impl Paint {
         Self {
             color,
             anti_alias: true,
+            gradient: None,
+        }
+    }
+
+    /// 渐变填充。`color` 回退为首个 stop（stops 为空时回退透明）。
+    pub fn gradient(g: Gradient) -> Self {
+        let color = g
+            .stops()
+            .first()
+            .map(|s| s.color)
+            .unwrap_or(Color::TRANSPARENT);
+        Self {
+            color,
+            anti_alias: true,
+            gradient: Some(g),
         }
     }
 }

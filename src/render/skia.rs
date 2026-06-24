@@ -3,8 +3,9 @@
 //! 支持矩形裁剪栈：用 alpha `Mask` 表示当前裁剪区，所有绘制传入栈顶 mask。
 
 use tiny_skia::{
-    FillRule, FilterQuality, LineCap, Mask, Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint,
-    Stroke, Transform,
+    FillRule, FilterQuality, GradientStop as SkStop, LineCap, LinearGradient, Mask,
+    Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Point as SkPoint, RadialGradient, Shader,
+    SpreadMode, Stroke, Transform,
 };
 
 use super::image::{Fit, Image};
@@ -71,9 +72,22 @@ impl<'a> SkiaCanvas<'a> {
         }
     }
 
+    /// 纯色 paint（stroke/line 用；渐变在 fill 路径单独处理）。
     fn sk_paint(p: &Paint) -> SkPaint<'static> {
         let mut sp = SkPaint::default();
         sp.set_color(to_sk_color(p.color));
+        sp.anti_alias = p.anti_alias;
+        sp
+    }
+
+    /// fill 类 paint：有 gradient 时按 (x,y,w,h) 逻辑矩形构造渐变 shader，
+    /// 坐标交由 self.tf() 统一缩放/平移（与 path 同一变换空间）。无 gradient 退纯色。
+    fn fill_paint(p: &Paint, x: f32, y: f32, w: f32, h: f32) -> SkPaint<'static> {
+        let mut sp = SkPaint::default();
+        match p.gradient.as_ref().and_then(|g| sk_shader(g, x, y, w, h)) {
+            Some(s) => sp.shader = s,
+            None => sp.set_color(to_sk_color(p.color)),
+        }
         sp.anti_alias = p.anti_alias;
         sp
     }
@@ -94,7 +108,7 @@ impl Canvas for SkiaCanvas<'_> {
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
-            let sp = Self::sk_paint(paint);
+            let sp = Self::fill_paint(paint, x, y, w, h);
             let mask = self.clips.last().map(|c| &c.mask);
             self.pixmap
                 .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
@@ -150,7 +164,7 @@ impl Canvas for SkiaCanvas<'_> {
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
-            let sp = Self::sk_paint(paint);
+            let sp = Self::fill_paint(paint, cx - r, cy - r, 2.0 * r, 2.0 * r);
             let mask = self.clips.last().map(|c| &c.mask);
             self.pixmap
                 .fill_path(&path, &sp, FillRule::Winding, self.tf(), mask);
@@ -336,6 +350,48 @@ impl Canvas for SkiaCanvas<'_> {
 
 fn to_sk_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
+
+/// 把归一化渐变映射到逻辑矩形 (x,y,w,h) 并构造 tiny-skia shader。
+/// 坐标在逻辑空间构造，物理化交给 fill_path 的 self.tf()（与 path 同源）。
+/// stops 不足 2 或构造失败时返回 None（调用方退回纯色）。
+fn sk_shader(
+    g: &crate::render::Gradient,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Option<Shader<'static>> {
+    use crate::render::Gradient;
+    let sk_stops: Vec<SkStop> = g
+        .stops()
+        .iter()
+        .map(|s| SkStop::new(s.offset.clamp(0.0, 1.0), to_sk_color(s.color)))
+        .collect();
+    if sk_stops.len() < 2 {
+        return None;
+    }
+    match g {
+        Gradient::Linear { start, end, .. } => {
+            let p0 = SkPoint::from_xy(x + start.0 * w, y + start.1 * h);
+            let p1 = SkPoint::from_xy(x + end.0 * w, y + end.1 * h);
+            LinearGradient::new(p0, p1, sk_stops, SpreadMode::Pad, Transform::identity())
+        }
+        Gradient::Radial { center, radius, .. } => {
+            let c = SkPoint::from_xy(x + center.0 * w, y + center.1 * h);
+            // 半径以短边为基准（保持圆形而非随宽高拉成椭圆）。
+            let r = (radius * w.min(h)).max(0.01);
+            RadialGradient::new(
+                c,
+                0.0,
+                c,
+                r,
+                sk_stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +594,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 水平线性渐变：左缘偏蓝、右缘偏红，证属过渡而非纯色。
+    #[test]
+    fn fill_round_rect_linear_gradient_left_to_right() {
+        let mut pm = Pixmap::new(100, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            let g = crate::render::Gradient::linear(
+                (0.0, 0.5),
+                (1.0, 0.5),
+                vec![(0.0, Color::hex(0x0000FF)), (1.0, Color::hex(0xFF0000))],
+            );
+            c.fill_round_rect(
+                0.0,
+                0.0,
+                100.0,
+                40.0,
+                8.0,
+                &crate::render::Paint::gradient(g),
+            );
+        }
+        let (lr, _lg, lb) = px(&pm, 6, 20);
+        let (rr, _rg, rb) = px(&pm, 93, 20);
+        assert!(lb > lr, "左缘应偏蓝（b>r），实得 r={lr} b={lb}");
+        assert!(rr > rb, "右缘应偏红（r>b），实得 r={rr} b={rb}");
+    }
+
+    /// 径向渐变：中心亮、边缘暗（证圆心向外过渡）。
+    #[test]
+    fn fill_rect_radial_gradient_center_to_edge() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::BLACK);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            let g = crate::render::Gradient::radial(
+                (0.5, 0.5),
+                1.0,
+                vec![(0.0, Color::hex(0xFFFFFF)), (1.0, Color::hex(0x000000))],
+            );
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &crate::render::Paint::gradient(g));
+        }
+        let (cr, _, _) = px(&pm, 30, 30);
+        let (er, _, _) = px(&pm, 3, 3);
+        assert!(cr > er + 80, "圆心应明显比边角亮，实得 中心={cr} 边角={er}");
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。
