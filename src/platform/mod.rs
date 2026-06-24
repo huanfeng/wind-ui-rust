@@ -266,3 +266,123 @@ pub trait AppHandler {
         None
     }
 }
+
+// ── 文件 / 目录选择对话框 ────────────────────────────────────────────────────
+
+/// 在调用 `pick_*` / `save_file` 前，将当前活跃窗口句柄注入 rfd 对话框。
+///
+/// Windows：读取 wnd_proc 入口处写入的 thread-local HWND，用 `IFileDialog::Show(hwnd)`
+/// 把主窗口设为父窗口，确保对话框阻塞主窗口（父窗口被 EnableWindow(FALSE) 禁用直到关闭）。
+///
+/// macOS：rfd 内部以 `NSOpenPanel.runModal()` 运行，系统保证浮层正确置顶，无需注入。
+#[cfg(windows)]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    use raw_window_handle::{
+        HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
+    };
+    use std::num::NonZeroIsize;
+
+    let hwnd_val = win32::active_hwnd();
+    let Some(nz) = NonZeroIsize::new(hwnd_val) else {
+        return d;
+    };
+    struct W(NonZeroIsize);
+    impl HasWindowHandle for W {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            Ok(unsafe {
+                WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(self.0)))
+            })
+        }
+    }
+    d.set_parent(&W(nz))
+}
+
+#[cfg(target_os = "macos")]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    d
+}
+
+/// 系统原生文件 / 目录选择对话框，链式配置后调 `pick_*` / `save_file` 弹出。
+///
+/// 框架自动将当前窗口注入为对话框父窗口，无需手动传递句柄：
+/// - **Windows**：`IFileDialog::Show(hwnd)` — 主窗口在对话框期间被禁用，点击不会穿透
+/// - **macOS**：`NSOpenPanel` 以浮层面板形式出现，系统保证 z 序
+///
+/// # 示例
+/// ```no_run
+/// use windui::prelude::*;
+///
+/// // 单文件
+/// let file = PickDialog::new().title("打开图片").filter("图片", &["png", "jpg"]).pick_file();
+///
+/// // 保存
+/// let dest = PickDialog::new().title("另存为").file_name("report.pdf").save_file();
+/// ```
+pub struct PickDialog(rfd::FileDialog);
+
+impl Default for PickDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PickDialog {
+    pub fn new() -> Self {
+        Self(rfd::FileDialog::new())
+    }
+
+    /// 设置对话框标题栏文字。
+    pub fn title(mut self, title: impl AsRef<str>) -> Self {
+        self.0 = self.0.set_title(title.as_ref());
+        self
+    }
+
+    /// 添加文件类型过滤器（`pick_file` / `pick_files` / `save_file` 生效；目录选择忽略）。
+    /// 可链式调用多次以添加多个过滤项。
+    pub fn filter(mut self, name: impl AsRef<str>, extensions: &[impl AsRef<str>]) -> Self {
+        let exts: Vec<&str> = extensions.iter().map(|s| s.as_ref()).collect();
+        self.0 = self.0.add_filter(name.as_ref(), &exts);
+        self
+    }
+
+    /// 设置初始目录。
+    pub fn directory(mut self, path: impl AsRef<Path>) -> Self {
+        self.0 = self.0.set_directory(path.as_ref());
+        self
+    }
+
+    /// 预填文件名输入框（`save_file` 场景常用）。
+    pub fn file_name(mut self, name: impl AsRef<str>) -> Self {
+        self.0 = self.0.set_file_name(name.as_ref());
+        self
+    }
+
+    fn into_dialog(self) -> rfd::FileDialog {
+        inject_parent(self.0)
+    }
+
+    /// 打开**单文件**选择对话框；用户取消返回 `None`。
+    pub fn pick_file(self) -> Option<PathBuf> {
+        self.into_dialog().pick_file()
+    }
+
+    /// 打开**多文件**选择对话框；用户取消返回 `None`。
+    pub fn pick_files(self) -> Option<Vec<PathBuf>> {
+        self.into_dialog().pick_files()
+    }
+
+    /// 打开**单目录**选择对话框；用户取消返回 `None`。
+    pub fn pick_folder(self) -> Option<PathBuf> {
+        self.into_dialog().pick_folder()
+    }
+
+    /// 打开**多目录**选择对话框；用户取消返回 `None`。
+    pub fn pick_folders(self) -> Option<Vec<PathBuf>> {
+        self.into_dialog().pick_folders()
+    }
+
+    /// 打开**保存文件**对话框；用户取消返回 `None`。
+    pub fn save_file(self) -> Option<PathBuf> {
+        self.into_dialog().save_file()
+    }
+}

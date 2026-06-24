@@ -8,6 +8,7 @@ pub mod tray;
 
 pub use tray::{Tray, TrayCtx, TrayMenuItem};
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -68,6 +69,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::{AppHandler, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
+
+thread_local! {
+    /// wnd_proc 入口处写入当前 HWND；PickDialog::pick_* 读取以注入父窗口。
+    static ACTIVE_HWND: Cell<isize> = const { Cell::new(0) };
+}
+
+/// 供 platform::inject_parent 读取当前活跃窗口句柄（单线程，消息循环内保证有效）。
+pub(super) fn active_hwnd() -> isize {
+    ACTIVE_HWND.with(|h| h.get())
+}
 
 /// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
 unsafe fn os_animations_enabled() -> bool {
@@ -591,6 +602,8 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // 记录当前 HWND，供 PickDialog 在事件回调中读取并注入为父窗口句柄。
+    ACTIVE_HWND.with(|h| h.set(hwnd.0 as isize));
     match msg {
         WM_NCCREATE => {
             // 取出 CreateWindow 传入的 WindowState 指针并挂到 HWND

@@ -26,6 +26,8 @@ svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
 [dependencies]
 # 与 resvg 0.47 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
 tiny-skia = "0.12"
+# 系统原生文件/目录选择对话框（PickDialog）。仅用阻塞 API，禁用异步 feature。
+rfd = { version = "0.14", default-features = false }
 # SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
 # 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
 resvg = { version = "0.47", optional = true, default-features = false }
@@ -38,6 +40,8 @@ toml = "1.1"
 # #[implement] 宏展开会引用 windows_core crate 名，需作为直接依赖暴露。
 # 0.62 起 implement 宏由 windows-core 无条件导出（windows 不再有 implement feature）。
 windows-core = "0.62"
+# rfd 的 set_parent 需要 HasWindowHandle（与 rfd 0.14 依赖版本对齐）。
+raw-window-handle = "0.6"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

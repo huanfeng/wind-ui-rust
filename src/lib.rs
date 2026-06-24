@@ -24,7 +24,7 @@ pub mod prelude {
     pub use crate::app::App;
     pub use crate::event::CursorShape;
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
-    pub use crate::platform::{Tray, TrayCtx, TrayMenuItem};
+    pub use crate::platform::{PickDialog, Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::Style;
