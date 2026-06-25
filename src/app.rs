@@ -975,7 +975,7 @@ impl AppHandler for UiHost {
             }
         }
         self.tree.focus_ring_visible = self.focus_visible;
-        let mut canvas = target.make_canvas(&mut self.engine);
+        let mut canvas = target.make_canvas(&mut self.engine, s);
         self.tree.paint(&mut *canvas);
         // 上下文菜单浮层绘制在控件树之上（self.menu 与 self.engine 为不相交字段，借用安全）。
         // 级联：从根到子菜单逐级绘制（子菜单覆盖在上）。
@@ -1629,7 +1629,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(60, 60),
         );
@@ -1640,7 +1639,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(60, 60),
         );
@@ -1663,7 +1661,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(60, 60),
         );
@@ -1673,7 +1670,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(60, 60),
         );
@@ -1707,7 +1703,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(80, 80),
         ); // 首帧全窗 + 建立结构签名
@@ -1721,7 +1716,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(80, 80),
         );
@@ -1747,7 +1741,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(120, 120),
         ); // 首帧全窗
@@ -1759,7 +1752,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(120, 120),
         );
@@ -1783,7 +1775,6 @@ mod tests {
         handler.render(
             &mut PixmapTarget {
                 pixmap: &mut pm,
-                scale: 1.0,
             },
             Size::new(50, 50),
         );

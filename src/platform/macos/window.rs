@@ -414,7 +414,6 @@ impl ContentView {
             let ptr = pixmap as *mut Pixmap;
             let mut tgt = crate::render::PixmapTarget {
                 pixmap: unsafe { &mut *ptr },
-                scale: 1.0,
             };
             st.handler.render(&mut tgt, size);
 

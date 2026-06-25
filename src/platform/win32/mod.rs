@@ -188,7 +188,7 @@ impl WinRenderBackend for SkiaBackend {
         pixmap.fill(to_skia_color(bg));
         // target 借用 self.pixmap，限定在块内：块结束借用即释放，再重取引用做后续处理。
         {
-            let mut tgt = crate::render::PixmapTarget { pixmap, scale: 1.0 };
+            let mut tgt = crate::render::PixmapTarget { pixmap };
             handler.render(&mut tgt, size);
         }
         let pixmap = self.pixmap.as_mut().unwrap();

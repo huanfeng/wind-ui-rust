@@ -58,7 +58,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     handler.set_scale(s);
     let mut tgt = crate::render::PixmapTarget {
         pixmap: &mut pixmap,
-        scale: s,
     };
     handler.render(&mut tgt, size);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
@@ -75,7 +74,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         pixmap.fill(to_skia_color(cfg.bg));
         let mut tgt = crate::render::PixmapTarget {
             pixmap: &mut pixmap,
-            scale: s,
         };
         handler.render(&mut tgt, size);
     }
@@ -98,7 +96,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         pixmap.fill(to_skia_color(cfg.bg));
         let mut tgt = crate::render::PixmapTarget {
             pixmap: &mut pixmap,
-            scale: s,
         };
         handler.render(&mut tgt, size);
     }
@@ -118,7 +115,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         pixmap.fill(to_skia_color(cfg.bg));
         let mut tgt = crate::render::PixmapTarget {
             pixmap: &mut pixmap,
-            scale: s,
         };
         handler.render(&mut tgt, size);
     }
@@ -133,7 +129,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         pixmap.fill(to_skia_color(cfg.bg));
         let mut tgt = crate::render::PixmapTarget {
             pixmap: &mut pixmap,
-            scale: s,
         };
         handler.render(&mut tgt, size);
     }
@@ -146,7 +141,6 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             pixmap.fill(to_skia_color(cfg.bg));
             let mut tgt = crate::render::PixmapTarget {
                 pixmap: &mut pixmap,
-                scale: s,
             };
             handler.render(&mut tgt, size);
             let ms = t.elapsed().as_secs_f32() * 1000.0;

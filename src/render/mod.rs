@@ -174,8 +174,13 @@ pub trait Canvas {
 ///
 /// 软后端把 `Pixmap` 包成 `SkiaCanvas`；GPU 后端自带 DirectWrite 文字栈，忽略 `engine`。
 pub trait RenderTarget {
-    /// 构造本帧 `Canvas`。`engine` 供软后端委托文字光栅。
-    fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a>;
+    /// 构造本帧 `Canvas`。`engine` 供软后端委托文字光栅；`scale` 为当前 DPI 缩放
+    /// （由 handler 经 `set_scale` 统一提供，平台层不再各自决定）。
+    fn make_canvas<'a>(
+        &'a mut self,
+        engine: &'a mut dyn TextEngine,
+        scale: f32,
+    ) -> Box<dyn Canvas + 'a>;
     /// 软渲染局部重绘快路取原始 Pixmap；GPU 后端默认 None → 调用方强制全窗。
     fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
         None
@@ -185,12 +190,15 @@ pub trait RenderTarget {
 /// tiny-skia 软后端的渲染目标：借用一份 `Pixmap`。跨平台共用。
 pub struct PixmapTarget<'p> {
     pub pixmap: &'p mut tiny_skia::Pixmap,
-    pub scale: f32,
 }
 
 impl RenderTarget for PixmapTarget<'_> {
-    fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a> {
-        Box::new(SkiaCanvas::with_text(&mut *self.pixmap, engine, self.scale))
+    fn make_canvas<'a>(
+        &'a mut self,
+        engine: &'a mut dyn TextEngine,
+        scale: f32,
+    ) -> Box<dyn Canvas + 'a> {
+        Box::new(SkiaCanvas::with_text(&mut *self.pixmap, engine, scale))
     }
 
     fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
@@ -243,9 +251,8 @@ mod tests {
         {
             let mut target = PixmapTarget {
                 pixmap: &mut pixmap,
-                scale: 1.0,
             };
-            let mut canvas = target.make_canvas(&mut engine);
+            let mut canvas = target.make_canvas(&mut engine, 1.0);
             canvas.fill_rect(0.0, 0.0, 10.0, 10.0, &Paint::fill(Color::rgb(255, 0, 0)));
         }
         // 左上角像素应为红（预乘 RGBA）。
