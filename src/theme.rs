@@ -348,8 +348,6 @@ pub struct TabTheme {
     pub accent: Option<Color>,
     pub inactive: Option<Color>,
     pub hover: Option<Color>,
-    /// 标签条水平内边距（首/末标签与容器边缘的距离，与卡片内容对齐用）。None=0。
-    pub bar_pad_x: Option<i32>,
 }
 
 impl TabTheme {
@@ -361,10 +359,6 @@ impl TabTheme {
     }
     pub fn hover(&self, p: &Palette) -> Color {
         self.hover.unwrap_or(p.text)
-    }
-    /// 标签条水平内边距（默认 0）。
-    pub fn bar_pad_x(&self) -> i32 {
-        self.bar_pad_x.unwrap_or(0)
     }
 }
 

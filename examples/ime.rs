@@ -38,8 +38,6 @@ fn light_theme() -> Theme {
     p.border = hex(0xE3E7EC);
     p.divider = hex(0xECEEF2);
     p.track = hex(0xD7DCE3);
-    // 标签条与卡片内容对齐（与 header/行同 22px 缩进）。
-    t.tab.bar_pad_x = Some(22);
     t
 }
 
@@ -60,8 +58,6 @@ fn dark_theme() -> Theme {
     p.border = hex(0x28324A);
     p.divider = hex(0x222C40);
     p.track = hex(0x2B3550);
-    // 标签条与卡片内容对齐（与 header/行同 22px 缩进）。
-    t.tab.bar_pad_x = Some(22);
     t
 }
 
@@ -332,7 +328,7 @@ fn setting_row(label: &str, sub: Option<&str>, control: Element) -> Element {
     Element::row()
         .width_match()
         .cross(Align::Center)
-        .padding_xy(22, 13)
+        .padding_xy(0, 13)
         .spacing(12)
         .child(left)
         .child(control)
@@ -344,7 +340,6 @@ fn settings_section_header(title: &str) -> Element {
         .font_weight(600)
         .fg_role(Role::TextMuted)
         .height(16)
-        .padding_xy(22, 0)
         .margin_xy(0, 9)
 }
 
@@ -421,7 +416,7 @@ fn build_settings(
     let dict_tool = Element::row()
         .width_match()
         .cross(Align::Center)
-        .padding_xy(18, 12)
+        .padding_xy(0, 12)
         .spacing(8)
         .child(
             Element::label("🔍 搜索词条")
@@ -452,7 +447,7 @@ fn build_settings(
 
     let dict_head = Element::row()
         .width_match()
-        .padding_xy(10, 7)
+        .padding_xy(0, 7)
         .border_role(Role::Border, 1)
         .child(col_label("词条", 1.6, Align::Start))
         .child(col_label("拼音", 1.4, Align::Start))
@@ -466,16 +461,13 @@ fn build_settings(
         ("芭比Q", "ba bi Q", "512", "网络"),
         ("内卷", "nei juan", "433", "自定义"),
     ];
-    let mut dict_table = Element::col()
-        .width_match()
-        .padding_xy(18, 0)
-        .child(dict_head);
+    let mut dict_table = Element::col().width_match().child(dict_head);
     for (w, py, fr, src) in rows {
         dict_table = dict_table.child(
             Element::row()
                 .width_match()
                 .cross(Align::Center)
-                .padding_xy(10, 9)
+                .padding_xy(0, 9)
                 .child(
                     Element::label(w)
                         .font_size(13.0)
@@ -513,7 +505,7 @@ fn build_settings(
         .child(
             Element::row()
                 .width_match()
-                .padding_xy(24, 12)
+                .padding_xy(0, 12)
                 .child(
                     Element::label("共 1,284 条自定义词")
                         .font_size(11.0)
@@ -555,7 +547,7 @@ fn build_settings(
         .child(
             Element::row()
                 .width_match()
-                .padding_xy(18, 6)
+                .padding_xy(0, 6)
                 .spacing(10)
                 .child(theme_swatch("深色", dark_grad, is_dark))
                 .child(theme_swatch("浅色", light_grad, !is_dark))
@@ -565,7 +557,7 @@ fn build_settings(
         .child(
             Element::col()
                 .width_match()
-                .padding_xy(18, 4)
+                .padding_xy(0, 4)
                 .child(Element::segmented(vec!["横向", "竖向", "网格"], seg_arrange).width_match()),
         )
         .child(setting_row(
@@ -625,7 +617,7 @@ fn build_settings(
         .width_match()
         .cross(Align::Center)
         .spacing(10)
-        .padding_xy(22, 16)
+        .padding_xy(0, 16)
         .child(logo)
         .child(
             Element::col()
@@ -656,12 +648,14 @@ fn build_settings(
         ],
     );
 
+    // 面板统一配水平内边距：header / 标签条 / 各行作为子节点一律被约束缩进对齐，
+    // 无需各自单独 padding 或单独计算标签条位置（容器 padding 约束子控件）。
     panel()
         .width(440)
-        .padding(0)
+        .padding_xy(22, 0)
         .child(header)
         .child(Element::divider())
-        .child(tabs.width_match().height(360))
+        .child(tabs.width_match().height(420))
 }
 
 fn col_label(text: &str, weight: f32, align: Align) -> Element {
