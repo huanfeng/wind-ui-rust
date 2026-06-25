@@ -194,6 +194,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::fill_paint(paint, x, y, w, h);
             let tf = self.tf();
@@ -211,6 +212,7 @@ impl Canvas for SkiaCanvas<'_> {
         width: f32,
         paint: &Paint,
     ) {
+        let _g = super::prof::scope(super::prof::STROKE);
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
         if let Some(path) = rounded_rect_path(
@@ -231,6 +233,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::STROKE);
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0);
         pb.line_to(x1, y1);
@@ -247,6 +250,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
         if let Some(path) = PathBuilder::from_circle(cx, cy, r) {
             let sp = Self::fill_paint(paint, cx - r, cy - r, 2.0 * r, 2.0 * r);
             let tf = self.tf();
@@ -264,6 +268,7 @@ impl Canvas for SkiaCanvas<'_> {
         blur: f32,
         color: Color,
     ) {
+        let _g = super::prof::scope(super::prof::SHADOW);
         if color.a == 0 || w <= 0.0 || h <= 0.0 || shadows_disabled() {
             return;
         }
@@ -335,6 +340,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {
+        let _g = super::prof::scope(super::prof::IMAGE);
         let opacity = opacity.clamp(0.0, 1.0);
         if opacity <= 0.0 {
             return;
@@ -427,6 +433,7 @@ impl Canvas for SkiaCanvas<'_> {
         family: Option<&str>,
         size: f32,
     ) {
+        let _g = super::prof::scope(super::prof::TEXT);
         // 传逻辑 rect/size/clip；引擎内部持有 scale 自行物理化（与 measure 同源）。
         // 局部重绘时减去 offset（逻辑），使引擎物理化后落入子 pixmap（×scale 与图元同源）。
         let off = self.offset;
@@ -516,6 +523,7 @@ impl Canvas for SkiaCanvas<'_> {
     }
 
     fn clip_rect(&mut self, r: Rect) {
+        let _g = super::prof::scope(super::prof::CLIP);
         // 契约：每次 clip_rect 须配一次先行的 save()，使其与 restore() 成对、
         // 仅在当前层之上叠加裁剪。否则裁剪会被 restore 遗漏而泄漏。
         debug_assert!(

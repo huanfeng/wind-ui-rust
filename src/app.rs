@@ -914,6 +914,13 @@ impl AppHandler for UiHost {
         if !do_full {
             self.render_partial(pixmap, size, s, damage.unwrap());
             self.pending_damage = next_damage(&mut self.needs_full);
+            if crate::render::prof::enabled() {
+                eprintln!(
+                    "[prof] partial {:.2}ms  {}",
+                    frame_t0.elapsed().as_secs_f64() * 1000.0,
+                    crate::render::prof::take_summary()
+                );
+            }
             return;
         }
 
@@ -1124,6 +1131,13 @@ impl AppHandler for UiHost {
         // 种入后备缓冲（整窗），供后续局部帧重建未变区域。
         self.seed_back(pixmap, size);
         self.pending_damage = next_damage(&mut self.needs_full);
+        if crate::render::prof::enabled() {
+            eprintln!(
+                "[prof] full {:.2}ms  {}",
+                frame_t0.elapsed().as_secs_f64() * 1000.0,
+                crate::render::prof::take_summary()
+            );
+        }
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
