@@ -42,6 +42,9 @@ fn wide(s: &str) -> Vec<u16> {
 
 const DEFAULT_FAMILY: &str = "Microsoft YaHei UI"; // 中文友好的默认字体
 
+/// 文本测量缓存容量上限；满则整体清空（周期性重测，命中率仍极高）。
+const MEASURE_CACHE_CAP: usize = 4096;
+
 /// DirectWrite 文字引擎。
 ///
 /// 约束：内部 COM 对象（`IDWrite*`）非 `Send`/`Sync`，必须在创建它的
@@ -52,6 +55,10 @@ pub struct DWriteEngine {
     renderer: IDWriteTextRenderer,
     /// 缓存 TextFormat，按 (family, 物理字号 bits) 复用。
     formats: HashMap<(String, u32, u16), IDWriteTextFormat>,
+    /// 文本测量缓存：键为 (文本+字体+字号+换行宽+字重+scale) 的 64 位哈希，值为逻辑尺寸。
+    /// 避免每帧对稳定文本重复 CreateTextLayout/GetMetrics（DirectWrite COM 往返昂贵）。
+    /// 用哈希键省去每次查表的字符串分配；64 位空间碰撞概率可忽略。
+    measure_cache: HashMap<u64, Size>,
     /// DPI 缩放因子（逻辑→物理）。
     scale: f32,
     /// 复用的离屏位图渲染目标（按需扩容），避免每次绘字都创建 COM 对象。
@@ -84,6 +91,7 @@ impl DWriteEngine {
                 gdi_interop,
                 renderer,
                 formats: HashMap::new(),
+                measure_cache: HashMap::new(),
                 scale: 1.0,
                 bitmap_target: None,
                 bitmap_w: 0,
@@ -167,7 +175,12 @@ impl Default for DWriteEngine {
 
 impl TextEngine for DWriteEngine {
     fn set_scale(&mut self, scale: f32) {
-        self.scale = scale.max(0.1);
+        let new = scale.max(0.1);
+        if new != self.scale {
+            // scale 变更使所有缓存尺寸失效（物理字号变了）。
+            self.measure_cache.clear();
+        }
+        self.scale = new;
     }
 
     fn measure(
@@ -180,6 +193,21 @@ impl TextEngine for DWriteEngine {
         if text.is_empty() {
             return Size::new(0, size.ceil() as i32);
         }
+        // 缓存键：把所有影响排版的输入哈希成 64 位（含线程局部字重与当前 scale）。
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            family.hash(&mut h);
+            size.to_bits().hash(&mut h);
+            max_width.map(f32::to_bits).hash(&mut h);
+            crate::text::current_weight().hash(&mut h);
+            self.scale.to_bits().hash(&mut h);
+            h.finish()
+        };
+        if let Some(sz) = self.measure_cache.get(&key) {
+            return *sz;
+        }
         // 物理字号排版（与 draw 同源），结果 /scale 回逻辑供布局使用。
         let s = self.scale;
         let psize = size * s;
@@ -189,7 +217,13 @@ impl TextEngine for DWriteEngine {
         };
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m).ok() };
-        Size::new((m.width / s).ceil() as i32, (m.height / s).ceil() as i32)
+        let sz = Size::new((m.width / s).ceil() as i32, (m.height / s).ceil() as i32);
+        // 容量上限：满则清空（稳定 UI 下命中率仍极高）。
+        if self.measure_cache.len() >= MEASURE_CACHE_CAP {
+            self.measure_cache.clear();
+        }
+        self.measure_cache.insert(key, sz);
+        sz
     }
 
     fn draw(
@@ -595,6 +629,24 @@ mod alpha_text_tests {
         );
         let d = darkest_red(&pm, 6, 40, 8, 40);
         assert!((96..=170).contains(&d), "50% 黑字块中心应为中灰，实得 {d}");
+    }
+
+    /// 测量缓存：相同输入命中不新增条目，不同字号/文本为不同键；结果稳定一致。
+    #[test]
+    fn measure_cache_dedups_and_keys() {
+        let mut eng = DWriteEngine::new();
+        eng.set_scale(1.0);
+        let _ = eng.measure("hello", None, 14.0, None);
+        let _ = eng.measure("world", None, 14.0, None);
+        assert_eq!(eng.measure_cache.len(), 2);
+        let a = eng.measure("hello", None, 14.0, None);
+        let b = eng.measure("hello", None, 14.0, None);
+        assert_eq!(a, b, "相同输入测量结果应一致");
+        assert_eq!(eng.measure_cache.len(), 2, "重复测量不应新增缓存条目");
+        let _ = eng.measure("hello", None, 18.0, None); // 不同字号 → 新键
+        assert_eq!(eng.measure_cache.len(), 3);
+        eng.set_scale(2.0); // scale 变更应清空缓存
+        assert_eq!(eng.measure_cache.len(), 0, "scale 变更应清空测量缓存");
     }
 
     /// fg.alpha=255 时与不透明渲染一致：纯黑全块中心应近黑（无回归）。
