@@ -35,7 +35,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -867,12 +867,12 @@ impl Canvas for D2DCanvas<'_> {
         if text.is_empty() || rect.is_empty() {
             return;
         }
-        // 逻辑 maxWidth/maxHeight：layout 在逻辑空间排版，变换统一物理化。缓存复用避免每帧重建。
-        let Some(layout) = self.text_layout(text, family, size, rect.w as f32, rect.h as f32)
-        else {
+        // 横向在 rect.w 内排版/对齐；纵向**不约束**（maxHeight=MAX），由下方按 metrics 手动定位。
+        // 纵向不进 layout 的 ParagraphAlignment，避免文本超高时 CENTER 把多行上下对称裁切
+        // （用户实测：2 行空间里 3 行被居中、首尾各裁半行）。缓存复用避免每帧重建。
+        let Some(layout) = self.text_layout(text, family, size, rect.w as f32, f32::MAX) else {
             return;
         };
-        // 对齐设在 layout（非缓存的 format）上，避免污染复用的 format。
         // 水平：与软路径 text_x0 的 Start/Center/End 语义一致（Stretch 同 Start→LEADING）。
         let h_align = match align {
             crate::spec::Align::Start | crate::spec::Align::Stretch => {
@@ -881,15 +881,24 @@ impl Canvas for D2DCanvas<'_> {
             crate::spec::Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
             crate::spec::Align::End => DWRITE_TEXT_ALIGNMENT_TRAILING,
         };
+        // 文本块总高（含软/硬换行的全部行），用于纵向定位。
+        let mut m = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+        let th = if unsafe { layout.GetMetrics(&mut m) }.is_ok() {
+            m.height
+        } else {
+            0.0
+        };
         unsafe {
             let _ = layout.SetTextAlignment(h_align);
-            // 垂直居中：匹配软路径 oy = y + (h - th)/2。
-            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            // 顶对齐（纵向位置由 origin.y 控制），配合下方 (h-th).max(0) 实现"装得下居中、装不下顶对齐"。
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         }
         // 文字色复用 solid brush（取一次→立即绘制，符合 solid 共享约束）。
         let brush = self.solid_brush(color);
-        // 原点为逻辑坐标（DrawTextLayout 在 0.62 接受 windows_numerics::Vector2）。
-        let origin = vec2(rect.x as f32, rect.y as f32);
+        // 纵向：装得下→垂直居中；装不下→顶对齐（origin 在 rect 顶部，超出部分由上层裁剪收口）。
+        // (h-th).max(0)/2 与 SkiaCanvas `oy = y + (h-th).max(0)/2` 完全一致。
+        let oy = rect.y as f32 + (rect.h as f32 - th).max(0.0) / 2.0;
+        let origin = vec2(rect.x as f32, oy);
         unsafe {
             // ENABLE_COLOR_FONT：让彩色 emoji（如工具栏 😊）正常渲染而非单色轮廓。
             self.ctx.DrawTextLayout(
