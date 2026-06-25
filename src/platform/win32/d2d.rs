@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use windows::core::Interface;
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
@@ -21,13 +21,20 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
     D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-    D2D1_COLOR_SPACE_SRGB, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_COLOR_SPACE_SRGB, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LAYER_OPTIONS1_NONE,
+    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
@@ -67,6 +74,13 @@ pub(super) struct D2DBackend {
     /// Task 11 注意：设备丢失重建 context 时必须 `grad_cache.clear()`——缓存的 `ID2D1Brush`
     /// 绑定到旧 context，复用会绘制失败/崩溃（solid brush 同理须重建）。
     grad_cache: HashMap<GradKey, ID2D1Brush>,
+    /// DirectWrite 工厂：文字排版/绘制的入口（`CreateTextFormat`/`CreateTextLayout`）。
+    /// device-**独立**资源（进程级系统字体缓存），设备丢失**无需**重建——
+    /// 不同于 solid/渐变缓存，**别**放进 Task 11 的设备丢失重建清单。
+    dwrite_factory: IDWriteFactory,
+    /// TextFormat 缓存：键 (family, 逻辑字号 bits, 字重)，与软引擎 `DWriteEngine::format` 同构。
+    /// IDWriteTextFormat 亦 device-independent，设备丢失无需清空。对齐不进 key（在 layout 上设）。
+    format_cache: HashMap<(String, u32, u16), IDWriteTextFormat>,
 }
 
 /// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
@@ -141,6 +155,12 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         .CreateSolidColorBrush(&d2d_color(Color::rgba(0, 0, 0, 255)), None)
         .ok()?;
 
+    // ClearType 文字抗锯齿：不透明渲染目标，一次设置即可（设备丢失重建 context 后须重设）。
+    context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+
+    // DirectWrite 工厂（device-independent；进程共享系统字体缓存）。失败即放弃 → 回退软后端。
+    let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+
     let backend = D2DBackend {
         d3d_device,
         d2d_factory,
@@ -149,6 +169,8 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         context,
         solid,
         grad_cache: HashMap::new(),
+        dwrite_factory,
+        format_cache: HashMap::new(),
     };
     // 初次绑定后备缓冲为 target。绑定失败同样回退软后端。
     backend.bind_target().ok()?;
@@ -215,6 +237,8 @@ impl WinRenderBackend for D2DBackend {
                 ctx: &self.context,
                 solid: &self.solid,
                 grad_cache: &mut self.grad_cache,
+                dwrite_factory: &self.dwrite_factory,
+                format_cache: &mut self.format_cache,
             };
             handler.render(&mut target, size);
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
@@ -237,6 +261,8 @@ struct D2DTarget<'a> {
     ctx: &'a ID2D1DeviceContext,
     solid: &'a ID2D1SolidColorBrush,
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
+    dwrite_factory: &'a IDWriteFactory,
+    format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -255,6 +281,8 @@ impl RenderTarget for D2DTarget<'_> {
             ctx: self.ctx,
             solid: self.solid,
             grad_cache: self.grad_cache,
+            dwrite_factory: self.dwrite_factory,
+            format_cache: self.format_cache,
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
@@ -271,6 +299,10 @@ struct D2DCanvas<'a> {
     ctx: &'a ID2D1DeviceContext,
     solid: &'a ID2D1SolidColorBrush,
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
+    /// DirectWrite 工厂（借入）：建 format/layout。
+    dwrite_factory: &'a IDWriteFactory,
+    /// TextFormat 缓存（借入，可变）：按 (family, 逻辑字号 bits, 字重) 复用。
+    format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
     saves: Vec<u32>,
     /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
@@ -433,6 +465,41 @@ impl D2DCanvas<'_> {
             Some(brush)
         }
     }
+
+    /// 取/建 `IDWriteTextFormat`（逻辑字号；DPI scale 由 SetTransform 应用，**不**在此 ×scale）。
+    /// 缓存键 (family, 逻辑字号 bits, 字重) 与软引擎 `DWriteEngine::format` 同构，保证两后端字体/字重一致。
+    /// family 缺省 `DEFAULT_FAMILY`、字重经线程局部 `current_weight()`，locale 固定 "zh-cn"——皆与软路径同源。
+    /// 对齐**不**进 key（在 layout 上设），避免污染缓存的 format。
+    fn text_format(&mut self, family: Option<&str>, size: f32) -> Option<IDWriteTextFormat> {
+        let fam = family.unwrap_or(DEFAULT_FAMILY).to_string();
+        let weight = crate::text::current_weight();
+        let key = (fam.clone(), size.to_bits(), weight);
+        if let Some(f) = self.format_cache.get(&key) {
+            return Some(f.clone());
+        }
+        let dw_weight = if weight == crate::text::WEIGHT_NORMAL {
+            DWRITE_FONT_WEIGHT_NORMAL
+        } else {
+            DWRITE_FONT_WEIGHT(weight as i32)
+        };
+        let fam_w = wide_nul(&fam);
+        let locale = wide_nul("zh-cn");
+        let format = unsafe {
+            self.dwrite_factory
+                .CreateTextFormat(
+                    PCWSTR(fam_w.as_ptr()),
+                    None,
+                    dw_weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size, // 逻辑字号：D2D 变换会放大到物理像素，绝不在此 ×scale
+                    PCWSTR(locale.as_ptr()),
+                )
+                .ok()?
+        };
+        self.format_cache.insert(key, format.clone());
+        Some(format)
+    }
 }
 
 impl Drop for D2DCanvas<'_> {
@@ -546,27 +613,92 @@ impl Canvas for D2DCanvas<'_> {
 
     fn draw_text(
         &mut self,
-        _text: &str,
-        _rect: crate::geometry::Rect,
-        _color: Color,
-        _align: crate::spec::Align,
-        _family: Option<&str>,
-        _size: f32,
+        text: &str,
+        rect: crate::geometry::Rect,
+        color: Color,
+        align: crate::spec::Align,
+        family: Option<&str>,
+        size: f32,
     ) {
-        // Task 8 实现（DirectWrite CreateTextLayout + DrawTextLayout）。
+        // ★ 全程逻辑坐标：D2D 已 SetTransform(scale)，会把逻辑值放大到物理像素。
+        //   绝不在此 ×scale（软渲染 DWriteEngine::draw 的 ×scale 是因其直画物理 pixmap、无变换）。
+        if text.is_empty() || rect.is_empty() {
+            return;
+        }
+        let Some(format) = self.text_format(family, size) else {
+            return;
+        };
+        let text_w = wide(text);
+        // 逻辑 maxWidth/maxHeight：layout 在逻辑空间排版，变换统一物理化。
+        let layout = match unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(&text_w, &format, rect.w as f32, rect.h as f32)
+        } {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        // 对齐设在 layout（非缓存的 format）上，避免污染复用的 format。
+        // 水平：与软路径 text_x0 的 Start/Center/End 语义一致（Stretch 同 Start→LEADING）。
+        let h_align = match align {
+            crate::spec::Align::Start | crate::spec::Align::Stretch => {
+                DWRITE_TEXT_ALIGNMENT_LEADING
+            }
+            crate::spec::Align::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+            crate::spec::Align::End => DWRITE_TEXT_ALIGNMENT_TRAILING,
+        };
+        unsafe {
+            let _ = layout.SetTextAlignment(h_align);
+            // 垂直居中：匹配软路径 oy = y + (h - th)/2。
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        // 文字色复用 solid brush（取一次→立即绘制，符合 solid 共享约束）。
+        let brush = self.solid_brush(color);
+        // 原点为逻辑坐标（DrawTextLayout 在 0.62 接受 windows_numerics::Vector2）。
+        let origin = vec2(rect.x as f32, rect.y as f32);
+        unsafe {
+            // ENABLE_COLOR_FONT：让彩色 emoji（如工具栏 😊）正常渲染而非单色轮廓。
+            self.ctx.DrawTextLayout(
+                origin,
+                &layout,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+            );
+        }
     }
 
     fn measure_text(
         &mut self,
         text: &str,
-        _family: Option<&str>,
+        family: Option<&str>,
         size: f32,
     ) -> crate::geometry::Size {
-        // Task 8 接入 DirectWrite 测量；当前返回粗略估算（仿 NullTextEngine），仅供光标占位/编译。
-        crate::geometry::Size::new(
-            (text.chars().count() as f32 * size * 0.6).ceil() as i32,
-            size.ceil() as i32,
-        )
+        // 用同一 DirectWrite 工厂建 layout + GetMetrics 返回**逻辑** Size（与软路径一致，
+        // 不 ×scale）。失败/空文本回退粗估，保证光标占位与编译。
+        if text.is_empty() {
+            return crate::geometry::Size::new(0, size.ceil() as i32);
+        }
+        let fallback = || {
+            crate::geometry::Size::new(
+                (text.chars().count() as f32 * size * 0.6).ceil() as i32,
+                size.ceil() as i32,
+            )
+        };
+        let Some(format) = self.text_format(family, size) else {
+            return fallback();
+        };
+        let text_w = wide(text);
+        let layout = match unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(&text_w, &format, f32::MAX, f32::MAX)
+        } {
+            Ok(l) => l,
+            Err(_) => return fallback(),
+        };
+        let mut m = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+        if unsafe { layout.GetMetrics(&mut m) }.is_err() {
+            return fallback();
+        }
+        crate::geometry::Size::new(m.width.ceil() as i32, m.height.ceil() as i32)
     }
 
     fn push_layer(&mut self, opacity: f32) {
@@ -634,6 +766,19 @@ const INFINITE_RECT: D2D_RECT_F = D2D_RECT_F {
     right: 1e7,
     bottom: 1e7,
 };
+
+/// 中文友好默认字体，与软引擎 `DWriteEngine` 的 `DEFAULT_FAMILY` 同值（两后端字体一致）。
+const DEFAULT_FAMILY: &str = "Microsoft YaHei UI";
+
+/// `&str` → UTF-16（不含 NUL），供 `CreateTextLayout`（带长度，不需 NUL）。
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
+}
+
+/// `&str` → 以 NUL 结尾的 UTF-16，供 `CreateTextFormat`/locale（PCWSTR 需 NUL 终止）。
+fn wide_nul(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
 
 /// 构造 D2D 矩形（left/top/right/bottom，注意非 x/y/w/h）。
 fn rect_f(x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
