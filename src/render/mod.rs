@@ -11,6 +11,7 @@ pub use skia::SkiaCanvas;
 
 use crate::geometry::{Color, Rect};
 use crate::spec::Align;
+use crate::text::TextEngine;
 
 /// 渐变色标：位置 `offset`（0..=1）+ 颜色。
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +170,26 @@ pub trait Canvas {
     fn clip_rect(&mut self, r: Rect);
 }
 
+/// 后端无关的一帧渲染目标。平台层每帧提供，宿主结合自身文字引擎得到 `Canvas`。
+///
+/// 软后端把 `Pixmap` 包成 `SkiaCanvas`；GPU 后端自带 DirectWrite 文字栈，忽略 `engine`。
+pub trait RenderTarget {
+    /// 构造本帧 `Canvas`。`engine` 供软后端委托文字光栅。
+    fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a>;
+}
+
+/// tiny-skia 软后端的渲染目标：借用一份 `Pixmap`。跨平台共用。
+pub struct PixmapTarget<'p> {
+    pub pixmap: &'p mut tiny_skia::Pixmap,
+    pub scale: f32,
+}
+
+impl RenderTarget for PixmapTarget<'_> {
+    fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a> {
+        Box::new(SkiaCanvas::with_text(&mut *self.pixmap, engine, self.scale))
+    }
+}
+
 /// 构造圆角矩形路径（cubic 贝塞尔逼近四角）。radius<=0 退化为直角矩形。
 pub(crate) fn rounded_rect_path(
     x: f32,
@@ -200,4 +221,27 @@ pub(crate) fn rounded_rect_path(
     pb.cubic_to(l, t + r - k, l + r - k, t, l + r, t);
     pb.close();
     pb.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixmap_target_make_canvas_paints() {
+        use crate::text::NullTextEngine;
+        let mut pixmap = tiny_skia::Pixmap::new(10, 10).unwrap();
+        let mut engine = NullTextEngine;
+        {
+            let mut target = PixmapTarget {
+                pixmap: &mut pixmap,
+                scale: 1.0,
+            };
+            let mut canvas = target.make_canvas(&mut engine);
+            canvas.fill_rect(0.0, 0.0, 10.0, 10.0, &Paint::fill(Color::rgb(255, 0, 0)));
+        }
+        // 左上角像素应为红（预乘 RGBA）。
+        let px = pixmap.data();
+        assert_eq!(&px[0..4], &[255, 0, 0, 255]);
+    }
 }
