@@ -15,14 +15,16 @@ use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
-    D2D1_COLOR_SPACE_SRGB, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LAYER_OPTIONS1_NONE,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
+    D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
     D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
@@ -37,7 +39,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+    DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
@@ -87,6 +90,11 @@ pub(super) struct D2DBackend {
     /// 文字 layout 缓存（键 `LayoutKey`）：`IDWriteTextLayout` 是重对象（字形整形/换行排版），
     /// 每帧每文字重建会 churn 驱动内存——官方文档明确要复用。device-independent，设备丢失无需清。
     layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
+    /// 图片位图缓存：键 = `Image::cache_id()`（底层 `Rc<Pixmap>` 指针），值为上传到 GPU 的
+    /// `ID2D1Bitmap1`。绝不每帧重建——图片每帧可画几十次，每次 `CreateBitmap` 会 churn 驱动内存
+    /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
+    /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
+    image_cache: HashMap<usize, ID2D1Bitmap1>,
 }
 
 /// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
@@ -182,6 +190,7 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         dwrite_factory,
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
+        image_cache: HashMap::new(),
     };
     // 初次绑定后备缓冲为 target。绑定失败同样回退软后端。
     backend.bind_target().ok()?;
@@ -259,6 +268,7 @@ impl WinRenderBackend for D2DBackend {
                 dwrite_factory: &self.dwrite_factory,
                 format_cache: &mut self.format_cache,
                 layout_cache: &mut self.layout_cache,
+                image_cache: &mut self.image_cache,
             };
             handler.render(&mut target, size);
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
@@ -284,6 +294,7 @@ struct D2DTarget<'a> {
     dwrite_factory: &'a IDWriteFactory,
     format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
+    image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -305,6 +316,7 @@ impl RenderTarget for D2DTarget<'_> {
             dwrite_factory: self.dwrite_factory,
             format_cache: self.format_cache,
             layout_cache: self.layout_cache,
+            image_cache: self.image_cache,
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
@@ -326,6 +338,8 @@ struct D2DCanvas<'a> {
     /// TextFormat 缓存（借入，可变）：按 (family, 逻辑字号 bits, 字重) 复用。
     format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
+    /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
+    image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
     saves: Vec<u32>,
     /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
@@ -374,6 +388,52 @@ impl D2DCanvas<'_> {
         }
         self.layout_cache.insert(key, layout.clone());
         Some(layout)
+    }
+
+    /// 取/建图片的 GPU 位图（device-dependent 重对象）。按 `Image::cache_id()`（底层
+    /// `Rc<Pixmap>` 指针）缓存复用——绝不每帧 `CreateBitmap`，否则图片每帧画几十次会 churn
+    /// 驱动内存到几百 M（与 layout/grad 同源的内存累积坑，参见文件头注释）。
+    ///
+    /// 源数据为 tiny-skia `Pixmap` 的**预乘 RGBA8**：像素布局与 `DXGI_FORMAT_R8G8B8A8_UNORM`
+    /// + `PREMULTIPLIED` 一致（无需 R/B 交换，区别于后备缓冲的 BGRA）。
+    fn image_bitmap(&mut self, img: &crate::render::image::Image) -> Option<ID2D1Bitmap1> {
+        let id = img.cache_id();
+        if let Some(b) = self.image_cache.get(&id) {
+            return Some(b.clone());
+        }
+        let pm = img.pixmap(); // 预乘 RGBA8
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            // 96 dpi：位图按其像素尺寸即逻辑尺寸取样（DPI 缩放由 context 的 SetTransform 统一施加）。
+            dpiX: 96.0,
+            dpiY: 96.0,
+            // 普通可绘制位图（非 target）：源数据直接上传，可作 DrawBitmap 的源。
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U {
+            width: w,
+            height: h,
+        };
+        // pitch = w*4（每行字节数，RGBA8）。ctx 为 ID2D1DeviceContext，此重载收 PROPERTIES1 出 Bitmap1。
+        let bitmap = unsafe {
+            self.ctx
+                .CreateBitmap(size, Some(pm.data().as_ptr() as *const _), w * 4, &props)
+        }
+        .ok()?;
+        // 防无界增长（如大量一次性图片）：超阈值整体清空重建。
+        if self.image_cache.len() > 64 {
+            self.image_cache.clear();
+        }
+        self.image_cache.insert(id, bitmap.clone());
+        Some(bitmap)
     }
 
     /// 取本次填充用的画刷：无渐变 → 复用 solid 并改色；有渐变 → 按包围盒 (x,y,w,h)
@@ -684,13 +744,113 @@ impl Canvas for D2DCanvas<'_> {
 
     fn draw_image(
         &mut self,
-        _img: &crate::render::image::Image,
-        _dst: crate::geometry::Rect,
-        _fit: crate::render::image::Fit,
-        _radius: f32,
-        _opacity: f32,
+        img: &crate::render::image::Image,
+        dst: crate::geometry::Rect,
+        fit: crate::render::image::Fit,
+        radius: f32,
+        opacity: f32,
     ) {
-        // 后续任务实现（CreateBitmapFromWicBitmap / DrawBitmap）。
+        use crate::render::image::Fit;
+        // ★ 全程逻辑坐标：D2D 已 SetTransform(scale)，会把逻辑值放大到物理像素。绝不在此 ×scale
+        //   （软路径 SkiaCanvas::draw_image 的 ×scale 是因其直画物理 pixmap、无变换；此处变换统一物理化）。
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 || dst.is_empty() {
+            return;
+        }
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+        // 上传/取缓存的 GPU 位图；失败（如尺寸非法/创建失败）直接放弃本图。
+        let Some(bitmap) = self.image_bitmap(img) else {
+            return;
+        };
+
+        let (dw0, dh0) = (dst.w as f32, dst.h as f32);
+        // 按 fit 求缩放因子（镜像 SkiaCanvas::draw_image 语义）。None 用 1.0：1 图片像素 = 1 逻辑 dp，
+        // DPI 物理化交给 context 的 SetTransform（不像软路径 ×scale，那是因软路径直画物理 pixmap）。
+        let (sx, sy) = match fit {
+            Fit::Fill => (dw0 / iw, dh0 / ih),
+            Fit::Contain => {
+                let s = (dw0 / iw).min(dh0 / ih);
+                (s, s)
+            }
+            Fit::Cover => {
+                let s = (dw0 / iw).max(dh0 / ih);
+                (s, s)
+            }
+            Fit::None => (1.0, 1.0),
+        };
+        let (dw, dh) = (iw * sx, ih * sy);
+        // 在 dst 框内居中（Cover/None 的溢出由裁剪收口）。
+        let tx = dst.x as f32 + (dw0 - dw) / 2.0;
+        let ty = dst.y as f32 + (dh0 - dh) / 2.0;
+        let dest_rect = D2D_RECT_F {
+            left: tx,
+            top: ty,
+            right: tx + dw,
+            bottom: ty + dh,
+        };
+
+        // 裁剪到 dst（圆角 radius；Cover/None 溢出由此收口）。
+        let r = radius.min(dw0 / 2.0).min(dh0 / 2.0).max(0.0);
+        if r <= 0.0 {
+            // 矩形裁剪：轴对齐 clip（ALIASED 与软后端整数矩形 mask 边缘一致），廉价。
+            let clip = rect_f(dst.x as f32, dst.y as f32, dw0, dh0);
+            unsafe {
+                self.ctx
+                    .PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                self.ctx.DrawBitmap(
+                    &bitmap,
+                    Some(&dest_rect),
+                    opacity,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None, // 整图源
+                    None, // 无透视变换
+                );
+                self.ctx.PopAxisAlignedClip();
+            }
+        } else {
+            // 圆角裁剪：用圆角矩形几何体作 layer 的 geometricMask。圆角图片较少见，
+            // 几何体每次创建可接受。TODO：若成热点再按 (dst.w,dst.h,radius) 缓存几何体。
+            let rr = D2D1_ROUNDED_RECT {
+                rect: rect_f(dst.x as f32, dst.y as f32, dw0, dh0),
+                radiusX: r,
+                radiusY: r,
+            };
+            // GetFactory 在 ID2D1Resource（ctx 实现），返回 ID2D1Factory（含 CreateRoundedRectangleGeometry）。
+            let geom = unsafe {
+                let factory = match self.ctx.GetFactory() {
+                    Ok(f) => f,
+                    Err(_) => return,
+                };
+                match factory.CreateRoundedRectangleGeometry(&rr) {
+                    Ok(g) => g,
+                    Err(_) => return,
+                }
+            };
+            let params = D2D1_LAYER_PARAMETERS1 {
+                contentBounds: INFINITE_RECT,
+                geometricMask: std::mem::ManuallyDrop::new(Some(geom.into())),
+                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                maskTransform: Matrix3x2::identity(),
+                opacity: 1.0,
+                opacityBrush: std::mem::ManuallyDrop::new(None),
+                layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+            };
+            unsafe {
+                self.ctx.PushLayer(&params, None);
+                self.ctx.DrawBitmap(
+                    &bitmap,
+                    Some(&dest_rect),
+                    opacity,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None, // 整图源
+                    None, // 无透视变换
+                );
+                self.ctx.PopLayer();
+            }
+        }
     }
 
     fn draw_text(

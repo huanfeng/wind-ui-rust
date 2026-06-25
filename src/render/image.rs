@@ -370,6 +370,12 @@ impl Image {
     pub(crate) fn pixmap(&self) -> &Pixmap {
         &self.pixmap
     }
+
+    /// 稳定缓存键：底层 `Rc<Pixmap>` 指针。同一图片的 `Rc` 克隆共享此 id
+    /// （供 D2D 后端按图片身份缓存 device-dependent 位图，避免每帧重建）。
+    pub(crate) fn cache_id(&self) -> usize {
+        std::rc::Rc::as_ptr(&self.pixmap) as usize
+    }
 }
 
 #[cfg(test)]
