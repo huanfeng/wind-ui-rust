@@ -118,17 +118,127 @@ pub(crate) fn run(
     unsafe { run_windowed(cfg, handler, waker) };
 }
 
+// ── 渲染后端接缝 ────────────────────────────────────────────────────────────
+// `WinRenderBackend` 把"如何把一帧呈现到 HWND"的策略封装到独立对象后面，
+// 让 `WindowState` 与具体后端（Skia/CPU、未来的 Direct2D）解耦。
+// 两个方法均为 `unsafe`：内部直接调用 Win32 GDI API。
+
+trait WinRenderBackend {
+    /// 客户区尺寸变化时预先调整缓冲（可选；paint 内部的 ensure 同样处理）。
+    /// 当前路径仅用 `paint` 内的 `ensure` 懒建缓冲；此方法为后续 D2D 后端预留。
+    #[allow(dead_code)]
+    fn resize(&mut self, w: i32, h: i32);
+    /// 渲染并呈现一帧：内部清屏 → 构造 target → handler.render → present。
+    /// 0×0 客户区仍配对 BeginPaint/EndPaint 但不绘制。
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler);
+}
+
+/// CPU 软件渲染后端：tiny-skia `Pixmap` 作后备缓冲，`SetDIBitsToDevice` 呈现。
+struct SkiaBackend {
+    pixmap: Option<Pixmap>,
+    buf_w: i32,
+    buf_h: i32,
+}
+
+impl SkiaBackend {
+    fn new() -> Self {
+        Self {
+            pixmap: None,
+            buf_w: 0,
+            buf_h: 0,
+        }
+    }
+
+    /// 确保后备缓冲匹配目标尺寸；尺寸变化时重建。
+    fn ensure(&mut self, w: i32, h: i32) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if self.buf_w == w && self.buf_h == h && self.pixmap.is_some() {
+            return;
+        }
+        self.pixmap = Some(Pixmap::new(w as u32, h as u32).expect("分配 pixmap 失败"));
+        self.buf_w = w;
+        self.buf_h = h;
+    }
+}
+
+impl WinRenderBackend for SkiaBackend {
+    fn resize(&mut self, w: i32, h: i32) {
+        self.ensure(w, h);
+    }
+
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let w = rc.right - rc.left;
+        let h = rc.bottom - rc.top;
+        // 最小化时客户区为 0×0：仍需配对 BeginPaint/EndPaint 校验区域，但不绘制。
+        if w <= 0 || h <= 0 {
+            let mut ps = PAINTSTRUCT::default();
+            let _ = BeginPaint(hwnd, &mut ps);
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        }
+        self.ensure(w, h);
+
+        let size = Size::new(self.buf_w, self.buf_h);
+        let pixmap = self.pixmap.as_mut().unwrap();
+        pixmap.fill(to_skia_color(bg));
+        // target 借用 self.pixmap，限定在块内：块结束借用即释放，再重取引用做后续处理。
+        {
+            let mut tgt = crate::render::PixmapTarget { pixmap, scale: 1.0 };
+            handler.render(&mut tgt, size);
+        }
+        let pixmap = self.pixmap.as_mut().unwrap();
+        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。
+        swap_rb_inplace(pixmap.data_mut());
+        let bits = pixmap.data().as_ptr() as *const c_void;
+
+        // top-down DIB 描述：直接从缓冲拷到设备，无需独立 DIB section。
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: self.buf_w,
+                biHeight: -self.buf_h, // 负数 = top-down，与 pixmap 行序一致
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let scanlines = SetDIBitsToDevice(
+            hdc,
+            0,
+            0,
+            self.buf_w as u32,
+            self.buf_h as u32,
+            0,
+            0,
+            0,
+            self.buf_h as u32,
+            bits,
+            &bmi,
+            DIB_RGB_COLORS,
+        );
+        debug_assert!(scanlines != 0, "SetDIBitsToDevice 呈现失败");
+        let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+
 /// 窗口端运行时状态，指针挂在 HWND 的 GWLP_USERDATA 上。
 struct WindowState {
     handler: Box<dyn AppHandler>,
     bg: Color,
     /// 当前是否已对窗口调用 OS SetCapture（与 handler 逻辑捕获态同步）。
     capturing: bool,
-    /// 单一后备缓冲（tiny-skia 渲染目标）。呈现时原地交换 R/B 为 BGRA 后
-    /// 直接 SetDIBitsToDevice 拷屏——省去独立 DIB section，全屏内存减半。
-    pixmap: Option<Pixmap>,
-    buf_w: i32,
-    buf_h: i32,
+    /// 渲染后端：封装"如何把一帧呈现到 HWND"的全部逻辑。
+    /// 当前为 CPU Skia 路径；后续可替换为 Direct2D 后端而无需改动 WindowState。
+    backend: Box<dyn WinRenderBackend>,
     /// 连续点击跟踪（用于双击/三击判定）。
     last_click: ClickTracker,
     /// 触摸拖动滚动状态机（触摸提升为鼠标消息后据此区分点击/滑动）。
@@ -213,9 +323,7 @@ impl WindowState {
             handler,
             bg,
             capturing: false,
-            pixmap: None,
-            buf_w: 0,
-            buf_h: 0,
+            backend: Box::new(SkiaBackend::new()),
             last_click: ClickTracker::default(),
             touch: Touch::default(),
             tray: None,
@@ -225,77 +333,10 @@ impl WindowState {
         }
     }
 
-    /// 确保后备缓冲匹配客户区；尺寸变化时重建。
-    fn ensure_pixmap(&mut self, w: i32, h: i32) {
-        let w = w.max(1);
-        let h = h.max(1);
-        if self.buf_w == w && self.buf_h == h && self.pixmap.is_some() {
-            return;
-        }
-        self.pixmap = Some(Pixmap::new(w as u32, h as u32).expect("分配 pixmap 失败"));
-        self.buf_w = w;
-        self.buf_h = h;
-    }
-
     /// 渲染并呈现到窗口。
     unsafe fn paint(&mut self, hwnd: HWND) {
-        let mut rc = RECT::default();
-        let _ = GetClientRect(hwnd, &mut rc);
-        let w = rc.right - rc.left;
-        let h = rc.bottom - rc.top;
-        // 最小化时客户区为 0×0：仍需配对 BeginPaint/EndPaint 校验区域，但不绘制。
-        if w <= 0 || h <= 0 {
-            let mut ps = PAINTSTRUCT::default();
-            let _ = BeginPaint(hwnd, &mut ps);
-            let _ = EndPaint(hwnd, &ps);
-            return;
-        }
-        self.ensure_pixmap(w, h);
-
-        let size = Size::new(self.buf_w, self.buf_h);
-        let pixmap = self.pixmap.as_mut().unwrap();
-        pixmap.fill(to_skia_color(self.bg));
-        // target 借用 self.pixmap，限定在块内：块结束借用即释放，再重取引用做后续处理。
-        {
-            let mut tgt = crate::render::PixmapTarget { pixmap, scale: 1.0 };
-            self.handler.render(&mut tgt, size);
-        }
-        let pixmap = self.pixmap.as_mut().unwrap();
-        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。
-        swap_rb_inplace(pixmap.data_mut());
-        let bits = pixmap.data().as_ptr() as *const c_void;
-
-        // top-down DIB 描述：直接从缓冲拷到设备，无需独立 DIB section。
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: self.buf_w,
-                biHeight: -self.buf_h, // 负数 = top-down，与 pixmap 行序一致
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut ps);
-        let scanlines = SetDIBitsToDevice(
-            hdc,
-            0,
-            0,
-            self.buf_w as u32,
-            self.buf_h as u32,
-            0,
-            0,
-            0,
-            self.buf_h as u32,
-            bits,
-            &bmi,
-            DIB_RGB_COLORS,
-        );
-        debug_assert!(scanlines != 0, "SetDIBitsToDevice 呈现失败");
-        let _ = EndPaint(hwnd, &ps);
+        let bg = self.bg;
+        self.backend.paint(hwnd, bg, self.handler.as_mut());
     }
 }
 
