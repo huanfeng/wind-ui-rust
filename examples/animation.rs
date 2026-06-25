@@ -12,9 +12,6 @@
 //! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const FG: u32 = 0x2D3436;
@@ -57,57 +54,57 @@ fn row(label: &str, control: Element) -> Element {
 
 fn main() {
     // 运行期动画开关：Button 点击翻转并调 anim::set_enabled，状态写入动态标签。
-    let anim_on = Rc::new(Cell::new(true));
-    let anim_label = Rc::new(RefCell::new(String::from("动画：开（点击关闭）")));
+    let anim_on = signal(true);
+    let anim_label = signal(String::from("动画：开（点击关闭）"));
 
     let toggle = {
-        let (flag, lbl) = (anim_on.clone(), anim_label.clone());
+        let (flag, lbl) = (anim_on, anim_label);
         Element::button("切换动画").on_click(move |_| {
             let v = !flag.get();
             flag.set(v);
             windui::anim::set_enabled(v);
-            *lbl.borrow_mut() = if v {
+            lbl.set(if v {
                 "动画：开（点击关闭）".into()
             } else {
                 "动画：关（点击开启）".into()
-            };
+            });
         })
     };
 
     // 各控件状态绑定。
-    let sw1 = Rc::new(Cell::new(true));
-    let sw2 = Rc::new(Cell::new(false));
-    let chk1 = Rc::new(Cell::new(true));
-    let chk2 = Rc::new(Cell::new(false));
-    let radio = Rc::new(Cell::new(0usize));
-    let seg = Rc::new(Cell::new(0usize));
-    let dd = Rc::new(Cell::new(0usize));
-    let step = Rc::new(Cell::new(3.0f64));
-    let listsel = Rc::new(Cell::new(0usize));
-    let tab = Rc::new(Cell::new(0usize));
-    let acc = Rc::new(Cell::new(0i32));
+    let sw1 = signal(true);
+    let sw2 = signal(false);
+    let chk1 = signal(true);
+    let chk2 = signal(false);
+    let radio = signal(0usize);
+    let seg = signal(0usize);
+    let dd = signal(0usize);
+    let step = signal(3.0f64);
+    let listsel = signal(0usize);
+    let tab = signal(0usize);
+    let acc = signal(0i32);
 
     let toggles = card(
         "开关 / 勾选 / 单选（点击看过渡）",
         Element::col()
             .width_match()
             .spacing(8)
-            .child(row("Switch A", Element::switch(sw1.clone())))
-            .child(row("Switch B", Element::switch(sw2.clone())))
+            .child(row("Switch A", Element::switch(sw1)))
+            .child(row("Switch B", Element::switch(sw2)))
             .child(row(
                 "CheckBox",
                 Element::row()
                     .spacing(16)
-                    .child(Element::checkbox("自动更新", chk1.clone()))
-                    .child(Element::checkbox("Beta", chk2.clone())),
+                    .child(Element::checkbox("自动更新", chk1))
+                    .child(Element::checkbox("Beta", chk2)),
             ))
             .child(row(
                 "Radio",
                 Element::row()
                     .spacing(16)
-                    .child(Element::radio("低", radio.clone(), 0))
-                    .child(Element::radio("中", radio.clone(), 1))
-                    .child(Element::radio("高", radio.clone(), 2)),
+                    .child(Element::radio("低", radio, 0))
+                    .child(Element::radio("中", radio, 1))
+                    .child(Element::radio("高", radio, 2)),
             )),
     );
 
@@ -118,17 +115,17 @@ fn main() {
             .spacing(10)
             .child(row(
                 "分段",
-                Element::segmented(vec!["简体", "繁体", "其它"], seg.clone()).height(32),
+                Element::segmented(vec!["简体", "繁体", "其它"], seg).height(32),
             ))
             .child(row(
                 "下拉",
-                Element::dropdown(vec!["北京", "上海", "广州"], dd.clone())
+                Element::dropdown(vec!["北京", "上海", "广州"], dd)
                     .width(140)
                     .height(32),
             ))
             .child(row(
                 "步进",
-                Element::stepper(step.clone(), 0.0, 10.0, 1.0).width(120),
+                Element::stepper(step, 0.0, 10.0, 1.0).width(120),
             )),
     );
 
@@ -154,7 +151,7 @@ fn main() {
     let tabs = card(
         "标签页（切换看指示条展宽滑动）",
         Element::tabs(
-            tab.clone(),
+            tab,
             vec![
                 ("常规", page("常规设置内容")),
                 ("外观", page("外观设置内容")),
@@ -167,20 +164,17 @@ fn main() {
 
     let list = card(
         "列表（选中看底色 + 左缘条淡入）",
-        Element::list(
-            vec!["收件箱", "已发送", "草稿箱", "垃圾箱"],
-            listsel.clone(),
-        )
-        .width_match()
-        .height(150)
-        .bg(Color::hex(0xF6F8FA))
-        .corner(8.0),
+        Element::list(vec!["收件箱", "已发送", "草稿箱", "垃圾箱"], listsel)
+            .width_match()
+            .height(150)
+            .bg(Color::hex(0xF6F8FA))
+            .corner(8.0),
     );
 
     let accordion = card(
         "手风琴（展开仍为瞬时，属 Phase C 待做）",
         Element::accordion(
-            acc.clone(),
+            acc,
             vec![
                 (
                     "面板一",
@@ -213,7 +207,7 @@ fn main() {
         )
         .child(toggle)
         .child(
-            Element::label_rc(anim_label.clone())
+            Element::label_rc(anim_label)
                 .font_size(13.0)
                 .fg(Color::hex(SUB))
                 .height(18)

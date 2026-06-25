@@ -6,9 +6,6 @@
 //! 亮色截图：cargo run --example ime -- --light --screenshot artifacts/ime_light.png
 //! 切主题：窗口右上角「暗色 / 亮色」按钮，或点外观页主题卡。
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 fn hex(v: u32) -> Color {
@@ -373,14 +370,14 @@ fn theme_swatch(label: &str, g: Gradient, selected: bool) -> Element {
 
 #[allow(clippy::too_many_arguments)]
 fn build_settings(
-    tab: Rc<Cell<usize>>,
-    seg_arrange: Rc<Cell<usize>>,
-    cand_count: Rc<Cell<usize>>,
-    cand_size: Rc<Cell<usize>>,
-    win_corner: Rc<Cell<usize>>,
-    dark: Rc<Cell<bool>>,
-    open_add: Rc<Cell<bool>>,
-    open_export: Rc<Cell<bool>>,
+    tab: Signal<usize>,
+    seg_arrange: Signal<usize>,
+    cand_count: Signal<usize>,
+    cand_size: Signal<usize>,
+    win_corner: Signal<usize>,
+    dark: Signal<bool>,
+    open_add: Signal<bool>,
+    open_export: Signal<bool>,
 ) -> Element {
     // 基本设置页。
     let general = Element::col()
@@ -389,19 +386,19 @@ fn build_settings(
         .child(setting_row(
             "默认中文输入",
             Some("启动后自动进入中文模式"),
-            Element::switch(Rc::new(Cell::new(true))),
+            Element::switch(signal(true)),
         ))
         .child(Element::divider())
         .child(setting_row(
             "模糊音纠错",
             Some("z/zh、c/ch、s/sh 不区分"),
-            Element::switch(Rc::new(Cell::new(false))),
+            Element::switch(signal(false)),
         ))
         .child(Element::divider())
         .child(setting_row(
             "中英混输",
             Some("自动识别英文单词"),
-            Element::switch(Rc::new(Cell::new(true))),
+            Element::switch(signal(true)),
         ))
         .child(settings_section_header("候选词"))
         .child(setting_row(
@@ -413,7 +410,7 @@ fn build_settings(
         .child(setting_row(
             "智能联想",
             Some("根据上下文优化排序"),
-            Element::switch(Rc::new(Cell::new(true))),
+            Element::switch(signal(true)),
         ));
 
     // 词库页：工具行 + 表格 + 页脚。
@@ -573,7 +570,7 @@ fn build_settings(
         .child(setting_row(
             "毛玻璃效果",
             Some("候选窗口背景模糊"),
-            Element::switch(Rc::new(Cell::new(true))),
+            Element::switch(signal(true)),
         ))
         .child(Element::divider())
         .child(setting_row(
@@ -707,7 +704,7 @@ fn dialog_frame(title: &str, body: Element, footer: Element) -> Element {
 
 fn main() {
     let start_dark = !std::env::args().any(|a| a == "--light");
-    let dark = Rc::new(Cell::new(start_dark));
+    let dark = signal(start_dark);
 
     // 可选 `--tab N` 指定初始标签页（截图各页用）。
     let tab_init = std::env::args()
@@ -715,23 +712,23 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(0);
-    let tab = Rc::new(Cell::new(tab_init));
-    let seg_arrange = Rc::new(Cell::new(0usize));
-    let cand_count = Rc::new(Cell::new(1usize));
-    let cand_size = Rc::new(Cell::new(1usize));
-    let win_corner = Rc::new(Cell::new(1usize));
-    let open_add = Rc::new(Cell::new(std::env::args().any(|a| a == "--add")));
-    let open_export = Rc::new(Cell::new(false));
+    let tab = signal(tab_init);
+    let seg_arrange = signal(0usize);
+    let cand_count = signal(1usize);
+    let cand_size = signal(1usize);
+    let win_corner = signal(1usize);
+    let open_add = signal(std::env::args().any(|a| a == "--add"));
+    let open_export = signal(false);
 
     let settings = build_settings(
-        tab.clone(),
+        tab,
         seg_arrange,
         cand_count,
         cand_size,
         win_corner,
-        dark.clone(),
-        open_add.clone(),
-        open_export.clone(),
+        dark,
+        open_add,
+        open_export,
     );
 
     // 页面：标题 + 主题切换 + 三组件分节。
@@ -739,9 +736,9 @@ fn main() {
     let th = app.theme_handle();
 
     let th_d = th.clone();
-    let d_d = dark.clone();
+    let d_d = dark;
     let th_l = th.clone();
-    let d_l = dark.clone();
+    let d_l = dark;
     let header_bar = Element::row()
         .width_match()
         .cross(Align::Center)
@@ -796,10 +793,10 @@ fn main() {
     let page = Element::scroll().fill().child(inner);
 
     // 对话框：添加用户词 / 导出词库。
-    let close_add = open_add.clone();
-    let close_add2 = open_add.clone();
+    let close_add = open_add;
+    let close_add2 = open_add;
     let add_dialog = Element::dialog(
-        open_add.clone(),
+        open_add,
         dialog_frame(
             "添加用户词",
             Element::col()
@@ -811,7 +808,7 @@ fn main() {
                 .child(setting_row(
                     "设为高频词",
                     None,
-                    Element::switch(Rc::new(Cell::new(true))),
+                    Element::switch(signal(true)),
                 )),
             Element::row()
                 .width_match()
@@ -828,10 +825,10 @@ fn main() {
         ),
     );
 
-    let close_exp = open_export.clone();
-    let close_exp2 = open_export.clone();
+    let close_exp = open_export;
+    let close_exp2 = open_export;
     let export_dialog = Element::dialog(
-        open_export.clone(),
+        open_export,
         dialog_frame(
             "导出词库",
             Element::col()

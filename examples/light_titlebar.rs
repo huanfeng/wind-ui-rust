@@ -37,7 +37,7 @@ fn main() {
         .align(Align::Center);
 
     // 底部：勾选 + 协议链接。
-    let agreed = std::rc::Rc::new(std::cell::Cell::new(true));
+    let agreed = signal(true);
     let agree_row = Element::row()
         .spacing(2)
         .align(Align::Center)

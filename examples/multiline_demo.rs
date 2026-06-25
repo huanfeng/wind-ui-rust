@@ -9,9 +9,6 @@
 //!   4. 按钮动态追加内容 — 滚动锚点是否随光标保持可见
 //!   5. 清空 — 回到顶部是否正确
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const FG: u32 = 0x1E2A3A;
@@ -71,19 +68,19 @@ fn hint(text: &str) -> Element {
 
 fn main() {
     // ── 场景 1：固定矮框，内容超出 → 测垂直滚动 ──────────────────────────
-    let text1 = Rc::new(RefCell::new(String::from(LONG_TEXT)));
+    let text1 = signal(String::from(LONG_TEXT));
 
     // ── 场景 2：wrap 模式，超宽长行自动折回 ─────────────────────────────
-    let text2 = Rc::new(RefCell::new(String::from(
+    let text2 = signal(String::from(
         "这是一行极长的文本，没有任何手动换行符。\
 它会一直延伸，测试软换行（wrap）是否将超出宽度的部分自动折入下一视觉行，\
 而不是截断或让用户水平滚动。English mixed: The quick brown fox jumps over \
 the lazy dog. Rust is fast safe and productive. Wind UI renders text via \
 DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
-    )));
+    ));
 
     // ── 场景 3：高度更大的编辑框，模拟笔记类使用 ─────────────────────────
-    let text3 = Rc::new(RefCell::new(String::from(
+    let text3 = signal(String::from(
         "这里是笔记区域，高度更大。\n\
 可以自由输入多行文本，测试：\n\
   - 光标上下移动是否正确切换视觉行\n\
@@ -91,14 +88,14 @@ DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
   - 双击选词是否正常\n\
   - 中文 IME 输入是否不乱码\n\
   - 长按 Backspace 连续删除是否稳定\n",
-    )));
+    ));
 
     // 追加按钮回调
-    let t1_clone = text1.clone();
-    let t3_clone = text3.clone();
+    let t1_clone = text1;
+    let t3_clone = text3;
 
     // ── 场景 4：空框，从零开始打字 ───────────────────────────────────────
-    let text4 = Rc::new(RefCell::new(String::new()));
+    let text4 = signal(String::new());
 
     let body = Element::col()
         .width_match()
@@ -114,7 +111,7 @@ DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
 向下滚动鼠标滚轮 / 拖动滚动条 / 按 ↑↓ PgUp PgDn Ctrl+End 验证滚动。",
                 ))
                 .child(
-                    Element::text_input(text1.clone(), "输入多行文字…")
+                    Element::text_input(text1, "输入多行文字…")
                         .multiline()
                         .width_match()
                         .height(120),
@@ -126,12 +123,12 @@ DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
                             Element::button("追加段落")
                                 .accent(Color::hex(ACCENT))
                                 .on_click(move |_| {
-                                    t1_clone.borrow_mut().push_str(APPEND_TEXT);
+                                    t1_clone.update(|s| s.push_str(APPEND_TEXT));
                                 }),
                         )
                         .child(Element::button("清空").neutral().on_click({
-                            let t = text1.clone();
-                            move |_| t.borrow_mut().clear()
+                            let t = text1;
+                            move |_| t.update(|s| s.clear())
                         })),
                 ),
         ))
@@ -147,7 +144,7 @@ wrap=true 时应在框宽处自动折行；\
 框高 100px 时折出的多行同样可以垂直滚动。",
                 ))
                 .child(
-                    Element::text_input(text2.clone(), "超宽长行…")
+                    Element::text_input(text2, "超宽长行…")
                         .multiline()
                         .width_match()
                         .height(100),
@@ -166,7 +163,7 @@ Home/End 跳行首尾、Ctrl+A 全选，\
 以及 IME 候选字期间滚动不跳位。",
                 ))
                 .child(
-                    Element::text_input(text3.clone(), "在这里记笔记…")
+                    Element::text_input(text3, "在这里记笔记…")
                         .multiline()
                         .width_match()
                         .height(200),
@@ -178,12 +175,12 @@ Home/End 跳行首尾、Ctrl+A 全选，\
                             Element::button("追加段落")
                                 .accent(Color::hex(ACCENT))
                                 .on_click(move |_| {
-                                    t3_clone.borrow_mut().push_str(APPEND_TEXT);
+                                    t3_clone.update(|s| s.push_str(APPEND_TEXT));
                                 }),
                         )
                         .child(Element::button("清空").neutral().on_click({
-                            let t = text3.clone();
-                            move |_| t.borrow_mut().clear()
+                            let t = text3;
+                            move |_| t.update(|s| s.clear())
                         })),
                 ),
         ))
@@ -200,14 +197,14 @@ Home/End 跳行首尾、Ctrl+A 全选，\
 行高随输入增长是否触发滚动。",
                 ))
                 .child(
-                    Element::text_input(text4.clone(), "在此输入，按 Enter 换行…")
+                    Element::text_input(text4, "在此输入，按 Enter 换行…")
                         .multiline()
                         .width_match()
                         .height(140),
                 )
                 .child(Element::button("清空").neutral().on_click({
-                    let t = text4.clone();
-                    move |_| t.borrow_mut().clear()
+                    let t = text4;
+                    move |_| t.update(|s| s.clear())
                 })),
         ));
 

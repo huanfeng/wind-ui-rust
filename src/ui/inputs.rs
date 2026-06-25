@@ -4,13 +4,13 @@
 //! 即写入共享单元，外部随时读取，无需回调闭包。
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -24,7 +24,7 @@ const GAP: i32 = 8;
 
 pub struct CheckBox {
     label: String,
-    state: Rc<Cell<bool>>,
+    state: Signal<bool>,
     /// 勾选填充补间（0=未选、1=选中）：驱动方框底色 white↔accent + 对勾淡入。
     fill: Cell<Transition<f32>>,
     /// 点击拦截回调（受控模式）。设了它，点击/键盘激活只调回调、不自动翻转 `state`，
@@ -35,7 +35,7 @@ pub struct CheckBox {
 }
 
 impl CheckBox {
-    pub fn new(label: String, state: Rc<Cell<bool>>) -> Self {
+    pub fn new(label: String, state: Signal<bool>) -> Self {
         let init = if state.get() { 1.0 } else { 0.0 };
         Self {
             label,
@@ -179,13 +179,13 @@ impl Widget for CheckBox {
 // ---------------- Switch ----------------
 
 pub struct Switch {
-    state: Rc<Cell<bool>>,
+    state: Signal<bool>,
     /// 滑块位置补间（0=关、1=开）；同时驱动轨道色 off↔on 渐变。retarget-in-paint。
     pos: Cell<Transition<f32>>,
 }
 
 impl Switch {
-    pub fn new(state: Rc<Cell<bool>>) -> Self {
+    pub fn new(state: Signal<bool>) -> Self {
         let init = if state.get() { 1.0 } else { 0.0 };
         Self {
             state,
@@ -273,14 +273,14 @@ impl Widget for Switch {
 
 pub struct RadioButton {
     label: String,
-    group: Rc<Cell<usize>>,
+    group: Signal<usize>,
     index: usize,
     /// 选中补间（0=未选、1=选中）：驱动外环色 + 环厚 + 中心点半径。
     sel: Cell<Transition<f32>>,
 }
 
 impl RadioButton {
-    pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
+    pub fn new(label: String, group: Signal<usize>, index: usize) -> Self {
         let init = if group.get() == index { 1.0 } else { 0.0 };
         Self {
             label,
@@ -392,12 +392,12 @@ impl Widget for RadioButton {
 // ---------------- Slider ----------------
 
 pub struct Slider {
-    value: Rc<Cell<f32>>, // 0.0..=1.0
+    value: Signal<f32>, // 0.0..=1.0
     dragging: bool,
 }
 
 impl Slider {
-    pub fn new(value: Rc<Cell<f32>>) -> Self {
+    pub fn new(value: Signal<f32>) -> Self {
         Self {
             value,
             dragging: false,
@@ -561,7 +561,7 @@ struct TextLayout {
 }
 
 pub struct TextInput {
-    text: Rc<RefCell<String>>,
+    text: Signal<String>,
     placeholder: String,
     config: TextConfig,
     cursor: usize,         // 字符索引
@@ -583,8 +583,8 @@ pub struct TextInput {
 }
 
 impl TextInput {
-    pub fn new(text: Rc<RefCell<String>>, placeholder: String) -> Self {
-        let cursor = text.borrow().chars().count();
+    pub fn new(text: Signal<String>, placeholder: String) -> Self {
+        let cursor = text.with(|t| t.chars().count());
         Self {
             text,
             placeholder,
@@ -614,18 +614,19 @@ impl TextInput {
     }
 
     fn char_count(&self) -> usize {
-        self.text.borrow().chars().count()
+        self.text.with(|t| t.chars().count())
     }
 
     /// 实际用于显示与测量的字符串：密码模式下逐字符替换为掩码圆点，
     /// 字符数与真实文本一一对应，故光标/选区索引可直接复用。
     fn display_string(&self) -> String {
-        let t = self.text.borrow();
-        if self.config.password {
-            t.chars().map(|_| PASSWORD_MASK).collect()
-        } else {
-            t.clone()
-        }
+        self.text.with(|t| {
+            if self.config.password {
+                t.chars().map(|_| PASSWORD_MASK).collect()
+            } else {
+                t.clone()
+            }
+        })
     }
     fn clamp_cursor(&mut self) {
         let n = self.char_count();
@@ -649,11 +650,11 @@ impl TextInput {
     /// 删除选区文本，返回是否删除了。
     fn delete_selection(&mut self, ctx: &mut EventCtx) -> bool {
         if let Some((s, e)) = self.selection() {
-            let mut t = self.text.borrow_mut();
-            let bs = char_to_byte(&t, s);
-            let be = char_to_byte(&t, e);
-            t.replace_range(bs..be, "");
-            drop(t);
+            self.text.update(|t| {
+                let bs = char_to_byte(t, s);
+                let be = char_to_byte(t, e);
+                t.replace_range(bs..be, "");
+            });
             self.cursor = s;
             self.anchor = None;
             self.goal_x.set(None);
@@ -669,11 +670,12 @@ impl TextInput {
         }
         self.delete_selection(ctx);
         self.clamp_cursor();
-        let mut s = self.text.borrow_mut();
-        let byte = char_to_byte(&s, self.cursor);
-        s.insert(byte, c);
+        let cursor = self.cursor;
+        self.text.update(|s| {
+            let byte = char_to_byte(s, cursor);
+            s.insert(byte, c);
+        });
         self.cursor += 1;
-        drop(s);
         self.anchor = None;
         self.goal_x.set(None);
         ctx.mark_dirty();
@@ -683,12 +685,13 @@ impl TextInput {
         if self.cursor == 0 {
             return;
         }
-        let mut s = self.text.borrow_mut();
-        let start = char_to_byte(&s, self.cursor - 1);
-        let end = char_to_byte(&s, self.cursor);
-        s.replace_range(start..end, "");
+        let cursor = self.cursor;
+        self.text.update(|s| {
+            let start = char_to_byte(s, cursor - 1);
+            let end = char_to_byte(s, cursor);
+            s.replace_range(start..end, "");
+        });
         self.cursor -= 1;
-        drop(s);
         self.goal_x.set(None);
         ctx.mark_dirty();
     }
@@ -698,11 +701,12 @@ impl TextInput {
         if self.cursor >= len {
             return;
         }
-        let mut s = self.text.borrow_mut();
-        let start = char_to_byte(&s, self.cursor);
-        let end = char_to_byte(&s, self.cursor + 1);
-        s.replace_range(start..end, "");
-        drop(s);
+        let cursor = self.cursor;
+        self.text.update(|s| {
+            let start = char_to_byte(s, cursor);
+            let end = char_to_byte(s, cursor + 1);
+            s.replace_range(start..end, "");
+        });
         self.goal_x.set(None);
         ctx.mark_dirty();
     }
@@ -721,7 +725,7 @@ impl TextInput {
     }
     /// 选中 `idx` 处的词（同类连续段）。
     fn select_word(&mut self, idx: usize) {
-        let chars: Vec<char> = self.text.borrow().chars().collect();
+        let chars: Vec<char> = self.text.with(|t| t.chars().collect());
         let (s, e) = word_run(&chars, idx);
         self.anchor = Some(s.min(chars.len()));
         self.cursor = e.min(chars.len());
@@ -751,7 +755,7 @@ impl TextInput {
     }
     /// 选中 `idx` 所在逻辑行（两 '\n' 之间）。单行文本无 '\n' 即全选。
     fn select_para(&mut self, idx: usize) {
-        let chars: Vec<char> = self.text.borrow().chars().collect();
+        let chars: Vec<char> = self.text.with(|t| t.chars().collect());
         let n = chars.len();
         let i = idx.min(n);
         let mut s = i;
@@ -956,11 +960,12 @@ impl TextInput {
     fn insert_newline(&mut self, ctx: &mut EventCtx) {
         self.delete_selection(ctx);
         self.clamp_cursor();
-        let mut s = self.text.borrow_mut();
-        let byte = char_to_byte(&s, self.cursor);
-        s.insert(byte, '\n');
+        let cursor = self.cursor;
+        self.text.update(|s| {
+            let byte = char_to_byte(s, cursor);
+            s.insert(byte, '\n');
+        });
         self.cursor += 1;
-        drop(s);
         self.anchor = None;
         self.goal_x.set(None);
         ctx.mark_dirty();
@@ -968,10 +973,11 @@ impl TextInput {
     /// 当前选区文本（无选区返回 None）。
     fn selected_text(&self) -> Option<String> {
         let (s, e) = self.selection()?;
-        let t = self.text.borrow();
-        let bs = char_to_byte(&t, s);
-        let be = char_to_byte(&t, e);
-        Some(t[bs..be].to_string())
+        self.text.with(|t| {
+            let bs = char_to_byte(t, s);
+            let be = char_to_byte(t, e);
+            Some(t[bs..be].to_string())
+        })
     }
     /// 在光标处粘贴（先删选区）。单行控件过滤所有控制字符；多行保留 '\n'
     /// （\r\n / \r 归一为 \n），仍过滤其他控制字符。
@@ -990,11 +996,13 @@ impl TextInput {
         if clean.is_empty() {
             return;
         }
-        let mut t = self.text.borrow_mut();
-        let byte = char_to_byte(&t, self.cursor);
-        t.insert_str(byte, &clean);
-        drop(t);
-        self.cursor += clean.chars().count();
+        let cursor = self.cursor;
+        let added = clean.chars().count();
+        self.text.update(|t| {
+            let byte = char_to_byte(t, cursor);
+            t.insert_str(byte, &clean);
+        });
+        self.cursor += added;
         self.anchor = None;
         self.goal_x.set(None);
         ctx.mark_dirty();
@@ -1140,7 +1148,7 @@ impl Widget for TextInput {
 
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
         let disp = self.display_string();
-        let is_empty = self.text.borrow().is_empty();
+        let is_empty = self.text.with(|t| t.is_empty());
         let multiline = self.is_multiline();
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
@@ -1595,8 +1603,7 @@ impl Widget for TextInput {
 #[cfg(test)]
 mod tests {
     use super::{word_run, wrap_paragraph, TextInput, TextLayout, VisLine};
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use crate::signal::signal;
 
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();
@@ -1643,7 +1650,7 @@ mod tests {
     }
 
     fn dummy_input() -> TextInput {
-        TextInput::new(Rc::new(RefCell::new(String::new())), String::new())
+        TextInput::new(signal(String::new()), String::new())
     }
 
     #[test]
@@ -1757,9 +1764,8 @@ mod anim_tests {
     use crate::core::Widget;
     use crate::geometry::Rect;
     use crate::render::SkiaCanvas;
+    use crate::signal::signal;
     use crate::style::Style;
-    use std::cell::Cell;
-    use std::rc::Rc;
     use tiny_skia::Pixmap;
 
     /// 把 Switch 在给定帧时钟下绘制一帧（触发 retarget-in-paint）。
@@ -1780,18 +1786,15 @@ mod anim_tests {
     #[test]
     fn pos_initializes_to_state_no_first_frame_anim() {
         // 构造期即按当前状态落定，避免首帧从 0 飞到 1 的突兀动画。
-        assert_eq!(Switch::new(Rc::new(Cell::new(true))).pos.get().value(), 1.0);
-        assert_eq!(
-            Switch::new(Rc::new(Cell::new(false))).pos.get().value(),
-            0.0
-        );
+        assert_eq!(Switch::new(signal(true)).pos.get().value(), 1.0);
+        assert_eq!(Switch::new(signal(false)).pos.get().value(), 0.0);
     }
 
     #[test]
     fn retargets_and_settles_when_animated() {
         crate::anim::set_enabled(true);
-        let state = Rc::new(Cell::new(false));
-        let sw = Switch::new(state.clone());
+        let state = signal(false);
+        let sw = Switch::new(state);
         paint_at(&sw, 0);
         state.set(true); // 外部切换
         paint_at(&sw, 0); // paint 检测目标变化 → 改向 1
@@ -1805,8 +1808,8 @@ mod anim_tests {
     #[test]
     fn snaps_when_animation_disabled() {
         crate::anim::set_enabled(false);
-        let state = Rc::new(Cell::new(false));
-        let sw = Switch::new(state.clone());
+        let state = signal(false);
+        let sw = Switch::new(state);
         state.set(true);
         paint_at(&sw, 0);
         assert_eq!(sw.pos.get().value(), 1.0, "关闭动画应瞬时到 on");

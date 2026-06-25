@@ -3,9 +3,6 @@
 //! 主界面截屏：cargo run --example phase5_containers -- --screenshot artifacts/phase5.png
 //! 对话框截屏：cargo run --example phase5_containers -- --dialog --screenshot artifacts/phase5_dialog.png
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 fn list_item(i: usize) -> Element {
@@ -30,8 +27,8 @@ fn list_item(i: usize) -> Element {
 
 fn main() {
     let dialog_open = std::env::args().any(|a| a == "--dialog");
-    let show = Rc::new(Cell::new(dialog_open));
-    let tab = Rc::new(Cell::new(0usize));
+    let show = signal(dialog_open);
+    let tab = signal(0usize);
 
     // 列表页：滚动容器装入 20 个条目
     let mut list = Element::scroll().fill().bg(Color::WHITE).corner(8.0);
@@ -40,7 +37,7 @@ fn main() {
     }
     let page_list = Element::col().fill().child(list);
 
-    let show2 = show.clone();
+    let show2 = show;
     let page_about = Element::col()
         .fill()
         .padding(16)
@@ -62,11 +59,11 @@ fn main() {
         .child(Element::divider())
         .child(Element::button("打开对话框").on_click(move |_| show2.set(true)));
 
-    let tabs = Element::tabs(tab.clone(), vec![("列表", page_list), ("关于", page_about)]);
+    let tabs = Element::tabs(tab, vec![("列表", page_list), ("关于", page_about)]);
 
-    let show3 = show.clone();
+    let show3 = show;
     let dialog = Element::dialog(
-        show.clone(),
+        show,
         Element::col()
             .width(300)
             .bg(Color::WHITE)

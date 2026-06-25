@@ -17,7 +17,6 @@ pub mod window_buttons;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
@@ -25,6 +24,7 @@ use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Insets, Rect, Size};
 use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::{Align, Axis, Dimension};
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -238,9 +238,9 @@ impl Widget for Label {
     }
 }
 
-/// 动态文本标签：绑定 `Rc<RefCell<String>>`，只读显示，内容随绑定变化而更新。
+/// 动态文本标签：绑定 `Signal<String>`，只读显示，内容随绑定变化而更新。
 pub struct DynLabel {
-    text: Rc<RefCell<String>>,
+    text: Signal<String>,
     pub max_lines: Option<usize>,
     pub truncate: Truncate,
     /// 截断缓存 `(text_clone, content_w, fsize_bits) → 截断串`。
@@ -248,7 +248,7 @@ pub struct DynLabel {
 }
 
 impl DynLabel {
-    pub fn new(text: Rc<RefCell<String>>) -> Self {
+    pub fn new(text: Signal<String>) -> Self {
         Self {
             text,
             max_lines: None,
@@ -311,7 +311,7 @@ impl DynLabel {
 
 impl Widget for DynLabel {
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let s = self.text.borrow();
+        let s = self.text.get();
         let max_w = if avail.w > 0 {
             Some(avail.w as f32)
         } else {
@@ -337,7 +337,7 @@ impl Widget for DynLabel {
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
-        let s = self.text.borrow();
+        let s = self.text.get();
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
 
@@ -704,7 +704,7 @@ pub struct Element {
     on_drop: Option<DropFn>,
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
-    enabled: Option<Rc<Cell<bool>>>,
+    enabled: Option<Signal<bool>>,
     tooltip: Option<String>,
 }
 
@@ -763,8 +763,8 @@ impl Element {
         Self::base(Layout::None).widget(Label::new(text.into()))
     }
 
-    /// 动态标签（绑定 `Rc<RefCell<String>>`，只读显示）。
-    pub fn label_rc(text: Rc<RefCell<String>>) -> Self {
+    /// 动态标签（绑定 `Signal<String>`，只读显示）。
+    pub fn label_rc(text: Signal<String>) -> Self {
         Self::base(Layout::None).widget(DynLabel::new(text))
     }
 
@@ -988,9 +988,9 @@ impl Element {
         self.config_button(|b| b.size = ButtonSize::Small, "small()")
     }
 
-    /// 启用标志（绑定 `Rc<Cell<bool>>`，运行期可切换）。**适用于任意控件/容器**：
+    /// 启用标志（绑定 `Signal<bool>`，运行期可切换）。**适用于任意控件/容器**：
     /// 核心据此拦事件、跳 Tab、令控件置灰；禁用沿父链继承（禁用容器即禁用其全部子节点）。
-    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
         self.enabled = Some(flag);
         self
     }
@@ -1007,7 +1007,7 @@ impl Element {
     /// 静态禁用（`true`=禁用）。`false` 为默认启用、无操作。适用于任意控件/容器。
     pub fn disabled(mut self, on: bool) -> Self {
         if on {
-            self.enabled = Some(Rc::new(Cell::new(false)));
+            self.enabled = Some(crate::signal::signal(false));
         }
         self
     }
@@ -1023,8 +1023,8 @@ impl Element {
         self
     }
 
-    /// 复选框（绑定 `Rc<Cell<bool>>`）。
-    pub fn checkbox(label: impl Into<String>, state: Rc<Cell<bool>>) -> Self {
+    /// 复选框（绑定 `Signal<bool>`）。
+    pub fn checkbox(label: impl Into<String>, state: Signal<bool>) -> Self {
         Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
     }
     /// 显式设置语义意图色。Button / CheckBox 通用。
@@ -1059,21 +1059,21 @@ impl Element {
         debug_assert!(false, "{who} 只能用于 Button / CheckBox");
         self
     }
-    /// 开关（绑定 `Rc<Cell<bool>>`）。
-    pub fn switch(state: Rc<Cell<bool>>) -> Self {
+    /// 开关（绑定 `Signal<bool>`）。
+    pub fn switch(state: Signal<bool>) -> Self {
         Self::base(Layout::None).widget(Switch::new(state))
     }
-    /// 单选按钮（共享 `Rc<Cell<usize>>` 组状态 + 本项索引）。
-    pub fn radio(label: impl Into<String>, group: Rc<Cell<usize>>, index: usize) -> Self {
+    /// 单选按钮（共享 `Signal<usize>` 组状态 + 本项索引）。
+    pub fn radio(label: impl Into<String>, group: Signal<usize>, index: usize) -> Self {
         Self::base(Layout::None).widget(RadioButton::new(label.into(), group, index))
     }
-    /// 滑块（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
-    pub fn slider(value: Rc<Cell<f32>>) -> Self {
+    /// 滑块（绑定 `Signal<f32>`，值域 0.0..=1.0）。
+    pub fn slider(value: Signal<f32>) -> Self {
         Self::base(Layout::None).widget(Slider::new(value))
     }
-    /// 单行文本输入（绑定 `Rc<RefCell<String>>`）。
+    /// 单行文本输入（绑定 `Signal<String>`）。
     /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` 配置行为。
-    pub fn text_input(text: Rc<RefCell<String>>, placeholder: impl Into<String>) -> Self {
+    pub fn text_input(text: Signal<String>, placeholder: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
     }
 
@@ -1118,35 +1118,35 @@ impl Element {
         self
     }
 
-    /// 分段控制器（绑定 `Rc<Cell<usize>>` 选中索引 + 段标签）：连体多段单选，
+    /// 分段控制器（绑定 `Signal<usize>` 选中索引 + 段标签）：连体多段单选，
     /// 选中段高亮。语义同 `radio` 组，外观更紧凑——适合"二/三选一"切换。
     /// 点击选段、悬停逐段高亮、聚焦后左右方向键移动选中。
-    pub fn segmented(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+    pub fn segmented(options: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
         let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
         debug_assert!(!opts.is_empty(), "Element::segmented 至少需要一段");
         Self::base(Layout::None).widget(segmented::SegmentedControl::new(opts, selected))
     }
 
-    /// 下拉选择（绑定 `Rc<Cell<usize>>` 选中索引 + 选项标签）。
-    pub fn dropdown(options: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+    /// 下拉选择（绑定 `Signal<usize>` 选中索引 + 选项标签）。
+    pub fn dropdown(options: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
         let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
         Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
     }
 
-    /// 数字步进（绑定 `Rc<Cell<f64>>`，带范围与步长；小数位由步长推断）。
-    pub fn stepper(value: Rc<Cell<f64>>, min: f64, max: f64, step: f64) -> Self {
+    /// 数字步进（绑定 `Signal<f64>`，带范围与步长；小数位由步长推断）。
+    pub fn stepper(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
         Self::base(Layout::None).widget(stepper::Stepper::new(value, min, max, step))
     }
 
-    /// 单选列表（绑定 `Rc<Cell<usize>>` 选中索引 + 行标签）。可滚动；
+    /// 单选列表（绑定 `Signal<usize>` 选中索引 + 行标签）。可滚动；
     /// 外观（背景/圆角/边框）由调用方在返回的滚动容器上设置。
     ///
     /// 已知限制：每行均可聚焦，长列表会拉长 Tab 焦点链（用户需多次 Tab 跨过）。
     /// 后续可改为整列表单一 tab-stop + 方向键内部移动。
-    pub fn list(items: Vec<impl Into<String>>, selected: Rc<Cell<usize>>) -> Self {
+    pub fn list(items: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(it.into(), selected.clone(), i);
+            let row = list::ListRow::new(it.into(), selected, i);
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -1161,11 +1161,11 @@ impl Element {
     /// 图标用 `ImageContent`，可链 `.fit()`/状态换图等；行图标随选中/悬停状态调制。
     pub fn list_icons(
         items: Vec<(impl Into<String>, ImageContent)>,
-        selected: Rc<Cell<usize>>,
+        selected: Signal<usize>,
     ) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, (label, icon)) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(label.into(), selected.clone(), i).with_icon(icon);
+            let row = list::ListRow::new(label.into(), selected, i).with_icon(icon);
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -1188,12 +1188,12 @@ impl Element {
     /// 可折叠分组：点击标题行展开 / 收起 `body`。`expanded` 绑定展开状态，
     /// body 经 `visible_when(expanded)` 显隐——收起时不占布局、不参与命中。
     /// 标题行右侧三角随状态翻转（展开向下 / 收起向右）。
-    pub fn collapsible(title: impl Into<String>, expanded: Rc<Cell<bool>>, body: Element) -> Self {
+    pub fn collapsible(title: impl Into<String>, expanded: Signal<bool>, body: Element) -> Self {
         let header = Self::base(Layout::None)
-            .widget(nav::CollapsibleHeader::new(title.into(), expanded.clone()))
+            .widget(nav::CollapsibleHeader::new(title.into(), expanded))
             .width_match()
             .height(nav::NAV_ROW_H);
-        let show = expanded.clone();
+        let show = expanded;
         Element::col()
             .width_match()
             .child(header)
@@ -1202,11 +1202,11 @@ impl Element {
 
     /// 手风琴（多面板折叠卡片）：带边框/圆角的卡片，逐面板「标题头 + 可折叠内容」，
     /// 面板间分隔线。**单开互斥**版——`selected` 共享选中索引，`-1` = 全收起，初值即
-    /// 默认展开项（与 [`Element::tabs`] 的 `Rc<Cell<usize>>` 选中模型同构）。
+    /// 默认展开项（与 [`Element::tabs`] 的 `Signal<usize>` 选中模型同构）。
     /// 点击某面板头展开它会自动收起其它面板。
-    pub fn accordion(selected: Rc<Cell<i32>>, panels: Vec<(impl Into<String>, Element)>) -> Self {
+    pub fn accordion(selected: Signal<i32>, panels: Vec<(impl Into<String>, Element)>) -> Self {
         Self::accordion_impl(panels, |i| nav::ExpandState::Single {
-            sel: selected.clone(),
+            sel: selected,
             index: i,
         })
     }
@@ -1214,7 +1214,7 @@ impl Element {
     /// 手风琴**多开**版：各面板独立展开/收起、互不影响（初始全部收起）。
     pub fn accordion_multi(panels: Vec<(impl Into<String>, Element)>) -> Self {
         Self::accordion_impl(panels, |_| {
-            nav::ExpandState::Multi(Rc::new(Cell::new(false)))
+            nav::ExpandState::Multi(crate::signal::signal(false))
         })
     }
 
@@ -1259,8 +1259,8 @@ impl Element {
         card
     }
 
-    /// 确定进度条（绑定 `Rc<Cell<f32>>`，值域 0.0..=1.0）。
-    pub fn progress(value: Rc<Cell<f32>>) -> Self {
+    /// 确定进度条（绑定 `Signal<f32>`，值域 0.0..=1.0）。
+    pub fn progress(value: Signal<f32>) -> Self {
         Self::base(Layout::None).widget(progress::ProgressBar::determinate(value))
     }
     /// 不确定进度条（忙碌动画）。需要宿主按帧驱动（仅可见时消耗 CPU）。
@@ -1286,7 +1286,7 @@ impl Element {
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
     /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
-    pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(impl Into<String>, Element)>) -> Self {
+    pub fn tabs(selected: Signal<usize>, pages: Vec<(impl Into<String>, Element)>) -> Self {
         let mut bar = Element::row()
             .width_match()
             .height(40)
@@ -1294,9 +1294,9 @@ impl Element {
             .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, page)) in pages.into_iter().enumerate() {
-            let tab = containers::TabButton::new(title.into(), selected.clone(), i);
+            let tab = containers::TabButton::new(title.into(), selected, i);
             bar = bar.child(Element::base(Layout::None).widget(tab));
-            let sel2 = selected.clone();
+            let sel2 = selected;
             content = content.child(page.fill().visible_when(move || sel2.get() == i));
         }
         Element::col().fill().spacing(10).child(bar).child(content)
@@ -1305,7 +1305,7 @@ impl Element {
     /// 带前置图标的标签页：`pages` 为 (标题, 图标内容, 页面) 列表。其余同 `tabs`。
     /// 标签图标随选中/悬停状态调制。
     pub fn tabs_icons(
-        selected: Rc<Cell<usize>>,
+        selected: Signal<usize>,
         pages: Vec<(impl Into<String>, ImageContent, Element)>,
     ) -> Self {
         let mut bar = Element::row()
@@ -1315,9 +1315,9 @@ impl Element {
             .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
-            let tab = containers::TabButton::new(title.into(), selected.clone(), i).with_icon(icon);
+            let tab = containers::TabButton::new(title.into(), selected, i).with_icon(icon);
             bar = bar.child(Element::base(Layout::None).widget(tab));
-            let sel2 = selected.clone();
+            let sel2 = selected;
             content = content.child(page.fill().visible_when(move || sel2.get() == i));
         }
         Element::col().fill().spacing(10).child(bar).child(content)
@@ -1325,7 +1325,7 @@ impl Element {
 
     /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
     /// `show` 绑定显示标志。
-    pub fn dialog(show: Rc<Cell<bool>>, content: Element) -> Self {
+    pub fn dialog(show: Signal<bool>, content: Element) -> Self {
         Element::stack()
             .fill()
             .widget(containers::ModalScrim)
@@ -1544,7 +1544,9 @@ impl Element {
 mod tests {
     use super::*;
     use crate::geometry::Point;
+    use crate::signal::signal;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     /// 在 200×200 窗口里布局并返回 (tree, root)。
     fn layout(el: Element) -> Tree {
@@ -1672,8 +1674,8 @@ mod tests {
 
     #[test]
     fn drop_skips_disabled_subtree() {
-        let got = Rc::new(Cell::new(0u32));
-        let sink = got.clone();
+        let got = signal(0u32);
+        let sink = got;
         // 回调挂在被禁用的容器上：核心拦截，不触发。
         let mut tree = layout(
             Element::col()

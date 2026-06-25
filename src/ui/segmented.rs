@@ -8,13 +8,13 @@
 //! 见 `core::dispatch_pointer`）；获得焦点后左右方向键在相邻段间移动选中。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -25,7 +25,7 @@ const SEG_PAD_X: i32 = 14;
 /// 多段单选控件。各段等宽，选中段高亮，段间以分隔线连体。
 pub struct SegmentedControl {
     options: Vec<String>,
-    selected: Rc<Cell<usize>>,
+    selected: Signal<usize>,
     /// 当前悬停段下标（仅视觉，不写绑定状态）。
     hover: Option<usize>,
     /// 选中高亮位置补间：存动画中的选中下标(f32)，驱动胶囊跨段滑动。
@@ -33,7 +33,7 @@ pub struct SegmentedControl {
 }
 
 impl SegmentedControl {
-    pub fn new(options: Vec<String>, selected: Rc<Cell<usize>>) -> Self {
+    pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
         let init = selected.get().min(options.len().saturating_sub(1)) as f32;
         Self {
             options,
@@ -275,6 +275,7 @@ mod tests {
     use super::*;
     use crate::event::{MouseButton, PointerEvent};
     use crate::geometry::Point;
+    use crate::signal::signal;
     use crate::ui::Element;
 
     /// 在 200×200 窗口布局单个分段控件，返回 (tree, root)。
@@ -306,10 +307,10 @@ mod tests {
 
     #[test]
     fn click_selects_segment_under_pointer() {
-        let sel = Rc::new(Cell::new(0usize));
+        let sel = signal(0usize);
         // 180 宽 3 段 → 每段 60：[0,60) [60,120) [120,180)。根布局落在 (0,0)。
         let mut tree = layout(
-            Element::segmented(vec!["简体", "繁体", "其它"], sel.clone())
+            Element::segmented(vec!["简体", "繁体", "其它"], sel)
                 .width(180)
                 .height(32),
         );
@@ -321,9 +322,9 @@ mod tests {
 
     #[test]
     fn arrow_keys_move_selection() {
-        let sel = Rc::new(Cell::new(0usize));
+        let sel = signal(0usize);
         let mut tree = layout(
-            Element::segmented(vec!["A", "B", "C"], sel.clone())
+            Element::segmented(vec!["A", "B", "C"], sel)
                 .width(180)
                 .height(32),
         );
@@ -377,8 +378,8 @@ mod tests {
     #[test]
     fn selected_pill_slides_then_settles_when_animated() {
         crate::anim::set_enabled(true);
-        let sel = Rc::new(Cell::new(0usize));
-        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel.clone());
+        let sel = signal(0usize);
+        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel);
         paint_at(&sc, 0);
         assert_eq!(sc.sel_pos.get().value(), 0.0, "初始胶囊在第 0 段");
         sel.set(2); // 外部选到第 3 段
@@ -392,8 +393,8 @@ mod tests {
     #[test]
     fn selected_pill_snaps_when_animation_disabled() {
         crate::anim::set_enabled(false);
-        let sel = Rc::new(Cell::new(0usize));
-        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel.clone());
+        let sel = signal(0usize);
+        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel);
         sel.set(2);
         paint_at(&sc, 0);
         assert_eq!(sc.sel_pos.get().value(), 2.0, "关闭动画应瞬时到选中段");
@@ -403,10 +404,7 @@ mod tests {
 
     #[test]
     fn seg_at_maps_boundaries() {
-        let sc = SegmentedControl::new(
-            vec!["a".into(), "b".into(), "c".into()],
-            Rc::new(Cell::new(0)),
-        );
+        let sc = SegmentedControl::new(vec!["a".into(), "b".into(), "c".into()], signal(0));
         let b = Rect::new(0, 0, 180, 32);
         assert_eq!(sc.seg_at(b, 0), 0);
         assert_eq!(sc.seg_at(b, 59), 0);

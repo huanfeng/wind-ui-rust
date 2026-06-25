@@ -4,9 +4,9 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
-use std::cell::Cell;
 use std::path::PathBuf;
-use std::rc::Rc;
+
+use crate::signal::Signal;
 
 use crate::event::{
     CursorShape, Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind,
@@ -145,7 +145,7 @@ pub struct Node {
     pub vis_cond: Option<Box<dyn Fn() -> bool>>,
     /// 自身启用标志（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
     /// 跳焦点，并把启用态传入 `Widget::paint` 供控件置灰。
-    pub enabled: Option<Rc<Cell<bool>>>,
+    pub enabled: Option<Signal<bool>>,
     /// 文件拖放回调（None=不接收拖放）。落点命中本节点或其子节点时，沿父链冒泡
     /// 到首个设了回调的节点触发；放在 fill 容器/根上即等价"全窗拖放"。
     pub on_drop: Option<DropFn>,
@@ -1537,8 +1537,9 @@ mod tests {
     use super::*;
     use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
     use crate::geometry::{Point, Size};
+    use crate::signal::signal;
     use crate::ui::Element;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     fn layout(root: Element, w: i32, h: i32) -> Tree {
@@ -1626,8 +1627,8 @@ mod tests {
 
     #[test]
     fn right_click_does_not_activate_button() {
-        let clicks = Rc::new(Cell::new(0));
-        let (mut tree, btn) = button_tree(clicks.clone());
+        let clicks = signal(0);
+        let (mut tree, btn) = button_tree(clicks);
         let b = tree.abs_bounds(btn);
         let c = Point::new(b.x + b.w / 2, b.y + b.h / 2);
         let (mut hover, mut cap) = (None, None);
@@ -1639,11 +1640,11 @@ mod tests {
 
     #[test]
     fn right_click_does_not_toggle_checkbox() {
-        let state = Rc::new(Cell::new(false));
+        let state = signal(false);
         let root = Element::col()
             .width(200)
             .height(40)
-            .child(Element::checkbox("x", state.clone()));
+            .child(Element::checkbox("x", state));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1657,7 +1658,7 @@ mod tests {
         assert!(!state.get(), "右键不应切换复选框");
     }
 
-    fn button_tree(clicks: Rc<Cell<i32>>) -> (Tree, NodeId) {
+    fn button_tree(clicks: Signal<i32>) -> (Tree, NodeId) {
         let c = clicks;
         let root = Element::col()
             .width(200)
@@ -1675,8 +1676,8 @@ mod tests {
 
     #[test]
     fn button_click_fires_callback_and_captures() {
-        let clicks = Rc::new(Cell::new(0));
-        let (mut tree, btn) = button_tree(clicks.clone());
+        let clicks = signal(0);
+        let (mut tree, btn) = button_tree(clicks);
         let b = tree.abs_bounds(btn);
         let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
         let (mut hover, mut cap) = (None, None);
@@ -1720,7 +1721,7 @@ mod tests {
     #[test]
     fn button_press_reports_visual_rect_damage() {
         // 按钮按下走 mark_dirty → DispatchResult 应带本节点视觉矩形的 Rect 失效（供局部重绘）。
-        let clicks = Rc::new(Cell::new(0));
+        let clicks = signal(0);
         let (mut tree, btn) = button_tree(clicks);
         let b = tree.abs_bounds(btn);
         let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
@@ -1736,8 +1737,8 @@ mod tests {
 
     #[test]
     fn release_outside_does_not_click() {
-        let clicks = Rc::new(Cell::new(0));
-        let (mut tree, btn) = button_tree(clicks.clone());
+        let clicks = signal(0);
+        let (mut tree, btn) = button_tree(clicks);
         let b = tree.abs_bounds(btn);
         let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
         let outside = Point::new(b.x + b.w + 60, b.y);
@@ -1752,7 +1753,7 @@ mod tests {
 
     #[test]
     fn hover_tracks_pointer() {
-        let clicks = Rc::new(Cell::new(0));
+        let clicks = signal(0);
         let (mut tree, btn) = button_tree(clicks);
         let b = tree.abs_bounds(btn);
         let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
@@ -1777,8 +1778,8 @@ mod tests {
 
     #[test]
     fn disabled_button_ignores_click_and_skips_focus() {
-        let clicks = Rc::new(Cell::new(0));
-        let c = clicks.clone();
+        let clicks = signal(0);
+        let c = clicks;
         let root = Element::col().width(200).height(100).padding(10).child(
             Element::button("OK")
                 .on_click(move |_| c.set(c.get() + 1))
@@ -1824,12 +1825,12 @@ mod tests {
 
     #[test]
     fn checkbox_binds_and_toggles() {
-        let st = Rc::new(Cell::new(false));
+        let st = signal(false);
         let root = Element::col()
             .width(200)
             .height(60)
             .padding(5)
-            .child(Element::checkbox("启用", st.clone()));
+            .child(Element::checkbox("启用", st));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1846,13 +1847,14 @@ mod tests {
     fn checkbox_on_toggle_intercepts_and_is_controlled() {
         // 设了 on_toggle 后：点击只触发回调、不自动翻转 state（受控），
         // 渲染完全跟随外部 state——app 可在翻转前弹确认、确认后才置真。
-        let st = Rc::new(Cell::new(false));
-        let fired = Rc::new(Cell::new(0u32));
-        let f = fired.clone();
-        let root =
-            Element::col().width(200).height(60).padding(5).child(
-                Element::checkbox("启用", st.clone()).on_toggle(move |_| f.set(f.get() + 1)),
-            );
+        let st = signal(false);
+        let fired = signal(0u32);
+        let f = fired;
+        let root = Element::col()
+            .width(200)
+            .height(60)
+            .padding(5)
+            .child(Element::checkbox("启用", st).on_toggle(move |_| f.set(f.get() + 1)));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1873,14 +1875,14 @@ mod tests {
 
     #[test]
     fn radio_group_is_exclusive() {
-        let g = Rc::new(Cell::new(0usize));
+        let g = signal(0usize);
         let root = Element::row()
             .width(360)
             .height(40)
             .padding(5)
             .spacing(20)
-            .child(Element::radio("A", g.clone(), 0))
-            .child(Element::radio("B", g.clone(), 1));
+            .child(Element::radio("A", g, 0))
+            .child(Element::radio("B", g, 1));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -1893,11 +1895,11 @@ mod tests {
 
     #[test]
     fn slider_sets_value_on_press() {
-        let v = Rc::new(Cell::new(0.0f32));
+        let v = signal(0.0f32);
         let root = Element::col()
             .width(200)
             .height(40)
-            .child(Element::slider(v.clone()).width(100));
+            .child(Element::slider(v).width(100));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2044,8 +2046,8 @@ mod tests {
 
     #[test]
     fn vis_cond_toggles_visibility() {
-        let flag = Rc::new(Cell::new(false));
-        let f2 = flag.clone();
+        let flag = signal(false);
+        let f2 = flag;
         let root = Element::col()
             .width(100)
             .height(100)
@@ -2058,11 +2060,11 @@ mod tests {
 
     #[test]
     fn text_input_edits_via_keys() {
-        let txt = Rc::new(RefCell::new(String::new()));
+        let txt = signal(String::new());
         let root = Element::col()
             .width(200)
             .height(40)
-            .child(Element::text_input(txt.clone(), "ph"));
+            .child(Element::text_input(txt, "ph"));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2077,17 +2079,17 @@ mod tests {
         };
         tree.dispatch_key(key(Key::Char('a')), Some(input));
         tree.dispatch_key(key(Key::Char('中')), Some(input));
-        assert_eq!(&*txt.borrow(), "a中", "应插入字符");
+        assert_eq!(txt.get(), "a中", "应插入字符");
         tree.dispatch_key(key(Key::Backspace), Some(input));
-        assert_eq!(&*txt.borrow(), "a", "退格应删除一个字符");
+        assert_eq!(txt.get(), "a", "退格应删除一个字符");
     }
 
-    fn input_tree(initial: &str) -> (Tree, NodeId, Rc<RefCell<String>>) {
-        let txt = Rc::new(RefCell::new(String::from(initial)));
+    fn input_tree(initial: &str) -> (Tree, NodeId, Signal<String>) {
+        let txt = signal(String::from(initial));
         let root = Element::col()
             .width(200)
             .height(40)
-            .child(Element::text_input(txt.clone(), "ph"));
+            .child(Element::text_input(txt, "ph"));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2108,7 +2110,7 @@ mod tests {
         };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Char('X'), false), Some(input));
-        assert_eq!(&*txt.borrow(), "X", "全选后输入应替换全部");
+        assert_eq!(txt.get(), "X", "全选后输入应替换全部");
     }
 
     #[test]
@@ -2122,7 +2124,7 @@ mod tests {
         };
         tree.dispatch_key(k(Key::Home), Some(input)); // 光标到行首
         tree.dispatch_key(k(Key::Delete), Some(input)); // 删首字符
-        assert_eq!(&*txt.borrow(), "bc", "Home 后 Delete 应删除首字符");
+        assert_eq!(txt.get(), "bc", "Home 后 Delete 应删除首字符");
     }
 
     #[test]
@@ -2143,7 +2145,7 @@ mod tests {
             ctrl: false,
         };
         tree.dispatch_key(bs, Some(input));
-        assert_eq!(&*txt.borrow(), "ab", "Shift 选区后退格应删除选区");
+        assert_eq!(txt.get(), "ab", "Shift 选区后退格应删除选区");
     }
 
     struct SharedClip(Rc<RefCell<String>>);
@@ -2172,17 +2174,17 @@ mod tests {
         assert_eq!(&*clip.borrow(), "hello", "复制应写入剪贴板");
         tree.dispatch_key(k(Key::End, false), Some(input)); // 光标到末尾、清选区
         tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V 粘贴
-        assert_eq!(&*txt.borrow(), "hellohello", "粘贴应在光标处插入剪贴板文本");
+        assert_eq!(txt.get(), "hellohello", "粘贴应在光标处插入剪贴板文本");
     }
 
     #[test]
     fn password_input_blocks_copy_allows_paste() {
         let clip = Rc::new(RefCell::new(String::from("seed")));
-        let txt = Rc::new(RefCell::new(String::from("secret")));
+        let txt = signal(String::from("secret"));
         let root = Element::col()
             .width(200)
             .height(40)
-            .child(Element::text_input(txt.clone(), "ph").password());
+            .child(Element::text_input(txt, "ph").password());
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2201,7 +2203,7 @@ mod tests {
         assert_eq!(&*clip.borrow(), "seed", "密码模式 Ctrl+C 不得写出明文");
         // 但粘贴仍可用：全选状态下粘贴替换内容。
         tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V
-        assert_eq!(&*txt.borrow(), "seed", "密码模式仍允许粘贴");
+        assert_eq!(txt.get(), "seed", "密码模式仍允许粘贴");
     }
 
     #[test]
@@ -2225,16 +2227,15 @@ mod tests {
             ctrl: false,
         };
         tree.dispatch_key(key, Some(input));
-        assert_eq!(&*txt.borrow(), "Z", "三击全选后输入应替换全部");
+        assert_eq!(txt.get(), "Z", "三击全选后输入应替换全部");
     }
 
-    fn multiline_tree(initial: &str) -> (Tree, NodeId, Rc<RefCell<String>>) {
-        let txt = Rc::new(RefCell::new(String::from(initial)));
-        let root = Element::col().width(200).height(120).child(
-            Element::text_input(txt.clone(), "ph")
-                .multiline()
-                .height(120),
-        );
+    fn multiline_tree(initial: &str) -> (Tree, NodeId, Signal<String>) {
+        let txt = signal(String::from(initial));
+        let root = Element::col()
+            .width(200)
+            .height(120)
+            .child(Element::text_input(txt, "ph").multiline().height(120));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2256,7 +2257,7 @@ mod tests {
         };
         tree.dispatch_key(k(Key::Enter), Some(input));
         tree.dispatch_key(k(Key::Char('c')), Some(input));
-        assert_eq!(&*txt.borrow(), "ab\nc", "多行 Enter 应插入换行符");
+        assert_eq!(txt.get(), "ab\nc", "多行 Enter 应插入换行符");
     }
 
     #[test]
@@ -2272,7 +2273,7 @@ mod tests {
             Some(input),
         );
         assert!(!res.consumed, "单行 Enter 不应被消费(冒泡给默认行为)");
-        assert_eq!(&*txt.borrow(), "ab", "单行 Enter 不改文本");
+        assert_eq!(txt.get(), "ab", "单行 Enter 不改文本");
     }
 
     #[test]
@@ -2289,22 +2290,17 @@ mod tests {
             },
             Some(input),
         );
-        assert_eq!(
-            &*txt.borrow(),
-            "x\ny",
-            "多行粘贴应保留换行(\\r\\n 归一为 \\n)"
-        );
+        assert_eq!(txt.get(), "x\ny", "多行粘贴应保留换行(\\r\\n 归一为 \\n)");
     }
 
     #[test]
     fn password_multiline_order_still_single_line() {
         // .password().multiline() 顺序也不能让换行进入密码底层文本。
-        let txt = Rc::new(RefCell::new(String::from("pw")));
-        let root = Element::col().width(200).height(40).child(
-            Element::text_input(txt.clone(), "ph")
-                .password()
-                .multiline(),
-        );
+        let txt = signal(String::from("pw"));
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .child(Element::text_input(txt, "ph").password().multiline());
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2321,7 +2317,7 @@ mod tests {
             Some(input),
         );
         assert!(!res.consumed, "密码框 Enter 不应被消费");
-        assert_eq!(&*txt.borrow(), "pw", "密码框 Enter 不得插入换行");
+        assert_eq!(txt.get(), "pw", "密码框 Enter 不得插入换行");
     }
 
     #[test]
@@ -2357,7 +2353,7 @@ mod tests {
     #[test]
     fn caret_of_none_for_non_text() {
         // 按钮等非文本控件无光标。
-        let (tree, btn) = button_tree(Rc::new(Cell::new(0)));
+        let (tree, btn) = button_tree(signal(0));
         assert!(
             tree.caret_of(btn).is_none(),
             "非文本控件 caret_of 应为 None"
@@ -2373,9 +2369,9 @@ mod tests {
 
     #[test]
     fn list_click_selects_row() {
-        let sel = Rc::new(Cell::new(0usize));
+        let sel = signal(0usize);
         let root = Element::col().width(200).height(200).child(
-            Element::list(vec!["A", "B", "C"], sel.clone())
+            Element::list(vec!["A", "B", "C"], sel)
                 .width_match()
                 .height(200),
         );
@@ -2398,11 +2394,11 @@ mod tests {
 
     #[test]
     fn stepper_buttons_adjust_and_clamp() {
-        let v = Rc::new(Cell::new(2.0f64));
+        let v = signal(2.0f64);
         let root = Element::col()
             .width(120)
             .height(40)
-            .child(Element::stepper(v.clone(), 0.0, 3.0, 1.0).width(120));
+            .child(Element::stepper(v, 0.0, 3.0, 1.0).width(120));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2430,11 +2426,11 @@ mod tests {
     #[test]
     fn stepper_degenerate_inputs_no_panic() {
         // min>max 且 step=0：构造期归一(step→1, min/max 互换)，点击不得 panic。
-        let v = Rc::new(Cell::new(5.0f64));
+        let v = signal(5.0f64);
         let root = Element::col()
             .width(120)
             .height(40)
-            .child(Element::stepper(v.clone(), 10.0, 0.0, 0.0).width(120));
+            .child(Element::stepper(v, 10.0, 0.0, 0.0).width(120));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2467,7 +2463,7 @@ mod tests {
     #[test]
     fn determinate_progress_no_animation() {
         crate::anim::reset_request();
-        let v = Rc::new(Cell::new(0.5f32));
+        let v = signal(0.5f32);
         let root = Element::col()
             .width(200)
             .height(20)
@@ -2483,11 +2479,11 @@ mod tests {
 
     #[test]
     fn dropdown_click_opens_menu_and_selects() {
-        let sel = Rc::new(Cell::new(0usize));
+        let sel = signal(0usize);
         let root = Element::col()
             .width(220)
             .height(40)
-            .child(Element::dropdown(vec!["A", "B", "C"], sel.clone()).width(220));
+            .child(Element::dropdown(vec!["A", "B", "C"], sel).width(220));
         let mut tree = Tree::new();
         let id = root.build(&mut tree);
         tree.root = Some(id);
@@ -2622,6 +2618,6 @@ mod tests {
             ctrl: false,
         };
         tree.dispatch_key(key, Some(input));
-        assert_eq!(&*txt.borrow(), "Z world", "双击应选中首词并被输入替换");
+        assert_eq!(txt.get(), "Z world", "双击应选中首词并被输入替换");
     }
 }

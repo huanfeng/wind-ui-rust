@@ -9,13 +9,13 @@
 //! Collapsible 专注"展开/收起"，三者组合即可拼出侧栏分组与内容区钻入，互不重复。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{CursorShape, Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -274,13 +274,13 @@ impl Widget for NavRow {
 /// 语义无需"拖出取消"，也无独立按压色，故不引入 Press 态。
 pub struct CollapsibleHeader {
     title: String,
-    expanded: Rc<Cell<bool>>,
+    expanded: Signal<bool>,
     hover: bool,
     hover_anim: Cell<Transition<f32>>,
 }
 
 impl CollapsibleHeader {
-    pub fn new(title: String, expanded: Rc<Cell<bool>>) -> Self {
+    pub fn new(title: String, expanded: Signal<bool>) -> Self {
         Self {
             title,
             expanded,
@@ -369,9 +369,9 @@ impl Widget for CollapsibleHeader {
 pub enum ExpandState {
     /// 单开互斥：共享选中索引，`-1` = 全收起。本面板展开 ⟺ `sel == index`。
     /// 点击展开本面板会把 `sel` 置为本索引，其它面板因 `sel != 其索引` 自动收起。
-    Single { sel: Rc<Cell<i32>>, index: usize },
+    Single { sel: Signal<i32>, index: usize },
     /// 多开独立：本面板自己的展开布尔，互不影响。
-    Multi(Rc<Cell<bool>>),
+    Multi(Signal<bool>),
 }
 
 impl ExpandState {
@@ -493,6 +493,7 @@ mod tests {
     use crate::core::{NodeId, Tree};
     use crate::event::{KeyEvent, MouseButton, PointerEvent};
     use crate::geometry::Point;
+    use crate::signal::signal;
     use crate::ui::Element;
 
     fn build(el: Element) -> (Tree, NodeId) {
@@ -520,8 +521,8 @@ mod tests {
 
     #[test]
     fn nav_row_click_fires_callback_and_hand_cursor() {
-        let hit = Rc::new(Cell::new(0));
-        let h2 = hit.clone();
+        let hit = signal(0);
+        let h2 = hit;
         let (mut tree, root) = build(
             Element::nav_row("双拼方案设定")
                 .width(180)
@@ -540,14 +541,10 @@ mod tests {
     #[test]
     fn collapsible_header_toggles_expanded() {
         // 走公开构建器：header 在顶部 0..40，点击切换 expanded。
-        let expanded = Rc::new(Cell::new(false));
+        let expanded = signal(false);
         let (mut tree, _root) = build(
-            Element::collapsible(
-                "属性设置",
-                expanded.clone(),
-                Element::label("子项").height(30),
-            )
-            .width(180),
+            Element::collapsible("属性设置", expanded, Element::label("子项").height(30))
+                .width(180),
         );
         click(&mut tree, Point::new(40, 20));
         assert!(expanded.get(), "首次点击 header 应展开");
@@ -558,11 +555,11 @@ mod tests {
     #[test]
     fn collapsible_body_hidden_when_collapsed() {
         // collapsible 构建器：body 用 visible_when(expanded) 显隐。收起时 body 不可见。
-        let expanded = Rc::new(Cell::new(false));
+        let expanded = signal(false);
         let (tree, root) = build(
             Element::collapsible(
                 "分组",
-                expanded.clone(),
+                expanded,
                 Element::label("子项").width_match().height(30),
             )
             .width(180),
@@ -578,8 +575,8 @@ mod tests {
 
     #[test]
     fn nav_key_enter_activates() {
-        let hit = Rc::new(Cell::new(0));
-        let h2 = hit.clone();
+        let hit = signal(0);
+        let h2 = hit;
         let (mut tree, root) = build(
             Element::nav_row("钻入")
                 .width(180)
@@ -600,7 +597,7 @@ mod tests {
 
     /// 构造一个三面板手风琴（标题 A/B/C）。初始全收起时各面板头依次纵向排布
     /// （header 40 高 + 面板间 1px 分隔线），body 收起不占位。
-    fn three_panel_accordion(sel: Rc<Cell<i32>>) -> Element {
+    fn three_panel_accordion(sel: Signal<i32>) -> Element {
         Element::accordion(
             sel,
             vec![
@@ -615,8 +612,8 @@ mod tests {
     #[test]
     fn accordion_single_open_is_mutually_exclusive() {
         // 全收起时布局：header0 0..40, 分隔 40..41, header1 41..81, 分隔 81..82, header2 82..122。
-        let sel = Rc::new(Cell::new(-1));
-        let (mut tree, _root) = build(three_panel_accordion(sel.clone()));
+        let sel = signal(-1);
+        let (mut tree, _root) = build(three_panel_accordion(sel));
         click(&mut tree, Point::new(40, 20)); // 点 A 头
         assert_eq!(sel.get(), 0, "点击 A 应展开（selected=0）");
         click(&mut tree, Point::new(40, 60)); // 点 B 头（互斥切换）
@@ -628,7 +625,7 @@ mod tests {
     #[test]
     fn accordion_default_open_shows_initial_panel() {
         // 初值 1 → 面板 B 展开：root 子节点 [h0,b0,div,h1,b1,div,h2,b2]，b1 可见、b0 不可见。
-        let sel = Rc::new(Cell::new(1));
+        let sel = signal(1);
         let (tree, root) = build(three_panel_accordion(sel));
         let kids = tree.get(root).unwrap().children.clone();
         let vis = |t: &Tree, n: NodeId| t.get(n).unwrap().effective_visible();
@@ -655,8 +652,8 @@ mod tests {
 
     #[test]
     fn accordion_key_enter_toggles() {
-        let sel = Rc::new(Cell::new(-1));
-        let (mut tree, root) = build(three_panel_accordion(sel.clone()));
+        let sel = signal(-1);
+        let (mut tree, root) = build(three_panel_accordion(sel));
         let header0 = tree.get(root).unwrap().children[0];
         tree.dispatch_key(
             KeyEvent {

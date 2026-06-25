@@ -5,9 +5,6 @@
 //!
 //! 为免捆绑二进制资源，演示图均用 `image_rgba` 程序化生成。
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const FG: u32 = 0x2D3436;
@@ -162,7 +159,7 @@ fn main() {
         ));
 
     // 列表行图标：list_icons 让每行带前置图标（图标随选中/悬停状态调制）。
-    let picked = Rc::new(Cell::new(0usize));
+    let picked = signal(0usize);
     let icon_list = Element::list_icons(
         vec![
             (
@@ -182,7 +179,7 @@ fn main() {
                 ImageContent::from_rgba(24, 24, &solid(24, 0xE5, 0x48, 0x4D)),
             ),
         ],
-        picked.clone(),
+        picked,
     )
     .height(150)
     .width_match()

@@ -3,9 +3,6 @@
 //! 运行：cargo run --release --example theming
 //! 截屏：cargo run --example theming -- --screenshot artifacts/theming.png
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 /// 仅覆盖部分 token，其余字段由 serde default 回退到内置默认。
@@ -40,11 +37,11 @@ fn row(label: &str, control: Element) -> Element {
 fn main() {
     let theme = Theme::from_toml(THEME_TOML).expect("解析主题 TOML");
 
-    let name = Rc::new(RefCell::new(String::from("紫色主题")));
-    let on = Rc::new(Cell::new(true));
-    let check = Rc::new(Cell::new(true));
-    let vol = Rc::new(Cell::new(0.6f32));
-    let mode = Rc::new(Cell::new(1usize));
+    let name = signal(String::from("紫色主题"));
+    let on = signal(true);
+    let check = signal(true);
+    let vol = signal(0.6f32);
+    let mode = signal(1usize);
 
     let card = Element::col()
         .width_match()

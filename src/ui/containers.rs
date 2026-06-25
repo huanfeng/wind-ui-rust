@@ -1,7 +1,6 @@
 //! 容器/导航控件的内部 widget：滚动滚轮、模态遮罩、标签按钮。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
@@ -9,6 +8,7 @@ use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -256,7 +256,7 @@ impl Widget for ModalScrim {
 pub struct TabButton {
     label: String,
     icon: Option<ImageContent>,
-    group: Rc<Cell<usize>>,
+    group: Signal<usize>,
     index: usize,
     hover: bool,
     /// 文字色补间（inactive/hover/accent 淡变）；首帧靠 `primed` 落定。
@@ -267,7 +267,7 @@ pub struct TabButton {
 }
 
 impl TabButton {
-    pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
+    pub fn new(label: String, group: Signal<usize>, index: usize) -> Self {
         let ind = if group.get() == index { 1.0 } else { 0.0 };
         Self {
             label,
@@ -461,14 +461,15 @@ impl Widget for TabButton {
 mod tests {
     use super::*;
     use crate::render::image::{Fit, Image};
+    use crate::signal::signal;
     use crate::text::NullTextEngine;
 
     #[test]
     fn tab_icon_widens_measure() {
-        let g = Rc::new(Cell::new(0));
+        let g = signal(0);
         let style = Style::default();
         let mut te = NullTextEngine;
-        let w0 = TabButton::new("Home".into(), g.clone(), 0)
+        let w0 = TabButton::new("Home".into(), g, 0)
             .measure(Size::ZERO, &style, &mut te)
             .w;
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
@@ -480,9 +481,9 @@ mod tests {
 
     #[test]
     fn tab_visual_state_tracks_selection() {
-        let g = Rc::new(Cell::new(2));
+        let g = signal(2);
         assert_eq!(
-            TabButton::new("A".into(), g.clone(), 2).visual_state(),
+            TabButton::new("A".into(), g, 2).visual_state(),
             VisualState::Selected
         );
         assert_eq!(

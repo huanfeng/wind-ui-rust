@@ -3,9 +3,6 @@
 //! 运行：cargo run --release --example progress
 //! 截屏：cargo run --example progress -- --screenshot artifacts/progress.png
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const BG: u32 = 0xEEF1F5;
@@ -19,9 +16,9 @@ fn label(t: &str) -> Element {
 }
 
 fn main() {
-    let p25 = Rc::new(Cell::new(0.25f32));
-    let p60 = Rc::new(Cell::new(0.6f32));
-    let p100 = Rc::new(Cell::new(1.0f32));
+    let p25 = signal(0.25f32);
+    let p60 = signal(0.6f32);
+    let p100 = signal(1.0f32);
 
     let ui = Element::col()
         .fill()

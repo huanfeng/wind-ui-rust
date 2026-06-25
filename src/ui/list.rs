@@ -4,7 +4,6 @@
 //! 共享 `Rc<Cell<usize>>` 选中索引，点击设置自身索引，选中/悬停高亮。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
@@ -12,6 +11,7 @@ use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -28,7 +28,7 @@ const ICON_GAP: i32 = 8;
 pub struct ListRow {
     label: String,
     icon: Option<ImageContent>,
-    group: Rc<Cell<usize>>,
+    group: Signal<usize>,
     index: usize,
     hover: bool,
     /// 行底色"存在量"补间（0..1）：对固定目标色缩 alpha 淡入淡出，避免从透明黑 lerp 过黑。
@@ -40,7 +40,7 @@ pub struct ListRow {
 }
 
 impl ListRow {
-    pub fn new(label: String, group: Rc<Cell<usize>>, index: usize) -> Self {
+    pub fn new(label: String, group: Signal<usize>, index: usize) -> Self {
         let on = if group.get() == index { 1.0 } else { 0.0 };
         Self {
             label,
@@ -223,11 +223,12 @@ mod tests {
     use super::*;
     use crate::render::image::{Fit, Image};
     use crate::render::SkiaCanvas;
+    use crate::signal::signal;
     use tiny_skia::Pixmap;
 
     #[test]
     fn row_with_icon_paints_icon_area() {
-        let group = Rc::new(Cell::new(0));
+        let group = signal(0);
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
         let row = ListRow::new("Inbox".into(), group, 0)
             .with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
@@ -260,8 +261,8 @@ mod tests {
 
     #[test]
     fn row_visual_state_tracks_selection() {
-        let group = Rc::new(Cell::new(1));
-        let selected = ListRow::new("A".into(), group.clone(), 1);
+        let group = signal(1);
+        let selected = ListRow::new("A".into(), group, 1);
         assert_eq!(selected.visual_state(), VisualState::Selected);
         let other = ListRow::new("B".into(), group, 2);
         assert_eq!(other.visual_state(), VisualState::Normal);

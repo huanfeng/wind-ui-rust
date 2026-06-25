@@ -3,9 +3,6 @@
 //! 运行：cargo run --release --example multiline
 //! 截屏：cargo run --example multiline -- --screenshot artifacts/multiline.png
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const FG: u32 = 0x2D3436;
@@ -21,13 +18,13 @@ fn label(t: &str) -> Element {
 }
 
 fn main() {
-    let wrap_txt = Rc::new(RefCell::new(String::from(
+    let wrap_txt = signal(String::from(
         "软换行模式：超过文本框宽度的长行会自动折到下一视觉行，不需要手动断行。\n这是第二个段落（按 Enter 产生的硬换行）。",
-    )));
-    let code_txt = Rc::new(RefCell::new(String::from(
+    ));
+    let code_txt = signal(String::from(
         "fn main() {\n    println!(\"不换行模式：长行水平滚动\");\n}",
-    )));
-    let pwd = Rc::new(RefCell::new(String::from("s3cr3t-pass")));
+    ));
+    let pwd = signal(String::from("s3cr3t-pass"));
 
     let ui = Element::col()
         .fill()

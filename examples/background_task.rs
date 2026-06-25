@@ -2,20 +2,18 @@
 //!
 //! 运行：cargo run --example background_task
 //! 截屏：cargo run --example background_task -- --screenshot artifacts/bg.png
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::time::Duration;
 use windui::prelude::*;
 
 fn main() {
-    let progress = Rc::new(Cell::new(0.0f32));
-    let clock = Rc::new(RefCell::new(String::from("已运行 0 秒")));
-    let ticks = Rc::new(Cell::new(0u32));
+    let progress = signal(0.0f32);
+    let clock = signal(String::from("已运行 0 秒"));
+    let ticks = signal(0u32);
 
     let mut app = App::new("后台任务", 360, 180);
 
     // 后台线程：每 40ms 发一次进度，channel 驱动 UI（有更新才唤醒一帧）。
-    let pc = progress.clone();
+    let pc = progress;
     let tx = app.channel::<f32>(move |p| pc.set(p));
     std::thread::spawn(move || {
         for i in 1..=100 {
@@ -32,14 +30,14 @@ fn main() {
         .padding(20)
         .spacing(12)
         .child(Element::label("下载进度").height(20).width_match())
-        .child(Element::progress(progress.clone()).width_match())
-        .child(Element::label_rc(clock.clone()).height(20).width_match());
+        .child(Element::progress(progress).width_match())
+        .child(Element::label_rc(clock).height(20).width_match());
 
     // on_interval：每秒更新秒表文本。
-    let (tk, ck) = (ticks.clone(), clock.clone());
+    let (tk, ck) = (ticks, clock);
     app.on_interval(Duration::from_millis(1000), move || {
         tk.set(tk.get() + 1);
-        *ck.borrow_mut() = format!("已运行 {} 秒", tk.get());
+        ck.set(format!("已运行 {} 秒", tk.get()));
     })
     .screenshot_from_args()
     .content(ui)

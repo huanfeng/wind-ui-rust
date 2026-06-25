@@ -3,9 +3,6 @@
 //! 交互窗口：cargo run --example phase4_form
 //! 截屏：    cargo run --example phase4_form -- --screenshot artifacts/phase4.png
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 fn field(label: &str, control: Element) -> Element {
@@ -24,11 +21,11 @@ fn field(label: &str, control: Element) -> Element {
 }
 
 fn main() {
-    let name = Rc::new(RefCell::new(String::from("windui")));
-    let enabled = Rc::new(Cell::new(true));
-    let dark = Rc::new(Cell::new(false));
-    let mode = Rc::new(Cell::new(1usize));
-    let volume = Rc::new(Cell::new(0.65f32));
+    let name = signal(String::from("windui"));
+    let enabled = signal(true);
+    let dark = signal(false);
+    let mode = signal(1usize);
+    let volume = signal(0.65f32);
 
     let ui = Element::col()
         .fill()
@@ -44,22 +41,22 @@ fn main() {
         )
         .child(field(
             "名称",
-            Element::text_input(name.clone(), "请输入名称").width(220),
+            Element::text_input(name, "请输入名称").width(220),
         ))
         .child(field(
             "启用功能",
-            Element::checkbox("开启高级模式", enabled.clone()),
+            Element::checkbox("开启高级模式", enabled),
         ))
-        .child(field("深色主题", Element::switch(dark.clone())))
+        .child(field("深色主题", Element::switch(dark)))
         .child(field(
             "渲染模式",
             Element::row()
                 .spacing(16)
-                .child(Element::radio("快速", mode.clone(), 0))
-                .child(Element::radio("均衡", mode.clone(), 1))
-                .child(Element::radio("高质量", mode.clone(), 2)),
+                .child(Element::radio("快速", mode, 0))
+                .child(Element::radio("均衡", mode, 1))
+                .child(Element::radio("高质量", mode, 2)),
         ))
-        .child(field("音量", Element::slider(volume.clone()).width(220)))
+        .child(field("音量", Element::slider(volume).width(220)))
         .child(
             Element::row()
                 .width_match()

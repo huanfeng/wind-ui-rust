@@ -204,9 +204,8 @@ mod tests {
     use crate::core::Tree;
     use crate::event::{KeyEvent, MouseButton, PointerEvent};
     use crate::geometry::Point;
+    use crate::signal::signal;
     use crate::ui::Element;
-    use std::cell::Cell;
-    use std::rc::Rc;
 
     /// 构建单链接树并返回 (tree, root)。链接绝对矩形 = 0,0,w,h（根节点）。
     fn link_tree(el: Element) -> (Tree, crate::core::NodeId) {
@@ -219,8 +218,8 @@ mod tests {
 
     #[test]
     fn click_fires_on_click_callback() {
-        let hit = Rc::new(Cell::new(0));
-        let h2 = hit.clone();
+        let hit = signal(0);
+        let h2 = hit;
         let (mut tree, _root) =
             link_tree(Element::link("打开").on_click(move |_| h2.set(h2.get() + 1)));
         let mut hover = None;

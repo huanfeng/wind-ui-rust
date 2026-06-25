@@ -3,13 +3,11 @@
 //! 不确定模式经 [`crate::anim::request_repaint`] 请求持续帧，宿主按帧驱动重绘；
 //! 动画相位由 [`crate::anim::clock_ms`] 的单调时钟计算，与挂钟无关。
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use crate::core::{EventCtx, Widget};
 use crate::event::Event;
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::style::Style;
 use crate::text::TextEngine;
 
@@ -21,11 +19,11 @@ const SEG_FRAC: f32 = 0.35;
 
 pub struct ProgressBar {
     /// Some=确定(0..=1)；None=不确定（忙碌动画）。
-    value: Option<Rc<Cell<f32>>>,
+    value: Option<Signal<f32>>,
 }
 
 impl ProgressBar {
-    pub fn determinate(value: Rc<Cell<f32>>) -> Self {
+    pub fn determinate(value: Signal<f32>) -> Self {
         Self { value: Some(value) }
     }
     pub fn indeterminate() -> Self {

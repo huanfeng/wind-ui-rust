@@ -4,9 +4,6 @@
 //! 截屏：    cargo run --example fullshowcase -- --screenshot artifacts/showcase.png
 //! 对话框：  cargo run --example fullshowcase -- --dialog --screenshot artifacts/showcase_dialog.png
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const FG: u32 = 0x2D3436;
@@ -81,18 +78,18 @@ fn card(title: &str, body: Element) -> Element {
 }
 
 fn main() {
-    let name = Rc::new(RefCell::new(String::from("我的设备")));
-    let pwd = Rc::new(RefCell::new(String::from("hunter2")));
-    let notes = Rc::new(RefCell::new(String::from(
+    let name = signal(String::from("我的设备"));
+    let pwd = signal(String::from("hunter2"));
+    let notes = signal(String::from(
         "这是一个多行文本框示例。\n超过宽度的长行会自动软换行，无需手动断行，体验接近现代编辑器。\n按 Enter 可换行。",
-    )));
-    let dark = Rc::new(Cell::new(true));
-    let notify = Rc::new(Cell::new(true));
-    let beta = Rc::new(Cell::new(false));
-    let quality = Rc::new(Cell::new(1usize));
-    let lang = Rc::new(Cell::new(0usize));
-    let volume = Rc::new(Cell::new(0.7f32));
-    let show_about = Rc::new(Cell::new(std::env::args().any(|a| a == "--dialog")));
+    ));
+    let dark = signal(true);
+    let notify = signal(true);
+    let beta = signal(false);
+    let quality = signal(1usize);
+    let lang = signal(0usize);
+    let volume = signal(0.7f32);
+    let show_about = signal(std::env::args().any(|a| a == "--dialog"));
 
     // 设置页（内容较多，包进滚动容器）
     let settings_body = Element::col()
@@ -105,47 +102,40 @@ fn main() {
                 .spacing(6)
                 .child(row(
                     "设备名称",
-                    Element::text_input(name.clone(), "输入名称").width_match(),
+                    Element::text_input(name, "输入名称").width_match(),
                 ))
                 .child(row(
                     "访问密码",
-                    Element::text_input(pwd.clone(), "输入密码")
+                    Element::text_input(pwd, "输入密码")
                         .password()
                         .width_match(),
                 ))
                 .child(row(
                     "界面语言",
-                    Element::dropdown(vec!["简体中文", "English", "日本語"], lang.clone())
-                        .width_match(),
+                    Element::dropdown(vec!["简体中文", "English", "日本語"], lang).width_match(),
                 ))
-                .child(row("深色主题", Element::switch(dark.clone())))
-                .child(row(
-                    "接收通知",
-                    Element::checkbox("启用推送通知", notify.clone()),
-                ))
-                .child(row(
-                    "测试版",
-                    Element::checkbox("加入 Beta 通道", beta.clone()),
-                )),
+                .child(row("深色主题", Element::switch(dark)))
+                .child(row("接收通知", Element::checkbox("启用推送通知", notify)))
+                .child(row("测试版", Element::checkbox("加入 Beta 通道", beta))),
         ))
         .child(card(
             "渲染",
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row("音量", Element::slider(volume.clone()).width_match()))
+                .child(row("音量", Element::slider(volume).width_match()))
                 .child(row(
                     "质量",
                     Element::row()
                         .spacing(16)
-                        .child(Element::radio("低", quality.clone(), 0))
-                        .child(Element::radio("中", quality.clone(), 1))
-                        .child(Element::radio("高", quality.clone(), 2)),
+                        .child(Element::radio("低", quality, 0))
+                        .child(Element::radio("中", quality, 1))
+                        .child(Element::radio("高", quality, 2)),
                 )),
         ))
         .child(card(
             "备注",
-            Element::text_input(notes.clone(), "输入备注")
+            Element::text_input(notes, "输入备注")
                 .multiline()
                 .width_match()
                 .height(96),
@@ -180,7 +170,7 @@ fn main() {
         );
     }
 
-    let about_show = show_about.clone();
+    let about_show = show_about;
     let about = Element::col().fill().spacing(12).child(card(
         "关于 windui",
         Element::col()
@@ -211,23 +201,23 @@ fn main() {
     ));
 
     // 控件页（新控件集中展示，内容可滚动便于后续扩充）。
-    let prog = Rc::new(Cell::new(0.45f32));
-    let qty = Rc::new(Cell::new(3.0f64));
-    let zoom = Rc::new(Cell::new(1.0f64));
-    let picked = Rc::new(Cell::new(1usize));
+    let prog = signal(0.45f32);
+    let qty = signal(3.0f64);
+    let zoom = signal(1.0f64);
+    let picked = signal(1usize);
     // 分段控制器演示状态（输入法常见的二/三选一切换）。
-    let zh_form = Rc::new(Cell::new(0usize)); // 简体/繁体
-    let width_mode = Rc::new(Cell::new(0usize)); // 半角/全角
-    let pinyin = Rc::new(Cell::new(0usize)); // 全拼/双拼/笔画
-                                             // 可折叠分组 + 导航行演示。
-    let adv_expand = Rc::new(Cell::new(true));
+    let zh_form = signal(0usize); // 简体/繁体
+    let width_mode = signal(0usize); // 半角/全角
+    let pinyin = signal(0usize); // 全拼/双拼/笔画
+                                 // 可折叠分组 + 导航行演示。
+    let adv_expand = signal(true);
     // 手风琴：单开互斥共享索引（初值 0 = 默认展开第一面板）。
-    let acc_sel = Rc::new(Cell::new(0i32));
-    let nav_msg = Rc::new(RefCell::new(String::from("（点下方导航行试试）")));
+    let acc_sel = signal(0i32);
+    let nav_msg = signal(String::from("（点下方导航行试试）"));
     // 链接 on_click 演示：点击计数写入动态标签。
-    let link_msg = Rc::new(RefCell::new(String::from("（点下方“点我计数”试试）")));
-    let link_n = Rc::new(Cell::new(0u32));
-    let (lm, ln) = (link_msg.clone(), link_n.clone());
+    let link_msg = signal(String::from("（点下方“点我计数”试试）"));
+    let link_n = signal(0u32);
+    let (lm, ln) = (link_msg, link_n);
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -248,20 +238,20 @@ fn main() {
                 .width_match()
                 .spacing(8)
                 .child(row("危险项", {
-                    let s = Rc::new(Cell::new(true));
+                    let s = signal(true);
                     Element::checkbox("删除我的所有数据", s).danger()
                 }))
                 .child(row("自定义色", {
-                    let s = Rc::new(Cell::new(true));
+                    let s = signal(true);
                     Element::checkbox("绿色强调（accent 覆盖）", s).accent(Color::hex(0x00A86B))
                 }))
                 .child(row("浅色自适应", {
-                    let s = Rc::new(Cell::new(true));
+                    let s = signal(true);
                     Element::checkbox("浅色 accent（对勾自动转深）", s).accent(Color::hex(0xFFD54F))
                 }))
                 .child(row("受控", {
-                    let s = Rc::new(Cell::new(false));
-                    let s2 = s.clone();
+                    let s = signal(false);
+                    let s2 = s;
                     // 受控：点击不自动翻转，交回调决定（此处演示直接翻转；真实场景可先弹确认再 set）。
                     Element::checkbox("点击交给 app 决定", s).on_toggle(move |_| s2.set(!s2.get()))
                 })),
@@ -271,35 +261,35 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row("简繁切换", Element::segmented(vec!["简体", "繁体"], zh_form.clone())))
-                .child(row("半全角", Element::segmented(vec!["半角", "全角"], width_mode.clone())))
-                .child(row("输入方案", Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin.clone())))
+                .child(row("简繁切换", Element::segmented(vec!["简体", "繁体"], zh_form)))
+                .child(row("半全角", Element::segmented(vec!["半角", "全角"], width_mode)))
+                .child(row("输入方案", Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin)))
                 .child(row(
                     "禁用态",
-                    Element::segmented(vec!["开", "关"], Rc::new(Cell::new(0usize))).disabled(true),
+                    Element::segmented(vec!["开", "关"], signal(0usize)).disabled(true),
                 )),
         ))
         .child(card(
             "可折叠分组 + 导航行（点标题展开/收起，行尾 > 钻入子页）",
             Element::col().width_match().spacing(4).child(Element::collapsible(
                 "高级设置",
-                adv_expand.clone(),
+                adv_expand,
                 Element::col()
                     .width_match()
                     .child({
-                        let m = nav_msg.clone();
-                        Element::nav_row("双拼方案设定").on_click(move |_| *m.borrow_mut() = "已进入：双拼方案设定".into())
+                        let m = nav_msg;
+                        Element::nav_row("双拼方案设定").on_click(move |_| m.set("已进入：双拼方案设定".into()))
                     })
                     .child({
-                        let m = nav_msg.clone();
-                        Element::nav_row("模糊音设置").on_click(move |_| *m.borrow_mut() = "已进入：模糊音设置".into())
+                        let m = nav_msg;
+                        Element::nav_row("模糊音设置").on_click(move |_| m.set("已进入：模糊音设置".into()))
                     })
                     .child({
-                        let m = nav_msg.clone();
-                        Element::nav_row("拼音纠错设置").on_click(move |_| *m.borrow_mut() = "已进入：拼音纠错设置".into())
+                        let m = nav_msg;
+                        Element::nav_row("拼音纠错设置").on_click(move |_| m.set("已进入：拼音纠错设置".into()))
                     }),
             ))
-            .child(Element::label_rc(nav_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+            .child(Element::label_rc(nav_msg).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
         ))
         .child(card(
             "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
@@ -308,7 +298,7 @@ fn main() {
                 .spacing(12)
                 .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
                 .child(Element::accordion(
-                    acc_sel.clone(),
+                    acc_sel,
                     vec![
                         ("什么是双拼？", Element::label("双拼用两键拼出一个音节，减少击键。").width_match().height(28).padding_xy(12, 0)),
                         ("如何切换方案？", Element::label("在“高级设置 → 双拼方案设定”里选择。").width_match().height(28).padding_xy(12, 0)),
@@ -338,7 +328,7 @@ fn main() {
                 .width_match()
                 .spacing(8)
                 .child(Element::label("确定 45%").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
-                .child(Element::progress(prog.clone()).width_match())
+                .child(Element::progress(prog).width_match())
                 .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
                 .child(Element::progress_indeterminate().width_match()),
         ))
@@ -347,14 +337,14 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(10)
-                .child(row("数量", Element::stepper(qty.clone(), 0.0, 99.0, 1.0).width(120)))
-                .child(row("缩放", Element::stepper(zoom.clone(), 0.5, 3.0, 0.25).width(120))),
+                .child(row("数量", Element::stepper(qty, 0.0, 99.0, 1.0).width(120)))
+                .child(row("缩放", Element::stepper(zoom, 0.5, 3.0, 0.25).width(120))),
         ))
         .child(card(
             "列表",
             Element::list(
                 vec!["收件箱", "已发送", "草稿箱", "垃圾邮件", "归档", "重要", "已加星标"],
-                picked.clone(),
+                picked,
             )
             .height(160)
             .width_match()
@@ -367,17 +357,17 @@ fn main() {
                 .width_match()
                 .spacing(8)
                 .child(row("按钮", Element::button("不可点").disabled(true)))
-                .child(row("开关", Element::switch(Rc::new(Cell::new(true))).disabled(true)))
-                .child(row("勾选", Element::checkbox("已禁用", Rc::new(Cell::new(true))).disabled(true)))
-                .child(row("滑块", Element::slider(Rc::new(Cell::new(0.5))).disabled(true).width_match()))
+                .child(row("开关", Element::switch(signal(true)).disabled(true)))
+                .child(row("勾选", Element::checkbox("已禁用", signal(true)).disabled(true)))
+                .child(row("滑块", Element::slider(signal(0.5)).disabled(true).width_match()))
                 .child(row(
                     "下拉",
-                    Element::dropdown(vec!["选项 A", "选项 B"], Rc::new(Cell::new(0))).disabled(true).width_match(),
+                    Element::dropdown(vec!["选项 A", "选项 B"], signal(0)).disabled(true).width_match(),
                 ))
-                .child(row("步进", Element::stepper(Rc::new(Cell::new(3.0)), 0.0, 9.0, 1.0).disabled(true).width(120)))
+                .child(row("步进", Element::stepper(signal(3.0), 0.0, 9.0, 1.0).disabled(true).width(120)))
                 .child(row(
                     "输入",
-                    Element::text_input(Rc::new(RefCell::new("只读内容".into())), "").disabled(true).width_match(),
+                    Element::text_input(signal("只读内容".into()), "").disabled(true).width_match(),
                 )),
         ))
         .child(card(
@@ -395,9 +385,9 @@ fn main() {
                 )
                 .child(Element::link("点我计数（自定义 on_click）").font_size(14.0).height(20).on_click(move |_| {
                     ln.set(ln.get() + 1);
-                    *lm.borrow_mut() = format!("已点击 {} 次", ln.get());
+                    lm.set(format!("已点击 {} 次", ln.get()));
                 }))
-                .child(Element::label_rc(link_msg.clone()).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+                .child(Element::label_rc(link_msg).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
         ))
         .child(card(
             "标签省略（max_lines + truncate）",
@@ -487,10 +477,10 @@ fn main() {
         ));
     let images = Element::scroll().fill().child(images_body);
 
-    let tab = Rc::new(Cell::new(0usize));
+    let tab = signal(0usize);
     let dot = |hex: u32| ImageContent::from_rgba(16, 16, &solid(16, hex));
     let tabs = Element::tabs_icons(
-        tab.clone(),
+        tab,
         vec![
             ("设置", dot(0x4C8BF5), settings),
             ("控件", dot(0x2EC48B), components),
@@ -501,9 +491,9 @@ fn main() {
     );
 
     // 关于对话框
-    let close = show_about.clone();
+    let close = show_about;
     let dialog = Element::dialog(
-        show_about.clone(),
+        show_about,
         Element::col()
             .width(320)
             .bg(Color::hex(CARD))

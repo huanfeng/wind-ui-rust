@@ -4,9 +4,6 @@
 //! 闭合截屏：cargo run --example dropdown -- --screenshot artifacts/dropdown.png
 //! 展开截屏：cargo run --example dropdown -- --screenshot artifacts/dropdown_open.png --click 120 96
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const BG: u32 = 0xEEF1F5;
@@ -20,8 +17,8 @@ fn label(t: &str) -> Element {
 }
 
 fn main() {
-    let theme = Rc::new(Cell::new(1usize));
-    let quality = Rc::new(Cell::new(0usize));
+    let theme = signal(1usize);
+    let quality = signal(0usize);
 
     let ui = Element::col()
         .fill()
@@ -36,9 +33,9 @@ fn main() {
                 .width_match(),
         )
         .child(label("主题"))
-        .child(Element::dropdown(vec!["跟随系统", "浅色", "深色"], theme.clone()).width(220))
+        .child(Element::dropdown(vec!["跟随系统", "浅色", "深色"], theme).width(220))
         .child(label("渲染质量"))
-        .child(Element::dropdown(vec!["低", "中", "高", "极致"], quality.clone()).width(220));
+        .child(Element::dropdown(vec!["低", "中", "高", "极致"], quality).width(220));
 
     App::new("windui — 下拉选择", 320, 280)
         .bg(Color::hex(BG))

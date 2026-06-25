@@ -4,13 +4,13 @@
 //! 每个选项的动作是设置绑定的 `Rc<Cell<usize>>` 选中索引（`MenuAction::Run` 闭包）。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, MenuItem, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -20,7 +20,7 @@ const CHEVRON_W: i32 = 18;
 
 pub struct Dropdown {
     options: Vec<String>,
-    selected: Rc<Cell<usize>>,
+    selected: Signal<usize>,
     hover: bool,
     /// 边框色补间（hover/focus 高亮淡变）；首帧靠 `primed` 落定。
     border_anim: Cell<Transition<Color>>,
@@ -28,7 +28,7 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
-    pub fn new(options: Vec<String>, selected: Rc<Cell<usize>>) -> Self {
+    pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
         Self {
             options,
             selected,
@@ -58,7 +58,7 @@ impl Dropdown {
             .iter()
             .enumerate()
             .map(|(i, o)| {
-                let sel = self.selected.clone();
+                let sel = self.selected;
                 MenuItem::run(o.clone(), move || sel.set(i), i == cur)
             })
             .collect();

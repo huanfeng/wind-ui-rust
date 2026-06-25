@@ -1,16 +1,16 @@
-//! 数字步进 Stepper：[−] 值 [+]，绑定 `Rc<Cell<f64>>`，带范围/步长钳制。
+//! 数字步进 Stepper：[−] 值 [+]，绑定 `Signal<f64>`，带范围/步长钳制。
 //!
 //! 自绘单控件：左右各一个按钮区，点击 ∓ 步长（钳制到 [min,max]）；中部显示当前值。
 //! 键盘 上/右=增、下/左=减。
 
 use std::cell::Cell;
-use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, PointerKind};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
@@ -31,7 +31,7 @@ fn hover_amt(cell: &Cell<Transition<f32>>, on: bool) -> f32 {
 }
 
 pub struct Stepper {
-    value: Rc<Cell<f64>>,
+    value: Signal<f64>,
     min: f64,
     max: f64,
     step: f64,
@@ -44,7 +44,7 @@ pub struct Stepper {
 }
 
 impl Stepper {
-    pub fn new(value: Rc<Cell<f64>>, min: f64, max: f64, step: f64) -> Self {
+    pub fn new(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
         // 退化输入归一：步长取正（0 退化为 1），min/max 顺序纠正（避免 clamp panic）。
         let step = if step.abs() < 1e-12 { 1.0 } else { step.abs() };
         let (min, max) = if min <= max { (min, max) } else { (max, min) };

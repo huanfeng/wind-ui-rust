@@ -3,15 +3,12 @@
 //! 运行：cargo run --release --example list
 //! 截屏：cargo run --example list -- --screenshot artifacts/list.png
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 const BG: u32 = 0xEEF1F5;
 
 fn main() {
-    let sel = Rc::new(Cell::new(2usize));
+    let sel = signal(2usize);
     let items = vec![
         "收件箱",
         "已发送",
