@@ -31,10 +31,10 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
@@ -66,6 +66,9 @@ pub(super) struct D2DBackend {
     swapchain: IDXGISwapChain1,
     /// D2D 设备上下文：BeginDraw/Clear/EndDraw 与 SetTarget 的目标。
     context: ID2D1DeviceContext,
+    /// 缓存的后备缓冲 D2D 位图：官方文档要求建一次、仅 resize 重建（每帧 CreateBitmapFromDxgiSurface
+    /// 很贵且连续重绘下累积驱动内存）。resize 时置 None，下一帧 bind_target 重建。
+    target_bitmap: Option<ID2D1Bitmap1>,
     /// 可复用纯色画刷：每次绘制前 `SetColor` 改色，避免逐图元建/销画刷。
     /// device-dependent 资源（设备丢失时随上下文一并重建——Task 11 处理丢失）。
     /// Task 11 注意：设备丢失重建 context 后必须重建此 brush（绑定旧 context，复用会绘制失败）。
@@ -81,7 +84,13 @@ pub(super) struct D2DBackend {
     /// TextFormat 缓存：键 (family, 逻辑字号 bits, 字重)，与软引擎 `DWriteEngine::format` 同构。
     /// IDWriteTextFormat 亦 device-independent，设备丢失无需清空。对齐不进 key（在 layout 上设）。
     format_cache: HashMap<(String, u32, u16), IDWriteTextFormat>,
+    /// 文字 layout 缓存（键 `LayoutKey`）：`IDWriteTextLayout` 是重对象（字形整形/换行排版），
+    /// 每帧每文字重建会 churn 驱动内存——官方文档明确要复用。device-independent，设备丢失无需清。
+    layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
 }
+
+/// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
+type LayoutKey = (String, String, u32, u16, u32, u32);
 
 /// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
 /// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
@@ -161,16 +170,18 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
     // DirectWrite 工厂（device-independent；进程共享系统字体缓存）。失败即放弃 → 回退软后端。
     let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
 
-    let backend = D2DBackend {
+    let mut backend = D2DBackend {
         d3d_device,
         d2d_factory,
         d2d_device,
         swapchain,
         context,
+        target_bitmap: None,
         solid,
         grad_cache: HashMap::new(),
         dwrite_factory,
         format_cache: HashMap::new(),
+        layout_cache: HashMap::new(),
     };
     // 初次绑定后备缓冲为 target。绑定失败同样回退软后端。
     backend.bind_target().ok()?;
@@ -178,23 +189,30 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
 }
 
 impl D2DBackend {
-    /// 把 swapchain 当前后备缓冲包成 D2D 位图并设为渲染 target。
-    unsafe fn bind_target(&self) -> windows::core::Result<()> {
-        let surface: IDXGISurface = self.swapchain.GetBuffer(0)?;
-        let props = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-            colorContext: std::mem::ManuallyDrop::new(None),
-        };
-        let bitmap: ID2D1Bitmap1 = self
-            .context
-            .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
-        self.context.SetTarget(&bitmap);
+    /// 把 swapchain 后备缓冲包成 D2D 位图并设为渲染 target。
+    /// **缓存复用**：仅在无缓存（首帧或 resize 后）时 `CreateBitmapFromDxgiSurface`，否则直接
+    /// `SetTarget` 复用——官方文档要求建一次、仅 resize 重建，避免每帧重建的开销与驱动内存累积。
+    unsafe fn bind_target(&mut self) -> windows::core::Result<()> {
+        if self.target_bitmap.is_none() {
+            let surface: IDXGISurface = self.swapchain.GetBuffer(0)?;
+            let props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            let bitmap: ID2D1Bitmap1 = self
+                .context
+                .CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
+            self.target_bitmap = Some(bitmap);
+        }
+        if let Some(bitmap) = &self.target_bitmap {
+            self.context.SetTarget(bitmap);
+        }
         Ok(())
     }
 }
@@ -202,8 +220,9 @@ impl D2DBackend {
 impl WinRenderBackend for D2DBackend {
     fn resize(&mut self, w: i32, h: i32) {
         unsafe {
-            // 先解绑 target，释放对旧后备缓冲的全部引用，否则 ResizeBuffers 失败。
+            // 先解绑 target 并释放缓存位图，释放对旧后备缓冲的全部引用，否则 ResizeBuffers 失败。
             self.context.SetTarget(None);
+            self.target_bitmap = None;
             let r = self.swapchain.ResizeBuffers(
                 0, // 保持缓冲数
                 w.max(1) as u32,
@@ -239,6 +258,7 @@ impl WinRenderBackend for D2DBackend {
                 grad_cache: &mut self.grad_cache,
                 dwrite_factory: &self.dwrite_factory,
                 format_cache: &mut self.format_cache,
+                layout_cache: &mut self.layout_cache,
             };
             handler.render(&mut target, size);
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
@@ -263,6 +283,7 @@ struct D2DTarget<'a> {
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
     dwrite_factory: &'a IDWriteFactory,
     format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
+    layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -283,6 +304,7 @@ impl RenderTarget for D2DTarget<'_> {
             grad_cache: self.grad_cache,
             dwrite_factory: self.dwrite_factory,
             format_cache: self.format_cache,
+            layout_cache: self.layout_cache,
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
@@ -303,6 +325,7 @@ struct D2DCanvas<'a> {
     dwrite_factory: &'a IDWriteFactory,
     /// TextFormat 缓存（借入，可变）：按 (family, 逻辑字号 bits, 字重) 复用。
     format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
+    layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
     saves: Vec<u32>,
     /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
@@ -314,6 +337,45 @@ struct D2DCanvas<'a> {
 }
 
 impl D2DCanvas<'_> {
+    /// 取/建文字 layout（重对象：字形整形/换行排版）。按 family/text/字号/字重/maxW/maxH 缓存复用，
+    /// 避免每帧每文字重建（官方文档明确 layout 须复用，否则连续重绘 churn 驱动内存）。
+    /// 对齐**不**进 key——在 `draw_text` 里每次绘制时设（`SetTextAlignment` 是元数据，不重排字形）。
+    fn text_layout(
+        &mut self,
+        text: &str,
+        family: Option<&str>,
+        size: f32,
+        maxw: f32,
+        maxh: f32,
+    ) -> Option<IDWriteTextLayout> {
+        let fam = family.unwrap_or(DEFAULT_FAMILY).to_string();
+        let weight = crate::text::current_weight();
+        let key: LayoutKey = (
+            fam,
+            text.to_string(),
+            size.to_bits(),
+            weight,
+            maxw.to_bits(),
+            maxh.to_bits(),
+        );
+        if let Some(l) = self.layout_cache.get(&key) {
+            return Some(l.clone());
+        }
+        let format = self.text_format(family, size)?;
+        let text_w = wide(text);
+        let layout = unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(&text_w, &format, maxw, maxh)
+        }
+        .ok()?;
+        // 防无界增长（文本输入/计数器等动态文字）：超阈值整体清空重建。
+        if self.layout_cache.len() > 512 {
+            self.layout_cache.clear();
+        }
+        self.layout_cache.insert(key, layout.clone());
+        Some(layout)
+    }
+
     /// 取本次填充用的画刷：无渐变 → 复用 solid 并改色；有渐变 → 按包围盒 (x,y,w,h)
     /// 把归一化端点映射到逻辑坐标，建/取缓存的渐变画刷。返回 `ID2D1Brush`（克隆引用计数，廉价）。
     /// 渐变构造失败时退回纯色（与 SkiaCanvas 一致）。
@@ -369,19 +431,18 @@ impl D2DCanvas<'_> {
             .map(|s| (q(s.offset.clamp(0.0, 1.0)), rgba(s.color)))
             .collect();
         let key = match g {
-            Gradient::Linear { start, end, .. } => {
-                let (sx, sy) = (x + start.0 * w, y + start.1 * h);
-                let (ex, ey) = (x + end.0 * w, y + end.1 * h);
-                GradKey {
-                    kind: 0,
-                    a: (q(sx), q(sy)),
-                    b: (q(ex), q(ey)),
-                    stops: stop_keys,
-                }
-            }
+            // 线性：key 用**归一化端点**（位置/尺寸无关）→ 同一渐变样式跨控件/跨位置复用一个画刷，
+            // 缓存条目从"渐变元素数"降到"渐变样式数"（~十几个），根治每帧重建 thrash（D2D 内存暴涨主因）。
+            Gradient::Linear { start, end, .. } => GradKey {
+                kind: 0,
+                a: (q(start.0), q(start.1)),
+                b: (q(end.0), q(end.1)),
+                stops: stop_keys,
+            },
+            // 径向：半径取 min(w,h) 保圆，无法用单一画刷变换做到位置无关，故 key 保留绝对
+            // 中心/半径（ime 中径向极少，不构成 thrash）。
             Gradient::Radial { center, radius, .. } => {
                 let (cx, cy) = (x + center.0 * w, y + center.1 * h);
-                // 半径以短边为基准（保持圆形而非随宽高拉成椭圆），与 SkiaCanvas 同。
                 let r = (radius * w.min(h)).max(0.01);
                 GradKey {
                     kind: 1,
@@ -391,15 +452,35 @@ impl D2DCanvas<'_> {
                 }
             }
         };
-        if let Some(b) = self.grad_cache.get(&key) {
-            return Some(b.clone());
+        let brush = match self.grad_cache.get(&key) {
+            Some(b) => b.clone(),
+            None => {
+                // 位置无关后缓存条目极少；上限仅防径向异常累积。
+                if self.grad_cache.len() > 256 {
+                    self.grad_cache.clear();
+                }
+                let b = self.build_gradient_brush(g, x, y, w, h)?;
+                self.grad_cache.insert(key, b.clone());
+                b
+            }
+        };
+        // 线性画刷在单位空间 [0,1]² 定义，每次绘制用画刷变换映射到当前控件**逻辑**矩形
+        // （DPI scale 由 context 的 SetTransform 再统一施加）。径向画刷已按绝对坐标构造，置单位变换。
+        match g {
+            Gradient::Linear { .. } => unsafe {
+                brush.SetTransform(&Matrix3x2 {
+                    M11: w,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: h,
+                    M31: x,
+                    M32: y,
+                });
+            },
+            Gradient::Radial { .. } => unsafe {
+                brush.SetTransform(&Matrix3x2::identity());
+            },
         }
-        // 防无界增长：渐变端点随控件尺寸有限，超阈值整体清空重建。
-        if self.grad_cache.len() > 128 {
-            self.grad_cache.clear();
-        }
-        let brush = self.build_gradient_brush(g, x, y, w, h)?;
-        self.grad_cache.insert(key, brush.clone());
         Some(brush)
     }
 
@@ -436,9 +517,10 @@ impl D2DCanvas<'_> {
                 .ok()?;
             let brush: ID2D1Brush = match g {
                 Gradient::Linear { start, end, .. } => {
+                    // 单位空间 [0,1]² 端点；位置/尺寸由调用处的画刷变换施加（位置无关复用）。
                     let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                        startPoint: vec2(x + start.0 * w, y + start.1 * h),
-                        endPoint: vec2(x + end.0 * w, y + end.1 * h),
+                        startPoint: vec2(start.0, start.1),
+                        endPoint: vec2(end.0, end.1),
                     };
                     self.ctx
                         .CreateLinearGradientBrush(&props, None, &coll)
@@ -625,17 +707,10 @@ impl Canvas for D2DCanvas<'_> {
         if text.is_empty() || rect.is_empty() {
             return;
         }
-        let Some(format) = self.text_format(family, size) else {
+        // 逻辑 maxWidth/maxHeight：layout 在逻辑空间排版，变换统一物理化。缓存复用避免每帧重建。
+        let Some(layout) = self.text_layout(text, family, size, rect.w as f32, rect.h as f32)
+        else {
             return;
-        };
-        let text_w = wide(text);
-        // 逻辑 maxWidth/maxHeight：layout 在逻辑空间排版，变换统一物理化。
-        let layout = match unsafe {
-            self.dwrite_factory
-                .CreateTextLayout(&text_w, &format, rect.w as f32, rect.h as f32)
-        } {
-            Ok(l) => l,
-            Err(_) => return,
         };
         // 对齐设在 layout（非缓存的 format）上，避免污染复用的 format。
         // 水平：与软路径 text_x0 的 Start/Center/End 语义一致（Stretch 同 Start→LEADING）。
@@ -683,16 +758,8 @@ impl Canvas for D2DCanvas<'_> {
                 size.ceil() as i32,
             )
         };
-        let Some(format) = self.text_format(family, size) else {
+        let Some(layout) = self.text_layout(text, family, size, f32::MAX, f32::MAX) else {
             return fallback();
-        };
-        let text_w = wide(text);
-        let layout = match unsafe {
-            self.dwrite_factory
-                .CreateTextLayout(&text_w, &format, f32::MAX, f32::MAX)
-        } {
-            Ok(l) => l,
-            Err(_) => return fallback(),
         };
         let mut m = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
         if unsafe { layout.GetMetrics(&mut m) }.is_err() {
