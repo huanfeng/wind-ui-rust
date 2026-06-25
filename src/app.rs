@@ -1626,22 +1626,12 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(60, 60).unwrap();
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(60, 60),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
         let lum = |c: Color| c.r as u32 + c.g as u32 + c.b as u32;
         assert!(lum(handler.theme.palette.bg) > 500, "初始亮色背景");
         // 句柄热切换为暗色 → 下一帧 render 后 host 主题快照应转暗。
         handle.set(crate::theme::Theme::dark());
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(60, 60),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
         assert!(
             lum(handler.theme.palette.bg) < 300,
             "热切换后 host 应共享句柄的暗色主题"
@@ -1658,21 +1648,11 @@ mod tests {
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(60, 60).unwrap();
         // 首帧：全窗，种入后备缓冲。
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(60, 60),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
         assert!(handler.last_frame_full, "首帧应为全窗");
         // 模拟交互产生的小脏区：下一帧应走局部重绘，不重排整树。
         handler.event_damage = Some(Rect::new(10, 10, 12, 12));
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(60, 60),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
         assert!(!handler.last_frame_full, "带小脏区的交互帧应走局部重绘");
     }
 
@@ -1700,12 +1680,7 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(80, 80).unwrap();
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(80, 80),
-        ); // 首帧全窗 + 建立结构签名
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(80, 80)); // 首帧全窗 + 建立结构签名
         let at = Point::new(15, 12);
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1713,12 +1688,7 @@ mod tests {
             MouseButton::Left,
         ));
         handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(80, 80),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(80, 80));
         assert!(handler.last_frame_full, "切换 visible_when 面板应整窗刷新");
     }
 
@@ -1738,23 +1708,13 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(120, 120).unwrap();
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(120, 120),
-        ); // 首帧全窗
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 120)); // 首帧全窗
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
             Point::new(15, 12),
             MouseButton::Left,
         ));
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(120, 120),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 120));
         assert!(!handler.last_frame_full, "无结构变化的点击应走局部重绘");
     }
 
@@ -1772,12 +1732,7 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(50, 50).unwrap();
-        handler.render(
-            &mut PixmapTarget {
-                pixmap: &mut pm,
-            },
-            Size::new(50, 50),
-        );
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(50, 50));
         assert_eq!(got.get(), 7, "render 前排空 pump，消息写入状态");
     }
 }
