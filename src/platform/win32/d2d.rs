@@ -9,15 +9,21 @@
 //! 必须在创建它们的 UI（STA）线程上使用——与 `DWriteEngine` 同样的单线程约束，
 //! 故仅作普通结构体字段持有，不跨线程共享。
 
+use std::collections::HashMap;
+
 use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB, D2D1_ELLIPSE,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
@@ -32,9 +38,11 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::Graphics::Gdi::ValidateRect;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use super::{AppHandler, WinRenderBackend};
-use crate::geometry::Color;
+use crate::geometry::{Color, Size};
+use crate::render::{Canvas, Gradient, Paint, RenderTarget};
 
 /// GPU 呈现后端。持有 D3D11/DXGI/D2D 的 COM 对象与 swapchain。
 pub(super) struct D2DBackend {
@@ -51,6 +59,27 @@ pub(super) struct D2DBackend {
     swapchain: IDXGISwapChain1,
     /// D2D 设备上下文：BeginDraw/Clear/EndDraw 与 SetTarget 的目标。
     context: ID2D1DeviceContext,
+    /// 可复用纯色画刷：每次绘制前 `SetColor` 改色，避免逐图元建/销画刷。
+    /// device-dependent 资源（设备丢失时随上下文一并重建——Task 11 处理丢失）。
+    /// Task 11 注意：设备丢失重建 context 后必须重建此 brush（绑定旧 context，复用会绘制失败）。
+    solid: ID2D1SolidColorBrush,
+    /// 渐变画刷缓存：键为 (类型, 量化端点/半径, 量化 stops)，避免每帧重复 CreateGradientBrush。
+    /// Task 11 注意：设备丢失重建 context 时必须 `grad_cache.clear()`——缓存的 `ID2D1Brush`
+    /// 绑定到旧 context，复用会绘制失败/崩溃（solid brush 同理须重建）。
+    grad_cache: HashMap<GradKey, ID2D1Brush>,
+}
+
+/// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
+/// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GradKey {
+    /// 0 = 线性，1 = 径向。
+    kind: u8,
+    /// 线性：(start, end)；径向：(center, (radius*1000, 0))。单位 1/1000 逻辑 px。
+    a: (i32, i32),
+    b: (i32, i32),
+    /// 量化色标：(offset×1000, rgba)。
+    stops: Vec<(i32, u32)>,
 }
 
 /// 尝试建立 GPU 呈现链路。任一环节失败返回 `None`（调用方回退软后端）。
@@ -107,12 +136,19 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
     let d2d_device = d2d_factory.CreateDevice(&dxgi_device).ok()?;
     let context = d2d_device.CreateDeviceContext(Default::default()).ok()?;
 
+    // 可复用纯色画刷（device-dependent）：初始色随意，绘制前会被 SetColor 覆盖。
+    let solid = context
+        .CreateSolidColorBrush(&d2d_color(Color::rgba(0, 0, 0, 255)), None)
+        .ok()?;
+
     let backend = D2DBackend {
         d3d_device,
         d2d_factory,
         d2d_device,
         swapchain,
         context,
+        solid,
+        grad_cache: HashMap::new(),
     };
     // 初次绑定后备缓冲为 target。绑定失败同样回退软后端。
     backend.bind_target().ok()?;
@@ -159,13 +195,31 @@ impl WinRenderBackend for D2DBackend {
         }
     }
 
-    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, _handler: &mut dyn AppHandler) {
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) {
         // 重新绑定 target：覆盖首帧之外、resize 之后等情形，幂等且廉价。
         if self.bind_target().is_err() {
             return;
         }
+        // 客户区物理像素尺寸：与 SkiaBackend 一致，作为 handler.render 的 size 传入
+        // （make_canvas 内再用 handler 提供的 scale 应用 SetTransform）。
+        let mut rc = windows::Win32::Foundation::RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
+        let size = Size::new(rc.right - rc.left, rc.bottom - rc.top);
+
         self.context.BeginDraw();
         self.context.Clear(Some(&d2d_color(bg)));
+        // 单线程 STA：把 ctx/solid/渐变缓存借给本帧 target，由 handler 渲染控件树。
+        // target 在 EndDraw 前 drop，释放对 ctx 的借用（EndDraw/Present 仍需 ctx/swapchain）。
+        {
+            let mut target = D2DTarget {
+                ctx: &self.context,
+                solid: &self.solid,
+                grad_cache: &mut self.grad_cache,
+            };
+            handler.render(&mut target, size);
+            // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
+            self.context.SetTransform(&Matrix3x2::identity());
+        }
         // EndDraw 的 out 参数（tag1/tag2）此处不关心；返回错误暂仅忽略（设备丢失留后续任务处理）。
         let _ = self.context.EndDraw(None, None);
         // Present(1, 0)：与垂直同步对齐，呈现一帧。
@@ -175,6 +229,344 @@ impl WinRenderBackend for D2DBackend {
         // 这让 backend.paint 自包含完成"呈现 + 验证更新区域"契约，与 SkiaBackend 对称。
         let _ = ValidateRect(Some(hwnd), None);
     }
+}
+
+/// 一帧的 D2D 渲染目标：借用设备上下文 + 可复用画刷 + 渐变缓存。
+/// `make_canvas` 应用 DPI scale 后产出 `D2DCanvas`，交给 handler 绘制控件树。
+struct D2DTarget<'a> {
+    ctx: &'a ID2D1DeviceContext,
+    solid: &'a ID2D1SolidColorBrush,
+    grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
+}
+
+impl RenderTarget for D2DTarget<'_> {
+    fn make_canvas<'a>(
+        &'a mut self,
+        _engine: &'a mut dyn crate::text::TextEngine,
+        scale: f32,
+    ) -> Box<dyn Canvas + 'a> {
+        // 应用 DPI 缩放：控件树用逻辑坐标绘制，D2D 在此按 scale 放大到物理像素。
+        // 漏掉会让 DPI≠1 时内容缩到左上角（与软渲染同源的坑，必须保留）。
+        // D2D 自带 DirectWrite 文字栈，忽略软后端的 engine。
+        unsafe {
+            self.ctx.SetTransform(&Matrix3x2::scale(scale, scale));
+        }
+        Box::new(D2DCanvas {
+            ctx: self.ctx,
+            solid: self.solid,
+            grad_cache: self.grad_cache,
+        })
+    }
+    // as_pixmap 用 trait 默认 None：GPU 无 pixmap，调用方走全窗重绘。
+}
+
+/// 把 `Canvas` 图元绘制到 D2D 设备上下文（逻辑坐标；DPI scale 已由 SetTransform 应用）。
+///
+/// 本任务实现填充/圆角/描边/线/圆 + 纯色/渐变画刷；文字/图片/阴影/裁剪/层为桩
+/// （分别由 Task 8/后续/Task 9/Task 7 补）。
+struct D2DCanvas<'a> {
+    ctx: &'a ID2D1DeviceContext,
+    solid: &'a ID2D1SolidColorBrush,
+    grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
+}
+
+impl D2DCanvas<'_> {
+    /// 取本次填充用的画刷：无渐变 → 复用 solid 并改色；有渐变 → 按包围盒 (x,y,w,h)
+    /// 把归一化端点映射到逻辑坐标，建/取缓存的渐变画刷。返回 `ID2D1Brush`（克隆引用计数，廉价）。
+    /// 渐变构造失败时退回纯色（与 SkiaCanvas 一致）。
+    fn fill_brush(&mut self, paint: &Paint, x: f32, y: f32, w: f32, h: f32) -> ID2D1Brush {
+        match paint.gradient.as_ref() {
+            Some(g) => match self.gradient_brush(g, x, y, w, h) {
+                Some(b) => b,
+                None => self.solid_brush(paint.color),
+            },
+            None => self.solid_brush(paint.color),
+        }
+    }
+
+    /// 纯色画刷：复用 solid，改色后向上转型为 `ID2D1Brush`。
+    ///
+    /// 共享可变陷阱：返回值是 `self.solid`（同一底层 COM 对象）的 cast 克隆，`SetColor`
+    /// 改的是该共享对象。**返回值不得跨多次 `SetColor` 持有**——同时持有两个 solid_brush
+    /// 返回值再绘制会互相覆盖颜色（都指向同一对象，后一次 SetColor 赢）。当前所有图元都是
+    /// "取一次→立即绘制"故安全；Task 7+ 扩展（如同一图元填充+描边混用两种纯色）须遵守此约束，
+    /// 否则需各自独立 brush（CreateSolidColorBrush）而非复用。
+    fn solid_brush(&self, color: Color) -> ID2D1Brush {
+        unsafe { self.solid.SetColor(&d2d_color(color)) };
+        self.solid
+            .cast()
+            .expect("ID2D1SolidColorBrush is ID2D1Brush")
+    }
+
+    /// 描边/线用纯色画刷（渐变仅作用于填充，描边退化用 paint.color，与 SkiaCanvas 一致）。
+    fn stroke_brush(&self, paint: &Paint) -> ID2D1Brush {
+        self.solid_brush(paint.color)
+    }
+
+    /// 取/建渐变画刷。归一化端点 × 逻辑包围盒 → 逻辑坐标（与 path 同一变换空间，
+    /// SetTransform 的 scale 会统一物理化）。stops<2 或构造失败返回 None。
+    fn gradient_brush(
+        &mut self,
+        g: &Gradient,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<ID2D1Brush> {
+        let stops = g.stops();
+        if stops.len() < 2 {
+            return None;
+        }
+        let q = |v: f32| (v * 1000.0).round() as i32;
+        let rgba = |c: Color| {
+            ((c.r as u32) << 24) | ((c.g as u32) << 16) | ((c.b as u32) << 8) | c.a as u32
+        };
+        let stop_keys: Vec<(i32, u32)> = stops
+            .iter()
+            .map(|s| (q(s.offset.clamp(0.0, 1.0)), rgba(s.color)))
+            .collect();
+        let key = match g {
+            Gradient::Linear { start, end, .. } => {
+                let (sx, sy) = (x + start.0 * w, y + start.1 * h);
+                let (ex, ey) = (x + end.0 * w, y + end.1 * h);
+                GradKey {
+                    kind: 0,
+                    a: (q(sx), q(sy)),
+                    b: (q(ex), q(ey)),
+                    stops: stop_keys,
+                }
+            }
+            Gradient::Radial { center, radius, .. } => {
+                let (cx, cy) = (x + center.0 * w, y + center.1 * h);
+                // 半径以短边为基准（保持圆形而非随宽高拉成椭圆），与 SkiaCanvas 同。
+                let r = (radius * w.min(h)).max(0.01);
+                GradKey {
+                    kind: 1,
+                    a: (q(cx), q(cy)),
+                    b: (q(r), 0),
+                    stops: stop_keys,
+                }
+            }
+        };
+        if let Some(b) = self.grad_cache.get(&key) {
+            return Some(b.clone());
+        }
+        // 防无界增长：渐变端点随控件尺寸有限，超阈值整体清空重建。
+        if self.grad_cache.len() > 128 {
+            self.grad_cache.clear();
+        }
+        let brush = self.build_gradient_brush(g, x, y, w, h)?;
+        self.grad_cache.insert(key, brush.clone());
+        Some(brush)
+    }
+
+    /// 实际构造渐变画刷（CreateGradientStopCollection → Create{Linear,Radial}GradientBrush）。
+    fn build_gradient_brush(
+        &self,
+        g: &Gradient,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<ID2D1Brush> {
+        let d2d_stops: Vec<D2D1_GRADIENT_STOP> = g
+            .stops()
+            .iter()
+            .map(|s| D2D1_GRADIENT_STOP {
+                position: s.offset.clamp(0.0, 1.0),
+                color: d2d_color(s.color),
+            })
+            .collect();
+        unsafe {
+            // ID2D1DeviceContext 重载（6 参）：sRGB 色空间 + 8bpc + 直通 alpha 插值，
+            // CLAMP 端点（与 SkiaCanvas 的 SpreadMode::Pad 一致）。
+            let coll = self
+                .ctx
+                .CreateGradientStopCollection(
+                    &d2d_stops,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                    D2D1_EXTEND_MODE_CLAMP,
+                    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+                )
+                .ok()?;
+            let brush: ID2D1Brush = match g {
+                Gradient::Linear { start, end, .. } => {
+                    let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: vec2(x + start.0 * w, y + start.1 * h),
+                        endPoint: vec2(x + end.0 * w, y + end.1 * h),
+                    };
+                    self.ctx
+                        .CreateLinearGradientBrush(&props, None, &coll)
+                        .ok()?
+                        .cast()
+                        .ok()?
+                }
+                Gradient::Radial { center, radius, .. } => {
+                    let c = vec2(x + center.0 * w, y + center.1 * h);
+                    let r = (radius * w.min(h)).max(0.01);
+                    let props = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                        center: c,
+                        gradientOriginOffset: vec2(0.0, 0.0),
+                        radiusX: r,
+                        radiusY: r,
+                    };
+                    self.ctx
+                        .CreateRadialGradientBrush(&props, None, &coll)
+                        .ok()?
+                        .cast()
+                        .ok()?
+                }
+            };
+            Some(brush)
+        }
+    }
+}
+
+impl Canvas for D2DCanvas<'_> {
+    fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
+        let brush = self.fill_brush(paint, x, y, w, h);
+        unsafe { self.ctx.FillRectangle(&rect_f(x, y, w, h), &brush) };
+    }
+
+    fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
+        let brush = self.fill_brush(paint, x, y, w, h);
+        let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+        let rr = D2D1_ROUNDED_RECT {
+            rect: rect_f(x, y, w, h),
+            radiusX: r,
+            radiusY: r,
+        };
+        unsafe { self.ctx.FillRoundedRectangle(&rr, &brush) };
+    }
+
+    fn stroke_round_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        width: f32,
+        paint: &Paint,
+    ) {
+        let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
+        let half = width / 2.0;
+        // 内缩半个线宽：D2D 描边以路径为中线对称外扩，内缩使描边落在 (x,y,w,h) 框内，
+        // 与 SkiaCanvas 的描边几何一致。
+        let r = (radius - half).max(0.0);
+        let rr = D2D1_ROUNDED_RECT {
+            rect: rect_f(x + half, y + half, w - width, h - width),
+            radiusX: r,
+            radiusY: r,
+        };
+        let brush = self.stroke_brush(paint);
+        unsafe { self.ctx.DrawRoundedRectangle(&rr, &brush, width, None) };
+    }
+
+    fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
+        let brush = self.stroke_brush(paint);
+        unsafe {
+            self.ctx
+                .DrawLine(vec2(x0, y0), vec2(x1, y1), &brush, width, None)
+        };
+    }
+
+    fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
+        // 渐变包围盒为圆的外接正方形（与 SkiaCanvas 一致）。
+        let brush = self.fill_brush(paint, cx - r, cy - r, 2.0 * r, 2.0 * r);
+        let ellipse = D2D1_ELLIPSE {
+            point: vec2(cx, cy),
+            radiusX: r,
+            radiusY: r,
+        };
+        unsafe { self.ctx.FillEllipse(&ellipse, &brush) };
+    }
+
+    fn draw_shadow(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _w: f32,
+        _h: f32,
+        _radius: f32,
+        _blur: f32,
+        _color: Color,
+    ) {
+        // Task 9 实现（ID2D1Effect 高斯模糊）。
+    }
+
+    fn draw_image(
+        &mut self,
+        _img: &crate::render::image::Image,
+        _dst: crate::geometry::Rect,
+        _fit: crate::render::image::Fit,
+        _radius: f32,
+        _opacity: f32,
+    ) {
+        // 后续任务实现（CreateBitmapFromWicBitmap / DrawBitmap）。
+    }
+
+    fn draw_text(
+        &mut self,
+        _text: &str,
+        _rect: crate::geometry::Rect,
+        _color: Color,
+        _align: crate::spec::Align,
+        _family: Option<&str>,
+        _size: f32,
+    ) {
+        // Task 8 实现（DirectWrite CreateTextLayout + DrawTextLayout）。
+    }
+
+    fn measure_text(
+        &mut self,
+        text: &str,
+        _family: Option<&str>,
+        size: f32,
+    ) -> crate::geometry::Size {
+        // Task 8 接入 DirectWrite 测量；当前返回粗略估算（仿 NullTextEngine），仅供光标占位/编译。
+        crate::geometry::Size::new(
+            (text.chars().count() as f32 * size * 0.6).ceil() as i32,
+            size.ceil() as i32,
+        )
+    }
+
+    fn push_layer(&mut self, _opacity: f32) {
+        // Task 7 实现（PushLayer + D2D1_LAYER_PARAMETERS opacity）。
+    }
+
+    fn pop_layer(&mut self) {
+        // Task 7 实现（PopLayer）。
+    }
+
+    fn save(&mut self) {
+        // Task 7 实现（裁剪栈 save）。
+    }
+
+    fn restore(&mut self) {
+        // Task 7 实现（裁剪栈 restore）。
+    }
+
+    fn clip_rect(&mut self, _r: crate::geometry::Rect) {
+        // Task 7 实现（PushAxisAlignedClip）。
+    }
+}
+
+/// 构造 D2D 矩形（left/top/right/bottom，注意非 x/y/w/h）。
+fn rect_f(x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    }
+}
+
+/// 逻辑坐标点 → D2D 的 `Vector2`（点/端点统一类型）。
+fn vec2(x: f32, y: f32) -> Vector2 {
+    Vector2 { X: x, Y: y }
 }
 
 /// `Color`（非预乘 sRGB u8）→ D2D `D2D1_COLOR_F`（直通 RGBA / 255）。

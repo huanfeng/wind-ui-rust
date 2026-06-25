@@ -43,6 +43,8 @@ toml = "1.1"
 windows-core = "0.62"
 # rfd 的 set_parent 需要 HasWindowHandle（与 rfd 0.14 依赖版本对齐）。
 raw-window-handle = "0.6"
+# D2D 几何/画刷端点用 Matrix3x2/Vector2（windows 0.62 已把数值类型拆到 windows-numerics）。
+windows-numerics = "0.3"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
