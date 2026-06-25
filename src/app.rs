@@ -164,6 +164,7 @@ impl App {
                 tray: None,
                 frameless: false,
                 animations: None,
+                accelerated: false,
             },
             render: None,
             content: None,
@@ -197,6 +198,13 @@ impl App {
     /// 窗口居中显示。
     pub fn centered(mut self) -> Self {
         self.cfg.centered = true;
+        self
+    }
+
+    /// 启用 GPU 加速渲染（Direct2D 后端）。默认关闭走软渲染。仅对不透明大窗有意义；
+    /// RDP 远程会话、无可用 GPU、离屏截图等情形会自动回退软渲染（绝不 panic）。
+    pub fn accelerated(mut self, on: bool) -> Self {
+        self.cfg.accelerated = on;
         self
     }
 
@@ -265,6 +273,10 @@ impl App {
             ) {
                 self.cfg.screenshot_hover = Some((x, y));
             }
+        }
+        // --accelerated：启用 GPU（Direct2D）后端，便于与软渲染对比测试（仅窗口模式生效）。
+        if args.iter().any(|a| a == "--accelerated") {
+            self.cfg.accelerated = true;
         }
         self
     }

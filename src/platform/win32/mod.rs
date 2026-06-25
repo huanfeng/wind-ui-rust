@@ -57,7 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
     HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG,
     MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXDOUBLECLK, SM_CXFRAME,
-    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN, SM_REMOTESESSION,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
@@ -132,7 +132,10 @@ trait WinRenderBackend {
     fn resize(&mut self, w: i32, h: i32);
     /// 渲染并呈现一帧：内部清屏 → 构造 target → handler.render → present。
     /// 0×0 客户区仍配对 BeginPaint/EndPaint 但不绘制。
-    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler);
+    ///
+    /// 返回 `true` 表示后端已不可用、需由 `WindowState` 降级替换为软后端
+    /// （D2D 设备丢失且连续重建失败时）。软后端恒返回 `false`。
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) -> bool;
 }
 
 /// CPU 软件渲染后端：tiny-skia `Pixmap` 作后备缓冲，`SetDIBitsToDevice` 呈现。
@@ -169,7 +172,7 @@ impl WinRenderBackend for SkiaBackend {
         self.ensure(w, h);
     }
 
-    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) {
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) -> bool {
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         let w = rc.right - rc.left;
@@ -179,7 +182,7 @@ impl WinRenderBackend for SkiaBackend {
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);
             let _ = EndPaint(hwnd, &ps);
-            return;
+            return false;
         }
         self.ensure(w, h);
 
@@ -227,6 +230,7 @@ impl WinRenderBackend for SkiaBackend {
         );
         debug_assert!(scanlines != 0, "SetDIBitsToDevice 呈现失败");
         let _ = EndPaint(hwnd, &ps);
+        false // 软后端永不失效
     }
 }
 
@@ -335,10 +339,15 @@ impl WindowState {
         }
     }
 
-    /// 渲染并呈现到窗口。
+    /// 渲染并呈现到窗口。后端报告失效（D2D 设备丢失且连续重建失败）时降级为软后端。
     unsafe fn paint(&mut self, hwnd: HWND) {
         let bg = self.bg;
-        self.backend.paint(hwnd, bg, self.handler.as_mut());
+        let downgrade = self.backend.paint(hwnd, bg, self.handler.as_mut());
+        if downgrade {
+            // 替换为软后端并请求重绘：下一帧用 Skia 呈现，进程不崩、内容继续渲染。
+            self.backend = Box::new(SkiaBackend::new());
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
     }
 }
 
@@ -478,21 +487,27 @@ unsafe fn run_windowed(
         s.handler.set_scale(scale);
     }
 
-    // 冒烟门：feature `d2d` 开 + 环境变量 WINDUI_D2D=1 时，尝试用 GPU 后端替换软后端。
-    // try_create 需要已就绪的 HWND 与客户区尺寸，故在窗口创建并完成尺寸校正后切换。
-    // 设备创建失败则保持软后端（绝不 panic）。这是临时冒烟手段；正式 opt-in 留 Task 10。
+    // GPU 后端选择（窗口级显式 opt-in）：`cfg.accelerated` 为真（或调试环境变量
+    // WINDUI_D2D=1 强制）时尝试用 Direct2D 后端替换软后端。try_create 需要已就绪的
+    // HWND 与客户区尺寸，故在窗口创建并完成尺寸校正后切换。
+    // 强制软渲染条件：RDP 远程会话（flip-model swapchain 在远程桌面不可用）。
+    // 离屏截图走 run_offscreen，根本不到此处，恒软。设备创建失败保持软后端（绝不 panic）。
     #[cfg(feature = "d2d")]
-    if std::env::var("WINDUI_D2D").is_ok_and(|v| v != "0" && !v.is_empty()) {
-        let mut rc = RECT::default();
-        let _ = GetClientRect(hwnd, &mut rc);
-        let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
-        match d2d::try_create(hwnd, cw, ch) {
-            Some(b) => {
-                if let Some(s) = state_from(hwnd) {
-                    s.backend = Box::new(b);
+    {
+        let env_force = std::env::var("WINDUI_D2D").is_ok_and(|v| v != "0" && !v.is_empty());
+        let is_remote = GetSystemMetrics(SM_REMOTESESSION) != 0;
+        if (cfg.accelerated || env_force) && !is_remote {
+            let mut rc = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rc);
+            let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+            match d2d::try_create(hwnd, cw, ch) {
+                Some(b) => {
+                    if let Some(s) = state_from(hwnd) {
+                        s.backend = Box::new(b);
+                    }
                 }
+                None => eprintln!("[windui] D2D 设备创建失败，回退软渲染（Skia）"),
             }
-            None => eprintln!("[WINDUI_D2D] D2D 设备创建失败，回退软渲染（Skia）"),
         }
     }
 

@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::Foundation::HWND;
+use windows::core::{Interface, HRESULT, PCWSTR};
+use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
     D2D_SIZE_U,
@@ -43,9 +43,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SCALING_STRETCH,
-    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_ERROR_DEVICE_REMOVED,
+    DXGI_ERROR_DEVICE_RESET, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows_numerics::{Matrix3x2, Vector2};
@@ -95,7 +95,17 @@ pub(super) struct D2DBackend {
     /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
     /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
     image_cache: HashMap<usize, ID2D1Bitmap1>,
+    /// 设备丢失标志：`EndDraw`/`Present`/`ResizeBuffers` 返回 RECREATE_TARGET /
+    /// DEVICE_REMOVED / DEVICE_RESET 时置真，下一帧 `paint` 据此整体重建（丢弃所有 COM
+    /// 对象与缓存，重走 try_create）。
+    lost: bool,
+    /// 连续重建失败次数。超过 `MAX_RECREATE_FAILS` 时 `paint` 返回 true，由 `WindowState`
+    /// 降级为软后端（避免设备永久不可用时无限重试空转）。
+    recreate_fails: u32,
 }
+
+/// 连续重建失败上限：超过即放弃 GPU、降级软渲染。
+const MAX_RECREATE_FAILS: u32 = 3;
 
 /// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
 type LayoutKey = (String, String, u32, u16, u32, u32);
@@ -191,6 +201,8 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
         image_cache: HashMap::new(),
+        lost: false,
+        recreate_fails: 0,
     };
     // 初次绑定后备缓冲为 target。绑定失败同样回退软后端。
     backend.bind_target().ok()?;
@@ -224,6 +236,31 @@ impl D2DBackend {
         }
         Ok(())
     }
+
+    /// 设备丢失后整体重建设备链。成功时用全新后端替换 `self`（所有 COM 对象与缓存重置、
+    /// `lost=false`、`recreate_fails=0`），返回 `true`；失败时累加 `recreate_fails` 返回 `false`。
+    /// 旧 `self`（含旧 COM 对象）在赋值时被 `Drop` 正常释放。
+    unsafe fn try_recreate(&mut self, hwnd: HWND) -> bool {
+        let mut rc = windows::Win32::Foundation::RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
+        let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+        match try_create_inner(hwnd, w, h) {
+            Some(fresh) => {
+                *self = fresh;
+                true
+            }
+            None => {
+                self.recreate_fails += 1;
+                false
+            }
+        }
+    }
+}
+
+/// 该 HRESULT 是否表示 D2D/DXGI 设备丢失（需重建整条设备链）。
+/// `D2DERR_RECREATE_TARGET`（EndDraw）/ `DEVICE_REMOVED` / `DEVICE_RESET`（Present/ResizeBuffers）。
+fn is_device_lost(hr: HRESULT) -> bool {
+    hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET
 }
 
 impl WinRenderBackend for D2DBackend {
@@ -239,16 +276,29 @@ impl WinRenderBackend for D2DBackend {
                 DXGI_FORMAT_UNKNOWN,     // 保持格式
                 DXGI_SWAP_CHAIN_FLAG(0), // 无额外标志
             );
-            debug_assert!(r.is_ok(), "ResizeBuffers 失败: {r:?}");
+            if let Err(e) = r {
+                // 设备丢失：标记 lost，下一帧 paint 整体重建。其余错误调试期断言暴露。
+                if is_device_lost(e.code()) {
+                    self.lost = true;
+                    return;
+                }
+                debug_assert!(false, "ResizeBuffers 失败: {e:?}");
+                return;
+            }
             // 重新绑定新尺寸的后备缓冲。
             let _ = self.bind_target();
         }
     }
 
-    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) {
+    unsafe fn paint(&mut self, hwnd: HWND, bg: Color, handler: &mut dyn AppHandler) -> bool {
+        // 设备丢失：先尝试整体重建。重建成功则用新设备链继续本帧；连续失败超上限则
+        // 返回 true，由 WindowState 降级软后端（避免设备永久不可用时无限重试空转）。
+        if self.lost && !self.try_recreate(hwnd) {
+            return self.recreate_fails >= MAX_RECREATE_FAILS;
+        }
         // 重新绑定 target：覆盖首帧之外、resize 之后等情形，幂等且廉价。
         if self.bind_target().is_err() {
-            return;
+            return false;
         }
         // 客户区物理像素尺寸：与 SkiaBackend 一致，作为 handler.render 的 size 传入
         // （make_canvas 内再用 handler 提供的 scale 应用 SetTransform）。
@@ -274,14 +324,27 @@ impl WinRenderBackend for D2DBackend {
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
             self.context.SetTransform(&Matrix3x2::identity());
         }
-        // EndDraw 的 out 参数（tag1/tag2）此处不关心；返回错误暂仅忽略（设备丢失留后续任务处理）。
-        let _ = self.context.EndDraw(None, None);
-        // Present(1, 0)：与垂直同步对齐，呈现一帧。
-        let _ = self.swapchain.Present(1, DXGI_PRESENT(0));
+        // EndDraw 的 out 参数（tag1/tag2）此处不关心。返回 D2DERR_RECREATE_TARGET 等设备丢失
+        // 错误时标记 lost，下一帧整体重建；本帧呈现已无意义，提前返回（不 Present、不 Validate，
+        // 让 WM_PAINT 再投递触发重建帧）。
+        if let Err(e) = self.context.EndDraw(None, None) {
+            if is_device_lost(e.code()) {
+                self.lost = true;
+                return false;
+            }
+        }
+        // Present(1, 0)：与垂直同步对齐，呈现一帧。返回 HRESULT（DXGI_STATUS_OCCLUDED 等成功码
+        // 也可能返回，不能当错误），仅设备移除/重置时标记 lost。
+        let hr = self.swapchain.Present(1, DXGI_PRESENT(0));
+        if is_device_lost(hr) {
+            self.lost = true;
+            return false;
+        }
         // DXGI 呈现路径不走 BeginPaint/EndPaint，必须显式验证整个客户区更新区域，
         // 否则 Windows 持续重投 WM_PAINT → 忙循环、单核 100%，破坏空闲零 CPU 设计。
         // 这让 backend.paint 自包含完成"呈现 + 验证更新区域"契约，与 SkiaBackend 对称。
         let _ = ValidateRect(Some(hwnd), None);
+        false
     }
 }
 

@@ -186,6 +186,9 @@ pub struct WindowConfig {
     pub frameless: bool,
     /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
     pub animations: Option<bool>,
+    /// GPU 加速渲染（Direct2D 后端）opt-in，默认 false（软渲染）。仅不透明大窗有效；
+    /// RDP 远程会话与离屏截图恒走软渲染（见 win32 后端选择）。
+    pub accelerated: bool,
 }
 
 impl Default for WindowConfig {
@@ -205,6 +208,7 @@ impl Default for WindowConfig {
             tray: None,
             frameless: false,
             animations: None,
+            accelerated: false,
         }
     }
 }
