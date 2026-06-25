@@ -38,6 +38,8 @@ fn light_theme() -> Theme {
     p.border = hex(0xE3E7EC);
     p.divider = hex(0xECEEF2);
     p.track = hex(0xD7DCE3);
+    // 标签条与卡片内容对齐（与 header/行同 22px 缩进）。
+    t.tab.bar_pad_x = Some(22);
     t
 }
 
@@ -58,6 +60,8 @@ fn dark_theme() -> Theme {
     p.border = hex(0x28324A);
     p.divider = hex(0x222C40);
     p.track = hex(0x2B3550);
+    // 标签条与卡片内容对齐（与 header/行同 22px 缩进）。
+    t.tab.bar_pad_x = Some(22);
     t
 }
 
@@ -178,12 +182,14 @@ fn menu_item(icon: &str, label: &str, trailing: &str, active: bool, accent_text:
                     Role::Accent
                 } else {
                     Role::Text
-                })
-                .weight(1.0),
+                }),
         )
+        // 弹性占位把尾随推到最右（避免给标签加 weight 时挤压尾随快捷键换行）。
+        .child(Element::leaf().weight(1.0))
         .child(
             Element::label(trailing)
                 .font_size(11.0)
+                .max_lines(1)
                 .fg_role(Role::TextMuted),
         );
     if active {

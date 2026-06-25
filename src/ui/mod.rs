@@ -1287,10 +1287,12 @@ impl Element {
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
     /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
     pub fn tabs(selected: Rc<Cell<usize>>, pages: Vec<(impl Into<String>, Element)>) -> Self {
+        let bar_pad = crate::theme::current().tab.bar_pad_x();
         let mut bar = Element::row()
             .width_match()
             .height(40)
             .spacing(6)
+            .padding_xy(bar_pad, 0)
             .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, page)) in pages.into_iter().enumerate() {
@@ -1308,10 +1310,12 @@ impl Element {
         selected: Rc<Cell<usize>>,
         pages: Vec<(impl Into<String>, ImageContent, Element)>,
     ) -> Self {
+        let bar_pad = crate::theme::current().tab.bar_pad_x();
         let mut bar = Element::row()
             .width_match()
             .height(40)
             .spacing(6)
+            .padding_xy(bar_pad, 0)
             .cross(Align::Stretch);
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
