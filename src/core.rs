@@ -26,6 +26,9 @@ pub type DropFn = Box<dyn FnMut(&mut EventCtx, &[PathBuf])>;
 /// 右键上下文菜单构建回调：返回该次菜单项（空 = 不弹）。
 pub type MenuFn = Box<dyn FnMut() -> Vec<crate::event::MenuItem>>;
 
+/// 失效矩形的抗锯齿外扩余量（逻辑像素）。与宿主局部重绘的余量同源。
+const DAMAGE_MARGIN: i32 = 2;
+
 /// 剪贴板读写抽象。由平台层提供实现，UiHost 注入到 `Tree`，控件经 `EventCtx` 访问。
 pub trait ClipboardProvider {
     fn get_text(&self) -> Option<String>;
@@ -764,10 +767,61 @@ impl Tree {
 
 // ---- 事件分发 ----
 
+/// 失效请求：控件/宿主上报"哪里需要刷新"。事件期由 `EventCtx` 把节点解析为绝对矩形。
+///
+/// 合并优先级 `None < Rect < Layout < Full`：同为 `Rect`/`Layout` 取并集，遇 `Full` 吞没。
+/// Layer 1 中 `Layout` 暂等价整窗（宿主置 `needs_full`），其携带的矩形供后续 Layer 2 精确重排用。
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum DamageReq {
+    /// 无失效。
+    #[default]
+    None,
+    /// 仅重画该绝对矩形（不改布局）：hover/按下/光标移动/补间等。
+    Rect(Rect),
+    /// 该绝对矩形对应子树需重排（尺寸/结构变化）：滚动、文本增删等。
+    Layout(Rect),
+    /// 整窗重绘（无法局部化）。
+    Full,
+}
+
+impl DamageReq {
+    fn rank(self) -> u8 {
+        match self {
+            DamageReq::None => 0,
+            DamageReq::Rect(_) => 1,
+            DamageReq::Layout(_) => 2,
+            DamageReq::Full => 3,
+        }
+    }
+    /// 合并两个失效请求（取更强者；同级矩形取并集）。
+    pub fn merge(self, o: DamageReq) -> DamageReq {
+        use DamageReq::*;
+        match (self, o) {
+            (Full, _) | (_, Full) => Full,
+            (Layout(a), Layout(b)) => Layout(a.union(&b)),
+            (Layout(a), Rect(b)) | (Rect(b), Layout(a)) => Layout(a.union(&b)),
+            (Rect(a), Rect(b)) => Rect(a.union(&b)),
+            // 其余必含 None：取 rank 更高一方。
+            (a, b) => {
+                if a.rank() >= b.rank() {
+                    a
+                } else {
+                    b
+                }
+            }
+        }
+    }
+    fn merge_with(&mut self, o: DamageReq) {
+        *self = (*self).merge(o);
+    }
+}
+
 /// 一次事件处理累积的副作用指令。
 #[derive(Default)]
 pub(crate) struct EventOutcome {
     repaint: bool,
+    /// 本次处理上报的失效区域（节点已在 `EventCtx` 解析为绝对矩形）。
+    damage: DamageReq,
     /// Some(Some(id))=设置捕获；Some(None)=释放捕获。
     capture: Option<Option<NodeId>>,
     close: bool,
@@ -791,8 +845,28 @@ impl EventCtx<'_> {
     pub fn id(&self) -> NodeId {
         self.self_id
     }
-    /// 请求重绘。
+    /// 请求重绘本控件（纯视觉变化，不改布局）。失效区域取本节点视觉矩形（含投影/焦点环）。
     pub fn mark_dirty(&mut self) {
+        let r = self.tree.visual_bounds(self.self_id);
+        self.out.damage.merge_with(DamageReq::Rect(r));
+        self.out.repaint = true;
+    }
+    /// 请求重绘一个比自身更大的绝对区域（投影/溢出绘制超出本框时用）。
+    pub fn mark_dirty_rect(&mut self, r: Rect) {
+        self.out.damage.merge_with(DamageReq::Rect(r));
+        self.out.repaint = true;
+    }
+    /// 本控件尺寸/子结构变化，需重排（Layer 1 暂等价整窗）。
+    pub fn mark_layout_dirty(&mut self) {
+        let r = self.tree.visual_bounds(self.self_id);
+        self.out.damage.merge_with(DamageReq::Layout(r));
+        self.out.repaint = true;
+    }
+    /// 整窗重绘：当本次改动影响到**本控件矩形之外**的区域时使用——例如改写了被其他
+    /// 节点读取的共享状态（单选组同伴、`visible_when` 绑定的显隐标志）。在读者订阅
+    /// （Signal Phase 2）落地前，这是非局部变更的安全兜底。
+    pub fn mark_dirty_all(&mut self) {
+        self.out.damage.merge_with(DamageReq::Full);
         self.out.repaint = true;
     }
     /// 修改本节点背景色并重绘（交互态切换常用）。
@@ -800,7 +874,7 @@ impl EventCtx<'_> {
         if let Some(n) = self.tree.get_mut(self.self_id) {
             n.style.bg = Some(crate::style::Brush::Solid(c));
         }
-        self.out.repaint = true;
+        self.mark_dirty();
     }
     /// 捕获指针（后续指针事件锁定到本节点）。
     pub fn capture(&mut self) {
@@ -827,7 +901,7 @@ impl EventCtx<'_> {
         if let Some(n) = self.tree.get_mut(self.self_id) {
             n.scroll_y += dy;
         }
-        self.out.repaint = true;
+        self.mark_layout_dirty();
     }
     /// 读取本滚动节点的 (scroll_y, content_h, 视口高)。
     pub fn scroll_metrics(&self) -> (i32, i32, i32) {
@@ -843,7 +917,7 @@ impl EventCtx<'_> {
         if let Some(n) = self.tree.get_mut(self.self_id) {
             n.scroll_y = y;
         }
-        self.out.repaint = true;
+        self.mark_layout_dirty();
     }
     /// 读取剪贴板文本（无剪贴板实现时返回 None）。
     pub fn clipboard_get(&self) -> Option<String> {
@@ -888,6 +962,8 @@ impl EventCtx<'_> {
 #[derive(Default, Clone)]
 pub struct DispatchResult {
     pub repaint: bool,
+    /// 本次分发累积的失效区域（宿主据此选择局部/整窗重绘）。
+    pub damage: DamageReq,
     pub close: bool,
     pub focus: Option<NodeId>,
     /// 事件是否被某个控件消费（供宿主决定是否回退到默认行为，如 Escape 关窗）。
@@ -973,6 +1049,27 @@ impl Tree {
             }
         }
         r
+    }
+
+    /// 节点用于失效的**视觉矩形**（逻辑坐标）：在 `abs_bounds` 基础上外扩，覆盖控件全部可见
+    /// 像素——抗锯齿余量、焦点环（外扩 1px 描 2px）、投影（spread+blur 再叠 |dx|/|dy|）。
+    /// 局部重绘据此取脏区；原则宁大勿漏，避免残影。
+    pub fn visual_bounds(&self, id: NodeId) -> Rect {
+        let abs = self.abs_bounds(id);
+        let n = match self.get(id) {
+            Some(n) => n,
+            None => return abs,
+        };
+        // 焦点环在框外 1px、线宽 2px → 至少 3px 余量；否则 AA 余量 2px。
+        let mut pad = if n.focused { 3 } else { DAMAGE_MARGIN };
+        if let Some(sh) = &n.style.shadow {
+            if sh.color.a > 0 {
+                let ext = (sh.spread + sh.blur).ceil() as i32
+                    + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32;
+                pad = pad.max(ext);
+            }
+        }
+        abs.inflate(pad)
     }
 
     /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。
@@ -1176,6 +1273,7 @@ impl Tree {
                         }),
                     );
                     res.repaint |= o.repaint;
+                    res.damage = res.damage.merge(o.damage);
                 }
                 if let Some(new) = target {
                     let (_, o) = self.call_on_event(
@@ -1186,6 +1284,7 @@ impl Tree {
                         }),
                     );
                     res.repaint |= o.repaint;
+                    res.damage = res.damage.merge(o.damage);
                 }
                 *hover = target;
             }
@@ -1211,6 +1310,7 @@ impl Tree {
                 }
                 let (consumed, o) = self.call_on_event(id, &Event::Pointer(ev));
                 res.repaint |= o.repaint;
+                res.damage = res.damage.merge(o.damage);
                 res.close |= o.close;
                 res.consumed |= consumed;
                 if o.focus.is_some() {
@@ -1266,6 +1366,7 @@ impl Tree {
                         }),
                     );
                     res.repaint |= o.repaint;
+                    res.damage = res.damage.merge(o.damage);
                 }
                 if let Some(new) = target {
                     let (_, o) = self.call_on_event(
@@ -1276,6 +1377,7 @@ impl Tree {
                         }),
                     );
                     res.repaint |= o.repaint;
+                    res.damage = res.damage.merge(o.damage);
                 }
                 *hover = target;
             }
@@ -1289,6 +1391,7 @@ impl Tree {
         if let Some(f) = focus {
             let (consumed, o) = self.call_on_event(f, &Event::Key(ev));
             res.repaint = o.repaint;
+            res.damage = o.damage;
             res.close = o.close;
             res.focus = o.focus;
             res.consumed = consumed;
@@ -1326,6 +1429,7 @@ impl Tree {
                 n.on_drop = Some(cb); // 放回（节点仍在才放回，遵循 call_on_event 契约）
             }
             res.repaint |= out.repaint;
+            res.damage = res.damage.merge(out.damage);
             res.close |= out.close;
             res.consumed = true;
             if out.focus.is_some() {
@@ -1557,6 +1661,50 @@ mod tests {
         tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
         assert_eq!(clicks.get(), 1, "在按钮内释放应触发一次点击");
         assert_eq!(cap, None, "释放应取消捕获");
+    }
+
+    #[test]
+    fn damage_req_merge_precedence() {
+        let r1 = Rect::new(0, 0, 10, 10);
+        let r2 = Rect::new(20, 20, 10, 10);
+        // None 被吸收。
+        assert_eq!(
+            DamageReq::None.merge(DamageReq::Rect(r1)),
+            DamageReq::Rect(r1)
+        );
+        // Rect ∪ Rect。
+        assert_eq!(
+            DamageReq::Rect(r1).merge(DamageReq::Rect(r2)),
+            DamageReq::Rect(r1.union(&r2))
+        );
+        // Layout 强于 Rect，且取并集。
+        assert_eq!(
+            DamageReq::Rect(r1).merge(DamageReq::Layout(r2)),
+            DamageReq::Layout(r1.union(&r2))
+        );
+        // Full 吞没一切。
+        assert_eq!(
+            DamageReq::Layout(r1).merge(DamageReq::Full),
+            DamageReq::Full
+        );
+        assert_eq!(DamageReq::Full.merge(DamageReq::Rect(r1)), DamageReq::Full);
+    }
+
+    #[test]
+    fn button_press_reports_visual_rect_damage() {
+        // 按钮按下走 mark_dirty → DispatchResult 应带本节点视觉矩形的 Rect 失效（供局部重绘）。
+        let clicks = Rc::new(Cell::new(0));
+        let (mut tree, btn) = button_tree(clicks);
+        let b = tree.abs_bounds(btn);
+        let center = Point::new(b.x + b.w / 2, b.y + b.h / 2);
+        let (mut hover, mut cap) = (None, None);
+        let res = tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        match res.damage {
+            DamageReq::Rect(r) => {
+                assert_eq!(r, tree.visual_bounds(btn), "应为按钮视觉矩形")
+            }
+            other => panic!("按下应上报 Rect 失效，实得 {other:?}"),
+        }
     }
 
     #[test]

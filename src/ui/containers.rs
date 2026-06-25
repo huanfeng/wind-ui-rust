@@ -437,7 +437,8 @@ impl Widget for TabButton {
                 PointerKind::Up => {
                     if ctx.bounds().contains(p.pos) {
                         self.group.set(self.index);
-                        ctx.mark_dirty();
+                        // 切页改变 visible_when 绑定的内容面板显隐（非局部 + 布局变化）→ 重排整窗。
+                        ctx.mark_layout_dirty();
                     }
                     true
                 }
@@ -445,7 +446,7 @@ impl Widget for TabButton {
             },
             Event::Key(k) if k.pressed && (k.key == Key::Enter || k.key == Key::Space) => {
                 self.group.set(self.index);
-                ctx.mark_dirty();
+                ctx.mark_layout_dirty();
                 true
             }
             _ => false,

@@ -290,7 +290,8 @@ impl CollapsibleHeader {
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.expanded.set(!self.expanded.get());
-        ctx.mark_dirty();
+        // body 经 visible_when(expanded) 显隐：展开/收起改变其布局与可见性（非局部）→ 重排。
+        ctx.mark_layout_dirty();
     }
 }
 
@@ -414,7 +415,8 @@ impl AccordionHeader {
     }
     fn toggle(&self, ctx: &mut EventCtx) {
         self.state.toggle();
-        ctx.mark_dirty();
+        // 折叠面板 body 经 visible_when 显隐（非局部 + 布局变化）→ 重排整窗。
+        ctx.mark_layout_dirty();
     }
 }
 

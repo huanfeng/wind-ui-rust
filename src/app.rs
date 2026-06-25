@@ -13,7 +13,7 @@ use crate::sync::{new_channel, Sender, WakerShared};
 
 use tiny_skia::Pixmap;
 
-use crate::core::{NodeId, Tree};
+use crate::core::{DamageReq, NodeId, Tree};
 use crate::event::{
     CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, WindowOp,
 };
@@ -458,8 +458,13 @@ struct UiHost {
     back: Option<Pixmap>,
     /// 上一帧累积的动画脏区（逻辑坐标）：下一动画帧据此局部重绘；None=下一帧需全窗。
     pending_damage: Option<Rect>,
+    /// 交互事件累积的失效区域（逻辑坐标）：下一帧与动画脏区并集后决定局部/整窗。
+    event_damage: Option<Rect>,
     /// 强制本帧全窗重绘（输入/结构/尺寸变更触发）。
     needs_full: bool,
+    /// 测试钩子：上一帧是否走了整窗路径（验证交互是否成功局部重绘）。
+    #[cfg(test)]
+    last_frame_full: bool,
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
@@ -515,12 +520,30 @@ impl UiHost {
             bg,
             back: None,
             pending_damage: None,
+            event_damage: None,
             needs_full: true,
+            #[cfg(test)]
+            last_frame_full: false,
             swallow_up: false,
             pumps,
             interval_cbs,
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
+        }
+    }
+
+    /// 消费一次分发的失效请求：`Rect` 累积为局部脏区，`Layout`/`Full` 升级为整窗。
+    /// （Layer 1：`Layout` 暂等价整窗，精确子树重排留待 Layer 2。）
+    fn apply_damage(&mut self, d: DamageReq) {
+        match d {
+            DamageReq::Rect(r) => {
+                self.event_damage = Some(match self.event_damage {
+                    Some(e) => e.union(&r),
+                    None => r,
+                });
+            }
+            DamageReq::Layout(_) | DamageReq::Full => self.needs_full = true,
+            DamageReq::None => {}
         }
     }
 
@@ -862,7 +885,11 @@ impl AppHandler for UiHost {
         let overlay = self.menu.is_some()
             || (!self.tooltip_suppressed
                 && self.hover.and_then(|h| self.tree.node_tooltip(h)).is_some());
-        let damage = self.pending_damage.take();
+        // 下一帧脏区 = 动画脏区（上帧遗留）∪ 交互脏区（事件累积）。
+        let damage = match (self.pending_damage.take(), self.event_damage.take()) {
+            (Some(a), Some(b)) => Some(a.union(&b)),
+            (a, b) => a.or(b),
+        };
         // 局部重绘前提：scale 为 0.25 的倍数——4 逻辑像素 ×scale 才为整数，子 pixmap 与全窗帧才
         // 逐像素对齐（否则文字纵向 1px 抖动）。非 25% 倍数缩放（罕见的分数缩放）一律退全窗，
         // 这也使「平台层零改动、各平台始终拿到完整 pixmap」的不变量在任何 scale 下都安全。
@@ -879,6 +906,10 @@ impl AppHandler for UiHost {
             .unwrap_or(false);
         let do_full = self.needs_full || !back_ok || overlay || !scale_ok || !damage_small;
         self.needs_full = false;
+        #[cfg(test)]
+        {
+            self.last_frame_full = do_full;
+        }
 
         if !do_full {
             self.render_partial(pixmap, size, s, damage.unwrap());
@@ -1096,7 +1127,6 @@ impl AppHandler for UiHost {
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
-        self.needs_full = true;
         // 物理坐标 → 逻辑坐标（布局与命中均在逻辑空间）。
         let s = self.scale;
         ev.pos = Point::new(
@@ -1169,11 +1199,17 @@ impl AppHandler for UiHost {
         if res.window_op.is_some() {
             self.pending_window_op = res.window_op;
         }
+        // 安全策略：仅 hover/拖动（Move）走局部重绘——这是高频且自包含（控件自身视觉）的路径。
+        // 点击/滚轮等低频事件一律整窗：用户回调、共享状态（单选组）、visible_when 显隐等
+        // 副作用常波及本控件矩形之外，整窗刷新可无条件覆盖，避免漏刷。
+        match ev.kind {
+            PointerKind::Move => self.apply_damage(res.damage),
+            _ => self.needs_full = true,
+        }
         res.repaint
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
-        self.needs_full = true;
         // 菜单激活时：Escape 关闭，其余键吞掉（避免在菜单后误编辑）。
         if self.menu.is_some() {
             if ev.key == Key::Escape {
@@ -1199,6 +1235,11 @@ impl AppHandler for UiHost {
         }
         if !res.consumed && ev.key == Key::Escape {
             self.close = true;
+        }
+        // 键盘事件统一整窗：编辑可能改变布局（文本增减）、激活可能波及他处（切页/对话框）。
+        // 局部化留待 Layer 2（文本测量缓存）与 Signal 读者订阅落地后再开。
+        if res.repaint {
+            self.needs_full = true;
         }
         res.repaint
     }
@@ -1533,6 +1574,48 @@ mod tests {
             lum(handler.theme.palette.bg) < 300,
             "热切换后 host 应共享句柄的暗色主题"
         );
+    }
+
+    #[test]
+    fn interaction_takes_partial_path() {
+        use crate::platform::AppHandler;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 60, 60).content(Element::col().width(60).height(60));
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        // 首帧：全窗，种入后备缓冲。
+        handler.render(&mut pm, Size::new(60, 60));
+        assert!(handler.last_frame_full, "首帧应为全窗");
+        // 模拟交互产生的小脏区：下一帧应走局部重绘，不重排整树。
+        handler.event_damage = Some(Rect::new(10, 10, 12, 12));
+        handler.render(&mut pm, Size::new(60, 60));
+        assert!(!handler.last_frame_full, "带小脏区的交互帧应走局部重绘");
+    }
+
+    #[test]
+    fn click_forces_full_repaint() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 80, 80).content(
+            Element::col()
+                .width(80)
+                .height(80)
+                .child(Element::button("X")),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(80, 80).unwrap();
+        handler.render(&mut pm, Size::new(80, 80)); // 首帧全窗
+        handler.needs_full = false;
+        // 防回归：点击可能改变本控件矩形之外的区域（对话框/切页/单选组），必须整窗刷新。
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(40, 20),
+            MouseButton::Left,
+        ));
+        assert!(handler.needs_full, "点击后应整窗刷新，避免漏刷他处");
     }
 
     #[test]

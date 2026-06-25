@@ -294,7 +294,8 @@ impl RadioButton {
     }
     fn select(&self, ctx: &mut EventCtx) {
         self.group.set(self.index);
-        ctx.mark_dirty();
+        // 共享 group 被同组其他单选按钮读取：选中变化会改其同伴视觉，属非局部 → 整窗失效。
+        ctx.mark_dirty_all();
     }
 }
 
