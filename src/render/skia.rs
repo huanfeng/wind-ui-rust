@@ -2,11 +2,55 @@
 //!
 //! 支持矩形裁剪栈：用 alpha `Mask` 表示当前裁剪区，所有绘制传入栈顶 mask。
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use tiny_skia::{
     FillRule, FilterQuality, GradientStop as SkStop, LineCap, LinearGradient, Mask,
     Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Point as SkPoint, RadialGradient, Shader,
     SpreadMode, Stroke, Transform,
 };
+
+/// 阴影缓存键：(物理宽, 物理高, 圆角, 模糊半径, 颜色 RGBA)。
+type ShadowKey = (i32, i32, i32, i32, u32);
+
+thread_local! {
+    /// 模糊后阴影 Pixmap 缓存。阴影几何帧间通常不变，缓存避免每帧重复 box-blur（卡顿主因）。
+    static SHADOW_CACHE: RefCell<HashMap<ShadowKey, Pixmap>> = RefCell::new(HashMap::new());
+}
+
+/// 是否禁用阴影绘制（环境变量 WINDUI_NOSHADOW；低端机降级或排查阴影开销用）。读一次缓存。
+fn shadows_disabled() -> bool {
+    use std::sync::OnceLock;
+    static D: OnceLock<bool> = OnceLock::new();
+    *D.get_or_init(|| std::env::var("WINDUI_NOSHADOW").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
+/// 构造一张模糊后的圆角矩形阴影 Pixmap（位置无关，可缓存复用）。
+fn build_shadow_pixmap(
+    tw: i32,
+    th: i32,
+    margin: i32,
+    pw: f32,
+    ph: f32,
+    pr: f32,
+    pblur: f32,
+    color: Color,
+) -> Pixmap {
+    let mut tmp =
+        Pixmap::new(tw as u32, th as u32).unwrap_or_else(|| Pixmap::new(1, 1).expect("1x1 pixmap"));
+    if let Some(path) = rounded_rect_path(margin as f32, margin as f32, pw, ph, pr) {
+        let mut sp = SkPaint::default();
+        sp.set_color(to_sk_color(color));
+        sp.anti_alias = true;
+        tmp.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), None);
+    }
+    let r = pblur.round() as usize;
+    if r > 0 {
+        box_blur(&mut tmp, r);
+    }
+    tmp
+}
 
 use super::image::{Fit, Image};
 use super::{rounded_rect_path, Canvas, Paint};
@@ -220,7 +264,7 @@ impl Canvas for SkiaCanvas<'_> {
         blur: f32,
         color: Color,
     ) {
-        if color.a == 0 || w <= 0.0 || h <= 0.0 {
+        if color.a == 0 || w <= 0.0 || h <= 0.0 || shadows_disabled() {
             return;
         }
         let s = self.scale;
@@ -231,40 +275,63 @@ impl Canvas for SkiaCanvas<'_> {
         let ph = h * s;
         let pr = (radius * s).max(0.0);
         let pblur = (blur * s).max(0.0);
-        // 3 趟 box-blur ≈ 高斯，边缘扩散约 1.5×半径，留 3× 余量防截断。
-        let margin = (pblur * 3.0).ceil() as i32 + 1;
+        // 3 趟 box-blur ≈ 高斯，实际可见扩散约 1.5×半径；留 2× 余量足够，缩小阴影 pixmap 降低合成开销。
+        let margin = (pblur * 2.0).ceil() as i32 + 1;
         let tw = (pw.ceil() as i32 + 2 * margin).max(1);
         let th = (ph.ceil() as i32 + 2 * margin).max(1);
         // 体量保护：超大投影直接跳过（避免离屏分配爆炸）。
         if tw > 8192 || th > 8192 {
             return;
         }
-        let Some(mut tmp) = Pixmap::new(tw as u32, th as u32) else {
-            return;
-        };
-        if let Some(path) = rounded_rect_path(margin as f32, margin as f32, pw, ph, pr) {
-            let mut sp = SkPaint::default();
-            sp.set_color(to_sk_color(color));
-            sp.anti_alias = true;
-            tmp.fill_path(&path, &sp, FillRule::Winding, Transform::identity(), None);
-        }
-        let r = pblur.round() as usize;
-        if r > 0 {
-            box_blur(&mut tmp, r);
-        }
+        // 取/建缓存的模糊阴影（位置无关）：避免每帧重复 box-blur，且直接从缓存合成（不 clone，
+        // 省去每帧 memcpy）。借用拆分：src 借缓存、mask 借 self.clips、目标借 self.layers/pixmap，
+        // 分属不同对象/字段，可并存。
+        let color_key = ((color.r as u32) << 24)
+            | ((color.g as u32) << 16)
+            | ((color.b as u32) << 8)
+            | color.a as u32;
+        let key = (tw, th, pr.round() as i32, pblur.round() as i32, color_key);
         // 合成到主缓冲：左上角对齐投影矩形外扩 margin 处；受当前裁剪 mask 约束（滚动视口）。
         let dx = px.floor() as i32 - margin;
         let dy = py.floor() as i32 - margin;
-        let mask = self.clips.last().map(|c| &c.mask);
-        let pp = PixmapPaint::default();
-        match self.layers.last_mut() {
-            Some(l) => l
-                .pixmap
-                .draw_pixmap(dx, dy, tmp.as_ref(), &pp, Transform::identity(), mask),
-            None => self
-                .pixmap
-                .draw_pixmap(dx, dy, tmp.as_ref(), &pp, Transform::identity(), mask),
+        // 性能：阴影物理边界完全落在当前裁剪矩形内时，mask 裁不掉任何东西——跳过带 mask 的
+        // 慢合成路径（大阴影 + 全窗 mask 的逐像素采样是卡顿主因），仅在跨裁剪边界时才用 mask。
+        let shadow_inside = match self.clips.last() {
+            Some(c) => {
+                let cr = c
+                    .rect
+                    .offset(-self.offset.x, -self.offset.y)
+                    .scaled(self.scale);
+                dx >= cr.x && dy >= cr.y && dx + tw <= cr.x + cr.w && dy + th <= cr.y + cr.h
+            }
+            None => true,
         };
+        SHADOW_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            // 防无界增长：不同尺寸有限，超阈值整体清空重建。
+            if cache.len() > 128 {
+                cache.clear();
+            }
+            let src = cache
+                .entry(key)
+                .or_insert_with(|| build_shadow_pixmap(tw, th, margin, pw, ph, pr, pblur, color));
+            let mask = if shadow_inside {
+                None
+            } else {
+                self.clips.last().map(|c| &c.mask)
+            };
+            let pp = PixmapPaint::default();
+            match self.layers.last_mut() {
+                Some(l) => {
+                    l.pixmap
+                        .draw_pixmap(dx, dy, src.as_ref(), &pp, Transform::identity(), mask)
+                }
+                None => {
+                    self.pixmap
+                        .draw_pixmap(dx, dy, src.as_ref(), &pp, Transform::identity(), mask)
+                }
+            };
+        });
     }
 
     fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {

@@ -469,6 +469,8 @@ struct UiHost {
     interval_cbs: Vec<Box<dyn FnMut()>>,
     /// 定时器间隔列表（平台据此注册 SetTimer/NSTimer）。
     interval_durs: Vec<std::time::Duration>,
+    /// 帧耗时浮层开关（环境变量 WINDUI_FPS 非空时开启）。
+    show_fps: bool,
 }
 
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
@@ -518,6 +520,7 @@ impl UiHost {
             pumps,
             interval_cbs,
             interval_durs,
+            show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
         }
     }
 
@@ -823,6 +826,8 @@ impl UiHost {
 
 impl AppHandler for UiHost {
     fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
+        // 帧耗时计时（WINDUI_FPS=1 时在左上角显示，用于排查渲染开销）。
+        let frame_t0 = std::time::Instant::now();
         // 跨线程消息：渲染前在 UI 线程一次性排空所有通道，把后台数据写入控件状态。
         // 契约：一帧 render 消费所有 pump 的全部积压消息（唤醒合并/批处理）——
         // 多个 channel 共享单一 Waker，勿改成每 pump 独立 wake/独立帧。
@@ -1061,6 +1066,28 @@ impl AppHandler for UiHost {
                     );
                 }
             }
+        }
+        // 帧耗时浮层（WINDUI_FPS=1）：左上角显示本帧渲染耗时与估算 fps，用于排查卡顿。
+        if self.show_fps {
+            let ms = frame_t0.elapsed().as_secs_f32() * 1000.0;
+            let fps = if ms > 0.01 { 1000.0 / ms } else { 999.0 };
+            let txt = format!("{ms:.1} ms  ~{fps:.0} fps");
+            canvas.fill_round_rect(
+                4.0,
+                4.0,
+                132.0,
+                22.0,
+                4.0,
+                &Paint::fill(Color::rgba(0, 0, 0, 180)),
+            );
+            canvas.draw_text(
+                &txt,
+                Rect::new(10, 4, 126, 22),
+                Color::rgba(0, 255, 120, 255),
+                crate::spec::Align::Start,
+                None,
+                12.0,
+            );
         }
         drop(canvas);
         // 种入后备缓冲（整窗），供后续局部帧重建未变区域。

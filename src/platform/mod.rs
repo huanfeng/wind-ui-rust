@@ -117,6 +117,24 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         pixmap.fill(to_skia_color(cfg.bg));
         handler.render(&mut pixmap, size);
     }
+    // 性能基准（WINDUI_BENCH=N）：首帧已暖（字体/阴影缓存已建），再渲染 N 帧打印稳态帧耗时。
+    if let Ok(spec) = std::env::var("WINDUI_BENCH") {
+        let n: u32 = spec.parse().unwrap_or(30);
+        let mut total = 0.0f32;
+        for i in 0..n {
+            let t = std::time::Instant::now();
+            pixmap.fill(to_skia_color(cfg.bg));
+            handler.render(&mut pixmap, size);
+            let ms = t.elapsed().as_secs_f32() * 1000.0;
+            total += ms;
+            eprintln!("[windui] bench frame {i}: {ms:.2} ms");
+        }
+        eprintln!(
+            "[windui] bench 平均: {:.2} ms / 帧（{} 帧，全窗重绘）",
+            total / n.max(1) as f32,
+            n
+        );
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

@@ -71,11 +71,15 @@ fn theme_for(dark: bool) -> Theme {
 
 /// 浮层面板：圆角 surface + 边框 + 投影（设计中所有浮窗的统一外观）。
 fn panel() -> Element {
+    flat_panel().shadow(Shadow::new(0.0, 6.0, 14.0, Color::rgba(0, 0, 0, 110)))
+}
+
+/// 无投影面板（圆角 surface + 边框）。用于密集/装饰性面板，避免大量大阴影合成拖慢帧率。
+fn flat_panel() -> Element {
     Element::col()
         .bg_role(Role::Surface)
         .border_role(Role::Border, 1)
         .corner(12.0)
-        .shadow(Shadow::new(0.0, 10.0, 26.0, Color::rgba(0, 0, 0, 90)))
 }
 
 /// 小节标签（11px 弱化大写感）。
@@ -205,7 +209,7 @@ fn menu_separator() -> Element {
 /// 三级级联菜单的最终展开态：L1 + L2（在激活项右侧）+ L3 并排呈现。
 fn context_menu() -> Element {
     // L3：字形风格子菜单。
-    let l3 = panel()
+    let l3 = flat_panel()
         .width(160)
         .padding_xy(0, 6)
         .corner(10.0)
@@ -214,7 +218,7 @@ fn context_menu() -> Element {
         .child(menu_item("楷", "楷体风格", "", false, false));
 
     // L2：字符集与字形子菜单（末项「字形风格」激活，右挂 L3）。
-    let l2 = panel()
+    let l2 = flat_panel()
         .width(190)
         .padding_xy(0, 6)
         .corner(10.0)
@@ -225,7 +229,7 @@ fn context_menu() -> Element {
         .child(menu_item("字", "字形风格", "›", true, true));
 
     // L1：主菜单（「字符集与字形」激活，右挂 L2）。
-    let l1 = panel()
+    let l1 = flat_panel()
         .width(220)
         .padding_xy(0, 6)
         .corner(10.0)
