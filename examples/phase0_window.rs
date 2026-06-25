@@ -3,15 +3,18 @@
 //! 运行窗口：    cargo run --example phase0_window
 //! 截屏验证：    cargo run --example phase0_window -- --screenshot artifacts/phase0.png
 
-use tiny_skia::{Paint, PathBuilder, Pixmap, Rect as SkRect, Transform};
+use tiny_skia::{Paint, PathBuilder, Rect as SkRect, Transform};
 use windui::prelude::*;
+use windui::render::RenderTarget;
 
 fn main() {
     App::new("Phase 0 — windui", 480, 320)
         .bg(Color::hex(0x2B2B3C))
         .screenshot_from_args()
-        .on_render(|pixmap: &mut Pixmap, size: Size| {
+        .on_render(|target: &mut dyn RenderTarget, size: Size| {
             // 在中心画一个橙色圆角块，验证 tiny-skia 绘制 + 呈现链路。
+            // 此 example 仅演示软渲染后端，故直接取原始 pixmap 操作 tiny-skia。
+            let pixmap = target.as_pixmap().expect("phase0 需要软渲染后端");
             let w = size.w as f32;
             let h = size.h as f32;
             let rw = w * 0.5;

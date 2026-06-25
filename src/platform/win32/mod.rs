@@ -255,7 +255,12 @@ impl WindowState {
         let size = Size::new(self.buf_w, self.buf_h);
         let pixmap = self.pixmap.as_mut().unwrap();
         pixmap.fill(to_skia_color(self.bg));
-        self.handler.render(pixmap, size);
+        // target 借用 self.pixmap，限定在块内：块结束借用即释放，再重取引用做后续处理。
+        {
+            let mut tgt = crate::render::PixmapTarget { pixmap, scale: 1.0 };
+            self.handler.render(&mut tgt, size);
+        }
+        let pixmap = self.pixmap.as_mut().unwrap();
         // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。
         swap_rb_inplace(pixmap.data_mut());
         let bits = pixmap.data().as_ptr() as *const c_void;

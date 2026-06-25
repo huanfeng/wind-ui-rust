@@ -412,7 +412,11 @@ impl ContentView {
             let size = Size::new(pw, ph);
             // 安全：render 只写 pixmap，不访问 st 其他字段。
             let ptr = pixmap as *mut Pixmap;
-            st.handler.render(unsafe { &mut *ptr }, size);
+            let mut tgt = crate::render::PixmapTarget {
+                pixmap: unsafe { &mut *ptr },
+                scale: 1.0,
+            };
+            st.handler.render(&mut tgt, size);
 
             // 直接把 pixmap 缓冲包成 CGImage：经 CGDataProvider **引用**缓冲（不拷贝像素），
             // release 回调为 None（缓冲由 pixmap 拥有）。CGImage 在本帧 draw_image 后即析构，

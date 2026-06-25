@@ -176,6 +176,10 @@ pub trait Canvas {
 pub trait RenderTarget {
     /// 构造本帧 `Canvas`。`engine` 供软后端委托文字光栅。
     fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a>;
+    /// 软渲染局部重绘快路取原始 Pixmap；GPU 后端默认 None → 调用方强制全窗。
+    fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
+        None
+    }
 }
 
 /// tiny-skia 软后端的渲染目标：借用一份 `Pixmap`。跨平台共用。
@@ -187,6 +191,10 @@ pub struct PixmapTarget<'p> {
 impl RenderTarget for PixmapTarget<'_> {
     fn make_canvas<'a>(&'a mut self, engine: &'a mut dyn TextEngine) -> Box<dyn Canvas + 'a> {
         Box::new(SkiaCanvas::with_text(&mut *self.pixmap, engine, self.scale))
+    }
+
+    fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
+        Some(self.pixmap)
     }
 }
 

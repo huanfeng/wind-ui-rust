@@ -19,7 +19,7 @@ use crate::event::{
 };
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, WindowConfig};
-use crate::render::{Canvas, Paint, SkiaCanvas};
+use crate::render::{Paint, SkiaCanvas};
 use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
 use crate::ui::Element;
@@ -107,7 +107,7 @@ impl ContextMenu {
     }
 }
 
-type RenderClosure = Box<dyn FnMut(&mut Pixmap, Size)>;
+type RenderClosure = Box<dyn FnMut(&mut dyn crate::render::RenderTarget, Size)>;
 
 /// 应用构建器。命令式 API 的根入口。
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
@@ -270,7 +270,10 @@ impl App {
     }
 
     /// 底层渲染回调（无控件树时使用）。
-    pub fn on_render(mut self, f: impl FnMut(&mut Pixmap, Size) + 'static) -> Self {
+    pub fn on_render(
+        mut self,
+        f: impl FnMut(&mut dyn crate::render::RenderTarget, Size) + 'static,
+    ) -> Self {
         self.render = Some(Box::new(f));
         self
     }
@@ -367,8 +370,8 @@ struct ClosureHandler {
 }
 
 impl AppHandler for ClosureHandler {
-    fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
-        (self.f)(pixmap, size);
+    fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size) {
+        (self.f)(target, size);
     }
 }
 
@@ -857,7 +860,7 @@ impl UiHost {
 }
 
 impl AppHandler for UiHost {
-    fn render(&mut self, pixmap: &mut Pixmap, size: Size) {
+    fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size) {
         // 帧耗时计时（WINDUI_FPS=1 时在左上角显示，用于排查渲染开销）。
         let frame_t0 = std::time::Instant::now();
         // 跨线程消息：渲染前在 UI 线程一次性排空所有通道，把后台数据写入控件状态。
@@ -929,7 +932,12 @@ impl AppHandler for UiHost {
                 win > 0 && (d.w as i64 * d.h as i64) * 2 <= win
             })
             .unwrap_or(false);
-        let do_full = self.needs_full || !back_ok || overlay || !scale_ok || !damage_small;
+        let do_full = self.needs_full
+            || !back_ok
+            || overlay
+            || !scale_ok
+            || !damage_small
+            || target.as_pixmap().is_none();
         self.needs_full = false;
         #[cfg(test)]
         {
@@ -937,6 +945,7 @@ impl AppHandler for UiHost {
         }
 
         if !do_full {
+            let pixmap = target.as_pixmap().expect("软目标必有 pixmap");
             self.render_partial(pixmap, size, s, damage.unwrap());
             self.pending_damage = next_damage(&mut self.needs_full);
             if crate::render::prof::enabled() {
@@ -966,8 +975,8 @@ impl AppHandler for UiHost {
             }
         }
         self.tree.focus_ring_visible = self.focus_visible;
-        let mut canvas = SkiaCanvas::with_text(pixmap, &mut self.engine, s);
-        self.tree.paint(&mut canvas);
+        let mut canvas = target.make_canvas(&mut self.engine);
+        self.tree.paint(&mut *canvas);
         // 上下文菜单浮层绘制在控件树之上（self.menu 与 self.engine 为不相交字段，借用安全）。
         // 级联：从根到子菜单逐级绘制（子菜单覆盖在上）。
         if let Some(menu) = self.menu.as_ref() {
@@ -1159,7 +1168,10 @@ impl AppHandler for UiHost {
         }
         drop(canvas);
         // 种入后备缓冲（整窗），供后续局部帧重建未变区域。
-        self.seed_back(pixmap, size);
+        // GPU 后端（as_pixmap=None）不走局部重绘，seed_back 无需调用；软后端必有 pixmap。
+        if let Some(pixmap) = target.as_pixmap() {
+            self.seed_back(pixmap, size);
+        }
         self.pending_damage = next_damage(&mut self.needs_full);
         if crate::render::prof::enabled() {
             eprintln!(
@@ -1606,6 +1618,7 @@ mod tests {
     #[test]
     fn theme_handle_hot_swaps_into_host() {
         use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
         let mut app = App::new("t", 60, 60).theme(crate::theme::Theme::default());
         let handle = app.theme_handle();
@@ -1613,12 +1626,24 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(60, 60).unwrap();
-        handler.render(&mut pm, Size::new(60, 60));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(60, 60),
+        );
         let lum = |c: Color| c.r as u32 + c.g as u32 + c.b as u32;
         assert!(lum(handler.theme.palette.bg) > 500, "初始亮色背景");
         // 句柄热切换为暗色 → 下一帧 render 后 host 主题快照应转暗。
         handle.set(crate::theme::Theme::dark());
-        handler.render(&mut pm, Size::new(60, 60));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(60, 60),
+        );
         assert!(
             lum(handler.theme.palette.bg) < 300,
             "热切换后 host 应共享句柄的暗色主题"
@@ -1628,17 +1653,30 @@ mod tests {
     #[test]
     fn interaction_takes_partial_path() {
         use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
         let app = App::new("t", 60, 60).content(Element::col().width(60).height(60));
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(60, 60).unwrap();
         // 首帧：全窗，种入后备缓冲。
-        handler.render(&mut pm, Size::new(60, 60));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(60, 60),
+        );
         assert!(handler.last_frame_full, "首帧应为全窗");
         // 模拟交互产生的小脏区：下一帧应走局部重绘，不重排整树。
         handler.event_damage = Some(Rect::new(10, 10, 12, 12));
-        handler.render(&mut pm, Size::new(60, 60));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(60, 60),
+        );
         assert!(!handler.last_frame_full, "带小脏区的交互帧应走局部重绘");
     }
 
@@ -1646,6 +1684,7 @@ mod tests {
     fn structural_click_repaints_full() {
         use crate::event::{MouseButton, PointerEvent, PointerKind};
         use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
         // 按钮点击切换 visible_when 面板显隐（结构变化）→ 重排后签名变 → 必须整窗。
         let flag = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -1665,7 +1704,13 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(80, 80).unwrap();
-        handler.render(&mut pm, Size::new(80, 80)); // 首帧全窗 + 建立结构签名
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(80, 80),
+        ); // 首帧全窗 + 建立结构签名
         let at = Point::new(15, 12);
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1673,7 +1718,13 @@ mod tests {
             MouseButton::Left,
         ));
         handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
-        handler.render(&mut pm, Size::new(80, 80));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(80, 80),
+        );
         assert!(handler.last_frame_full, "切换 visible_when 面板应整窗刷新");
     }
 
@@ -1681,6 +1732,7 @@ mod tests {
     fn local_click_stays_partial() {
         use crate::event::{MouseButton, PointerEvent, PointerKind};
         use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
         // 无结构副作用的按钮点击：重排后签名不变 → 走局部重绘（不整窗）。
         let app = App::new("t", 120, 120).content(
@@ -1692,19 +1744,32 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(120, 120).unwrap();
-        handler.render(&mut pm, Size::new(120, 120)); // 首帧全窗
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(120, 120),
+        ); // 首帧全窗
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
             Point::new(15, 12),
             MouseButton::Left,
         ));
-        handler.render(&mut pm, Size::new(120, 120));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(120, 120),
+        );
         assert!(!handler.last_frame_full, "无结构变化的点击应走局部重绘");
     }
 
     #[test]
     fn render_drains_pending_messages() {
         use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
         let got = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let g2 = got.clone();
@@ -1715,7 +1780,13 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(50, 50).unwrap();
-        handler.render(&mut pm, Size::new(50, 50));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pm,
+                scale: 1.0,
+            },
+            Size::new(50, 50),
+        );
         assert_eq!(got.get(), 7, "render 前排空 pump，消息写入状态");
     }
 }

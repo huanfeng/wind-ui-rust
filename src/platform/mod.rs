@@ -56,7 +56,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     let mut pixmap = Pixmap::new(pw as u32, ph as u32).expect("分配 pixmap 失败");
     pixmap.fill(to_skia_color(cfg.bg));
     handler.set_scale(s);
-    handler.render(&mut pixmap, size);
+    let mut tgt = crate::render::PixmapTarget {
+        pixmap: &mut pixmap,
+        scale: s,
+    };
+    handler.render(&mut tgt, size);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
         let pos = Point::new(
@@ -69,7 +73,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             MouseButton::Right,
         ));
         pixmap.fill(to_skia_color(cfg.bg));
-        handler.render(&mut pixmap, size);
+        let mut tgt = crate::render::PixmapTarget {
+            pixmap: &mut pixmap,
+            scale: s,
+        };
+        handler.render(&mut tgt, size);
     }
     // 可选：合成一次左键单击（Down+Up），捕获下拉展开等。
     if let Some((lx, ly)) = cfg.screenshot_click {
@@ -88,7 +96,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             MouseButton::Left,
         ));
         pixmap.fill(to_skia_color(cfg.bg));
-        handler.render(&mut pixmap, size);
+        let mut tgt = crate::render::PixmapTarget {
+            pixmap: &mut pixmap,
+            scale: s,
+        };
+        handler.render(&mut tgt, size);
     }
     // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
     if let Some((lx, ly)) = cfg.screenshot_hover {
@@ -104,7 +116,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
         std::thread::sleep(std::time::Duration::from_millis(650));
         pixmap.fill(to_skia_color(cfg.bg));
-        handler.render(&mut pixmap, size);
+        let mut tgt = crate::render::PixmapTarget {
+            pixmap: &mut pixmap,
+            scale: s,
+        };
+        handler.render(&mut tgt, size);
     }
     // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
     // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
@@ -115,7 +131,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         pixmap.fill(to_skia_color(cfg.bg));
-        handler.render(&mut pixmap, size);
+        let mut tgt = crate::render::PixmapTarget {
+            pixmap: &mut pixmap,
+            scale: s,
+        };
+        handler.render(&mut tgt, size);
     }
     // 性能基准（WINDUI_BENCH=N）：首帧已暖（字体/阴影缓存已建），再渲染 N 帧打印稳态帧耗时。
     if let Ok(spec) = std::env::var("WINDUI_BENCH") {
@@ -124,7 +144,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         for i in 0..n {
             let t = std::time::Instant::now();
             pixmap.fill(to_skia_color(cfg.bg));
-            handler.render(&mut pixmap, size);
+            let mut tgt = crate::render::PixmapTarget {
+                pixmap: &mut pixmap,
+                scale: s,
+            };
+            handler.render(&mut tgt, size);
             let ms = t.elapsed().as_secs_f32() * 1000.0;
             total += ms;
             eprintln!("[windui] bench frame {i}: {ms:.2} ms");
@@ -193,7 +217,7 @@ impl Default for WindowConfig {
 
 /// 平台驱动的应用逻辑：渲染一帧 + 处理输入。返回 true 表示需要重绘。
 pub trait AppHandler {
-    fn render(&mut self, pixmap: &mut Pixmap, size: Size);
+    fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size);
     fn on_pointer(&mut self, _ev: PointerEvent) -> bool {
         false
     }
