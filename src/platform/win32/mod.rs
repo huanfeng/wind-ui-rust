@@ -4,6 +4,8 @@
 //! R/B 交换为 BGRA 后 `SetDIBitsToDevice` 直接拷屏。空闲时阻塞在 `GetMessageW`，零 CPU。
 
 pub mod clipboard;
+#[cfg(feature = "d2d")]
+mod d2d;
 pub mod tray;
 
 pub use tray::{Tray, TrayCtx, TrayMenuItem};
@@ -476,6 +478,24 @@ unsafe fn run_windowed(
         s.handler.set_scale(scale);
     }
 
+    // 冒烟门：feature `d2d` 开 + 环境变量 WINDUI_D2D=1 时，尝试用 GPU 后端替换软后端。
+    // try_create 需要已就绪的 HWND 与客户区尺寸，故在窗口创建并完成尺寸校正后切换。
+    // 设备创建失败则保持软后端（绝不 panic）。这是临时冒烟手段；正式 opt-in 留 Task 10。
+    #[cfg(feature = "d2d")]
+    if std::env::var("WINDUI_D2D").is_ok_and(|v| v != "0" && !v.is_empty()) {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+        match d2d::try_create(hwnd, cw, ch) {
+            Some(b) => {
+                if let Some(s) = state_from(hwnd) {
+                    s.backend = Box::new(b);
+                }
+            }
+            None => eprintln!("[WINDUI_D2D] D2D 设备创建失败，回退软渲染（Skia）"),
+        }
+    }
+
     // 居中窗口
     if cfg.centered {
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
@@ -667,7 +687,13 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SIZE => {
-            // 客户区变化：请求重绘（paint 内按客户区重建缓冲）。
+            // 客户区变化：通知后端调整缓冲（D2D 需 ResizeBuffers；Skia 为懒建无副作用），
+            // 再请求重绘。lParam 低/高字为新客户区宽/高（物理像素）。
+            let w = (lparam.0 & 0xffff) as i32;
+            let h = ((lparam.0 >> 16) & 0xffff) as i32;
+            if let Some(state) = state_from(hwnd) {
+                state.backend.resize(w, h);
+            }
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
