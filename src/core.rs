@@ -1257,8 +1257,17 @@ impl Tree {
             self_id: id,
             out: EventOutcome::default(),
         };
+        // 括起事件期：期间 Signal::set 仅记"写过信号"，不强制整窗。
+        crate::signal::begin_event();
         let consumed = widget.on_event(&mut ctx, ev);
-        let out = ctx.out;
+        let mut out = ctx.out;
+        // 事件内写过信号但控件未显式 mark_dirty → 据当前节点自动局部失效
+        // （结构签名层会在显隐/布局变化时升级整窗）。
+        if crate::signal::end_event() {
+            let r = self.visual_bounds(id);
+            out.damage = out.damage.merge(DamageReq::Rect(r));
+            out.repaint = true;
+        }
         match self.get_mut(id) {
             Some(n) => n.widget = widget,
             None => debug_assert!(

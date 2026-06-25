@@ -8,7 +8,7 @@
 //! 释放作用域（动态列表回收 slot）留作后续；当前单一全局运行时随线程存活（静态树可接受）。
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 
 /// 运行时 slot 键：索引 + 代际（复用 core arena 的失效心智，回收后旧句柄自然失效）。
@@ -77,12 +77,34 @@ impl Runtime {
 
 thread_local! {
     static RT: RefCell<Runtime> = const { RefCell::new(Runtime::new()) };
+    /// 是否处于节点事件处理期（核心在 call_on_event 前后括起）。
+    static EVENT_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    /// 本次事件处理期内是否写过信号（供核心据当前事件节点局部失效）。
+    static TOUCHED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// 写信号后触发重绘的钩子。Phase 1 粗粒度：经 anim 失效通道请求重绘
-/// （事件期外→整窗；事件期内由控件/宿主据当前节点局部化，后续增量细化）。
+/// 写信号后触发重绘的钩子。
+/// - 事件期内：仅记"写过信号"，由核心在 `end_event` 据当前事件节点产生**局部**脏区
+///   （结构签名层会在显隐/布局变化时升级整窗），不强制整窗。
+/// - 事件期外（后台 pump / 定时器 / 直接调用）：经 anim 通道请求重绘（整窗兜底）。
 fn notify_changed() {
-    crate::anim::request_repaint();
+    if EVENT_ACTIVE.with(|c| c.get()) {
+        TOUCHED.with(|c| c.set(true));
+    } else {
+        crate::anim::request_repaint();
+    }
+}
+
+/// 核心：进入某节点事件处理前调用——标记事件期开始、清"写过信号"标志。
+pub(crate) fn begin_event() {
+    EVENT_ACTIVE.with(|c| c.set(true));
+    TOUCHED.with(|c| c.set(false));
+}
+
+/// 核心：退出节点事件处理后调用——结束事件期，返回这期间是否写过信号。
+pub(crate) fn end_event() -> bool {
+    EVENT_ACTIVE.with(|c| c.set(false));
+    TOUCHED.with(|c| c.replace(false))
 }
 
 /// `Copy` 状态句柄。指向运行时存储，可自由按值传入控件/闭包，无需 clone。
@@ -204,6 +226,23 @@ mod tests {
         assert_eq!(len, 5);
         s.update(|v| v.push_str(" world"));
         assert_eq!(s.with(String::len), 11);
+    }
+
+    #[test]
+    fn set_in_event_marks_touched() {
+        let s = signal(0i32);
+        begin_event();
+        s.set(1);
+        assert!(end_event(), "事件期内写信号应标记 touched");
+    }
+
+    #[test]
+    fn set_outside_event_not_touched() {
+        let _ = end_event(); // 幂等保证非事件期（防同线程上个测试残留）
+        let s = signal(0i32);
+        s.set(9);
+        begin_event();
+        assert!(!end_event(), "事件期外的写不应记入下一次事件 touched");
     }
 
     #[test]
