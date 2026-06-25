@@ -13,6 +13,7 @@ pub mod event;
 pub mod geometry;
 pub mod platform;
 pub mod render;
+pub mod signal;
 pub mod spec;
 pub mod style;
 pub(crate) mod sync;
@@ -27,6 +28,7 @@ pub mod prelude {
     pub use crate::platform::{PickDialog, Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::Gradient;
+    pub use crate::signal::{signal, Signal};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::{Brush, Role, Shadow, Style};
     pub use crate::sync::Sender;
