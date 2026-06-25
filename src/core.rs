@@ -1072,6 +1072,24 @@ impl Tree {
         abs.inflate(pad)
     }
 
+    /// 全树**结构签名**：对每个存活节点哈希 (索引, 代际, 有效可见, bounds)。
+    /// 用于交互后判定"是否发生了显隐/位移/尺寸变化"——签名不变即本次仅为局部视觉
+    /// 变化（可局部重绘），变了则说明结构改变（影响区域不可局部化，需整窗）。
+    pub fn layout_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some(n) = &slot.node {
+                (i as u32).hash(&mut h);
+                slot.generation.hash(&mut h);
+                n.effective_visible().hash(&mut h);
+                let b = n.bounds;
+                (b.x, b.y, b.w, b.h).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
     /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。
     /// 用于宿主定位输入法候选窗。节点非文本控件或无光标时返回 None。
     pub fn caret_of(&self, id: NodeId) -> Option<(Point, i32)> {

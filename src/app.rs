@@ -460,6 +460,12 @@ struct UiHost {
     pending_damage: Option<Rect>,
     /// 交互事件累积的失效区域（逻辑坐标）：下一帧与动画脏区并集后决定局部/整窗。
     event_damage: Option<Rect>,
+    /// 本帧需重排（点击/按键后置位）：render 先 layout_root，再以结构签名判定是否升级整窗。
+    needs_relayout: bool,
+    /// 上一帧的结构签名（可见性+布局）；与重排后签名比对，变则升级整窗。
+    last_layout_sig: u64,
+    /// `last_layout_sig` 是否已就绪（首帧布局后置真）。
+    sig_valid: bool,
     /// 强制本帧全窗重绘（输入/结构/尺寸变更触发）。
     needs_full: bool,
     /// 测试钩子：上一帧是否走了整窗路径（验证交互是否成功局部重绘）。
@@ -521,6 +527,9 @@ impl UiHost {
             back: None,
             pending_damage: None,
             event_damage: None,
+            needs_relayout: false,
+            last_layout_sig: 0,
+            sig_valid: false,
             needs_full: true,
             #[cfg(test)]
             last_frame_full: false,
@@ -874,6 +883,22 @@ impl AppHandler for UiHost {
         );
         self.logical_size = logical;
 
+        // 交互/结构可能改变布局：先重排，再用结构签名判定本次是否仅为局部视觉变化。
+        // 签名变（显隐/位移/尺寸，如对话框弹出、切页）→ 影响区域不可局部化 → 升级整窗；
+        // 签名不变（打字、按钮、勾选）→ 沿用控件上报的交互脏区走 1ms 局部重绘。
+        let mut laid_out = false;
+        if self.needs_relayout {
+            self.tree.layout_root(logical, &mut self.engine);
+            laid_out = true;
+            let sig = self.tree.layout_signature();
+            if self.sig_valid && sig != self.last_layout_sig {
+                self.needs_full = true;
+            }
+            self.last_layout_sig = sig;
+            self.sig_valid = true;
+            self.needs_relayout = false;
+        }
+
         // 全窗 vs 局部重绘决策：
         // - needs_full（输入/结构/尺寸变更）、后备缓冲缺失/尺寸不符、有浮层、无脏区 → 全窗。
         // - 否则用上一帧动画脏区做局部重绘（仅重画动的那一小块，高 DPI 也稳 60fps）。
@@ -925,7 +950,12 @@ impl AppHandler for UiHost {
         }
 
         // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果种入后备缓冲供后续局部帧复用。----
-        self.tree.layout_root(logical, &mut self.engine);
+        // 重排块已布局过则跳过，避免重复 layout_root。
+        if !laid_out {
+            self.tree.layout_root(logical, &mut self.engine);
+            self.last_layout_sig = self.tree.layout_signature();
+            self.sig_valid = true;
+        }
         // 布局后结构稳定，刷新 Tab 焦点顺序。
         self.focus_order = self.tree.focusable_order();
         // 若当前焦点已不在可聚焦集合中（结构变更），归一化为无焦点。
@@ -1213,12 +1243,12 @@ impl AppHandler for UiHost {
         if res.window_op.is_some() {
             self.pending_window_op = res.window_op;
         }
-        // 安全策略：仅 hover/拖动（Move）走局部重绘——这是高频且自包含（控件自身视觉）的路径。
-        // 点击/滚轮等低频事件一律整窗：用户回调、共享状态（单选组）、visible_when 显隐等
-        // 副作用常波及本控件矩形之外，整窗刷新可无条件覆盖，避免漏刷。
-        match ev.kind {
-            PointerKind::Move => self.apply_damage(res.damage),
-            _ => self.needs_full = true,
+        // hover/拖动（Move）自包含（控件自身视觉）→ 直接用其脏区走局部。
+        // 点击等可能改变布局/显隐 → 置 needs_relayout：render 重排后用结构签名判定，
+        // 签名不变才用控件脏区走局部，变了（对话框/切页等）自动升级整窗。
+        self.apply_damage(res.damage);
+        if !matches!(ev.kind, PointerKind::Move) {
+            self.needs_relayout = true;
         }
         res.repaint
     }
@@ -1231,10 +1261,14 @@ impl AppHandler for UiHost {
             }
             return true;
         }
-        // Tab 由宿主独占用于焦点导航，并启用焦点环显示。
+        // Tab 由宿主独占用于焦点导航，并启用焦点环显示。焦点环跨节点变化（低频）→ 整窗。
         if ev.key == Key::Tab {
             self.focus_visible = true;
-            return self.move_focus(!ev.shift);
+            let moved = self.move_focus(!ev.shift);
+            if moved {
+                self.needs_full = true;
+            }
+            return moved;
         }
         // 其余键先交给焦点控件；未被消费的 Escape 回退为关闭窗口。
         let res = self.tree.dispatch_key(ev, self.focus);
@@ -1250,10 +1284,11 @@ impl AppHandler for UiHost {
         if !res.consumed && ev.key == Key::Escape {
             self.close = true;
         }
-        // 键盘事件统一整窗：编辑可能改变布局（文本增减）、激活可能波及他处（切页/对话框）。
-        // 局部化留待 Layer 2（文本测量缓存）与 Signal 读者订阅落地后再开。
+        // 键盘改动可能影响布局（文本增减）或他处（切页/对话框）→ 置 needs_relayout：
+        // render 重排后用结构签名判定，签名不变（定宽输入打字）走局部，变了升级整窗。
         if res.repaint {
-            self.needs_full = true;
+            self.apply_damage(res.damage);
+            self.needs_relayout = true;
         }
         res.repaint
     }
@@ -1608,28 +1643,63 @@ mod tests {
     }
 
     #[test]
-    fn click_forces_full_repaint() {
+    fn structural_click_repaints_full() {
         use crate::event::{MouseButton, PointerEvent, PointerKind};
         use crate::platform::AppHandler;
         use tiny_skia::Pixmap;
+        // 按钮点击切换 visible_when 面板显隐（结构变化）→ 重排后签名变 → 必须整窗。
+        let flag = std::rc::Rc::new(std::cell::Cell::new(false));
+        let f2 = flag.clone();
         let app = App::new("t", 80, 80).content(
             Element::col()
                 .width(80)
                 .height(80)
-                .child(Element::button("X")),
+                .child(Element::button("X").on_click(move |_| f2.set(true)))
+                .child(
+                    Element::col()
+                        .width(80)
+                        .height(30)
+                        .visible_when(move || flag.get()),
+                ),
         );
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(80, 80).unwrap();
-        handler.render(&mut pm, Size::new(80, 80)); // 首帧全窗
-        handler.needs_full = false;
-        // 防回归：点击可能改变本控件矩形之外的区域（对话框/切页/单选组），必须整窗刷新。
+        handler.render(&mut pm, Size::new(80, 80)); // 首帧全窗 + 建立结构签名
+        let at = Point::new(15, 12);
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
-            Point::new(40, 20),
+            at,
             MouseButton::Left,
         ));
-        assert!(handler.needs_full, "点击后应整窗刷新，避免漏刷他处");
+        handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+        handler.render(&mut pm, Size::new(80, 80));
+        assert!(handler.last_frame_full, "切换 visible_when 面板应整窗刷新");
+    }
+
+    #[test]
+    fn local_click_stays_partial() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use tiny_skia::Pixmap;
+        // 无结构副作用的按钮点击：重排后签名不变 → 走局部重绘（不整窗）。
+        let app = App::new("t", 120, 120).content(
+            Element::col()
+                .width(120)
+                .height(120)
+                .child(Element::button("X")),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(120, 120).unwrap();
+        handler.render(&mut pm, Size::new(120, 120)); // 首帧全窗
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(15, 12),
+            MouseButton::Left,
+        ));
+        handler.render(&mut pm, Size::new(120, 120));
+        assert!(!handler.last_frame_full, "无结构变化的点击应走局部重绘");
     }
 
     #[test]
