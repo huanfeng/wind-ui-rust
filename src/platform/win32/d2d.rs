@@ -18,12 +18,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
-    D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB, D2D1_ELLIPSE,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_ROUNDED_RECT,
+    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
+    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT,
+    D2D1_COLOR_SPACE_SRGB, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_LAYER_OPTIONS1_NONE, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
@@ -255,6 +255,9 @@ impl RenderTarget for D2DTarget<'_> {
             ctx: self.ctx,
             solid: self.solid,
             grad_cache: self.grad_cache,
+            saves: Vec::new(),
+            pushed_clips: 0,
+            pushed_layers: 0,
         })
     }
     // as_pixmap 用 trait 默认 None：GPU 无 pixmap，调用方走全窗重绘。
@@ -268,6 +271,14 @@ struct D2DCanvas<'a> {
     ctx: &'a ID2D1DeviceContext,
     solid: &'a ID2D1SolidColorBrush,
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
+    /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
+    saves: Vec<u32>,
+    /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
+    /// EndDraw 前必须归零（LIFO 平衡），否则 EndDraw 失败。
+    pushed_clips: u32,
+    /// 当前已 PushLayer 未配对 PopLayer 的合成层数。
+    /// 同裁剪：EndDraw 前必须归零，否则层不平衡使 EndDraw 静默返回 Err、整帧丢失。
+    pushed_layers: u32,
 }
 
 impl D2DCanvas<'_> {
@@ -424,6 +435,31 @@ impl D2DCanvas<'_> {
     }
 }
 
+impl Drop for D2DCanvas<'_> {
+    /// 兜底平衡：正常控件树的 save/clip/restore 与 push/pop_layer 本就 LIFO 平衡
+    /// （pushed_clips / pushed_layers 归零）。此处防御性清空残留裁剪与层，避免 EndDraw
+    /// 因 Push/PopAxisAlignedClip 或 Push/PopLayer 不平衡而（静默）失败、整帧丢失。
+    /// 理论上不应触发，触发即上层逻辑漏 restore / pop_layer。
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.pushed_clips, 0,
+            "EndDraw 前裁剪栈应已平衡（pushed_clips==0），残留说明上层漏 restore"
+        );
+        while self.pushed_clips > 0 {
+            unsafe { self.ctx.PopAxisAlignedClip() };
+            self.pushed_clips -= 1;
+        }
+        debug_assert_eq!(
+            self.pushed_layers, 0,
+            "EndDraw 前合成层应已平衡（pushed_layers==0），残留说明上层 push_layer/pop_layer 不平衡"
+        );
+        while self.pushed_layers > 0 {
+            unsafe { self.ctx.PopLayer() };
+            self.pushed_layers -= 1;
+        }
+    }
+}
+
 impl Canvas for D2DCanvas<'_> {
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
         let brush = self.fill_brush(paint, x, y, w, h);
@@ -533,26 +569,71 @@ impl Canvas for D2DCanvas<'_> {
         )
     }
 
-    fn push_layer(&mut self, _opacity: f32) {
-        // Task 7 实现（PushLayer + D2D1_LAYER_PARAMETERS opacity）。
+    fn push_layer(&mut self, opacity: f32) {
+        // 离屏合成层：后续绘制重定向到层，PopLayer 时按 opacity 整体合回父层
+        // （子树统一不透明度）。无限 contentBounds 不裁剪层内容（裁剪由 clip 栈负责）。
+        let params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: INFINITE_RECT,
+            geometricMask: std::mem::ManuallyDrop::new(None),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: opacity.clamp(0.0, 1.0),
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        // layer 传 None：让 D2D 自行分配/复用层资源（device context 重载支持）。
+        unsafe { self.ctx.PushLayer(&params, None) };
+        self.pushed_layers += 1;
     }
 
     fn pop_layer(&mut self) {
-        // Task 7 实现（PopLayer）。
+        // 守卫防溢出（仿 Skia pop_layer 的 if let Some）：仅在有未配对层时 Pop。
+        if self.pushed_layers > 0 {
+            unsafe { self.ctx.PopLayer() };
+            self.pushed_layers -= 1;
+        }
     }
 
     fn save(&mut self) {
-        // Task 7 实现（裁剪栈 save）。
+        // 记录当前裁剪栈深度，restore() 据此 pop 回此快照。
+        self.saves.push(self.pushed_clips);
     }
 
     fn restore(&mut self) {
-        // Task 7 实现（裁剪栈 restore）。
+        if let Some(target) = self.saves.pop() {
+            while self.pushed_clips > target {
+                unsafe { self.ctx.PopAxisAlignedClip() };
+                self.pushed_clips -= 1;
+            }
+        }
     }
 
-    fn clip_rect(&mut self, _r: crate::geometry::Rect) {
-        // Task 7 实现（PushAxisAlignedClip）。
+    fn clip_rect(&mut self, r: crate::geometry::Rect) {
+        // 契约：clip_rect 须在 save() 之后（与 restore() 配对），否则裁剪会泄漏。
+        debug_assert!(
+            !self.saves.is_empty(),
+            "clip_rect 必须在 save() 之后调用，以与 restore() 配对"
+        );
+        // PushAxisAlignedClip 自动与现有 clip 栈求交，无需手算交集。
+        // 逻辑坐标：当前 SetTransform(scale) 会对 clip rect 施加缩放（仅缩放不旋转，
+        // axis-aligned 仍成立）。ALIASED 与软后端的整数矩形 mask 边缘语义一致。
+        let rect = rect_f(r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+        unsafe {
+            self.ctx
+                .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED)
+        };
+        self.pushed_clips += 1;
     }
 }
+
+/// 合成层的“无限” contentBounds：层内容不被边界裁剪（裁剪交给 clip 栈）。
+/// 用足够大的有限值（windows-rs 无 InfiniteRect 辅助常量），±1e7 远超任何窗口尺寸。
+const INFINITE_RECT: D2D_RECT_F = D2D_RECT_F {
+    left: -1e7,
+    top: -1e7,
+    right: 1e7,
+    bottom: 1e7,
+};
 
 /// 构造 D2D 矩形（left/top/right/bottom，注意非 x/y/w/h）。
 fn rect_f(x: f32, y: f32, w: f32, h: f32) -> D2D_RECT_F {
