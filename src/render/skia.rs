@@ -20,7 +20,8 @@ thread_local! {
 }
 
 /// 是否禁用阴影绘制（环境变量 WINDUI_NOSHADOW；低端机降级或排查阴影开销用）。读一次缓存。
-fn shadows_disabled() -> bool {
+/// `pub(crate)`：D2D 后端的 `draw_shadow` 复用同一开关，保证两后端阴影禁用语义一致。
+pub(crate) fn shadows_disabled() -> bool {
     use std::sync::OnceLock;
     static D: OnceLock<bool> = OnceLock::new();
     *D.get_or_init(|| std::env::var("WINDUI_NOSHADOW").is_ok_and(|v| v != "0" && !v.is_empty()))

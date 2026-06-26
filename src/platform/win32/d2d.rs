@@ -14,19 +14,21 @@ use std::collections::HashMap;
 use windows::core::{Interface, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F,
-    D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
+    CLSID_D2D1Shadow, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext,
+    ID2D1Effect, ID2D1Factory1, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
+    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
     D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
-    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
-    D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT,
+    D2D1_PROPERTY_TYPE_VECTOR4, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
@@ -95,6 +97,13 @@ pub(super) struct D2DBackend {
     /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
     /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
     image_cache: HashMap<usize, ID2D1Bitmap1>,
+    /// 阴影 GPU 模糊效果（lazy，device-dependent）：每帧复用同一实例，仅改 input/blur/color，
+    /// 避免每帧 `CreateEffect`。Task 11 设备丢失整体重建（`*self=fresh`）时随之重置为 None。
+    shadow_effect: Option<ID2D1Effect>,
+    /// 清晰圆角矩形 alpha 掩膜缓存：键 (w,h,radius 量化逻辑 px)，值上传到 GPU 的位图。
+    /// Shadow 效果只取其 alpha 通道（颜色/模糊由效果属性决定），故同尺寸控件复用一张白色掩膜。
+    /// device-**dependent**（绑定 context）：设备丢失重建时随 `*self=fresh` 清空。
+    shadow_mask_cache: HashMap<ShadowMaskKey, ID2D1Bitmap1>,
     /// 设备丢失标志：`EndDraw`/`Present`/`ResizeBuffers` 返回 RECREATE_TARGET /
     /// DEVICE_REMOVED / DEVICE_RESET 时置真，下一帧 `paint` 据此整体重建（丢弃所有 COM
     /// 对象与缓存，重走 try_create）。
@@ -109,6 +118,9 @@ const MAX_RECREATE_FAILS: u32 = 3;
 
 /// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
 type LayoutKey = (String, String, u32, u16, u32, u32);
+
+/// 阴影掩膜缓存键：(宽 px, 高 px, 圆角 px)，均为量化后的逻辑像素整数。
+type ShadowMaskKey = (u32, u32, u32);
 
 /// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
 /// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
@@ -201,6 +213,8 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
         image_cache: HashMap::new(),
+        shadow_effect: None,
+        shadow_mask_cache: HashMap::new(),
         lost: false,
         recreate_fails: 0,
     };
@@ -319,6 +333,8 @@ impl WinRenderBackend for D2DBackend {
                 format_cache: &mut self.format_cache,
                 layout_cache: &mut self.layout_cache,
                 image_cache: &mut self.image_cache,
+                shadow_effect: &mut self.shadow_effect,
+                shadow_mask_cache: &mut self.shadow_mask_cache,
             };
             handler.render(&mut target, size);
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
@@ -358,6 +374,8 @@ struct D2DTarget<'a> {
     format_cache: &'a mut HashMap<(String, u32, u16), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
+    shadow_effect: &'a mut Option<ID2D1Effect>,
+    shadow_mask_cache: &'a mut HashMap<ShadowMaskKey, ID2D1Bitmap1>,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -380,6 +398,8 @@ impl RenderTarget for D2DTarget<'_> {
             format_cache: self.format_cache,
             layout_cache: self.layout_cache,
             image_cache: self.image_cache,
+            shadow_effect: self.shadow_effect,
+            shadow_mask_cache: self.shadow_mask_cache,
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
@@ -403,6 +423,10 @@ struct D2DCanvas<'a> {
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
     image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
+    /// 阴影模糊效果（借入，可变 Option）：lazy 建一次后复用。
+    shadow_effect: &'a mut Option<ID2D1Effect>,
+    /// 阴影清晰圆角掩膜缓存（借入，可变）：按尺寸复用白色掩膜，颜色/模糊由效果属性决定。
+    shadow_mask_cache: &'a mut HashMap<ShadowMaskKey, ID2D1Bitmap1>,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
     saves: Vec<u32>,
     /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
@@ -497,6 +521,70 @@ impl D2DCanvas<'_> {
         }
         self.image_cache.insert(id, bitmap.clone());
         Some(bitmap)
+    }
+
+    /// 取/建清晰圆角矩形 alpha 掩膜（白色不透明，边缘抗锯齿 → alpha=覆盖率），按尺寸缓存。
+    /// Shadow 效果只用其 **alpha 通道**生成投影、RGB 由效果的 Color 属性决定，故掩膜恒白、
+    /// 与颜色/模糊无关——同尺寸控件跨颜色/模糊共用一张掩膜（缓存条目少）。
+    /// 逻辑分辨率：DPI 物理化由 context 的 SetTransform 统一施加；阴影本就柔和，放大无碍。
+    fn shadow_mask(&mut self, w: f32, h: f32, radius: f32) -> Option<ID2D1Bitmap1> {
+        let wpx = w.ceil().max(1.0) as u32;
+        let hpx = h.ceil().max(1.0) as u32;
+        let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+        let key: ShadowMaskKey = (wpx, hpx, r.round() as u32);
+        if let Some(b) = self.shadow_mask_cache.get(&key) {
+            return Some(b.clone());
+        }
+        // tiny-skia 光栅一张白色圆角矩形（复用跨平台的 rounded_rect_path，与软路径同源几何）。
+        let mut pm = tiny_skia::Pixmap::new(wpx, hpx)?;
+        if let Some(path) = crate::render::rounded_rect_path(0.0, 0.0, wpx as f32, hpx as f32, r) {
+            let mut sp = tiny_skia::Paint::default();
+            sp.set_color_rgba8(255, 255, 255, 255);
+            sp.anti_alias = true;
+            pm.fill_path(
+                &path,
+                &sp,
+                tiny_skia::FillRule::Winding,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+        // 上传：预乘 RGBA8 与 R8G8B8A8_UNORM+PREMULTIPLIED 一致（同 image_bitmap，无需 R/B 交换）。
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+            colorContext: std::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U {
+            width: wpx,
+            height: hpx,
+        };
+        let bitmap = unsafe {
+            self.ctx
+                .CreateBitmap(size, Some(pm.data().as_ptr() as *const _), wpx * 4, &props)
+        }
+        .ok()?;
+        // 防无界增长（不同尺寸有限）：超阈值整体清空重建。
+        if self.shadow_mask_cache.len() > 64 {
+            self.shadow_mask_cache.clear();
+        }
+        self.shadow_mask_cache.insert(key, bitmap.clone());
+        Some(bitmap)
+    }
+
+    /// 取/建可复用的 Shadow 效果实例（lazy）。device-dependent，设备丢失随后端整体重置。
+    fn shadow_effect(&mut self) -> Option<ID2D1Effect> {
+        if let Some(e) = self.shadow_effect.as_ref() {
+            return Some(e.clone());
+        }
+        let e = unsafe { self.ctx.CreateEffect(&CLSID_D2D1Shadow) }.ok()?;
+        *self.shadow_effect = Some(e.clone());
+        Some(e)
     }
 
     /// 取本次填充用的画刷：无渐变 → 复用 solid 并改色；有渐变 → 按包围盒 (x,y,w,h)
@@ -794,15 +882,61 @@ impl Canvas for D2DCanvas<'_> {
 
     fn draw_shadow(
         &mut self,
-        _x: f32,
-        _y: f32,
-        _w: f32,
-        _h: f32,
-        _radius: f32,
-        _blur: f32,
-        _color: Color,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        blur: f32,
+        color: Color,
     ) {
-        // Task 9 实现（ID2D1Effect 高斯模糊）。
+        // 与软路径同源的禁用/退化判定（WINDUI_NOSHADOW、全透明、零尺寸跳过）。
+        if color.a == 0 || w <= 0.0 || h <= 0.0 || crate::render::skia::shadows_disabled() {
+            return;
+        }
+        // 清晰圆角 alpha 掩膜（按尺寸缓存）+ 复用的 Shadow 效果（GPU 高斯模糊 + 着色）。
+        let Some(mask) = self.shadow_mask(w, h, radius) else {
+            return;
+        };
+        let Some(effect) = self.shadow_effect() else {
+            return;
+        };
+        // 标准差：3 趟 box-blur(半径 r) 的方差≈r²+r，故高斯 σ≈blur 与软路径扩散量同量级。
+        let sigma = blur.max(0.0);
+        // Shadow 颜色为直通（非预乘）RGBA f32×4；alpha 调制投影整体不透明度。
+        let col = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a as f32 / 255.0,
+        ];
+        unsafe {
+            effect.SetInput(0, &mask, true);
+            let _ = effect.SetValue(
+                D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32,
+                D2D1_PROPERTY_TYPE_FLOAT,
+                &sigma.to_le_bytes(),
+            );
+            let col_bytes =
+                std::slice::from_raw_parts(col.as_ptr() as *const u8, std::mem::size_of_val(&col));
+            let _ = effect.SetValue(
+                D2D1_SHADOW_PROP_COLOR.0 as u32,
+                D2D1_PROPERTY_TYPE_VECTOR4,
+                col_bytes,
+            );
+            let Ok(out) = effect.GetOutput() else {
+                return;
+            };
+            // 掩膜原点 (0,0) → 投影矩形左上 (x,y)；模糊向四周外扩（偏移/外扩已由调用方算入 x,y,w,h）。
+            let off = vec2(x, y);
+            self.ctx.DrawImage(
+                &out,
+                Some(&off as *const _),
+                None,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                D2D1_COMPOSITE_MODE_SOURCE_OVER,
+            );
+        }
     }
 
     fn draw_image(
