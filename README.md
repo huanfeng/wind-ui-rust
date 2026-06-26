@@ -44,6 +44,7 @@
 - **纯净焦点环** — 焦点环仅在键盘 Tab 导航时显示，纯鼠标操作不显示外框。
 - **完整控件集** — 布局、文本、按钮、表单输入、容器导航、列表、图片、托盘一应俱全。
 - **触摸/触控板** — 平移滚动 + 惯性滑动 + 撞界回弹。
+- **可选 GPU 加速（Windows）** — 大窗口可 opt-in Direct2D 后端（`App::accelerated(true)`），几何/渐变/阴影/文字光栅走 GPU；文字仍用 DirectWrite（系统字体缓存、ClearType）。默认软渲染；RDP / 无 GPU / 离屏截图自动回退、绝不 panic。
 - **自动截屏** — `--screenshot` 离屏渲染存 PNG（`--scale 1.5` 验证高 DPI），适合自动化回归。
 
 ## 界面预览
@@ -119,6 +120,7 @@ fn main() {
 
 ```bash
 cargo run --release --example fullshowcase                  # 运行综合示例窗口
+cargo run --release --example ime -- --accelerated          # 启用 Direct2D GPU 后端（Windows）
 cargo run --example fullshowcase -- --screenshot out.png    # 离屏渲染存 PNG
 cargo test                                                  # 运行单元测试
 cargo clippy --all-targets                                  # 静态检查

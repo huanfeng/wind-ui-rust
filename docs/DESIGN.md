@@ -257,6 +257,30 @@ pub trait Canvas {
 - 呈现：把 pixmap 脏区拷进 DIB 时做 **R↔B 交换**（SIMD 友好的逐 u32 旋转）。retained 模式下仅脏区参与，空闲零成本。
 - DIB + MemDC 跨帧复用，仅窗口尺寸变化时重建。
 
+### GPU 后端（Direct2D，可选 opt-in）
+
+大窗口下软件光栅是 paint-bound（CPU 逐像素填色，几百控件/全窗重绘时掉帧）。为此引入 **Direct2D GPU 后端**，与软路径**并存**、按窗口选择。约束：文字**必须**继续走 DirectWrite（系统字体缓存、ClearType 字形，内存远低于自建字形图集），故选 Direct2D 而非 vello/wgpu。
+
+**两条接缝**（软/GPU 共用）：
+- `RenderTarget`（每帧、平台无关）：`make_canvas(engine, scale) -> Box<dyn Canvas>`。软后端把 `Pixmap` 包成 `SkiaCanvas`；GPU 后端自带 DirectWrite 栈、忽略 `engine`，返回 `D2DCanvas`。`as_pixmap()` 默认 `None`——软渲染据此走局部重绘快路，GPU 恒走全窗。
+- `WinRenderBackend`（生命周期、win32 私有）：`resize` / `paint(hwnd, bg, handler) -> bool`。`SkiaBackend` 重构自原 present 逻辑（零行为变化）；`D2DBackend` 为 D3D11 + DXGI flip-model swapchain + D2D `DeviceContext`。
+
+**范围（v1）**：仅接管**不透明大窗**（`CreateSwapChainForHwnd` flip-model，**不引入 DirectComposition**）；透明小窗留软渲染。
+
+**后端选择（窗口级显式 opt-in）**：`WindowConfig.accelerated`（默认 `false`）/ `App::accelerated(true)` / 示例 `--accelerated`。即使开启，以下情形**强制软渲染**：RDP 远程会话（`SM_REMOTESESSION`，flip-model 在远程桌面不可用）、离屏截图（`run_offscreen` 走 `Pixmap`）、设备创建失败（`try_create` 返 `None` → 回退，**绝不 panic**）。
+
+**DPI**：D2D 在逻辑坐标绘制，`make_canvas` 时 `SetTransform(scale)` 统一放大到物理像素（不同于软路径直画物理 `Pixmap` 的 ×scale）。
+
+**重对象缓存复用（内存纪律，关键）**：D2D 重对象每帧重建会累积驱动内存（实测可达 190M+）。故全部缓存复用、仅在失效时重建：后备缓冲位图（建一次/仅 resize）、`IDWriteTextLayout`/`IDWriteTextFormat`（按文本/字体键）、图片 GPU 位图（按 `Rc<Pixmap>` 指针键）、渐变画刷（按归一化样式键，位置无关 + 画刷变换）、纯色画刷（复用一个、`SetColor` 改色）。
+
+**文字**：复用 DirectWrite——`D2DCanvas::draw_text` 经 `DrawTextLayout` 用 DirectWrite 栈直接光栅（ClearType + emoji 彩字），measure 与软路径同源、字体/字重一致。
+
+**阴影**：`ID2D1Shadow` GPU 高斯模糊，但**烘焙一次缓存成品**避免每帧重模糊累积内存。流程：CPU（tiny-skia）光栅清晰圆角掩膜 → 第二个 `DeviceContext`（`bake_ctx`）离屏把模糊成品渲到位图（绕开「帧内主 ctx 禁止 `SetTarget`」限制）→ 主 ctx 每帧仅 `DrawBitmap` 合成。成品按 (尺寸/圆角/模糊/颜色) 缓存。
+
+**设备丢失**：`EndDraw`/`Present`/`ResizeBuffers` 返回 `D2DERR_RECREATE_TARGET` / `DXGI_ERROR_DEVICE_REMOVED` / `DEVICE_RESET` 时标记丢失，下一帧整体重建设备链（`*self = try_create(...)`，天然清空全部 device-dependent 缓存）；连续重建失败超上限则 `paint` 返回 `true`，由 `WindowState` 降级为 `SkiaBackend`（进程不崩、内容续渲）。
+
+**内存权衡**：软路径 ime ~19M；D2D ime ~70M（无阴影）、~100M（含暗/亮两主题阴影成品缓存）。换取大窗 GPU 合成的流畅滚动/悬停。v1 用全量 `Present` 不做 dirty-rect 增量（flip-model 后备缓冲跨帧不保证保留），脏区增量为后续优化项。
+
 ---
 
 ## 9. 文字层（DirectWrite）

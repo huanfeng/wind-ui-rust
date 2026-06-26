@@ -246,6 +246,15 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 - `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 
+### GPU 加速渲染（Windows，可选）
+```rust
+App::new("…", w, h).accelerated(true).content(ui).run();
+```
+- `App::accelerated(true)` 在 Windows 上 opt-in **Direct2D GPU 后端**：几何/渐变/阴影/文字光栅走 GPU，适合大窗口/多控件下降低软件光栅的逐像素填色开销。**默认关闭**（软渲染）。
+- 文字仍走 **DirectWrite**（系统字体缓存、ClearType 字形），与软路径字体/字重一致。
+- 自动回退软渲染（绝不 panic）：RDP 远程会话、无可用 GPU、设备创建失败、离屏截图（`--screenshot`）。
+- v1 仅适用**不透明窗口**；透明/分层窗口仍走软渲染。示例对比：`cargo run --release --example ime -- --accelerated`。
+
 ---
 
 ## 6. 布局系统
