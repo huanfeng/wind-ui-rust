@@ -401,6 +401,206 @@ impl Widget for Clickable {
     }
 }
 
+/// 图标按钮内容：字形（draw_text）或图片（ImageContent）。
+enum IconKind {
+    Glyph(String),
+    Image(ImageContent),
+}
+
+/// 图标按钮默认方形边长与内边距（px）。Element 可用 `.size()` 覆盖。
+const ICON_BTN_SIZE: i32 = 30;
+const ICON_BTN_PAD: i32 = 6;
+
+/// 纯图标按钮：无文字、方形、hover/press 半透明圆底 + 点击/键盘激活 + 手型光标。
+/// 用于 ⓘ 信息、▲▼ 调序、× 关闭等工具图标。字形随 `.fg()` 取色（默认主题文字色）；
+/// 图片随状态调制。由 `Element::icon_button()/icon_button_content()` 接入。
+pub struct IconButton {
+    kind: IconKind,
+    state: ClickState,
+    on_click: Option<ClickFn>,
+    overlay: Cell<Transition<f32>>,
+    primed: Cell<bool>,
+}
+
+impl IconButton {
+    pub fn glyph(g: impl Into<String>) -> Self {
+        Self::with(IconKind::Glyph(g.into()))
+    }
+    pub fn image(content: ImageContent) -> Self {
+        Self::with(IconKind::Image(content))
+    }
+    fn with(kind: IconKind) -> Self {
+        Self {
+            kind,
+            state: ClickState::Normal,
+            on_click: None,
+            overlay: Cell::new(Transition::new(0.0)),
+            primed: Cell::new(false),
+        }
+    }
+    fn visual_state(&self, enabled: bool) -> VisualState {
+        if !enabled {
+            return VisualState::Disabled;
+        }
+        match self.state {
+            ClickState::Normal => VisualState::Normal,
+            ClickState::Hover => VisualState::Hover,
+            ClickState::Press => VisualState::Pressed,
+        }
+    }
+}
+
+impl Widget for IconButton {
+    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        match &self.kind {
+            IconKind::Glyph(g) => {
+                let t = text.measure(g, style.font_family.as_deref(), style.font_size, None);
+                let side = t.w.max(t.h).max(style.font_size as i32) + 2 * ICON_BTN_PAD;
+                Size::new(side.max(ICON_BTN_SIZE), side.max(ICON_BTN_SIZE))
+            }
+            IconKind::Image(_) => Size::new(ICON_BTN_SIZE, ICON_BTN_SIZE),
+        }
+    }
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
+        let th = crate::theme::current();
+        // hover/press 圆底（主题文字色低 alpha，自适应明暗）。
+        let target = if !enabled {
+            0.0
+        } else {
+            match self.state {
+                ClickState::Normal => 0.0,
+                ClickState::Hover => CLICK_HOVER_A,
+                ClickState::Press => CLICK_PRESS_A,
+            }
+        };
+        let mut ov = self.overlay.get();
+        if !self.primed.get() {
+            ov = Transition::new(target);
+            self.primed.set(true);
+        } else if ov.target() != target {
+            ov.retarget(target, th.anim.fast(), Easing::EaseOut);
+        }
+        let a = ov.animate();
+        self.overlay.set(ov);
+        if a > 0.001 {
+            let r = if style.corner_radius > 0.0 {
+                style.corner_radius
+            } else {
+                th.metrics.corner_sm
+            };
+            canvas.fill_round_rect(
+                bounds.x as f32,
+                bounds.y as f32,
+                bounds.w as f32,
+                bounds.h as f32,
+                r,
+                &Paint::fill(th.palette.text.scale_alpha(a)),
+            );
+        }
+        match &self.kind {
+            IconKind::Glyph(g) => {
+                let color = if enabled {
+                    style.resolved_fg(&th)
+                } else {
+                    th.palette.text_disabled
+                };
+                canvas.draw_text(
+                    g,
+                    bounds,
+                    color,
+                    Align::Center,
+                    style.font_family.as_deref(),
+                    style.font_size,
+                );
+            }
+            IconKind::Image(content) => {
+                let side = (bounds.w.min(bounds.h) - 2 * ICON_BTN_PAD).max(1);
+                let ix = bounds.x + (bounds.w - side) / 2;
+                let iy = bounds.y + (bounds.h - side) / 2;
+                content.paint_into(
+                    Rect::new(ix, iy, side, side),
+                    canvas,
+                    style,
+                    self.visual_state(enabled),
+                );
+            }
+        }
+    }
+    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        match ev {
+            Event::Pointer(p) => match p.kind {
+                PointerKind::Enter => {
+                    if self.state == ClickState::Normal {
+                        self.state = ClickState::Hover;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Leave => {
+                    if self.state != ClickState::Press {
+                        self.state = ClickState::Normal;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Down => {
+                    self.state = ClickState::Press;
+                    ctx.capture();
+                    ctx.request_focus();
+                    ctx.mark_dirty();
+                    true
+                }
+                PointerKind::Up => {
+                    let was_press = self.state == ClickState::Press;
+                    let inside = ctx.bounds().contains(p.pos);
+                    self.state = if inside {
+                        ClickState::Hover
+                    } else {
+                        ClickState::Normal
+                    };
+                    ctx.release_capture();
+                    ctx.mark_dirty();
+                    if was_press && inside {
+                        if let Some(cb) = self.on_click.as_mut() {
+                            cb(ctx);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+            Event::Key(k) => {
+                if k.pressed && (k.key == Key::Enter || k.key == Key::Space) {
+                    if let Some(cb) = self.on_click.as_mut() {
+                        cb(ctx);
+                    }
+                    ctx.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    fn focusable(&self) -> bool {
+        true
+    }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
+    }
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Hand
+    }
+}
+
 /// 标签按钮：点击切换共享选中索引，选中时高亮 + 底部指示条。可选前置图标。
 pub struct TabButton {
     label: String,

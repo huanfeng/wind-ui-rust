@@ -524,7 +524,7 @@ const SEL_EOL_EXTRA: i32 = 6;
 /// 密码掩码字符（U+2022 BULLET）。
 const PASSWORD_MASK: char = '\u{2022}';
 
-/// TextInput 行为配置。由 Builder 的 `.password()/.multiline()/.wrap()` 设置。
+/// TextInput 行为配置。由 Builder 的 `.password()/.multiline()/.wrap()/.leading_icon()` 设置。
 #[derive(Clone, Copy)]
 pub struct TextConfig {
     /// 多行模式（P4 实现编辑/换行；当前仅占位存储）。
@@ -533,6 +533,9 @@ pub struct TextConfig {
     pub password: bool,
     /// 多行软换行（仅 multiline 生效）；false 时仅显式 \n 换行。
     pub wrap: bool,
+    /// 前置图标字形（如放大镜 🔍）：在左侧留出图标区并绘制，文字/光标/命中相应右移。
+    /// 单字形（Copy 友好）；搜索框等用。
+    pub leading: Option<char>,
 }
 
 impl Default for TextConfig {
@@ -542,6 +545,7 @@ impl Default for TextConfig {
             multiline: false,
             password: false,
             wrap: true,
+            leading: None,
         }
     }
 }
@@ -587,6 +591,8 @@ pub struct TextInput {
     follow_cursor: Cell<bool>,
     /// 鼠标当前悬停在滚动条命中区内（影响光标形状）。
     hover_in_scrollbar: Cell<bool>,
+    /// 最近一帧 paint 用的字号快照：供无 style 的命中路径换算前置图标左偏移。
+    font_size_hint: Cell<f32>,
 }
 
 impl TextInput {
@@ -607,6 +613,7 @@ impl TextInput {
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
             hover_in_scrollbar: Cell::new(false),
+            font_size_hint: Cell::new(14.0),
         }
     }
 
@@ -618,6 +625,16 @@ impl TextInput {
     /// 运行期是否多行：密码模式恒为单行（与 Builder 链式顺序无关，杜绝换行进入密码底层文本）。
     fn is_multiline(&self) -> bool {
         self.config.multiline && !self.config.password
+    }
+
+    /// 前置图标占用的左侧内宽（图标区 ≈ 字号 + 间距）；无图标为 0。
+    /// paint 的 `inner` 与命中的 `local_x` 都按此右移，保证文字/光标/点击一致。
+    fn lead_inset(&self, fsize: f32) -> i32 {
+        if self.config.leading.is_some() {
+            (fsize as i32) + 8
+        } else {
+            0
+        }
     }
 
     fn char_count(&self) -> usize {
@@ -881,7 +898,8 @@ impl TextInput {
             return 0;
         }
         let b = ctx.bounds();
-        let local_x = screen_x - (b.x + TEXT_PAD) + self.scroll_x.get();
+        let lead = self.lead_inset(self.font_size_hint.get());
+        let local_x = screen_x - (b.x + TEXT_PAD + lead) + self.scroll_x.get();
         // 垂直按多行内边距换算行号。单行只有一行、下方 clamp 恒为 0，故单行垂直
         // 居中（vpad=0）与此处用 TEXT_PAD 的不一致不影响命中；若将来单行支持多视觉
         // 行，需与 paint 的 first_line_y 同步。
@@ -1160,14 +1178,29 @@ impl Widget for TextInput {
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
         let vpad = if multiline { TEXT_PAD } else { 0 };
+        let lead = self.lead_inset(style.font_size);
         let inner = Rect::new(
-            bounds.x + TEXT_PAD,
+            bounds.x + TEXT_PAD + lead,
             bounds.y + vpad,
-            bounds.w - 2 * TEXT_PAD,
+            bounds.w - 2 * TEXT_PAD - lead,
             bounds.h - 2 * vpad,
         );
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
+        self.font_size_hint.set(fsize);
+        // 前置图标（搜索框等）：绘于左侧留白区，垂直居中，弱化色。
+        if let Some(g) = self.config.leading {
+            let mut buf = [0u8; 4];
+            let icon_rect = Rect::new(bounds.x + TEXT_PAD, bounds.y, lead, bounds.h);
+            canvas.draw_text(
+                g.encode_utf8(&mut buf),
+                icon_rect,
+                pal.placeholder,
+                Align::Center,
+                family,
+                fsize,
+            );
+        }
         let wrap = self.config.wrap && multiline;
         let cursor = self.cursor.min(disp.chars().count());
 

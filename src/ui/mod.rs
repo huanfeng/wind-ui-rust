@@ -900,6 +900,19 @@ impl Element {
         Self::base(Layout::None).widget(Button::new(label.into()))
     }
 
+    /// 纯图标按钮（字形）：无文字、方形、hover/press 圆底 + 点击/键盘激活 + 手型光标。
+    /// 用于 ⓘ 信息、▲▼ 调序、× 关闭等工具图标。字形随 `.fg()` 取色，`.size()` 调尺寸，
+    /// `.tooltip()` 加说明。配合 `.on_click(...)` 设回调。
+    pub fn icon_button(glyph: impl Into<String>) -> Self {
+        Self::base(Layout::None).widget(containers::IconButton::glyph(glyph))
+    }
+
+    /// 纯图标按钮（图片/SVG）：同 [`Element::icon_button`]，但图标用 `ImageContent`
+    /// （随状态调制）。配合 `ImageContent::from_svg_bytes`/`from_bytes` 等构造。
+    pub fn icon_button_content(content: ImageContent) -> Self {
+        Self::base(Layout::None).widget(containers::IconButton::image(content))
+    }
+
     /// 点击/激活回调（按钮等交互控件）。
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
@@ -1202,6 +1215,12 @@ impl Element {
         self.config_text_input(|c| c.wrap = on)
     }
 
+    /// 前置图标字形（如放大镜 `'\u{1F50D}'`）：在输入框左侧留出图标区并绘制，
+    /// 文字/光标/点击命中相应右移。搜索框等用。仅 `Element::text_input(..)` 可用。
+    pub fn leading_icon(self, glyph: char) -> Self {
+        self.config_text_input(|c| c.leading = Some(glyph))
+    }
+
     /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。
     ///
     /// 契约：闭包**必须是纯函数**（仅读状态、无副作用）。它在每帧的
@@ -1442,6 +1461,212 @@ impl Element {
             .child(content.align(Align::Center))
     }
 
+    /// 带标题栏 + 关闭按钮 + 底栏的对话框面板（在 `dialog` 遮罩之上居中）。
+    /// `width` 为面板逻辑宽（标题区靠它分配 title/×）；`on_close` 点右上 × 触发
+    /// （通常 `show.set(false)`）；`body` 为内容；`footer` 为底部按钮行（调用方组织，
+    /// 用 `Element::flex_spacer()` 把按钮推到右侧）。
+    pub fn dialog_panel(
+        show: Signal<bool>,
+        title: impl Into<String>,
+        width: i32,
+        on_close: impl FnMut(&mut EventCtx) + 'static,
+        body: Element,
+        footer: Element,
+    ) -> Self {
+        let th = crate::theme::current();
+        let header = Element::row()
+            .width_match()
+            .cross(Align::Center)
+            .child(
+                Element::label(title.into())
+                    .font_size(18.0)
+                    .font_weight(700)
+                    .fg(th.palette.text)
+                    .weight(1.0)
+                    .height(26),
+            )
+            .child(
+                Element::icon_button("\u{2715}")
+                    .size(28, 28)
+                    .fg(th.palette.text_muted)
+                    .on_click(on_close),
+            );
+        let panel = Element::col()
+            .width(width)
+            .bg(th.palette.surface)
+            .corner(th.metrics.corner_lg)
+            .padding(20)
+            .spacing(16)
+            .child(header)
+            .child(body)
+            .child(footer);
+        Element::dialog(show, panel)
+    }
+
+    /// 弹性空白：主轴方向占据剩余空间，把其后的兄弟元素推到另一端（如底栏「左按钮 … 右按钮」）。
+    pub fn flex_spacer() -> Self {
+        Element::stack().weight(1.0)
+    }
+
+    /// 等宽网格：把 `items` 按每行 `cols` 个排布，行/列间距 `gap`，列按权重均分等宽；
+    /// 末行不足时用空白补齐以保持列对齐。常用于复选框组、卡片墙。
+    pub fn grid(cols: usize, gap: i32, items: Vec<Element>) -> Self {
+        debug_assert!(cols >= 1, "grid 至少需要 1 列");
+        let cols = cols.max(1);
+        let mut container = Element::col().width_match().spacing(gap);
+        let mut iter = items.into_iter();
+        loop {
+            let mut cells: Vec<Element> = Vec::with_capacity(cols);
+            for _ in 0..cols {
+                match iter.next() {
+                    Some(e) => cells.push(e),
+                    None => break,
+                }
+            }
+            if cells.is_empty() {
+                break;
+            }
+            let n = cells.len();
+            let mut r = Element::row()
+                .width_match()
+                .spacing(gap)
+                .cross(Align::Stretch);
+            for e in cells {
+                r = r.child(e.weight(1.0));
+            }
+            for _ in n..cols {
+                r = r.child(Element::stack().weight(1.0)); // 末行补空占位
+            }
+            container = container.child(r);
+        }
+        container
+    }
+
+    /// 可删除标签（chip）：意图色淡底 pill + 文字 + 右侧 × 删除按钮。点 × 触发 `on_remove`。
+    /// 纯展示标签（不可删）用 [`Element::badge`]。多值字段见 [`Element::tag_field`]。
+    pub fn chip(text: impl Into<String>, on_remove: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        let th = crate::theme::current();
+        let base = th.palette.accent;
+        Element::row()
+            .cross(Align::Center)
+            .spacing(4)
+            .padding_xy(9, 3)
+            .corner(999.0)
+            .bg(base.scale_alpha(0.14))
+            .child(
+                Element::label(text.into())
+                    .font_size(12.5)
+                    .fg(base)
+                    .height(18),
+            )
+            .child(
+                Element::icon_button("\u{2715}")
+                    .size(16, 16)
+                    .font_size(11.0)
+                    .fg(base)
+                    .on_click(on_remove),
+            )
+    }
+
+    /// 标签字段：仿输入框的带边框容器，内含一组 chip（多值展示）。`chips` 用
+    /// [`Element::chip`] 生成；为空时显示 `placeholder`。新增值由 app 驱动
+    /// （维护值列表 Signal，变化后重建 chips 列表）。
+    pub fn tag_field(placeholder: impl Into<String>, chips: Vec<Element>) -> Self {
+        let th = crate::theme::current();
+        let mut row = Element::row()
+            .width_match()
+            .cross(Align::Center)
+            .spacing(6)
+            .padding_xy(8, 6)
+            .corner(th.input.corner(&th.metrics))
+            .bg(th.input.bg(&th.palette))
+            .border(th.input.border(&th.palette), 1);
+        if chips.is_empty() {
+            row = row.child(
+                Element::label(placeholder.into())
+                    .font_size(13.0)
+                    .fg(th.palette.placeholder)
+                    .weight(1.0)
+                    .height(20),
+            );
+        } else {
+            for c in chips {
+                row = row.child(c);
+            }
+        }
+        row
+    }
+
+    /// 数据表格（只读）：固定表头 + 可滚动正文 + 斑马纹。`columns` 为 (列标题, 权重)，
+    /// 列宽按权重均分；`rows` 为每行的单元格文本。需在限高容器内使用（正文滚动）。
+    /// 需要可编辑/可点击单元格时用 [`Element::table_custom`]，自带 cell 元素。
+    pub fn table(
+        columns: Vec<(impl Into<String>, f32)>,
+        rows: Vec<Vec<impl Into<String>>>,
+    ) -> Self {
+        let th = crate::theme::current();
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let fg = th.palette.text;
+        let body: Vec<Vec<Element>> = rows
+            .into_iter()
+            .map(|r| {
+                r.into_iter()
+                    .map(|c| {
+                        Element::label(c.into())
+                            .font_size(13.0)
+                            .fg(fg)
+                            .width_match()
+                            .height(20)
+                    })
+                    .collect()
+            })
+            .collect();
+        Self::table_custom(cols, body)
+    }
+
+    /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
+    /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
+    pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
+        let th = crate::theme::current();
+        // 表头：加粗、弱化色、次级表面底。
+        let mut header = Element::row()
+            .width_match()
+            .cross(Align::Center)
+            .padding_xy(14, 10)
+            .bg(th.palette.surface_alt);
+        for (title, w) in &columns {
+            header = header.child(
+                Element::label(title.clone())
+                    .font_size(13.0)
+                    .font_weight(600)
+                    .fg(th.palette.text_muted)
+                    .weight(*w)
+                    .height(18),
+            );
+        }
+        // 正文：逐行，斑马纹 + 行下分隔线，整体置于滚动容器。
+        let mut scroll = Element::scroll().fill();
+        for (ri, cells) in rows.into_iter().enumerate() {
+            let mut tr = Element::row()
+                .width_match()
+                .cross(Align::Center)
+                .padding_xy(14, 9);
+            if ri % 2 == 1 {
+                tr = tr.bg(th.palette.surface_alt.scale_alpha(0.5));
+            }
+            for (ci, cell) in cells.into_iter().enumerate() {
+                let w = columns.get(ci).map(|c| c.1).unwrap_or(1.0);
+                tr = tr.child(cell.weight(w));
+            }
+            scroll = scroll.child(Element::col().width_match().child(tr).child(Element::divider()));
+        }
+        Element::col()
+            .width_match()
+            .child(header)
+            .child(Element::divider())
+            .child(scroll.weight(1.0))
+    }
+
     /// 设置自定义内容控件（叶子）。
     pub fn widget(mut self, w: impl Widget + 'static) -> Self {
         self.widget = Box::new(w);
@@ -1663,6 +1888,44 @@ mod tests {
         tree.root = Some(root);
         tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
         tree
+    }
+
+    #[test]
+    fn grid_chunks_items_into_rows_and_pads_last() {
+        // 5 项 2 列 → 3 行；末行 1 真项 + 1 空占位，列数对齐。
+        let items: Vec<Element> = (0..5).map(|_| Element::label("x")).collect();
+        let tree = layout(Element::grid(2, 8, items));
+        let root = tree.root.unwrap();
+        let rows = tree.get(root).unwrap().children.clone();
+        assert_eq!(rows.len(), 3, "5 项 2 列应分 3 行");
+        assert_eq!(
+            tree.get(rows[0]).unwrap().children.len(),
+            2,
+            "整行应有 2 个单元格"
+        );
+        assert_eq!(
+            tree.get(rows[2]).unwrap().children.len(),
+            2,
+            "末行应补空占位到 2 列"
+        );
+    }
+
+    #[test]
+    fn table_builds_header_divider_and_scroll_body() {
+        // table → col[header, divider, scroll]；scroll 内每行一个 (row + divider) 包裹。
+        let tree = layout(Element::table(
+            vec![("A", 1.0), ("B", 1.0)],
+            vec![vec!["1", "2"], vec!["3", "4"]],
+        ));
+        let root = tree.root.unwrap();
+        let top = tree.get(root).unwrap().children.clone();
+        assert_eq!(top.len(), 3, "表格 = 表头 + 分隔线 + 滚动正文");
+        let scroll = top[2];
+        assert_eq!(
+            tree.get(scroll).unwrap().children.len(),
+            2,
+            "正文应有 2 行"
+        );
     }
 
     #[test]
