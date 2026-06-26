@@ -448,6 +448,15 @@ pub struct Button {
     intent: Intent,
     /// 尺寸变体（默认 Medium）。
     size: ButtonSize,
+    /// 填充变体（默认 Solid 实心；Outline 描边）。
+    variant: ButtonVariant,
+}
+
+/// 按钮填充变体：实心或描边（透明底 + 意图色边框/文字）。
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum ButtonVariant {
+    Solid,
+    Outline,
 }
 
 impl Button {
@@ -461,6 +470,7 @@ impl Button {
             primed: Cell::new(false),
             intent: Intent::Primary,
             size: ButtonSize::Medium,
+            variant: ButtonVariant::Solid,
         }
     }
 
@@ -472,6 +482,11 @@ impl Button {
     /// 设置语义意图色（供 Builder 的 `.intent()/.danger()/.neutral()/.accent()` 调用）。
     pub fn set_intent(&mut self, intent: Intent) {
         self.intent = intent;
+    }
+
+    /// 设置填充变体（供 Builder 的 `.outline()` 调用）。
+    pub fn set_variant(&mut self, variant: ButtonVariant) {
+        self.variant = variant;
     }
 
     /// 把内部三态 + 核心传入的启用态映射为通用视觉状态（供图标调制）。
@@ -519,6 +534,7 @@ impl Widget for Button {
         let vstate = self.visual_state(enabled);
         // intent 解析：Primary 走 ButtonTheme（保持全局换肤 + style.bg 单点覆盖），其余由 palette 派生。
         let is_primary = matches!(self.intent, Intent::Primary);
+        let is_outline = self.variant == ButtonVariant::Outline;
         let ic = if is_primary {
             IntentColors {
                 bg: bt.bg(pal),
@@ -529,17 +545,30 @@ impl Widget for Button {
         } else {
             self.intent.colors(pal)
         };
-        // 背景：禁用用专用置灰底；Primary 下 style.bg 单点覆盖优先；否则按三态取 intent 色。
-        let target = match vstate {
-            VisualState::Disabled => bt.disabled(pal),
-            _ => match &style.bg {
-                Some(bc) if is_primary => bc.solid_color(&t),
+        // 背景：
+        // - Outline：透明底，hover/press 用意图色的淡色叠层（禁用恒透明）。
+        // - Solid：禁用用置灰底；Primary 下 style.bg 单点覆盖优先；否则按三态取 intent 色。
+        let target = if is_outline {
+            match vstate {
+                VisualState::Disabled => Color::TRANSPARENT,
                 _ => match self.state {
-                    BtnState::Normal => ic.bg,
-                    BtnState::Hover => ic.hover,
-                    BtnState::Press => ic.active,
+                    BtnState::Normal => Color::TRANSPARENT,
+                    BtnState::Hover => ic.bg.scale_alpha(0.10),
+                    BtnState::Press => ic.bg.scale_alpha(0.18),
                 },
-            },
+            }
+        } else {
+            match vstate {
+                VisualState::Disabled => bt.disabled(pal),
+                _ => match &style.bg {
+                    Some(bc) if is_primary => bc.solid_color(&t),
+                    _ => match self.state {
+                        BtnState::Normal => ic.bg,
+                        BtnState::Hover => ic.hover,
+                        BtnState::Press => ic.active,
+                    },
+                },
+            }
         };
         // 背景色补间：首帧直接落定（构造期无主题色），其后状态变化淡入淡出。
         let mut anim = self.bg_anim.get();
@@ -551,10 +580,12 @@ impl Widget for Button {
         }
         let color = anim.animate();
         self.bg_anim.set(anim);
-        // 文字色：禁用用 text_disabled；fg_role 优先（运行期换主题跟随）；
-        // 否则 style.bg 有值时用显式 style.fg；再否则用意图前景。
+        // 文字色：禁用用 text_disabled；Outline 用意图主色（蓝/红/灰）作文字；
+        // 否则 fg_role 优先（运行期换主题跟随）；style.bg 有值时用显式 style.fg；再否则用意图前景。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled
+        } else if is_outline {
+            ic.bg
         } else if style.fg_role.is_some() {
             style.resolved_fg(&t)
         } else if is_primary && style.bg.is_some() {
@@ -576,6 +607,23 @@ impl Widget for Button {
             r,
             &Paint::fill(color),
         );
+        // Outline：描边（意图主色；禁用用置灰边）。绘于填充之上、内容之下。
+        if is_outline {
+            let border = if vstate == VisualState::Disabled {
+                pal.text_disabled
+            } else {
+                ic.bg
+            };
+            canvas.stroke_round_rect(
+                bounds.x as f32,
+                bounds.y as f32,
+                bounds.w as f32,
+                bounds.h as f32,
+                r,
+                1.0,
+                &Paint::fill(border),
+            );
+        }
         // 无图标：文字整体居中（原行为）。
         let Some(icon) = self.icon.as_ref() else {
             canvas.draw_text(
@@ -768,6 +816,32 @@ impl Element {
         Self::base(Layout::None).widget(DynLabel::new(text))
     }
 
+    /// 胶囊徽章/标签（如版本号 `v0.0.0-alpha`、状态 `新`）：小字号 + pill 圆角 +
+    /// 意图色淡底 + 意图色文字。默认 Primary（强调色）。颜色在构造期据当前主题解析。
+    pub fn badge(text: impl Into<String>) -> Self {
+        Self::badge_intent(text, Intent::Primary)
+    }
+
+    /// 指定语义意图的徽章（Primary=强调蓝 / Neutral=灰 / Danger=红 / Custom=自定义基色）。
+    pub fn badge_intent(text: impl Into<String>, intent: Intent) -> Self {
+        let th = crate::theme::current();
+        let base = match intent {
+            Intent::Primary => th.palette.accent,
+            other => other.colors(&th.palette).bg,
+        };
+        Element::row()
+            .cross(Align::Center)
+            .padding_xy(9, 3)
+            .corner(999.0)
+            .bg(base.scale_alpha(0.15))
+            .child(
+                Element::label(text.into())
+                    .font_size(12.0)
+                    .font_weight(600)
+                    .fg(base),
+            )
+    }
+
     /// Label/DynLabel 专属配置入口。
     fn config_label(mut self, f: impl FnOnce(&mut Label)) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
@@ -829,6 +903,19 @@ impl Element {
     /// 点击/激活回调（按钮等交互控件）。
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
+        self
+    }
+
+    /// 让**任意容器**（`col`/`row`/`stack`）成为可点击面板：补上 hover/press 视觉反馈
+    /// （主题自适应半透明叠层）、键盘可聚焦 + 回车/空格激活、悬停手型光标。
+    /// 配合 `.on_click(...)` 设回调，`.bg()`/`.corner()`/`.border()` 设外观即得卡片。
+    /// 注意：会替换该节点的占位 widget，故不可与叶子控件（label/button 等）叠加使用。
+    pub fn clickable(mut self) -> Self {
+        debug_assert!(
+            self.widget.as_any_mut().is_none(),
+            "clickable() 仅用于容器（col/row/stack），不能叠加在叶子控件上"
+        );
+        self.widget = Box::new(containers::Clickable::new());
         self
     }
 
@@ -986,6 +1073,12 @@ impl Element {
     /// 小号按钮（更紧凑的内边距，用于密集工具栏；默认为 Medium）。仅 `Element::button(..)` 可用。
     pub fn small(self) -> Self {
         self.config_button(|b| b.size = ButtonSize::Small, "small()")
+    }
+
+    /// 描边按钮（透明底 + 意图色边框/文字，hover 淡色叠层）。与 `.neutral()/.danger()/.accent()`
+    /// 组合可得不同语义的描边按钮（如蓝色"检查更新"、红色"删除"次按钮）。仅 `Element::button(..)` 可用。
+    pub fn outline(self) -> Self {
+        self.config_button(|b| b.set_variant(ButtonVariant::Outline), "outline()")
     }
 
     /// 启用标志（绑定 `Signal<bool>`，运行期可切换）。**适用于任意控件/容器**：

@@ -3,8 +3,8 @@
 use std::cell::Cell;
 
 use crate::anim::{Easing, Transition};
-use crate::core::{EventCtx, Widget};
-use crate::event::{Event, Key, PointerKind};
+use crate::core::{ClickFn, EventCtx, Widget};
+use crate::event::{CursorShape, Event, Key, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
@@ -249,6 +249,155 @@ impl Widget for ModalScrim {
     fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
         // 仅吞指针事件；键盘仍可冒泡（如 Escape 关闭由宿主处理）。
         matches!(ev, Event::Pointer(_))
+    }
+}
+
+/// 可点击容器三态。
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ClickState {
+    Normal,
+    Hover,
+    Press,
+}
+
+/// hover/press 叠层不透明度（叠层取主题文字色，明暗主题均自适应）。
+const CLICK_HOVER_A: f32 = 0.06;
+const CLICK_PRESS_A: f32 = 0.11;
+
+/// 通用可点击容器 widget：为任意容器（卡片 / 列表项 / 自定义行）补上 hover/press
+/// 视觉反馈 + 点击/键盘激活 + 手型光标。反馈用**主题自适应的半透明叠层**（绘制在节点
+/// 背景之上、子内容之下），故明暗主题均成立、无需配置基色。
+/// 由 `Element::clickable()` 接入；点击回调经 `Element::on_click` 注入。
+pub struct Clickable {
+    state: ClickState,
+    on_click: Option<ClickFn>,
+    /// 叠层不透明度补间（normal=0 / hover / press）；首帧靠 `primed` 落定。
+    overlay: Cell<Transition<f32>>,
+    primed: Cell<bool>,
+}
+
+impl Default for Clickable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clickable {
+    pub fn new() -> Self {
+        Self {
+            state: ClickState::Normal,
+            on_click: None,
+            overlay: Cell::new(Transition::new(0.0)),
+            primed: Cell::new(false),
+        }
+    }
+}
+
+impl Widget for Clickable {
+    fn paint(
+        &self,
+        bounds: Rect,
+        _content: Rect,
+        _focused: bool,
+        enabled: bool,
+        canvas: &mut dyn Canvas,
+        style: &Style,
+    ) {
+        // 禁用：不显示 hover 反馈（核心层已拦事件，状态恒 Normal）。
+        let th = crate::theme::current();
+        let target = if !enabled {
+            0.0
+        } else {
+            match self.state {
+                ClickState::Normal => 0.0,
+                ClickState::Hover => CLICK_HOVER_A,
+                ClickState::Press => CLICK_PRESS_A,
+            }
+        };
+        let mut ov = self.overlay.get();
+        if !self.primed.get() {
+            ov = Transition::new(target);
+            self.primed.set(true);
+        } else if ov.target() != target {
+            ov.retarget(target, th.anim.fast(), Easing::EaseOut);
+        }
+        let a = ov.animate();
+        self.overlay.set(ov);
+        if a > 0.001 {
+            canvas.fill_round_rect(
+                bounds.x as f32,
+                bounds.y as f32,
+                bounds.w as f32,
+                bounds.h as f32,
+                style.corner_radius,
+                &Paint::fill(th.palette.text.scale_alpha(a)),
+            );
+        }
+    }
+    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        match ev {
+            Event::Pointer(p) => match p.kind {
+                PointerKind::Enter => {
+                    if self.state == ClickState::Normal {
+                        self.state = ClickState::Hover;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Leave => {
+                    if self.state != ClickState::Press {
+                        self.state = ClickState::Normal;
+                        ctx.mark_dirty();
+                    }
+                    true
+                }
+                PointerKind::Down => {
+                    self.state = ClickState::Press;
+                    ctx.capture();
+                    ctx.request_focus();
+                    ctx.mark_dirty();
+                    true
+                }
+                PointerKind::Up => {
+                    let was_press = self.state == ClickState::Press;
+                    let inside = ctx.bounds().contains(p.pos);
+                    self.state = if inside {
+                        ClickState::Hover
+                    } else {
+                        ClickState::Normal
+                    };
+                    ctx.release_capture();
+                    ctx.mark_dirty();
+                    if was_press && inside {
+                        if let Some(cb) = self.on_click.as_mut() {
+                            cb(ctx);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+            Event::Key(k) => {
+                if k.pressed && (k.key == Key::Enter || k.key == Key::Space) {
+                    if let Some(cb) = self.on_click.as_mut() {
+                        cb(ctx);
+                    }
+                    ctx.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+    fn focusable(&self) -> bool {
+        true
+    }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
+    }
+    fn cursor(&self) -> CursorShape {
+        CursorShape::Hand
     }
 }
 
