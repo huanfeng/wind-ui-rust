@@ -112,12 +112,40 @@ fn dropdown_row(title: &str, desc: &str, options: Vec<&str>, sel: Signal<usize>)
         .child(Element::dropdown(options, sel).width(180))
 }
 
+/// 导航占位页（演示左侧栏切换内容）。
+fn nav_placeholder(title: &str) -> Element {
+    Element::scroll().fill().child(
+        Element::col()
+            .width_match()
+            .padding(24)
+            .spacing(16)
+            .child(
+                Element::label(title)
+                    .font_size(24.0)
+                    .font_weight(700)
+                    .fg(Color::hex(FG))
+                    .height(32),
+            )
+            .child(card(
+                Element::label("（此页为导航切换占位演示）")
+                    .font_size(14.0)
+                    .fg(Color::hex(MUTED))
+                    .width_match()
+                    .height(22),
+            )),
+    )
+}
+
 fn main() {
     let nav = signal(0usize);
     let main_scheme = signal(0usize);
     let pinyin_scheme = signal(0usize);
     let show_table = signal(false);
     let show_pairs = signal(false);
+    // 标点表格的可编辑数据 + 编辑子对话框状态。
+    let edit_show = signal(false);
+    let edit_buf = signal(String::new());
+    let edit_pos = signal((0usize, 0usize));
     // 中文配对：8 个开关状态。
     let pairs: Vec<(Signal<bool>, &str, &str)> = vec![
         (signal(true), "（ ）", "圆括号"),
@@ -168,10 +196,9 @@ fn main() {
         )
         .child(Element::button("保存设置").width_match());
 
-    // ── 右侧内容 ──（横向占剩余空间用 weight，不能用 width_match/fill 否则溢出父宽）
-    let content = Element::scroll()
-        .height_match()
-        .weight(1.0)
+    // ── 右侧内容：方案页（横向占剩余空间用 weight，不能用 width_match/fill 否则溢出父宽）──
+    let scheme_page = Element::scroll()
+        .fill()
         .child(
             Element::col()
                 .width_match()
@@ -220,7 +247,17 @@ fn main() {
                 )),
         );
 
-    // ── 标点表格对话框 ──
+    // 内容区 = 按 nav 切换的页面栈（visible_when 显隐，点侧栏即换页）。
+    let pages = ["", "输入设置", "按键设置", "外观设置", "词库设置", "高级设置", "统计", "关于"];
+    let mut content = Element::stack()
+        .height_match()
+        .weight(1.0)
+        .child(scheme_page.visible_when(move || nav.get() == 0));
+    for (i, title) in pages.iter().enumerate().skip(1) {
+        content = content.child(nav_placeholder(title).visible_when(move || nav.get() == i));
+    }
+
+    // ── 标点表格对话框（可编辑：点单元格 → 编辑框 → 写回，表格自动刷新）──
     let table_cols = vec![
         ("原字符", 1.0f32),
         ("英文半角", 1.0),
@@ -228,16 +265,28 @@ fn main() {
         ("中文半角", 1.0),
         ("中文全角", 1.0),
     ];
-    let table_rows = vec![
-        vec!["空格", "—", "", "—", ""],
-        vec!["!", "!", "！", "!", "！"],
-        vec!["@", "@", "＠", "@", "＠"],
-        vec!["#", "#", "＃", "#", "＃"],
-        vec!["$", "$", "＄", "￥", "￥"],
-        vec!["%", "%", "％", "%", "％"],
-        vec!["^", "^", "＾", "……", "……"],
-        vec!["&", "&", "＆", "&", "＆"],
+    let init: Vec<[&str; 5]> = vec![
+        ["空格", "—", "", "—", ""],
+        ["!", "!", "！", "!", "！"],
+        ["@", "@", "＠", "@", "＠"],
+        ["#", "#", "＃", "#", "＃"],
+        ["$", "$", "＄", "￥", "￥"],
+        ["%", "%", "％", "%", "％"],
+        ["^", "^", "＾", "……", "……"],
+        ["&", "&", "＆", "&", "＆"],
     ];
+    let cells: Vec<Vec<Signal<String>>> = init
+        .iter()
+        .map(|r| r.iter().map(|s| signal(s.to_string())).collect())
+        .collect();
+    // 点单元格：载入当前值到编辑缓冲、记录坐标、弹编辑子对话框。
+    let cells_edit = cells.clone();
+    let table_w = Element::table_editable(table_cols, cells.clone(), move |_ctx, r, c| {
+        edit_buf.set(cells_edit[r][c].get());
+        edit_pos.set((r, c));
+        edit_show.set(true);
+    })
+    .height(360);
     let table_dialog = Element::dialog_panel(
         show_table,
         "自定义标点设置",
@@ -246,14 +295,33 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(10)
-            .child(Element::label("双击单元格编辑，长度 1–8 个字符").font_size(12.5).fg(Color::hex(MUTED)).width_match().height(18))
-            .child(Element::table(table_cols, table_rows).height(360)),
+            .child(Element::label("点单元格编辑，长度 1–8 个字符").font_size(12.5).fg(Color::hex(MUTED)).width_match().height(18))
+            .child(table_w),
         Element::row()
             .width_match()
             .child(Element::button("恢复默认").small().outline().neutral())
             .child(Element::flex_spacer())
-            .child(Element::button("取消").small().outline().neutral())
-            .child(Element::button("确定").small()),
+            .child(Element::button("取消").small().outline().neutral().on_click(move |_| show_table.set(false)))
+            .child(Element::button("确定").small().on_click(move |_| show_table.set(false))),
+    );
+
+    // ── 单元格编辑子对话框 ──
+    let cells_ok = cells.clone();
+    let edit_dialog = Element::dialog_panel(
+        edit_show,
+        "编辑单元格",
+        340,
+        move |_| edit_show.set(false),
+        Element::text_input(edit_buf, "输入字符…").width_match(),
+        Element::row()
+            .width_match()
+            .child(Element::flex_spacer())
+            .child(Element::button("取消").small().outline().neutral().on_click(move |_| edit_show.set(false)))
+            .child(Element::button("确定").small().on_click(move |_| {
+                let (r, c) = edit_pos.get();
+                cells_ok[r][c].set(edit_buf.get());
+                edit_show.set(false);
+            })),
     );
 
     // ── 中文配对对话框（复选框 2 列网格）──
@@ -282,7 +350,8 @@ fn main() {
         .bg(Color::hex(0xF0F2F4))
         .child(Element::row().fill().child(sidebar).child(content))
         .child(table_dialog)
-        .child(pairs_dialog);
+        .child(pairs_dialog)
+        .child(edit_dialog);
 
     App::new("清风输入法 设置", 1000, 680)
         .bg(Color::hex(0xF0F2F4))
