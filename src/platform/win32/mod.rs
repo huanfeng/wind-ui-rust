@@ -55,17 +55,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
-    HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MSG,
-    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXDOUBLECLK, SM_CXFRAME,
-    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN, SM_REMOTESESSION,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
-    WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
-    WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_THICKFRAME,
+    HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
+    MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
+    SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
+    SM_CYSCREEN, SM_REMOTESESSION, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO,
+    WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 
 use super::{AppHandler, WindowConfig};
@@ -257,6 +257,9 @@ struct WindowState {
     mouse_tracked: bool,
     /// WM_CHAR 暂存的高代理项：补充平面字符（emoji 等）分两条 WM_CHAR 发来 UTF-16 代理对。
     pending_surrogate: Option<u16>,
+    /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。WM_GETMINMAXINFO 据此换算物理像素下限。
+    min_w: i32,
+    min_h: i32,
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -336,6 +339,8 @@ impl WindowState {
             frameless: false,
             mouse_tracked: false,
             pending_surrogate: None,
+            min_w: 0,
+            min_h: 0,
         }
     }
 
@@ -419,7 +424,9 @@ unsafe fn run_windowed(
     debug_assert!(atom != 0, "RegisterClassExW 失败");
 
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
-    let state = Box::new(WindowState::new(handler, cfg.bg));
+    let mut state = Box::new(WindowState::new(handler, cfg.bg));
+    state.min_w = cfg.min_width;
+    state.min_h = cfg.min_height;
     let state_ptr = Box::into_raw(state);
 
     let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -700,6 +707,35 @@ unsafe extern "system" fn wnd_proc(
                 state.paint(hwnd);
             }
             LRESULT(0)
+        }
+        WM_GETMINMAXINFO => {
+            // 限制窗口最小尺寸：把逻辑 dp 下限按当前 DPI 换算为物理像素写入 ptMinTrackSize。
+            // 无边框窗口外框≈客户区，直接用 client×scale；带框窗口经 AdjustWindowRect 计入边框。
+            if let Some(state) = state_from(hwnd) {
+                if state.min_w > 0 || state.min_h > 0 {
+                    let dpi = GetDpiForWindow(hwnd).max(96);
+                    let scale = dpi as f32 / 96.0;
+                    let (pw, ph) = if state.frameless {
+                        (
+                            (state.min_w as f32 * scale).round() as i32,
+                            (state.min_h as f32 * scale).round() as i32,
+                        )
+                    } else {
+                        frame_size_for_client(state.min_w, state.min_h, scale, dpi)
+                    };
+                    let mmi = lparam.0 as *mut MINMAXINFO;
+                    if !mmi.is_null() {
+                        if pw > 0 {
+                            (*mmi).ptMinTrackSize.x = pw;
+                        }
+                        if ph > 0 {
+                            (*mmi).ptMinTrackSize.y = ph;
+                        }
+                    }
+                    return LRESULT(0);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_SIZE => {
             // 客户区变化：通知后端调整缓冲（D2D 需 ResizeBuffers；Skia 为懒建无副作用），

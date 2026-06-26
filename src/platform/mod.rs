@@ -189,6 +189,9 @@ pub struct WindowConfig {
     /// GPU 加速渲染（Direct2D 后端）opt-in，默认 false（软渲染）。仅不透明大窗有效；
     /// RDP 远程会话与离屏截图恒走软渲染（见 win32 后端选择）。
     pub accelerated: bool,
+    /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
+    pub min_width: i32,
+    pub min_height: i32,
 }
 
 impl Default for WindowConfig {
@@ -209,6 +212,8 @@ impl Default for WindowConfig {
             frameless: false,
             animations: None,
             accelerated: false,
+            min_width: 0,
+            min_height: 0,
         }
     }
 }

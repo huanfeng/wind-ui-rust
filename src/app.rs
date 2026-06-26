@@ -165,6 +165,8 @@ impl App {
                 frameless: false,
                 animations: None,
                 accelerated: false,
+                min_width: 0,
+                min_height: 0,
             },
             render: None,
             content: None,
@@ -185,6 +187,13 @@ impl App {
     /// 禁止用户拖拽调整窗口大小（去掉 WS_THICKFRAME 和最大化按钮）。
     pub fn resizable(mut self, v: bool) -> Self {
         self.cfg.resizable = v;
+        self
+    }
+
+    /// 窗口最小客户区尺寸（逻辑 dp）。限制用户不能把窗口缩到操作不到内容/按钮。
+    pub fn min_size(mut self, w: i32, h: i32) -> Self {
+        self.cfg.min_width = w;
+        self.cfg.min_height = h;
         self
     }
 
