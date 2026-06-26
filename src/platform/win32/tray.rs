@@ -12,6 +12,8 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::rc::Rc;
 
+use crate::signal::Signal;
+
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
@@ -79,7 +81,7 @@ enum ItemKind {
         label: String,
         checked: Option<Rc<Cell<bool>>>,
         /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
-        enabled: Option<Rc<Cell<bool>>>,
+        enabled: Option<Signal<bool>>,
         cb: TrayFn,
     },
     Separator,
@@ -119,8 +121,8 @@ impl TrayMenuItem {
         }
     }
     /// 绑定禁用态：`flag` 为 false 时该项灰显且不可点（菜单弹出时读当前值）。
-    /// 对分隔线无效。永久禁用可传 `Rc::new(Cell::new(false))`。
-    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+    /// 对分隔线无效。永久禁用可传 `signal(false)`。
+    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
         if let ItemKind::Action { enabled, .. } = &mut self.kind {
             *enabled = Some(flag);
         }
@@ -265,7 +267,7 @@ unsafe fn show_menu(state: &mut TrayState) {
                     flags |= MF_CHECKED;
                 }
                 // 禁用：灰显且不可选（TPM_RETURNCMD 不会返回灰显项 id，故回调天然不触发）。
-                if enabled.as_ref().is_some_and(|e| !e.get()) {
+                if enabled.is_some_and(|e| !e.get()) {
                     flags |= MF_GRAYED;
                 }
                 let w = wide_nul(label);

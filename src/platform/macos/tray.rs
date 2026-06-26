@@ -11,6 +11,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 
+use crate::signal::Signal;
+
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
@@ -81,7 +83,7 @@ enum ItemKind {
         label: String,
         checked: Option<Rc<Cell<bool>>>,
         /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
-        enabled: Option<Rc<Cell<bool>>>,
+        enabled: Option<Signal<bool>>,
         cb: TrayFn,
     },
     Separator,
@@ -121,8 +123,8 @@ impl TrayMenuItem {
         }
     }
     /// 绑定禁用态：`flag` 为 false 时该项灰显且不可点（菜单弹出时读当前值）。
-    /// 对分隔线无效。永久禁用可传 `Rc::new(Cell::new(false))`。
-    pub fn enabled(mut self, flag: Rc<Cell<bool>>) -> Self {
+    /// 对分隔线无效。永久禁用可传 `signal(false)`。
+    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
         if let ItemKind::Action { enabled, .. } = &mut self.kind {
             *enabled = Some(flag);
         }
@@ -297,7 +299,7 @@ impl TrayTarget {
                             NSControlStateValueOff
                         });
                         // 禁用态：enabled 绑定为 false 则灰显不可点（默认可用）。
-                        let usable = enabled.as_ref().map(|e| e.get()).unwrap_or(true);
+                        let usable = enabled.map(|e| e.get()).unwrap_or(true);
                         item.setEnabled(usable);
                         menu.addItem(&item);
                     }
