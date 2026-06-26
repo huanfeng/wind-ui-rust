@@ -1,5 +1,7 @@
 /target
 **/*.rs.bk
+# 库 crate 不提交 Cargo.lock（由使用方的 lockfile 决定依赖版本）
+Cargo.lock
 Cargo.lock.bak
 # 截屏产物（按需保留，默认忽略临时输出）
 /artifacts

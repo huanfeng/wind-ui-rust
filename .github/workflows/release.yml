@@ -31,7 +31,7 @@ jobs:
           fi
 
       - name: 发布到 crates.io
-        run: cargo publish
+        run: cargo publish --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
