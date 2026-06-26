@@ -233,6 +233,56 @@ fn main() {
                 .child(Element::button("禁用").danger().disabled(true)),
         ))
         .child(card(
+            "轻提示 Toast（居中浮层 + 淡入淡出 + 定时消失，回调内 ctx.toast*）",
+            Element::row()
+                .spacing(10)
+                .cross(Align::Center)
+                .child(Element::button("成功提示").on_click(|ctx| ctx.toast_ok("已添加到剪贴板")))
+                .child(
+                    Element::button("普通提示")
+                        .neutral()
+                        .on_click(|ctx| ctx.toast("已保存设置")),
+                )
+                .child(
+                    Element::button("错误提示")
+                        .danger()
+                        .on_click(|ctx| ctx.toast_err("操作失败，请重试")),
+                ),
+        ))
+        .child(card(
+            "描边按钮 Outline + 胶囊徽章 Badge",
+            Element::row()
+                .spacing(10)
+                .cross(Align::Center)
+                .child(Element::button("检查更新").outline())
+                .child(Element::button("次要").neutral().outline())
+                .child(Element::button("删除").danger().outline())
+                .child(Element::badge("v0.0.0-alpha"))
+                .child(Element::badge_intent("稳定", Intent::Custom(Color::hex(0x2EA043))))
+                .child(Element::badge_intent("废弃", Intent::Danger)),
+        ))
+        .child(card(
+            "可点击容器 clickable（hover/press 叠层 + 键盘激活 + 手型光标）",
+            Element::row()
+                .clickable()
+                .on_click(|ctx| ctx.toast_ok("卡片被点击"))
+                .width_match()
+                .cross(Align::Center)
+                .spacing(12)
+                .padding(12)
+                .corner(10.0)
+                .bg(Color::hex(CARD))
+                .border(Color::hex(0x3A4150), 1)
+                .child(
+                    Element::label("整行可点击 — 悬停高亮 / 回车激活 / 点击弹 Toast")
+                        .font_size(14.0)
+                        .fg(Color::hex(FG))
+                        .weight(1.0)
+                        .height(20),
+                )
+                .child(Element::label("›").font_size(20.0).fg(Color::hex(0x8A9099))),
+        ))
+        .child(card(
             "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",
             Element::col()
                 .width_match()
