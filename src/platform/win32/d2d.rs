@@ -9,6 +9,7 @@
 //! 必须在创建它们的 UI（STA）线程上使用——与 `DWriteEngine` 同样的单线程约束，
 //! 故仅作普通结构体字段持有，不跨线程共享。
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use windows::core::{Interface, HRESULT, PCWSTR};
@@ -106,6 +107,9 @@ pub(super) struct D2DBackend {
     /// 命中后主 ctx 每帧仅 `DrawImage` 合成、**不再跑模糊**（重对象算一次的复用纪律，根治每帧
     /// 重模糊累积驱动内存）。device-**dependent**：设备丢失重建时随 `*self=fresh` 清空。
     shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
+    /// 本后端所用共享设备链的代际。设备丢失重建时用于守卫 `invalidate_shared_device`
+    /// （多窗下只失效自己那一代，不误清他窗已重建的新设备）。
+    device_gen: u64,
     /// 设备丢失标志：`EndDraw`/`Present`/`ResizeBuffers` 返回 RECREATE_TARGET /
     /// DEVICE_REMOVED / DEVICE_RESET 时置真，下一帧 `paint` 据此整体重建（丢弃所有 COM
     /// 对象与缓存，重走 try_create）。
@@ -137,12 +141,61 @@ struct GradKey {
     stops: Vec<(i32, u32)>,
 }
 
-/// 尝试建立 GPU 呈现链路。任一环节失败返回 `None`（调用方回退软后端）。
-pub(super) fn try_create(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
-    unsafe { try_create_inner(hwnd, w, h) }
+/// 线程局部共享的设备链（device 级、与具体窗口无关）。同一 UI（STA）线程的所有 D2D 窗口
+/// 共用一份，避免每窗各建一套 D3D/D2D 设备造成 ×N 内存。COM 对象非 `Send`/`Sync`，故用
+/// `thread_local!` 而非 `OnceLock`（后者要求 `Sync`）——windui 消息循环单线程，语义正确且 sound。
+#[derive(Clone)]
+struct SharedDevice {
+    /// D3D11 设备（DXGI/D2D 设备链之源）。
+    d3d_device: ID3D11Device,
+    /// DXGI 工厂：每窗 `CreateSwapChainForHwnd` 的入口。
+    dxgi_factory: IDXGIFactory2,
+    /// D2D 工厂（device-independent，设备丢失存活；但被本结构整体重建以保链路一致）。
+    d2d_factory: ID2D1Factory1,
+    /// D2D 设备：每窗 `CreateDeviceContext` 之源。
+    d2d_device: ID2D1Device,
+    /// DirectWrite 工厂（device-independent，进程共享系统字体缓存）。
+    dwrite_factory: IDWriteFactory,
+    /// 代际：每次重建递增。设备丢失失效时用于多窗竞态守卫（只清自己那一代，不误清他人新建的）。
+    generation: u64,
 }
 
-unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
+thread_local! {
+    /// 当前线程的共享设备链（懒建）。设备丢失时 `invalidate_shared_device` 清空，下次重建。
+    static SHARED_DEVICE: RefCell<Option<SharedDevice>> = const { RefCell::new(None) };
+    /// 单调代际计数器（每次建共享设备 +1）。
+    static DEVICE_GEN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 取/建本线程共享设备链。已存在则克隆其 COM 引用返回（廉价 AddRef）；否则新建并缓存。
+unsafe fn shared_device() -> Option<SharedDevice> {
+    SHARED_DEVICE.with(|cell| {
+        if let Some(d) = cell.borrow().as_ref() {
+            return Some(d.clone());
+        }
+        let d = create_shared_device()?;
+        *cell.borrow_mut() = Some(d.clone());
+        Some(d)
+    })
+}
+
+/// 设备丢失后失效共享设备：**仅当缓存代际 == 调用方代际**才清空。多窗下首个检测到丢失者清并
+/// 重建（代际 +1），其余窗随后检测到丢失时代际已不匹配 → 不误清新设备，转而复用之（最终收敛同一代）。
+unsafe fn invalidate_shared_device(gen: u64) {
+    SHARED_DEVICE.with(|cell| {
+        let stale = cell
+            .borrow()
+            .as_ref()
+            .map(|d| d.generation == gen)
+            .unwrap_or(false);
+        if stale {
+            *cell.borrow_mut() = None;
+        }
+    });
+}
+
+/// 新建设备链（D3D11 硬件设备 → DXGI 工厂 → D2D 工厂/设备 → DirectWrite 工厂）。任一环节失败返回 `None`。
+unsafe fn create_shared_device() -> Option<SharedDevice> {
     // 1. D3D11 硬件设备（BGRA 支持，供 D2D 互操作）。失败即放弃。
     let mut d3d_device: Option<ID3D11Device> = None;
     let mut feature_level = D3D_FEATURE_LEVEL::default();
@@ -160,11 +213,44 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
     .ok()?;
     let d3d_device = d3d_device?;
 
-    // 2. D3D11 → IDXGIDevice → adapter → IDXGIFactory2，建 flip-model swapchain。
+    // 2. D3D11 → IDXGIDevice → adapter → IDXGIFactory2（每窗建 swapchain 用）。
     let dxgi_device: IDXGIDevice = d3d_device.cast().ok()?;
     let adapter = dxgi_device.GetAdapter().ok()?;
-    let factory: IDXGIFactory2 = adapter.GetParent().ok()?;
+    let dxgi_factory: IDXGIFactory2 = adapter.GetParent().ok()?;
 
+    // 3. D2D 工厂 → 设备（from IDXGIDevice）。
+    let d2d_factory: ID2D1Factory1 =
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+    let d2d_device = d2d_factory.CreateDevice(&dxgi_device).ok()?;
+
+    // DirectWrite 工厂（device-independent；进程共享系统字体缓存）。
+    let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+
+    let generation = DEVICE_GEN.with(|g| {
+        let n = g.get() + 1;
+        g.set(n);
+        n
+    });
+    Some(SharedDevice {
+        d3d_device,
+        dxgi_factory,
+        d2d_factory,
+        d2d_device,
+        dwrite_factory,
+        generation,
+    })
+}
+
+/// 尝试建立 GPU 呈现链路。任一环节失败返回 `None`（调用方回退软后端）。
+pub(super) fn try_create(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
+    unsafe { try_create_inner(hwnd, w, h) }
+}
+
+unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
+    // 设备链（D3D/D2D/DWrite）取自线程共享单例；本函数只建**每窗私有**资源（swapchain/context/画刷）。
+    let shared = shared_device()?;
+
+    // flip-model swapchain（绑定本窗 hwnd）。
     let desc = DXGI_SWAP_CHAIN_DESC1 {
         Width: w.max(1) as u32,
         Height: h.max(1) as u32,
@@ -181,18 +267,20 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         AlphaMode: DXGI_ALPHA_MODE_IGNORE,
         Flags: 0,
     };
-    let swapchain = factory
-        .CreateSwapChainForHwnd(&d3d_device, hwnd, &desc, None, None)
+    let swapchain = shared
+        .dxgi_factory
+        .CreateSwapChainForHwnd(&shared.d3d_device, hwnd, &desc, None, None)
         .ok()?;
 
-    // 3. D2D 工厂 → 设备（from IDXGIDevice）→ 设备上下文。
-    let d2d_factory: ID2D1Factory1 =
-        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
-    let d2d_device = d2d_factory.CreateDevice(&dxgi_device).ok()?;
-    let context = d2d_device.CreateDeviceContext(Default::default()).ok()?;
-    // 离屏烘焙用的第二个设备上下文（同 device，位图跨上下文共享）：主帧 BeginDraw 期间主 ctx
-    // 禁止 SetTarget，故阴影模糊的离屏渲染走这个独立 ctx，互不干扰。
-    let bake_ctx = d2d_device.CreateDeviceContext(Default::default()).ok()?;
+    // 每窗主 ctx + 烘焙 ctx（同 device，位图跨上下文共享）。
+    let context = shared
+        .d2d_device
+        .CreateDeviceContext(Default::default())
+        .ok()?;
+    let bake_ctx = shared
+        .d2d_device
+        .CreateDeviceContext(Default::default())
+        .ok()?;
 
     // 可复用纯色画刷（device-dependent）：初始色随意，绘制前会被 SetColor 覆盖。
     let solid = context
@@ -202,25 +290,23 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
     // ClearType 文字抗锯齿：不透明渲染目标，一次设置即可（设备丢失重建 context 后须重设）。
     context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
-    // DirectWrite 工厂（device-independent；进程共享系统字体缓存）。失败即放弃 → 回退软后端。
-    let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-
     let mut backend = D2DBackend {
-        d3d_device,
-        d2d_factory,
-        d2d_device,
+        d3d_device: shared.d3d_device.clone(),
+        d2d_factory: shared.d2d_factory.clone(),
+        d2d_device: shared.d2d_device.clone(),
         swapchain,
         context,
         target_bitmap: None,
         solid,
         grad_cache: HashMap::new(),
-        dwrite_factory,
+        dwrite_factory: shared.dwrite_factory.clone(),
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
         image_cache: HashMap::new(),
         bake_ctx,
         shadow_effect: None,
         shadow_cache: HashMap::new(),
+        device_gen: shared.generation,
         lost: false,
         recreate_fails: 0,
     };
@@ -261,6 +347,9 @@ impl D2DBackend {
     /// `lost=false`、`recreate_fails=0`），返回 `true`；失败时累加 `recreate_fails` 返回 `false`。
     /// 旧 `self`（含旧 COM 对象）在赋值时被 `Drop` 正常释放。
     unsafe fn try_recreate(&mut self, hwnd: HWND) -> bool {
+        // 先失效共享设备链（代际守卫：仅清自己那一代）。下一句 try_create_inner → shared_device
+        // 发现缓存空 → 重建一套新设备（代际 +1），本窗及其余丢失窗最终都收敛到这套新设备。
+        invalidate_shared_device(self.device_gen);
         let mut rc = windows::Win32::Foundation::RECT::default();
         let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
