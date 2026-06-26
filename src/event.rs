@@ -219,3 +219,35 @@ pub struct MenuRequest {
     /// 最小宽度（逻辑 px，0=按内容）。下拉用控件宽度对齐。
     pub min_width: i32,
 }
+
+/// 轻提示语义类型：决定提示图标（及默认强调色）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ToastKind {
+    /// 中性信息（ℹ）。
+    #[default]
+    Info,
+    /// 成功（✓），如"已添加到剪贴板"。
+    Success,
+    /// 失败/错误（✕）。
+    Error,
+}
+
+impl ToastKind {
+    /// 提示图标字形（用 `draw_text` 绘制）。
+    pub fn glyph(self) -> &'static str {
+        match self {
+            ToastKind::Info => "\u{2139}",    // ℹ
+            ToastKind::Success => "\u{2713}", // ✓
+            ToastKind::Error => "\u{2715}",   // ✕
+        }
+    }
+}
+
+/// 控件经 `EventCtx::toast*` 发起的轻提示请求。宿主接管居中浮层渲染、淡入淡出与定时消失。
+#[derive(Clone)]
+pub struct ToastRequest {
+    pub text: String,
+    pub kind: ToastKind,
+    /// 完整显示时长（毫秒，含淡入淡出）。
+    pub duration_ms: u64,
+}

@@ -10,7 +10,7 @@ use crate::signal::Signal;
 
 use crate::event::{
     CursorShape, Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind,
-    WindowOp,
+    ToastKind, ToastRequest, WindowOp,
 };
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::{Canvas, Paint};
@@ -832,6 +832,8 @@ pub(crate) struct EventOutcome {
     open_url: Option<String>,
     /// 控件请求的窗口操作（最小化/最大化切换，自定义标题栏按钮触发）。
     window_op: Option<WindowOp>,
+    /// 控件请求弹出的轻提示（宿主接管居中浮层渲染与定时消失）。
+    toast: Option<ToastRequest>,
 }
 
 /// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
@@ -956,6 +958,32 @@ impl EventCtx<'_> {
     pub fn toggle_maximize(&mut self) {
         self.out.window_op = Some(WindowOp::ToggleMaximize);
     }
+
+    /// 默认时长（毫秒）：约 1.8s，含淡入淡出。
+    const TOAST_DEFAULT_MS: u64 = 1800;
+
+    /// 弹出轻提示（中性信息）。居中浮层 + 淡入淡出 + 定时自动消失，由宿主接管。
+    /// **脱离布局树**——不绑定任何节点，任意控件回调内 `ctx.toast("…")` 即可。
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.toast_with(text, ToastKind::Info, Self::TOAST_DEFAULT_MS);
+    }
+    /// 弹出成功轻提示（✓ 图标），如"已添加到剪贴板"。
+    pub fn toast_ok(&mut self, text: impl Into<String>) {
+        self.toast_with(text, ToastKind::Success, Self::TOAST_DEFAULT_MS);
+    }
+    /// 弹出错误轻提示（✕ 图标）。
+    pub fn toast_err(&mut self, text: impl Into<String>) {
+        self.toast_with(text, ToastKind::Error, Self::TOAST_DEFAULT_MS);
+    }
+    /// 弹出轻提示（完全指定语义与时长）。`duration_ms` 含淡入淡出。
+    pub fn toast_with(&mut self, text: impl Into<String>, kind: ToastKind, duration_ms: u64) {
+        self.out.toast = Some(ToastRequest {
+            text: text.into(),
+            kind,
+            duration_ms,
+        });
+        self.out.repaint = true;
+    }
 }
 
 /// 指针/键盘分发的对外结果。
@@ -974,6 +1002,8 @@ pub struct DispatchResult {
     pub open_url: Option<String>,
     /// 控件请求的窗口操作（最小化/最大化切换）。
     pub window_op: Option<WindowOp>,
+    /// 控件请求弹出的轻提示（宿主接管居中浮层渲染与定时消失）。
+    pub toast: Option<ToastRequest>,
 }
 
 impl Tree {
@@ -1355,6 +1385,9 @@ impl Tree {
                 if o.window_op.is_some() {
                     res.window_op = o.window_op;
                 }
+                if o.toast.is_some() {
+                    res.toast = o.toast;
+                }
                 // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
                 // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
                 if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
@@ -1425,6 +1458,7 @@ impl Tree {
             res.menu = o.menu;
             res.open_url = o.open_url;
             res.window_op = o.window_op;
+            res.toast = o.toast;
         }
         res
     }
@@ -1464,6 +1498,9 @@ impl Tree {
             }
             if out.open_url.is_some() {
                 res.open_url = out.open_url;
+            }
+            if out.toast.is_some() {
+                res.toast = out.toast;
             }
             break; // 命中一个拖放处理者即止
         }

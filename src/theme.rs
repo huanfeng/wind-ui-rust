@@ -610,6 +610,40 @@ impl TooltipTheme {
     }
 }
 
+/// 轻提示（Toast）浮层主题。始终为深色半透明面板（不随明暗主题翻转），
+/// 与 tooltip 同源；`success`/`error` 为成功/失败图标色。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToastTheme {
+    pub bg: Option<Color>,
+    pub text: Option<Color>,
+    pub success: Option<Color>,
+    pub error: Option<Color>,
+    pub corner: Option<f32>,
+}
+
+impl ToastTheme {
+    pub fn bg(&self, _p: &Palette) -> Color {
+        self.bg.unwrap_or(Color::rgba(0x32, 0x32, 0x35, 235))
+    }
+    pub fn text(&self, _p: &Palette) -> Color {
+        self.text.unwrap_or(Color::WHITE)
+    }
+    /// 信息图标色（中性，跟随文字白）。
+    pub fn info(&self, _p: &Palette) -> Color {
+        self.text.unwrap_or(Color::WHITE)
+    }
+    pub fn success(&self, _p: &Palette) -> Color {
+        self.success.unwrap_or(Color::hex(0x4ADE80))
+    }
+    pub fn error(&self, p: &Palette) -> Color {
+        self.error.unwrap_or(p.danger)
+    }
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_md)
+    }
+}
+
 /// 完整主题：base（palette/metrics）+ 各控件覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -631,6 +665,7 @@ pub struct Theme {
     pub accordion: AccordionTheme,
     pub anim: AnimTheme,
     pub tooltip: TooltipTheme,
+    pub toast: ToastTheme,
 }
 
 impl Theme {

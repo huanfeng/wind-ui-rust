@@ -15,7 +15,8 @@ use tiny_skia::Pixmap;
 
 use crate::core::{DamageReq, NodeId, Tree};
 use crate::event::{
-    CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, WindowOp,
+    CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, ToastRequest,
+    WindowOp,
 };
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, WindowConfig};
@@ -46,6 +47,46 @@ const TOOLTIP_PAD_X: i32 = 8;
 const TOOLTIP_PAD_Y: i32 = 4;
 const TOOLTIP_CURSOR_DX: i32 = 12;
 const TOOLTIP_CURSOR_DY: i32 = 20;
+
+/// 轻提示浮层：字号、图标字号、内边距、图标与文字间距、淡入/淡出时长（ms）。
+const TOAST_FONT: f32 = 14.0;
+const TOAST_ICON_FONT: f32 = 34.0;
+const TOAST_PAD_X: i32 = 24;
+const TOAST_PAD_Y: i32 = 20;
+const TOAST_ICON_GAP: i32 = 12;
+const TOAST_MIN_W: i32 = 132;
+const TOAST_FADE_IN_MS: u64 = 140;
+const TOAST_FADE_OUT_MS: u64 = 280;
+
+/// 活动轻提示状态：内容 + 起始时刻（单调 ms）+ 总时长。淡入淡出与过期均据此推算。
+struct ToastState {
+    req: ToastRequest,
+    shown_at_ms: u64,
+}
+
+impl ToastState {
+    /// 距起始的毫秒。
+    fn elapsed(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.shown_at_ms)
+    }
+    /// 是否已过期（应清除）。
+    fn expired(&self, now_ms: u64) -> bool {
+        self.elapsed(now_ms) >= self.req.duration_ms
+    }
+    /// 当前不透明度系数 [0,1]：前段淡入、末段淡出、中间恒 1。
+    fn alpha(&self, now_ms: u64) -> f32 {
+        let e = self.elapsed(now_ms);
+        let d = self.req.duration_ms;
+        if e < TOAST_FADE_IN_MS {
+            return e as f32 / TOAST_FADE_IN_MS as f32;
+        }
+        let fade_out_start = d.saturating_sub(TOAST_FADE_OUT_MS);
+        if e >= fade_out_start && d > fade_out_start {
+            return ((d - e) as f32 / TOAST_FADE_OUT_MS as f32).clamp(0.0, 1.0);
+        }
+        1.0
+    }
+}
 
 /// 单级菜单面板：一组项 + 面板矩形 + 悬停项 + 是否含图标列。
 struct MenuLevel {
@@ -476,6 +517,8 @@ struct UiHost {
     hover_since_ms: u64,
     /// 点击后抑制提示，直到指针再次移动（避免点完控件原地又弹出盖住它）。
     tooltip_suppressed: bool,
+    /// 活动的轻提示浮层（None=无）：居中显示、淡入淡出、定时消失。
+    toast: Option<ToastState>,
     /// 窗口背景色（与平台 fill 同色）：局部重绘的子缓冲按此填底，重建脏区与全窗一致。
     bg: Color,
     /// 持久后备缓冲（物理像素，整窗）：保留上一全窗帧，供局部帧重建未变区域。
@@ -547,6 +590,7 @@ impl UiHost {
             hover_pos: Point::new(0, 0),
             hover_since_ms: 0,
             tooltip_suppressed: false,
+            toast: None,
             bg,
             back: None,
             pending_damage: None,
@@ -754,6 +798,17 @@ impl UiHost {
         });
     }
 
+    /// 弹出/替换轻提示：以当前单调时钟为起点，强制整窗重绘叠加浮层。
+    /// 后续帧会持续推进淡入淡出并在过期后自动清除（见 render 中的浮层段）。
+    fn show_toast(&mut self, req: ToastRequest) {
+        let now_ms = self.start.elapsed().as_millis() as u64;
+        self.toast = Some(ToastState {
+            req,
+            shown_at_ms: now_ms,
+        });
+        self.needs_full = true;
+    }
+
     /// 按指针位置更新悬停路径：设置所在层悬停项，并按需展开/收起其级联子菜单。
     fn menu_hover_update(&mut self, pos: Point) -> bool {
         let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(pos)) else {
@@ -932,6 +987,7 @@ impl AppHandler for UiHost {
             .map(|b| b.width() == size.w as u32 && b.height() == size.h as u32)
             .unwrap_or(false);
         let overlay = self.menu.is_some()
+            || self.toast.is_some()
             || (!self.tooltip_suppressed
                 && self.hover.and_then(|h| self.tree.node_tooltip(h)).is_some());
         // 下一帧脏区 = 动画脏区（上帧遗留）∪ 交互脏区（事件累积）。
@@ -1165,6 +1221,69 @@ impl AppHandler for UiHost {
                 }
             }
         }
+        // 轻提示浮层：居中深色面板 + 语义图标 + 文字，淡入淡出；过期帧先清除再正常重绘。
+        if self.toast.as_ref().map(|t| t.expired(now_ms)).unwrap_or(false) {
+            self.toast = None;
+        }
+        if let Some(toast) = self.toast.as_ref() {
+            let alpha = toast.alpha(now_ms);
+            let pal = &self.theme.palette;
+            let tt = &self.theme.toast;
+            let glyph = toast.req.kind.glyph();
+            let icon_color = match toast.req.kind {
+                crate::event::ToastKind::Info => tt.info(pal),
+                crate::event::ToastKind::Success => tt.success(pal),
+                crate::event::ToastKind::Error => tt.error(pal),
+            };
+            let ts = canvas.measure_text(&toast.req.text, None, TOAST_FONT);
+            let icon_sz = canvas.measure_text(glyph, None, TOAST_ICON_FONT);
+            let panel_w = (ts.w + 2 * TOAST_PAD_X).max(TOAST_MIN_W);
+            let panel_h = TOAST_PAD_Y + icon_sz.h + TOAST_ICON_GAP + ts.h + TOAST_PAD_Y;
+            let ws = self.logical_size;
+            let x = ((ws.w - panel_w) / 2).max(0);
+            let y = ((ws.h - panel_h) / 2).max(0);
+            let corner = tt.corner(&self.theme.metrics);
+            // 柔和投影（透明度跟随淡入淡出）。
+            canvas.draw_shadow(
+                x as f32,
+                (y + 6) as f32,
+                panel_w as f32,
+                panel_h as f32,
+                corner,
+                22.0,
+                Color::rgba(0, 0, 0, 90).scale_alpha(alpha),
+            );
+            canvas.fill_round_rect(
+                x as f32,
+                y as f32,
+                panel_w as f32,
+                panel_h as f32,
+                corner,
+                &Paint::fill(tt.bg(pal).scale_alpha(alpha)),
+            );
+            // 图标（上）。
+            let icon_rect = Rect::new(x, y + TOAST_PAD_Y, panel_w, icon_sz.h);
+            canvas.draw_text(
+                glyph,
+                icon_rect,
+                icon_color.scale_alpha(alpha),
+                crate::spec::Align::Center,
+                None,
+                TOAST_ICON_FONT,
+            );
+            // 文字（下）。
+            let text_rect = Rect::new(x, y + TOAST_PAD_Y + icon_sz.h + TOAST_ICON_GAP, panel_w, ts.h);
+            canvas.draw_text(
+                &toast.req.text,
+                text_rect,
+                tt.text(pal).scale_alpha(alpha),
+                crate::spec::Align::Center,
+                None,
+                TOAST_FONT,
+            );
+            // 持续推进淡入淡出与过期：请求下一帧。
+            crate::anim::request_repaint();
+        }
         // 帧耗时浮层（WINDUI_FPS=1）：左上角显示本帧渲染耗时与估算 fps，用于排查卡顿。
         if self.show_fps {
             let ms = frame_t0.elapsed().as_secs_f32() * 1000.0;
@@ -1276,6 +1395,10 @@ impl AppHandler for UiHost {
         if res.window_op.is_some() {
             self.pending_window_op = res.window_op;
         }
+        // 控件请求轻提示：居中浮层 + 淡入淡出 + 定时消失（强制整窗重绘以叠加浮层）。
+        if let Some(req) = res.toast {
+            self.show_toast(req);
+        }
         // hover/拖动（Move）自包含（控件自身视觉）→ 直接用其脏区走局部。
         // 点击等可能改变布局/显隐 → 置 needs_relayout：render 重排后用结构签名判定，
         // 签名不变才用控件脏区走局部，变了（对话框/切页等）自动升级整窗。
@@ -1313,6 +1436,9 @@ impl AppHandler for UiHost {
         }
         if res.window_op.is_some() {
             self.pending_window_op = res.window_op;
+        }
+        if let Some(req) = res.toast {
+            self.show_toast(req);
         }
         if !res.consumed && ev.key == Key::Escape {
             self.close = true;
@@ -1372,6 +1498,9 @@ impl AppHandler for UiHost {
         }
         if let Some(url) = res.open_url {
             platform::open_url(&url);
+        }
+        if let Some(req) = res.toast {
+            self.show_toast(req);
         }
         res.repaint
     }
@@ -1634,6 +1763,29 @@ mod tests {
     fn on_interval_registers() {
         let app = App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), || {});
         assert_eq!(app.intervals.len(), 1);
+    }
+
+    #[test]
+    fn toast_fade_curve_and_expiry() {
+        let t = ToastState {
+            req: ToastRequest {
+                text: "hi".into(),
+                kind: crate::event::ToastKind::Success,
+                duration_ms: 1000,
+            },
+            shown_at_ms: 100,
+        };
+        // 起点 alpha=0，淡入中点约 0.5，淡入完成后恒 1。
+        assert_eq!(t.alpha(100), 0.0, "起点不可见");
+        let mid_in = t.alpha(100 + TOAST_FADE_IN_MS / 2);
+        assert!((0.4..=0.6).contains(&mid_in), "淡入中点约半透明: {mid_in}");
+        assert_eq!(t.alpha(100 + 500), 1.0, "中段完全不透明");
+        // 末段淡出回落，终点附近趋 0。
+        let near_end = t.alpha(100 + 1000 - TOAST_FADE_OUT_MS / 2);
+        assert!((0.4..=0.6).contains(&near_end), "淡出中点约半透明: {near_end}");
+        // 过期判定：到时即过期，未到不过期。
+        assert!(!t.expired(100 + 999), "未到时不过期");
+        assert!(t.expired(100 + 1000), "到时即过期");
     }
 
     #[test]
