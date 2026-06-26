@@ -373,6 +373,8 @@ impl Image {
 
     /// 稳定缓存键：底层 `Rc<Pixmap>` 指针。同一图片的 `Rc` 克隆共享此 id
     /// （供 D2D 后端按图片身份缓存 device-dependent 位图，避免每帧重建）。
+    /// 仅 Windows + `d2d` 后端是消费者；其余平台/配置下无人使用，显式放行 dead_code。
+    #[cfg_attr(not(all(windows, feature = "d2d")), allow(dead_code))]
     pub(crate) fn cache_id(&self) -> usize {
         std::rc::Rc::as_ptr(&self.pixmap) as usize
     }

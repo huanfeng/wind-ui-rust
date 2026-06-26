@@ -73,7 +73,7 @@ pub fn take_summary() -> String {
         .map(|i| (i, nanos[i], counts[i]))
         .filter(|x| x.1 > 0)
         .collect();
-    items.sort_by(|a, b| b.1.cmp(&a.1));
+    items.sort_by_key(|x| std::cmp::Reverse(x.1));
     items
         .iter()
         .map(|(i, ns, cnt)| format!("{} {:.2}ms({})", LABELS[*i], *ns as f64 / 1e6, cnt))
