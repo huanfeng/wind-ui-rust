@@ -22,8 +22,8 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, 
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC, ScreenToClient,
-    SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    PAINTSTRUCT, VREFRESH,
+    SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET,
+    DIB_RGB_COLORS, LOGFONTW, PAINTSTRUCT, VREFRESH,
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -33,8 +33,8 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::Ime::{
-    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
+    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW,
+    ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
@@ -1422,6 +1422,15 @@ unsafe fn handle_ime_position(hwnd: HWND) {
     if himc.0.is_null() {
         return; // 无输入法上下文
     }
+    // 合成串字体：按 caret 物理高度设字高（h 已含 DPI scale），使 IME 内联绘制的
+    // 合成串与我们自绘、已缩放的上屏文字大小一致。不设则 IME 用默认未缩放字体，
+    // 高 DPI 下合成串明显偏小（上屏后正常）。空 lfFaceName = 用系统默认字体族。
+    let lf = LOGFONTW {
+        lfHeight: h,
+        lfCharSet: DEFAULT_CHARSET,
+        ..Default::default()
+    };
+    let _ = ImmSetCompositionFontW(himc, &lf);
     // 合成串定位在光标处。
     let cf = COMPOSITIONFORM {
         dwStyle: CFS_POINT,
