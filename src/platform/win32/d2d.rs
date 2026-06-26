@@ -102,9 +102,10 @@ pub(super) struct D2DBackend {
     bake_ctx: ID2D1DeviceContext,
     /// 阴影 GPU 模糊效果（lazy，建在 bake_ctx 上）：烘焙时复用，仅 cache-miss 跑一次。
     shadow_effect: Option<ID2D1Effect>,
-    /// 烘焙后的阴影位图缓存：键 (w,h,radius,blur,color)，值为含模糊外扩 margin 的成品位图。
-    /// 命中后主 ctx 每帧仅 `DrawImage` 合成、**不再跑模糊**（重对象算一次的复用纪律，根治每帧
-    /// 重模糊累积驱动内存）。device-**dependent**：设备丢失重建时随 `*self=fresh` 清空。
+    /// 烘焙后的阴影 **alpha 蒙版**缓存：键 (w,h,radius,blur)，值为含模糊外扩 margin 的白色成品位图。
+    /// 命中后主 ctx 每帧仅 `FillOpacityMask` 着色合成、**不再跑模糊**（重对象算一次的复用纪律，
+    /// 根治每帧重模糊累积驱动内存）。颜色不进键 → 暗/亮主题共用同一蒙版（不翻倍）。
+    /// device-**dependent**：设备丢失重建时随 `*self=fresh` 清空。
     shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
     /// 设备丢失标志：`EndDraw`/`Present`/`ResizeBuffers` 返回 RECREATE_TARGET /
     /// DEVICE_REMOVED / DEVICE_RESET 时置真，下一帧 `paint` 据此整体重建（丢弃所有 COM
@@ -121,8 +122,9 @@ const MAX_RECREATE_FAILS: u32 = 3;
 /// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
 type LayoutKey = (String, String, u32, u16, u32, u32);
 
-/// 烘焙阴影缓存键：(宽 px, 高 px, 圆角 px, 模糊 bits, 颜色 rgba)，前三项量化逻辑像素整数。
-type ShadowKey = (u32, u32, u32, u32, u32);
+/// 烘焙阴影缓存键：(宽 px, 高 px, 圆角 px, 模糊 bits)。**不含颜色**——成品为白色 alpha 蒙版，
+/// 合成时经 `FillOpacityMask` 以阴影色填充，故同尺寸阴影跨颜色/跨主题共用一张（暗/亮主题不翻倍）。
+type ShadowKey = (u32, u32, u32, u32);
 
 /// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
 /// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
@@ -585,8 +587,9 @@ impl D2DCanvas<'_> {
         Some(e)
     }
 
-    /// 离屏烘焙一张「模糊后的阴影」成品位图（含四周 margin 外扩）。在 bake_ctx 上独立 BeginDraw/
-    /// EndDraw，与主帧互不干扰。仅 cache-miss 调用一次；成品交由 `draw_shadow` 缓存复用。
+    /// 离屏烘焙一张「模糊后的阴影 alpha 蒙版」成品位图（白色，含四周 margin 外扩）。在 bake_ctx 上
+    /// 独立 BeginDraw/EndDraw，与主帧互不干扰。仅 cache-miss 调用一次；成品交由 `draw_shadow` 缓存。
+    /// **不吃颜色**——蒙版恒白（效果 Color=白不透明），阴影色在 `draw_shadow` 经 `FillOpacityMask` 施加。
     fn bake_shadow(
         &mut self,
         wpx: u32,
@@ -594,7 +597,6 @@ impl D2DCanvas<'_> {
         r: f32,
         sigma: f32,
         margin: u32,
-        color: Color,
     ) -> Option<ID2D1Bitmap1> {
         let mask = self.build_mask(wpx, hpx, r)?;
         let effect = self.bake_effect()?;
@@ -622,13 +624,9 @@ impl D2DCanvas<'_> {
             )
         }
         .ok()?;
-        // Shadow 颜色为直通（非预乘）RGBA f32×4；alpha 调制投影整体不透明度。
-        let col = [
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
-            color.a as f32 / 255.0,
-        ];
+        // 效果 Color 恒为白色不透明：成品 alpha = 模糊后的覆盖率，RGB=白（预乘后 rgb=alpha）。
+        // 真正的阴影色在合成时由 FillOpacityMask 的画刷提供，故蒙版与颜色无关、跨主题共用。
+        let col = [1.0f32, 1.0, 1.0, 1.0];
         unsafe {
             effect.SetInput(0, &mask, true);
             let _ = effect.SetValue(
@@ -977,19 +975,16 @@ impl Canvas for D2DCanvas<'_> {
         let sigma = blur.max(0.0);
         // 模糊外扩：高斯 3σ 覆盖 >99%，成品四周各留 margin 像素容纳模糊溢出。
         let margin = (sigma * 3.0).ceil().max(0.0) as u32;
-        let rgba = ((color.r as u32) << 24)
-            | ((color.g as u32) << 16)
-            | ((color.b as u32) << 8)
-            | color.a as u32;
-        let key: ShadowKey = (wpx, hpx, r.round() as u32, sigma.to_bits(), rgba);
-        // 取/烘焙成品（模糊一次、缓存复用）。烘焙失败则跳过本阴影。
+        // 键不含颜色（成品为白色 alpha 蒙版）→ 暗/亮主题同尺寸阴影共用一张。
+        let key: ShadowKey = (wpx, hpx, r.round() as u32, sigma.to_bits());
+        // 取/烘焙成品蒙版（模糊一次、缓存复用）。烘焙失败则跳过本阴影。
         let baked = match self.shadow_cache.get(&key) {
             Some(b) => b.clone(),
             None => {
-                let Some(b) = self.bake_shadow(wpx, hpx, r, sigma, margin, color) else {
+                let Some(b) = self.bake_shadow(wpx, hpx, r, sigma, margin) else {
                     return;
                 };
-                // 防无界增长（不同尺寸/颜色有限）：超阈值整体清空重建。
+                // 防无界增长（不同尺寸有限）：超阈值整体清空重建。
                 if self.shadow_cache.len() > 128 {
                     self.shadow_cache.clear();
                 }
@@ -997,23 +992,19 @@ impl Canvas for D2DCanvas<'_> {
                 b
             }
         };
-        // 主 ctx 每帧仅合成缓存位图：成品的 (margin,margin) 对应阴影矩形左上，故左上对齐
-        // (x-margin, y-margin)，模糊溢出落在边缘（偏移/外扩已由调用方算入 x,y,w,h）。
+        // 主 ctx 每帧仅以阴影色「透过蒙版 alpha」填充：成品的 (margin,margin) 对应阴影矩形左上，
+        // 故左上对齐 (x-margin, y-margin)，模糊溢出落在边缘（偏移/外扩已由调用方算入 x,y,w,h）。
+        // FillOpacityMask（DeviceContext 版，无抗锯齿模式限制）以 brush 颜色 × 蒙版 alpha 合成。
         let dest = rect_f(
             x - margin as f32,
             y - margin as f32,
             (wpx + 2 * margin) as f32,
             (hpx + 2 * margin) as f32,
         );
+        let brush = self.solid_brush(color);
         unsafe {
-            self.ctx.DrawBitmap(
-                &baked,
-                Some(&dest),
-                1.0,
-                D2D1_INTERPOLATION_MODE_LINEAR,
-                None,
-                None,
-            );
+            self.ctx
+                .FillOpacityMask(&baked, &brush, Some(&dest as *const _), None);
         }
     }
 
