@@ -1157,6 +1157,21 @@ impl Element {
         scroll
     }
 
+    /// 同 `list`，但选中/悬停为内缩圆角 pill 底（无左缘强调条）。侧栏导航等现代样式用。
+    pub fn list_pill(items: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
+        let mut scroll = Self::scroll().fill();
+        for (i, it) in items.into_iter().enumerate() {
+            let row = list::ListRow::new(it.into(), selected, i).pill();
+            scroll = scroll.child(
+                Self::base(Layout::None)
+                    .widget(row)
+                    .width_match()
+                    .height(list::ROW_H),
+            );
+        }
+        scroll
+    }
+
     /// 带前置图标的单选列表：`items` 为 (标签, 图标内容) 列表。其余同 `list`。
     /// 图标用 `ImageContent`，可链 `.fit()`/状态换图等；行图标随选中/悬停状态调制。
     pub fn list_icons(

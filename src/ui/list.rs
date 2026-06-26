@@ -25,12 +25,19 @@ const ICON_GAP: i32 = 8;
 
 /// 单个列表行：点击设置共享选中索引，选中/悬停高亮。可选前置图标（复用 `ImageContent`）。
 /// 事件契约与 `containers::TabButton` 同构，两者应保持同步。
+/// 圆角 pill 选中样式的内缩与圆角（逻辑 px）。侧栏导航等用，更贴近现代设计稿。
+const PILL_INSET_X: f32 = 6.0;
+const PILL_INSET_Y: f32 = 3.0;
+const PILL_RADIUS: f32 = 7.0;
+
 pub struct ListRow {
     label: String,
     icon: Option<ImageContent>,
     group: Signal<usize>,
     index: usize,
     hover: bool,
+    /// pill 样式：选中/悬停底色画成内缩圆角矩形、且不绘左缘强调条（侧栏导航用）。
+    pill: bool,
     /// 行底色"存在量"补间（0..1）：对固定目标色缩 alpha 淡入淡出，避免从透明黑 lerp 过黑。
     bg_amt: Cell<Transition<f32>>,
     /// 记住的底色（选中/悬停色），淡出期沿用以保 RGB 不变。
@@ -48,6 +55,7 @@ impl ListRow {
             group,
             index,
             hover: false,
+            pill: false,
             bg_amt: Cell::new(Transition::new(on)),
             bg_color: Cell::new(Color::TRANSPARENT),
             sel: Cell::new(Transition::new(on)),
@@ -56,6 +64,11 @@ impl ListRow {
     /// 附带前置图标。
     pub fn with_icon(mut self, icon: ImageContent) -> Self {
         self.icon = Some(icon);
+        self
+    }
+    /// 启用 pill 选中样式：选中/悬停底为内缩圆角矩形、去掉左缘强调条。
+    pub fn pill(mut self) -> Self {
+        self.pill = true;
         self
     }
     fn selected(&self) -> bool {
@@ -116,17 +129,28 @@ impl Widget for ListRow {
         let bg_amt = bg.animate();
         self.bg_amt.set(bg);
         if bg_amt > 0.0 {
-            canvas.fill_rect(
-                x,
-                y,
-                w,
-                h,
-                &Paint::fill(self.bg_color.get().scale_alpha(bg_amt)),
-            );
+            let c = self.bg_color.get().scale_alpha(bg_amt);
+            if self.pill {
+                // pill：内缩圆角矩形（贴近现代侧栏导航设计稿）。
+                canvas.fill_round_rect(
+                    x + PILL_INSET_X,
+                    y + PILL_INSET_Y,
+                    (w - 2.0 * PILL_INSET_X).max(0.0),
+                    (h - 2.0 * PILL_INSET_Y).max(0.0),
+                    PILL_RADIUS,
+                    &Paint::fill(c),
+                );
+            } else {
+                canvas.fill_rect(x, y, w, h, &Paint::fill(c));
+            }
         }
-        // 选中左缘强调条补间（禁用时不强调）：淡入。
+        // 选中左缘强调条补间（禁用时不强调）：淡入。pill 样式不绘左条（靠圆角底块表达选中）。
         let mut selt = self.sel.get();
-        let sel_target = if sel && enabled { 1.0 } else { 0.0 };
+        let sel_target = if sel && enabled && !self.pill {
+            1.0
+        } else {
+            0.0
+        };
         if selt.target() != sel_target {
             selt.retarget(sel_target, th.anim.normal(), Easing::EaseOut);
         }
@@ -141,7 +165,13 @@ impl Widget for ListRow {
         } else {
             self.visual_state()
         };
-        let mut text_x = bounds.x + PAD_X;
+        // pill 样式文字左移与 pill 内缩对齐（更舒展的内边距，短标题也美观）。
+        let pad_x = if self.pill {
+            PILL_INSET_X as i32 + 10
+        } else {
+            PAD_X
+        };
+        let mut text_x = bounds.x + pad_x;
         if let Some(icon) = &self.icon {
             let side = (bounds.h - 14).max(0);
             let iy = bounds.y + (bounds.h - side) / 2;
@@ -150,12 +180,12 @@ impl Widget for ListRow {
                 ..style.clone()
             };
             icon.paint_into(
-                Rect::new(bounds.x + PAD_X, iy, side, side),
+                Rect::new(bounds.x + pad_x, iy, side, side),
                 canvas,
                 &istyle,
                 vstate,
             );
-            text_x = bounds.x + PAD_X + side + ICON_GAP;
+            text_x = bounds.x + pad_x + side + ICON_GAP;
         }
         let color = if !enabled {
             pal.text_disabled
