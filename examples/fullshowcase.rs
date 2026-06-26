@@ -283,6 +283,65 @@ fn main() {
                 .child(Element::label("›").font_size(20.0).fg(Color::hex(0x8A9099))),
         ))
         .child(card(
+            "图标按钮 IconButton / 标签 chip / 标签字段 tag_field",
+            Element::row()
+                .width_match()
+                .spacing(8)
+                .cross(Align::Center)
+                .child(Element::icon_button("\u{25B2}").fg(Color::hex(0x8A9099)))
+                .child(Element::icon_button("\u{25BC}").fg(Color::hex(0x8A9099)))
+                .child(Element::icon_button("\u{24D8}").fg(Color::hex(0x8A9099)))
+                .child(Element::icon_button("\u{2715}").fg(Color::hex(0x8A9099)))
+                .child(
+                    Element::tag_field(
+                        "添加触发键…",
+                        vec![
+                            Element::chip("分号(;)", |ctx| ctx.toast("移除：分号")),
+                            Element::chip("逗号(,)", |ctx| ctx.toast("移除：逗号")),
+                        ],
+                    )
+                    .weight(1.0),
+                ),
+        ))
+        .child(card(
+            "网格 grid（每行 2 列等宽）",
+            Element::grid(
+                2,
+                10,
+                vec![
+                    {
+                        let s = signal(true);
+                        Element::checkbox("（ ） 圆括号", s)
+                    },
+                    {
+                        let s = signal(true);
+                        Element::checkbox("【 】 方括号", s)
+                    },
+                    {
+                        let s = signal(false);
+                        Element::checkbox("｛ ｝ 花括号", s)
+                    },
+                    {
+                        let s = signal(true);
+                        Element::checkbox("《 》 书名号", s)
+                    },
+                ],
+            ),
+        ))
+        .child(card(
+            "数据表格 table（固定表头 + 滚动 + 斑马纹）",
+            Element::table(
+                vec![("字符", 1.0), ("半角", 1.0), ("全角", 1.0)],
+                vec![
+                    vec!["!", "!", "！"],
+                    vec!["@", "@", "＠"],
+                    vec!["#", "#", "＃"],
+                    vec!["$", "￥", "￥"],
+                ],
+            )
+            .height(160),
+        ))
+        .child(card(
             "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",
             Element::col()
                 .width_match()
