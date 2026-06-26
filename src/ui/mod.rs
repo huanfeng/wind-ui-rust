@@ -17,6 +17,7 @@ pub mod window_buttons;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
+use std::rc::Rc;
 
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
@@ -1665,6 +1666,46 @@ impl Element {
             .child(header)
             .child(Element::divider())
             .child(scroll.weight(1.0))
+    }
+
+    /// 可编辑数据表格：单元格数据用 `Signal<String>` 承载（显示自动跟随），点单元格触发
+    /// `on_edit(ctx, row, col)`——由 app 据 (row,col) 弹出编辑框（如 `dialog_panel` + `text_input`），
+    /// 确认后写回对应 `cells[row][col]`，表格下一帧自动刷新。**非即时编辑**，编辑入口与提交解耦。
+    ///
+    /// `columns` 为 (列标题, 权重)；`cells` 为每行的单元格信号（与列一一对应）。
+    pub fn table_editable(
+        columns: Vec<(impl Into<String>, f32)>,
+        cells: Vec<Vec<Signal<String>>>,
+        on_edit: impl FnMut(&mut EventCtx, usize, usize) + 'static,
+    ) -> Self {
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let cb = Rc::new(RefCell::new(on_edit));
+        let fg = crate::theme::current().palette.text;
+        let rows: Vec<Vec<Element>> = cells
+            .into_iter()
+            .enumerate()
+            .map(|(r, row)| {
+                row.into_iter()
+                    .enumerate()
+                    .map(|(c, sig)| {
+                        let cb = cb.clone();
+                        // 每格为可点击容器（hover 反馈 + 手型），内含绑定信号的动态文本。
+                        Element::stack()
+                            .clickable()
+                            .on_click(move |ctx| (cb.borrow_mut())(ctx, r, c))
+                            .corner(4.0)
+                            .child(
+                                Element::label_rc(sig)
+                                    .font_size(13.0)
+                                    .fg(fg)
+                                    .width_match()
+                                    .height(20),
+                            )
+                    })
+                    .collect()
+            })
+            .collect();
+        Self::table_custom(cols, rows)
     }
 
     /// 设置自定义内容控件（叶子）。
