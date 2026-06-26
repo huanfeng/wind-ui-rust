@@ -78,13 +78,25 @@ impl Widget for WindowButton {
         style: &Style,
     ) {
         let is_close = self.kind == WindowButtonKind::Close;
-        // 悬停/按下底色：关闭键红，其余淡灰；Normal 用全透明（淡入淡出的起止）。
+        // 悬停叠层随主题：暗色标题栏用浅色叠层（否则黑叠层在暗底上几乎不可见），
+        // 亮色用深色叠层。据当前主题 surface（标题栏底）亮度判定明暗。
+        let surf = crate::theme::current().palette.surface;
+        let dark_titlebar = (surf.r as u32 + surf.g as u32 + surf.b as u32) < 384;
+        let (hover_ov, press_ov) = if dark_titlebar {
+            (
+                Color::rgba(255, 255, 255, 0x20),
+                Color::rgba(255, 255, 255, 0x33),
+            )
+        } else {
+            (Color::rgba(0, 0, 0, 0x14), Color::rgba(0, 0, 0, 0x22))
+        };
+        // 悬停/按下底色：关闭键红，其余随主题淡叠层；Normal 全透明（淡入淡出的起止）。
         let target_bg = match self.state {
             BtnState::Normal => Color::rgba(0, 0, 0, 0),
             BtnState::Hover if is_close => Color::hex(0xE81123),
             BtnState::Press if is_close => Color::hex(0xC50F1F),
-            BtnState::Hover => Color::rgba(0, 0, 0, 0x14),
-            BtnState::Press => Color::rgba(0, 0, 0, 0x22),
+            BtnState::Hover => hover_ov,
+            BtnState::Press => press_ov,
         };
         // 底色补间：首帧落定，其后淡入淡出。
         let mut anim = self.bg_anim.get();
@@ -109,9 +121,13 @@ impl Widget for WindowButton {
                 &Paint::fill(bg),
             );
         }
-        // 图标色：关闭键 hover/press 时白，否则取元素 fg（深色标题栏用 .fg(WHITE)）。
+        // 图标色：关闭键 hover/press 时白；否则取元素前景——
+        // 设了 fg_role 时按当前主题解析（运行期换肤跟随，暗色标题栏自动转浅），
+        // 与 label 等控件一致；未设角色则用显式 style.fg。
         let glyph = if is_close && self.state != BtnState::Normal {
             Color::WHITE
+        } else if style.fg_role.is_some() {
+            style.resolved_fg(&crate::theme::current())
         } else {
             style.fg
         };

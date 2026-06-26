@@ -90,8 +90,15 @@ impl Widget for CheckBox {
             }
         };
         // 禁用：强调色降为灰轨道、文字用 text_disabled。
+        // 文字色：设了 fg_role 时按当前主题解析（运行期换肤跟随，暗色自动转浅），与 label 一致。
         let accent = if enabled { base_accent } else { p.track };
-        let text_color = if enabled { style.fg } else { p.text_disabled };
+        let text_color = if !enabled {
+            p.text_disabled
+        } else if style.fg_role.is_some() {
+            style.resolved_fg(&th)
+        } else {
+            style.fg
+        };
         let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
         // 勾选填充补间：据状态改向，amount 驱动底色渐变 + 边框淡出 + 对勾淡入。
