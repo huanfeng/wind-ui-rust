@@ -228,7 +228,10 @@ impl Widget for ListRow {
                 PointerKind::Up => {
                     if ctx.bounds().contains(p.pos) {
                         self.group.set(self.index);
-                        ctx.mark_dirty();
+                        // 选中是共享状态：改写后旧选中行（另一节点）也要重绘以清掉其高亮，
+                        // 仅 mark_dirty 只失效本行 → 旧行高亮残留（移动鼠标整窗重绘才清）。
+                        // 故升整窗（与 RadioButton 同处理）。
+                        ctx.mark_dirty_all();
                     }
                     true
                 }
@@ -236,7 +239,7 @@ impl Widget for ListRow {
             },
             Event::Key(k) if k.pressed && (k.key == Key::Enter || k.key == Key::Space) => {
                 self.group.set(self.index);
-                ctx.mark_dirty();
+                ctx.mark_dirty_all();
                 true
             }
             _ => false,
