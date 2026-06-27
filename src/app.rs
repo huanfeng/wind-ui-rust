@@ -554,6 +554,11 @@ struct UiHost {
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
 const DAMAGE_MARGIN: i32 = 2;
 
+/// 交互调试日志开关（环境变量 WINDUI_DBG 非空时开启）：打印结构变化时的 hover 重对齐过程。
+fn dbg_interaction() -> bool {
+    std::env::var_os("WINDUI_DBG").is_some()
+}
+
 impl UiHost {
     fn new(
         root: Element,
@@ -813,6 +818,17 @@ impl UiHost {
             &mut hover,
             &mut capture,
         );
+        if dbg_interaction() {
+            eprintln!(
+                "[wdbg] resync: pos=({},{}) hover {:?} -> {:?} cap {:?} (hit={:?})",
+                self.hover_pos.x,
+                self.hover_pos.y,
+                self.hover,
+                hover,
+                capture,
+                self.tree.hit_test(self.hover_pos)
+            );
+        }
         self.hover = hover;
         self.capture = capture;
     }
@@ -990,6 +1006,12 @@ impl AppHandler for UiHost {
             laid_out = true;
             let sig = self.tree.layout_signature();
             if self.sig_valid && sig != self.last_layout_sig {
+                if dbg_interaction() {
+                    eprintln!(
+                        "[wdbg] sig changed -> reset+resync; hover={:?} pos=({},{}) cap={:?}",
+                        self.hover, self.hover_pos.x, self.hover_pos.y, self.capture
+                    );
+                }
                 self.needs_full = true;
                 // 结构变化（模态弹出/关闭、切页等）的两类交互态修正（对齐 Flutter MouseTracker /
                 // Qt 模态弹出补发 leave 的做法）：
@@ -1869,6 +1891,64 @@ mod tests {
     }
 
     #[test]
+    fn nested_modal_over_cell_clears_hover() {
+        // 镜像 settings：单元格在 scroll 在对话框A（已开）内，点单元格开对话框B（在其上）。
+        // 验证 B 弹出后该单元格（被 B 遮住）的 hover 被清。
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let show_a = crate::signal::signal(true);
+        let show_b = crate::signal::signal(false);
+        let sb = show_b;
+        let cell = Element::stack()
+            .clickable()
+            .on_click(move |_| sb.set(true))
+            .width(100)
+            .height(40);
+        let dialog_a = Element::dialog(
+            show_a,
+            Element::scroll().width(200).height(200).child(cell),
+        );
+        let dialog_b = Element::dialog(show_b, Element::leaf().width(80).height(60));
+        let ui = Element::stack()
+            .fill()
+            .child(Element::col().fill())
+            .child(dialog_a)
+            .child(dialog_b);
+        let app = App::new("t", 300, 300).content(ui);
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        // 对话框A居中(scroll 200x200@(50,50))，cell 在 scroll 顶部(50,50,100,40)→中心(100,70)。
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            Point::new(100, 70),
+            MouseButton::Left,
+        ));
+        let cell_hover = handler.hover;
+        assert!(cell_hover.is_some(), "应 hover 到单元格，实得 {cell_hover:?}");
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(100, 70),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            Point::new(100, 70),
+            MouseButton::Left,
+        ));
+        assert!(show_b.get(), "点单元格应打开对话框B");
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        assert_ne!(
+            handler.hover, cell_hover,
+            "对话框B弹出后，被遮住的单元格 hover 应被清掉"
+        );
+    }
+
+    #[test]
     fn hiding_node_resets_its_interaction_state() {
         // 回归：控件在按下/悬停态被隐藏（如关闭其所在对话框）时，框架应调 reset_interaction
         // 重置其交互态，避免下次显示瞬间闪出旧的按下/悬停态。
@@ -1886,15 +1966,13 @@ mod tests {
         }
         let hits = Rc::new(StdCell::new(0u32));
         let show = crate::signal::signal(true);
-        let s2 = show;
         let probe = hits.clone();
-        let ui = Element::col().fill().child(
-            Element::leaf()
-                .width(20)
-                .height(20)
-                .widget(ResetProbe(probe))
-                .visible_when(move || s2.get()),
-        );
+        // 关键：探针**嵌在对话框内部**（自身无 vis_cond），对话框隐藏时探针的局部
+        // effective_visible 不变——只有祖先链累积可见性才能检测到它被隐藏。
+        let ui = Element::stack().fill().child(Element::dialog(
+            show,
+            Element::leaf().width(20).height(20).widget(ResetProbe(probe)),
+        ));
         let app = App::new("t", 40, 40).content(ui);
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);

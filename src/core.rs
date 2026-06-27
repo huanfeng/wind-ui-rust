@@ -1127,21 +1127,36 @@ impl Tree {
         h.finish()
     }
 
-    /// 显隐翻转后重置交互态：遍历存活节点，对**由可见变为隐藏**的节点调
-    /// `Widget::reset_interaction`（清 hover/press、令补间瞬时落定）。修正"控件在按下/
-    /// 悬停态被隐藏（如关闭它所在的对话框），其状态/动画冻结、下次显示瞬间闪出旧态"。
-    /// 由宿主在检测到结构签名变化时调用（与 hover 重对齐同源，见 Flutter MouseTracker /
-    /// Qt 关于模态弹出后需补发 leave 的做法）。
+    /// 显隐翻转后重置交互态：从根遍历，按**祖先链累积可见性**（父隐藏则子也隐藏）对每个
+    /// 节点判定真实可见，对**由可见变为隐藏**者调 `Widget::reset_interaction`（清 hover/press、
+    /// 令补间瞬时落定）。修正"控件在按下/悬停态被隐藏（如关闭它所在的对话框）、其状态/动画
+    /// 冻结、下次显示瞬间闪出旧态"。
+    ///
+    /// 注意：必须用累积可见性而非节点局部 `effective_visible`——对话框关闭只翻转对话框节点本身，
+    /// 其子节点（关闭按钮等）的局部可见性不变，仅靠局部判定会漏掉它们。
+    /// 由宿主在结构签名变化时调用（对齐 Flutter MouseTracker / Qt 模态弹出补发 leave 的做法）。
     pub fn reset_hidden_interactions(&mut self) {
-        for slot in self.slots.iter_mut() {
-            let Some(node) = slot.node.as_mut() else {
-                continue;
-            };
-            let vis = node.effective_visible();
-            let prev = node.prev_visible.replace(vis);
-            if prev && !vis {
-                node.widget.reset_interaction();
+        if let Some(root) = self.root {
+            self.reset_hidden_rec(root, true);
+        }
+    }
+
+    fn reset_hidden_rec(&mut self, id: NodeId, parent_visible: bool) {
+        let (vis, children, transitioned) = match self.get(id) {
+            Some(n) => {
+                let v = parent_visible && n.effective_visible();
+                let prev = n.prev_visible.replace(v);
+                (v, n.children.clone(), prev && !v)
             }
+            None => return,
+        };
+        if transitioned {
+            if let Some(n) = self.get_mut(id) {
+                n.widget.reset_interaction();
+            }
+        }
+        for c in children {
+            self.reset_hidden_rec(c, vis);
         }
     }
 
