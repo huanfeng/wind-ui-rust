@@ -45,6 +45,13 @@ pub use window_buttons::{WindowButton, WindowButtonKind};
 /// 图标与文字之间的间距（Button 等）。
 const ICON_GAP: i32 = 6;
 
+/// 表格单元格内边距（横/纵，px）与可点击单元格高亮圆角。内边距在单元格内部，
+/// 使可点击单元格填满整格、hover 高亮覆盖整格（而非仅贴着文字）。
+const TABLE_CELL_PAD_X: i32 = 14;
+const TABLE_CELL_PAD_Y: i32 = 9;
+const TABLE_HEADER_PAD_Y: i32 = 10;
+const TABLE_CELL_CORNER: f32 = 4.0;
+
 /// 文本溢出时的省略方式。对 `Label`/`DynLabel` 生效；配合 `.max_lines(1)` 使用最为常见。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Truncate {
@@ -1616,46 +1623,50 @@ impl Element {
             .into_iter()
             .map(|r| {
                 r.into_iter()
-                    .map(|c| {
-                        Element::label(c.into())
-                            .font_size(13.0)
-                            .fg(fg)
-                            .width_match()
-                            .height(20)
-                    })
+                    .map(|c| Self::table_cell_pad(Element::label(c.into()).font_size(13.0).fg(fg)))
                     .collect()
             })
             .collect();
         Self::table_custom(cols, body)
     }
 
+    /// 表格单元格统一内边距包裹（文字内缩、单元格本身占满整格——便于整格背景/高亮）。
+    /// 内边距在单元格**内部**而非行上，故可点击单元格的 hover 高亮能覆盖整格。
+    fn table_cell_pad(content: Element) -> Self {
+        Element::stack()
+            .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
+            .child(content.width_match().height(20))
+    }
+
     /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
     /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
     pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
         let th = crate::theme::current();
-        // 表头：加粗、弱化色、次级表面底。
+        // 表头：加粗、弱化色、次级表面底。内边距在每列格内部（与正文同分布，列对齐）。
         let mut header = Element::row()
             .width_match()
-            .cross(Align::Center)
-            .padding_xy(14, 10)
+            .cross(Align::Stretch)
             .bg(th.palette.surface_alt);
         for (title, w) in &columns {
             header = header.child(
-                Element::label(title.clone())
-                    .font_size(13.0)
-                    .font_weight(600)
-                    .fg(th.palette.text_muted)
+                Element::stack()
                     .weight(*w)
-                    .height(18),
+                    .padding_xy(TABLE_CELL_PAD_X, TABLE_HEADER_PAD_Y)
+                    .child(
+                        Element::label(title.clone())
+                            .font_size(13.0)
+                            .font_weight(600)
+                            .fg(th.palette.text_muted)
+                            .width_match()
+                            .height(18),
+                    ),
             );
         }
-        // 正文：逐行，斑马纹 + 行下分隔线，整体置于滚动容器。
+        // 正文：逐行，斑马纹 + 行下分隔线。`cross(Stretch)` 让单元格撑满行高（便于整格高亮）；
+        // 行本身不设内边距——内边距在各单元格内部（见 table_cell_pad / table_editable）。
         let mut scroll = Element::scroll().fill();
         for (ri, cells) in rows.into_iter().enumerate() {
-            let mut tr = Element::row()
-                .width_match()
-                .cross(Align::Center)
-                .padding_xy(14, 9);
+            let mut tr = Element::row().width_match().cross(Align::Stretch);
             if ri % 2 == 1 {
                 tr = tr.bg(th.palette.surface_alt.scale_alpha(0.5));
             }
@@ -1693,11 +1704,13 @@ impl Element {
                     .enumerate()
                     .map(|(c, sig)| {
                         let cb = cb.clone();
-                        // 每格为可点击容器（hover 反馈 + 手型），内含绑定信号的动态文本。
+                        // 每格为可点击容器（hover 反馈 + 手型），填满整格、内边距在内部，
+                        // 故 hover 高亮覆盖整个单元格（带圆角），而非仅贴着文字。
                         Element::stack()
                             .clickable()
                             .on_click(move |ctx| (cb.borrow_mut())(ctx, r, c))
-                            .corner(4.0)
+                            .corner(TABLE_CELL_CORNER)
+                            .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
                             .child(
                                 Element::label_rc(sig)
                                     .font_size(13.0)
