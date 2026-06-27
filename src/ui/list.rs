@@ -249,6 +249,17 @@ impl Widget for ListRow {
     fn focusable(&self) -> bool {
         true
     }
+    fn reset_interaction(&mut self) {
+        // 清悬停并把底色/左缘补间瞬时落定到当前选中态（隐藏期不回放 hover 淡出）。
+        self.hover = false;
+        let on = if self.selected() { 1.0 } else { 0.0 };
+        self.bg_amt.set(Transition::new(on));
+        self.sel.set(Transition::new(if self.selected() && !self.pill {
+            1.0
+        } else {
+            0.0
+        }));
+    }
 }
 
 #[cfg(test)]

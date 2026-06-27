@@ -4,6 +4,7 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use crate::signal::Signal;
@@ -72,6 +73,10 @@ pub trait Widget {
     }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
     fn take_click(&mut self, _f: ClickFn) {}
+    /// 显隐切换时重置交互态（hover/press → 静止，并令下次绘制的补间瞬时落定不动画）。
+    /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
+    /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。
+    fn reset_interaction(&mut self) {}
     /// 类型擦除下转钩子：供 Builder 对具体控件做类型化配置（如 TextInput 的
     /// 多行/密码开关）。默认返回 None，需要的控件返回 `Some(self)`。
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
@@ -169,6 +174,8 @@ pub struct Node {
     /// 越界回弹的瞬时视觉偏移（不参与钳制，仅惯性撞界时短暂非零）。
     /// 正=内容下移（顶部回弹），负=内容上移（底部回弹）。
     pub over_scroll: i32,
+    /// 上一次 `reset_hidden_interactions` 扫描时的有效可见性（显隐翻转检测用）。
+    pub prev_visible: Cell<bool>,
 }
 
 struct Slot {
@@ -1118,6 +1125,24 @@ impl Tree {
             }
         }
         h.finish()
+    }
+
+    /// 显隐翻转后重置交互态：遍历存活节点，对**由可见变为隐藏**的节点调
+    /// `Widget::reset_interaction`（清 hover/press、令补间瞬时落定）。修正"控件在按下/
+    /// 悬停态被隐藏（如关闭它所在的对话框），其状态/动画冻结、下次显示瞬间闪出旧态"。
+    /// 由宿主在检测到结构签名变化时调用（与 hover 重对齐同源，见 Flutter MouseTracker /
+    /// Qt 关于模态弹出后需补发 leave 的做法）。
+    pub fn reset_hidden_interactions(&mut self) {
+        for slot in self.slots.iter_mut() {
+            let Some(node) = slot.node.as_mut() else {
+                continue;
+            };
+            let vis = node.effective_visible();
+            let prev = node.prev_visible.replace(vis);
+            if prev && !vis {
+                node.widget.reset_interaction();
+            }
+        }
     }
 
     /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。

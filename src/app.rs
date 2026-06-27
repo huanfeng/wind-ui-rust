@@ -991,9 +991,12 @@ impl AppHandler for UiHost {
             let sig = self.tree.layout_signature();
             if self.sig_valid && sig != self.last_layout_sig {
                 self.needs_full = true;
-                // 结构变化（模态弹出/关闭、切页等）可能在光标静止时改变了指针下的命中节点：
-                // 旧 hover 节点（被新浮层遮住，或其上层消失）需补发 Leave/Enter，否则其
-                // hover/press 视觉会"卡住"（典型：点单元格弹模态后该格高亮残留）。
+                // 结构变化（模态弹出/关闭、切页等）的两类交互态修正（对齐 Flutter MouseTracker /
+                // Qt 模态弹出补发 leave 的做法）：
+                // 1) 被隐藏的控件（如关闭它所在的对话框）重置其 hover/press 与补间，避免下次
+                //    显示瞬间闪出旧的按下/悬停态；
+                self.tree.reset_hidden_interactions();
+                // 2) 在光标静止时被新浮层遮住的旧 hover 节点补发 Leave/Enter，清掉残留高亮。
                 self.resync_hover_after_relayout();
             }
             self.last_layout_sig = sig;
@@ -1863,6 +1866,45 @@ mod tests {
             handler.hover, row_hover,
             "模态弹出后旧 hover 应被清掉，避免高亮残留"
         );
+    }
+
+    #[test]
+    fn hiding_node_resets_its_interaction_state() {
+        // 回归：控件在按下/悬停态被隐藏（如关闭其所在对话框）时，框架应调 reset_interaction
+        // 重置其交互态，避免下次显示瞬间闪出旧的按下/悬停态。
+        use crate::core::Widget;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        use tiny_skia::Pixmap;
+        struct ResetProbe(Rc<StdCell<u32>>);
+        impl Widget for ResetProbe {
+            fn reset_interaction(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let hits = Rc::new(StdCell::new(0u32));
+        let show = crate::signal::signal(true);
+        let s2 = show;
+        let probe = hits.clone();
+        let ui = Element::col().fill().child(
+            Element::leaf()
+                .width(20)
+                .height(20)
+                .widget(ResetProbe(probe))
+                .visible_when(move || s2.get()),
+        );
+        let app = App::new("t", 40, 40).content(ui);
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(40, 40));
+        // 隐藏：模拟交互后置 needs_relayout（正常由事件置位），渲染触发结构变化处理。
+        show.set(false);
+        handler.needs_relayout = true;
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(40, 40));
+        assert!(hits.get() >= 1, "节点隐藏时应调用 reset_interaction 重置交互态");
     }
 
     #[test]

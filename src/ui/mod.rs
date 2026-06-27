@@ -729,6 +729,10 @@ impl Widget for Button {
     fn take_click(&mut self, f: ClickFn) {
         self.on_click = Some(f);
     }
+    fn reset_interaction(&mut self) {
+        self.state = BtnState::Normal;
+        self.primed.set(false); // 下次显示瞬时落定背景色，不回放旧的 hover/press
+    }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
@@ -1897,6 +1901,7 @@ impl Element {
             scroll_y: 0,
             content_h: 0,
             over_scroll: 0,
+            prev_visible: Cell::new(true),
         };
         let id = tree.insert(node);
         for mut ce in children {

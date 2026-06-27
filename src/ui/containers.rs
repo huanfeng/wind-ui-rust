@@ -399,6 +399,10 @@ impl Widget for Clickable {
     fn cursor(&self) -> CursorShape {
         CursorShape::Hand
     }
+    fn reset_interaction(&mut self) {
+        self.state = ClickState::Normal;
+        self.primed.set(false); // 下次显示瞬时落定到静止叠层，不回放旧的 hover/press
+    }
 }
 
 /// 图标按钮内容：字形（draw_text）或图片（ImageContent）。
@@ -598,6 +602,10 @@ impl Widget for IconButton {
     }
     fn cursor(&self) -> CursorShape {
         CursorShape::Hand
+    }
+    fn reset_interaction(&mut self) {
+        self.state = ClickState::Normal;
+        self.primed.set(false);
     }
 }
 
@@ -803,6 +811,10 @@ impl Widget for TabButton {
     }
     fn focusable(&self) -> bool {
         true
+    }
+    fn reset_interaction(&mut self) {
+        self.hover = false;
+        self.primed.set(false); // 下次显示瞬时落定文字色，不回放旧 hover
     }
 }
 
