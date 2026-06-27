@@ -1348,6 +1348,46 @@ impl Tree {
         (consumed, out)
     }
 
+    /// hover 目标变化时沿**祖先链**派发 Leave/Enter：旧链中不在新链的节点收 Leave（叶→根序），
+    /// 新链中不在旧链的节点收 Enter（根→叶序）。匹配 DOM mouseenter/mouseleave 传播语义——
+    /// hover 一个子节点等于 hover 其所有祖先。
+    ///
+    /// 关键：命中测试返回**最深**节点，但可点击容器（如带 label 子节点的表格单元格）的
+    /// hover/press 态由点击冒泡设上，其子节点拦截了命中点，单点派发的 Leave 永远到不了
+    /// 容器 → 高亮卡住（"点击过的一直高亮"）。沿祖先链派发即修正。
+    fn dispatch_hover_change(
+        &mut self,
+        old: Option<NodeId>,
+        new: Option<NodeId>,
+        ev: &PointerEvent,
+        res: &mut DispatchResult,
+    ) {
+        let old_chain = old.map(|h| self.ancestor_chain(h)).unwrap_or_default();
+        let new_chain = new.map(|t| self.ancestor_chain(t)).unwrap_or_default();
+        for &id in old_chain.iter().filter(|id| !new_chain.contains(id)) {
+            let (_, o) = self.call_on_event(
+                id,
+                &Event::Pointer(PointerEvent {
+                    kind: PointerKind::Leave,
+                    ..*ev
+                }),
+            );
+            res.repaint |= o.repaint;
+            res.damage = res.damage.merge(o.damage);
+        }
+        for &id in new_chain.iter().rev().filter(|id| !old_chain.contains(id)) {
+            let (_, o) = self.call_on_event(
+                id,
+                &Event::Pointer(PointerEvent {
+                    kind: PointerKind::Enter,
+                    ..*ev
+                }),
+            );
+            res.repaint |= o.repaint;
+            res.damage = res.damage.merge(o.damage);
+        }
+    }
+
     /// 分发指针事件：维护 hover/capture，冒泡处理，汇总副作用。
     pub fn dispatch_pointer(
         &mut self,
@@ -1357,32 +1397,11 @@ impl Tree {
     ) -> DispatchResult {
         let mut res = DispatchResult::default();
 
-        // hover 进出（仅 Move 且无捕获时）
+        // hover 进出（仅 Move 且无捕获时）：沿祖先链派发，使可点击容器也能收到 Enter/Leave。
         if matches!(ev.kind, PointerKind::Move) && capture.is_none() {
             let target = self.hit_test(ev.pos);
             if *hover != target {
-                if let Some(old) = *hover {
-                    let (_, o) = self.call_on_event(
-                        old,
-                        &Event::Pointer(PointerEvent {
-                            kind: PointerKind::Leave,
-                            ..ev
-                        }),
-                    );
-                    res.repaint |= o.repaint;
-                    res.damage = res.damage.merge(o.damage);
-                }
-                if let Some(new) = target {
-                    let (_, o) = self.call_on_event(
-                        new,
-                        &Event::Pointer(PointerEvent {
-                            kind: PointerKind::Enter,
-                            ..ev
-                        }),
-                    );
-                    res.repaint |= o.repaint;
-                    res.damage = res.damage.merge(o.damage);
-                }
+                self.dispatch_hover_change(*hover, target, &ev, &mut res);
                 *hover = target;
             }
         }
@@ -1457,28 +1476,7 @@ impl Tree {
         if had_capture && capture.is_none() {
             let target = self.hit_test(ev.pos);
             if *hover != target {
-                if let Some(old) = *hover {
-                    let (_, o) = self.call_on_event(
-                        old,
-                        &Event::Pointer(PointerEvent {
-                            kind: PointerKind::Leave,
-                            ..ev
-                        }),
-                    );
-                    res.repaint |= o.repaint;
-                    res.damage = res.damage.merge(o.damage);
-                }
-                if let Some(new) = target {
-                    let (_, o) = self.call_on_event(
-                        new,
-                        &Event::Pointer(PointerEvent {
-                            kind: PointerKind::Enter,
-                            ..ev
-                        }),
-                    );
-                    res.repaint |= o.repaint;
-                    res.damage = res.damage.merge(o.damage);
-                }
+                self.dispatch_hover_change(*hover, target, &ev, &mut res);
                 *hover = target;
             }
         }

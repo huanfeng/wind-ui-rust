@@ -554,11 +554,6 @@ struct UiHost {
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
 const DAMAGE_MARGIN: i32 = 2;
 
-/// 交互调试日志开关（环境变量 WINDUI_DBG 非空时开启）：打印结构变化时的 hover 重对齐过程。
-fn dbg_interaction() -> bool {
-    std::env::var_os("WINDUI_DBG").is_some()
-}
-
 impl UiHost {
     fn new(
         root: Element,
@@ -818,17 +813,6 @@ impl UiHost {
             &mut hover,
             &mut capture,
         );
-        if dbg_interaction() {
-            eprintln!(
-                "[wdbg] resync: pos=({},{}) hover {:?} -> {:?} cap {:?} (hit={:?})",
-                self.hover_pos.x,
-                self.hover_pos.y,
-                self.hover,
-                hover,
-                capture,
-                self.tree.hit_test(self.hover_pos)
-            );
-        }
         self.hover = hover;
         self.capture = capture;
     }
@@ -1006,12 +990,6 @@ impl AppHandler for UiHost {
             laid_out = true;
             let sig = self.tree.layout_signature();
             if self.sig_valid && sig != self.last_layout_sig {
-                if dbg_interaction() {
-                    eprintln!(
-                        "[wdbg] sig changed -> reset+resync; hover={:?} pos=({},{}) cap={:?}",
-                        self.hover, self.hover_pos.x, self.hover_pos.y, self.capture
-                    );
-                }
                 self.needs_full = true;
                 // 结构变化（模态弹出/关闭、切页等）的两类交互态修正（对齐 Flutter MouseTracker /
                 // Qt 模态弹出补发 leave 的做法）：

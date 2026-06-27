@@ -1937,6 +1937,61 @@ mod tests {
     }
 
     #[test]
+    fn hover_leave_reaches_interactive_container_with_child() {
+        // 回归：可点击容器内有子节点（命中返回最深子节点）时，hover 移开容器后容器本身
+        // 仍须收到 Leave——否则带 label 的表格单元格点击后高亮卡住（"点击过的一直高亮"）。
+        use crate::core::{EventCtx, Widget};
+        use crate::event::{Event, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        struct LeaveProbe(Rc<StdCell<u32>>);
+        impl Widget for LeaveProbe {
+            fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
+                if let Event::Pointer(p) = ev {
+                    if p.kind == PointerKind::Leave {
+                        self.0.set(self.0.get() + 1);
+                    }
+                }
+                false
+            }
+        }
+        let leaves = Rc::new(StdCell::new(0u32));
+        // A：带子 label 的容器（探针）；B：相邻普通块。
+        let ui = Element::row()
+            .fill()
+            .child(
+                Element::stack()
+                    .width(50)
+                    .height(50)
+                    .widget(LeaveProbe(leaves.clone()))
+                    .child(Element::label("x").fill()),
+            )
+            .child(Element::leaf().width(50).height(50));
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(100, 50), &mut crate::text::NullTextEngine);
+        let (mut hover, mut capture) = (None, None);
+        // 移到 A（命中其子 label），再移到 B → A 容器应收到 Leave。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, Point::new(25, 25), MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, Point::new(75, 25), MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert!(
+            leaves.get() >= 1,
+            "hover 移开容器后容器应收到 Leave，实得 {}",
+            leaves.get()
+        );
+    }
+
+    #[test]
     fn grid_chunks_items_into_rows_and_pads_last() {
         // 5 项 2 列 → 3 行；末行 1 真项 + 1 空占位，列数对齐。
         let items: Vec<Element> = (0..5).map(|_| Element::label("x")).collect();
