@@ -798,6 +798,25 @@ impl UiHost {
         });
     }
 
+    /// 结构变化后按当前指针位置重新求值 hover：合成一个 Move 事件复用既有的 Enter/Leave
+    /// 逻辑——旧 hover 节点若被新浮层遮住会收到 Leave（清掉残留高亮），指针下的新节点收到
+    /// Enter。修正"模态弹出/关闭、切页等在光标静止时改变命中节点导致 hover 卡住"。
+    /// 菜单浮层有独立命中逻辑，激活时跳过。
+    fn resync_hover_after_relayout(&mut self) {
+        if self.menu.is_some() {
+            return;
+        }
+        let mut hover = self.hover;
+        let mut capture = self.capture;
+        let _ = self.tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, self.hover_pos, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        self.hover = hover;
+        self.capture = capture;
+    }
+
     /// 弹出/替换轻提示：以当前单调时钟为起点，强制整窗重绘叠加浮层。
     /// 后续帧会持续推进淡入淡出并在过期后自动清除（见 render 中的浮层段）。
     fn show_toast(&mut self, req: ToastRequest) {
@@ -972,6 +991,10 @@ impl AppHandler for UiHost {
             let sig = self.tree.layout_signature();
             if self.sig_valid && sig != self.last_layout_sig {
                 self.needs_full = true;
+                // 结构变化（模态弹出/关闭、切页等）可能在光标静止时改变了指针下的命中节点：
+                // 旧 hover 节点（被新浮层遮住，或其上层消失）需补发 Leave/Enter，否则其
+                // hover/press 视觉会"卡住"（典型：点单元格弹模态后该格高亮残留）。
+                self.resync_hover_after_relayout();
             }
             self.last_layout_sig = sig;
             self.sig_valid = true;
@@ -1786,6 +1809,60 @@ mod tests {
         // 过期判定：到时即过期，未到不过期。
         assert!(!t.expired(100 + 999), "未到时不过期");
         assert!(t.expired(100 + 1000), "到时即过期");
+    }
+
+    #[test]
+    fn modal_open_clears_stale_hover() {
+        // 回归：点可点击行弹出模态后，光标静止，旧 hover 节点被新遮罩遮住须收到 Leave，
+        // 否则其 hover 高亮残留（结构变化触发 resync_hover_after_relayout 修正）。
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let show = crate::signal::signal(false);
+        let s2 = show;
+        let ui = Element::stack()
+            .fill()
+            .child(
+                Element::row()
+                    .clickable()
+                    .on_click(move |_| s2.set(true))
+                    .width_match()
+                    .height(60),
+            )
+            .child(Element::dialog(show, Element::leaf().width(40).height(40)));
+        let app = App::new("t", 100, 100).content(ui);
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 100));
+        // 悬停到可点击行。
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            Point::new(30, 30),
+            MouseButton::Left,
+        ));
+        let row_hover = handler.hover;
+        assert!(row_hover.is_some(), "应 hover 到可点击行");
+        // 点击打开模态（光标不再移动）。
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(30, 30),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            Point::new(30, 30),
+            MouseButton::Left,
+        ));
+        assert!(show.get(), "点击应打开模态");
+        // 渲染：结构变化 → resync_hover 在原位置重新命中，旧 hover（被遮罩盖住）应被替换。
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 100));
+        assert_ne!(
+            handler.hover, row_hover,
+            "模态弹出后旧 hover 应被清掉，避免高亮残留"
+        );
     }
 
     #[test]
