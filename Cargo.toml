@@ -28,7 +28,7 @@ svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
 # 与 resvg 0.47 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
 tiny-skia = "0.12"
 # 系统原生文件/目录选择对话框（PickDialog）。仅用阻塞 API，禁用异步 feature。
-rfd = { version = "0.14", default-features = false }
+rfd = { version = "0.17", default-features = false }
 # SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
 # 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
 resvg = { version = "0.47", optional = true, default-features = false }
