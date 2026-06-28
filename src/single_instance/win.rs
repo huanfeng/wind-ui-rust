@@ -132,9 +132,19 @@ unsafe extern "system" fn si_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 let data = unsafe { std::slice::from_raw_parts(ptr, cb) };
                 let argv = decode_argv(data);
                 SI_CTX.with(|c| {
-                    if let Some(ctx) = c.borrow_mut().as_mut() {
+                    // take() 释放借用后再调回调，防止 on_second 内调 install_listener
+                    // 导致同线程二次 borrow_mut panic。
+                    let maybe_ctx = c.borrow_mut().take();
+                    if let Some(mut ctx) = maybe_ctx {
+                        let main_hwnd = ctx.main_hwnd;
                         (ctx.on_second)(argv);
-                        activate(ctx.main_hwnd);
+                        // 若回调未替换上下文则还原；已替换则丢弃旧值。
+                        let mut guard = c.borrow_mut();
+                        if guard.is_none() {
+                            *guard = Some(ctx);
+                        }
+                        drop(guard);
+                        activate(main_hwnd);
                     }
                 });
             }

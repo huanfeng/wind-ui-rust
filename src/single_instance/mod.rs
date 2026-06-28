@@ -27,9 +27,10 @@ pub(crate) fn socket_path(app_id: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(dir).join(format!("{app_id}_si.sock"))
 }
 
-/// argv 编码为字节(`\n` 分隔,UTF-8),供 WM_COPYDATA / socket 传输。
+/// argv 编码为字节（`\0` 分隔，UTF-8），供 WM_COPYDATA / socket 传输。
+/// 用 NUL 而非 `\n`：NUL 在 Windows/Unix 路径中均非法，无需转义。
 pub(crate) fn encode_argv(argv: &[String]) -> Vec<u8> {
-    argv.join("\n").into_bytes()
+    argv.join("\0").into_bytes()
 }
 
 /// 字节解码回 argv。空输入 → 空 Vec。
@@ -38,7 +39,7 @@ pub(crate) fn decode_argv(bytes: &[u8]) -> Vec<String> {
     if s.is_empty() {
         Vec::new()
     } else {
-        s.split('\n').map(|x| x.to_string()).collect()
+        s.split('\0').map(|x| x.to_string()).collect()
     }
 }
 
