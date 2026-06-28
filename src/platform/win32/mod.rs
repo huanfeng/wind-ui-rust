@@ -104,6 +104,7 @@ pub(crate) fn run(
     cfg: WindowConfig,
     mut handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
 ) {
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() {
@@ -117,7 +118,15 @@ pub(crate) fn run(
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    unsafe { run_windowed(cfg, handler, waker) };
+    // 单实例：检测；二次实例把 argv 转发给首实例后直接返回、不建窗口。
+    if let Some(si) = &single {
+        if !crate::single_instance::acquire(&si.app_id) {
+            let argv: Vec<String> = std::env::args().collect();
+            crate::single_instance::forward(&si.app_id, &argv);
+            return;
+        }
+    }
+    unsafe { run_windowed(cfg, handler, waker, single) };
 }
 
 // ── 渲染后端接缝 ────────────────────────────────────────────────────────────
@@ -399,6 +408,7 @@ unsafe fn run_windowed(
     mut cfg: WindowConfig,
     handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
 ) {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
@@ -551,6 +561,11 @@ unsafe fn run_windowed(
         w.bind(Box::new(Win32Wake {
             hwnd: hwnd.0 as isize,
         }));
+    }
+
+    // 单实例首实例：建 message-only 窗口接收二次实例 argv（UI 线程切页 + 激活主窗口）。
+    if let Some(si) = single {
+        crate::single_instance::install_listener(&si.app_id, hwnd.0 as isize, si.on_second);
     }
 
     // 注册周期定时器（on_interval）：timer id 从 1 起，靠 WM_TIMER 派发。

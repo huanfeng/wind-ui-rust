@@ -26,7 +26,10 @@ pub(crate) fn run(
     cfg: WindowConfig,
     mut handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
 ) {
+    // 单实例：Task 6 用 Unix domain socket 完整实现；当前占位（unix stub 视为永远首实例）。
+    let _ = single;
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() {
         true

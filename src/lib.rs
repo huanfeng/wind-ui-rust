@@ -14,6 +14,7 @@ pub mod geometry;
 pub mod platform;
 pub mod render;
 pub mod signal;
+pub(crate) mod single_instance;
 pub mod spec;
 pub mod style;
 pub(crate) mod sync;

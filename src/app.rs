@@ -185,6 +185,7 @@ pub struct App {
     pumps: Vec<Box<dyn FnMut()>>,
     intervals: Vec<(Duration, Box<dyn FnMut()>)>,
     waker_shared: Option<Arc<WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
 }
 
 impl App {
@@ -216,6 +217,7 @@ impl App {
             pumps: Vec::new(),
             intervals: Vec::new(),
             waker_shared: None,
+            single: None,
         }
     }
 
@@ -361,7 +363,23 @@ impl App {
         self
     }
 
-    pub fn run(self) {
+    /// 单实例 + 二次运行激活/传参。`app_id` 唯一标识（建议含变体后缀，使 dev/release 互不干扰）。
+    /// 仅首实例会被调用 `on_second_instance`（收到另一进程 argv 时，在 UI 线程）；
+    /// 二次实例：argv 已转发给首实例，`run()` 直接返回、不建窗口。
+    pub fn single_instance(
+        mut self,
+        app_id: impl Into<String>,
+        on_second_instance: impl FnMut(Vec<String>) + 'static,
+    ) -> Self {
+        self.single = Some(crate::single_instance::SingleInstance {
+            app_id: app_id.into(),
+            on_second: Box::new(on_second_instance),
+        });
+        self
+    }
+
+    pub fn run(mut self) {
+        let single = self.single.take();
         let theme_src = match self.theme_src {
             Some(h) => h,
             None => ThemeHandle::new(Rc::new(self.theme.unwrap_or_default())),
@@ -383,7 +401,7 @@ impl App {
                 f: Box::new(|_, _| {}),
             })
         };
-        platform::run(cfg, handler, waker);
+        platform::run(cfg, handler, waker, single);
     }
 
     #[cfg(test)]
