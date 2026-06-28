@@ -8,7 +8,8 @@
 use std::cell::RefCell;
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, SetLastError,
+    WIN32_ERROR, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
@@ -39,6 +40,8 @@ fn wide(s: &str) -> Vec<u16> {
 pub(crate) fn acquire(app_id: &str) -> bool {
     let name = wide(&mutex_name(app_id));
     unsafe {
+        // 清零 TLS 错误槽，防止 prior Win32 调用留下的 ERROR_ALREADY_EXISTS 导致误判。
+        SetLastError(WIN32_ERROR(0));
         match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(handle) => {
                 let already = GetLastError() == ERROR_ALREADY_EXISTS;
@@ -125,7 +128,7 @@ pub(crate) fn install_listener(
 unsafe extern "system" fn si_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if msg == WM_COPYDATA {
         let pcd = lp.0 as *const COPYDATASTRUCT;
-        if !pcd.is_null() {
+        if !pcd.is_null() && unsafe { (*pcd).dwData } == 1 {
             let cb = unsafe { (*pcd).cbData } as usize;
             let ptr = unsafe { (*pcd).lpData } as *const u8;
             if !ptr.is_null() && cb > 0 {
@@ -137,7 +140,10 @@ unsafe extern "system" fn si_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     let maybe_ctx = c.borrow_mut().take();
                     if let Some(mut ctx) = maybe_ctx {
                         let main_hwnd = ctx.main_hwnd;
-                        (ctx.on_second)(argv);
+                        // catch_unwind 防止回调 panic 穿越 extern "system" FFI 边界导致 UB。
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            (ctx.on_second)(argv);
+                        }));
                         // 若回调未替换上下文则还原；已替换则丢弃旧值。
                         let mut guard = c.borrow_mut();
                         if guard.is_none() {
