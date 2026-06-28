@@ -109,9 +109,10 @@ impl Node {
     pub fn effective_visible(&self) -> bool {
         self.visible && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
-    /// 本节点自身启用态（不含父链继承）。
+    /// 本节点自身启用态（不含父链继承）：静态/响应式启用标志与启用条件闭包取与。
     pub fn own_enabled(&self) -> bool {
         self.enabled.as_ref().is_none_or(|c| c.get())
+            && self.en_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
 }
 
@@ -151,6 +152,9 @@ pub struct Node {
     /// 自身启用标志（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
     /// 跳焦点，并把启用态传入 `Widget::paint` 供控件置灰。
     pub enabled: Option<Signal<bool>>,
+    /// 运行期启用条件（如设置项的 enabled_when 联动）。与 `enabled` 取与：
+    /// 返回 false 则该节点（及子树）置灰、不可交互，但仍占位参与布局/绘制（区别于 vis_cond）。
+    pub en_cond: Option<Box<dyn Fn() -> bool>>,
     /// 文件拖放回调（None=不接收拖放）。落点命中本节点或其子节点时，沿父链冒泡
     /// 到首个设了回调的节点触发；放在 fill 容器/根上即等价"全窗拖放"。
     pub on_drop: Option<DropFn>,

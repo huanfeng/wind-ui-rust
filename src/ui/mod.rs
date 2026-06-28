@@ -765,6 +765,7 @@ pub struct Element {
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
     enabled: Option<Signal<bool>>,
+    en_cond: Option<Box<dyn Fn() -> bool>>,
     tooltip: Option<String>,
 }
 
@@ -789,6 +790,7 @@ impl Element {
             context_menu: None,
             window_drag: false,
             enabled: None,
+            en_cond: None,
             tooltip: None,
         }
     }
@@ -1116,6 +1118,13 @@ impl Element {
     /// 核心据此拦事件、跳 Tab、令控件置灰；禁用沿父链继承（禁用容器即禁用其全部子节点）。
     pub fn enabled(mut self, flag: Signal<bool>) -> Self {
         self.enabled = Some(flag);
+        self
+    }
+    /// 启用条件（闭包，运行期求值）。镜像 [`visible_when`](Self::visible_when)，但不影响布局：
+    /// 条件为 false 时该元素（及子树）置灰、不可交互，仍占位参与测量/绘制。
+    /// 适合设置项联动（如「细节项随开关置灰」），避免隐藏导致的分隔线残留与高度抖动。
+    pub fn enabled_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
+        self.en_cond = Some(Box::new(f));
         self
     }
     /// 悬停提示：指针在本元素上停留片刻后，于指针附近弹出说明浮层。
@@ -1911,6 +1920,7 @@ impl Element {
             visible: self.visible,
             vis_cond: self.vis_cond,
             enabled: self.enabled,
+            en_cond: self.en_cond,
             on_drop: self.on_drop,
             context_menu: self.context_menu,
             window_drag: self.window_drag,
