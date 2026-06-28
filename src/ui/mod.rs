@@ -1689,7 +1689,12 @@ impl Element {
                 let w = columns.get(ci).map(|c| c.1).unwrap_or(1.0);
                 tr = tr.child(cell.weight(w));
             }
-            scroll = scroll.child(Element::col().width_match().child(tr).child(Element::divider()));
+            scroll = scroll.child(
+                Element::col()
+                    .width_match()
+                    .child(tr)
+                    .child(Element::divider()),
+            );
         }
         Element::col()
             .width_match()
@@ -2051,11 +2056,7 @@ mod tests {
         let top = tree.get(root).unwrap().children.clone();
         assert_eq!(top.len(), 3, "表格 = 表头 + 分隔线 + 滚动正文");
         let scroll = top[2];
-        assert_eq!(
-            tree.get(scroll).unwrap().children.len(),
-            2,
-            "正文应有 2 行"
-        );
+        assert_eq!(tree.get(scroll).unwrap().children.len(), 2, "正文应有 2 行");
     }
 
     #[test]

@@ -1266,7 +1266,12 @@ impl AppHandler for UiHost {
             }
         }
         // 轻提示浮层：居中深色面板 + 语义图标 + 文字，淡入淡出；过期帧先清除再正常重绘。
-        if self.toast.as_ref().map(|t| t.expired(now_ms)).unwrap_or(false) {
+        if self
+            .toast
+            .as_ref()
+            .map(|t| t.expired(now_ms))
+            .unwrap_or(false)
+        {
             self.toast = None;
         }
         if let Some(toast) = self.toast.as_ref() {
@@ -1316,7 +1321,12 @@ impl AppHandler for UiHost {
                 TOAST_ICON_FONT,
             );
             // 文字（下）。
-            let text_rect = Rect::new(x, y + TOAST_PAD_Y + icon_sz.h + TOAST_ICON_GAP, panel_w, ts.h);
+            let text_rect = Rect::new(
+                x,
+                y + TOAST_PAD_Y + icon_sz.h + TOAST_ICON_GAP,
+                panel_w,
+                ts.h,
+            );
             canvas.draw_text(
                 &toast.req.text,
                 text_rect,
@@ -1826,7 +1836,10 @@ mod tests {
         assert_eq!(t.alpha(100 + 500), 1.0, "中段完全不透明");
         // 末段淡出回落，终点附近趋 0。
         let near_end = t.alpha(100 + 1000 - TOAST_FADE_OUT_MS / 2);
-        assert!((0.4..=0.6).contains(&near_end), "淡出中点约半透明: {near_end}");
+        assert!(
+            (0.4..=0.6).contains(&near_end),
+            "淡出中点约半透明: {near_end}"
+        );
         // 过期判定：到时即过期，未到不过期。
         assert!(!t.expired(100 + 999), "未到时不过期");
         assert!(t.expired(100 + 1000), "到时即过期");
@@ -1903,10 +1916,8 @@ mod tests {
             .on_click(move |_| sb.set(true))
             .width(100)
             .height(40);
-        let dialog_a = Element::dialog(
-            show_a,
-            Element::scroll().width(200).height(200).child(cell),
-        );
+        let dialog_a =
+            Element::dialog(show_a, Element::scroll().width(200).height(200).child(cell));
         let dialog_b = Element::dialog(show_b, Element::leaf().width(80).height(60));
         let ui = Element::stack()
             .fill()
@@ -1925,7 +1936,10 @@ mod tests {
             MouseButton::Left,
         ));
         let cell_hover = handler.hover;
-        assert!(cell_hover.is_some(), "应 hover 到单元格，实得 {cell_hover:?}");
+        assert!(
+            cell_hover.is_some(),
+            "应 hover 到单元格，实得 {cell_hover:?}"
+        );
         handler.on_pointer(PointerEvent::single(
             PointerKind::Down,
             Point::new(100, 70),
@@ -1967,7 +1981,10 @@ mod tests {
         // effective_visible 不变——只有祖先链累积可见性才能检测到它被隐藏。
         let ui = Element::stack().fill().child(Element::dialog(
             show,
-            Element::leaf().width(20).height(20).widget(ResetProbe(probe)),
+            Element::leaf()
+                .width(20)
+                .height(20)
+                .widget(ResetProbe(probe)),
         ));
         let app = App::new("t", 40, 40).content(ui);
         let mut handler = app.into_handler_for_test();
@@ -1978,7 +1995,10 @@ mod tests {
         show.set(false);
         handler.needs_relayout = true;
         handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(40, 40));
-        assert!(hits.get() >= 1, "节点隐藏时应调用 reset_interaction 重置交互态");
+        assert!(
+            hits.get() >= 1,
+            "节点隐藏时应调用 reset_interaction 重置交互态"
+        );
     }
 
     #[test]

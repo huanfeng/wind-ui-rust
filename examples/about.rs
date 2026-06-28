@@ -9,16 +9,12 @@ use windui::prelude::*;
 
 /// 彩色圆角图标方块 + 居中白色字形（替代真实 SVG 图标，验证布局）。
 fn icon_box(bg: Color, glyph: &str, size: i32) -> Element {
-    Element::stack()
-        .size(size, size)
-        .corner(12.0)
-        .bg(bg)
-        .child(
-            Element::label(glyph)
-                .font_size((size as f32) * 0.42)
-                .fg(Color::WHITE)
-                .align(Align::Center),
-        )
+    Element::stack().size(size, size).corner(12.0).bg(bg).child(
+        Element::label(glyph)
+            .font_size((size as f32) * 0.42)
+            .fg(Color::WHITE)
+            .align(Align::Center),
+    )
 }
 
 /// 可点击卡片：彩色图标 + 标题 + 描述。点击弹出 Toast。
@@ -105,44 +101,36 @@ fn main() {
                 .width_match()
                 .spacing(14)
                 .cross(Align::Stretch)
-                .child(
-                    Element::stack().weight(1.0).child(card(
-                        Color::hex(0x24292F),
-                        "G",
-                        "GitHub",
-                        "源码与文档",
-                    )),
-                )
-                .child(
-                    Element::stack().weight(1.0).child(card(
-                        Color::hex(0xF5A623),
-                        "!",
-                        "报告 Bug",
-                        "报告 Bug 或建议",
-                    )),
-                ),
+                .child(Element::stack().weight(1.0).child(card(
+                    Color::hex(0x24292F),
+                    "G",
+                    "GitHub",
+                    "源码与文档",
+                )))
+                .child(Element::stack().weight(1.0).child(card(
+                    Color::hex(0xF5A623),
+                    "!",
+                    "报告 Bug",
+                    "报告 Bug 或建议",
+                ))),
         )
         .child(
             Element::row()
                 .width_match()
                 .spacing(14)
                 .cross(Align::Stretch)
-                .child(
-                    Element::stack().weight(1.0).child(card(
-                        Color::hex(0x2EA043),
-                        "↓",
-                        "版本发布",
-                        "更新日志",
-                    )),
-                )
-                .child(
-                    Element::stack().weight(1.0).child(card(
-                        Color::hex(0x12B7F5),
-                        "Q",
-                        "QQ 交流群",
-                        "1085293418",
-                    )),
-                ),
+                .child(Element::stack().weight(1.0).child(card(
+                    Color::hex(0x2EA043),
+                    "↓",
+                    "版本发布",
+                    "更新日志",
+                )))
+                .child(Element::stack().weight(1.0).child(card(
+                    Color::hex(0x12B7F5),
+                    "Q",
+                    "QQ 交流群",
+                    "1085293418",
+                ))),
         );
 
     let panel = Element::col()

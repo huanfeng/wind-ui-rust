@@ -161,14 +161,20 @@ impl Widget for CheckBox {
             let paint = Paint::fill(check.scale_alpha(amount));
             let s = sz / 18.0; // 18px 为基准尺寸
             canvas.draw_line(
-                bx + 4.0 * s, by + 9.0 * s,
-                bx + 8.0 * s, by + 13.0 * s,
-                check_stroke, &paint,
+                bx + 4.0 * s,
+                by + 9.0 * s,
+                bx + 8.0 * s,
+                by + 13.0 * s,
+                check_stroke,
+                &paint,
             );
             canvas.draw_line(
-                bx + 8.0 * s, by + 13.0 * s,
-                bx + 14.0 * s, by + 5.0 * s,
-                check_stroke, &paint,
+                bx + 8.0 * s,
+                by + 13.0 * s,
+                bx + 14.0 * s,
+                by + 5.0 * s,
+                check_stroke,
+                &paint,
             );
         }
         let text_rect = Rect::new(

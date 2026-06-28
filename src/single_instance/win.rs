@@ -7,19 +7,19 @@
 
 use std::cell::RefCell;
 
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, SetLastError,
-    WIN32_ERROR, WPARAM,
+    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM,
+    LRESULT, WIN32_ERROR, WPARAM,
 };
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CreateWindowExW, DefWindowProcW, FindWindowW, HWND_MESSAGE, IsIconic,
-    RegisterClassExW, SW_RESTORE, SendMessageW, SetForegroundWindow, ShowWindow, WINDOW_EX_STYLE,
+    BringWindowToTop, CreateWindowExW, DefWindowProcW, FindWindowW, IsIconic, RegisterClassExW,
+    SendMessageW, SetForegroundWindow, ShowWindow, HWND_MESSAGE, SW_RESTORE, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_COPYDATA, WNDCLASSEXW,
 };
-use windows::core::PCWSTR;
 
 use super::{class_name, decode_argv, encode_argv, mutex_name};
 
@@ -99,7 +99,11 @@ pub(crate) fn install_listener(
     });
     let cls = wide(&class_name(app_id));
     unsafe {
-        let hinst = HINSTANCE(GetModuleHandleW(None).map(|h| h.0).unwrap_or(std::ptr::null_mut()));
+        let hinst = HINSTANCE(
+            GetModuleHandleW(None)
+                .map(|h| h.0)
+                .unwrap_or(std::ptr::null_mut()),
+        );
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(si_wnd_proc),

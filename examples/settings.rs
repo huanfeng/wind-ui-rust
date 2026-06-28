@@ -26,7 +26,12 @@ fn section_title(title: &str) -> Element {
     Element::row()
         .cross(Align::Center)
         .spacing(10)
-        .child(Element::leaf().size(4, 18).corner(2.0).bg(Color::hex(ACCENT)))
+        .child(
+            Element::leaf()
+                .size(4, 18)
+                .corner(2.0)
+                .bg(Color::hex(ACCENT)),
+        )
         .child(
             Element::label(title)
                 .font_size(16.0)
@@ -63,8 +68,16 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
         .child(
             Element::col()
                 .spacing(2)
-                .child(Element::icon_button("\u{25B2}").size(22, 18).fg(Color::hex(MUTED)))
-                .child(Element::icon_button("\u{25BC}").size(22, 18).fg(Color::hex(MUTED))),
+                .child(
+                    Element::icon_button("\u{25B2}")
+                        .size(22, 18)
+                        .fg(Color::hex(MUTED)),
+                )
+                .child(
+                    Element::icon_button("\u{25BC}")
+                        .size(22, 18)
+                        .fg(Color::hex(MUTED)),
+                ),
         )
         .child(
             Element::col()
@@ -82,11 +95,25 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
                                 .height(20),
                         )
                         .child(Element::badge_intent(tag, Intent::Neutral))
-                        .child(Element::label("v1.0").font_size(12.0).fg(Color::hex(MUTED)).height(18)),
+                        .child(
+                            Element::label("v1.0")
+                                .font_size(12.0)
+                                .fg(Color::hex(MUTED))
+                                .height(18),
+                        ),
                 )
-                .child(Element::label(desc).font_size(12.5).fg(Color::hex(MUTED)).height(18)),
+                .child(
+                    Element::label(desc)
+                        .font_size(12.5)
+                        .fg(Color::hex(MUTED))
+                        .height(18),
+                ),
         )
-        .child(Element::icon_button("\u{24D8}").size(26, 26).fg(Color::hex(MUTED)))
+        .child(
+            Element::icon_button("\u{24D8}")
+                .size(26, 26)
+                .fg(Color::hex(MUTED)),
+        )
         .child(status)
         .child(Element::button("方案设置").small().outline().neutral())
 }
@@ -107,7 +134,12 @@ fn dropdown_row(title: &str, desc: &str, options: Vec<&str>, sel: Signal<usize>)
                         .fg(Color::hex(FG))
                         .height(20),
                 )
-                .child(Element::label(desc).font_size(12.5).fg(Color::hex(MUTED)).height(18)),
+                .child(
+                    Element::label(desc)
+                        .font_size(12.5)
+                        .fg(Color::hex(MUTED))
+                        .height(18),
+                ),
         )
         .child(Element::dropdown(options, sel).width(180))
 }
@@ -181,74 +213,150 @@ fn main() {
                                 .fg(Color::hex(FG))
                                 .height(20),
                         )
-                        .child(Element::label("v0.0.0-alpha").font_size(11.5).fg(Color::hex(MUTED)).height(16)),
+                        .child(
+                            Element::label("v0.0.0-alpha")
+                                .font_size(11.5)
+                                .fg(Color::hex(MUTED))
+                                .height(16),
+                        ),
                 )
-                .child(Element::leaf().size(8, 8).corner(4.0).bg(Color::hex(0x2EA043))),
+                .child(
+                    Element::leaf()
+                        .size(8, 8)
+                        .corner(4.0)
+                        .bg(Color::hex(0x2EA043)),
+                ),
         )
-        .child(Element::text_input(signal(String::new()), "搜索设置…").leading_icon('\u{1F50D}').width_match())
-        .child(Element::list_pill(vec!["方案", "输入", "按键", "外观", "词库", "高级", "统计", "关于"], nav).weight(1.0))
+        .child(
+            Element::text_input(signal(String::new()), "搜索设置…")
+                .leading_icon('\u{1F50D}')
+                .width_match(),
+        )
+        .child(
+            Element::list_pill(
+                vec![
+                    "方案", "输入", "按键", "外观", "词库", "高级", "统计", "关于",
+                ],
+                nav,
+            )
+            .weight(1.0),
+        )
         .child(
             Element::row()
                 .width_match()
                 .spacing(8)
-                .child(Element::button("恢复本页").small().outline().neutral().weight(1.0))
-                .child(Element::button("重新加载").small().outline().neutral().weight(1.0)),
+                .child(
+                    Element::button("恢复本页")
+                        .small()
+                        .outline()
+                        .neutral()
+                        .weight(1.0),
+                )
+                .child(
+                    Element::button("重新加载")
+                        .small()
+                        .outline()
+                        .neutral()
+                        .weight(1.0),
+                ),
         )
         .child(Element::button("保存设置").width_match());
 
     // ── 右侧内容：方案页（横向占剩余空间用 weight，不能用 width_match/fill 否则溢出父宽）──
-    let scheme_page = Element::scroll()
-        .fill()
-        .child(
-            Element::col()
-                .width_match()
-                .padding(24)
-                .spacing(20)
-                .child(
-                    Element::row()
-                        .cross(Align::Center)
-                        .spacing(12)
-                        .child(
-                            Element::label("方案设置")
-                                .font_size(24.0)
-                                .font_weight(700)
-                                .fg(Color::hex(FG))
-                                .height(32),
-                        )
-                        .child(Element::label("启用、排序与方案专属设置").font_size(13.0).fg(Color::hex(MUTED)).height(20))
-                        .child(Element::flex_spacer())
-                        .child(Element::button("标点表格").small().on_click(move |_| show_table.set(true)))
-                        .child(Element::button("中文配对").small().neutral().on_click(move |_| show_pairs.set(true))),
-                )
-                .child(card(
-                    Element::col()
-                        .width_match()
-                        .spacing(12)
-                        .child(
-                            Element::row()
-                                .width_match()
-                                .cross(Align::Center)
-                                .child(section_title("输入方案").weight(1.0))
-                                .child(Element::button("方案管理").small()),
-                        )
-                        .child(Element::label("使用箭头调整顺序，快捷键切换时按此顺序循环").font_size(12.5).fg(Color::hex(MUTED)).width_match().height(18))
-                        .child(Element::divider())
-                        .child(scheme_row("五笔", "码表", true, "内置 · 五笔86版输入方案"))
-                        .child(Element::divider())
-                        .child(scheme_row("五笔拼音", "混输", false, "内置 · 五笔86+拼音混合，五笔优先")),
-                ))
-                .child(card(
-                    Element::col()
-                        .width_match()
-                        .spacing(16)
-                        .child(section_title("主方案设置"))
-                        .child(dropdown_row("主码表方案", "拼音方案的\"反查/编码提示\"基于此方案的码表", vec!["五笔", "仓颉"], main_scheme))
-                        .child(dropdown_row("主拼音方案", "码表方案的\"临时拼音\"使用此方案", vec!["全拼", "双拼"], pinyin_scheme)),
-                )),
-        );
+    let scheme_page = Element::scroll().fill().child(
+        Element::col()
+            .width_match()
+            .padding(24)
+            .spacing(20)
+            .child(
+                Element::row()
+                    .cross(Align::Center)
+                    .spacing(12)
+                    .child(
+                        Element::label("方案设置")
+                            .font_size(24.0)
+                            .font_weight(700)
+                            .fg(Color::hex(FG))
+                            .height(32),
+                    )
+                    .child(
+                        Element::label("启用、排序与方案专属设置")
+                            .font_size(13.0)
+                            .fg(Color::hex(MUTED))
+                            .height(20),
+                    )
+                    .child(Element::flex_spacer())
+                    .child(
+                        Element::button("标点表格")
+                            .small()
+                            .on_click(move |_| show_table.set(true)),
+                    )
+                    .child(
+                        Element::button("中文配对")
+                            .small()
+                            .neutral()
+                            .on_click(move |_| show_pairs.set(true)),
+                    ),
+            )
+            .child(card(
+                Element::col()
+                    .width_match()
+                    .spacing(12)
+                    .child(
+                        Element::row()
+                            .width_match()
+                            .cross(Align::Center)
+                            .child(section_title("输入方案").weight(1.0))
+                            .child(Element::button("方案管理").small()),
+                    )
+                    .child(
+                        Element::label("使用箭头调整顺序，快捷键切换时按此顺序循环")
+                            .font_size(12.5)
+                            .fg(Color::hex(MUTED))
+                            .width_match()
+                            .height(18),
+                    )
+                    .child(Element::divider())
+                    .child(scheme_row("五笔", "码表", true, "内置 · 五笔86版输入方案"))
+                    .child(Element::divider())
+                    .child(scheme_row(
+                        "五笔拼音",
+                        "混输",
+                        false,
+                        "内置 · 五笔86+拼音混合，五笔优先",
+                    )),
+            ))
+            .child(card(
+                Element::col()
+                    .width_match()
+                    .spacing(16)
+                    .child(section_title("主方案设置"))
+                    .child(dropdown_row(
+                        "主码表方案",
+                        "拼音方案的\"反查/编码提示\"基于此方案的码表",
+                        vec!["五笔", "仓颉"],
+                        main_scheme,
+                    ))
+                    .child(dropdown_row(
+                        "主拼音方案",
+                        "码表方案的\"临时拼音\"使用此方案",
+                        vec!["全拼", "双拼"],
+                        pinyin_scheme,
+                    )),
+            )),
+    );
 
     // 内容区 = 按 nav 切换的页面栈（visible_when 显隐，点侧栏即换页）。
-    let pages = ["", "输入设置", "按键设置", "外观设置", "词库设置", "高级设置", "统计", "关于"];
+    let pages = [
+        "",
+        "输入设置",
+        "按键设置",
+        "外观设置",
+        "词库设置",
+        "高级设置",
+        "统计",
+        "关于",
+    ];
     let mut content = Element::stack()
         .height_match()
         .weight(1.0)
@@ -295,14 +403,30 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(10)
-            .child(Element::label("点单元格编辑，长度 1–8 个字符").font_size(12.5).fg(Color::hex(MUTED)).width_match().height(18))
+            .child(
+                Element::label("点单元格编辑，长度 1–8 个字符")
+                    .font_size(12.5)
+                    .fg(Color::hex(MUTED))
+                    .width_match()
+                    .height(18),
+            )
             .child(table_w),
         Element::row()
             .width_match()
             .child(Element::button("恢复默认").small().outline().neutral())
             .child(Element::flex_spacer())
-            .child(Element::button("取消").small().outline().neutral().on_click(move |_| show_table.set(false)))
-            .child(Element::button("确定").small().on_click(move |_| show_table.set(false))),
+            .child(
+                Element::button("取消")
+                    .small()
+                    .outline()
+                    .neutral()
+                    .on_click(move |_| show_table.set(false)),
+            )
+            .child(
+                Element::button("确定")
+                    .small()
+                    .on_click(move |_| show_table.set(false)),
+            ),
     );
 
     // ── 单元格编辑子对话框 ──
@@ -316,7 +440,13 @@ fn main() {
         Element::row()
             .width_match()
             .child(Element::flex_spacer())
-            .child(Element::button("取消").small().outline().neutral().on_click(move |_| edit_show.set(false)))
+            .child(
+                Element::button("取消")
+                    .small()
+                    .outline()
+                    .neutral()
+                    .on_click(move |_| edit_show.set(false)),
+            )
             .child(Element::button("确定").small().on_click(move |_| {
                 let (r, c) = edit_pos.get();
                 cells_ok[r][c].set(edit_buf.get());
@@ -327,9 +457,7 @@ fn main() {
     // ── 中文配对对话框（复选框 2 列网格）──
     let checks: Vec<Element> = pairs
         .iter()
-        .map(|(sig, sym, label)| {
-            Element::checkbox(format!("{sym}  {label}"), *sig)
-        })
+        .map(|(sig, sym, label)| Element::checkbox(format!("{sym}  {label}"), *sig))
         .collect();
     let pairs_dialog = Element::dialog_panel(
         show_pairs,

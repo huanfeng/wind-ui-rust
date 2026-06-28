@@ -254,11 +254,12 @@ impl Widget for ListRow {
         self.hover = false;
         let on = if self.selected() { 1.0 } else { 0.0 };
         self.bg_amt.set(Transition::new(on));
-        self.sel.set(Transition::new(if self.selected() && !self.pill {
-            1.0
-        } else {
-            0.0
-        }));
+        self.sel
+            .set(Transition::new(if self.selected() && !self.pill {
+                1.0
+            } else {
+                0.0
+            }));
     }
 }
 

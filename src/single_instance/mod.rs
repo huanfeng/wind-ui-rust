@@ -44,10 +44,10 @@ pub(crate) fn decode_argv(bytes: &[u8]) -> Vec<String> {
 }
 
 // ── 平台实现分发 ──────────────────────────────────────────────
-#[cfg(windows)]
-mod win;
 #[cfg(not(windows))]
 mod unix;
+#[cfg(windows)]
+mod win;
 
 /// 单实例配置:app_id + 二次实例回调。由 `App` 组装,平台 `run` 消费。
 pub(crate) struct SingleInstance {
@@ -126,8 +126,13 @@ mod tests {
 
     #[test]
     fn naming_includes_app_id() {
-        assert_eq!(mutex_name("wind_setting_dev"), r"Local\wind_setting_dev_si_mutex");
+        assert_eq!(
+            mutex_name("wind_setting_dev"),
+            r"Local\wind_setting_dev_si_mutex"
+        );
         assert_eq!(class_name("wind_setting_dev"), "wind_setting_dev_si_win");
-        assert!(socket_path("wind_setting_dev").to_string_lossy().ends_with("wind_setting_dev_si.sock"));
+        assert!(socket_path("wind_setting_dev")
+            .to_string_lossy()
+            .ends_with("wind_setting_dev_si.sock"));
     }
 }
