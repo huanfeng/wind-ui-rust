@@ -366,6 +366,31 @@ fn main() {
                 })),
         ))
         .child(card(
+            "复选框尺寸（Normal 18px vs Small 14px）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(row("默认", {
+                    let s = signal(true);
+                    Element::checkbox("Normal（18px）", s)
+                }))
+                .child(row("小尺寸", {
+                    let s = signal(true);
+                    Element::checkbox("Small（14px）", s).small()
+                }))
+                .child(row("小+危险", {
+                    let s = signal(true);
+                    Element::checkbox("Small danger", s).small().danger()
+                }))
+                .child(row("小+自定义色", {
+                    let s = signal(false);
+                    Element::checkbox("Small accent", s).small().accent(Color::hex(0x00A86B))
+                }))
+                .child(row("小+禁用", {
+                    Element::checkbox("Small disabled", signal(true)).small().disabled(true)
+                })),
+        ))
+        .child(card(
             "分段控制器（连体多段单选，点击/方向键切换）",
             Element::col()
                 .width_match()

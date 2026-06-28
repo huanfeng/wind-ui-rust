@@ -18,7 +18,17 @@ use crate::theme::Intent;
 use crate::ui::containers::VScrollbar;
 
 const BOX_SIZE: i32 = 18;
+const BOX_SIZE_SMALL: i32 = 14;
 const GAP: i32 = 8;
+const GAP_SMALL: i32 = 6;
+
+/// CheckBox 尺寸变体。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum CheckBoxSize {
+    #[default]
+    Normal,
+    Small,
+}
 
 // ---------------- CheckBox ----------------
 
@@ -32,6 +42,7 @@ pub struct CheckBox {
     on_toggle: Option<ClickFn>,
     /// 语义意图色（默认 Primary=主题 accent）。运行时在 paint 解析，故 danger/自定义随主题/实例而变。
     intent: Intent,
+    size: CheckBoxSize,
 }
 
 impl CheckBox {
@@ -43,11 +54,16 @@ impl CheckBox {
             fill: Cell::new(Transition::new(init)),
             on_toggle: None,
             intent: Intent::Primary,
+            size: CheckBoxSize::Normal,
         }
     }
     /// 设置语义意图色（供 Builder 的 `.intent()/.danger()/.accent()` 调用）。
     pub fn set_intent(&mut self, intent: Intent) {
         self.intent = intent;
+    }
+    /// 设置尺寸变体（供 Builder 的 `.small()` 调用）。
+    pub fn set_size(&mut self, size: CheckBoxSize) {
+        self.size = size;
     }
     fn toggle(&mut self, ctx: &mut EventCtx) {
         if let Some(cb) = self.on_toggle.as_mut() {
@@ -61,13 +77,17 @@ impl CheckBox {
 
 impl Widget for CheckBox {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        let (bsz, gap) = match self.size {
+            CheckBoxSize::Normal => (BOX_SIZE, GAP),
+            CheckBoxSize::Small => (BOX_SIZE_SMALL, GAP_SMALL),
+        };
         let t = text.measure(
             &self.label,
             style.font_family.as_deref(),
             style.font_size,
             None,
         );
-        Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
+        Size::new(bsz + gap + t.w, bsz.max(t.h))
     }
     fn paint(
         &self,
@@ -99,7 +119,11 @@ impl Widget for CheckBox {
         } else {
             style.fg
         };
-        let cy = bounds.y + (bounds.h - BOX_SIZE) / 2;
+        let (bsz_i, gap_i, radius, stroke_w, check_stroke) = match self.size {
+            CheckBoxSize::Normal => (BOX_SIZE, GAP, 4.0_f32, 1.5_f32, 2.0_f32),
+            CheckBoxSize::Small => (BOX_SIZE_SMALL, GAP_SMALL, 3.0_f32, 1.0_f32, 1.5_f32),
+        };
+        let cy = bounds.y + (bounds.h - bsz_i) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
         // 勾选填充补间：据状态改向，amount 驱动底色渐变 + 边框淡出 + 对勾淡入。
         let mut fill = self.fill.get();
@@ -109,14 +133,14 @@ impl Widget for CheckBox {
         }
         let amount = fill.animate();
         self.fill.set(fill);
-        let sz = BOX_SIZE as f32;
+        let sz = bsz_i as f32;
         // 底色 white→accent；边框（未选描边）随填充淡出。
         canvas.fill_round_rect(
             bx,
             by,
             sz,
             sz,
-            4.0,
+            radius,
             &Paint::fill(tg.knob(p).lerp(accent, amount)),
         );
         if amount < 1.0 {
@@ -125,23 +149,32 @@ impl Widget for CheckBox {
                 by,
                 sz,
                 sz,
-                4.0,
-                1.5,
+                radius,
+                stroke_w,
                 &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)),
             );
         }
         if amount > 0.0 {
             // 启用用 intent 解析的对比色（浅底自动转深）；禁用回退 on_accent。
             let check = if enabled { check_fg } else { p.on_accent };
-            // 勾：两段线，按 amount 淡入。
+            // 勾：两段线按 amount 淡入；坐标按方框尺寸等比缩放。
             let paint = Paint::fill(check.scale_alpha(amount));
-            canvas.draw_line(bx + 4.0, by + 9.0, bx + 8.0, by + 13.0, 2.0, &paint);
-            canvas.draw_line(bx + 8.0, by + 13.0, bx + 14.0, by + 5.0, 2.0, &paint);
+            let s = sz / 18.0; // 18px 为基准尺寸
+            canvas.draw_line(
+                bx + 4.0 * s, by + 9.0 * s,
+                bx + 8.0 * s, by + 13.0 * s,
+                check_stroke, &paint,
+            );
+            canvas.draw_line(
+                bx + 8.0 * s, by + 13.0 * s,
+                bx + 14.0 * s, by + 5.0 * s,
+                check_stroke, &paint,
+            );
         }
         let text_rect = Rect::new(
-            bounds.x + BOX_SIZE + GAP,
+            bounds.x + bsz_i + gap_i,
             bounds.y,
-            bounds.w - BOX_SIZE - GAP,
+            bounds.w - bsz_i - gap_i,
             bounds.h,
         );
         canvas.draw_text(
