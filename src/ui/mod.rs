@@ -62,6 +62,20 @@ pub enum Truncate {
     Middle, // te…xt
 }
 
+/// 文本控件（`Label`/`DynLabel`）前景色：启用取样式解析色；禁用统一降为 `text_disabled`，
+/// 使整行（标签 + 说明）随容器禁用一并置灰（控件自身早已响应禁用，此处补齐文字部分）。
+///
+/// 契约提示：这是框架级语义——禁用子树内的**任何**文本一律置灰，暂无单节点豁免。
+/// 若将来出现"禁用整块、但某段说明/警示文字需保持原色"的诉求，可在 `Style` 增设
+/// `keep_fg_when_disabled` 之类标志，而非在此处特判。
+fn text_fg(enabled: bool, style: &Style, theme: &crate::theme::Theme) -> Color {
+    if enabled {
+        style.resolved_fg(theme)
+    } else {
+        theme.palette.text_disabled
+    }
+}
+
 /// 文本叶子控件。
 pub struct Label {
     text: String,
@@ -171,12 +185,14 @@ impl Widget for Label {
         _bounds: Rect,
         content: Rect,
         _focused: bool,
-        _enabled: bool,
+        enabled: bool,
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
+        // 禁用态：文字降为 text_disabled，使整行（含标签/说明）随容器禁用统一置灰。
+        let fg = text_fg(enabled, style, &crate::theme::current());
 
         // max_lines：计算限高矩形；DirectWrite 高度始终为 f32::MAX，必须用 clip_rect 裁剪。
         let (paint_rect, need_clip) = if let Some(max_n) = self.max_lines {
@@ -221,7 +237,7 @@ impl Widget for Label {
             canvas.draw_text(
                 &text_str,
                 paint_rect,
-                style.resolved_fg(&crate::theme::current()),
+                fg,
                 style.text_align,
                 family,
                 fsize,
@@ -230,7 +246,7 @@ impl Widget for Label {
             canvas.draw_text(
                 &self.text,
                 paint_rect,
-                style.resolved_fg(&crate::theme::current()),
+                fg,
                 style.text_align,
                 family,
                 fsize,
@@ -341,13 +357,15 @@ impl Widget for DynLabel {
         _bounds: Rect,
         content: Rect,
         _focused: bool,
-        _enabled: bool,
+        enabled: bool,
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
         let s = self.text.get();
         let family = style.font_family.as_deref();
         let fsize = style.font_size;
+        // 禁用态：文字降为 text_disabled（与 Label 一致，随容器禁用置灰）。
+        let fg = text_fg(enabled, style, &crate::theme::current());
 
         let (paint_rect, need_clip) = if let Some(max_n) = self.max_lines {
             let line_h = canvas.measure_text("Ay", family, fsize).h.max(1);
@@ -390,7 +408,7 @@ impl Widget for DynLabel {
             canvas.draw_text(
                 &text_str,
                 paint_rect,
-                style.resolved_fg(&crate::theme::current()),
+                fg,
                 style.text_align,
                 family,
                 fsize,
@@ -399,7 +417,7 @@ impl Widget for DynLabel {
             canvas.draw_text(
                 &s,
                 paint_rect,
-                style.resolved_fg(&crate::theme::current()),
+                fg,
                 style.text_align,
                 family,
                 fsize,
@@ -1975,6 +1993,127 @@ mod tests {
         tree.root = Some(root);
         tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
         tree
+    }
+
+    #[test]
+    fn disabled_text_uses_text_disabled_color() {
+        let theme = crate::theme::Theme::default();
+        let style = Style {
+            fg: Color::hex(0x123456),
+            ..Style::default()
+        };
+        // 启用：取样式自身前景色。
+        assert_eq!(text_fg(true, &style, &theme), Color::hex(0x123456));
+        // 禁用：统一降为 text_disabled（标签/说明随容器禁用一并置灰）。
+        assert_eq!(text_fg(false, &style, &theme), theme.palette.text_disabled);
+        // 启用 + fg_role（hint 的真实形态）：经 role 解析为 text_muted，不被禁用分支吞掉。
+        let muted = Style {
+            fg_role: Some(crate::style::Role::TextMuted),
+            ..Style::default()
+        };
+        assert_eq!(text_fg(true, &muted, &theme), theme.palette.text_muted);
+        assert_eq!(text_fg(false, &muted, &theme), theme.palette.text_disabled);
+    }
+
+    /// 记录 `draw_text` 颜色实参的最小 Canvas，用于在 paint 级守护"禁用置灰"接线。
+    struct CaptureCanvas {
+        last_text_color: std::cell::Cell<Option<Color>>,
+    }
+    impl crate::render::Canvas for CaptureCanvas {
+        fn fill_rect(&mut self, _: f32, _: f32, _: f32, _: f32, _: &crate::render::Paint) {}
+        fn fill_round_rect(
+            &mut self,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: &crate::render::Paint,
+        ) {
+        }
+        fn stroke_round_rect(
+            &mut self,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: &crate::render::Paint,
+        ) {
+        }
+        fn draw_line(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: &crate::render::Paint) {}
+        fn fill_circle(&mut self, _: f32, _: f32, _: f32, _: &crate::render::Paint) {}
+        fn draw_shadow(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: Color) {}
+        fn draw_image(
+            &mut self,
+            _: &crate::render::image::Image,
+            _: Rect,
+            _: crate::render::image::Fit,
+            _: f32,
+            _: f32,
+        ) {
+        }
+        fn draw_text(
+            &mut self,
+            _text: &str,
+            _rect: Rect,
+            color: Color,
+            _align: crate::spec::Align,
+            _family: Option<&str>,
+            _size: f32,
+        ) {
+            self.last_text_color.set(Some(color));
+        }
+        fn measure_text(&mut self, _: &str, _: Option<&str>, _: f32) -> Size {
+            Size::ZERO
+        }
+        fn push_layer(&mut self, _: f32) {}
+        fn pop_layer(&mut self) {}
+        fn save(&mut self) {}
+        fn restore(&mut self) {}
+        fn clip_rect(&mut self, _: Rect) {}
+    }
+
+    #[test]
+    fn label_paint_wires_enabled_to_text_color() {
+        use crate::core::Widget;
+        let style = Style {
+            fg: Color::hex(0x123456),
+            ..Style::default()
+        };
+        let r = Rect::new(0, 0, 100, 20);
+        let disabled_col = crate::theme::current().palette.text_disabled;
+
+        let paint_color = |draw: &dyn Fn(&mut CaptureCanvas)| {
+            let mut cv = CaptureCanvas {
+                last_text_color: std::cell::Cell::new(None),
+            };
+            draw(&mut cv);
+            cv.last_text_color.get()
+        };
+
+        // Label：启用取 style.fg，禁用取 text_disabled。
+        let label = Label::new("x".into());
+        assert_eq!(
+            paint_color(&|cv| label.paint(r, r, false, true, cv, &style)),
+            Some(Color::hex(0x123456))
+        );
+        assert_eq!(
+            paint_color(&|cv| label.paint(r, r, false, false, cv, &style)),
+            Some(disabled_col)
+        );
+
+        // DynLabel：独立覆盖（不依赖"共用同一函数"的隐含推理）。
+        let dl = DynLabel::new(crate::signal::signal(String::from("y")));
+        assert_eq!(
+            paint_color(&|cv| dl.paint(r, r, false, true, cv, &style)),
+            Some(Color::hex(0x123456))
+        );
+        assert_eq!(
+            paint_color(&|cv| dl.paint(r, r, false, false, cv, &style)),
+            Some(disabled_col)
+        );
     }
 
     #[test]

@@ -1124,9 +1124,10 @@ impl Tree {
         abs.inflate(pad)
     }
 
-    /// 全树**结构签名**：对每个存活节点哈希 (索引, 代际, 有效可见, bounds)。
-    /// 用于交互后判定"是否发生了显隐/位移/尺寸变化"——签名不变即本次仅为局部视觉
+    /// 全树**结构签名**：对每个存活节点哈希 (索引, 代际, 有效可见, 有效启用, bounds)。
+    /// 用于交互后判定"是否发生了显隐/启用/位移/尺寸变化"——签名不变即本次仅为局部视觉
     /// 变化（可局部重绘），变了则说明结构改变（影响区域不可局部化，需整窗）。
+    /// 注：`own_enabled()` 含 `en_cond` 闭包求值，确保 `enabled_when` 联动能被签名感知。
     pub fn layout_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1135,6 +1136,7 @@ impl Tree {
                 (i as u32).hash(&mut h);
                 slot.generation.hash(&mut h);
                 n.effective_visible().hash(&mut h);
+                n.own_enabled().hash(&mut h);
                 let b = n.bounds;
                 (b.x, b.y, b.w, b.h).hash(&mut h);
             }
@@ -1346,11 +1348,23 @@ impl Tree {
         crate::signal::begin_event();
         let consumed = widget.on_event(&mut ctx, ev);
         let mut out = ctx.out;
-        // 事件内写过信号但控件未显式 mark_dirty → 据当前节点自动局部失效
-        // （结构签名层会在显隐/布局变化时升级整窗）。
+        // 事件内写过信号但控件未显式 mark_dirty → 据事件类型选择失效强度：
+        // - Move(hover)：写的是自身悬停态，局部重绘即可；
+        // - Key：打字高频，保留局部重绘避免整窗卡顿；
+        // - 其余指针事件(Down/Up/Click 等)：可能写跨控件共享状态（计数器、enabled_when 门控），
+        //   升 Layout 使 apply_damage 直接置 needs_full，覆盖所有读者（含 DynLabel/en_cond）。
         if crate::signal::end_event() {
             let r = self.visual_bounds(id);
-            out.damage = out.damage.merge(DamageReq::Rect(r));
+            let is_hover_or_key = matches!(
+                ev,
+                Event::Pointer(ref pe) if pe.kind == crate::event::PointerKind::Move
+            ) || matches!(ev, Event::Key(_));
+            let d = if is_hover_or_key {
+                DamageReq::Rect(r)
+            } else {
+                DamageReq::Layout(r)
+            };
+            out.damage = out.damage.merge(d);
             out.repaint = true;
         }
         match self.get_mut(id) {
