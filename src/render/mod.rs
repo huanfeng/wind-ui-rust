@@ -109,6 +109,9 @@ impl Paint {
 
 /// 绘制接口。Phase 1 提供基础图元；裁剪/变换在 Phase 3 扩展。
 pub trait Canvas {
+    /// 当前 DPI 缩放因子（物理像素 / 逻辑像素，如 150% → 1.5）。
+    /// 用于将 `Len::Px` 换算为等效逻辑值，使描边落在整数物理栅格。
+    fn dpi_scale(&self) -> f32;
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint);
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint);
     fn stroke_round_rect(

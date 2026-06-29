@@ -212,7 +212,8 @@ impl Widget for Stepper {
         } else {
             st.border(pal)
         };
-        canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
+        let bw = th.metrics.border_width.to_logical(canvas.dpi_scale());
+        canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         let (amt_l, amt_r) = (
             hover_amt(&self.hover_l, enabled && self.hover == 0),

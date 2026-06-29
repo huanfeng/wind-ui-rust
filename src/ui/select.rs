@@ -136,7 +136,11 @@ impl Widget for Dropdown {
         }
         let border = ba.animate();
         self.border_anim.set(ba);
-        let bw = if focused { 1.8 } else { 1.5 };
+        let bw = if focused {
+            th.metrics.border_width_focus.to_logical(canvas.dpi_scale())
+        } else {
+            th.metrics.border_width.to_logical(canvas.dpi_scale())
+        };
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         // 当前选项文本（左侧，留出右侧 chevron）。

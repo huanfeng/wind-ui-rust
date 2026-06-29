@@ -647,13 +647,14 @@ impl Widget for Button {
             } else {
                 outline_col
             };
+            let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
             canvas.stroke_round_rect(
                 bounds.x as f32,
                 bounds.y as f32,
                 bounds.w as f32,
                 bounds.h as f32,
                 r,
-                1.0,
+                bw,
                 &Paint::fill(border),
             );
         }
@@ -2044,6 +2045,9 @@ mod tests {
         last_text_color: std::cell::Cell<Option<Color>>,
     }
     impl crate::render::Canvas for CaptureCanvas {
+        fn dpi_scale(&self) -> f32 {
+            1.0
+        }
         fn fill_rect(&mut self, _: f32, _: f32, _: f32, _: f32, _: &crate::render::Paint) {}
         fn fill_round_rect(
             &mut self,

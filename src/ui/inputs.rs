@@ -1260,7 +1260,9 @@ impl Widget for TextInput {
         } else {
             inp.border(pal)
         };
-        canvas.stroke_round_rect(x, y, w, h, corner, 1.5, &Paint::fill(border));
+        let t = crate::theme::current();
+        let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
+        canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
         let disp = self.display_string();

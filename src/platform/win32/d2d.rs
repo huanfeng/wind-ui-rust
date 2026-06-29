@@ -501,6 +501,7 @@ impl RenderTarget for D2DTarget<'_> {
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
+            scale,
         })
     }
     // as_pixmap 用 trait 默认 None：GPU 无 pixmap，调用方走全窗重绘。
@@ -535,6 +536,9 @@ struct D2DCanvas<'a> {
     /// 当前已 PushLayer 未配对 PopLayer 的合成层数。
     /// 同裁剪：EndDraw 前必须归零，否则层不平衡使 EndDraw 静默返回 Err、整帧丢失。
     pushed_layers: u32,
+    /// 当前帧 DPI 缩放因子（物理像素 / 逻辑像素）。由 make_canvas 传入，
+    /// 供 Canvas::dpi_scale() 返回，使控件层能将 Len::Px 换算为逻辑值。
+    scale: f32,
 }
 
 impl D2DCanvas<'_> {
@@ -986,6 +990,10 @@ impl Drop for D2DCanvas<'_> {
 }
 
 impl Canvas for D2DCanvas<'_> {
+    fn dpi_scale(&self) -> f32 {
+        self.scale
+    }
+
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
         let brush = self.fill_brush(paint, x, y, w, h);
         unsafe { self.ctx.FillRectangle(&rect_f(x, y, w, h), &brush) };

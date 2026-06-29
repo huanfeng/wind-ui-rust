@@ -190,6 +190,10 @@ impl<'a> SkiaCanvas<'a> {
 }
 
 impl Canvas for SkiaCanvas<'_> {
+    fn dpi_scale(&self) -> f32 {
+        self.scale
+    }
+
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
         self.fill_round_rect(x, y, w, h, 0.0, paint);
     }

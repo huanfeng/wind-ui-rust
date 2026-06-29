@@ -1,68 +1,117 @@
-//! 主题系统示例：用 TOML 部分覆盖默认主题（换强调色/表面/背景），其余回退默认。
+//! 主题系统示例：TOML 部分覆盖 + border_width 单位对比（Dp vs Px）。
 //!
 //! 运行：cargo run --release --example theming
-//! 截屏：cargo run --example theming -- --screenshot artifacts/theming.png
+//!
+//! 点击右上角"切换"按钮在 Dp（逻辑像素）和 Px（物理像素）之间切换。
+//! 在 125% / 150% DPI 缩放下，Dp 边框会因亚像素映射产生模糊感；
+//! Px 边框精确落在整数光栅，任意缩放比例下均清晰。
 
 use windui::prelude::*;
 
-/// 仅覆盖部分 token，其余字段由 serde default 回退到内置默认。
-const THEME_TOML: &str = r##"
+const THEME_DP: &str = r##"
 [palette]
-accent = "#7C5CFC"
-accent_hover = "#9277FF"
-accent_active = "#5E3FD6"
-bg = "#F4F2FB"
+accent  = "#5B8AF5"
+bg      = "#F5F7FA"
 surface = "#FFFFFF"
-text = "#241B45"
+text    = "#1A2035"
 
 [metrics]
-corner_md = 10.0
+corner_md    = 6.0
+border_width = 1.0
 "##;
 
-fn row(label: &str, control: Element) -> Element {
-    Element::row()
-        .width_match()
-        .height(40)
-        .cross(Align::Center)
-        .spacing(12)
-        .child(
-            Element::label(label)
-                .font_size(14.0)
-                .fg(Color::hex(0x241B45))
-                .width(96),
-        )
-        .child(control)
-}
+/// 使用物理像素边框：{ px = 1 } 在任意 DPI 下清晰无模糊。
+const THEME_PX: &str = r##"
+[palette]
+accent  = "#5B8AF5"
+bg      = "#F5F7FA"
+surface = "#FFFFFF"
+text    = "#1A2035"
+
+[metrics]
+corner_md          = 6.0
+border_width       = { px = 1 }
+border_width_focus = { px = 2 }
+"##;
 
 fn main() {
-    let theme = Theme::from_toml(THEME_TOML).expect("解析主题 TOML");
+    let theme_dp = Theme::from_toml(THEME_DP).expect("Dp 主题解析失败");
+    let theme_px = Theme::from_toml(THEME_PX).expect("Px 主题解析失败");
 
-    let name = signal(String::from("紫色主题"));
-    let on = signal(true);
+    let name  = signal(String::new());
+    let on    = signal(true);
     let check = signal(true);
-    let vol = signal(0.6f32);
-    let mode = signal(1usize);
+    let vol   = signal(0.5f32);
+    let mode  = signal(0usize);
+    let use_px = signal(false);
+    let mode_text = signal(String::from(
+        "当前：border_width = 1.0（Dp）— 逻辑像素，125%/150% DPI 可见亚像素模糊",
+    ));
+
+    let mut app = App::new("windui — border_width 单位对比", 440, 400);
+    let handle = app.theme_handle();
+
+    let toggle_btn = {
+        let h = handle.clone();
+        let tdp = theme_dp.clone();
+        let tpx = theme_px.clone();
+        let mt = mode_text.clone();
+        Element::button("切换单位")
+            .on_click(move |_| {
+                let now = use_px.get();
+                use_px.set(!now);
+                if now {
+                    h.set(tdp.clone());
+                    mt.set(String::from(
+                        "当前：border_width = 1.0（Dp）— 逻辑像素，125%/150% DPI 可见亚像素模糊",
+                    ));
+                } else {
+                    h.set(tpx.clone());
+                    mt.set(String::from(
+                        "当前：border_width = { px = 1 }（Px）— 物理像素，任意 DPI 清晰无模糊",
+                    ));
+                }
+            })
+            .neutral()
+            .outline()
+    };
+
+    let row = |lbl: &str, ctrl: Element| {
+        Element::row()
+            .width_match()
+            .height(36)
+            .cross(Align::Center)
+            .spacing(10)
+            .child(
+                Element::label(lbl)
+                    .font_size(13.0)
+                    .fg(Color::hex(0x555577))
+                    .width(56),
+            )
+            .child(ctrl)
+    };
 
     let card = Element::col()
         .width_match()
         .bg(Color::hex(0xFFFFFF))
-        .corner(12.0)
+        .corner(10.0)
         .padding(16)
         .spacing(8)
-        .child(row("名称", Element::text_input(name, "输入").width_match()))
+        .child(row("文本框", Element::text_input(name, "点击聚焦…").width_match()))
+        .child(row(
+            "下拉",
+            Element::dropdown(vec!["选项 A", "选项 B", "选项 C"], mode).width_match(),
+        ))
         .child(row("开关", Element::switch(on)))
         .child(row("复选", Element::checkbox("启用功能", check)))
-        .child(row("音量", Element::slider(vol).width_match()))
-        .child(row(
-            "模式",
-            Element::dropdown(vec!["A", "B", "C"], mode).width(160),
-        ))
+        .child(row("滑块", Element::slider(vol).width_match()))
         .child(
             Element::row()
                 .width_match()
-                .spacing(10)
+                .spacing(8)
                 .child(Element::button("主操作"))
-                .child(Element::button("次操作")),
+                .child(Element::button("次操作").outline().neutral())
+                .child(Element::button("删除").outline().danger()),
         );
 
     let ui = Element::col()
@@ -70,17 +119,27 @@ fn main() {
         .padding(20)
         .spacing(12)
         .child(
-            Element::label("自定义主题（TOML 覆盖）")
-                .font_size(22.0)
-                .fg(Color::hex(0x241B45))
-                .height(30)
-                .width_match(),
+            Element::row()
+                .width_match()
+                .height(32)
+                .cross(Align::Center)
+                .spacing(12)
+                .child(
+                    Element::label("border_width 单位对比")
+                        .font_size(17.0)
+                        .fg(Color::hex(0x1A2035))
+                        .weight(1.0),
+                )
+                .child(toggle_btn),
+        )
+        .child(
+            Element::label_rc(mode_text)
+                .font_size(12.0)
+                .fg(Color::hex(0x666688))
+                .width_match()
+                .height(20),
         )
         .child(card);
 
-    App::new("windui — 主题", 380, 360)
-        .theme(theme)
-        .screenshot_from_args()
-        .content(ui)
-        .run();
+    app.theme(theme_dp).content(ui).run();
 }

@@ -217,11 +217,8 @@ impl Widget for SegmentedControl {
         // 外边框最后描，盖住分隔线端点与选中底的圆角缝。键盘焦点的可见性交由核心
         // 焦点环（仅键盘导航时绘制），纯鼠标操作不再强制高亮框。
         let _ = focused;
-        let (border, bw) = if !enabled {
-            (pal.track, 1.5)
-        } else {
-            (sg.border(pal), 1.5)
-        };
+        let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
+        let border = if !enabled { pal.track } else { sg.border(pal) };
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
     }
 

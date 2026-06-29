@@ -142,6 +142,40 @@ impl Intent {
     }
 }
 
+/// 尺寸单位：支持随 DPI 缩放的逻辑像素和固定物理像素两种模式。
+///
+/// TOML 写法：
+/// - `1.0`           → `Dp(1.0)`（向后兼容，随 DPI 等比缩放）
+/// - `{ dp = 1.5 }`  → `Dp(1.5)`（显式逻辑像素）
+/// - `{ px = 1 }`    → `Px(1.0)`（精确物理像素，任意 DPI 下清晰无模糊）
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Len {
+    /// 逻辑像素（dp），随 DPI scale 等比放大。125%/150% 时映射到亚像素，
+    /// 渲染器以抗锯齿混合（视觉略模糊）。
+    Dp(f32),
+    /// 精确物理像素。内部转换为 `px / scale` 的逻辑值，使 D2D/Skia 变换后
+    /// 落在整数光栅，任意 DPI 下清晰无模糊。
+    Physical { px: f32 },
+}
+
+impl Len {
+    /// 将此尺寸换算为逻辑坐标值（传给 `Canvas::stroke_round_rect` 等图元的 `width` 参数）。
+    /// `scale` 来自 `Canvas::dpi_scale()`。
+    pub fn to_logical(self, scale: f32) -> f32 {
+        match self {
+            Len::Dp(v) => v,
+            Len::Physical { px } => {
+                if scale > 0.0 {
+                    px / scale
+                } else {
+                    px
+                }
+            }
+        }
+    }
+}
+
 /// 全局基础度量（间距 / 圆角 / 字号）。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,7 +183,12 @@ pub struct Metrics {
     pub corner_sm: f32,
     pub corner_md: f32,
     pub corner_lg: f32,
-    pub border_width: f32,
+    /// 控件边框（输入框 / 描边按钮 / 分段控件等）的线宽。
+    /// 使用 `{ px = 1 }` 可在任意 DPI 下获得清晰的单像素边框。
+    pub border_width: Len,
+    /// 聚焦状态下的边框线宽（Dropdown 等有聚焦加粗行为的控件使用）。
+    /// 默认比 `border_width` 略粗以突出焦点。
+    pub border_width_focus: Len,
     /// 基础间距单位。
     pub spacing: i32,
     /// 文本控件内边距。
@@ -165,7 +204,8 @@ impl Default for Metrics {
             corner_sm: 4.0,
             corner_md: 6.0,
             corner_lg: 10.0,
-            border_width: 1.5,
+            border_width: Len::Dp(1.0),
+            border_width_focus: Len::Dp(1.8),
             spacing: 8,
             text_pad: 10,
             font_sm: 13.0,
