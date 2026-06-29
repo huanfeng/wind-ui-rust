@@ -1229,6 +1229,24 @@ impl Element {
     pub fn slider(value: Signal<f32>) -> Self {
         Self::base(Layout::None).widget(Slider::new(value))
     }
+
+    fn config_slider(mut self, f: impl FnOnce(&mut Slider)) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Slider>())
+        {
+            Some(s) => f(s),
+            None => debug_assert!(false, "show_value() 只能用于 Element::slider(..)"),
+        }
+        self
+    }
+
+    /// 在旋钮右侧显示当前值百分比（如 "65%"）。仅 `Element::slider(..)` 可用。
+    pub fn show_value(self, on: bool) -> Self {
+        self.config_slider(|s| s.set_show_value(on))
+    }
+
     /// 单行文本输入（绑定 `Signal<String>`）。
     /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` 配置行为。
     pub fn text_input(text: Signal<String>, placeholder: impl Into<String>) -> Self {

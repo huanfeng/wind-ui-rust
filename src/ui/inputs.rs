@@ -439,9 +439,14 @@ impl Widget for RadioButton {
 
 // ---------------- Slider ----------------
 
+/// 值标签额外占用的宽度（px），仅 `show_value` 开启时生效。"100%" 约 4 字符。
+const VALUE_LABEL_W: i32 = 44;
+
 pub struct Slider {
     value: Signal<f32>, // 0.0..=1.0
     dragging: bool,
+    /// 是否在旋钮右侧显示当前值百分比（如 "65%"）。
+    pub show_value: bool,
 }
 
 impl Slider {
@@ -449,8 +454,14 @@ impl Slider {
         Self {
             value,
             dragging: false,
+            show_value: false,
         }
     }
+
+    pub fn set_show_value(&mut self, on: bool) {
+        self.show_value = on;
+    }
+
     fn set_from_pos(&self, ctx: &mut EventCtx, x: i32) {
         let b = ctx.bounds();
         let r = KNOB_R;
@@ -464,9 +475,17 @@ impl Slider {
 const KNOB_R: i32 = 9;
 
 impl Widget for Slider {
-    fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(120, 2 * KNOB_R)
+    fn measure(&self, _avail: Size, style: &Style, _text: &mut dyn TextEngine) -> Size {
+        let extra = if self.show_value { VALUE_LABEL_W } else { 0 };
+        // 高度略高于旋钮直径，留出文字空间（show_value 时取字号与旋钮直径的较大值）。
+        let h = if self.show_value {
+            (2 * KNOB_R).max(style.font_size as i32 + 4)
+        } else {
+            2 * KNOB_R
+        };
+        Size::new(120 + extra, h)
     }
+
     fn paint(
         &self,
         bounds: Rect,
@@ -474,19 +493,26 @@ impl Widget for Slider {
         _focused: bool,
         enabled: bool,
         canvas: &mut dyn Canvas,
-        _style: &Style,
+        style: &Style,
     ) {
         let v = self.value.get().clamp(0.0, 1.0);
+        let th = crate::theme::current();
+        let (pal, tg) = (&th.palette, &th.toggle);
+        let accent = if enabled { tg.accent(pal) } else { pal.track };
+
+        // show_value 时把轨道限制在左侧，右侧留给标签。
+        let track_w = if self.show_value {
+            bounds.w - VALUE_LABEL_W
+        } else {
+            bounds.w
+        };
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
         let r = KNOB_R as f32;
         let x0 = bounds.x as f32 + r;
-        let x1 = bounds.x as f32 + bounds.w as f32 - r;
+        let x1 = bounds.x as f32 + track_w as f32 - r;
         let knob_x = x0 + (x1 - x0) * v;
+
         // 轨道
-        let th = crate::theme::current();
-        let (pal, tg) = (&th.palette, &th.toggle);
-        // 禁用：已填充与钮芯的强调色降为灰。
-        let accent = if enabled { tg.accent(pal) } else { pal.track };
         canvas.fill_round_rect(
             x0,
             cy - 2.0,
@@ -504,9 +530,29 @@ impl Widget for Slider {
             2.0,
             &Paint::fill(accent),
         );
-        // 钮
+        // 旋钮
         canvas.fill_circle(knob_x, cy, r, &Paint::fill(tg.knob(pal)));
         canvas.fill_circle(knob_x, cy, r - 2.0, &Paint::fill(accent));
+
+        // 值标签
+        if self.show_value {
+            let label = format!("{:.0}%", v * 100.0);
+            let label_rect = Rect::new(
+                bounds.x + track_w,
+                bounds.y,
+                VALUE_LABEL_W,
+                bounds.h,
+            );
+            let text_color = if enabled { pal.text } else { pal.text_disabled };
+            canvas.draw_text(
+                &label,
+                label_rect,
+                text_color,
+                crate::spec::Align::Center,
+                style.font_family.as_deref(),
+                style.font_size,
+            );
+        }
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
@@ -552,6 +598,10 @@ impl Widget for Slider {
     }
     fn focusable(&self) -> bool {
         true
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
     }
 }
 
