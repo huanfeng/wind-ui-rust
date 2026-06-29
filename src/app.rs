@@ -505,6 +505,20 @@ struct Fling {
     last_ms: Option<u64>,
 }
 
+/// 菜单滚动条鼠标拖拽状态。
+struct MenuScrollbarDrag {
+    /// 正在拖拽的面板层级下标。
+    level: usize,
+    /// 拖拽起始的鼠标 y（逻辑坐标）。
+    start_y: i32,
+    /// 拖拽起始时的 scroll 偏移。
+    start_scroll: i32,
+    /// 可滑动轨道高度（面板高 - 上下 padding）。
+    track_h: f32,
+    /// 拖拽起始时的滑块高度（同帧渲染几何）。
+    thumb_h: f32,
+}
+
 /// 控件树交互宿主：渲染 + 事件分发 + 焦点管理。
 struct UiHost {
     tree: Tree,
@@ -565,6 +579,8 @@ struct UiHost {
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
+    /// 菜单滚动条拖拽状态（None=无）。
+    menu_scrollbar_drag: Option<MenuScrollbarDrag>,
     /// 跨线程通道的排空回调：渲染前在 UI 线程依次调用，把后台数据写入控件状态。
     pumps: Vec<Box<dyn FnMut()>>,
     /// 定时器回调列表（与 interval_durs 下标对应）。
@@ -626,6 +642,7 @@ impl UiHost {
             #[cfg(test)]
             last_frame_full: false,
             swallow_up: false,
+            menu_scrollbar_drag: None,
             pumps,
             interval_cbs,
             interval_durs,
@@ -768,8 +785,9 @@ impl UiHost {
         (w, has_icons)
     }
 
-    /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻（贴父面板左缘），
-    /// 否则贴窗右；越窗下缘上移钳制。
+    /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻；
+    /// 越窗下缘时：若 `anchor_top` 有值（下拉控件顶部 y），优先向上翻转（菜单底对齐控件顶），
+    /// 保证控件自身不被遮挡；否则退化为向上钳制。
     fn build_level(
         &mut self,
         items: Vec<MenuItem>,
@@ -777,6 +795,7 @@ impl UiHost {
         ay: i32,
         min_width: i32,
         flip_right: Option<i32>,
+        anchor_top: Option<i32>,
     ) -> MenuLevel {
         let (w, has_icons) = self.level_width(&items, min_width);
         let body: i32 = items
@@ -798,7 +817,24 @@ impl UiHost {
         }
         x = x.max(0);
         if ws.h > 0 && y + h > ws.h {
-            y = (ws.h - h).max(0);
+            if let Some(top) = anchor_top {
+                // 下拉控件：优先向上翻转（菜单底对齐控件顶），避免遮住控件。
+                // 若上方空间也不足，取上下哪侧空间大的一侧并钳制。
+                let y_above = top - h;
+                if y_above >= 0 {
+                    y = y_above;
+                } else {
+                    let space_below = ws.h - ay;
+                    let space_above = top;
+                    if space_above >= space_below {
+                        y = 0; // 上方更大，贴顶
+                    } else {
+                        y = (ws.h - h).max(0); // 下方更大，贴底
+                    }
+                }
+            } else {
+                y = (ws.h - h).max(0);
+            }
         }
         y = y.max(0);
         MenuLevel {
@@ -814,7 +850,7 @@ impl UiHost {
 
     /// 打开上下文菜单（根级）。
     fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
-        let level = self.build_level(req.items, req.pos.x, req.pos.y, req.min_width, None);
+        let level = self.build_level(req.items, req.pos.x, req.pos.y, req.min_width, None, req.anchor_top);
         self.menu = Some(ContextMenu {
             levels: vec![level],
             target,
@@ -896,7 +932,7 @@ impl UiHost {
                     if let Some(m) = self.menu.as_mut() {
                         m.levels.truncate(k + 1);
                     }
-                    let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2));
+                    let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2), None);
                     child.spawn = Some(i);
                     self.menu.as_mut().unwrap().levels.push(child);
                     changed = true;
@@ -917,10 +953,46 @@ impl UiHost {
     /// 菜单激活时处理指针；返回是否需重绘。
     fn handle_menu_pointer(&mut self, ev: PointerEvent) -> bool {
         match ev.kind {
-            PointerKind::Move => self.menu_hover_update(ev.pos),
+            PointerKind::Move => {
+                // 滚动条拖拽中：按拖拽量更新 scroll，不做悬停高亮。
+                if let Some(drag) = &self.menu_scrollbar_drag {
+                    let dy = ev.pos.y - drag.start_y;
+                    let travel = (drag.track_h - drag.thumb_h).max(1.0);
+                    let level_idx = drag.level;
+                    let start_scroll = drag.start_scroll;
+                    if let Some(m) = self.menu.as_mut() {
+                        if let Some(level) = m.levels.get_mut(level_idx) {
+                            let max_sc = level.max_scroll();
+                            let new_scroll = start_scroll + (dy as f32 * max_sc as f32 / travel).round() as i32;
+                            level.scroll = new_scroll.clamp(0, max_sc);
+                        }
+                    }
+                    return true;
+                }
+                self.menu_hover_update(ev.pos)
+            }
             PointerKind::Down => {
-                // 本次 Down 关闭菜单（命中叶子项执行后关 / 点外关）；标记吞掉随后的 Up，
-                // 否则该 Up 会下发到控件树重新激活下方控件（下拉点一下又弹一遍）。
+                // 滚动条命中检测：面板右侧 10px 区域内且该面板有滚动内容。
+                if let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(ev.pos)) {
+                    let level = &self.menu.as_ref().unwrap().levels[k];
+                    let r = level.rect;
+                    if level.content_h > r.h && ev.pos.x >= r.right() - 10 {
+                        // 命中滚动条：开始拖拽，不关闭菜单也不触发项。
+                        let track_h = (r.h - 8) as f32;
+                        let ratio = r.h as f32 / level.content_h as f32;
+                        let thumb_h = (track_h * ratio).max(20.0);
+                        self.menu_scrollbar_drag = Some(MenuScrollbarDrag {
+                            level: k,
+                            start_y: ev.pos.y,
+                            start_scroll: level.scroll,
+                            track_h,
+                            thumb_h,
+                        });
+                        self.swallow_up = true;
+                        return true;
+                    }
+                }
+                // 常规 Down：关闭菜单（命中叶子项执行后关 / 点外关）。
                 self.swallow_up = true;
                 let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(ev.pos)) else {
                     self.menu = None; // 点击所有面板之外：关闭
@@ -948,7 +1020,12 @@ impl UiHost {
                         }
                     }
                 }
-                true // 菜单内始终吞掉
+                true
+            }
+            PointerKind::Up => {
+                // 结束滚动条拖拽（若有）。
+                self.menu_scrollbar_drag = None;
+                true
             }
             PointerKind::Wheel(delta) => {
                 // 滚轮在菜单面板内滚动：delta>0=上滚（内容下移，scroll 减小）。
@@ -960,7 +1037,7 @@ impl UiHost {
                 }
                 true
             }
-            _ => true, // 吞掉 Up 等，避免穿透到下层
+            _ => true, // 其余事件吞掉，避免穿透到下层
         }
     }
 

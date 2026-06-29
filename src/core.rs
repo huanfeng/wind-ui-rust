@@ -949,12 +949,23 @@ impl EventCtx<'_> {
             pos,
             items,
             min_width,
+            anchor_top: None,
         });
         self.out.repaint = true;
     }
     /// 请求在 `pos` 弹出上下文菜单（内容宽度）。
     pub fn show_context_menu(&mut self, pos: Point, items: Vec<MenuItem>) {
         self.show_menu(pos, items, 0);
+    }
+    /// 下拉控件专用：按控件 bounds 弹出浮层，空间不足时自动向上翻转以避免遮住控件。
+    pub fn show_dropdown_menu(&mut self, bounds: crate::geometry::Rect, items: Vec<MenuItem>) {
+        self.out.menu = Some(MenuRequest {
+            pos: Point::new(bounds.x, bounds.y + bounds.h),
+            items,
+            min_width: bounds.w,
+            anchor_top: Some(bounds.y),
+        });
+        self.out.repaint = true;
     }
     /// 请求宿主用系统默认程序打开 URL/路径（链接点击等）。fire-and-forget：
     /// 经 `DispatchResult` 上交宿主，由平台执行（win32 `ShellExecuteW`），核心保持平台无关。
@@ -1464,6 +1475,7 @@ impl Tree {
                                 pos: ev.pos,
                                 items,
                                 min_width: 0,
+                                anchor_top: None,
                             });
                             res.consumed = true;
                         }

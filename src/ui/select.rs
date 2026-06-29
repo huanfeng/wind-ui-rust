@@ -8,7 +8,7 @@ use std::cell::Cell;
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
 use crate::event::{Event, Key, MenuItem, PointerKind};
-use crate::geometry::{Color, Point, Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
 use crate::spec::Align;
@@ -62,7 +62,7 @@ impl Dropdown {
                 MenuItem::run(o.clone(), move || sel.set(i), i == cur)
             })
             .collect();
-        ctx.show_menu(Point::new(b.x, b.y + b.h), items, b.w);
+        ctx.show_dropdown_menu(b, items);
     }
 }
 

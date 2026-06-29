@@ -218,6 +218,9 @@ pub struct MenuRequest {
     pub items: Vec<MenuItem>,
     /// 最小宽度（逻辑 px，0=按内容）。下拉用控件宽度对齐。
     pub min_width: i32,
+    /// 下拉控件自身的顶部 y（逻辑坐标）：空间不足时菜单向上翻转，避免遮住控件。
+    /// 普通右键菜单留 None，不需要翻转语义。
+    pub anchor_top: Option<i32>,
 }
 
 /// 轻提示语义类型：决定提示图标（及默认强调色）。
