@@ -41,6 +41,9 @@ const MENU_ICON_W: i32 = 18;
 const MENU_GAP: i32 = 8;
 /// 标签与尾随（快捷键/箭头）间最小间距。
 const MENU_TRAIL_GAP: i32 = 18;
+/// 菜单弹层距窗口四边最小留白（逻辑像素）：与 resize 边框区域宽度对齐，
+/// 确保弹层滚动条不会覆盖到缩放操作区域，无需修改 WM_NCHITTEST 优先级。
+const MENU_EDGE_MARGIN: i32 = 10;
 
 /// 悬停提示：触发延时（ms）、字号、内边距、相对指针的偏移。
 const TOOLTIP_DELAY_MS: u64 = 500;
@@ -809,34 +812,52 @@ impl UiHost {
         let h = content_h.min(max_h);
         let mut x = ax;
         let mut y = ay;
-        if ws.w > 0 && x + w > ws.w {
+        // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
+        let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
+        if ws.w > 0 && x + w > ws.w - em {
             x = match flip_right {
-                Some(parent_left) => (parent_left - w).max(0),
-                None => (ws.w - w).max(0),
+                Some(parent_left) => (parent_left - w).max(em),
+                None => (ws.w - w - em).max(em),
             };
         }
-        x = x.max(0);
-        if ws.h > 0 && y + h > ws.h {
+        x = x.max(em);
+        if ws.h > 0 && y + h > ws.h - em {
             if let Some(top) = anchor_top {
                 // 下拉控件：优先向上翻转（菜单底对齐控件顶），避免遮住控件。
                 // 若上方空间也不足，取上下哪侧空间大的一侧并钳制。
                 let y_above = top - h;
-                if y_above >= 0 {
+                if y_above >= em {
                     y = y_above;
                 } else {
                     let space_below = ws.h - ay;
                     let space_above = top;
                     if space_above >= space_below {
-                        y = 0; // 上方更大，贴顶
+                        y = em; // 上方更大，贴顶留边
                     } else {
-                        y = (ws.h - h).max(0); // 下方更大，贴底
+                        y = (ws.h - h - em).max(em); // 下方更大，贴底留边
                     }
                 }
             } else {
-                y = (ws.h - h).max(0);
+                y = (ws.h - h - em).max(em);
             }
         }
-        y = y.max(0);
+        y = y.max(em);
+        // 计算初始滚动偏移：使 checked 项（当前选中）居中于可视区域。
+        let initial_scroll = if content_h > h {
+            let mut offset = MENU_VPAD;
+            let mut result = 0i32;
+            for it in &items {
+                let ih = if it.separator { MENU_SEP_H } else { MENU_ITEM_H };
+                if it.checked {
+                    result = offset + ih / 2 - h / 2;
+                    break;
+                }
+                offset += ih;
+            }
+            result.clamp(0, (content_h - h).max(0))
+        } else {
+            0
+        };
         MenuLevel {
             items,
             rect: Rect::new(x, y, w, h),
@@ -844,7 +865,7 @@ impl UiHost {
             has_icons,
             spawn: None,
             content_h,
-            scroll: 0,
+            scroll: initial_scroll,
         }
     }
 
@@ -976,8 +997,8 @@ impl UiHost {
                 if let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(ev.pos)) {
                     let level = &self.menu.as_ref().unwrap().levels[k];
                     let r = level.rect;
-                    if level.content_h > r.h && ev.pos.x >= r.right() - 10 {
-                        // 命中滚动条：开始拖拽，不关闭菜单也不触发项。
+                    if level.content_h > r.h && ev.pos.x >= r.right() - 16 {
+                        // 命中滚动条（命中区 16px）：开始拖拽，不关闭菜单也不触发项。
                         let track_h = (r.h - 8) as f32;
                         let ratio = r.h as f32 / level.content_h as f32;
                         let thumb_h = (track_h * ratio).max(20.0);
@@ -1231,9 +1252,15 @@ impl AppHandler for UiHost {
                     } else {
                         0
                     };
-                // 裁剪到面板矩形，防止滚动后条目溢出。
+                // 裁剪到内缩矩形：上下各留 MENU_VPAD 像素，使条目在触达圆角边框前
+                // 自然裁切（scroll=0 时第一项恰在裁剪边界，滚动时产生平滑"滚出"效果）。
                 canvas.save();
-                canvas.clip_rect(r);
+                canvas.clip_rect(Rect::new(
+                    r.x,
+                    r.y + MENU_VPAD,
+                    r.w,
+                    (r.h - 2 * MENU_VPAD).max(0),
+                ));
                 for (i, (top, h)) in level.item_rows().into_iter().enumerate() {
                     let it = &level.items[i];
                     if it.separator {
@@ -1328,11 +1355,11 @@ impl AppHandler for UiHost {
                     let thumb_y = (r.y + 4) as f32
                         + (track_h - thumb_h) * (level.scroll as f32 / max_sc);
                     canvas.fill_round_rect(
-                        (r.right() - 5) as f32,
+                        (r.right() - 8) as f32,
                         thumb_y,
-                        3.0,
+                        5.0,
                         thumb_h,
-                        1.5,
+                        2.5,
                         &Paint::fill(mt.border(pal)),
                     );
                 }
@@ -1692,6 +1719,12 @@ impl AppHandler for UiHost {
             (pos.x as f32 / s).round() as i32,
             (pos.y as f32 / s).round() as i32,
         );
+        // 菜单浮层激活时，面板范围内全部判为客户区，防止窗口缩放边框夺走滚动条事件。
+        if let Some(menu) = &self.menu {
+            if menu.levels.iter().any(|l| l.rect.contains(p)) {
+                return true;
+            }
+        }
         self.tree.interactive_hit_at(p)
     }
 
