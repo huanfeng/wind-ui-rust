@@ -19,7 +19,7 @@ pub(crate) fn class_name(app_id: &str) -> String {
 }
 
 /// Unix socket 路径(macOS/Linux):`$TMPDIR`(回退 /tmp)下 `{app_id}_si.sock`。
-#[cfg_attr(windows, allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn socket_path(app_id: &str) -> std::path::PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR")
         .or_else(|_| std::env::var("TMPDIR"))
@@ -29,11 +29,13 @@ pub(crate) fn socket_path(app_id: &str) -> std::path::PathBuf {
 
 /// argv 编码为字节（`\0` 分隔，UTF-8），供 WM_COPYDATA / socket 传输。
 /// 用 NUL 而非 `\n`：NUL 在 Windows/Unix 路径中均非法，无需转义。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn encode_argv(argv: &[String]) -> Vec<u8> {
     argv.join("\0").into_bytes()
 }
 
 /// 字节解码回 argv。空输入 → 空 Vec。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn decode_argv(bytes: &[u8]) -> Vec<String> {
     let s = String::from_utf8_lossy(bytes);
     if s.is_empty() {
@@ -50,12 +52,14 @@ mod unix;
 mod win;
 
 /// 单实例配置:app_id + 二次实例回调。由 `App` 组装,平台 `run` 消费。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct SingleInstance {
     pub app_id: String,
     pub on_second: Box<dyn FnMut(Vec<String>)>,
 }
 
 /// 检测单实例:true=首实例(已持锁),false=已有实例在运行。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn acquire(app_id: &str) -> bool {
     #[cfg(windows)]
     {
@@ -68,6 +72,7 @@ pub(crate) fn acquire(app_id: &str) -> bool {
 }
 
 /// 二次实例:把 argv 转发给首实例。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn forward(app_id: &str, argv: &[String]) {
     #[cfg(windows)]
     {
@@ -80,6 +85,7 @@ pub(crate) fn forward(app_id: &str, argv: &[String]) {
 }
 
 /// 首实例:主窗口就绪后安装监听(收二次实例 argv → on_second + 激活主窗口)。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn install_listener(
     app_id: &str,
     main_hwnd: isize,
