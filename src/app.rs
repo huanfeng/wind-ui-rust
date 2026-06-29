@@ -32,6 +32,8 @@ const MENU_SEP_H: i32 = 9;
 const MENU_PAD_X: i32 = 12;
 const MENU_VPAD: i32 = 6;
 const MENU_MIN_W: i32 = 140;
+/// 下拉菜单面板最大可视高度（超出后启用滚动）。
+const MENU_MAX_H: i32 = 320;
 const MENU_FONT: f32 = 13.5;
 /// 图标列宽（有图标项时预留）。
 const MENU_ICON_W: i32 = 18;
@@ -96,23 +98,27 @@ struct MenuLevel {
     has_icons: bool,
     /// 该级由父级哪一项展开（根级为 None）；用于避免同项重复重建子菜单。
     spawn: Option<usize>,
+    /// 项内容总高（含上下内边距，未截断）；超出 rect.h 时启用滚动。
+    content_h: i32,
+    /// 当前滚动偏移（像素，0=顶部）。
+    scroll: i32,
 }
 
 impl MenuLevel {
-    /// 每项的 (顶部 y, 高度)（逻辑坐标，含分隔线的小高度）。
+    /// 每项的 (顶部 y, 高度)（逻辑坐标，已减去 scroll 偏移）。
     fn item_rows(&self) -> Vec<(i32, i32)> {
-        let mut y = self.rect.y + MENU_VPAD;
+        let mut y = self.rect.y + MENU_VPAD - self.scroll;
         let mut rows = Vec::with_capacity(self.items.len());
         for it in &self.items {
-            let h = if it.separator {
-                MENU_SEP_H
-            } else {
-                MENU_ITEM_H
-            };
+            let h = if it.separator { MENU_SEP_H } else { MENU_ITEM_H };
             rows.push((y, h));
             y += h;
         }
         rows
+    }
+    /// 最大可滚动量（content_h 超出面板高时才有效）。
+    fn max_scroll(&self) -> i32 {
+        (self.content_h - self.rect.h).max(0)
     }
     /// 命中点 → 项下标（分隔线不可命中）。
     fn item_at(&self, p: Point) -> Option<usize> {
@@ -775,16 +781,13 @@ impl UiHost {
         let (w, has_icons) = self.level_width(&items, min_width);
         let body: i32 = items
             .iter()
-            .map(|it| {
-                if it.separator {
-                    MENU_SEP_H
-                } else {
-                    MENU_ITEM_H
-                }
-            })
+            .map(|it| if it.separator { MENU_SEP_H } else { MENU_ITEM_H })
             .sum();
-        let h = body + 2 * MENU_VPAD;
+        let content_h = body + 2 * MENU_VPAD;
+        // 面板可视高度：不超过 MENU_MAX_H，也不超过窗口高的 3/4。
         let ws = self.logical_size;
+        let max_h = MENU_MAX_H.min(if ws.h > 0 { ws.h * 3 / 4 } else { MENU_MAX_H });
+        let h = content_h.min(max_h);
         let mut x = ax;
         let mut y = ay;
         if ws.w > 0 && x + w > ws.w {
@@ -804,6 +807,8 @@ impl UiHost {
             hover: None,
             has_icons,
             spawn: None,
+            content_h,
+            scroll: 0,
         }
     }
 
@@ -945,7 +950,17 @@ impl UiHost {
                 }
                 true // 菜单内始终吞掉
             }
-            _ => true, // 吞掉 Up/Wheel 等，避免穿透到下层
+            PointerKind::Wheel(delta) => {
+                // 滚轮在菜单面板内滚动：delta>0=上滚（内容下移，scroll 减小）。
+                if let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(ev.pos)) {
+                    let level = &mut self.menu.as_mut().unwrap().levels[k];
+                    let step = (delta.abs() / 3).max(MENU_ITEM_H);
+                    let dir = if delta > 0 { -step } else { step };
+                    level.scroll = (level.scroll + dir).clamp(0, level.max_scroll());
+                }
+                true
+            }
+            _ => true, // 吞掉 Up 等，避免穿透到下层
         }
     }
 
@@ -1139,6 +1154,9 @@ impl AppHandler for UiHost {
                     } else {
                         0
                     };
+                // 裁剪到面板矩形，防止滚动后条目溢出。
+                canvas.save();
+                canvas.clip_rect(r);
                 for (i, (top, h)) in level.item_rows().into_iter().enumerate() {
                     let it = &level.items[i];
                     if it.separator {
@@ -1222,6 +1240,24 @@ impl AppHandler for UiHost {
                             MENU_FONT,
                         );
                     }
+                }
+                canvas.restore();
+                // 内容超高时绘制右侧滚动指示条。
+                if level.content_h > r.h {
+                    let track_h = (r.h - 8) as f32;
+                    let ratio = r.h as f32 / level.content_h as f32;
+                    let thumb_h = (track_h * ratio).max(20.0);
+                    let max_sc = level.max_scroll().max(1) as f32;
+                    let thumb_y = (r.y + 4) as f32
+                        + (track_h - thumb_h) * (level.scroll as f32 / max_sc);
+                    canvas.fill_round_rect(
+                        (r.right() - 5) as f32,
+                        thumb_y,
+                        3.0,
+                        thumb_h,
+                        1.5,
+                        &Paint::fill(mt.border(pal)),
+                    );
                 }
             }
         }

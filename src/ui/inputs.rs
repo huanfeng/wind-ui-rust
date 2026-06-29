@@ -65,6 +65,12 @@ impl CheckBox {
     pub fn set_size(&mut self, size: CheckBoxSize) {
         self.size = size;
     }
+    fn font_size(&self, style: &Style) -> f32 {
+        match self.size {
+            CheckBoxSize::Normal => style.font_size,
+            CheckBoxSize::Small => (style.font_size - 2.0).max(10.0),
+        }
+    }
     fn toggle(&mut self, ctx: &mut EventCtx) {
         if let Some(cb) = self.on_toggle.as_mut() {
             cb(ctx);
@@ -81,12 +87,8 @@ impl Widget for CheckBox {
             CheckBoxSize::Normal => (BOX_SIZE, GAP),
             CheckBoxSize::Small => (BOX_SIZE_SMALL, GAP_SMALL),
         };
-        let t = text.measure(
-            &self.label,
-            style.font_family.as_deref(),
-            style.font_size,
-            None,
-        );
+        let fsize = self.font_size(style);
+        let t = text.measure(&self.label, style.font_family.as_deref(), fsize, None);
         Size::new(bsz + gap + t.w, bsz.max(t.h))
     }
     fn paint(
@@ -189,7 +191,7 @@ impl Widget for CheckBox {
             text_color,
             Align::Start,
             style.font_family.as_deref(),
-            style.font_size,
+            self.font_size(style),
         );
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
