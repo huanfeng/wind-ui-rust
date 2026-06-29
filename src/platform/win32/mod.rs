@@ -604,6 +604,12 @@ unsafe fn run_windowed(
     let _ = UpdateWindow(hwnd);
 
     run_message_loop(hwnd);
+
+    // 消息循环结束后立即显式释放 GPU 共享设备链（D3D11/DXGI/D2D/DWrite COM 对象）。
+    // 推迟到线程析构才 Release 会触发 GPU 命令队列排空 + DWrite 字体缓存全局清理，
+    // 实测延迟可达 3–4 秒；此处提前释放可规避该问题。
+    #[cfg(feature = "d2d")]
+    d2d::release_shared_device();
 }
 
 /// 消息循环：无动画时阻塞至下一条消息（零 CPU）；有动画时按**帧截止时间**配速——
@@ -881,13 +887,15 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_DESTROY => {
-            // 回收 WindowState
+            // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。
+            // TrayState::drop 会调 Shell_NotifyIconW(NIM_DELETE)，需在进程退出前执行，
+            // 因此不能 leak，仍须显式 drop——但顺序调整后用户感知到的关闭延迟消失。
+            PostQuitMessage(0);
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
             if !ptr.is_null() {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 drop(Box::from_raw(ptr));
             }
-            PostQuitMessage(0);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
