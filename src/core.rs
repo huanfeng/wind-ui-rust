@@ -98,11 +98,22 @@ pub trait Widget {
     fn cursor(&self) -> CursorShape {
         CursorShape::Arrow
     }
+    /// 命中是否在本节点「落定」：true（默认，所有真实控件）= 命中即停、吞掉事件；
+    /// false（仅 `EmptyWidget` 纯容器）= 子节点都未命中时穿透，让父节点继续测下层兄弟。
+    /// 防止透明纯布局容器（尤其根级全窗覆盖层）遮挡其下兄弟的指针事件。
+    /// 节点级的背景/滚动/拖窗/拖放等仍由命中逻辑单独判为「吞命中」（见 `hit_node`）。
+    fn hit_opaque(&self) -> bool {
+        true
+    }
 }
 
 /// 容器/纯样式节点占位控件。
 pub struct EmptyWidget;
-impl Widget for EmptyWidget {}
+impl Widget for EmptyWidget {
+    fn hit_opaque(&self) -> bool {
+        false
+    }
+}
 
 impl Node {
     /// 该帧是否有效可见（静态 visible 与可见条件取与）。
@@ -1285,7 +1296,18 @@ impl Tree {
                 }
             }
         }
-        Some(id)
+        // 子节点都未命中：仅当本节点「吞命中」时在此落定；否则穿透（None），
+        // 让父节点继续测试其下层兄弟。防止透明纯布局容器（尤其根级全窗覆盖层，
+        // 如关闭状态的对话框外层）遮挡其下内容的指针事件。
+        // 吞命中 = 真实控件 / 有背景 / 滚动容器 / 拖窗区 / 拖放·右键菜单·悬停提示。
+        let catches = n.widget.hit_opaque()
+            || n.style.bg.is_some()
+            || matches!(n.layout, Layout::Scroll)
+            || n.window_drag
+            || n.on_drop.is_some()
+            || n.context_menu.is_some()
+            || n.tooltip.is_some();
+        if catches { Some(id) } else { None }
     }
 
     /// 祖先链：从节点自身到根。
@@ -1794,6 +1816,53 @@ mod tests {
         tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
         assert_eq!(clicks.get(), 1, "在按钮内释放应触发一次点击");
         assert_eq!(cap, None, "释放应取消捕获");
+    }
+
+    /// 构建 [下层按钮 + 上层全覆盖容器]，返回 (tree, 按钮 id, 按钮中心点)。
+    /// `opaque_bg`=true 时上层容器带背景（应吞命中），false 时为透明纯容器（应穿透）。
+    fn overlay_tree(clicks: Signal<i32>, opaque_bg: bool) -> (Tree, NodeId, Point) {
+        let c = clicks;
+        let mut overlay = Element::stack().width_match().height_match();
+        if opaque_bg {
+            overlay = overlay.bg(crate::geometry::Color::rgba(0, 0, 0, 255));
+        }
+        let root = Element::stack()
+            .width(200)
+            .height(100)
+            .child(Element::button("OK").on_click(move |_| c.set(c.get() + 1)))
+            .child(overlay);
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 100), &mut te);
+        let btn = tree.get(id).unwrap().children[0];
+        let b = tree.abs_bounds(btn);
+        (tree, btn, Point::new(b.x + b.w / 2, b.y + b.h / 2))
+    }
+
+    #[test]
+    fn transparent_overlay_passes_pointer_through_to_lower_sibling() {
+        // 透明纯容器（EmptyWidget、无背景）全覆盖在按钮之上：命中应穿透到下层按钮。
+        let clicks = signal(0);
+        let (mut tree, btn, center) = overlay_tree(clicks, false);
+        assert_eq!(tree.hit_test(center), Some(btn), "透明覆盖容器应穿透命中下层按钮");
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 1, "点击应穿透透明覆盖层触发下层按钮");
+    }
+
+    #[test]
+    fn opaque_bg_overlay_blocks_pointer_to_lower_sibling() {
+        // 带背景的容器全覆盖：吞掉命中，不穿透（卡片/面板/遮罩等视觉表面的既有行为）。
+        let clicks = signal(0);
+        let (mut tree, btn, center) = overlay_tree(clicks, true);
+        assert_ne!(tree.hit_test(center), Some(btn), "带背景的覆盖容器应吞命中，不穿透");
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
+        assert_eq!(clicks.get(), 0, "带背景覆盖层应拦截点击，不触发下层按钮");
     }
 
     #[test]
