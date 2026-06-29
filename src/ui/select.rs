@@ -19,7 +19,9 @@ const PAD_X: i32 = 12;
 const CHEVRON_W: i32 = 18;
 
 pub struct Dropdown {
-    options: Vec<String>,
+    /// 选项绑定 `Signal<Vec<String>>`：静态构造时包一层定值信号；响应式构造直接传入，
+    /// 选项随信号变更自动刷新（异步加载的主题/字体列表到达后下拉即填充）。
+    options: Signal<Vec<String>>,
     selected: Signal<usize>,
     hover: bool,
     /// 边框色补间（hover/focus 高亮淡变）；首帧靠 `primed` 落定。
@@ -29,6 +31,15 @@ pub struct Dropdown {
 
 impl Dropdown {
     pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
+        Self::with_signal(crate::signal::signal(options), selected)
+    }
+
+    /// 响应式选项：选项列表绑定外部 `Signal<Vec<String>>`，变更即重新测量/渲染。
+    pub fn new_reactive(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
+        Self::with_signal(options, selected)
+    }
+
+    fn with_signal(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
         Self {
             options,
             selected,
@@ -38,28 +49,27 @@ impl Dropdown {
         }
     }
 
-    fn current(&self) -> &str {
-        let i = self
-            .selected
-            .get()
-            .min(self.options.len().saturating_sub(1));
-        self.options.get(i).map(|s| s.as_str()).unwrap_or("")
+    fn current(&self) -> String {
+        self.options.with(|opts| {
+            let i = self.selected.get().min(opts.len().saturating_sub(1));
+            opts.get(i).cloned().unwrap_or_default()
+        })
     }
 
     /// 弹出浮层列表：宽度对齐控件，每项点击设置选中索引。
     fn open(&self, ctx: &mut EventCtx) {
-        if self.options.is_empty() {
+        let opts = self.options.get();
+        if opts.is_empty() {
             return;
         }
         let b = ctx.bounds();
         let cur = self.selected.get();
-        let items: Vec<MenuItem> = self
-            .options
-            .iter()
+        let items: Vec<MenuItem> = opts
+            .into_iter()
             .enumerate()
             .map(|(i, o)| {
                 let sel = self.selected;
-                MenuItem::run(o.clone(), move || sel.set(i), i == cur)
+                MenuItem::run(o, move || sel.set(i), i == cur)
             })
             .collect();
         ctx.show_dropdown_menu(b, items);
@@ -69,12 +79,14 @@ impl Dropdown {
 impl Widget for Dropdown {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let mut w = 0;
-        for o in &self.options {
-            w = w.max(
-                text.measure(o, style.font_family.as_deref(), style.font_size, None)
-                    .w,
-            );
-        }
+        self.options.with(|opts| {
+            for o in opts {
+                w = w.max(
+                    text.measure(o, style.font_family.as_deref(), style.font_size, None)
+                        .w,
+                );
+            }
+        });
         Size::new(w + 2 * PAD_X + CHEVRON_W, (style.font_size as i32) + 16)
     }
 
@@ -134,8 +146,9 @@ impl Widget for Dropdown {
             bounds.w - 2 * PAD_X - CHEVRON_W,
             bounds.h,
         );
+        let cur = self.current();
         canvas.draw_text(
-            self.current(),
+            &cur,
             tr,
             text_color,
             Align::Start,
@@ -191,5 +204,45 @@ impl Widget for Dropdown {
 
     fn focusable(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::signal;
+
+    #[test]
+    fn reactive_dropdown_reflects_option_signal() {
+        let opts = signal(vec!["甲".to_string(), "乙".to_string()]);
+        let sel = signal(1usize);
+        let dd = Dropdown::new_reactive(opts, sel);
+        assert_eq!(dd.current(), "乙");
+        // 选项异步更新后，current 立即反映新列表（按同一索引）。
+        opts.set(vec!["X".to_string(), "Y".to_string(), "Z".to_string()]);
+        assert_eq!(dd.current(), "Y");
+        sel.set(2);
+        assert_eq!(dd.current(), "Z");
+    }
+
+    #[test]
+    fn dropdown_current_clamps_when_index_overflows() {
+        let opts = signal(vec!["a".to_string(), "b".to_string()]);
+        let sel = signal(5usize); // 越界
+        let dd = Dropdown::new_reactive(opts, sel);
+        assert_eq!(dd.current(), "b"); // 钳到末项
+        opts.set(vec![]); // 空列表
+        assert_eq!(dd.current(), ""); // 不 panic，返回空
+    }
+
+    #[test]
+    fn measure_empty_list_is_chrome_only_width() {
+        use crate::text::NullTextEngine;
+        let dd = Dropdown::new_reactive(signal(vec![]), signal(0usize));
+        let style = Style::default();
+        let mut te = NullTextEngine;
+        // 空列表：宽度仅为左右内边距 + 箭头区（无选项文本贡献）。
+        let w = dd.measure(Size::ZERO, &style, &mut te).w;
+        assert_eq!(w, 2 * PAD_X + CHEVRON_W);
     }
 }

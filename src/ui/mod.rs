@@ -1315,6 +1315,12 @@ impl Element {
         Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
     }
 
+    /// 响应式下拉：选项绑定 `Signal<Vec<String>>`，列表变更（如异步加载的主题/字体到达）
+    /// 自动重新测量/渲染。选中索引仍由 `selected` 绑定。
+    pub fn dropdown_reactive(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
+        Self::base(Layout::None).widget(select::Dropdown::new_reactive(options, selected))
+    }
+
     /// 数字步进（绑定 `Signal<f64>`，带范围与步长；小数位由步长推断）。
     pub fn stepper(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
         Self::base(Layout::None).widget(stepper::Stepper::new(value, min, max, step))
