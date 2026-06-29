@@ -1029,6 +1029,17 @@ impl Canvas for D2DCanvas<'_> {
         width: f32,
         paint: &Paint,
     ) {
+        // 对齐物理像素整数坐标：矩形四边乘以 scale 取整后还原，
+        // 使描边中心（边 + half_width）在物理坐标上落在半像素（n+0.5），
+        // 从而描边两侧各 0.5px 恰好覆盖完整一列物理像素，消除 125%/150% 等
+        // 非整数 DPI 下的亚像素抗锯齿模糊。
+        let s = self.scale;
+        let x0 = (x * s).round() / s;
+        let y0 = (y * s).round() / s;
+        let x1 = ((x + w) * s).round() / s;
+        let y1 = ((y + h) * s).round() / s;
+        let (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
+
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
         // 内缩半个线宽：D2D 描边以路径为中线对称外扩，内缩使描边落在 (x,y,w,h) 框内，
