@@ -588,12 +588,19 @@ impl Widget for Button {
         }
         let color = anim.animate();
         self.bg_anim.set(anim);
+        // Outline 的文字/描边色：Primary/Danger 用意图主色（蓝/红）；Neutral 的意图主色是
+        // p.border（分割线色，过淡，启用态会比禁用态还不可见），改用 text_muted 保证可读对比。
+        let outline_col = if matches!(self.intent, Intent::Neutral) {
+            pal.text_muted
+        } else {
+            ic.bg
+        };
         // 文字色：禁用用 text_disabled；Outline 用意图主色（蓝/红/灰）作文字；
         // 否则 fg_role 优先（运行期换主题跟随）；style.bg 有值时用显式 style.fg；再否则用意图前景。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled
         } else if is_outline {
-            ic.bg
+            outline_col
         } else if style.fg_role.is_some() {
             style.resolved_fg(&t)
         } else if is_primary && style.bg.is_some() {
@@ -620,7 +627,7 @@ impl Widget for Button {
             let border = if vstate == VisualState::Disabled {
                 pal.text_disabled
             } else {
-                ic.bg
+                outline_col
             };
             canvas.stroke_round_rect(
                 bounds.x as f32,
