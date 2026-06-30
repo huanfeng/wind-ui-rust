@@ -4,6 +4,7 @@
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
 pub mod containers;
+pub mod dyn_list;
 pub mod image;
 pub mod inputs;
 pub mod link;
@@ -793,6 +794,9 @@ pub struct Element {
     enabled: Option<Signal<bool>>,
     en_cond: Option<Box<dyn Fn() -> bool>>,
     tooltip: Option<String>,
+    /// 注册为响应式节点：build 后自动调用 `Tree::register_reactive`，
+    /// 框架在每次 layout 前向其 widget 调用 `on_update`。
+    reactive: bool,
 }
 
 impl Element {
@@ -818,6 +822,7 @@ impl Element {
             enabled: None,
             en_cond: None,
             tooltip: None,
+            reactive: false,
         }
     }
 
@@ -1359,6 +1364,48 @@ impl Element {
             );
         }
         scroll
+    }
+
+    /// 标记为响应式节点：build 后注册到框架，每次 layout 前收到 `Widget::on_update`。
+    /// 通常由 `list_signal` 内部调用，手动使用时需搭配实现了 `on_update` 的自定义 widget。
+    pub fn reactive(mut self) -> Self {
+        self.reactive = true;
+        self
+    }
+
+    /// 响应式动态列表：数据源绑定 `Signal<Vec<T>>`，信号变化时框架自动重建行元素。
+    ///
+    /// - `data`：数据源信号；写入新 Vec 即触发列表刷新（排序/过滤均可）。
+    /// - `_key_fn`：预留 diff 优化用，当前版本做全量重建，传 `|_| ()` 即可。
+    /// - `row_fn`：每行的构建函数，接收数据条目返回 `Element`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let items = signal(vec!["苹果", "香蕉", "橙子"]);
+    /// Element::list_signal(items, |_| (), |s, _i| Element::label(s))
+    /// ```
+    pub fn list_signal<T, K>(
+        data: Signal<Vec<T>>,
+        _key_fn: impl Fn(&T) -> K + 'static,
+        row_fn: impl Fn(T) -> Self + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+        K: Eq + std::hash::Hash,
+    {
+        let row_fn = std::rc::Rc::new(row_fn);
+        // 构建初始子元素
+        let initial: Vec<Self> = data.get().into_iter().map(|item| row_fn(item)).collect();
+        // DynList widget 持有 Rc 副本，信号变更时重建子节点
+        let row_fn_clone = row_fn.clone();
+        let widget = dyn_list::DynList::new(data, move |item: T| row_fn_clone(item));
+        let mut container = Self::scroll().fill();
+        container.widget = Box::new(widget);
+        container.reactive = true;
+        for el in initial {
+            container.children.push(el);
+        }
+        container
     }
 
     /// 带前置图标的单选列表：`items` 为 (标签, 图标内容) 列表。其余同 `list`。
@@ -1949,6 +1996,7 @@ impl Element {
 
     /// 递归落入 arena，返回根 NodeId。
     pub fn build(mut self, tree: &mut Tree) -> NodeId {
+        let is_reactive = self.reactive;
         let my_axis = match self.layout {
             Layout::Linear { axis, .. } => Some(axis),
             _ => None,
@@ -1988,6 +2036,9 @@ impl Element {
             prev_visible: Cell::new(true),
         };
         let id = tree.insert(node);
+        if is_reactive {
+            tree.register_reactive(id);
+        }
         for mut ce in children {
             // 父为线性容器时，把请求的 weight 落到主轴维度
             if let (Some(axis), Some(w)) = (my_axis, ce.weight) {

@@ -88,6 +88,10 @@ pub trait Widget {
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         None
     }
+    /// layout 前由框架向**已注册的响应式节点**调用（见 `Tree::register_reactive`）。
+    /// 响应式控件在此检测绑定信号的版本变化，若有变化则通过 `ctx.tree_mut()` 重建子节点。
+    /// 默认无操作；普通控件无需实现。
+    fn on_update(&mut self, _ctx: &mut EventCtx) {}
     /// 是否接收非左键（右/中键）的按下/抬起。默认 false——右键**不**作为单击，
     /// 符合桌面习惯。仅需右键交互的控件（如 TextInput 的上下文菜单）返回 true。
     fn wants_right_click(&self) -> bool {
@@ -208,6 +212,8 @@ pub struct Tree {
     pub focus_ring_visible: bool,
     /// 剪贴板实现（平台注入）；None 时复制粘贴为空操作。
     pub clipboard: Option<Box<dyn ClipboardProvider>>,
+    /// 响应式节点列表：每次 `layout_root` 前广播 `on_update`，允许控件重建子节点。
+    reactive_nodes: Vec<NodeId>,
 }
 
 impl Default for Tree {
@@ -224,6 +230,7 @@ impl Tree {
             root: None,
             focus_ring_visible: false,
             clipboard: None,
+            reactive_nodes: Vec::new(),
         }
     }
 
@@ -286,6 +293,48 @@ impl Tree {
         }
     }
 
+    /// 将节点注册为响应式：每次 `layout_root` 前收到 `Widget::on_update` 回调。
+    /// 由 `Element::build` 在 `Element::reactive(true)` 时自动调用。
+    pub fn register_reactive(&mut self, id: NodeId) {
+        if !self.reactive_nodes.contains(&id) {
+            self.reactive_nodes.push(id);
+        }
+    }
+
+    /// 调用单个响应式节点的 `on_update`（与 call_on_event 同款 widget swap 模式）。
+    fn call_on_update(&mut self, id: NodeId) {
+        if !self.node_enabled(id) {
+            return;
+        }
+        let mut widget = match self.get_mut(id) {
+            Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
+            None => return,
+        };
+        let mut ctx = EventCtx {
+            tree: self,
+            self_id: id,
+            out: EventOutcome::default(),
+        };
+        widget.on_update(&mut ctx);
+        // EventOutcome 丢弃：update 后紧接着全量 layout，damage 信息无意义
+        if let Some(n) = self.get_mut(id) {
+            n.widget = widget;
+        }
+    }
+
+    /// 在 layout 前向所有响应式节点广播 on_update；同时剔除已被删除的节点。
+    fn dispatch_reactive_updates(&mut self) {
+        let nodes: Vec<NodeId> = self.reactive_nodes.clone();
+        let mut live = Vec::with_capacity(nodes.len());
+        for id in nodes {
+            if self.get(id).is_some() {
+                self.call_on_update(id);
+                live.push(id);
+            }
+        }
+        self.reactive_nodes = live;
+    }
+
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
         if let Some(p) = self.get_mut(parent) {
             p.children.push(child);
@@ -318,6 +367,8 @@ impl Tree {
 
     /// 用窗口尺寸测量并排布整棵树。
     pub fn layout_root(&mut self, size: Size, text: &mut dyn TextEngine) {
+        // 先让响应式节点重建子树结构，再 measure/arrange
+        self.dispatch_reactive_updates();
         if let Some(root) = self.root {
             self.measure(
                 root,
@@ -919,6 +970,11 @@ impl EventCtx<'_> {
     /// 本节点绝对矩形（判断指针是否仍在控件内）。
     pub fn bounds(&self) -> Rect {
         self.tree.abs_bounds(self.self_id)
+    }
+    /// 暴露底层树，供响应式控件（`on_update` 内）重建子节点。
+    /// 调用方负责维护树结构一致性（不要删除 `ctx.id()` 自身节点）。
+    pub fn tree_mut(&mut self) -> &mut Tree {
+        self.tree
     }
     /// 调整本节点滚动偏移（滚动容器），下一帧 arrange 会钳制范围。
     pub fn scroll_by(&mut self, dy: i32) {

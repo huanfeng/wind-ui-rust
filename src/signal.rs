@@ -172,6 +172,14 @@ impl<T: 'static> Signal<T> {
     }
 }
 
+impl<T: 'static> Signal<T> {
+    /// 当前写入版本号（每次 `set`/`update` 自增）。用于变更检测：缓存上次版本，
+    /// 不相等则说明值已更新。信号已被释放时返回 `0`。
+    pub fn version(self) -> u64 {
+        RT.with(|rt| rt.borrow().slot(self.key).map(|s| s.version).unwrap_or(0))
+    }
+}
+
 impl<T: Clone + 'static> Signal<T> {
     /// 读取当前值（克隆）。需要追踪依赖的派生场景用 `with` 更省。
     pub fn get(&self) -> T {
