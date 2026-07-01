@@ -61,7 +61,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CYSCREEN, SM_REMOTESESSION, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
     SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO,
     WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
     WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH,
@@ -885,6 +885,25 @@ unsafe extern "system" fn wnd_proc(
         WM_IME_STARTCOMPOSITION | WM_IME_COMPOSITION => {
             handle_ime_position(hwnd);
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_CLOSE => {
+            // 先询问应用层：对话框关闭 / 未保存拦截等。
+            let (allow, repaint) = {
+                let Some(state) = state_from(hwnd) else {
+                    return LRESULT(0);
+                };
+                let allow = state.handler.on_close_request();
+                // 若取消关闭但对话框已关，需重绘。
+                let repaint = !allow;
+                (allow, repaint)
+            };
+            if repaint {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            if allow {
+                let _ = DestroyWindow(hwnd);
+            }
+            return LRESULT(0);
         }
         WM_DESTROY => {
             // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。

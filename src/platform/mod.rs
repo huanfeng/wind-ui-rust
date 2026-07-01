@@ -231,6 +231,11 @@ pub trait AppHandler {
     fn wants_close(&self) -> bool {
         false
     }
+    /// 用户请求关闭窗口（点击 × 按钮或 WM_CLOSE）时调用。
+    /// 返回 true 允许关闭，false 取消（如弹出"未保存"提示后需重绘，平台会自行 Invalidate）。
+    fn on_close_request(&mut self) -> bool {
+        true
+    }
     /// 当前是否处于指针捕获态。平台据此调用 OS 的 SetCapture/ReleaseCapture，
     /// 保证拖出窗口时仍能收到移动/抬起消息。
     fn capture_active(&self) -> bool {

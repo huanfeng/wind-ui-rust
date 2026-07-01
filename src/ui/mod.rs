@@ -1577,6 +1577,8 @@ impl Element {
     /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
     /// `show` 绑定显示标志。
     pub fn dialog(show: Signal<bool>, content: Element) -> Self {
+        // 注册到宿主的对话框信号栈，使 ESC / WM_CLOSE 能优先关闭此对话框。
+        crate::app::register_modal(show);
         Element::stack()
             .fill()
             .widget(containers::ModalScrim)

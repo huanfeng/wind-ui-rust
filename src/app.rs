@@ -14,6 +14,7 @@ use crate::sync::{new_channel, Sender, WakerShared};
 use tiny_skia::Pixmap;
 
 use crate::core::{DamageReq, NodeId, Tree};
+use crate::signal::Signal;
 use crate::event::{
     CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, ToastRequest,
     WindowOp,
@@ -23,6 +24,29 @@ use crate::platform::{self, AppHandler, WindowConfig};
 use crate::render::{Paint, SkiaCanvas};
 use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
+
+thread_local! {
+    /// 构建期收集所有 `Element::dialog` 注册的显示 Signal，供 ESC / WM_CLOSE 优先关闭对话框。
+    static MODAL_SIGNALS: RefCell<Vec<Signal<bool>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 注册一个对话框显示信号（由 `Element::dialog` 在构建期调用）。
+pub(crate) fn register_modal(show: Signal<bool>) {
+    MODAL_SIGNALS.with(|s| s.borrow_mut().push(show));
+}
+
+/// 关闭当前最顶层（最后注册）的可见对话框。返回 true 表示确实关闭了一个。
+fn close_topmost_modal() -> bool {
+    MODAL_SIGNALS.with(|s| {
+        for sig in s.borrow().iter().rev() {
+            if sig.get() {
+                sig.set(false);
+                return true;
+            }
+        }
+        false
+    })
+}
 use crate::ui::Element;
 
 // ---- 上下文菜单（宿主层自绘浮层）----
@@ -195,6 +219,7 @@ pub struct App {
     intervals: Vec<(Duration, Box<dyn FnMut()>)>,
     waker_shared: Option<Arc<WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
+    close_handler: Option<Box<dyn FnMut() -> bool>>,
 }
 
 impl App {
@@ -227,6 +252,7 @@ impl App {
             intervals: Vec::new(),
             waker_shared: None,
             single: None,
+            close_handler: None,
         }
     }
 
@@ -387,6 +413,14 @@ impl App {
         self
     }
 
+    /// 注册关闭请求拦截器。ESC 无对话框时，以及用户点击窗口关闭按钮时，
+    /// 框架先调用此回调：返回 `true` 允许关闭，返回 `false` 取消关闭。
+    /// 常用于"有未保存数据时弹提示"场景。
+    pub fn on_close_request(mut self, f: impl FnMut() -> bool + 'static) -> Self {
+        self.close_handler = Some(Box::new(f));
+        self
+    }
+
     pub fn run(mut self) {
         let single = self.single.take();
         let theme_src = match self.theme_src {
@@ -404,6 +438,7 @@ impl App {
                 cfg.bg,
                 self.pumps,
                 self.intervals,
+                self.close_handler,
             ))
         } else {
             Box::new(ClosureHandler {
@@ -425,6 +460,7 @@ impl App {
             self.cfg.bg,
             self.pumps,
             self.intervals,
+            self.close_handler,
         )
     }
 
@@ -592,6 +628,8 @@ struct UiHost {
     interval_durs: Vec<std::time::Duration>,
     /// 帧耗时浮层开关（环境变量 WINDUI_FPS 非空时开启）。
     show_fps: bool,
+    /// 关闭请求拦截器：返回 true 允许关闭，false 取消。None 时默认允许。
+    close_handler: Option<Box<dyn FnMut() -> bool>>,
 }
 
 /// 脏区四周外扩的抗锯齿余量（逻辑像素）：覆盖滑块边缘 AA 与子像素取整，杜绝残影。
@@ -604,6 +642,7 @@ impl UiHost {
         bg: Color,
         pumps: Vec<Box<dyn FnMut()>>,
         intervals: Vec<(std::time::Duration, Box<dyn FnMut()>)>,
+        close_handler: Option<Box<dyn FnMut() -> bool>>,
     ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
         let theme = theme_src.current();
@@ -650,6 +689,7 @@ impl UiHost {
             interval_cbs,
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
+            close_handler,
         }
     }
 
@@ -1635,7 +1675,16 @@ impl AppHandler for UiHost {
             self.show_toast(req);
         }
         if !res.consumed && ev.key == Key::Escape {
-            self.close = true;
+            // 优先关闭最顶层可见对话框；无对话框时才询问 close_handler，再关窗口。
+            if !close_topmost_modal() {
+                let allowed = self.close_handler.as_mut().map(|h| h()).unwrap_or(true);
+                if allowed {
+                    self.close = true;
+                }
+            } else {
+                // 对话框被关闭，需要重绘以隐藏遮罩。
+                self.needs_full = true;
+            }
         }
         // 键盘改动可能影响布局（文本增减）或他处（切页/对话框）→ 置 needs_relayout：
         // render 重排后用结构签名判定，签名不变（定宽输入打字）走局部，变了升级整窗。
@@ -1648,6 +1697,16 @@ impl AppHandler for UiHost {
 
     fn wants_close(&self) -> bool {
         self.close
+    }
+
+    fn on_close_request(&mut self) -> bool {
+        // 优先关闭最顶层可见对话框（不退出窗口）。
+        if close_topmost_modal() {
+            self.needs_full = true;
+            return false;
+        }
+        // 无对话框时询问 close_handler，默认允许关闭。
+        self.close_handler.as_mut().map(|h| h()).unwrap_or(true)
     }
 
     fn capture_active(&self) -> bool {
