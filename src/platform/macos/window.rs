@@ -847,6 +847,16 @@ pub(crate) fn run_windowed(
     };
     window.setTitle(&NSString::from_str(&cfg.title));
 
+    // 最小客户区尺寸（逻辑点，0=不限制某轴）：对照 win32 的 WM_GETMINMAXINFO，防止用户把
+    // 窗口缩到操作不到按钮。macOS 以点为单位、无需按 DPI 换算——AppKit 自动按 backingScale
+    // 映射到物理像素；setContentMinSize 约束的是内容区（与 win32 的 ptMinTrackSize 客户区语义一致）。
+    if cfg.min_width > 0 || cfg.min_height > 0 {
+        window.setContentMinSize(NSSize {
+            width: cfg.min_width.max(0) as f64,
+            height: cfg.min_height.max(0) as f64,
+        });
+    }
+
     // 无边框窗口：隐藏系统标题栏与三枚标准按钮（应用自绘标题栏与按钮），客户区铺满整窗，
     // 保留系统级吸附/阴影/缩放。拖动经 mouseDown→performWindowDragWithEvent 自管。
     if cfg.frameless {
