@@ -272,9 +272,23 @@ define_class!(
         }
     }
 
-    // 窗口委托：窗口被关闭（关闭按钮 / `wants_close`）时退出应用——对照 win32 的
-    // WM_DESTROY→PostQuitMessage。注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
+    // 窗口委托：拦截关闭请求并驱动真正的退出——对照 win32 的 WM_CLOSE / WM_DESTROY。
     unsafe impl NSWindowDelegate for ContentView {
+        // 拦截标题栏 × 按钮（`performClose:` 会先咨询本回调）：交应用层 `on_close_request`
+        // 走同一优先链——先关最顶层可见对话框、再问未保存拦截回调，返回 false 则取消关闭并
+        // 重绘（反映对话框已关），返回 true 才放行，随后系统触发 `windowWillClose:` 退出。
+        // 注意 `win.close()`（app 主动关窗，见 after_event）不经过本回调，故不会重复询问。
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &AnyObject) -> bool {
+            let allow = self.ivars().borrow_mut().handler.on_close_request();
+            if !allow {
+                self.setNeedsDisplay(true);
+            }
+            allow
+        }
+
+        // 窗口即将销毁时退出应用（对照 win32 WM_DESTROY→PostQuitMessage）。
+        // 注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
             let mtm = MainThreadMarker::from(self);
