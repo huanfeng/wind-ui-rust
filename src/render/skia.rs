@@ -218,6 +218,18 @@ impl Canvas for SkiaCanvas<'_> {
         paint: &Paint,
     ) {
         let _g = super::prof::scope(super::prof::STROKE);
+        // 对齐物理像素整数坐标（与 D2DCanvas::stroke_round_rect 同源）：矩形四边乘以 scale
+        // 取整后还原，使描边中心（边 + half_width）在物理坐标上落在半像素（n+0.5），描边两侧
+        // 各 0.5px 恰好覆盖完整一列物理像素，消除非整数 DPI（125%/150%/175% 等）下的亚像素
+        // 抗锯齿模糊。tf() 的局部重绘 offset 已按 4 逻辑像素网格对齐（offset×scale 为整数），
+        // 故此处对齐逻辑坐标后经变换仍落在物理整数。
+        let s = self.scale;
+        let x0 = (x * s).round() / s;
+        let y0 = (y * s).round() / s;
+        let x1 = ((x + w) * s).round() / s;
+        let y1 = ((y + h) * s).round() / s;
+        let (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
+
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
         if let Some(path) = rounded_rect_path(
