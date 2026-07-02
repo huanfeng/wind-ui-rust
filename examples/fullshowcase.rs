@@ -6,10 +6,6 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
-const CARD: u32 = 0xFFFFFF;
-const BG: u32 = 0xEEF1F5;
 
 /// 内联 SVG 演示资源（含 `#` 颜色值，故用 br##"..."## 定界）。渐变圆 + 单色对勾。
 const SVG_CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b9d"/><stop offset="1" stop-color="#4c8bf5"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="url(#g)"/></svg>"##;
@@ -53,7 +49,7 @@ fn row(label: &str, control: Element) -> Element {
         .child(
             Element::label(label)
                 .font_size(14.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width(110),
         )
         .child(control)
@@ -62,7 +58,7 @@ fn row(label: &str, control: Element) -> Element {
 fn card(title: &str, body: Element) -> Element {
     Element::col()
         .width_match()
-        .bg(Color::hex(CARD))
+        .bg_role(Role::Surface)
         .corner(10.0)
         .padding(16)
         .spacing(8)
@@ -70,7 +66,7 @@ fn card(title: &str, body: Element) -> Element {
         .child(
             Element::label(title)
                 .font_size(16.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width_match(),
         )
         .child(Element::divider())
@@ -83,13 +79,16 @@ fn main() {
     let notes = signal(String::from(
         "这是一个多行文本框示例。\n超过宽度的长行会自动软换行，无需手动断行，体验接近现代编辑器。\n按 Enter 可换行。",
     ));
-    let dark = signal(true);
+    let dark = signal(false);
     let notify = signal(true);
     let beta = signal(false);
     let quality = signal(1usize);
     let lang = signal(0usize);
     let volume = signal(0.7f32);
     let show_about = signal(std::env::args().any(|a| a == "--dialog"));
+
+    let mut app = App::new("windui — 综合示例", 520, 560);
+    let th = app.theme_handle();
 
     // 设置页（内容较多，包进滚动容器）
     let settings_body = Element::col()
@@ -143,7 +142,7 @@ fn main() {
     let settings = Element::scroll().fill().child(settings_body);
 
     // 列表页（滚动）
-    let mut list = Element::scroll().fill().bg(Color::hex(CARD)).corner(10.0);
+    let mut list = Element::scroll().fill().bg_role(Role::Surface).corner(10.0);
     for i in 0u32..24 {
         list = list.child(
             Element::row()
@@ -151,21 +150,21 @@ fn main() {
                 .height(38)
                 .cross(Align::Center)
                 .padding_xy(14, 0)
-                .bg(if i.is_multiple_of(2) {
-                    Color::hex(CARD)
+                .bg_role(if i.is_multiple_of(2) {
+                    Role::Surface
                 } else {
-                    Color::hex(0xF6F8FA)
+                    Role::SurfaceAlt
                 })
                 .child(
                     Element::label(format!("历史记录 {i:02}"))
                         .font_size(14.0)
-                        .fg(Color::hex(FG))
+                        .fg_role(Role::Text)
                         .weight(1.0),
                 )
                 .child(
                     Element::label("查看")
                         .font_size(13.0)
-                        .fg(Color::hex(0x4C8BF5)),
+                        .fg_role(Role::Accent),
                 ),
         );
     }
@@ -179,21 +178,21 @@ fn main() {
             .child(
                 Element::label("轻量 Windows 桌面 GUI 框架")
                     .font_size(15.0)
-                    .fg(Color::hex(FG))
+                    .fg_role(Role::Text)
                     .height(22)
                     .width_match(),
             )
             .child(
                 Element::label("Win32 窗口 + GDI 呈现 + tiny-skia 图形 + DirectWrite 文字")
                     .font_size(13.0)
-                    .fg(Color::hex(SUB))
+                    .fg_role(Role::TextMuted)
                     .height(20)
                     .width_match(),
             )
             .child(
                 Element::label("目标内存占用 2–5MB，无运行时、无 GC。")
                     .font_size(13.0)
-                    .fg(Color::hex(SUB))
+                    .fg_role(Role::TextMuted)
                     .height(20)
                     .width_match(),
             )
@@ -271,12 +270,12 @@ fn main() {
                 .spacing(12)
                 .padding(12)
                 .corner(10.0)
-                .bg(Color::hex(CARD))
-                .border(Color::hex(0x3A4150), 1)
+                .bg_role(Role::Surface)
+                .border_role(Role::Border, 1)
                 .child(
                     Element::label("整行可点击 — 悬停高亮 / 回车激活 / 点击弹 Toast")
                         .font_size(14.0)
-                        .fg(Color::hex(FG))
+                        .fg_role(Role::Text)
                         .weight(1.0)
                         .height(20),
                 )
@@ -423,14 +422,14 @@ fn main() {
                         Element::nav_row("拼音纠错设置").on_click(move |_| m.set("已进入：拼音纠错设置".into()))
                     }),
             ))
-            .child(Element::label_rc(nav_msg).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+            .child(Element::label_rc(nav_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
         ))
         .child(card(
             "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
             Element::col()
                 .width_match()
                 .spacing(12)
-                .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
                 .child(Element::accordion(
                     acc_sel,
                     vec![
@@ -439,7 +438,7 @@ fn main() {
                         ("支持自定义吗？", Element::label("支持，导入自定义码表即可。").width_match().height(28).padding_xy(12, 0)),
                     ],
                 ))
-                .child(Element::label("多开独立（各面板互不影响）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::label("多开独立（各面板互不影响）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
                 .child(Element::accordion_multi(vec![
                     ("常规", Element::label("常规设置项……").width_match().height(28).padding_xy(12, 0)),
                     ("外观", Element::label("外观设置项……").width_match().height(28).padding_xy(12, 0)),
@@ -453,7 +452,7 @@ fn main() {
                 .child(row("按钮", Element::button("悬停我").tooltip("这是按钮的悬停说明")))
                 .child(row(
                     "帮助图标",
-                    Element::label("(?)").font_size(14.0).fg(Color::hex(SUB)).tooltip("把鼠标停在元素上片刻即可看到提示"),
+                    Element::label("(?)").font_size(14.0).fg_role(Role::TextMuted).tooltip("把鼠标停在元素上片刻即可看到提示"),
                 )),
         ))
         .child(card(
@@ -461,9 +460,9 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(Element::label("确定 45%").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::label("确定 45%").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
                 .child(Element::progress(prog).width_match())
-                .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg(Color::hex(SUB)).height(18).width_match())
+                .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
                 .child(Element::progress_indeterminate().width_match()),
         ))
         .child(card(
@@ -482,7 +481,7 @@ fn main() {
             )
             .height(160)
             .width_match()
-            .bg(Color::hex(0xF6F8FA))
+            .bg_role(Role::SurfaceAlt)
             .corner(8.0),
         ))
         .child(card(
@@ -521,17 +520,17 @@ fn main() {
                     ln.set(ln.get() + 1);
                     lm.set(format!("已点击 {} 次", ln.get()));
                 }))
-                .child(Element::label_rc(link_msg).font_size(13.0).fg(Color::hex(SUB)).height(18).width_match()),
+                .child(Element::label_rc(link_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
         ))
         .child(card(
             "标签省略（max_lines + truncate）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
-                .child(row("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
-                .child(row("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg(Color::hex(FG)).weight(1.0)))
-                .child(row("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg(Color::hex(FG)).weight(1.0))),
+                .child(row("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(row("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(row("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(row("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg_role(Role::Text).weight(1.0))),
         ));
     let components = Element::scroll().fill().child(components_body);
 
@@ -543,13 +542,13 @@ fn main() {
             .child(
                 e.width(84)
                     .height(60)
-                    .bg(Color::hex(0xF6F8FA))
-                    .border(Color::hex(0xDDDDDD), 1),
+                    .bg_role(Role::SurfaceAlt)
+                    .border_role(Role::Border, 1),
             )
             .child(
                 Element::label(label)
                     .font_size(12.0)
-                    .fg(Color::hex(SUB))
+                    .fg_role(Role::TextMuted)
                     .height(16),
             )
     };
@@ -630,21 +629,21 @@ fn main() {
         show_about,
         Element::col()
             .width(320)
-            .bg(Color::hex(CARD))
+            .bg_role(Role::Surface)
             .corner(14.0)
             .padding(22)
             .spacing(14)
             .child(
                 Element::label("windui v0.1")
                     .font_size(20.0)
-                    .fg(Color::hex(FG))
+                    .fg_role(Role::Text)
                     .height(28)
                     .width_match(),
             )
             .child(
                 Element::label("一个用 Rust 编写的轻量桌面 GUI 框架，适合做内存友好的小工具。")
                     .font_size(14.0)
-                    .fg(Color::hex(SUB))
+                    .fg_role(Role::TextMuted)
                     .height(44)
                     .width_match(),
             )
@@ -659,26 +658,40 @@ fn main() {
 
     let ui = Element::stack()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .child(
             Element::col()
                 .fill()
                 .padding(18)
                 .spacing(12)
-                .child(
-                    Element::label("偏好设置")
-                        .font_size(24.0)
-                        .fg(Color::hex(0x1A1A2E))
+                .child({
+                    let th_dark = th.clone();
+                    let th_light = th.clone();
+                    Element::row()
+                        .width_match()
                         .height(34)
-                        .width_match(),
-                )
+                        .cross(Align::Center)
+                        .child(
+                            Element::label("偏好设置")
+                                .font_size(24.0)
+                                .fg_role(Role::Text)
+                                .weight(1.0),
+                        )
+                        .child(Element::button("暗色").neutral().on_click(move |_| {
+                            dark.set(true);
+                            th_dark.set(Theme::dark());
+                        }))
+                        .child(Element::button("亮色").neutral().on_click(move |_| {
+                            dark.set(false);
+                            th_light.set(Theme::default());
+                        }))
+                })
                 // tabs 用 weight 占据标题以下的剩余高度（纵向 Match 会降级为 Wrap，需 weight 才填充）。
                 .child(tabs.weight(1.0)),
         )
         .child(dialog);
 
-    App::new("windui — 综合示例", 520, 560)
-        .bg(Color::hex(BG))
+    app.bg(Theme::default().palette.bg)
         .screenshot_from_args()
         .content(ui)
         .run();
