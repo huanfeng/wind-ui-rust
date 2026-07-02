@@ -587,15 +587,18 @@ impl Widget for Button {
             ic.bg
         };
         // 文字色：禁用用 text_disabled；Outline 用意图主色（蓝/红/灰）作文字；
-        // 否则 fg_role 优先（运行期换主题跟随）；style.bg 有值时用显式 style.fg；再否则用意图前景。
+        // 显式 .fg(color) 覆盖优先；显式 .fg_role(非默认角色) 次之；否则填充按钮用意图对比
+        // 前景 ic.fg（on_accent，跟随主题，保证蓝底白字）。
+        // 注：Style::default() 的 fg_role 为 Some(Role::Text)（为让 Label/CheckBox 等跟随主题），
+        // 填充按钮须把这个「默认角色」视作未覆盖、回落到 ic.fg，否则蓝底会被刷成深色文字。
         let fg = if vstate == VisualState::Disabled {
             pal.text_disabled
         } else if is_outline {
             outline_col
-        } else if style.fg_role.is_some() {
-            style.resolved_fg(&t)
-        } else if is_primary && style.bg.is_some() {
+        } else if style.fg_role.is_none() {
             style.fg
+        } else if style.fg_role != Some(Role::Text) {
+            style.resolved_fg(&t)
         } else {
             ic.fg
         };
