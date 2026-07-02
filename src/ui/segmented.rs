@@ -156,7 +156,8 @@ impl Widget for SegmentedControl {
             let pill_bg = if enabled {
                 sg.selected_bg(pal)
             } else {
-                pal.surface_alt
+                // track 在亮/暗模式下均与 surface 有明显对比度，surface_alt 几乎不可见
+                pal.track
             };
             let (rx, ry, rw, rh) = (
                 px0 + 2.0,
@@ -181,7 +182,8 @@ impl Widget for SegmentedControl {
         let tc_selected = if enabled {
             sg.selected_text(pal)
         } else {
-            pal.text_disabled
+            // text_muted 比 text_disabled 更深，使选中段与非选中段有可见对比
+            pal.text_muted
         };
         for i in 0..n {
             let (x0, x1) = self.seg_x(bounds, i);
