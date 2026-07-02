@@ -903,7 +903,7 @@ unsafe extern "system" fn wnd_proc(
             if allow {
                 let _ = DestroyWindow(hwnd);
             }
-            return LRESULT(0);
+            LRESULT(0)
         }
         WM_DESTROY => {
             // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。

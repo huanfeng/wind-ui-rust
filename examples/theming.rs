@@ -55,7 +55,7 @@ fn main() {
         let h = handle.clone();
         let tdp = theme_dp.clone();
         let tpx = theme_px.clone();
-        let mt = mode_text.clone();
+        let mt = mode_text;
         Element::button("切换单位")
             .on_click(move |_| {
                 let now = use_px.get();

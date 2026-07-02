@@ -290,10 +290,10 @@ impl Widget for Stepper {
         if self.editing.get() {
             let edit_buf = self.edit_buf.borrow();
             // 文字本身不含光标符，避免宽度变化导致居中位移抖动。
-            canvas.draw_text(&*edit_buf, mid, value_color, Align::Center, family, fsize);
+            canvas.draw_text(&edit_buf, mid, value_color, Align::Center, family, fsize);
 
             // 用 measure_text 算光标 x，然后画竖线（与 TextInput 一致）。
-            let full_w = canvas.measure_text(&*edit_buf, family, fsize).w;
+            let full_w = canvas.measure_text(&edit_buf, family, fsize).w;
             let cursor = self.edit_cursor.get();
             let before_w = canvas.measure_text(&edit_buf[..cursor], family, fsize).w;
             let text_start_x = mid.x + (mid.w - full_w) / 2;

@@ -161,7 +161,6 @@ fn main() {
 
     // 排序按钮
     let sort_btn = {
-        let tasks = tasks;
         Element::button("按优先级排序")
             .on_click(move |_| {
                 let by_name = !sort_by_name.get();
@@ -173,7 +172,6 @@ fn main() {
 
     // 筛选按钮
     let filter_btn = {
-        let tasks = tasks;
         Element::button("隐藏已完成")
             .on_click(move |_| {
                 let hide = !hide_done.get();

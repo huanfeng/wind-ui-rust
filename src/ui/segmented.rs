@@ -145,8 +145,7 @@ impl Widget for SegmentedControl {
         // 滑动选中胶囊（始终有选中项）。几何按相邻整数段的 seg_x 端点插值，
         // 使落定态与文字/分隔线所用的整数分段逐像素对齐（段宽不整除时也不错位）。
         // 提前计算胶囊矩形，供后续文字裁剪复用。
-        let pill_clip: Option<Rect>;
-        if n > 0 {
+        let pill_clip: Option<Rect> = if n > 0 {
             let i0 = (fi.floor() as usize).min(n - 1);
             let i1 = (i0 + 1).min(n - 1);
             let frac = fi - i0 as f32;
@@ -168,10 +167,10 @@ impl Widget for SegmentedControl {
             let pr = (corner - 2.0).max(0.0);
             // 选中胶囊：实心强调色（文字反色由 selected_text 提供），无投影/渐变。
             canvas.fill_round_rect(rx, ry, rw, rh, pr, &Paint::fill(pill_bg));
-            pill_clip = Some(Rect::new(rx as i32, ry as i32, rw as i32, rh as i32));
+            Some(Rect::new(rx as i32, ry as i32, rw as i32, rh as i32))
         } else {
-            pill_clip = None;
-        }
+            None
+        };
         // 文字两遍绘制：先全段用普通色，再裁剪到胶囊区域用选中色覆盖。
         // 这样文字颜色精确跟随胶囊像素位置，动画过程中不会出现颜色提前切换的问题。
         let tc_normal = if enabled {
