@@ -553,6 +553,48 @@ impl SegmentTheme {
     }
 }
 
+/// 表格覆盖层：排序指示器（箭头）的字形 / 字号 / 颜色 / 槽宽 / 间距 / 位置。
+/// 每实例可用 `Element::sort_indicator(SortStyle)` 覆盖，未覆盖字段回退到本主题、再回退到内置默认。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableTheme {
+    /// 升序箭头字形（默认 ▲）。
+    pub sort_asc: Option<String>,
+    /// 降序箭头字形（默认 ▼）。
+    pub sort_desc: Option<String>,
+    /// 箭头字号 px（默认 10）。
+    pub sort_size: Option<f32>,
+    /// 箭头颜色（None 时用 `text_muted` 并随主题热切换；Some 为定死色）。
+    pub sort_color: Option<Color>,
+    /// 箭头槽宽度 px（默认 14；始终预留避免排序切换时标题宽度跳动）。
+    pub sort_slot: Option<i32>,
+    /// 标题与箭头间距 px（默认 2）。
+    pub sort_gap: Option<i32>,
+    /// 箭头置于标题左侧（默认 false = 右侧）。
+    pub sort_leading: Option<bool>,
+}
+
+impl TableTheme {
+    pub fn sort_asc(&self) -> &str {
+        self.sort_asc.as_deref().unwrap_or("\u{25B2}")
+    }
+    pub fn sort_desc(&self) -> &str {
+        self.sort_desc.as_deref().unwrap_or("\u{25BC}")
+    }
+    pub fn sort_size(&self) -> f32 {
+        self.sort_size.unwrap_or(10.0)
+    }
+    pub fn sort_slot(&self) -> i32 {
+        self.sort_slot.unwrap_or(14)
+    }
+    pub fn sort_gap(&self) -> i32 {
+        self.sort_gap.unwrap_or(2)
+    }
+    pub fn sort_leading(&self) -> bool {
+        self.sort_leading.unwrap_or(false)
+    }
+}
+
 /// 导航覆盖层（NavRow 钻入行 + CollapsibleHeader 折叠头共用）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -701,6 +743,7 @@ pub struct Theme {
     pub list: ListTheme,
     pub link: LinkTheme,
     pub segment: SegmentTheme,
+    pub table: TableTheme,
     pub nav: NavTheme,
     pub accordion: AccordionTheme,
     pub anim: AnimTheme,

@@ -13,6 +13,7 @@ pub mod nav;
 pub mod progress;
 pub mod segmented;
 pub mod select;
+pub mod sortable_table;
 pub mod stepper;
 pub mod window_buttons;
 
@@ -40,6 +41,7 @@ pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use progress::ProgressBar;
 pub use segmented::SegmentedControl;
 pub use select::Dropdown;
+pub use sortable_table::SortStyle;
 pub use stepper::Stepper;
 pub use window_buttons::{WindowButton, WindowButtonKind};
 
@@ -61,6 +63,16 @@ pub enum Truncate {
     End,    // text…（最常用）
     Start,  // …text
     Middle, // te…xt
+}
+
+/// 表格排序方向。配合 [`Element::table_sortable`] 的受控排序状态
+/// `Signal<Option<(列下标, SortOrder)>>` 使用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    /// 升序（数值从小到大 / 字符串字典序）。
+    Asc,
+    /// 降序。
+    Desc,
 }
 
 /// 文本控件（`Label`/`DynLabel`）前景色：启用取样式解析色；禁用统一降为 `text_disabled`，
@@ -1814,6 +1826,137 @@ impl Element {
             })
             .collect();
         Self::table_custom(cols, rows)
+    }
+
+    /// 可排序数据表格（受控排序）：点表头在 无 → 升序 → 降序 → 无 间循环，活动列显示
+    /// 排序箭头（▲/▼）；正文按当前排序列重排。数值型列（两侧都能解析为 f64）按数值比较，
+    /// 否则按字符串。排序状态由 `sort` 信号承载（受控——app 可读取/预置/联动服务端排序）。
+    ///
+    /// `columns` 为 (列标题, 权重)；`rows` 为每行的单元格文本。需在限高容器内使用（正文滚动）。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let sort = signal(Some((0usize, SortOrder::Asc)));
+    /// Element::table_sortable(
+    ///     vec![("名称", 2.0), ("大小", 1.0)],
+    ///     vec![vec!["a.txt", "12"], vec!["b.txt", "3"]],
+    ///     sort,
+    /// ).height(200)
+    /// ```
+    pub fn table_sortable(
+        columns: Vec<(impl Into<String>, f32)>,
+        rows: Vec<Vec<impl Into<String>>>,
+        sort: Signal<Option<(usize, SortOrder)>>,
+    ) -> Self {
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let data: Vec<Vec<String>> = rows
+            .into_iter()
+            .map(|r| r.into_iter().map(Into::into).collect())
+            .collect();
+        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+
+        // 表头：响应式。单元格由 SortableHeader 首次布局时构建（见其 on_update），
+        // 故 .sort_indicator(..) 覆盖能在 build 前设入并被采纳。客户端模式无回调。
+        let mut header = Element::row()
+            .width_match()
+            .cross(Align::Stretch)
+            .bg_role(Role::SurfaceAlt);
+        header.widget = Box::new(sortable_table::SortableHeader::new(cols, sort, None));
+        header.reactive = true;
+
+        // 正文：响应式（排序变化重排重建）。初始行按当前排序状态排列。
+        let order = sortable_table::sorted_order(&data, sort.get());
+        let mut scroll = Element::scroll().fill();
+        for (disp, &ri) in order.iter().enumerate() {
+            scroll = scroll.child(sortable_table::body_row(disp, &data[ri], &weights));
+        }
+        scroll.widget = Box::new(sortable_table::SortableBody::new(data, weights, sort));
+        scroll.reactive = true;
+
+        Element::col()
+            .width_match()
+            .child(header)
+            .child(Element::divider())
+            .child(scroll.weight(1.0))
+    }
+
+    /// 服务端排序表格（受控数据 + 排序意图回调）：适合大数据集分页——**前端不排序**，
+    /// 排序与分页由后端完成，前端只负责排序状态 UI（箭头）、捕获点击、触发重新拉取。
+    ///
+    /// - `rows` 为「当前页数据」信号：应用在 `on_sort` 里按新排序拉取数据后 `set` 写回，
+    ///   正文自动重建（不做任何内部排序，后端给什么顺序就显示什么顺序）。
+    /// - `sort` 承载当前排序列/方向，供表头渲染 ▲/▼；点表头先更新它、再触发 `on_sort`。
+    /// - `on_sort(ctx, 新排序)` 在点表头时回调：应用据此请求「该排序 + 第一页」并 `set(rows)`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let rows = signal(fetch_page(None, 0)); // 当前页数据
+    /// let sort = signal(None);
+    /// Element::table_sortable_server(
+    ///     vec![("名称", 2.0), ("大小", 1.0)],
+    ///     rows,
+    ///     sort,
+    ///     move |_ctx, new_sort| rows.set(fetch_page(new_sort, 0)),
+    /// ).height(400)
+    /// ```
+    pub fn table_sortable_server(
+        columns: Vec<(impl Into<String>, f32)>,
+        rows: Signal<Vec<Vec<String>>>,
+        sort: Signal<Option<(usize, SortOrder)>>,
+        on_sort: impl FnMut(&mut EventCtx, Option<(usize, SortOrder)>) + 'static,
+    ) -> Self {
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+        let on_sort: sortable_table::OnSort = Rc::new(RefCell::new(on_sort));
+
+        // 表头：响应式，单元格由 SortableHeader 首次布局构建（透传排序意图回调）。
+        let mut header = Element::row()
+            .width_match()
+            .cross(Align::Stretch)
+            .bg_role(Role::SurfaceAlt);
+        header.widget = Box::new(sortable_table::SortableHeader::new(
+            cols,
+            sort,
+            Some(on_sort),
+        ));
+        header.reactive = true;
+
+        // 正文：绑定当前页数据信号，按后端给定顺序渲染（无内部排序），数据变即重建。
+        let initial = rows.get();
+        let mut scroll = Element::scroll().fill();
+        for (disp, row) in initial.iter().enumerate() {
+            scroll = scroll.child(sortable_table::body_row(disp, row, &weights));
+        }
+        scroll.widget = Box::new(sortable_table::PagedBody::new(rows, weights));
+        scroll.reactive = true;
+
+        Element::col()
+            .width_match()
+            .child(header)
+            .child(Element::divider())
+            .child(scroll.weight(1.0))
+    }
+
+    /// 覆盖排序表格的排序指示器样式（字形/字号/颜色/槽宽/间距/位置）。仅对
+    /// [`table_sortable`](Self::table_sortable) / [`table_sortable_server`](Self::table_sortable_server)
+    /// 返回的元素有效——它会定位表头行并设置每实例覆盖（未设字段回退主题 `TableTheme`）。
+    /// 用于个别表格与全局主题不同的场景；全局统一样式请配主题。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// Element::table_sortable(cols, rows, sort)
+    ///     .sort_indicator(SortStyle { asc: Some("↑".into()), desc: Some("↓".into()), ..Default::default() })
+    /// ```
+    pub fn sort_indicator(mut self, style: SortStyle) -> Self {
+        // 排序表格结构为 col[ header, divider, scroll ]，表头为首个子节点。
+        if let Some(header) = self.children.get_mut(0) {
+            if let Some(a) = header.widget.as_any_mut() {
+                if let Some(h) = a.downcast_mut::<sortable_table::SortableHeader>() {
+                    h.set_style(style);
+                }
+            }
+        }
+        self
     }
 
     /// 设置自定义内容控件（叶子）。

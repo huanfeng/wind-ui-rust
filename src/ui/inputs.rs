@@ -370,7 +370,11 @@ impl Widget for RadioButton {
         let (p, tg) = (&th.palette, &th.toggle);
         // 禁用：强调色降为灰、文字用 text_disabled。
         let accent = if enabled { tg.accent(p) } else { p.track };
-        let text_color = if !enabled { p.text_disabled } else { style.resolved_fg(&th) };
+        let text_color = if !enabled {
+            p.text_disabled
+        } else {
+            style.resolved_fg(&th)
+        };
         let cy = bounds.y + bounds.h / 2;
         let cx = bounds.x + BOX_SIZE / 2;
         let outer = BOX_SIZE as f32 / 2.0;
@@ -1248,7 +1252,11 @@ impl Widget for TextInput {
         } else {
             pal.surface_alt
         };
-        let text_color = if enabled { style.resolved_fg(&th) } else { pal.text_disabled };
+        let text_color = if enabled {
+            style.resolved_fg(&th)
+        } else {
+            pal.text_disabled
+        };
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused {
             inp.border_focus(pal)

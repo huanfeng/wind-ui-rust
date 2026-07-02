@@ -6,7 +6,6 @@
 
 use windui::prelude::*;
 
-
 /// 内联 SVG 演示资源（含 `#` 颜色值，故用 br##"..."## 定界）。渐变圆 + 单色对勾。
 const SVG_CIRCLE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b9d"/><stop offset="1" stop-color="#4c8bf5"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="url(#g)"/></svg>"##;
 const SVG_CHECK: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z" fill="#000000"/></svg>"##;
@@ -161,11 +160,7 @@ fn main() {
                         .fg_role(Role::Text)
                         .weight(1.0),
                 )
-                .child(
-                    Element::label("查看")
-                        .font_size(13.0)
-                        .fg_role(Role::Accent),
-                ),
+                .child(Element::label("查看").font_size(13.0).fg_role(Role::Accent)),
         );
     }
 
@@ -339,6 +334,63 @@ fn main() {
                 ],
             )
             .height(160),
+        ))
+        .child(card(
+            "可排序表格 table_sortable（点表头循环 无→升→降；数值列按数值比较）",
+            Element::table_sortable(
+                vec![("名称", 2.0), ("大小(KB)", 1.0), ("修改日期", 1.5)],
+                vec![
+                    vec!["report.pdf", "1280", "2026-05-01"],
+                    vec!["notes.txt", "3", "2026-06-18"],
+                    vec!["photo.png", "845", "2026-04-22"],
+                    vec!["archive.zip", "20480", "2026-06-30"],
+                    vec!["readme.md", "12", "2026-05-15"],
+                ],
+                signal(Some((0usize, SortOrder::Asc))),
+            )
+            .height(200),
+        ))
+        .child(card(
+            "服务端排序 table_sortable_server（前端不排序：点表头→回调重拉当前页）",
+            {
+                // 模拟「后端」全量数据（真实场景在服务器；此处放内存演示解耦流程）。
+                let full: Vec<Vec<String>> = vec![
+                    vec!["report.pdf".into(), "1280".into(), "2026-05-01".into()],
+                    vec!["notes.txt".into(), "3".into(), "2026-06-18".into()],
+                    vec!["photo.png".into(), "845".into(), "2026-04-22".into()],
+                    vec!["archive.zip".into(), "20480".into(), "2026-06-30".into()],
+                    vec!["readme.md".into(), "12".into(), "2026-05-15".into()],
+                ];
+                // 「后端」按排序意图返回当前页（此处演示：全量排序后取全部；真实为 LIMIT/OFFSET）。
+                let backend = move |s: Option<(usize, SortOrder)>| -> Vec<Vec<String>> {
+                    let mut rows = full.clone();
+                    if let Some((col, ord)) = s {
+                        rows.sort_by(|a, b| {
+                            let c = match (a[col].parse::<f64>(), b[col].parse::<f64>()) {
+                                (Ok(x), Ok(y)) => {
+                                    x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
+                                }
+                                _ => a[col].cmp(&b[col]),
+                            };
+                            if matches!(ord, SortOrder::Desc) {
+                                c.reverse()
+                            } else {
+                                c
+                            }
+                        });
+                    }
+                    rows
+                };
+                let sort = signal(Some((1usize, SortOrder::Asc)));
+                let page = signal(backend(sort.get())); // 当前页数据信号
+                Element::table_sortable_server(
+                    vec![("名称", 2.0), ("大小(KB)", 1.0), ("修改日期", 1.5)],
+                    page,
+                    sort,
+                    move |_ctx, new_sort| page.set(backend(new_sort)), // 点表头→重拉
+                )
+                .height(200)
+            },
         ))
         .child(card(
             "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",

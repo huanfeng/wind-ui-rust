@@ -33,8 +33,9 @@ pub mod prelude {
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::{Brush, Role, Shadow, Style};
     pub use crate::sync::Sender;
-    pub use crate::theme::{Intent, Len, Theme};
+    pub use crate::theme::{Intent, Len, TableTheme, Theme};
     pub use crate::ui::{
-        Element, ImageContent, ImageView, Link, Truncate, WindowButton, WindowButtonKind,
+        Element, ImageContent, ImageView, Link, SortOrder, SortStyle, Truncate, WindowButton,
+        WindowButtonKind,
     };
 }
