@@ -328,7 +328,8 @@ pub trait AppHandler {
 #[cfg(windows)]
 fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
     use raw_window_handle::{
-        HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle, Win32WindowHandle, WindowHandle, WindowsDisplayHandle,
     };
     use std::num::NonZeroIsize;
 
@@ -341,6 +342,13 @@ fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
         fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
             Ok(unsafe {
                 WindowHandle::borrow_raw(RawWindowHandle::Win32(Win32WindowHandle::new(self.0)))
+            })
+        }
+    }
+    impl HasDisplayHandle for W {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            Ok(unsafe {
+                DisplayHandle::borrow_raw(RawDisplayHandle::Windows(WindowsDisplayHandle::new()))
             })
         }
     }
