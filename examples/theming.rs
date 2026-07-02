@@ -38,11 +38,11 @@ fn main() {
     let theme_dp = Theme::from_toml(THEME_DP).expect("Dp 主题解析失败");
     let theme_px = Theme::from_toml(THEME_PX).expect("Px 主题解析失败");
 
-    let name  = signal(String::new());
-    let on    = signal(true);
+    let name = signal(String::new());
+    let on = signal(true);
     let check = signal(true);
-    let vol   = signal(0.5f32);
-    let mode  = signal(0usize);
+    let vol = signal(0.5f32);
+    let mode = signal(0usize);
     let use_px = signal(false);
     let mode_text = signal(String::from(
         "当前：border_width = 1.0（Dp）— 逻辑像素，125%/150% DPI 可见亚像素模糊",
@@ -97,7 +97,10 @@ fn main() {
         .corner(10.0)
         .padding(16)
         .spacing(8)
-        .child(row("文本框", Element::text_input(name, "点击聚焦…").width_match()))
+        .child(row(
+            "文本框",
+            Element::text_input(name, "点击聚焦…").width_match(),
+        ))
         .child(row(
             "下拉",
             Element::dropdown(vec!["选项 A", "选项 B", "选项 C"], mode).width_match(),

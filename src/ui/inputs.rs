@@ -537,12 +537,7 @@ impl Widget for Slider {
         // 值标签
         if self.show_value {
             let label = format!("{:.0}%", v * 100.0);
-            let label_rect = Rect::new(
-                bounds.x + track_w,
-                bounds.y,
-                VALUE_LABEL_W,
-                bounds.h,
-            );
+            let label_rect = Rect::new(bounds.x + track_w, bounds.y, VALUE_LABEL_W, bounds.h);
             let text_color = if enabled { pal.text } else { pal.text_disabled };
             canvas.draw_text(
                 &label,

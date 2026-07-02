@@ -168,23 +168,33 @@ impl Widget for SegmentedControl {
             let pr = (corner - 2.0).max(0.0);
             // 选中胶囊：实心强调色（文字反色由 selected_text 提供），无投影/渐变。
             canvas.fill_round_rect(rx, ry, rw, rh, pr, &Paint::fill(pill_bg));
-            pill_clip = Some(Rect::new(
-                rx as i32,
-                ry as i32,
-                rw as i32,
-                rh as i32,
-            ));
+            pill_clip = Some(Rect::new(rx as i32, ry as i32, rw as i32, rh as i32));
         } else {
             pill_clip = None;
         }
         // 文字两遍绘制：先全段用普通色，再裁剪到胶囊区域用选中色覆盖。
         // 这样文字颜色精确跟随胶囊像素位置，动画过程中不会出现颜色提前切换的问题。
-        let tc_normal = if enabled { sg.text(pal) } else { pal.text_disabled };
-        let tc_selected = if enabled { sg.selected_text(pal) } else { pal.text_disabled };
+        let tc_normal = if enabled {
+            sg.text(pal)
+        } else {
+            pal.text_disabled
+        };
+        let tc_selected = if enabled {
+            sg.selected_text(pal)
+        } else {
+            pal.text_disabled
+        };
         for i in 0..n {
             let (x0, x1) = self.seg_x(bounds, i);
             let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-            canvas.draw_text(&self.options[i], seg, tc_normal, Align::Center, family, fsize);
+            canvas.draw_text(
+                &self.options[i],
+                seg,
+                tc_normal,
+                Align::Center,
+                family,
+                fsize,
+            );
         }
         if let Some(clip) = pill_clip {
             canvas.save();
@@ -192,7 +202,14 @@ impl Widget for SegmentedControl {
             for i in 0..n {
                 let (x0, x1) = self.seg_x(bounds, i);
                 let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-                canvas.draw_text(&self.options[i], seg, tc_selected, Align::Center, family, fsize);
+                canvas.draw_text(
+                    &self.options[i],
+                    seg,
+                    tc_selected,
+                    Align::Center,
+                    family,
+                    fsize,
+                );
             }
             canvas.restore();
         }

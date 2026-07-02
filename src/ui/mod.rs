@@ -235,23 +235,9 @@ impl Widget for Label {
                 *self.trunc_cache.borrow_mut() = Some((key_w, key_f, s.clone()));
                 s
             };
-            canvas.draw_text(
-                &text_str,
-                paint_rect,
-                fg,
-                style.text_align,
-                family,
-                fsize,
-            );
+            canvas.draw_text(&text_str, paint_rect, fg, style.text_align, family, fsize);
         } else {
-            canvas.draw_text(
-                &self.text,
-                paint_rect,
-                fg,
-                style.text_align,
-                family,
-                fsize,
-            );
+            canvas.draw_text(&self.text, paint_rect, fg, style.text_align, family, fsize);
         }
 
         if need_clip {
@@ -406,23 +392,9 @@ impl Widget for DynLabel {
                 *self.trunc_cache.borrow_mut() = Some((s.clone(), key_w, key_f, out.clone()));
                 out
             };
-            canvas.draw_text(
-                &text_str,
-                paint_rect,
-                fg,
-                style.text_align,
-                family,
-                fsize,
-            );
+            canvas.draw_text(&text_str, paint_rect, fg, style.text_align, family, fsize);
         } else {
-            canvas.draw_text(
-                &s,
-                paint_rect,
-                fg,
-                style.text_align,
-                family,
-                fsize,
-            );
+            canvas.draw_text(&s, paint_rect, fg, style.text_align, family, fsize);
         }
 
         if need_clip {

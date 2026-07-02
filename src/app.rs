@@ -14,7 +14,6 @@ use crate::sync::{new_channel, Sender, WakerShared};
 use tiny_skia::Pixmap;
 
 use crate::core::{DamageReq, NodeId, Tree};
-use crate::signal::Signal;
 use crate::event::{
     CursorShape, Key, MenuAction, MenuItem, MouseButton, PointerEvent, PointerKind, ToastRequest,
     WindowOp,
@@ -22,6 +21,7 @@ use crate::event::{
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, WindowConfig};
 use crate::render::{Paint, SkiaCanvas};
+use crate::signal::Signal;
 use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
 
@@ -137,7 +137,11 @@ impl MenuLevel {
         let mut y = self.rect.y + MENU_VPAD - self.scroll;
         let mut rows = Vec::with_capacity(self.items.len());
         for it in &self.items {
-            let h = if it.separator { MENU_SEP_H } else { MENU_ITEM_H };
+            let h = if it.separator {
+                MENU_SEP_H
+            } else {
+                MENU_ITEM_H
+            };
             rows.push((y, h));
             y += h;
         }
@@ -843,7 +847,13 @@ impl UiHost {
         let (w, has_icons) = self.level_width(&items, min_width);
         let body: i32 = items
             .iter()
-            .map(|it| if it.separator { MENU_SEP_H } else { MENU_ITEM_H })
+            .map(|it| {
+                if it.separator {
+                    MENU_SEP_H
+                } else {
+                    MENU_ITEM_H
+                }
+            })
             .sum();
         let content_h = body + 2 * MENU_VPAD;
         // 面板可视高度：不超过 MENU_MAX_H，也不超过窗口高的 3/4。
@@ -887,7 +897,11 @@ impl UiHost {
             let mut offset = MENU_VPAD;
             let mut result = 0i32;
             for it in &items {
-                let ih = if it.separator { MENU_SEP_H } else { MENU_ITEM_H };
+                let ih = if it.separator {
+                    MENU_SEP_H
+                } else {
+                    MENU_ITEM_H
+                };
                 if it.checked {
                     result = offset + ih / 2 - h / 2;
                     break;
@@ -911,7 +925,14 @@ impl UiHost {
 
     /// 打开上下文菜单（根级）。
     fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
-        let level = self.build_level(req.items, req.pos.x, req.pos.y, req.min_width, None, req.anchor_top);
+        let level = self.build_level(
+            req.items,
+            req.pos.x,
+            req.pos.y,
+            req.min_width,
+            None,
+            req.anchor_top,
+        );
         self.menu = Some(ContextMenu {
             levels: vec![level],
             target,
@@ -993,7 +1014,8 @@ impl UiHost {
                     if let Some(m) = self.menu.as_mut() {
                         m.levels.truncate(k + 1);
                     }
-                    let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2), None);
+                    let mut child =
+                        self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2), None);
                     child.spawn = Some(i);
                     self.menu.as_mut().unwrap().levels.push(child);
                     changed = true;
@@ -1024,7 +1046,8 @@ impl UiHost {
                     if let Some(m) = self.menu.as_mut() {
                         if let Some(level) = m.levels.get_mut(level_idx) {
                             let max_sc = level.max_scroll();
-                            let new_scroll = start_scroll + (dy as f32 * max_sc as f32 / travel).round() as i32;
+                            let new_scroll =
+                                start_scroll + (dy as f32 * max_sc as f32 / travel).round() as i32;
                             level.scroll = new_scroll.clamp(0, max_sc);
                         }
                     }
@@ -1392,8 +1415,8 @@ impl AppHandler for UiHost {
                     let ratio = r.h as f32 / level.content_h as f32;
                     let thumb_h = (track_h * ratio).max(20.0);
                     let max_sc = level.max_scroll().max(1) as f32;
-                    let thumb_y = (r.y + 4) as f32
-                        + (track_h - thumb_h) * (level.scroll as f32 / max_sc);
+                    let thumb_y =
+                        (r.y + 4) as f32 + (track_h - thumb_h) * (level.scroll as f32 / max_sc);
                     canvas.fill_round_rect(
                         (r.right() - 8) as f32,
                         thumb_y,

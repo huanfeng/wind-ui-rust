@@ -1363,7 +1363,11 @@ impl Tree {
             || n.on_drop.is_some()
             || n.context_menu.is_some()
             || n.tooltip.is_some();
-        if catches { Some(id) } else { None }
+        if catches {
+            Some(id)
+        } else {
+            None
+        }
     }
 
     /// 祖先链：从节点自身到根。
@@ -1902,7 +1906,11 @@ mod tests {
         // 透明纯容器（EmptyWidget、无背景）全覆盖在按钮之上：命中应穿透到下层按钮。
         let clicks = signal(0);
         let (mut tree, btn, center) = overlay_tree(clicks, false);
-        assert_eq!(tree.hit_test(center), Some(btn), "透明覆盖容器应穿透命中下层按钮");
+        assert_eq!(
+            tree.hit_test(center),
+            Some(btn),
+            "透明覆盖容器应穿透命中下层按钮"
+        );
         let (mut hover, mut cap) = (None, None);
         tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
         tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);
@@ -1914,7 +1922,11 @@ mod tests {
         // 带背景的容器全覆盖：吞掉命中，不穿透（卡片/面板/遮罩等视觉表面的既有行为）。
         let clicks = signal(0);
         let (mut tree, btn, center) = overlay_tree(clicks, true);
-        assert_ne!(tree.hit_test(center), Some(btn), "带背景的覆盖容器应吞命中，不穿透");
+        assert_ne!(
+            tree.hit_test(center),
+            Some(btn),
+            "带背景的覆盖容器应吞命中，不穿透"
+        );
         let (mut hover, mut cap) = (None, None);
         tree.dispatch_pointer(ptr(PointerKind::Down, center), &mut hover, &mut cap);
         tree.dispatch_pointer(ptr(PointerKind::Up, center), &mut hover, &mut cap);

@@ -51,14 +51,46 @@ struct Task {
 /// 原始数据（固定，不修改）。
 fn all_tasks() -> Vec<Task> {
     vec![
-        Task { name: "修复登录崩溃", priority: Priority::High, done: false },
-        Task { name: "撰写发布说明", priority: Priority::Medium, done: true },
-        Task { name: "重构数据库层", priority: Priority::High, done: false },
-        Task { name: "更新依赖版本", priority: Priority::Low, done: true },
-        Task { name: "添加单元测试", priority: Priority::Medium, done: false },
-        Task { name: "性能分析报告", priority: Priority::Low, done: false },
-        Task { name: "安全审计排查", priority: Priority::High, done: false },
-        Task { name: "设计评审会议", priority: Priority::Medium, done: true },
+        Task {
+            name: "修复登录崩溃",
+            priority: Priority::High,
+            done: false,
+        },
+        Task {
+            name: "撰写发布说明",
+            priority: Priority::Medium,
+            done: true,
+        },
+        Task {
+            name: "重构数据库层",
+            priority: Priority::High,
+            done: false,
+        },
+        Task {
+            name: "更新依赖版本",
+            priority: Priority::Low,
+            done: true,
+        },
+        Task {
+            name: "添加单元测试",
+            priority: Priority::Medium,
+            done: false,
+        },
+        Task {
+            name: "性能分析报告",
+            priority: Priority::Low,
+            done: false,
+        },
+        Task {
+            name: "安全审计排查",
+            priority: Priority::High,
+            done: false,
+        },
+        Task {
+            name: "设计评审会议",
+            priority: Priority::Medium,
+            done: true,
+        },
     ]
 }
 
@@ -78,7 +110,11 @@ fn compute(sort_by_name: bool, hide_done: bool) -> Vec<Task> {
 
 /// 单行任务卡片。
 fn task_row(task: Task) -> Element {
-    let name_color = if task.done { Color::hex(SUB) } else { Color::hex(FG) };
+    let name_color = if task.done {
+        Color::hex(SUB)
+    } else {
+        Color::hex(FG)
+    };
     let badge_text = format!("优先级：{}", task.priority.label());
     let done_text = if task.done { " ✓ 已完成" } else { "" };
 

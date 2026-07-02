@@ -185,8 +185,7 @@ impl Widget for Stepper {
             if elapsed >= REPEAT_DELAY_MS {
                 let interval = repeat_interval_ms(elapsed);
                 if now.saturating_sub(self.last_step_ms.get()) >= interval {
-                    let v = (self.value.get() + dir as f64 * self.step)
-                        .clamp(self.min, self.max);
+                    let v = (self.value.get() + dir as f64 * self.step).clamp(self.min, self.max);
                     self.value.set(v);
                     self.last_step_ms.set(now);
                 }
@@ -204,7 +203,11 @@ impl Widget for Stepper {
         );
         let corner = th.metrics.corner_md;
         let bg = if enabled { st.bg(pal) } else { pal.surface_alt };
-        let value_color = if enabled { st.text(pal) } else { pal.text_disabled };
+        let value_color = if enabled {
+            st.text(pal)
+        } else {
+            pal.text_disabled
+        };
 
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
         let border = if focused || self.editing.get() {
@@ -262,8 +265,16 @@ impl Widget for Stepper {
 
         let at_min = self.value.get() <= self.min;
         let at_max = self.value.get() >= self.max;
-        let minus_c = if !enabled || at_min { pal.text_disabled } else { st.button(pal) };
-        let plus_c = if !enabled || at_max { pal.text_disabled } else { st.button(pal) };
+        let minus_c = if !enabled || at_min {
+            pal.text_disabled
+        } else {
+            st.button(pal)
+        };
+        let plus_c = if !enabled || at_max {
+            pal.text_disabled
+        } else {
+            st.button(pal)
+        };
         let minus_r = Rect::new(bounds.x, bounds.y, BTN_W, bounds.h);
         let plus_r = Rect::new(bounds.right() - BTN_W, bounds.y, BTN_W, bounds.h);
         canvas.draw_text("\u{2212}", minus_r, minus_c, Align::Center, family, fsize);
@@ -300,7 +311,14 @@ impl Widget for Stepper {
                 .set(Some((cursor_x - bounds.x, mid.y - bounds.y, mid.h)));
         } else {
             self.caret_local.set(None);
-            canvas.draw_text(&self.display(), mid, value_color, Align::Center, family, fsize);
+            canvas.draw_text(
+                &self.display(),
+                mid,
+                value_color,
+                Align::Center,
+                family,
+                fsize,
+            );
         }
     }
 
