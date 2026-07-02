@@ -137,7 +137,7 @@ impl Default for Style {
             border: None,
             corner_radius: 0.0,
             fg: Color::hex(0x1A1A1A),
-            fg_role: None,
+            fg_role: Some(Role::Text),
             font_size: 14.0,
             font_weight: crate::text::WEIGHT_NORMAL,
             font_family: None,

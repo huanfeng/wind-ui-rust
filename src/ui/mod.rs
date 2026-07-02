@@ -28,7 +28,7 @@ use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
 use crate::spec::{Align, Axis, Dimension};
-use crate::style::Style;
+use crate::style::{Role, Style};
 use crate::text::TextEngine;
 use crate::theme::{Intent, IntentColors};
 
@@ -1702,14 +1702,12 @@ impl Element {
         columns: Vec<(impl Into<String>, f32)>,
         rows: Vec<Vec<impl Into<String>>>,
     ) -> Self {
-        let th = crate::theme::current();
         let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
-        let fg = th.palette.text;
         let body: Vec<Vec<Element>> = rows
             .into_iter()
             .map(|r| {
                 r.into_iter()
-                    .map(|c| Self::table_cell_pad(Element::label(c.into()).font_size(13.0).fg(fg)))
+                    .map(|c| Self::table_cell_pad(Element::label(c.into()).font_size(13.0)))
                     .collect()
             })
             .collect();
@@ -1727,12 +1725,11 @@ impl Element {
     /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
     /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
     pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
-        let th = crate::theme::current();
         // 表头：加粗、弱化色、次级表面底。内边距在每列格内部（与正文同分布，列对齐）。
         let mut header = Element::row()
             .width_match()
             .cross(Align::Stretch)
-            .bg(th.palette.surface_alt);
+            .bg_role(Role::SurfaceAlt);
         for (title, w) in &columns {
             header = header.child(
                 Element::stack()
@@ -1742,7 +1739,7 @@ impl Element {
                         Element::label(title.clone())
                             .font_size(13.0)
                             .font_weight(600)
-                            .fg(th.palette.text_muted)
+                            .fg_role(Role::TextMuted)
                             .width_match()
                             .height(18),
                     ),
@@ -1754,7 +1751,7 @@ impl Element {
         for (ri, cells) in rows.into_iter().enumerate() {
             let mut tr = Element::row().width_match().cross(Align::Stretch);
             if ri % 2 == 1 {
-                tr = tr.bg(th.palette.surface_alt.scale_alpha(0.5));
+                tr = tr.bg_role(Role::SurfaceAlt);
             }
             for (ci, cell) in cells.into_iter().enumerate() {
                 let w = columns.get(ci).map(|c| c.1).unwrap_or(1.0);
@@ -2050,9 +2047,10 @@ mod tests {
         let theme = crate::theme::Theme::default();
         let style = Style {
             fg: Color::hex(0x123456),
+            fg_role: None, // 显式 fg 覆盖（不走主题角色）
             ..Style::default()
         };
-        // 启用：取样式自身前景色。
+        // 启用：fg_role 为 None 时取样式自身前景色。
         assert_eq!(text_fg(true, &style, &theme), Color::hex(0x123456));
         // 禁用：统一降为 text_disabled（标签/说明随容器禁用一并置灰）。
         assert_eq!(text_fg(false, &style, &theme), theme.palette.text_disabled);
@@ -2133,6 +2131,7 @@ mod tests {
         use crate::core::Widget;
         let style = Style {
             fg: Color::hex(0x123456),
+            fg_role: None, // 显式 fg 覆盖（不走主题角色）
             ..Style::default()
         };
         let r = Rect::new(0, 0, 100, 20);
