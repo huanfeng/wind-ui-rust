@@ -74,13 +74,18 @@ impl Rect {
     pub fn is_empty(&self) -> bool {
         self.w <= 0 || self.h <= 0
     }
-    /// 按缩放因子转为物理像素矩形。按边界（右/下）取整，避免四分量独立 round 漂移。
+    /// 按缩放因子转为物理像素矩形。
+    ///
+    /// 左/上边向下取整（`floor`），右/下边向上取整（`ceil`），保证物理矩形
+    /// 的宽高**不小于** `size × scale`——避免因取整导致测量阶段预留的逻辑宽度
+    /// 在绘制阶段反向换算后被截短，进而使本应单行的文字最后一个字换到下一行。
+    /// 这个差异在 125%/175%/225% 等非整数 DPI 下尤其显著。
     pub fn scaled(&self, s: f32) -> Rect {
-        let x0 = (self.x as f32 * s).round() as i32;
-        let y0 = (self.y as f32 * s).round() as i32;
-        let x1 = (self.right() as f32 * s).round() as i32;
-        let y1 = (self.bottom() as f32 * s).round() as i32;
-        Rect::new(x0, y0, x1 - x0, y1 - y0)
+        let x0 = (self.x as f32 * s).floor() as i32;
+        let y0 = (self.y as f32 * s).floor() as i32;
+        let x1 = (self.right() as f32 * s).ceil() as i32;
+        let y1 = (self.bottom() as f32 * s).ceil() as i32;
+        Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
     }
 
     /// 包含两矩形的最小外接矩形（空矩形被忽略）。

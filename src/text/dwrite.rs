@@ -323,8 +323,11 @@ impl TextEngine for DWriteEngine {
         let prect = rect.scaled(s);
         let pclip = clip.map(|c| c.scaled(s));
         let psize = size * s;
-        // 按物理 rect 宽度换行（与 measure 传入的物理 maxWidth 一致）。
-        let Some(layout) = self.layout(text, ts, psize, prect.w as f32) else {
+        // 用 rect.w * s（精确乘法，与 measure 里 pmw = max_width * s 同源）作为
+        // 排版最大宽度。prect.w 是经 scaled() 取整后的物理宽度，可能因取整略小于
+        // rect.w * s，导致本应单行的文字被截断换行（125%/175% 等非整数 DPI 典型）。
+        let layout_max_w = (rect.w as f32 * s).max(prect.w as f32);
+        let Some(layout) = self.layout(text, ts, psize, layout_max_w) else {
             return;
         };
         let mut m = DWRITE_TEXT_METRICS::default();
