@@ -29,8 +29,6 @@ pub(crate) fn run(
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
 ) {
-    // 单实例：Task 6 用 Unix domain socket 完整实现；当前占位（unix stub 视为永远首实例）。
-    let _ = single;
     // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
     let os_default = if cfg.screenshot.is_some() {
         true
@@ -44,7 +42,21 @@ pub(crate) fn run(
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    window::run_windowed(cfg, handler, waker);
+    // 单实例：检测；二次实例把 argv 转发给首实例后直接返回、不建窗口。
+    // 若转发失败（首实例正退出中/僵死），回退为正常启动，避免被永久挡在门外。
+    //
+    // ⚠ macOS 的 `.app` 由 LaunchServices 保证不会启第二个进程，但它**丢弃**第二次启动
+    // 带的 arguments、只把窗口拉到前台——深链（如「打开设置的词库页」）因此在程序已开着
+    // 时失效。argv 的转发必须由这一层自己做，不能指望系统的单实例语义。
+    if let Some(si) = &single {
+        if !crate::single_instance::acquire(&si.app_id) {
+            let argv: Vec<String> = std::env::args().collect();
+            if crate::single_instance::forward(&si.app_id, &argv) {
+                return;
+            }
+        }
+    }
+    window::run_windowed(cfg, handler, waker, single);
 }
 
 /// 查询系统“显示动画”偏好（减弱动态效果）。占位：默认开。

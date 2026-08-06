@@ -870,6 +870,7 @@ pub(crate) fn run_windowed(
     mut cfg: WindowConfig,
     handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
 ) {
     let mtm = MainThreadMarker::new().expect("macOS GUI 必须在主线程运行");
     let app = NSApplication::sharedApplication(mtm);
@@ -957,6 +958,16 @@ pub(crate) fn run_windowed(
             view: Retained::as_ptr(&view) as usize,
         }));
     }
+    // 单实例首实例：起 accept 线程接收二次实例 argv（收到后经 libdispatch 派回主线程
+    // 切页 + 激活窗口）。窗口指针存活至进程退出，对照 MacWake 持视图指针的做法。
+    if let Some(si) = single {
+        crate::single_instance::install_listener(
+            &si.app_id,
+            Retained::as_ptr(&window) as isize,
+            si.on_second,
+        );
+    }
+
     // on_interval：按 handler 注册的间隔安装周期 NSTimer。
     view.install_interval_timers();
 
