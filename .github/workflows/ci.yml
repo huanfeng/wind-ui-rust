@@ -45,6 +45,11 @@ jobs:
         run: cargo test
       - name: Clippy（零警告）
         run: cargo clippy --all-targets -- -D warnings
+      # 默认 feature 之外唯一在用的组合（wind-portable 用 default-features = false）。
+      # 它的消费者在别的仓里，本仓的 example 又全跑默认 feature——没有这条，svg/d2d
+      # 关闭时的门控疏漏一路溜到发布版才被发现（0.11.0 即如此）。
+      - name: Clippy（关闭默认 feature）
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
 
   dco:
     name: DCO sign-off

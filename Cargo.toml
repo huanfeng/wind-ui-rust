@@ -158,6 +158,16 @@ objc2-core-text = { version = "0.3", features = [
     "CTStringAttributes",
 ] }
 
+# 这两个示例用到 svg feature 才有的 API（`icon_svg` / `image_svg`）。声明 required-features
+# 后，`--no-default-features` 下它们被跳过而非编译失败——其余示例仍自动发现，无需逐个声明。
+[[example]]
+name = "fullshowcase"
+required-features = ["svg"]
+
+[[example]]
+name = "image"
+required-features = ["svg"]
+
 [profile.release]
 opt-level = "z"
 lto = true

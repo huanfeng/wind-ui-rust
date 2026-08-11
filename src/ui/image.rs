@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
+#[cfg(feature = "svg")]
 use std::rc::Rc;
 
 use crate::core::{EventCtx, Widget};
@@ -62,11 +63,15 @@ impl Layer {
 ///
 /// 缓存单条 `(物理宽, 结果)`：同一控件的物理宽只在 DPI 变化或布局改尺寸时才变，
 /// 单条缓存即可命中每一帧；着色结果一并存入，避免每帧重跑 `tinted`。
+/// 整体挂在 `svg` feature 上：无该 feature 时 `Image::from_svg_bytes` 不存在，
+/// 类型留着也只会是无法构造、`bytes` 永不被读的死代码。
+#[cfg(feature = "svg")]
 struct SvgSource {
     bytes: Rc<[u8]>,
     cache: RefCell<Option<(u32, Image)>>,
 }
 
+#[cfg(feature = "svg")]
 impl SvgSource {
     /// 取指定物理宽的光栅（含着色）结果；缓存未命中则重新光栅化。
     fn resolve(&self, target_w: u32, tint: Option<Color>) -> Option<Image> {
@@ -97,6 +102,7 @@ pub struct ImageContent {
     tint: Option<Color>,
     /// DPI 感知矢量源（仅 `from_svg_bytes(_, None)` 持有）。`base` 保留固有尺寸
     /// 光栅作 `intrinsic_size` 的度量依据与光栅失败时的回退。
+    #[cfg(feature = "svg")]
     svg: Option<SvgSource>,
 }
 
@@ -108,6 +114,7 @@ impl ImageContent {
             overrides: Vec::new(),
             fit: Fit::default(),
             tint: None,
+            #[cfg(feature = "svg")]
             svg: None,
         }
     }
@@ -162,6 +169,7 @@ impl ImageContent {
     /// `&mut` 版着色设置（供 Builder 的 `.tint()` 调用）。着色色变更时清缓存。
     pub fn set_tint(&mut self, color: Color) {
         self.tint = Some(color);
+        #[cfg(feature = "svg")]
         if let Some(s) = &self.svg {
             *s.cache.borrow_mut() = None;
         }
