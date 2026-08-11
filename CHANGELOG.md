@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-11
+
+### Fixed
+- **`--no-default-features` 下编译失败**：`SvgSource` 及其 `impl` 没有随 `svg` feature 门控，
+  而 `resolve` 内调用的 `Image::from_svg_bytes` 有门控——关掉 `svg` 就是 E0599「找不到
+  `from_svg_bytes`」，且报错指向本 crate 内部，使用方无从下手。同一组合下 `SM_REMOTESESSION`
+  的未使用导入（只在 `d2d` 下用到）一并门控。
+  漏到发布版是因为 CI 只跑默认 feature：本仓的 example 全部跑在默认 feature 上，而唯一使用
+  `default-features = false` 的消费者在另一个仓里，本仓看不见。已在 CI 补 `--no-default-features`
+  的 clippy 门禁防回归。
+
+### Changed
+- **`fullshowcase` / `image` 两个 example 声明 `required-features = ["svg"]`**：它们用到
+  `icon_svg` / `image_svg`，关掉 `svg` 时应被跳过而非编译失败。其余 example 仍自动发现。
+
 ## [0.11.0] - 2026-08-11
 
 本版本补齐键盘可达性：浮层菜单弹不出也动不了、模态对话框圈不住焦点、Tab 会跑到视口外、
@@ -354,7 +369,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.8.3...v0.9.0
