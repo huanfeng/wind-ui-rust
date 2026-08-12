@@ -118,6 +118,11 @@ pub(crate) fn install_listener(
         .ok();
 }
 
+/// 外部来源的 argv(macOS URL scheme)走与二次实例同一条主线程通路。
+pub(crate) fn deliver_argv(argv: Vec<String>) {
+    dispatch_to_main(argv);
+}
+
 // ── 主线程蹦床 ────────────────────────────────────────────────────────────
 
 // libdispatch FFI:与 `platform::macos::window` 同一套(那边用于跨线程标脏一帧)。

@@ -966,6 +966,10 @@ pub(crate) fn run_windowed(
             Retained::as_ptr(&window) as isize,
             si.on_second,
         );
+        // 自定义 URL scheme（`myapp://…`）与二次实例共用 on_second，故与它同一处安装。
+        // **必须在事件循环起来之前**：由链接拉起的那一次启动，Apple Event 已排在队列里，
+        // 装晚了就直接丢掉（表现为「第一次点链接没反应，第二次才行」）。
+        super::url_scheme::install();
     }
 
     // on_interval：按 handler 注册的间隔安装周期 NSTimer。

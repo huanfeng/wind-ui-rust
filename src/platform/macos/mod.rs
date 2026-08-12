@@ -16,6 +16,7 @@
 pub mod clipboard;
 pub mod hotkey;
 pub mod tray;
+pub mod url_scheme;
 pub mod window;
 
 pub use tray::{Tray, TrayCtx, TrayMenuItem};
