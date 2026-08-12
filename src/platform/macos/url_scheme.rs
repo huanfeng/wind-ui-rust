@@ -85,7 +85,11 @@ pub(crate) fn install() {
     }
 }
 
-extern "C" fn handle_get_url(event: *const c_void, _reply: *mut c_void, _refcon: isize) -> OSStatus {
+extern "C" fn handle_get_url(
+    event: *const c_void,
+    _reply: *mut c_void,
+    _refcon: isize,
+) -> OSStatus {
     let Some(url) = (unsafe { direct_object_utf8(event) }) else {
         return 0; // 取不出就当没收到；返回非零只会让系统弹一个用户看不懂的错误
     };
