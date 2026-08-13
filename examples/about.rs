@@ -139,9 +139,13 @@ fn main() {
         .child(header)
         .child(grid)
         .child(
+            // 版权行要比卡片说明再弱一档，而 Role 只到 TextMuted（没有 text_subtle
+            // 这类三级弱化色）。用 opacity 在语义色基础上再压一档：既跟随主题，
+            // 又拿回原设计的三级层次。
             Element::label("© 2026 windui Contributors · MIT License")
                 .font_size(12.5)
                 .fg_role(Role::TextMuted)
+                .opacity(0.7)
                 .width_match()
                 .text_align(Align::Center),
         );
