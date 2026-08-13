@@ -805,6 +805,68 @@ impl AccordionTheme {
     }
 }
 
+/// 拖拽重排列表覆盖层（`Element::reorder_list`）。
+///
+/// 投影拆成 `shadow_color` + `shadow_blur` 两个标量而非直接放 `Shadow`——后者
+/// 不实现 `Serialize`，拆开才能进 TOML。控件内部据此组装出 `Shadow`。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReorderTheme {
+    /// 拖动手柄常态色。
+    pub handle: Option<Color>,
+    /// 拖动手柄悬停/拖动中色。
+    pub handle_hover: Option<Color>,
+    /// 被拖行浮起时的底色（须不透明，否则会透出下方让位中的行）。
+    pub dragging_bg: Option<Color>,
+    /// 被拖行浮起时的投影色（含 alpha）。
+    pub shadow_color: Option<Color>,
+    /// 被拖行浮起时的投影模糊半径（逻辑 px）。
+    pub shadow_blur: Option<f32>,
+    /// 插入指示线色。
+    pub indicator: Option<Color>,
+    /// 手柄槽宽（逻辑 px）。
+    pub handle_w: Option<i32>,
+    /// 被拖行浮起时的圆角。
+    pub corner: Option<f32>,
+}
+
+impl ReorderTheme {
+    pub fn handle(&self, p: &Palette) -> Color {
+        self.handle.unwrap_or(p.text_muted)
+    }
+    pub fn handle_hover(&self, p: &Palette) -> Color {
+        self.handle_hover.unwrap_or(p.text)
+    }
+    pub fn dragging_bg(&self, p: &Palette) -> Color {
+        self.dragging_bg.unwrap_or(p.surface)
+    }
+    pub fn shadow_color(&self) -> Color {
+        self.shadow_color.unwrap_or(Color::rgba(0, 0, 0, 56))
+    }
+    pub fn shadow_blur(&self) -> f32 {
+        self.shadow_blur.unwrap_or(12.0)
+    }
+    pub fn indicator(&self, p: &Palette) -> Color {
+        self.indicator.unwrap_or(p.accent)
+    }
+    pub fn handle_w(&self) -> i32 {
+        self.handle_w.unwrap_or(20)
+    }
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_md)
+    }
+    /// 组装被拖行的浮起投影（略向下偏移，模拟光从上方来）。
+    pub fn shadow(&self) -> crate::style::Shadow {
+        crate::style::Shadow {
+            dx: 0.0,
+            dy: 2.0,
+            blur: self.shadow_blur(),
+            spread: 0.0,
+            color: self.shadow_color(),
+        }
+    }
+}
+
 /// 悬停提示浮层覆盖层（深底浅字）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -887,6 +949,7 @@ pub struct Theme {
     pub table: TableTheme,
     pub nav: NavTheme,
     pub accordion: AccordionTheme,
+    pub reorder: ReorderTheme,
     pub anim: AnimTheme,
     pub tooltip: TooltipTheme,
     pub toast: ToastTheme,

@@ -325,6 +325,22 @@ pub struct Node {
     pub over_scroll: i32,
     /// 上一次 `reset_hidden_interactions` 扫描时的有效可见性（显隐翻转检测用）。
     pub prev_visible: Cell<bool>,
+    /// **绘制/命中偏移**（逻辑 px，相对布局位置）：不参与 measure/arrange，只在绘制与
+    /// 命中时叠加到绝对坐标上。用于"视觉位移但布局不变"的场景——拖拽重排的让位与浮起、
+    /// 列表增删的 FLIP 动画等。
+    ///
+    /// 与直接改 `bounds` 的本质区别：`bounds` 是布局结果，任何一次 relayout 都会重算它，
+    /// 临时视觉状态写进去必被冲掉；`offset` 独立于布局，relayout 不影响。
+    ///
+    /// 变化会进入 [`Tree::layout_signature`]，故宿主自动判为结构变化并升级整窗重绘。
+    ///
+    /// 已知限制：`arrange` 侧的绝对原点（`arrange_origin`）**不含** offset，故带水平
+    /// offset 的滚动容器贴近窗口右缘时，预留的滚动条宽度会与实际绘制位置差一个内缩量。
+    /// 这是刻意取舍，理由见 `arrange_origin` 的文档。
+    pub offset: Point,
+    /// **同级绘制顺序提升**：为 true 的子节点在其余兄弟之后绘制、命中时优先测试。
+    /// 拖拽浮起的行用，否则会被排在它后面的兄弟行盖住。
+    pub raised: bool,
 }
 
 struct Slot {
@@ -353,6 +369,13 @@ pub struct Tree {
     /// `arrange` 全程使用相对父的坐标，但滚动条要判断"本容器是否贴着窗口右缘"必须知道
     /// 绝对位置。arrange 是严格嵌套的深度优先遍历，故用一个成员变量当栈顶（进入时累加、
     /// 退出时还原）即可，无需给 `arrange_*` 全家加参数。
+    ///
+    /// **刻意不累加 [`Node::offset`]**，与 paint/hit 两侧的口径不同。offset 是绘制期的
+    /// 临时位移，改它只需重绘、不必重排；一旦 arrange 依赖它，就等于引入"改 offset 必须
+    /// relayout"的隐含契约，漏一次就会让布局与视觉悄悄错位。代价是：带**水平** offset 的
+    /// 滚动容器若贴近窗口右缘，这里预留的滚动条宽度会与实际绘制位置差一个内缩量。
+    /// 当前无调用方使用水平 offset（拖拽重排只写 y），如需支持应改内缩判定本身，
+    /// 而不是让 arrange 去读 offset。
     arrange_origin: Point,
 }
 
@@ -959,9 +982,11 @@ impl Tree {
         };
         // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
         let enabled = parent_enabled && n.own_enabled();
+        // 绘制偏移叠加在布局位置之上（见 `Node::offset`）。子节点以 abs 为原点递归，
+        // 故父节点的位移自动带着整棵子树走。
         let abs = Rect::new(
-            origin.x + n.bounds.x,
-            origin.y + n.bounds.y,
+            origin.x + n.bounds.x + n.offset.x,
+            origin.y + n.bounds.y + n.offset.y,
             n.bounds.w,
             n.bounds.h,
         );
@@ -1045,17 +1070,15 @@ impl Tree {
         }
 
         let child_origin = Point::new(abs.x, abs.y);
+        // 子节点分两趟绘制：先普通、后 `raised`。拖拽浮起的行须画在其余兄弟之上，
+        // 否则会被排在它后面的行盖住。绝大多数容器没有 raised 子节点，第二趟是空转。
         if n.clip_children {
             canvas.save();
             canvas.clip_rect(content);
-            for &c in &n.children {
-                self.paint_node(canvas, c, child_origin, enabled);
-            }
+            self.paint_children(canvas, n, child_origin, enabled);
             canvas.restore();
         } else {
-            for &c in &n.children {
-                self.paint_node(canvas, c, child_origin, enabled);
-            }
+            self.paint_children(canvas, n, child_origin, enabled);
         }
 
         // 滚动条：内容高于视口时在右缘绘制纵向指示条。贴窗口右缘时整体内缩，避开
@@ -1085,6 +1108,22 @@ impl Tree {
 
         if use_layer {
             canvas.pop_layer();
+        }
+    }
+
+    /// 绘制子节点：先非 `raised`、后 `raised`，各自保持原有相对顺序（稳定分区）。
+    /// 与 [`Tree::hit_node`] 的倒序遍历互为镜像——那边先测 `raised`，两者对"谁在上层"
+    /// 的判断必须一致，否则会出现"画在上面却点不到"。
+    fn paint_children(&self, canvas: &mut dyn Canvas, n: &Node, origin: Point, enabled: bool) {
+        for &c in &n.children {
+            if !self.get(c).map(|cn| cn.raised).unwrap_or(false) {
+                self.paint_node(canvas, c, origin, enabled);
+            }
+        }
+        for &c in &n.children {
+            if self.get(c).map(|cn| cn.raised).unwrap_or(false) {
+                self.paint_node(canvas, c, origin, enabled);
+            }
         }
     }
 }
@@ -1283,6 +1322,23 @@ impl EventCtx<'_> {
     /// 调用方负责维护树结构一致性（不要删除 `ctx.id()` 自身节点）。
     pub fn tree_mut(&mut self) -> &mut Tree {
         self.tree
+    }
+    /// 设置节点的**绘制/命中偏移**（见 [`Node::offset`]）：视觉位移但布局不变。
+    /// 返回值是否真的发生了变化——调用方据此决定要不要打脏，避免每帧无谓失效。
+    pub fn set_node_offset(&mut self, id: NodeId, off: Point) -> bool {
+        match self.tree.get_mut(id) {
+            Some(n) if n.offset != off => {
+                n.offset = off;
+                true
+            }
+            _ => false,
+        }
+    }
+    /// 设置节点的**同级绘制顺序提升**（见 [`Node::raised`]）：拖拽浮起的行用。
+    pub fn set_node_raised(&mut self, id: NodeId, raised: bool) {
+        if let Some(n) = self.tree.get_mut(id) {
+            n.raised = raised;
+        }
     }
     /// 调整本节点滚动偏移（滚动容器），下一帧 arrange 会钳制范围。
     pub fn scroll_by(&mut self, dy: i32) {
@@ -1544,15 +1600,22 @@ impl Tree {
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
     pub fn abs_bounds(&self, id: NodeId) -> Rect {
         let mut r = match self.get(id) {
-            Some(n) => n.bounds,
+            Some(n) => {
+                // 自身的绘制偏移也算进去——调用方（脏区、滚动可视、拖拽命中）要的是
+                // "这个节点当前画在哪"，而非它的布局槽位。
+                let mut b = n.bounds;
+                b.x += n.offset.x;
+                b.y += n.offset.y;
+                b
+            }
             None => return Rect::default(),
         };
         let mut cur = self.get(id).and_then(|n| n.parent);
         while let Some(p) = cur {
             match self.get(p) {
                 Some(pn) => {
-                    r.x += pn.bounds.x;
-                    r.y += pn.bounds.y;
+                    r.x += pn.bounds.x + pn.offset.x;
+                    r.y += pn.bounds.y + pn.offset.y;
                     cur = pn.parent;
                 }
                 None => break,
@@ -1582,7 +1645,8 @@ impl Tree {
         abs.inflate(pad)
     }
 
-    /// 全树**结构签名**：对每个存活节点哈希 (索引, 代际, 有效可见, 有效启用, bounds)。
+    /// 全树**结构签名**：对每个存活节点哈希
+    /// (索引, 代际, 有效可见, 有效启用, bounds, offset, raised)。
     /// 用于交互后判定"是否发生了显隐/启用/位移/尺寸变化"——签名不变即本次仅为局部视觉
     /// 变化（可局部重绘），变了则说明结构改变（影响区域不可局部化，需整窗）。
     /// 注：`own_enabled()` 含 `en_cond` 闭包求值，确保 `enabled_when` 联动能被签名感知。
@@ -1597,6 +1661,9 @@ impl Tree {
                 n.own_enabled().hash(&mut h);
                 let b = n.bounds;
                 (b.x, b.y, b.w, b.h).hash(&mut h);
+                // 绘制偏移/层级提升进签名：拖拽让位这类"布局不变但像素位移"的变化据此
+                // 自动升级整窗重绘，无需为其单开特例分支；hover 重同步也随之生效。
+                (n.offset.x, n.offset.y, n.raised).hash(&mut h);
             }
         }
         h.finish()
@@ -1755,9 +1822,10 @@ impl Tree {
         if !n.effective_visible() {
             return None;
         }
+        // 与 paint_node 同源：命中必须叠加同一个绘制偏移，否则移动过的节点"看得见、点不着"。
         let abs = Rect::new(
-            origin.x + n.bounds.x,
-            origin.y + n.bounds.y,
+            origin.x + n.bounds.x + n.offset.x,
+            origin.y + n.bounds.y + n.offset.y,
             n.bounds.w,
             n.bounds.h,
         );
@@ -1778,11 +1846,21 @@ impl Tree {
             true
         };
         if in_content {
-            // 倒序遍历子节点：后绘制者在上层，优先命中。
+            // 倒序遍历子节点：后绘制者在上层，优先命中。`raised` 子节点整体后绘制
+            // （见 `Tree::paint_children`），故先倒序测它们，再倒序测其余。
             let child_origin = Point::new(abs.x, abs.y);
             for &c in n.children.iter().rev() {
-                if let Some(hit) = self.hit_node(c, p, child_origin, for_drag) {
-                    return Some(hit);
+                if self.get(c).map(|cn| cn.raised).unwrap_or(false) {
+                    if let Some(hit) = self.hit_node(c, p, child_origin, for_drag) {
+                        return Some(hit);
+                    }
+                }
+            }
+            for &c in n.children.iter().rev() {
+                if !self.get(c).map(|cn| cn.raised).unwrap_or(false) {
+                    if let Some(hit) = self.hit_node(c, p, child_origin, for_drag) {
+                        return Some(hit);
+                    }
                 }
             }
         }
@@ -2269,6 +2347,85 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(w, h), &mut te);
         tree
+    }
+
+    /// 三行竖排（各 100×40）的树，返回 (tree, 三个子节点 id)。
+    fn three_rows() -> (Tree, Vec<NodeId>) {
+        let tree = layout(
+            Element::col()
+                .width(100)
+                .height(120)
+                .child(Element::leaf().width(100).height(40).bg(Color::WHITE))
+                .child(Element::leaf().width(100).height(40).bg(Color::WHITE))
+                .child(Element::leaf().width(100).height(40).bg(Color::WHITE)),
+            100,
+            120,
+        );
+        let kids = tree.get(tree.root.unwrap()).unwrap().children.clone();
+        (tree, kids)
+    }
+
+    #[test]
+    fn node_offset_shifts_both_paint_bounds_and_hit_test() {
+        // offset 是绘制/命中偏移：abs_bounds（脏区与拖拽逻辑读它）与 hit_test
+        // （点击落到谁身上）必须同步位移，否则控件会"看得见、点不着"。
+        let (mut tree, kids) = three_rows();
+        assert_eq!(tree.abs_bounds(kids[0]).y, 0);
+        // 未偏移时 y=50 落在第二行。
+        assert_eq!(tree.hit_test(Point::new(50, 50)), Some(kids[1]));
+
+        tree.get_mut(kids[0]).unwrap().offset = Point::new(0, 45);
+
+        assert_eq!(tree.abs_bounds(kids[0]).y, 45, "abs_bounds 应叠加 offset");
+        assert_eq!(
+            tree.get(kids[0]).unwrap().bounds.y,
+            0,
+            "布局 bounds 不应被 offset 污染"
+        );
+        // 第一行下移 45 后覆盖 y∈[45,85)，此处它排在第二行之前绘制，故第二行仍在其上层。
+        assert_eq!(
+            tree.hit_test(Point::new(50, 30)),
+            None,
+            "原位置已无节点（第一行已移走，该处是容器空白）"
+        );
+    }
+
+    #[test]
+    fn raised_node_wins_hit_test_over_later_siblings() {
+        // raised 子节点最后绘制（画在最上层），命中也必须优先——两者不一致就会
+        // 出现"画在上面却点不到"。此处让首行下移盖住次行，仅靠 raised 决定胜负。
+        let (mut tree, kids) = three_rows();
+        {
+            let n = tree.get_mut(kids[0]).unwrap();
+            n.offset = Point::new(0, 40);
+        }
+        // 未提升时：同一位置命中的是后绘制的第二行。
+        assert_eq!(
+            tree.hit_test(Point::new(50, 50)),
+            Some(kids[1]),
+            "未提升时后绘制的兄弟在上层"
+        );
+
+        tree.get_mut(kids[0]).unwrap().raised = true;
+        assert_eq!(
+            tree.hit_test(Point::new(50, 50)),
+            Some(kids[0]),
+            "raised 节点应优先命中"
+        );
+    }
+
+    #[test]
+    fn offset_change_alters_layout_signature() {
+        // 签名把 offset 纳入后，拖拽让位这类"布局不变但像素位移"的变化会被宿主判为
+        // 结构变化并升级整窗重绘——拖拽因此不需要任何重绘特例分支。
+        let (mut tree, kids) = three_rows();
+        let before = tree.layout_signature();
+        tree.get_mut(kids[0]).unwrap().offset = Point::new(0, 7);
+        assert_ne!(before, tree.layout_signature(), "offset 变化应改变签名");
+
+        let mid = tree.layout_signature();
+        tree.get_mut(kids[0]).unwrap().raised = true;
+        assert_ne!(mid, tree.layout_signature(), "raised 变化应改变签名");
     }
 
     #[test]

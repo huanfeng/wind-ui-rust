@@ -11,6 +11,7 @@ pub mod link;
 pub mod list;
 pub mod nav;
 pub mod progress;
+pub mod reorder;
 pub mod rich;
 pub mod segmented;
 pub mod select;
@@ -25,7 +26,7 @@ use std::rc::Rc;
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Color, Insets, Rect, Size};
+use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
@@ -40,6 +41,7 @@ pub use link::Link;
 pub use list::ListRow;
 pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use progress::ProgressBar;
+pub use reorder::{CommitMode, DragHandle, ReorderList};
 pub use rich::{Para, RichColor, RichDoc, RichText, SpanStyle};
 pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
@@ -1638,6 +1640,79 @@ impl Element {
         container
     }
 
+    /// **可手动排序的列表**：每行前置一个拖动手柄，按住手柄上下拖动即可调整顺序。
+    ///
+    /// 面向设置类应用——行内可以放任意控件（开关、下拉、按钮），拖拽走独立手柄
+    /// 因而不与它们抢事件。行高允许不等（带副标题/徽章的表单行），让位算法按实际
+    /// 高度重新堆叠。
+    ///
+    /// 默认 [`CommitMode::Children`]：内部直接重排子节点，**不重建行**，故行内控件
+    /// 状态天然保留。若列表由数据信号驱动，用 [`commit_mode`](Self::commit_mode)
+    /// 切到 `Callback`，由应用在回调里更新数据。
+    ///
+    /// 拖动中按 `Esc` 取消，行动画回到原位且不触发回调。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// use windui::prelude::*;
+    /// let order = signal(vec![0usize, 1, 2]);
+    /// Element::reorder_list(vec![
+    ///     form_row("拼音方案", enabled_a),
+    ///     form_row("五笔方案", enabled_b),
+    /// ])
+    /// .on_reorder(move |_ctx, from, to| {
+    ///     order.update(|v| { let x = v.remove(from); v.insert(to, x); });
+    /// })
+    /// ```
+    pub fn reorder_list(rows: Vec<Element>) -> Self {
+        let ctl = reorder::new_ctl();
+        let mut container = Self::col().width_match();
+        for row in rows {
+            let handle = Self::base(Layout::None).widget(reorder::DragHandle::new(ctl.clone()));
+            container = container.child(
+                Self::row()
+                    .width_match()
+                    .cross(Align::Center)
+                    // 手柄在前：与 macOS 设置、VS Code 等一致，也让整列手柄对齐成一条竖线。
+                    .child(handle)
+                    .child(row.weight(1.0)),
+            );
+        }
+        container.widget = Box::new(reorder::ReorderList::new(
+            ctl,
+            reorder::CommitMode::Children,
+        ));
+        container.reactive = true;
+        container
+    }
+
+    /// 重排完成回调：`(ctx, 原下标, 新下标)`。顺序未变化时不触发。
+    /// 仅 [`Element::reorder_list`] 可用。
+    pub fn on_reorder(mut self, f: impl FnMut(&mut EventCtx, usize, usize) + 'static) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<reorder::ReorderList>())
+        {
+            Some(rl) => rl.set_on_reorder(Box::new(f)),
+            None => debug_assert!(false, "on_reorder() 只能用于 Element::reorder_list(..)"),
+        }
+        self
+    }
+
+    /// 提交模式（见 [`CommitMode`]）。仅 [`Element::reorder_list`] 可用。
+    pub fn commit_mode(mut self, mode: reorder::CommitMode) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<reorder::ReorderList>())
+        {
+            Some(rl) => rl.set_mode(mode),
+            None => debug_assert!(false, "commit_mode() 只能用于 Element::reorder_list(..)"),
+        }
+        self
+    }
+
     /// 带前置图标的单选列表：`items` 为 (标签, 图标内容) 列表。其余同 `list`。
     /// 图标用 `ImageContent`，可链 `.fit()`/状态换图等；行图标随选中/悬停状态调制。
     pub fn list_icons(
@@ -2718,6 +2793,8 @@ impl Element {
             content_h: 0,
             over_scroll: 0,
             prev_visible: Cell::new(true),
+            offset: Point::new(0, 0),
+            raised: false,
         };
         let id = tree.insert(node);
         if is_reactive {
@@ -2741,6 +2818,7 @@ impl Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{KeyEvent, MouseButton, PointerEvent};
     use crate::geometry::Point;
     use crate::signal::signal;
     use std::path::PathBuf;
@@ -2791,6 +2869,400 @@ mod tests {
         tree.root = Some(root);
         tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
         tree
+    }
+
+    // ---- 拖拽重排（reorder_list）：全部经真实 dispatch_pointer / layout_root 驱动 ----
+
+    /// 关闭动画的作用域守卫：`Drop` 时复位。
+    ///
+    /// 必须是守卫而不是"函数末尾调 `set_enabled(true)`"：`anim` 的开关是 thread_local，
+    /// 而 `cargo test -- --test-threads=1` 下所有测试跑在同一线程上——一旦某个断言 panic
+    /// 就再也复位不了，同线程后续测试全部在动画关闭状态下运行，依赖补间活跃的断言会被
+    /// 静默弱化。
+    struct AnimOff;
+    impl AnimOff {
+        fn new() -> Self {
+            crate::anim::set_enabled(false);
+            AnimOff
+        }
+    }
+    impl Drop for AnimOff {
+        fn drop(&mut self) {
+            crate::anim::set_enabled(true);
+        }
+    }
+
+    /// 行高可指定的可排序列表（`heights` 决定行数与各行高度）。`hook` 收到 (from, to)。
+    /// 动画全局关闭，使补间瞬时收敛——否则回落阶段要等真实时钟，测试不确定。
+    fn reorder_tree_with(
+        hook: Rc<RefCell<Vec<(usize, usize)>>>,
+        mode: reorder::CommitMode,
+        heights: &[i32],
+    ) -> (Tree, Vec<NodeId>, AnimOff) {
+        let guard = AnimOff::new();
+        let rows: Vec<Element> = heights
+            .iter()
+            .map(|&h| Element::leaf().width_match().height(h))
+            .collect();
+        let el = Element::reorder_list(rows)
+            .commit_mode(mode)
+            .on_reorder(move |_ctx, from, to| hook.borrow_mut().push((from, to)));
+        let tree = layout(el);
+        let root = tree.root.unwrap();
+        let kids = tree.get(root).unwrap().children.clone();
+        (tree, kids, guard)
+    }
+
+    /// 三行等高 40 的可排序列表。
+    fn reorder_tree(
+        hook: Rc<RefCell<Vec<(usize, usize)>>>,
+        mode: reorder::CommitMode,
+    ) -> (Tree, Vec<NodeId>, AnimOff) {
+        reorder_tree_with(hook, mode, &[40, 40, 40])
+    }
+
+    /// 第 `row` 行手柄的中心点（手柄是行的首个子节点）。
+    fn handle_center(tree: &Tree, rows: &[NodeId], row: usize) -> Point {
+        let handle = tree.get(rows[row]).unwrap().children[0];
+        let b = tree.abs_bounds(handle);
+        Point::new(b.x + b.w / 2, b.y + b.h / 2)
+    }
+
+    fn relayout(tree: &mut Tree) {
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+    }
+
+    #[test]
+    fn drag_handle_reorders_children_and_reports_indices() {
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Children);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+
+        // 按下手柄：捕获落在手柄自身（它 capture 后返回 false，逻辑由列表接管）。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        assert!(cap.is_some(), "按下手柄应捕获指针");
+
+        // 拖到 y=110：首行视觉中心 110 越过第三行中心 100 → 目标位 2。
+        let to_pos = Point::new(start.x, 110);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, to_pos, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        // 让位：后两行各上移一个行高，首行跟指针下移。
+        assert_eq!(tree.get(rows[1]).unwrap().offset.y, -40, "第二行应上移让位");
+        assert_eq!(tree.get(rows[2]).unwrap().offset.y, -40, "第三行应上移让位");
+        assert!(tree.get(rows[0]).unwrap().raised, "被拖行应提为浮起层");
+        // 被拖行不走补间、直接跟指针（补间会带来橡皮筋般的滞后手感）：
+        // 按下点 y=20 拖到 y=110，位移应精确等于 90。
+        assert_eq!(
+            tree.get(rows[0]).unwrap().offset.y,
+            110 - start.y,
+            "被拖行应精确跟随指针位移"
+        );
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, to_pos, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree); // 回落动画（已禁用→瞬时）结束并提交
+
+        assert_eq!(*hook.borrow(), vec![(0, 2)], "应上报 (0, 2)");
+        let after = tree.get(tree.root.unwrap()).unwrap().children.clone();
+        assert_eq!(after, vec![rows[1], rows[2], rows[0]], "首行应移到末位");
+        assert!(
+            after.iter().all(|&r| tree.get(r).unwrap().offset.y == 0),
+            "提交后所有视觉偏移必须清零，否则会与新布局叠加成双倍位移"
+        );
+        assert!(!tree.get(rows[0]).unwrap().raised, "提交后应取消浮起");
+    }
+
+    #[test]
+    fn tap_below_threshold_does_not_reorder() {
+        // 按下手柄后只抖动 2px：是一次点击，不该变成微小重排。
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Children);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+
+        for (kind, y) in [
+            (PointerKind::Down, start.y),
+            (PointerKind::Move, start.y + 2),
+            (PointerKind::Up, start.y + 2),
+        ] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, Point::new(start.x, y), MouseButton::Left),
+                &mut hover,
+                &mut cap,
+            );
+        }
+        relayout(&mut tree);
+
+        assert!(hook.borrow().is_empty(), "未超阈值不应触发重排回调");
+        assert_eq!(
+            tree.get(tree.root.unwrap()).unwrap().children,
+            rows,
+            "顺序不应变化"
+        );
+    }
+
+    #[test]
+    fn escape_cancels_drag_without_committing() {
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Children);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+        let handle_id = tree.get(rows[0]).unwrap().children[0];
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, 110),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        assert_ne!(tree.get(rows[1]).unwrap().offset.y, 0, "拖动中应已让位");
+
+        // Esc 送到持有焦点的手柄（按下时 request_focus 已把焦点交给它）。
+        tree.dispatch_key(
+            KeyEvent {
+                key: Key::Escape,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
+            Some(handle_id),
+        );
+        relayout(&mut tree);
+
+        assert!(hook.borrow().is_empty(), "取消不应触发回调");
+        assert_eq!(
+            tree.get(tree.root.unwrap()).unwrap().children,
+            rows,
+            "取消后顺序不变"
+        );
+        assert!(
+            rows.iter().all(|&r| tree.get(r).unwrap().offset.y == 0),
+            "取消后所有行应归位"
+        );
+        assert!(
+            !tree.get(rows[0]).unwrap().raised,
+            "取消后应取消浮起，否则该行会一直盖住兄弟并抢命中"
+        );
+
+        // 用户随后松手：捕获必须在这里归还。键盘路径不传播 capture 副作用
+        // （`DispatchResult` 无 capture 字段），所以只能靠 Up 的兜底臂——漏掉它
+        // 会让指针捕获永久泄漏，整个窗口失去响应。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(start.x, 110), MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        assert!(cap.is_none(), "取消后松手必须释放指针捕获");
+    }
+
+    #[test]
+    fn escape_before_threshold_does_not_wedge_state_machine() {
+        // 按下手柄但还没起拖就按 Esc：状态机必须干净收尾。曾因 on_update 里读的是
+        // 未更新的局部 phase 而从早退分支直接返回——cancel 标志一直挂着，
+        // 之后每次拖动都会被立刻取消，整个列表从此拖不动。
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Children);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+        let handle_id = tree.get(rows[0]).unwrap().children[0];
+        let esc = KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_key(esc, Some(handle_id));
+        relayout(&mut tree);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        assert!(cap.is_none(), "取消后松手必须释放指针捕获");
+
+        // 关键回归点：紧接着再拖一次，必须正常生效。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, 110),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(start.x, 110), MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+
+        assert_eq!(*hook.borrow(), vec![(0, 2)], "上一次取消不得污染后续拖动");
+    }
+
+    #[test]
+    fn capture_lost_cancels_instead_of_committing() {
+        // Alt+Tab / 别的窗口夺走捕获时，宿主补发一个远处坐标的合成 Up。既有约定是
+        // "收尾/复位"而非"确认"（Slider 借它复位拖动），顺序不该被悄悄改掉。
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Children);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, 110),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        // UiHost::on_capture_lost 合成的事件（坐标 -1_000_000）。
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Up,
+                Point::new(-1_000_000, -1_000_000),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+
+        assert!(hook.borrow().is_empty(), "捕获丢失应取消而非提交");
+        assert_eq!(
+            tree.get(tree.root.unwrap()).unwrap().children,
+            rows,
+            "捕获丢失后顺序不变"
+        );
+        assert!(cap.is_none(), "捕获丢失后不应残留逻辑捕获");
+    }
+
+    #[test]
+    fn unequal_row_heights_stack_correctly_through_real_dispatch() {
+        // 表单行常带副标题/徽章，高度天然不齐。这条走真实事件路径验证重堆叠让位，
+        // 而不只是测 stack_offsets 纯函数——布局给出的槽位与算法假设是否吻合，
+        // 只有经 layout_root 才能验证。
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) =
+            reorder_tree_with(hook.clone(), reorder::CommitMode::Children, &[40, 60, 40]);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+
+        // 槽位应为 y=0/40/100。首行拖到末位：需越过末行中心 120。
+        assert_eq!(tree.get(rows[1]).unwrap().bounds.y, 40);
+        assert_eq!(tree.get(rows[2]).unwrap().bounds.y, 100);
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, 130),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+
+        // 抽掉 40 高的首行后，后两行各上移 40；首行则要落到 y=100（下移 100）。
+        assert_eq!(tree.get(rows[1]).unwrap().offset.y, -40, "60 高行应上移 40");
+        assert_eq!(tree.get(rows[2]).unwrap().offset.y, -40, "末行应上移 40");
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(start.x, 130), MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        assert_eq!(*hook.borrow(), vec![(0, 2)], "不等高列表也应算出正确目标位");
+        assert_eq!(
+            tree.get(tree.root.unwrap()).unwrap().children,
+            vec![rows[1], rows[2], rows[0]],
+            "首行应移到末位"
+        );
+    }
+
+    #[test]
+    fn callback_mode_reports_without_touching_children() {
+        // 数据驱动场景：children 由上游重建负责，控件只上报意图。
+        let hook = Rc::new(RefCell::new(Vec::new()));
+        let (mut tree, rows, _anim) = reorder_tree(hook.clone(), reorder::CommitMode::Callback);
+        let (mut hover, mut cap) = (None, None);
+        let start = handle_center(&tree, &rows, 0);
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, 110),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(start.x, 110), MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+
+        assert_eq!(*hook.borrow(), vec![(0, 2)], "应上报 (0, 2)");
+        assert_eq!(
+            tree.get(tree.root.unwrap()).unwrap().children,
+            rows,
+            "Callback 模式下控件不得自行重排 children"
+        );
     }
 
     #[test]

@@ -75,6 +75,31 @@ fn card(title: &str, body: Element) -> Element {
         .child(body)
 }
 
+/// 可排序列表的一行：名称 + 副标题 + 右侧开关。
+///
+/// 刻意做成"行内带交互控件 + 高度不等"的形态——这正是拖拽手柄存在的理由：
+/// 整行拖拽会与开关抢事件，而让位算法也必须按各行实际高度重新堆叠。
+fn scheme_row(name: &str, sub: &str, on: Signal<bool>) -> Element {
+    Element::row()
+        .width_match()
+        .cross(Align::Center)
+        .spacing(10)
+        .padding_xy(8, 6)
+        .child(
+            Element::col()
+                .weight(1.0)
+                .spacing(2)
+                .child(Element::label(name).font_size(14.0).fg_role(Role::Text))
+                .child(
+                    Element::label(sub)
+                        .font_size(11.0)
+                        .fg_role(Role::TextMuted)
+                        .height(16),
+                ),
+        )
+        .child(Element::switch(on))
+}
+
 fn main() {
     let name = signal(String::from("我的设备"));
     let pwd = signal(String::from("hunter2"));
@@ -236,9 +261,37 @@ fn main() {
     let link_msg = signal(String::from("（点下方“点我计数”试试）"));
     let link_n = signal(0u32);
     let (lm, ln) = (link_msg, link_n);
+    // 拖拽重排演示：三个输入方案，行内各带一个开关。
+    let scheme_a = signal(true);
+    let scheme_b = signal(false);
+    let scheme_c = signal(true);
+    let order_msg = signal(String::from("（按住左侧手柄上下拖动即可调整顺序）"));
+    let om = order_msg;
     let components_body = Element::col()
         .width_match()
         .spacing(14)
+        .child(card(
+            "拖拽重排 reorder_list（按住手柄拖动；行内开关照常可点，拖动中按 Esc 取消）",
+            Element::col()
+                .width_match()
+                .spacing(6)
+                .child(
+                    Element::reorder_list(vec![
+                        scheme_row("拼音方案", "全拼 · 默认", scheme_a),
+                        scheme_row("五笔方案", "86 版", scheme_b),
+                        scheme_row("双拼方案", "小鹤双拼", scheme_c),
+                    ])
+                    .on_reorder(move |_ctx, from, to| {
+                        om.set(format!("已把第 {} 项移到第 {} 位", from + 1, to + 1));
+                    }),
+                )
+                .child(
+                    Element::label_rc(order_msg)
+                        .font_size(12.0)
+                        .fg_role(Role::TextMuted)
+                        .height(18),
+                ),
+        ))
         .child(card(
             "富文本 RichText（span 混排基线对齐 + 胶囊 + 分隔线 + 可折叠例句组）",
             Element::rich(
