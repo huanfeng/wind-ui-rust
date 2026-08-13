@@ -37,6 +37,12 @@ pub(super) struct ToastState {
     paused_at_ms: Option<u64>,
     /// 历史累计暂停总时长（ms）。
     paused_total_ms: u64,
+    /// 上一帧算出的命中矩形 `(面板, ✕ 按钮)`（逻辑坐标）；未绘制过则 `None`。
+    ///
+    /// 跟着自己这一条走，而不是放在与 `items` 平行的另一个 `Vec` 里——平行数组
+    /// 要求每一处改动 `items` 的地方都记得同步，而改动点有三个（堆叠上限淘汰、
+    /// 过期清理、✕ 关闭），漏一个就会用陈旧下标索引到别条上，最坏是越界 panic。
+    hit: Option<(Rect, Rect)>,
 }
 
 impl ToastState {
@@ -84,9 +90,8 @@ impl ToastState {
 #[derive(Default)]
 pub(super) struct ToastHost {
     /// 活动的轻提示浮层堆栈（先进先出，超过 `TOAST_MAX` 丢最旧）：居中显示、淡入淡出、定时消失。
+    /// 命中矩形跟在每条自己的 `hit` 字段里（见 [`ToastState::hit`］），故删条即删矩形。
     pub(super) items: Vec<ToastState>,
-    /// 每帧渲染重算的命中矩形缓存，与 `items` 同序：`(面板矩形, ✕ 按钮矩形)`（逻辑坐标）。
-    pub(super) rects: Vec<(Rect, Rect)>,
 }
 
 impl ToastHost {
@@ -97,7 +102,9 @@ impl ToastHost {
 
     /// 逻辑坐标是否落在任一条面板内（平台层用于把浮层区域判为客户区）。
     pub(super) fn hit_any_panel(&self, p: crate::geometry::Point) -> bool {
-        self.rects.iter().any(|(panel, _)| panel.contains(p))
+        self.items
+            .iter()
+            .any(|t| t.hit.is_some_and(|(panel, _)| panel.contains(p)))
     }
 }
 
@@ -126,6 +133,7 @@ impl UiHost {
             shown_at_ms: now_ms,
             paused_at_ms: None,
             paused_total_ms: 0,
+            hit: None, // 本帧尚未绘制，绘制后才可命中
         });
     }
     /// 移除已过期（Task 3 先提供，供 render 调用）。
@@ -134,18 +142,20 @@ impl UiHost {
     }
 
     /// toast 面板命中测试（逻辑坐标）→ 命中条的下标。
+    ///
+    /// 下标直接来自 `items`，故拿它索引 `items` 恒安全。
     fn toast_hit(&self, p: crate::geometry::Point) -> Option<usize> {
         self.toast
-            .rects
+            .items
             .iter()
-            .position(|(panel, _)| panel.contains(p))
+            .position(|t| t.hit.is_some_and(|(panel, _)| panel.contains(p)))
     }
     /// toast ✕ 关闭按钮命中测试（逻辑坐标）→ 命中条的下标。
     fn toast_close_hit(&self, p: crate::geometry::Point) -> Option<usize> {
         self.toast
-            .rects
+            .items
             .iter()
-            .position(|(_, close)| close.contains(p))
+            .position(|t| t.hit.is_some_and(|(_, close)| close.contains(p)))
     }
 
     /// toast 浮层指针交互：命中则消费（悬停暂停 / ✕关闭 / 右键复制）。
@@ -203,12 +213,11 @@ impl UiHost {
 
 impl ToastHost {
     /// 轻提示浮层绘制：顶部居中堆叠，单条横向 [图标][文字][✕关闭]，淡入淡出
-    /// （过期条已由 `retain_live_toasts` 在建 canvas 前清除）。命中矩形逐帧重算
-    /// 写入 `rects`，供点击测试使用。
+    /// （过期条已由 `retain_live_toasts` 在建 canvas 前清除）。命中矩形逐帧重算，
+    /// 写回每条自己的 `hit` 字段供点击测试使用。
     pub(super) fn paint(&mut self, canvas: &mut dyn Canvas, theme: &Theme, ws: Size, now_ms: u64) {
-        self.rects.clear();
         let mut y = TOAST_TOP_MARGIN;
-        for toast in &self.items {
+        for toast in &mut self.items {
             let alpha = toast.alpha(now_ms);
             let pal = &theme.palette;
             let tt = &theme.toast;
@@ -303,7 +312,7 @@ impl ToastHost {
                 &TextStyle::new(TOAST_FONT),
             );
             let panel = Rect::new(x, y, panel_w, panel_h);
-            self.rects.push((panel, close));
+            toast.hit = Some((panel, close));
             y += panel_h + TOAST_GAP;
             // 持续推进淡入淡出与过期：请求下一帧。
             crate::anim::request_repaint();
@@ -351,6 +360,7 @@ mod tests {
             shown_at_ms: 100,
             paused_at_ms: None,
             paused_total_ms: 0,
+            hit: None,
         };
         assert_eq!(t.alpha(100), 0.0, "起点不可见");
         let mid_in = t.alpha(100 + TOAST_FADE_IN_MS / 2);
@@ -371,6 +381,7 @@ mod tests {
             shown_at_ms: 0,
             paused_at_ms: None,
             paused_total_ms: 0,
+            hit: None,
         };
         // 200ms 时悬停，冻结；在 5000ms（远超 1000）仍不过期。
         t.set_hover(200, true);
@@ -382,14 +393,29 @@ mod tests {
         assert!(t.expired(5000 + 800));
     }
 
+    /// 造一条已绘制过（带命中矩形）的 toast。
+    fn placed(text: &str, panel: Rect, close: Rect) -> ToastState {
+        ToastState {
+            req: ToastRequest {
+                text: text.into(),
+                kind: crate::event::ToastKind::Info,
+                duration_ms: 1000,
+            },
+            shown_at_ms: 0,
+            paused_at_ms: None,
+            paused_total_ms: 0,
+            hit: Some((panel, close)),
+        }
+    }
+
     #[test]
     fn toast_hit_and_close_hit() {
         use crate::geometry::Point;
         let app = App::new("t", 400, 300).content(Element::col());
         let mut app = app.into_handler_for_test();
-        app.toast.rects = vec![
-            (Rect::new(100, 16, 200, 44), Rect::new(280, 16, 22, 44)),
-            (Rect::new(100, 70, 200, 44), Rect::new(280, 70, 22, 44)),
+        app.toast.items = vec![
+            placed("a", Rect::new(100, 16, 200, 44), Rect::new(280, 16, 22, 44)),
+            placed("b", Rect::new(100, 70, 200, 44), Rect::new(280, 70, 22, 44)),
         ];
         assert_eq!(app.toast_hit(Point::new(150, 30)), Some(0));
         assert_eq!(app.toast_hit(Point::new(150, 84)), Some(1));
@@ -399,6 +425,37 @@ mod tests {
             app.toast_close_hit(Point::new(150, 30)),
             None,
             "面板内非✕区不算关闭"
+        );
+    }
+
+    /// 关掉一条之后，命中下标不会再指向别条——命中矩形跟着条走，删条即删矩形。
+    ///
+    /// 回归：矩形原先存在与 `items` 平行的 `rects` 里、只在 paint 时重建，而 ✕ 关闭
+    /// 只 `items.remove(i)`。屏上两条时关掉第二条，在下一帧渲染前再点原位置，
+    /// 命中仍返回 `Some(1)`，拿它索引只剩一条的 `items` 就是越界 panic。
+    #[test]
+    fn closing_a_toast_invalidates_its_hit_rect_immediately() {
+        use crate::geometry::Point;
+        let app = App::new("t", 400, 300).content(Element::col());
+        let mut app = app.into_handler_for_test();
+        app.toast.items = vec![
+            placed("a", Rect::new(100, 16, 200, 44), Rect::new(280, 16, 22, 44)),
+            placed("b", Rect::new(100, 70, 200, 44), Rect::new(280, 70, 22, 44)),
+        ];
+        let second = Point::new(150, 84);
+        assert_eq!(app.toast_hit(second), Some(1), "关闭前命中第二条");
+
+        app.toast.items.remove(1); // ✕ 关闭走的就是这一步
+
+        assert_eq!(
+            app.toast_hit(second),
+            None,
+            "第二条已移除，其命中矩形必须随之消失，不能再返回下标"
+        );
+        assert!(
+            app.toast_hit(second)
+                .is_none_or(|i| i < app.toast.items.len()),
+            "任何命中下标都必须对 items 有效"
         );
     }
 }
