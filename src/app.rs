@@ -2313,15 +2313,16 @@ impl AppHandler for UiHost {
             let panel_h = TOAST_PAD_Y + ts.h.max(icon_sz.h) + TOAST_PAD_Y;
             let x = ((ws.w - panel_w) / 2).max(0);
             let corner = tt.corner(&self.theme.metrics);
-            // 柔和投影（透明度跟随淡入淡出）。
+            // 柔和投影（透明度跟随淡入淡出）。参数与菜单浮层同源，见 ToastTheme::shadow。
+            let (sh_dy, sh_blur, sh_col) = tt.shadow();
             canvas.draw_shadow(
                 x as f32,
-                (y + 6) as f32,
+                y as f32 + sh_dy,
                 panel_w as f32,
                 panel_h as f32,
                 corner,
-                22.0,
-                Color::rgba(0, 0, 0, 90).scale_alpha(alpha),
+                sh_blur,
+                sh_col.scale_alpha(alpha),
             );
             canvas.fill_round_rect(
                 x as f32,

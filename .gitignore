@@ -11,3 +11,5 @@ Cargo.lock.bak
 
 # 工作流草稿
 .superpowers/
+# 并行开发用的临时 git worktree（agent 隔离工作树）
+.claude/worktrees/

@@ -926,9 +926,25 @@ pub struct ToastTheme {
     pub success: Option<Color>,
     pub error: Option<Color>,
     pub corner: Option<f32>,
+    /// 浮层投影：向下偏移 / 模糊半径 / 颜色（含 alpha）。任一为 `None` 取内置默认。
+    ///
+    /// 默认值与 [`MenuTheme::shadow`] 一致——两者都是浮在内容之上的临时面板，
+    /// 投影只负责把它们从背景里托起来，没有理由一个比另一个重。
+    pub shadow_dy: Option<f32>,
+    pub shadow_blur: Option<f32>,
+    pub shadow_color: Option<Color>,
 }
 
 impl ToastTheme {
+    /// 投影参数 `(向下偏移, 模糊半径, 颜色)`。默认与 [`MenuTheme::shadow`] 相同。
+    pub fn shadow(&self) -> (f32, f32, Color) {
+        (
+            self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
+            self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
+            self.shadow_color
+                .unwrap_or(Color::rgba(0, 0, 0, MENU_SHADOW_ALPHA)),
+        )
+    }
     pub fn bg(&self, _p: &Palette) -> Color {
         self.bg.unwrap_or(Color::rgba(0x32, 0x32, 0x35, 235))
     }
