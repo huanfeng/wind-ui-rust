@@ -171,9 +171,19 @@ extern "C" fn on_main(ctx: *mut std::ffi::c_void) {
     });
 }
 
-/// 激活主窗口:取消最小化 + 带到前台 + 让 app 成为前台应用。
+/// 激活主窗口:取消最小化 + 带到前台 + **标脏一帧** + 让 app 成为前台应用。
 ///
 /// macOS 无 Windows 那套「前台激活权」限制,`activate` 直接生效,不需要二次实例先授权。
+///
+/// # 为什么必须显式标脏
+///
+/// `on_second` 里写 Signal 触发的是 `anim::request_repaint`,而它只置线程局部脏标志、
+/// 等宿主在帧收尾时消费 —— 空闲时 macOS 后端零唤醒,根本没有帧在跑,没人来消费。窗口
+/// 若本就在前台,`makeKeyAndOrderFront` 也是 no-op,于是页切了、界面纹丝不动(要等用户
+/// 晃一下鼠标才跳过去)。故这里照 `MacWake::wake_on_main` 的做法对 contentView
+/// `setNeedsDisplay:` —— 与后台数据经 channel 回 UI 线程后标脏是同一条理。
+///
+/// win32 那边不需要这一步: `SetForegroundWindow`/`BringWindowToTop` 顺带就引发了重绘。
 #[cfg(target_os = "macos")]
 fn activate(main_window: usize) {
     use objc2_app_kit::{NSApplication, NSWindow};
@@ -189,6 +199,9 @@ fn activate(main_window: usize) {
             w.deminiaturize(None);
         }
         w.makeKeyAndOrderFront(None);
+        if let Some(v) = w.contentView() {
+            v.setNeedsDisplay(true);
+        }
     }
     NSApplication::sharedApplication(mtm).activate();
 }
