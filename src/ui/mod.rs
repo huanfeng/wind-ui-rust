@@ -1642,7 +1642,7 @@ impl Element {
     /// # 示例
     /// ```ignore
     /// let items = signal(vec!["苹果", "香蕉", "橙子"]);
-    /// Element::list_signal(items, |_| (), |s, _i| Element::label(s))
+    /// Element::list_signal(items, |_| (), |s| Element::label(s))
     /// ```
     pub fn list_signal<T, K>(
         data: Signal<Vec<T>>,
