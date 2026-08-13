@@ -246,6 +246,13 @@ pub struct MenuItem {
     /// 仅对 [`MenuAction::Run`] 有效：`SendKey` 是"把按键交给控件、菜单退场"的语义，
     /// 与粘滞矛盾——粘滞的 `SendKey` 项点击后按键不派发，只保持展开。
     pub stay_open: bool,
+    /// 语义色（`None` = 常规文字色）。`Danger` 把标签染成 `palette.danger`，
+    /// 用于「删除 / 清空」这类不可逆项——菜单里所有项长得一样时，破坏性操作与「复制」
+    /// 只差一行的距离，颜色是唯一能在扫读时拦住手的信号。
+    ///
+    /// 与 `enabled` 的优先级：禁用胜出（变灰）——不可点的项不该还在喊"危险"。
+    /// 与悬停/勾选的优先级：intent 胜出——危险项被指向时更该保持红，而不是变成中性的强调色。
+    pub intent: Option<crate::theme::Intent>,
 }
 
 /// 空动作（分隔线/子菜单父项占位，永不执行）。
@@ -254,12 +261,14 @@ fn noop_action() -> MenuAction {
 }
 
 impl MenuItem {
-    /// 便捷构造：标签 + 合成按键。
-    pub fn key(label: impl Into<String>, key: KeyEvent, enabled: bool) -> Self {
+    /// 各便捷构造的共同底座：动作以外全取默认。
+    ///
+    /// 四个构造各写一遍全字段的话，加字段要改四处；四份一模一样的 `None` 也没人愿意读。
+    fn base(action: MenuAction) -> Self {
         Self {
-            label: label.into(),
-            action: MenuAction::SendKey(key),
-            enabled,
+            label: String::new(),
+            action,
+            enabled: true,
             checked: false,
             icon: None,
             shortcut: None,
@@ -270,61 +279,49 @@ impl MenuItem {
             trailing_icon: None,
             on_trailing_click: None,
             stay_open: false,
+            intent: None,
+        }
+    }
+    /// 便捷构造：标签 + 合成按键。
+    pub fn key(label: impl Into<String>, key: KeyEvent, enabled: bool) -> Self {
+        Self {
+            label: label.into(),
+            enabled,
+            ..Self::base(MenuAction::SendKey(key))
         }
     }
     /// 便捷构造：标签 + 闭包动作。
     pub fn run(label: impl Into<String>, f: impl Fn() + 'static, checked: bool) -> Self {
         Self {
             label: label.into(),
-            action: MenuAction::Run(std::rc::Rc::new(f)),
-            enabled: true,
             checked,
-            icon: None,
-            shortcut: None,
-            separator: false,
-            submenu: Vec::new(),
-            subtitle: None,
-            badge: None,
-            trailing_icon: None,
-            on_trailing_click: None,
-            stay_open: false,
+            ..Self::base(MenuAction::Run(std::rc::Rc::new(f)))
         }
     }
     /// 分隔线项。
     pub fn separator() -> Self {
         Self {
-            label: String::new(),
-            action: noop_action(),
-            enabled: false,
-            checked: false,
-            icon: None,
-            shortcut: None,
             separator: true,
-            submenu: Vec::new(),
-            subtitle: None,
-            badge: None,
-            trailing_icon: None,
-            on_trailing_click: None,
-            stay_open: false,
+            enabled: false,
+            ..Self::base(noop_action())
         }
     }
     /// 级联子菜单父项：悬停展开 `items`。
     pub fn submenu(label: impl Into<String>, items: Vec<MenuItem>) -> Self {
         Self {
             label: label.into(),
-            action: noop_action(),
-            enabled: true,
-            checked: false,
-            icon: None,
-            shortcut: None,
-            separator: false,
             submenu: items,
-            subtitle: None,
-            badge: None,
-            trailing_icon: None,
-            on_trailing_click: None,
-            stay_open: false,
+            ..Self::base(noop_action())
         }
+    }
+    /// 设置语义色（见 [`MenuItem::intent`]）。
+    pub fn with_intent(mut self, intent: crate::theme::Intent) -> Self {
+        self.intent = Some(intent);
+        self
+    }
+    /// 标为危险项：标签用 `palette.danger`（删除 / 清空这类不可逆操作）。
+    pub fn danger(self) -> Self {
+        self.with_intent(crate::theme::Intent::Danger)
     }
     /// 设置前置图标（字符/emoji）。
     pub fn with_icon(mut self, icon: impl Into<String>) -> Self {

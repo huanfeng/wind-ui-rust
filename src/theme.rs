@@ -370,9 +370,31 @@ pub struct MenuTheme {
     pub text_disabled: Option<Color>,
     pub hover: Option<Color>,
     pub accent: Option<Color>,
+    /// 浮层投影：向下偏移 / 模糊半径 / 颜色（含 alpha）。任一为 `None` 取内置默认。
+    ///
+    /// 默认值刻意克制（偏移 3 / 模糊 9 / 黑 22%）：投影是用来把浮层从背景里"托起来"的，
+    /// 它自己不该成为画面里最显眼的东西。大半径 + 高不透明度的投影在远程桌面这类有损
+    /// 压缩通道上尤其难看——大片低对比渐变正是压缩最先牺牲的部分，会糊成块状。
+    pub shadow_dy: Option<f32>,
+    pub shadow_blur: Option<f32>,
+    pub shadow_color: Option<Color>,
 }
 
+/// 菜单浮层投影的内置默认（取值理由见 [`MenuTheme::shadow_dy`]）。
+const MENU_SHADOW_DY: f32 = 3.0;
+const MENU_SHADOW_BLUR: f32 = 9.0;
+const MENU_SHADOW_ALPHA: u8 = 56;
+
 impl MenuTheme {
+    /// 投影参数 `(向下偏移, 模糊半径, 颜色)`。
+    pub fn shadow(&self) -> (f32, f32, Color) {
+        (
+            self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
+            self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
+            self.shadow_color
+                .unwrap_or(Color::rgba(0, 0, 0, MENU_SHADOW_ALPHA)),
+        )
+    }
     pub fn bg(&self, p: &Palette) -> Color {
         self.bg.unwrap_or(p.surface)
     }

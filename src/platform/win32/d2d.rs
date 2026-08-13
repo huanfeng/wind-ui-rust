@@ -1106,11 +1106,15 @@ impl Canvas for D2DCanvas<'_> {
         if color.a == 0 || w <= 0.0 || h <= 0.0 || crate::render::skia::shadows_disabled() {
             return;
         }
-        let wpx = w.ceil().max(1.0) as u32;
-        let hpx = h.ceil().max(1.0) as u32;
-        let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
+        // ★ 全程按**物理像素**烘焙。此前按逻辑像素烘焙，再由主 ctx 的 SetTransform(scale)
+        //   连同 DrawBitmap 的 LINEAR 插值一起放大：125%/150% DPI 下等于把一张低分辨率的
+        //   软阴影拉大，边缘出现插值台阶。阴影是纯渐变，最经不起重采样。
+        let s = self.scale.max(0.01);
+        let wpx = (w * s).ceil().max(1.0) as u32;
+        let hpx = (h * s).ceil().max(1.0) as u32;
+        let r = radius.min(w / 2.0).min(h / 2.0).max(0.0) * s;
         // 标准差：3 趟 box-blur(半径 r) 的方差≈r²+r，故高斯 σ≈blur 与软路径扩散量同量级。
-        let sigma = blur.max(0.0);
+        let sigma = blur.max(0.0) * s;
         // 模糊外扩：高斯 3σ 覆盖 >99%，成品四周各留 margin 像素容纳模糊溢出。
         let margin = (sigma * 3.0).ceil().max(0.0) as u32;
         let rgba = ((color.r as u32) << 24)
@@ -1135,11 +1139,14 @@ impl Canvas for D2DCanvas<'_> {
         };
         // 主 ctx 每帧仅合成缓存位图：成品的 (margin,margin) 对应阴影矩形左上，故左上对齐
         // (x-margin, y-margin)，模糊溢出落在边缘（偏移/外扩已由调用方算入 x,y,w,h）。
+        // 成品是物理像素，而 dest 走**逻辑坐标**（ctx 的 SetTransform 会再乘回 scale）——
+        // 故此处一律 ÷s，换算后物理尺寸与位图 1:1，不触发重采样。
+        let m = margin as f32 / s;
         let dest = rect_f(
-            x - margin as f32,
-            y - margin as f32,
-            (wpx + 2 * margin) as f32,
-            (hpx + 2 * margin) as f32,
+            x - m,
+            y - m,
+            (wpx + 2 * margin) as f32 / s,
+            (hpx + 2 * margin) as f32 / s,
         );
         unsafe {
             self.ctx.DrawBitmap(

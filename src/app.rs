@@ -122,6 +122,23 @@ fn menu_item_height(it: &MenuItem) -> i32 {
     }
 }
 
+/// 规范化分组分隔线：去掉首尾的、把相邻多条折叠成一条。
+///
+/// 菜单项**按条件生成**是常态（某一整组可能一项都不剩），而分组分隔线只有无条件写下来
+/// 才读得顺。若不在这里收，每个调用方都得自己回溯"上一项是不是分隔线"——写起来啰嗦，
+/// 且必然有漏网的分支，症状就是菜单里凭空多出一条线、或者顶上/底下悬着一条。
+///
+/// 在 `build_level`（所有层的唯一构建入口）与 `refresh_items` 各调一次，故子菜单同样受益。
+fn normalize_separators(items: &mut Vec<MenuItem>) {
+    items.dedup_by(|a, b| a.separator && b.separator);
+    if items.first().is_some_and(|i| i.separator) {
+        items.remove(0);
+    }
+    if items.last().is_some_and(|i| i.separator) {
+        items.pop();
+    }
+}
+
 /// 焦点由哪种设备转移而来。决定焦点环显不显示——`:focus-visible` 的判据是用户最近
 /// 一次交互用的什么设备，而不是这次聚焦是不是程序性的。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -306,6 +323,9 @@ impl ContextMenu {
             return;
         };
         let mut items = rb();
+        // 必须在用下标取子菜单**之前**规范化：`spawn` 记的是已规范化列表里的位置
+        //（`build_level` 先规范化再定下标），拿未规范化的列表按同一下标取会错位。
+        normalize_separators(&mut items);
         let mut keep = self.levels.len();
         for k in 0..self.levels.len() {
             let next_spawn = self.levels.get(k + 1).and_then(|l| l.spawn);
@@ -1269,6 +1289,10 @@ impl UiHost {
         flip_right: Option<i32>,
         anchor_top: Option<i32>,
     ) -> MenuLevel {
+        // 空组留下的孤立/相邻分隔线在此收口（见 `normalize_separators`）。所有层——根层
+        // 与各级子菜单——都经过这里，故规范化对整棵菜单生效。
+        let mut items = items;
+        normalize_separators(&mut items);
         let (w, has_icons) = self.level_width(&items, min_width);
         let body: i32 = items.iter().map(menu_item_height).sum();
         let content_h = body + 2 * MENU_VPAD;
@@ -1953,7 +1977,7 @@ impl UiHost {
 
     /// toast 浮层指针交互：命中则消费（悬停暂停 / ✕关闭 / 右键复制）。
     fn handle_toast_pointer(&mut self, ev: crate::event::PointerEvent) -> bool {
-        use crate::event::{MenuAction, MenuItem, MouseButton, PointerKind};
+        use crate::event::{MenuItem, MouseButton, PointerKind};
         let now_ms = self.start.elapsed().as_millis() as u64;
         // 悬停暂停：逐条按是否命中切换（未命中该条则恢复计时）。
         let hit = self.toast_hit(ev.pos);
@@ -1976,24 +2000,14 @@ impl UiHost {
         if ev.kind == PointerKind::Down && ev.button == MouseButton::Right {
             if let Some(i) = hit {
                 let text = self.toasts[i].req.text.clone();
-                let item = MenuItem {
-                    label: "复制内容".to_string(),
-                    action: MenuAction::Run(std::rc::Rc::new(move || {
+                let item = MenuItem::run(
+                    "复制内容",
+                    move || {
                         use crate::core::ClipboardProvider;
                         crate::platform::Clipboard.set_text(&text);
-                    })),
-                    enabled: true,
-                    checked: false,
-                    icon: None,
-                    shortcut: None,
-                    separator: false,
-                    submenu: Vec::new(),
-                    subtitle: None,
-                    badge: None,
-                    trailing_icon: None,
-                    on_trailing_click: None,
-                    stay_open: false,
-                };
+                    },
+                    false,
+                );
                 if let Some(target) = self.focus.or(self.tree.root) {
                     self.open_menu(
                         crate::event::MenuRequest {
@@ -2313,15 +2327,16 @@ impl AppHandler for UiHost {
             let (pal, mt) = (&self.theme.palette, &self.theme.menu);
             for (li, level) in menu.levels.iter().enumerate() {
                 let r = level.rect;
-                // 面板投影 + 圆角底 + 描边。
+                // 面板投影 + 圆角底 + 描边。投影参数走主题（见 `MenuTheme::shadow`）。
+                let (sh_dy, sh_blur, sh_col) = mt.shadow();
                 canvas.draw_shadow(
                     r.x as f32,
-                    (r.y + 6) as f32,
+                    r.y as f32 + sh_dy,
                     r.w as f32,
                     r.h as f32,
                     10.0,
-                    18.0,
-                    Color::rgba(0, 0, 0, 110),
+                    sh_blur,
+                    sh_col,
                 );
                 canvas.fill_round_rect(
                     r.x as f32,
@@ -2381,12 +2396,14 @@ impl AppHandler for UiHost {
                             &Paint::fill(mt.hover(pal)),
                         );
                     }
-                    let color = if !it.enabled {
-                        mt.text_disabled(pal)
-                    } else if active || it.checked {
-                        mt.accent(pal)
-                    } else {
-                        mt.text(pal)
+                    // 取色优先级：禁用 > intent > 悬停/勾选 > 常规。
+                    // intent 压过悬停是有意的——危险项被指向时更该保持红，而不是变成与
+                    // 「复制」同款的强调色；禁用压过 intent 也是——不可点的项不该还在喊危险。
+                    let color = match (it.enabled, it.intent) {
+                        (false, _) => mt.text_disabled(pal),
+                        (true, Some(intent)) => intent.badge_colors(pal).1,
+                        _ if active || it.checked => mt.accent(pal),
+                        _ => mt.text(pal),
                     };
                     // 图标列。
                     if let Some(icon) = &it.icon {
@@ -3673,6 +3690,94 @@ mod tests {
         ));
         handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 120));
         assert!(!handler.last_frame_full, "无结构变化的点击应走局部重绘");
+    }
+
+    /// 条件生成的菜单里，空组留下的分隔线要被收掉：首尾的去掉、相邻的折叠成一条。
+    ///
+    /// 调用方按 `if 有这项 { push }` 生成、分组线无条件写下，是菜单最自然的写法；
+    /// 整组为空时那条线就孤在那儿。让每个调用方自己回溯上一项，必然有漏网的分支。
+    #[test]
+    fn separators_collapse_around_empty_groups() {
+        let item = |s: &str| MenuItem::run(s, || {}, false);
+        let labels = |v: &Vec<MenuItem>| -> Vec<String> {
+            v.iter()
+                .map(|i| {
+                    if i.separator {
+                        "—".into()
+                    } else {
+                        i.label.clone()
+                    }
+                })
+                .collect()
+        };
+
+        // 中间那组（编辑）整组为空 → 两条线挨在一起，应折叠为一条。
+        let mut v = vec![
+            item("标题"),
+            MenuItem::separator(),
+            MenuItem::separator(),
+            item("复制"),
+        ];
+        normalize_separators(&mut v);
+        assert_eq!(labels(&v), ["标题", "—", "复制"]);
+
+        // 首尾悬空的线。
+        let mut v = vec![
+            MenuItem::separator(),
+            item("只有一项"),
+            MenuItem::separator(),
+        ];
+        normalize_separators(&mut v);
+        assert_eq!(labels(&v), ["只有一项"]);
+
+        // 三条连排（连着两组都空）也只留一条。
+        let mut v = vec![
+            item("A"),
+            MenuItem::separator(),
+            MenuItem::separator(),
+            MenuItem::separator(),
+            item("B"),
+        ];
+        normalize_separators(&mut v);
+        assert_eq!(labels(&v), ["A", "—", "B"]);
+
+        // 正常菜单不受影响（幂等）。
+        let mut v = vec![item("A"), MenuItem::separator(), item("B")];
+        normalize_separators(&mut v);
+        let once = labels(&v);
+        normalize_separators(&mut v);
+        assert_eq!(labels(&v), once);
+    }
+
+    /// `danger()` 项用 palette.danger 上色，且**悬停时不退回强调色**；禁用则一律灰。
+    #[test]
+    fn danger_item_keeps_its_color_over_hover_but_not_over_disabled() {
+        let pal = crate::theme::Palette::default();
+        // 复刻绘制侧的取色规则（见菜单绘制处的 match）。
+        let pick = |it: &MenuItem, active: bool| match (it.enabled, it.intent) {
+            (false, _) => pal.text_disabled,
+            (true, Some(i)) => i.badge_colors(&pal).1,
+            _ if active || it.checked => pal.accent,
+            _ => pal.text,
+        };
+        let del = MenuItem::run("删除", || {}, false).danger();
+        assert_eq!(pick(&del, false), pal.danger, "常态应为危险色");
+        assert_eq!(
+            pick(&del, true),
+            pal.danger,
+            "悬停仍应是危险色，不该变成 accent"
+        );
+        let del_off = MenuItem::run("删除", || {}, false)
+            .danger()
+            .with_enabled(false);
+        assert_eq!(
+            pick(&del_off, false),
+            pal.text_disabled,
+            "禁用胜过 intent——不可点的项不该还在喊危险"
+        );
+        let plain = MenuItem::run("复制", || {}, false);
+        assert_eq!(pick(&plain, false), pal.text);
+        assert_eq!(pick(&plain, true), pal.accent, "普通项悬停仍走强调色");
     }
 
     #[test]

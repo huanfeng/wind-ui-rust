@@ -297,8 +297,13 @@ impl Canvas for SkiaCanvas<'_> {
         let ph = h * s;
         let pr = (radius * s).max(0.0);
         let pblur = (blur * s).max(0.0);
-        // 3 趟 box-blur ≈ 高斯，实际可见扩散约 1.5×半径；留 2× 余量足够，缩小阴影 pixmap 降低合成开销。
-        let margin = (pblur * 2.0).ceil() as i32 + 1;
+        // 3 趟 box-blur（见 `box_blur`）**每趟各扩散 pblur**，总扩散 3×pblur——余量必须给足这么多。
+        //
+        // ★ 曾按 2× 留余量（注释写着"实际可见扩散约 1.5×半径"），那是把单趟当成了全部：
+        //   模糊尾部在 pixmap 边界处被硬截断，阴影最外圈留下一道直角硬边。半径越大越明显，
+        //   在远程桌面下尤其扎眼——RDP 强制走本软后端（见 platform/win32/mod.rs 的后端选择，
+        //   flip-model swapchain 在远程会话不可用），而有损压缩会把这道本就突兀的边缘糊成块。
+        let margin = (pblur * 3.0).ceil() as i32 + 1;
         let tw = (pw.ceil() as i32 + 2 * margin).max(1);
         let th = (ph.ceil() as i32 + 2 * margin).max(1);
         // 体量保护：超大投影直接跳过（避免离屏分配爆炸）。
@@ -1097,6 +1102,53 @@ mod tests {
         // 远角应保持纯白（未被投影波及）。
         let (fr, _, _) = px(&pm, 4, 4);
         assert!(fr > 250, "远角应保持白，实得 {fr}");
+    }
+
+    /// 投影外缘必须**渐隐到底**，不能在某一圈上突然截断。
+    ///
+    /// ★ 回归：阴影 pixmap 的 margin 曾按 `2×半径` 留（以为 3 趟 box-blur 的可见扩散只有
+    /// 1.5 倍），而每趟各扩散一个半径、总共 3 倍——尾部被 pixmap 边界切掉，阴影最外圈
+    /// 留下一道直角硬边。判据取尾部而非每一步：紧邻矩形处梯度本就陡（从实心到渐隐），
+    /// 而截断的特征很具体——渐隐还没走到 0 就没了，"最后一个可见暗度"仍是个大数。
+    #[test]
+    fn shadow_fades_out_without_a_hard_cutoff_ring() {
+        let mut pm = Pixmap::new(400, 400).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // 大半径最能放大截断（菜单浮层用的就是这一档）。
+            c.draw_shadow(
+                150.0,
+                150.0,
+                100.0,
+                100.0,
+                10.0,
+                18.0,
+                Color::rgba(0, 0, 0, 180),
+            );
+        }
+        // 从矩形右缘向外逐像素取样，记录暗度（255-r，越大越暗）。
+        let dark: Vec<i32> = (250..399).map(|x| 255 - px(&pm, x, 200).0 as i32).collect();
+        for i in 1..dark.len() {
+            assert!(
+                dark[i] <= dark[i - 1] + 1,
+                "暗度应向外单调递减，第 {i} 步从 {} 跳到 {}",
+                dark[i - 1],
+                dark[i]
+            );
+        }
+        let last = dark.iter().rposition(|&d| d > 0).expect("阴影应有可见范围");
+        assert!(
+            dark[last] <= 2,
+            "渐隐尾部最后一个可见暗度为 {}（在第 {last} 像素处），说明模糊被 pixmap 边界切断——\
+             渐隐走完的话末端应几乎归零",
+            dark[last]
+        );
+        assert!(
+            dark[0] > 10,
+            "紧邻边缘应有可见暗度（否则这条测试没测到东西）"
+        );
+        assert_eq!(*dark.last().unwrap(), 0, "足够远处应回到纯白");
     }
 
     /// 复现进度条精确场景：with_text + 真实几何，薄裁剪带 + 圆角填充。
