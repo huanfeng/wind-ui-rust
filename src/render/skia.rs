@@ -1116,7 +1116,7 @@ mod tests {
         pm.fill(tiny_skia::Color::WHITE);
         {
             let mut c = SkiaCanvas::new(&mut pm);
-            // 大半径最能放大截断（菜单浮层用的就是这一档）。
+            // 半径取得比默认大：截断随半径放大，小半径下未必看得出来。
             c.draw_shadow(
                 150.0,
                 150.0,

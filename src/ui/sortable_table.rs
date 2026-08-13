@@ -1185,6 +1185,7 @@ pub(super) fn action_col(
 }
 
 /// 若 `el` 挂的是 `SortableHeader` 则设入操作列并返回 true，否则 false（供定位表头）。
+#[must_use]
 pub(super) fn set_header_actions(el: &mut Element, ac: &ActionCol) -> bool {
     if let Some(a) = el.widget.as_any_mut() {
         if let Some(h) = a.downcast_mut::<SortableHeader>() {
@@ -1196,6 +1197,7 @@ pub(super) fn set_header_actions(el: &mut Element, ac: &ActionCol) -> bool {
 }
 
 /// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入操作列并返回 true。
+#[must_use]
 pub(super) fn set_body_actions(el: &mut Element, ac: &ActionCol) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
         return false;
@@ -1216,6 +1218,7 @@ pub(super) fn set_body_actions(el: &mut Element, ac: &ActionCol) -> bool {
 }
 
 /// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入自定义单元格渲染并返回 true。
+#[must_use]
 pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
         return false;
@@ -1237,6 +1240,7 @@ pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> boo
 
 /// 若 `el` 挂的是 HoverRow 型响应式正文（Sortable/Paged）则设入整行双击激活回调并返回 true。
 /// 可选表格（SelectableBody/SelectableRow）不支持整行激活（首列复选框语义冲突），返回 false。
+#[must_use]
 pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
         return false;
@@ -1256,6 +1260,7 @@ pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> b
 ///
 /// 与整行双击激活不同，可选表格**也支持**：右键不与首列复选框争语义（复选框只吃左键），
 /// 而"右击某行做点什么"在多选表格里同样成立。
+#[must_use]
 pub(super) fn set_body_menu(el: &mut Element, menu: &OnRowMenu) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
         return false;
@@ -1276,6 +1281,7 @@ pub(super) fn set_body_menu(el: &mut Element, menu: &OnRowMenu) -> bool {
 }
 
 /// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入默认文本格最多行数并返回 true。
+#[must_use]
 pub(super) fn set_body_cell_lines(el: &mut Element, lines: usize) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
         return false;
