@@ -1040,11 +1040,18 @@ impl Element {
     /// 右键上下文菜单：在本元素（或其子元素）上右击时，调用 `build` 取菜单项并以
     /// 级联浮层弹出。**适用于任意控件/容器**——挂到面板容器即"在该区域右击弹菜单"；
     /// 命中沿父链冒泡到首个设了回调的节点。项用 `MenuItem`（支持图标/分隔/快捷键/子菜单）。
+    /// 项**每次右击现取现建**，且粘滞项（[`MenuItem::stay_open`](crate::event::MenuItem::stay_open)，
+    /// 即菜单内的复选开关）点击后会原地重跑本构建器刷新勾选态，故 `build` 须为 `Fn`
+    /// （可重入），捕获的可变状态放 `Cell`/`RefCell`/`Signal`。
+    ///
+    /// ⚠ 挂了菜单的节点会**吞命中**（同 `on_drop`/`tooltip`）：透明的纯布局容器一旦挂上
+    /// 就开始拦截指针事件、遮住其下内容。挂在本就吞命中的节点上（有背景 / `clickable()` /
+    /// 真实控件）。表格数据行用 [`on_row_context_menu`](Self::on_row_context_menu)。
     pub fn on_context_menu(
         mut self,
-        build: impl FnMut() -> Vec<crate::event::MenuItem> + 'static,
+        build: impl Fn() -> Vec<crate::event::MenuItem> + 'static,
     ) -> Self {
-        self.context_menu = Some(Box::new(build));
+        self.context_menu = Some(Rc::new(build));
         self
     }
 

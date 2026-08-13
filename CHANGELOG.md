@@ -54,6 +54,14 @@
 - **`ReorderTheme` 主题覆盖层**：手柄常态/悬停色、拖动中行底色与投影、指示线色、手柄槽宽、
   拖动行圆角，全部 `Option` 回退 palette 并接入 TOML。
 
+### Changed
+- **`on_context_menu` 的构建器改收 `Fn`（原 `FnMut`），并交宿主兼任菜单重建器**：
+  粘滞项（`MenuItem::stay_open`，即右键菜单里的复选开关）点击后菜单不关，此前
+  `MenuRequest::rebuild` 恒为 `None`，勾选态刷不了——勾了也不变，看着像没生效。
+  同一个构建器要留两份（弹出时建项、粘滞项点击后重建），`FnMut` 独占交不出第二份，
+  故 `core::MenuFn` 由 `Box<dyn FnMut>` 改为 `Rc<dyn Fn>`。
+  迁移：构建器捕获的可变状态改放 `Cell`/`RefCell`/`Signal`（本来也该如此——它每次右击都跑）。
+
 ## [0.11.1] - 2026-08-11
 
 ### Fixed

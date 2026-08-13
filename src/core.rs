@@ -26,7 +26,12 @@ pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
 /// 文件拖放回调类型：收到落在本节点（或其子节点冒泡上来）的文件路径列表。
 pub type DropFn = Box<dyn FnMut(&mut EventCtx, &[PathBuf])>;
 /// 右键上下文菜单构建回调：返回该次菜单项（空 = 不弹）。
-pub type MenuFn = Box<dyn FnMut() -> Vec<crate::event::MenuItem>>;
+///
+/// 用 `Rc<dyn Fn>` 而非 `Box<dyn FnMut>`：菜单弹出后还要留一份给宿主当
+/// [`MenuRequest::rebuild`](crate::event::MenuRequest::rebuild)——粘滞项
+/// （`MenuItem::stay_open`，即右键菜单里的复选项）点击后菜单不关，得靠它重跑构建器
+/// 才能把勾选态刷新过来。`FnMut` 独占，交不出第二份。
+pub type MenuFn = std::rc::Rc<dyn Fn() -> Vec<crate::event::MenuItem>>;
 
 /// 失效矩形的抗锯齿外扩余量（逻辑像素）。与宿主局部重绘的余量同源。
 const DAMAGE_MARGIN: i32 = 2;
@@ -2167,18 +2172,17 @@ impl Tree {
                 // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
                 // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
                 if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
-                    if let Some(mut cb) = self.get_mut(id).and_then(|n| n.context_menu.take()) {
+                    if let Some(cb) = self.get(id).and_then(|n| n.context_menu.clone()) {
                         let items = cb();
-                        if let Some(n) = self.get_mut(id) {
-                            n.context_menu = Some(cb);
-                        }
                         if !items.is_empty() {
                             res.menu = Some(crate::event::MenuRequest {
                                 pos: ev.pos,
                                 items,
                                 min_width: 0,
                                 anchor_top: None,
-                                rebuild: None,
+                                // 同一个构建器交宿主当重建器：粘滞项（复选）点击后菜单不关，
+                                // 靠重跑它把勾选态刷新过来，否则勾了也不变、看着像没生效。
+                                rebuild: Some(cb),
                             });
                             res.consumed = true;
                         }
@@ -3939,6 +3943,38 @@ mod tests {
         assert!(menu.items[1].separator);
         assert_eq!(menu.items[2].submenu.len(), 1, "子菜单项应携带级联项");
         assert!(!menu.items[2].is_actionable(), "子菜单父项不可直接执行");
+    }
+
+    /// 上下文菜单必须把构建器一并交给宿主当重建器：粘滞项（菜单内的复选开关）点击后
+    /// 菜单不关，靠重跑它刷新勾选态——不交的话勾了也不变，看着像没生效。
+    #[test]
+    fn on_context_menu_hands_builder_to_host_as_rebuilder() {
+        use crate::event::MenuItem;
+        use crate::ui::Element;
+        use std::cell::Cell as StdCell;
+        let on = Rc::new(StdCell::new(false));
+        let (o_build, o_click) = (on.clone(), on.clone());
+        let tree_el = Element::col().fill().on_context_menu(move || {
+            let o = o_click.clone();
+            vec![MenuItem::run("开关", move || o.set(!o.get()), o_build.get()).stay_open()]
+        });
+        let mut tree = layout(tree_el, 200, 200);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(100, 100),
+            button: MouseButton::Right,
+            click_count: 1,
+        };
+        let res = tree.dispatch_pointer(down, &mut h, &mut cap);
+        let menu = res.menu.expect("右键容器应请求上下文菜单");
+        assert!(!menu.items[0].checked, "初始未勾选");
+        let rebuild = menu.rebuild.clone().expect("应交付重建器");
+        // 模拟宿主：执行粘滞项动作后重跑重建器 → 勾选态跟着翻。
+        if let crate::event::MenuAction::Run(f) = &menu.items[0].action {
+            f();
+        }
+        assert!(rebuild()[0].checked, "重建后勾选态应反映新值");
     }
 
     #[test]
