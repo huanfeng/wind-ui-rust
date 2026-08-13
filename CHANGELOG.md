@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+### Added
+- **拖拽重排列表 `Element::reorder_list`**：面向设置类应用的手动排序列表，每行前置拖动手柄，
+  按住上下拖动即可调顺序，其余行平滑让位、被拖行浮起跟手，松手播回落动画后才提交，
+  拖动中按 `Esc` 取消。手柄独立于行内容，故行里照常可放开关/下拉/输入框而不抢事件；
+  让位按各行实际高度重新堆叠，支持带副标题的不等高表单行。
+  默认 `CommitMode::Children` 直接重排子节点、**不重建行**，行内控件状态天然保留；
+  数据驱动场景切 `CommitMode::Callback`，由应用在 `on_reorder` 回调里更新数据源。
+  设计文档见 `docs/reorder-design.md`。
+- **`Node::offset` / `Node::raised` 绘制层能力**：`offset` 是不参与 measure/arrange 的
+  绘制/命中偏移，`raised` 把子节点提到同级最上层绘制并优先命中。二者供"视觉位移但布局不变"
+  的场景使用（拖拽让位、后续的 FLIP 动画等）——直接改 `bounds` 会被任何一次 relayout 冲掉。
+  变化纳入 `layout_signature`，故宿主自动升级整窗重绘，无需为其开特例分支。
+- **`ReorderTheme` 主题覆盖层**：手柄常态/悬停色、拖动中行底色与投影、指示线色、手柄槽宽、
+  拖动行圆角，全部 `Option` 回退 palette 并接入 TOML。
+
 ## [0.11.1] - 2026-08-11
 
 ### Fixed
