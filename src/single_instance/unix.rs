@@ -71,6 +71,12 @@ pub(crate) fn acquire(app_id: &str) -> bool {
     }
 }
 
+/// 只读探测(见 [`super::instance_running`]):连得上 = 首实例在 accept。残留 socket
+/// 文件连不上(对端已死),故与 [`acquire`] 的探活判据一致。
+pub(crate) fn instance_running(app_id: &str) -> bool {
+    UnixStream::connect(socket_path(app_id)).is_ok()
+}
+
 /// 二次实例:把 argv 写给首实例。返回是否成功送达(失败时调用方回退为正常启动)。
 pub(crate) fn forward(app_id: &str, argv: &[String]) -> bool {
     let Ok(mut s) = UnixStream::connect(socket_path(app_id)) else {
@@ -236,6 +242,31 @@ mod tests {
         assert!(acquire(&id), "首次应取得单实例");
         // 首实例的 listener 已在 backlog 上，二次 acquire 的探测连接能连上 → false。
         assert!(!acquire(&id), "已有实例在运行时不得再取得");
+        cleanup(&id);
+    }
+
+    /// 探测必须无副作用：调用它之后 `acquire` 仍要能正常取得单实例。
+    /// （它若手滑 bind 了一下，调用方就会被自己挡在门外。）
+    #[test]
+    fn probe_is_read_only_and_reports_running_instance() {
+        let _g = lock();
+        let id = app_id("probe");
+        cleanup(&id);
+        assert!(!instance_running(&id), "没人在跑时应报 false");
+        assert!(acquire(&id), "探测过后仍应能取得单实例（证明探测无副作用）");
+        assert!(instance_running(&id), "首实例在 accept 时应报 true");
+        cleanup(&id);
+    }
+
+    /// 残留 socket 文件不等于有实例在跑 —— 判据须与 `acquire` 的探活一致，否则
+    /// 一次异常退出就能让调用方永远以为「还有实例开着」。
+    #[test]
+    fn probe_ignores_stale_socket() {
+        let _g = lock();
+        let id = app_id("probe_stale");
+        cleanup(&id);
+        std::fs::write(socket_path(&id), b"").expect("造一个残留文件");
+        assert!(!instance_running(&id), "残留 socket 应报 false");
         cleanup(&id);
     }
 
