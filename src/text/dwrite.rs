@@ -18,13 +18,13 @@ use windows::core::{implement, IUnknown, Interface, Ref, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, FALSE};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteFactory2,
-    IDWriteGdiInterop, IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams,
-    IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl,
-    DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
-    DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS,
-    DWRITE_UNDERLINE,
+    IDWriteFactory3, IDWriteFontCollection1, IDWriteFontSetBuilder1, IDWriteGdiInterop,
+    IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat,
+    IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_COLOR_F,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION,
+    DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
+    DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
 };
 use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 
@@ -42,6 +42,123 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 const DEFAULT_FAMILY: &str = "Microsoft YaHei UI"; // 中文友好的默认字体
+
+/// 扫描 UTF-16 序列，返回私用区（PUA）字符的连续段 `[(起始下标, 码元长度)]`。
+/// 下标/长度均以 **UTF-16 码元** 计，可直接用作 `DWRITE_TEXT_RANGE`。
+///
+/// 三段私用区缺一不可——图标字体用哪一段并不统一：多数图标集（Font Awesome、
+/// Material Icons 等）落在 BMP 私用区，而自制字体常用补充私用区以避开冲突。
+/// 只判 BMP 一段的话，后者会静默落回主字体、渲染成方框。
+///
+/// - BMP 私用区 `U+E000..=U+F8FF`：单码元，`u16` 值即码位。
+/// - 补充私用区 A/B `U+F0000..=U+10FFFD`：UTF-16 下是代理对。高位代理恰好占满
+///   `0xDB80..=0xDBFF`（`0xDB80..=0xDBBF` → 第 15 平面，`0xDBC0..=0xDBFF` → 第 16
+///   平面），不多不少，故判「高位代理落在该段 + 后随合法低位代理」即可，无需还原码位。
+///
+/// 相邻的 BMP 与补充私用区字符合并进同一段——它们目标字体族相同，合并只减少
+/// `SetFontFamilyName` 调用次数，不改变渲染结果。
+fn pua_runs(wide: &[u16]) -> Vec<(usize, usize)> {
+    /// 单码元即为私用区码位（BMP PUA）。
+    fn is_bmp_pua(u: u16) -> bool {
+        (0xE000..=0xF8FF).contains(&u)
+    }
+    /// 补充私用区 A/B 的高位代理段。
+    fn is_spua_lead(u: u16) -> bool {
+        (0xDB80..=0xDBFF).contains(&u)
+    }
+    /// 任意低位代理（配对合法性；具体码位无需还原）。
+    fn is_trail(u: u16) -> bool {
+        (0xDC00..=0xDFFF).contains(&u)
+    }
+
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut i = 0usize;
+    while i < wide.len() {
+        // 命中长度：1=BMP 私用区，2=补充私用区代理对，0=非私用区。
+        let step = if is_bmp_pua(wide[i]) {
+            1
+        } else if is_spua_lead(wide[i]) && wide.get(i + 1).is_some_and(|&t| is_trail(t)) {
+            2
+        } else {
+            0
+        };
+        if step == 0 {
+            if let Some(s) = start.take() {
+                runs.push((s, i - s));
+            }
+            i += 1;
+        } else {
+            start.get_or_insert(i);
+            i += step;
+        }
+    }
+    if let Some(s) = start {
+        runs.push((s, wide.len() - s));
+    }
+    runs
+}
+
+/// 私用区回退字体：自建字体集 + 其家族名。
+///
+/// 用**自建字体集**而非系统字体，是为了让应用能直接带一个 `.ttf` 随包分发，
+/// 无需安装到系统（安装需要管理员权限，且会污染用户字体列表）。
+///
+/// `Clone` 是 COM 的 AddRef，廉价；引擎创建时从注册表克隆一份持有。
+#[derive(Clone)]
+struct PrivateUseFont {
+    collection: IDWriteFontCollection1,
+    family: Vec<u16>,
+}
+
+thread_local! {
+    /// 进程内已注册的私用区回退字体。照搬 `render::image` 解码器注册表的
+    /// thread-local 模式（UI 单线程，免加锁）。
+    static PRIVATE_USE_FONT: std::cell::RefCell<Option<PrivateUseFont>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 加载字体文件为自建字体集。不安装到系统。
+fn build_private_use_font(path: &str, family: &str) -> Result<PrivateUseFont> {
+    let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+    let f3: IDWriteFactory3 = factory.cast()?;
+    let path_w = wide_nul(path);
+    let file = unsafe { f3.CreateFontFileReference(PCWSTR(path_w.as_ptr()), None)? };
+    let builder: IDWriteFontSetBuilder1 = unsafe { f3.CreateFontSetBuilder()? }.cast()?;
+    unsafe { builder.AddFontFile(&file)? };
+    let set = unsafe { builder.CreateFontSet()? };
+    let collection = unsafe { f3.CreateFontCollectionFromFontSet(&set)? };
+    Ok(PrivateUseFont {
+        collection,
+        family: wide_nul(family),
+    })
+}
+
+/// 注册**私用区回退字体**：此后文本里落在私用区的码位改用该字体渲染，其余字符不受影响。
+///
+/// 典型用途是图标字体（Font Awesome、Material Icons 等，其字形全部落在私用区）：
+/// 注册后就能把图标码位当普通文字放进任何 `label`/`button`，与文本同流布局、随字号缩放。
+///
+/// ```no_run
+/// windui::text::register_private_use_font("assets/fa-solid-900.ttf", "Font Awesome 6 Free")?;
+/// # Ok::<(), windows::core::Error>(())
+/// ```
+///
+/// - `path`：字体文件路径。**不需要安装到系统**——用 DirectWrite 自建字体集加载，
+///   应用可以直接把 `.ttf` 随包分发（安装需要管理员权限，还会污染用户字体列表）。
+/// - `family`：字体文件**内部的家族名**（不是文件名）——双击字体文件即可在预览窗口顶部
+///   看到。它无法从路径推断，必须显式给出；写错的表现是图标仍为方框。
+///
+/// **须在 [`crate::app::App::run`] 之前调用**：文字引擎在窗口创建时读取本注册表。
+/// 运行期改字体请拿 [`DWriteEngine::set_private_use_font`]（它会一并清测量缓存）。
+///
+/// 失败返回 `Err`（文件不存在、格式不受支持等），此时保持未注册状态——图标渲染为方框，
+/// 其余文本不受影响。重复调用以最后一次为准。
+pub fn register_private_use_font(path: &str, family: &str) -> Result<()> {
+    let puf = build_private_use_font(path, family)?;
+    PRIVATE_USE_FONT.with(|f| *f.borrow_mut() = Some(puf));
+    Ok(())
+}
 
 /// 文本测量缓存容量上限；满则整体清空（周期性重测，命中率仍极高）。
 const MEASURE_CACHE_CAP: usize = 4096;
@@ -69,6 +186,8 @@ pub struct DWriteEngine {
     bitmap_target: Option<IDWriteBitmapRenderTarget>,
     bitmap_w: i32,
     bitmap_h: i32,
+    /// 私用区回退字体（可选）：设置后，文本里的私用区码位改用它渲染。
+    private_use: Option<PrivateUseFont>,
 }
 
 impl DWriteEngine {
@@ -101,6 +220,41 @@ impl DWriteEngine {
                 bitmap_target: None,
                 bitmap_w: 0,
                 bitmap_h: 0,
+                // 取启动时注册的回退字体（见 `register_private_use_font`）。此刻缓存尚空，
+                // 故无需失效处理；运行期改字体走 `set_private_use_font`，它自己清缓存。
+                private_use: PRIVATE_USE_FONT.with(|f| f.borrow().clone()),
+            }
+        }
+    }
+
+    /// 运行期替换本引擎的私用区回退字体。参数语义同
+    /// [`register_private_use_font`]，多数应用用那个自由函数在启动时注册即可。
+    ///
+    /// **会清空测量与基线缓存**——私用区字符换了字形来源，宽度随之改变，留着旧值会让
+    /// 图标按上一套字形的宽度布局（未注册时即主字体的方框宽度）。
+    pub fn set_private_use_font(&mut self, path: &str, family: &str) -> Result<()> {
+        self.private_use = Some(build_private_use_font(path, family)?);
+        self.measure_cache.clear();
+        self.metrics_cache.clear();
+        Ok(())
+    }
+
+    /// 把 `layout` 中的私用区段切到回退字体。无回退字体或无私用区字符时不做任何事。
+    ///
+    /// 走**字体集 + 家族名**而非 DirectWrite 的 fallback 机制：后者按脚本/语言匹配，
+    /// 私用区没有脚本归属，匹配不到。
+    fn apply_private_use(&self, layout: &IDWriteTextLayout, text_w: &[u16]) {
+        let Some(puf) = &self.private_use else {
+            return;
+        };
+        for (start, len) in pua_runs(text_w) {
+            let range = DWRITE_TEXT_RANGE {
+                startPosition: start as u32,
+                length: len as u32,
+            };
+            unsafe {
+                let _ = layout.SetFontCollection(&puf.collection, range);
+                let _ = layout.SetFontFamilyName(PCWSTR(puf.family.as_ptr()), range);
             }
         }
     }
@@ -160,11 +314,15 @@ impl DWriteEngine {
     ) -> Option<IDWriteTextLayout> {
         let format = self.format(ts, psize)?;
         let text_w = wide(text);
-        unsafe {
+        let layout = unsafe {
             self.factory
                 .CreateTextLayout(&text_w, &format, max_w, f32::MAX)
-                .ok()
-        }
+                .ok()?
+        };
+        // 私用区改字体必须在这里做——measure 与 draw 共用本函数，两处若不同源，
+        // 布局会按主字体的方框宽度排、绘制却出图标字形，宽度对不上。
+        self.apply_private_use(&layout, &text_w);
+        Some(layout)
     }
 
     /// 返回复用的位图渲染目标，必要时按历史最大尺寸扩容（减少 COM 重建）。
@@ -786,5 +944,140 @@ mod alpha_text_tests {
         );
         let d = darkest_red(&pm, 6, 40, 8, 40);
         assert!(d < 40, "不透明黑字块中心应近黑(<40)，实得 {d}");
+    }
+}
+
+/// 私用区分段的测试。`pua_runs` 是纯函数（不碰 DirectWrite），故不需要图形环境。
+///
+/// 覆盖三段私用区各自的识别、非私用区代理对的排除、以及段边界的合并规则——
+/// 这几条正是「图标字体渲染成方框」类问题的根源所在：漏判一段，那一段就静默
+/// 落回主字体。
+#[cfg(test)]
+mod pua_runs_tests {
+    use super::pua_runs;
+
+    fn runs(s: &str) -> Vec<(usize, usize)> {
+        pua_runs(&s.encode_utf16().collect::<Vec<u16>>())
+    }
+
+    /// BMP 私用区（U+E000..=U+F8FF）：多数图标集所在段，单码元。
+    #[test]
+    fn bmp_pua_run_is_detected() {
+        assert_eq!(runs("\u{E0E1}\u{E124}\u{E147}\u{E13D}"), vec![(0, 4)]);
+    }
+
+    /// 补充私用区 A（第 15 平面）：各占 2 个码元，故长度是字符数的两倍。
+    #[test]
+    fn spua_a_run_is_detected() {
+        assert_eq!(runs("\u{F00FD}\u{F00F7}\u{F013C}"), vec![(0, 6)]);
+    }
+
+    /// 补充私用区 B（第 16 平面）同样纳入。
+    #[test]
+    fn spua_b_run_is_detected() {
+        assert_eq!(runs("\u{100000}\u{10FFFD}"), vec![(0, 4)]);
+    }
+
+    /// 非私用区的**代理对不得命中**——CJK 扩展 B（U+20000）等生僻字若被误切到
+    /// 图标字体，反而会变成方框。这是判据不能只看「是不是代理对」的原因。
+    #[test]
+    fn non_pua_supplementary_chars_are_excluded() {
+        assert!(runs("\u{20000}\u{2A6DF}").is_empty());
+    }
+
+    /// 混排时下标以 UTF-16 码元计，可直接用作 DWRITE_TEXT_RANGE。
+    #[test]
+    fn mixed_text_run_offsets_are_utf16_units() {
+        // "ab" + PUA + "c" → 段起点 2、长度 1
+        assert_eq!(runs("ab\u{E001}c"), vec![(2, 1)]);
+    }
+
+    /// 被普通文本隔开的两段不合并。
+    #[test]
+    fn separate_runs_are_not_merged_across_plain_text() {
+        assert_eq!(runs("\u{E001}x\u{E002}"), vec![(0, 1), (2, 1)]);
+    }
+
+    /// 相邻的 BMP 与补充私用区字符合并为一段——目标字体族相同，合并只减少
+    /// SetFontFamilyName 调用次数，不改变渲染结果。
+    #[test]
+    fn adjacent_bmp_and_supplementary_pua_merge() {
+        assert_eq!(runs("\u{E001}\u{F00FD}"), vec![(0, 3)]);
+    }
+
+    /// 孤立高位代理（非法 UTF-16 片段）不得命中，否则 range 会越界。
+    #[test]
+    fn lone_lead_surrogate_is_ignored() {
+        assert!(pua_runs(&[0xDB80]).is_empty());
+    }
+
+    /// 空串与纯普通文本不产生段。
+    #[test]
+    fn empty_and_plain_text_yield_no_runs() {
+        assert!(runs("").is_empty());
+        assert!(runs("hello 世界").is_empty());
+    }
+}
+
+/// 私用区字体注册的 COM 链路与接线测试。需要真实 DirectWrite，故随 Windows 测试跑。
+#[cfg(test)]
+mod private_use_font_tests {
+    use super::{build_private_use_font, register_private_use_font, DWriteEngine};
+
+    /// 系统自带、各 Windows 版本均存在，用来验证「加载文件为自建字体集」这条 COM 链路。
+    /// 它不是图标字体，但注册流程与字体内容无关。
+    const SYSTEM_FONT: &str = r"C:\Windows\Fonts\segoeui.ttf";
+
+    /// COM 链路可用：文件 → FontFileReference → FontSet → FontCollection1 全程不报错。
+    #[test]
+    fn builds_collection_from_font_file() {
+        assert!(
+            std::path::Path::new(SYSTEM_FONT).exists(),
+            "测试前提：{SYSTEM_FONT} 应存在于任何 Windows 上"
+        );
+        assert!(build_private_use_font(SYSTEM_FONT, "Segoe UI").is_ok());
+    }
+
+    /// 路径不存在时返回 Err 而非 panic，且**不改动注册表**——注册失败应保持原状态，
+    /// 让图标退回方框，而不是把引擎推进半初始化的状态。
+    #[test]
+    fn missing_file_returns_err_and_leaves_registry_intact() {
+        let before = super::PRIVATE_USE_FONT.with(|f| f.borrow().is_some());
+        assert!(register_private_use_font(r"Z:\no\such\font.ttf", "Nope").is_err());
+        let after = super::PRIVATE_USE_FONT.with(|f| f.borrow().is_some());
+        assert_eq!(before, after, "失败的注册不得改动注册表");
+    }
+
+    /// 接线：注册后新建的引擎应当拿到该字体。
+    ///
+    /// 没有这条，前两条测试在「注册表写了但引擎从不读」时也会全绿——而引擎读不到
+    /// 就等于功能没接上，图标照样是方框。
+    ///
+    /// 注册表是 thread_local，Rust 测试各跑各的线程，故本用例的写入不影响其它用例。
+    #[test]
+    fn registered_font_reaches_new_engine() {
+        assert!(
+            DWriteEngine::new().private_use.is_none(),
+            "未注册时引擎不应持有回退字体"
+        );
+        register_private_use_font(SYSTEM_FONT, "Segoe UI").expect("注册系统字体");
+        assert!(
+            DWriteEngine::new().private_use.is_some(),
+            "注册后新建的引擎应拿到回退字体"
+        );
+    }
+
+    /// 运行期替换会清掉测量缓存——私用区字符换了字形来源，宽度随之改变。
+    #[test]
+    fn set_private_use_font_clears_caches() {
+        use crate::text::{TextEngine, TextStyle};
+        let mut eng = DWriteEngine::new();
+        eng.set_scale(1.0);
+        eng.measure("测量填充缓存", &TextStyle::new(14.0), None);
+        assert!(!eng.measure_cache.is_empty(), "前提：缓存应已有内容");
+        eng.set_private_use_font(SYSTEM_FONT, "Segoe UI")
+            .expect("注册系统字体");
+        assert!(eng.measure_cache.is_empty(), "换字体须清空测量缓存");
+        assert!(eng.metrics_cache.is_empty(), "换字体须清空基线缓存");
     }
 }
