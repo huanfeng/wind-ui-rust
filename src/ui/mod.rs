@@ -892,8 +892,17 @@ impl Element {
     }
 
     /// 动态标签（绑定 `Signal<String>`，只读显示）。
-    pub fn label_rc(text: Signal<String>) -> Self {
+    pub fn label_signal(text: Signal<String>) -> Self {
         Self::base(Layout::None).widget(DynLabel::new(text))
+    }
+
+    /// 改名为 [`Element::label_signal`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `label_signal`：参数早已是 Signal，`_rc` 是 Rc 时代的化石，会让人以为要传 Rc 而绕开它"
+    )]
+    pub fn label_rc(text: Signal<String>) -> Self {
+        Self::label_signal(text)
     }
 
     /// 胶囊徽章/标签（如版本号 `v0.0.0-alpha`、状态 `新`）：小字号 + pill 圆角 +
@@ -952,13 +961,13 @@ impl Element {
         // 终态提示——只提 label_rc 会把用了 label(..) 的调用方指向错误的构造器。
         debug_assert!(
             false,
-            "max_lines()/truncate() 只能用于 Element::label(..) / label_rc(..)"
+            "max_lines()/truncate() 只能用于 Element::label(..) / label_signal(..)"
         );
         self
     }
 
     /// 限制显示行数（超出高度裁剪；配合 `.truncate()` 可在末行加省略号）。
-    /// 同时适用于 `label` 和 `label_rc`。
+    /// 同时适用于 `label` 和 `label_signal`。
     #[track_caller]
     pub fn max_lines(mut self, n: usize) -> Self {
         if self
@@ -973,7 +982,7 @@ impl Element {
     }
 
     /// 文本溢出省略方式（`max_lines(1)` 时精确截断，多行仅高度裁剪）。
-    /// 同时适用于 `label` 和 `label_rc`。
+    /// 同时适用于 `label` 和 `label_signal`。
     #[track_caller]
     pub fn truncate(mut self, mode: Truncate) -> Self {
         if self
@@ -1141,11 +1150,20 @@ impl Element {
 
     /// 动态富文本：绑定 `Signal<RichDoc>`，信号变化时整篇换文档（词典切词条）。
     /// 布局缓存与选区随之失效；折叠/clamp 的 Signal 在应用侧持有，跨词条是否
-    /// 复位由应用决定。范式同 [`Element::label_rc`]。
-    pub fn rich_rc(doc: Signal<RichDoc>) -> Self {
+    /// 复位由应用决定。范式同 [`Element::label_signal`]。
+    pub fn rich_signal(doc: Signal<RichDoc>) -> Self {
         Self::base(Layout::None)
             .widget(rich::RichText::new_dynamic(doc))
             .reactive()
+    }
+
+    /// 改名为 [`Element::rich_signal`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `rich_signal`：参数早已是 Signal，`_rc` 是 Rc 时代的化石，会让人以为要传 Rc 而绕开它"
+    )]
+    pub fn rich_rc(doc: Signal<RichDoc>) -> Self {
+        Self::rich_signal(doc)
     }
 
     /// RichText 专属配置入口（误用检测同 text_input/link）。
@@ -1496,8 +1514,17 @@ impl Element {
 
     /// 响应式下拉：选项绑定 `Signal<Vec<String>>`，列表变更（如异步加载的主题/字体到达）
     /// 自动重新测量/渲染。选中索引仍由 `selected` 绑定。
-    pub fn dropdown_reactive(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
+    pub fn dropdown_signal(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
         Self::base(Layout::None).widget(select::Dropdown::new_reactive(options, selected))
+    }
+
+    /// 改名为 [`Element::dropdown_signal`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `dropdown_signal`：绑信号的构造统一用 `_signal` 后缀（对齐 list_signal/host_signal），`_reactive` 与标记节点响应式的 `Element::reactive()` 撞概念"
+    )]
+    pub fn dropdown_reactive(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
+        Self::dropdown_signal(options, selected)
     }
 
     /// 富内容下拉：选项支持副标题（两行）、尾随徽章（收起态当前项与展开态列表项均显示）、
@@ -1507,11 +1534,23 @@ impl Element {
     }
 
     /// 响应式富内容下拉：选项列表绑定外部 `Signal<Vec<DropdownItem>>`。
-    pub fn dropdown_items_reactive(
+    pub fn dropdown_items_signal(
         items: Signal<Vec<select::DropdownItem>>,
         selected: Signal<usize>,
     ) -> Self {
         Self::base(Layout::None).widget(select::Dropdown::with_items_reactive(items, selected))
+    }
+
+    /// 改名为 [`Element::dropdown_items_signal`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `dropdown_items_signal`：绑信号的构造统一用 `_signal` 后缀（对齐 list_signal/host_signal），`_reactive` 与标记节点响应式的 `Element::reactive()` 撞概念"
+    )]
+    pub fn dropdown_items_reactive(
+        items: Signal<Vec<select::DropdownItem>>,
+        selected: Signal<usize>,
+    ) -> Self {
+        Self::dropdown_items_signal(items, selected)
     }
 
     /// 下拉式复选菜单：外观同 `dropdown`，面板是菜单，项可单独开关。
@@ -2285,7 +2324,7 @@ impl Element {
                             .corner(TABLE_CELL_CORNER)
                             .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
                             .child(
-                                Element::label_rc(sig)
+                                Element::label_signal(sig)
                                     .font_size(13.0)
                                     .fg_role(crate::style::Role::Text)
                                     .width_match()
@@ -2660,7 +2699,7 @@ impl Element {
     /// 为原始行下标，服务端表格（[`table_sortable_server`](Self::table_sortable_server)）
     /// 为页内显示下标。三类表格均支持——右键不与首列复选框争语义（复选框只吃左键）。
     ///
-    /// 菜单项**每次右击现取现建**：这样勾选态（`with_check`）、禁用态（`with_enabled`）
+    /// 菜单项**每次右击现取现建**：这样勾选态（`check`）、禁用态（`enabled`）
     /// 都反映右击当刻的数据。回调挂在行容器上，右击行内任何位置（含空白、自定义单元格、
     /// 操作列）都能弹。
     ///

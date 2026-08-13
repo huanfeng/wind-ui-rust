@@ -3922,9 +3922,9 @@ mod tests {
         use crate::ui::Element;
         let tree_el = Element::col().fill().on_context_menu(|| {
             vec![
-                MenuItem::run("剪切", || {}, false).with_icon("✂"),
+                MenuItem::run("剪切", || {}, false).icon("✂"),
                 MenuItem::separator(),
-                MenuItem::submenu("更多", vec![MenuItem::run("子项", || {}, false)]).with_icon("⋯"),
+                MenuItem::submenu("更多", vec![MenuItem::run("子项", || {}, false)]).icon("⋯"),
             ]
         });
         let mut tree = layout(tree_el, 200, 200);

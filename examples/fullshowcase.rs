@@ -301,7 +301,7 @@ fn main() {
                     }),
                 )
                 .child(
-                    Element::label_rc(order_msg)
+                    Element::label_signal(order_msg)
                         .font_size(12.0)
                         .fg_role(Role::TextMuted)
                         .height(18),
@@ -663,7 +663,7 @@ fn main() {
                         Element::nav_row("拼音纠错设置").on_click(move |_| m.set("已进入：拼音纠错设置".into()))
                     }),
             ))
-            .child(Element::label_rc(nav_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
+            .child(Element::label_signal(nav_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
         ))
         .child(card(
             "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
@@ -761,7 +761,7 @@ fn main() {
                     ln.set(ln.get() + 1);
                     lm.set(format!("已点击 {} 次", ln.get()));
                 }))
-                .child(Element::label_rc(link_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
+                .child(Element::label_signal(link_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
         ))
         .child(card(
             "标签省略（max_lines + truncate）",
@@ -994,7 +994,7 @@ fn main() {
                             },
                         ))
                         .child(
-                            Element::label_rc(sel_count)
+                            Element::label_signal(sel_count)
                                 .font_size(13.0)
                                 .fg_role(Role::TextMuted)
                                 .height(18)

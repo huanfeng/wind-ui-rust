@@ -136,7 +136,7 @@ fn main() {
                 .child(toggle_btn),
         )
         .child(
-            Element::label_rc(mode_text)
+            Element::label_signal(mode_text)
                 .font_size(12.0)
                 .fg(Color::hex(0x666688))
                 .width_match()

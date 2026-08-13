@@ -249,13 +249,13 @@ impl Dropdown {
                         let sel = self.selected;
                         let mut mi = MenuItem::run(it.label, move || sel.set(i), i == cur);
                         if let Some(sub) = it.subtitle {
-                            mi = mi.with_subtitle(sub);
+                            mi = mi.subtitle(sub);
                         }
                         if let Some((text, intent)) = it.badge {
-                            mi = mi.with_badge(text, intent);
+                            mi = mi.badge(text, intent);
                         }
                         if let Some((icon, cb)) = it.trailing_icon {
-                            mi = mi.with_trailing_icon(icon, move || (*cb)());
+                            mi = mi.trailing_icon(icon, move || (*cb)());
                         }
                         mi
                     })
@@ -571,7 +571,7 @@ impl CheckMenu {
                     if stay_open {
                         mi = mi.stay_open();
                     }
-                    mi.with_enabled(*enabled)
+                    mi.enabled(*enabled)
                 }
                 CheckMenuItem::Action {
                     label,
@@ -579,7 +579,7 @@ impl CheckMenu {
                     enabled,
                 } => {
                     let f = on_click.clone();
-                    MenuItem::run(label.clone(), move || f(), false).with_enabled(*enabled)
+                    MenuItem::run(label.clone(), move || f(), false).enabled(*enabled)
                 }
                 CheckMenuItem::Separator => MenuItem::separator(),
             })

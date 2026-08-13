@@ -35,7 +35,7 @@
 //!   换行、块内软换行按 CJK/Latin 边界补空格。选区随重排失效（碎片下标不稳定）。
 //! - **行数截断**：[`Para::clamp`]（长释义预览）——未展开时最多排 N 行，截断处
 //!   缀「… 展开」可点击标记；展开态是 `Signal<bool>`，同折叠的状态分离纪律。
-//! - **动态文档**：[`super::Element::rich_rc`] 绑定 `Signal<RichDoc>`（词典切
+//! - **动态文档**：[`super::Element::rich_signal`] 绑定 `Signal<RichDoc>`（词典切
 //!   词条），信号版本变化时整篇换文档、失效布局缓存与选区。
 //!
 //! 已知限制（后续分期）：Latin 词内字符级选区（需每碎片字符偏移表）；动画期
@@ -504,7 +504,7 @@ struct Frag {
     block: u32,
 }
 
-/// Section 高度补间状态。以折叠 Signal 为身份键——跨重排、跨 `rich_rc` 换文档
+/// Section 高度补间状态。以折叠 Signal 为身份键——跨重排、跨 `rich_signal` 换文档
 /// 前后都稳定（应用复用同一信号时动画自然衔接）。`Transition` 是 Copy，
 /// 布局器按下标先取副本、排完子块再写回，避开与 `&mut self` 的借用冲突。
 #[derive(Clone, Copy)]
@@ -1292,7 +1292,7 @@ pub struct RichText {
     copy_menu: bool,
     /// 各 Section 高度补间（以折叠 Signal 为身份，跨重排存活）。
     sect_anims: RefCell<Vec<SectAnim>>,
-    /// 动态文档源（`Element::rich_rc` 绑定）：`on_update` 检测版本变化换文档。
+    /// 动态文档源（`Element::rich_signal` 绑定）：`on_update` 检测版本变化换文档。
     doc_sig: Option<Signal<RichDoc>>,
     /// 已消化的文档信号版本。
     doc_version: Cell<u64>,
@@ -1326,7 +1326,7 @@ impl RichText {
     }
 
     /// 绑定动态文档信号（词典切词条）：`layout_root` 前经 `on_update` 检测版本、
-    /// 换入新文档并失效布局缓存/选区。须配合 `Element::reactive()`（`rich_rc` 已代办）。
+    /// 换入新文档并失效布局缓存/选区。须配合 `Element::reactive()`（`rich_signal` 已代办）。
     pub fn new_dynamic(sig: Signal<RichDoc>) -> Self {
         let mut rt = Self::new(sig.get());
         rt.doc_version = Cell::new(sig.version());
@@ -2567,11 +2567,11 @@ mod tests {
     }
 
     #[test]
-    fn rich_rc_swaps_document_on_signal_change() {
+    fn rich_signal_swaps_document_on_signal_change() {
         let doc_sig = signal(RichDoc::new().para("一"));
         let mut tree = Tree::new();
         let root = Element::col()
-            .child(Element::rich_rc(doc_sig).width(200))
+            .child(Element::rich_signal(doc_sig).width(200))
             .build(&mut tree);
         tree.root = Some(root);
         tree.layout_root(Size::new(300, 300), &mut crate::text::NullTextEngine);
@@ -2608,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn rich_rc_doc_swap_resets_hover_state() {
+    fn rich_signal_doc_swap_resets_hover_state() {
         // 切词条时鼠标常停在被点 span 上：换文档必须复位悬停态，否则新文档
         // 同下标碎片会被幽灵提亮/显示手型。
         let doc_sig = signal(RichDoc::new().para(Para::new().span_id(
@@ -2618,7 +2618,7 @@ mod tests {
         )));
         let mut tree = Tree::new();
         let root = Element::col()
-            .child(Element::rich_rc(doc_sig).width(200))
+            .child(Element::rich_signal(doc_sig).width(200))
             .build(&mut tree);
         tree.root = Some(root);
         tree.layout_root(Size::new(300, 300), &mut crate::text::NullTextEngine);

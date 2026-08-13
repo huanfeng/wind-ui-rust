@@ -31,7 +31,7 @@ fn main() {
         .spacing(12)
         .child(Element::label("下载进度").height(20).width_match())
         .child(Element::progress(progress).width_match())
-        .child(Element::label_rc(clock).height(20).width_match());
+        .child(Element::label_signal(clock).height(20).width_match());
 
     // on_interval：每秒更新秒表文本。
     let (tk, ck) = (ticks, clock);

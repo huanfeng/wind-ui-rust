@@ -397,13 +397,13 @@ impl ThemeHandle {
     }
 }
 
-/// 运行期热键句柄（`App::hotkey_rc` 返回）。克隆进控件回调，随时改绑/启停：
+/// 运行期热键句柄（`App::hotkey_handle` 返回）。克隆进控件回调，随时改绑/启停：
 ///
 /// ```ignore
-/// let hk = app.hotkey_rc(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.show_window());
+/// let hk = app.hotkey_handle(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.show_window());
 /// // 设置页回调里：
-/// hk.rebind(Hotkey::new(Key::Char('J')).ctrl());   // 立即向系统换注册
-/// hk.set_enabled(false);                            // 注销，把组合归还系统
+/// hk.set(Hotkey::new(Key::Char('J')).ctrl());   // 立即向系统换注册
+/// hk.set_enabled(false);                        // 注销，把组合归还系统
 /// ```
 ///
 /// 操作经意图队列在平台层落地（下一次消息循环内生效）：改绑失败（新组合被其他
@@ -415,13 +415,21 @@ pub struct HotkeyHandle {
 }
 
 impl HotkeyHandle {
-    /// 改绑到新组合（下一次消息循环生效；失败回滚保留旧绑定）。
-    pub fn rebind(&self, hotkey: crate::event::Hotkey) {
+    /// 换成这个热键（下一次消息循环生效；失败回滚保留旧绑定）。
+    pub fn set(&self, hotkey: crate::event::Hotkey) {
         self.queue
             .borrow_mut()
             .push((self.id, crate::event::HotkeyOp::Rebind(hotkey)));
         // 唤一帧，让平台意图消费点尽快跑到。
         crate::anim::request_repaint();
+    }
+    /// 改名为 [`HotkeyHandle::set`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `set`：运行期句柄的方法面与 ThemeHandle/Signal 对齐（set/set_enabled），少记一个词"
+    )]
+    pub fn rebind(&self, hotkey: crate::event::Hotkey) {
+        self.set(hotkey);
     }
     /// 启用/停用（停用即注销，组合归还给其他程序）。
     pub fn set_enabled(&self, on: bool) {
@@ -449,7 +457,7 @@ pub struct App {
     /// 用户是否经 `App::bg` 显式指定了窗口背景（是 → 固定色；否 → 清屏色随主题
     /// palette.bg 热切换，修"切暗色主题后清屏仍是亮色底"）。
     bg_explicit: bool,
-    /// 运行期热键操作队列（`hotkey_rc` 句柄写入、UiHost 中转、平台消费）。
+    /// 运行期热键操作队列（`hotkey_handle` 句柄写入、UiHost 中转、平台消费）。
     hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
 }
 
@@ -668,10 +676,10 @@ impl App {
     /// ```no_run
     /// # use windui::prelude::*;
     /// # let mut app = App::new("demo", 320, 200);
-    /// let hk = app.hotkey_rc(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.show_window());
-    /// // 之后某个按钮回调里：hk.rebind(Hotkey::new(Key::Char('J')).ctrl());
+    /// let hk = app.hotkey_handle(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.show_window());
+    /// // 之后某个按钮回调里：hk.set(Hotkey::new(Key::Char('J')).ctrl());
     /// ```
-    pub fn hotkey_rc(
+    pub fn hotkey_handle(
         &mut self,
         hotkey: crate::event::Hotkey,
         callback: impl FnMut(&mut crate::event::HotkeyCtx) + 'static,
@@ -685,6 +693,19 @@ impl App {
             id,
             queue: self.hotkey_ops.clone(),
         }
+    }
+
+    /// 改名为 [`App::hotkey_handle`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `hotkey_handle`：返回运行期句柄的方法统一叫 `*_handle`（对齐 App::theme_handle），`_rc` 既非 Rc 又与「绑信号」用的 `_rc` 撞义"
+    )]
+    pub fn hotkey_rc(
+        &mut self,
+        hotkey: crate::event::Hotkey,
+        callback: impl FnMut(&mut crate::event::HotkeyCtx) + 'static,
+    ) -> HotkeyHandle {
+        self.hotkey_handle(hotkey, callback)
     }
 
     /// 启动即隐藏：窗口创建后不显示，等托盘点击或全局热键唤起。
@@ -3248,9 +3269,9 @@ mod tests {
         let trashed = std::rc::Rc::new(std::cell::Cell::new(false));
         let (sel, trash) = (selected.clone(), trashed.clone());
         let item = MenuItem::run("团队版", move || sel.set(true), false)
-            .with_subtitle("多人协作 + 权限管理")
-            .with_badge("New", crate::theme::Intent::Danger)
-            .with_trailing_icon("🗑", move || trash.set(true));
+            .subtitle("多人协作 + 权限管理")
+            .badge("New", crate::theme::Intent::Danger)
+            .trailing_icon("🗑", move || trash.set(true));
 
         let level = app.build_level(vec![item], 20, 20, 0, None, None);
         app.menu = Some(ContextMenu {
@@ -3625,9 +3646,9 @@ mod tests {
         use crate::event::{Hotkey, HotkeyOp};
         use crate::platform::AppHandler;
         let mut app = App::new("t", 60, 60);
-        let hk = app.hotkey_rc(Hotkey::new(Key::Char('D')).ctrl().alt(), |_| {});
+        let hk = app.hotkey_handle(Hotkey::new(Key::Char('D')).ctrl().alt(), |_| {});
         let hk2 = hk.clone();
-        hk.rebind(Hotkey::new(Key::Char('J')).ctrl());
+        hk.set(Hotkey::new(Key::Char('J')).ctrl());
         hk2.set_enabled(false);
         let mut handler = app.content(Element::col()).into_handler_for_test();
         let ops = handler.take_hotkey_ops();
@@ -3877,9 +3898,7 @@ mod tests {
             pal.danger,
             "悬停仍应是危险色，不该变成 accent"
         );
-        let del_off = MenuItem::run("删除", || {}, false)
-            .danger()
-            .with_enabled(false);
+        let del_off = MenuItem::run("删除", || {}, false).danger().enabled(false);
         assert_eq!(
             pick(&del_off, false),
             pal.text_disabled,

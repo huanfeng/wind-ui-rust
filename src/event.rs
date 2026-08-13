@@ -314,46 +314,42 @@ impl MenuItem {
             ..Self::base(noop_action())
         }
     }
-    /// 设置语义色（见 [`MenuItem::intent`]）。
-    pub fn with_intent(mut self, intent: crate::theme::Intent) -> Self {
+    /// 设置语义色（字段见 [`MenuItem::intent`] 的文档）。
+    pub fn intent(mut self, intent: crate::theme::Intent) -> Self {
         self.intent = Some(intent);
         self
     }
     /// 标为危险项：标签用 `palette.danger`（删除 / 清空这类不可逆操作）。
     pub fn danger(self) -> Self {
-        self.with_intent(crate::theme::Intent::Danger)
+        self.intent(crate::theme::Intent::Danger)
     }
     /// 设置前置图标（字符/emoji）。
-    pub fn with_icon(mut self, icon: impl Into<String>) -> Self {
+    pub fn icon(mut self, icon: impl Into<String>) -> Self {
         self.icon = Some(icon.into());
         self
     }
     /// 设置尾随快捷键文本。
-    pub fn with_shortcut(mut self, s: impl Into<String>) -> Self {
+    pub fn shortcut(mut self, s: impl Into<String>) -> Self {
         self.shortcut = Some(s.into());
         self
     }
     /// 设置选中勾。
-    pub fn with_check(mut self, checked: bool) -> Self {
+    pub fn check(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
     }
     /// 设置第二行小字说明（该项渲染为两行，行高变高）。
-    pub fn with_subtitle(mut self, s: impl Into<String>) -> Self {
+    pub fn subtitle(mut self, s: impl Into<String>) -> Self {
         self.subtitle = Some(s.into());
         self
     }
     /// 设置尾随徽章胶囊（纯展示，不参与命中）。
-    pub fn with_badge(mut self, text: impl Into<String>, intent: crate::theme::Intent) -> Self {
+    pub fn badge(mut self, text: impl Into<String>, intent: crate::theme::Intent) -> Self {
         self.badge = Some((text.into(), intent));
         self
     }
     /// 设置尾随可独立点击的图标：点击只触发 `on_click`，不触发本项的 `action`。
-    pub fn with_trailing_icon(
-        mut self,
-        icon: impl Into<String>,
-        on_click: impl Fn() + 'static,
-    ) -> Self {
+    pub fn trailing_icon(mut self, icon: impl Into<String>, on_click: impl Fn() + 'static) -> Self {
         self.trailing_icon = Some(icon.into());
         self.on_trailing_click = Some(std::rc::Rc::new(on_click));
         self
@@ -364,9 +360,78 @@ impl MenuItem {
         self
     }
     /// 设置启用态（禁用项变灰且不可点击）。
-    pub fn with_enabled(mut self, enabled: bool) -> Self {
+    pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
+    }
+
+    /// 改名为 [`MenuItem::icon`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `icon`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致；`with_*` 在 Rust 生态里通常表示「带某配置构造」（如 Vec::with_capacity），而非设属性"
+    )]
+    pub fn with_icon(self, icon: impl Into<String>) -> Self {
+        self.icon(icon)
+    }
+    /// 改名为 [`MenuItem::intent`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `intent`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_intent(self, intent: crate::theme::Intent) -> Self {
+        self.intent(intent)
+    }
+    /// 改名为 [`MenuItem::shortcut`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `shortcut`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_shortcut(self, s: impl Into<String>) -> Self {
+        self.shortcut(s)
+    }
+    /// 改名为 [`MenuItem::check`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `check`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_check(self, checked: bool) -> Self {
+        self.check(checked)
+    }
+    /// 改名为 [`MenuItem::subtitle`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `subtitle`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_subtitle(self, s: impl Into<String>) -> Self {
+        self.subtitle(s)
+    }
+    /// 改名为 [`MenuItem::badge`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `badge`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_badge(self, text: impl Into<String>, intent: crate::theme::Intent) -> Self {
+        self.badge(text, intent)
+    }
+    /// 改名为 [`MenuItem::trailing_icon`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `trailing_icon`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_trailing_icon(
+        self,
+        icon: impl Into<String>,
+        on_click: impl Fn() + 'static,
+    ) -> Self {
+        self.trailing_icon(icon, on_click)
+    }
+    /// 改名为 [`MenuItem::enabled`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `enabled`：builder 属性设置统一去掉 `with_` 前缀，与 DropdownItem/CheckMenuItem 一致"
+    )]
+    pub fn with_enabled(self, enabled: bool) -> Self {
+        self.enabled(enabled)
     }
     /// 是否可点击执行（非分隔、无子菜单、启用）。
     pub fn is_actionable(&self) -> bool {

@@ -48,7 +48,7 @@ fn main() {
         )
         .child(Element::divider())
         .child(
-            Element::label_rc(report)
+            Element::label_signal(report)
                 .font_size(14.0)
                 .fg(Color::hex(FG))
                 .width_match()

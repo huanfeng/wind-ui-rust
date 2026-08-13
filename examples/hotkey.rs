@@ -6,7 +6,7 @@
 //! - 按 **Ctrl+Alt+D**（任何程序里都行，本窗口无需焦点）唤起窗口并置前。
 //! - 按 **Ctrl+Alt+H** 隐藏窗口。
 //! - 窗口内可**运行期改绑**唤起热键为 Ctrl+Alt+J / 改回 D、启停热键——
-//!   `App::hotkey_rc` 返回的句柄在回调里 `rebind`/`set_enabled`，立即生效无需重启。
+//!   `App::hotkey_handle` 返回的句柄在回调里 `set`/`set_enabled`，立即生效无需重启。
 //! - 「切换暗色」演示主题热切换（`ThemeHandle::update` 同样可局部改色/字号）。
 //! - **ESC 或点标题栏 × 均隐藏而非退出**（`hide_on_close`）。
 //! - 退出只有一条路：托盘右键 → 退出。
@@ -50,8 +50,8 @@ fn main() {
             ctx.hide_window()
         });
 
-    // 运行期可改绑的唤起热键：hotkey_rc 返回句柄，克隆进任意控件回调。
-    let show_hk = app.hotkey_rc(Hotkey::new(Key::Char('D')).ctrl().alt(), move |ctx| {
+    // 运行期可改绑的唤起热键：hotkey_handle 返回句柄，克隆进任意控件回调。
+    let show_hk = app.hotkey_handle(Hotkey::new(Key::Char('D')).ctrl().alt(), move |ctx| {
         hits.set(hits.get() + 1);
         hits_text.set(format!("热键唤起次数：{}", hits.get()));
         ctx.show_window();
@@ -74,14 +74,14 @@ fn main() {
                 .height(28)
                 .width_match(),
         )
-        .child(Element::label_rc(binding_text).height(22).width_match())
-        .child(Element::label_rc(hits_text).height(22).width_match())
+        .child(Element::label_signal(binding_text).height(22).width_match())
+        .child(Element::label_signal(hits_text).height(22).width_match())
         .child(Element::divider())
         .child(
             Element::row()
                 .spacing(8)
                 .child(Element::button("改绑 Ctrl+Alt+J").on_click(move |ctx| {
-                    hk_j.rebind(Hotkey::new(Key::Char('J')).ctrl().alt());
+                    hk_j.set(Hotkey::new(Key::Char('J')).ctrl().alt());
                     bt1.set(String::from("当前唤起热键：Ctrl+Alt+J"));
                     ctx.toast_ok("已改绑，无需重启");
                 }))
@@ -89,7 +89,7 @@ fn main() {
                     Element::button("改回 Ctrl+Alt+D")
                         .neutral()
                         .on_click(move |ctx| {
-                            hk_d.rebind(Hotkey::new(Key::Char('D')).ctrl().alt());
+                            hk_d.set(Hotkey::new(Key::Char('D')).ctrl().alt());
                             bt2.set(String::from("当前唤起热键：Ctrl+Alt+D"));
                             ctx.toast_ok("已改回");
                         }),

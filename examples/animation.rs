@@ -207,7 +207,7 @@ fn main() {
         )
         .child(toggle)
         .child(
-            Element::label_rc(anim_label)
+            Element::label_signal(anim_label)
                 .font_size(13.0)
                 .fg(Color::hex(SUB))
                 .height(18)

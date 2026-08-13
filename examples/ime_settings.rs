@@ -164,7 +164,7 @@ fn main() {
             )
             .child(Element::divider())
             .child(
-                Element::label_rc(status)
+                Element::label_signal(status)
                     .font_size(13.0)
                     .fg(Color::hex(SUB))
                     .height(20)

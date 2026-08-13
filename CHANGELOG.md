@@ -103,6 +103,33 @@
   下标，按同一下标去原始列表取会错位——取到分隔线（`submenu` 为空）即走截断分支，把已展开的
   孙级菜单无声关掉。改为取子级时就地规范化。
 
+### Changed
+- **绑信号的构造统一 `_signal` 后缀**：`Element::label_rc` → `label_signal`、`rich_rc` → `rich_signal`、
+  `dropdown_reactive` → `dropdown_signal`、`dropdown_items_reactive` → `dropdown_items_signal`。
+  同一个概念此前有三套后缀：`_rc` 是 `Rc<Cell<T>>` 时代的残留，参数早已换成 `Signal<T>`（`Copy` 句柄），
+  名字却还在暗示"要先包一层 `Rc`"，读文档的人因此绕开这些构造、退回手写 `Rc<RefCell<..>>`；
+  `_reactive` 则与 `Element::reactive()`（把节点标记为响应式，供自定义控件用）撞概念，
+  一个是"绑什么数据"、一个是"节点怎么刷新"，二者出现在同一份补全列表里无从分辨。
+  既有的 `list_signal` / `host_signal` / `reorder_list_signal` 就是命名基准，本次向它们收敛。
+  **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除），编译告警会逐处指出新名，
+  照着改即可，签名与行为完全不变。
+- **运行期句柄的获取与操作对齐**：`App::hotkey_rc` → `App::hotkey_handle`，与既有的 `App::theme_handle`
+  同名式；`HotkeyHandle::rebind` → `HotkeyHandle::set`，与 `ThemeHandle::set` / `Signal::set` 同名式。
+  改名的动因是 `_rc` 一个后缀被用出了两种意思——`label_rc` 是"绑信号"，`hotkey_rc` 是"返回句柄"，
+  同一份 API 里同一个词指两件事，比起名不好更糟。句柄类现在统一是"`*_handle` 拿到、`set` 改值、
+  `set_enabled` 启停"，学会一个即会用另一个。
+  **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除）；`rebind(hk)` 直接换成 `set(hk)`，
+  语义未变（下一次消息循环生效，失败回滚保留旧绑定）。
+- **`MenuItem` builder 去掉 `with_` 前缀**：`with_icon`/`with_shortcut`/`with_check`/`with_subtitle`/
+  `with_badge`/`with_trailing_icon`/`with_enabled` → `icon`/`shortcut`/`check`/`subtitle`/
+  `badge`/`trailing_icon`/`enabled`。同类 builder 此前两套风格并存——`MenuItem` 全套 `with_*`，
+  而 `DropdownItem` / `CheckMenuItem` 全套无前缀，混用同一个菜单时要来回切换习惯。
+  取无前缀一侧是因为 Rust 生态里 `with_*` 通常表示"带着某配置构造"（如 `Vec::with_capacity`），
+  用在链式设属性上是误导；`MenuItem::stay_open()` 本就没有前缀，也印证了这一侧才是本意。
+  方法名与同名 `pub` 字段（`icon`/`enabled` 等）共存合法且无歧义：`self.icon` 取字段、
+  `item.icon(..)` 调方法，`stay_open` 字段与方法早已如此共存。
+  **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除），去掉 `with_` 前缀即可。
+
 ## [0.11.1] - 2026-08-11
 
 ### Fixed
