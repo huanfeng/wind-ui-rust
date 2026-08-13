@@ -19,7 +19,7 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSDragOperation,
     NSDraggingDestination, NSDraggingInfo, NSEvent, NSGraphicsContext, NSPasteboardType, NSScreen,
     NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindowDelegate, NSWindowLevel, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -912,6 +912,12 @@ pub(crate) fn run_windowed(
         });
     }
 
+    // 窗口置顶：浮于其他窗口之上（如系统提示弹框）。用 NSWindowLevel 的 Floating 层级，
+    // 等价于 win32 的 HWND_TOPMOST。
+    if cfg.topmost {
+        window.setLevel(NSWindowLevel::Floating);
+    }
+
     // 无边框窗口：隐藏系统标题栏与三枚标准按钮（应用自绘标题栏与按钮），客户区铺满整窗，
     // 保留系统级吸附/阴影/缩放。拖动经 mouseDown→performWindowDragWithEvent 自管。
     if cfg.frameless {
@@ -986,6 +992,12 @@ pub(crate) fn run_windowed(
         .tray
         .take()
         .and_then(|t| super::tray::install(mtm, window.clone(), t));
+
+    // 窗口就绪回调：创建完成、首次显示前调用（定位/调整后自行显示）。
+    // 与 `start_hidden` 搭配时回调内须自行 orderFront，否则窗口保持隐藏。
+    if let Some(mut f) = cfg.on_ready.take() {
+        f(Retained::as_ptr(&window) as usize as isize);
+    }
 
     // 启动即隐藏：不 orderFront，窗口保持不可见，等托盘唤起。
     // 注意 app.activate() 仍需调用——否则应用不在前台，托盘菜单交互会异常。

@@ -245,7 +245,7 @@ pub(crate) fn install(hwnd: HWND, tray: Tray) -> Option<TrayState> {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = hicon;
-    copy_wide(&mut nid.szTip, &tray.tooltip);
+    copy_wide(std::ptr::addr_of_mut!(nid.szTip), &tray.tooltip);
     let ok = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) }.as_bool();
     if !ok {
         if owns_icon {
@@ -373,8 +373,8 @@ pub(crate) fn notify(hwnd: HWND, uid: u32, title: &str, body: &str) {
     unsafe {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_INFO;
-        copy_wide(&mut nid.szInfoTitle, title);
-        copy_wide(&mut nid.szInfo, body);
+        copy_wide(std::ptr::addr_of_mut!(nid.szInfoTitle), title);
+        copy_wide(std::ptr::addr_of_mut!(nid.szInfo), body);
         nid.dwInfoFlags = NIIF_INFO;
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -419,22 +419,29 @@ fn base_nid(hwnd: HWND, uid: u32) -> NOTIFYICONDATAW {
 }
 
 /// 把 &str 写入定长 UTF-16 缓冲（截断 + NUL 收尾）。
-fn copy_wide(dst: &mut [u16], s: &str) {
-    let n = dst.len();
+///
+/// 收 `*mut [u16; N]` 而非 `&mut [u16]`：`NOTIFYICONDATAW` 是 `#[repr(C, packed)]`
+/// （1 字节对齐），其 `szTip`/`szInfo`/`szInfoTitle` 字段不一定按 `u16` 对齐，
+/// 直接取 `&mut` 引用是 E0793/UB。调用方须用 `addr_of_mut!(nid.field)` 传裸指针，
+/// 写入统一走 `write_unaligned`。
+fn copy_wide<const N: usize>(dst: *mut [u16; N], s: &str) {
+    let n = N;
     if n == 0 {
         return;
     }
+    let dst = dst.cast::<u16>();
     let mut it = s.encode_utf16();
-    for slot in dst.iter_mut().take(n - 1) {
+    for i in 0..n - 1 {
         match it.next() {
-            Some(c) => *slot = c,
+            Some(c) => unsafe { dst.add(i).write_unaligned(c) },
             None => {
-                *slot = 0;
+                unsafe { dst.add(i).write_unaligned(0) };
                 return;
             }
         }
     }
-    dst[n - 1] = 0;
+    // 末位恒为 NUL（写满时截断最后一个字符）。
+    unsafe { dst.add(n - 1).write_unaligned(0) };
 }
 
 /// &str → 以 NUL 结尾的 UTF-16。

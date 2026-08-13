@@ -232,6 +232,12 @@ pub struct WindowConfig {
     pub start_hidden: bool,
     /// 无标题栏窗口（自定义标题栏）：客户区铺满整窗，保留系统级吸附/阴影/缩放。
     pub frameless: bool,
+    /// 窗口置顶（始终浮于其他窗口之上，如系统提示弹框）。
+    pub topmost: bool,
+    /// 窗口创建完成、**首次显示前**的回调（收到平台句柄数值，win32=HWND、macOS=NSWindow
+    /// 指针）。用于定位窗口、调整样式后自行显示，避免"先默认显示再跳位"的闪现。
+    /// 与 `start_hidden` 搭配时须在回调内自行显示窗口，否则窗口将保持隐藏。
+    pub on_ready: Option<Box<dyn FnMut(isize)>>,
     /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
     pub animations: Option<bool>,
     /// GPU 加速渲染（Direct2D 后端）opt-in，默认 false（软渲染）。仅不透明大窗有效；
@@ -260,6 +266,8 @@ impl Default for WindowConfig {
             hotkeys: Vec::new(),
             start_hidden: false,
             frameless: false,
+            topmost: false,
+            on_ready: None,
             animations: None,
             accelerated: false,
             min_width: 0,

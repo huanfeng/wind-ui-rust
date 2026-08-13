@@ -55,7 +55,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsZoomed, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
+    GetWindowRect, HWND_TOPMOST, IsIconic, IsZoomed, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
     PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow,
     SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
@@ -648,6 +648,26 @@ unsafe fn run_windowed(
         );
     }
 
+    // 窗口置顶：浮于其他窗口之上（如系统提示弹框）。在首次显示前设置，避免
+    // 先普通 z 序显示再跳顶的肉眼可见闪动。
+    if cfg.topmost {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+
+    // 窗口就绪回调：创建完成、首次显示前调用（定位/调整后自行显示）。
+    // 与 `start_hidden` 搭配时回调内须自行 ShowWindow，否则窗口保持隐藏。
+    if let Some(mut f) = cfg.on_ready.take() {
+        f(hwnd.0 as isize);
+    }
+
     // 启动即隐藏：常驻托盘类应用不该在启动时闪一下窗口。此处**不调用 ShowWindow**，
     // 窗口保持初始的不可见态，等托盘点击或全局热键送来 WindowOp::Show。
     if !cfg.start_hidden {
@@ -771,7 +791,7 @@ unsafe extern "system" fn wnd_proc(
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
                 let state_ptr = (*cs).lpCreateParams as isize;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

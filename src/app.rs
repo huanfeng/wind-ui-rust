@@ -410,6 +410,8 @@ impl App {
                 hotkeys: Vec::new(),
                 start_hidden: false,
                 frameless: false,
+                topmost: false,
+                on_ready: None,
                 animations: None,
                 accelerated: false,
                 min_width: 0,
@@ -441,6 +443,20 @@ impl App {
     /// 禁止用户拖拽调整窗口大小（去掉 WS_THICKFRAME 和最大化按钮）。
     pub fn resizable(mut self, v: bool) -> Self {
         self.cfg.resizable = v;
+        self
+    }
+
+    /// 窗口置顶：始终浮于其他窗口之上（如系统提示弹框）。
+    pub fn topmost(mut self) -> Self {
+        self.cfg.topmost = true;
+        self
+    }
+
+    /// 窗口创建完成、**首次显示前**的回调。参数为平台句柄数值（win32=HWND、macOS=NSWindow
+    /// 指针），用于定位窗口、调整样式后自行显示，避免"先默认显示再跳位"的闪现。
+    /// 与 `start_hidden` 搭配时须在回调内自行显示窗口。
+    pub fn on_ready(mut self, f: impl FnMut(isize) + 'static) -> Self {
+        self.cfg.on_ready = Some(Box::new(f));
         self
     }
 
@@ -699,7 +715,8 @@ impl App {
         debug_assert!(
             !(self.cfg.start_hidden || self.hide_on_close)
                 || self.cfg.tray.is_some()
-                || !self.cfg.hotkeys.is_empty(),
+                || !self.cfg.hotkeys.is_empty()
+                || self.cfg.on_ready.is_some(),
             "start_hidden / hide_on_close 需配合 tray 或 hotkey：否则窗口隐藏后无法被唤起"
         );
         let single = self.single.take();
