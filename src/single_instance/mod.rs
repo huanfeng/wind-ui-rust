@@ -55,6 +55,71 @@ pub(crate) struct SingleInstance {
     pub on_second: Box<dyn FnMut(Vec<String>)>,
 }
 
+/// [`claim_instance`] 的结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceRole {
+    /// 本进程是首实例,照常启动。
+    First,
+    /// 已有实例在跑,本进程的 argv 已转交给它 —— 调用方应**立即返回**,不要再做任何事。
+    Handoff,
+}
+
+/// 本进程已取得单实例的 app_id(未调用 [`claim_instance`] 或未取得则为 `None`)。
+static HELD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn held(app_id: &str) -> bool {
+    HELD.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        .is_some_and(|h| h == app_id)
+}
+
+/// 单实例闸门:提前到 `main` 开头做仲裁,让二次实例转发完 argv 就走。
+///
+/// [`App::run`](crate::App::run) 内部本来就会仲裁一次,但那是在应用把启动流程跑完之后
+/// ——二次实例会白白读配置、发 RPC、开线程,其中一些还带副作用(轮转日志、抢占独占资源
+/// 等),而它的全部使命只是把 argv 递过去然后死掉。在 `main` 第一行调本函数即可跳过这些:
+///
+/// ```ignore
+/// fn main() {
+///     if windui::claim_instance("myapp") == windui::InstanceRole::Handoff {
+///         return;
+///     }
+///     // …照常启动
+/// }
+/// ```
+///
+/// 取得单实例后本进程会记住 `app_id`,`App::run` 据此跳过重复仲裁 —— 重复 `acquire`
+/// 会撞上本进程**自己**持有的锁/socket,把自己误判成二次实例、forward 给自己,窗口就
+/// 永不出现了。故传入的 `app_id` 必须与随后 `App::single_instance` 的完全一致。
+///
+/// 转发失败(首实例正退出中/僵死)时返回 [`InstanceRole::First`] 回退为正常启动,避免被
+/// 一个无响应的首实例永久挡在门外 —— 与 `App::run` 内的策略一致。此时并未持锁,`run`
+/// 会再仲裁一次(那时首实例多半已死透,能正常接手)。
+pub fn claim_instance(app_id: &str) -> InstanceRole {
+    if acquire(app_id) {
+        *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(app_id.to_string());
+        return InstanceRole::First;
+    }
+    let argv: Vec<String> = std::env::args().collect();
+    if forward(app_id, &argv) {
+        InstanceRole::Handoff
+    } else {
+        InstanceRole::First
+    }
+}
+
+/// `platform::*::run` 的仲裁入口:返回 false = 本进程是二次实例且 argv 已送达,
+/// 调用方应直接返回、不建窗口。已由 [`claim_instance`] 仲裁过则直接放行。
+pub(crate) fn arbitrate(app_id: &str) -> bool {
+    if held(app_id) || acquire(app_id) {
+        return true;
+    }
+    let argv: Vec<String> = std::env::args().collect();
+    // 送不到就回退为正常启动(见 claim_instance 文档)。
+    !forward(app_id, &argv)
+}
+
 /// 检测单实例:true=首实例(已持锁),false=已有实例在运行。
 pub(crate) fn acquire(app_id: &str) -> bool {
     #[cfg(windows)]

@@ -126,15 +126,11 @@ pub(crate) fn run(
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    // 单实例：检测；二次实例把 argv 转发给首实例后直接返回、不建窗口。
-    // 若转发失败（首实例正退出中/僵死、消息泵已停），回退为正常启动新窗口，
-    // 避免被一个无响应的首实例永久挡在门外。
+    // 单实例仲裁（应用若已在 main 里 claim_instance 过，这里直接放行）：二次实例把 argv
+    // 转发给首实例后直接返回、不建窗口。
     if let Some(si) = &single {
-        if !crate::single_instance::acquire(&si.app_id) {
-            let argv: Vec<String> = std::env::args().collect();
-            if crate::single_instance::forward(&si.app_id, &argv) {
-                return;
-            }
+        if !crate::single_instance::arbitrate(&si.app_id) {
+            return;
         }
     }
     unsafe { run_windowed(cfg, handler, waker, single) };

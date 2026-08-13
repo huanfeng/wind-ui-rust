@@ -231,7 +231,46 @@ mod tests {
 
     fn cleanup(id: &str) {
         *PENDING_LISTENER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *crate::single_instance::HELD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = std::fs::remove_file(socket_path(id));
+    }
+
+    /// `claim_instance` 取得单实例后，`run` 内的仲裁必须直接放行。
+    ///
+    /// 少了这层记忆就会 `acquire` 第二次 —— 那次连得上的是本进程**自己** bind 的
+    /// socket，于是把自己判成二次实例、把 argv forward 给自己，`run` 随即返回，
+    /// 窗口永不出现。整个程序打不开，且看不出任何报错。
+    #[test]
+    fn claim_then_arbitrate_does_not_hand_off_to_self() {
+        let _g = lock();
+        let id = app_id("claim");
+        cleanup(&id);
+        assert_eq!(
+            crate::single_instance::claim_instance(&id),
+            crate::single_instance::InstanceRole::First
+        );
+        assert!(
+            crate::single_instance::arbitrate(&id),
+            "已 claim 的进程必须被放行"
+        );
+        cleanup(&id);
+    }
+
+    /// 没 claim 过的进程走原路：首次仲裁取得单实例，之后同 app_id 的仲裁一律判二次实例
+    /// （此处 forward 送得进 backlog，故返回 false = 调用方应退出）。
+    #[test]
+    fn arbitrate_without_claim_still_gates() {
+        let _g = lock();
+        let id = app_id("arb");
+        cleanup(&id);
+        assert!(crate::single_instance::arbitrate(&id), "首次仲裁应放行");
+        assert!(
+            !crate::single_instance::arbitrate(&id),
+            "已有实例在跑时应判二次实例"
+        );
+        cleanup(&id);
     }
 
     #[test]
