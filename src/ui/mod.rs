@@ -929,6 +929,7 @@ impl Element {
     }
 
     /// Label/DynLabel 专属配置入口。
+    #[track_caller]
     fn config_label(mut self, f: impl FnOnce(&mut Label)) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
             if let Some(l) = a.downcast_mut::<Label>() {
@@ -939,6 +940,7 @@ impl Element {
         debug_assert!(false, "max_lines()/truncate() 只能用于 Element::label(..)");
         self
     }
+    #[track_caller]
     fn config_dynlabel(mut self, f: impl FnOnce(&mut DynLabel)) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
             if let Some(l) = a.downcast_mut::<DynLabel>() {
@@ -946,15 +948,18 @@ impl Element {
                 return self;
             }
         }
+        // max_lines()/truncate() 先试 Label 再落到这里，故本条是两种 label 都没命中时的
+        // 终态提示——只提 label_rc 会把用了 label(..) 的调用方指向错误的构造器。
         debug_assert!(
             false,
-            "max_lines()/truncate() 只能用于 Element::label_rc(..)"
+            "max_lines()/truncate() 只能用于 Element::label(..) / label_rc(..)"
         );
         self
     }
 
     /// 限制显示行数（超出高度裁剪；配合 `.truncate()` 可在末行加省略号）。
     /// 同时适用于 `label` 和 `label_rc`。
+    #[track_caller]
     pub fn max_lines(mut self, n: usize) -> Self {
         if self
             .widget
@@ -969,6 +974,7 @@ impl Element {
 
     /// 文本溢出省略方式（`max_lines(1)` 时精确截断，多行仅高度裁剪）。
     /// 同时适用于 `label` 和 `label_rc`。
+    #[track_caller]
     pub fn truncate(mut self, mode: Truncate) -> Self {
         if self
             .widget
@@ -1009,6 +1015,7 @@ impl Element {
     /// （主题自适应半透明叠层）、键盘可聚焦 + 回车/空格激活、悬停手型光标。
     /// 配合 `.on_click(...)` 设回调，`.bg()`/`.corner()`/`.border()` 设外观即得卡片。
     /// 注意：会替换该节点的占位 widget，故不可与叶子控件（label/button 等）叠加使用。
+    #[track_caller]
     pub fn clickable(mut self) -> Self {
         debug_assert!(
             self.widget.as_any_mut().is_none(),
@@ -1089,6 +1096,7 @@ impl Element {
 
     /// 配置内含的 Link。`url()/underline()` 是 link 专属修饰符，链到其他控件属误用——
     /// debug 构建下 panic 提示，release 下静默忽略（与 text_input/image 的误用检测一致）。
+    #[track_caller]
     fn config_link(mut self, f: impl FnOnce(&mut link::Link)) -> Self {
         match self
             .widget
@@ -1101,11 +1109,13 @@ impl Element {
         self
     }
     /// 链接点击时用系统默认程序打开的 URL/路径（未设 `on_click` 时生效）。
+    #[track_caller]
     pub fn url(self, url: impl Into<String>) -> Self {
         let url = url.into();
         self.config_link(move |l| l.set_url(url))
     }
     /// 是否绘制链接下划线（默认开）。
+    #[track_caller]
     pub fn underline(self, on: bool) -> Self {
         self.config_link(move |l| l.set_underline(on))
     }
@@ -1139,6 +1149,7 @@ impl Element {
     }
 
     /// RichText 专属配置入口（误用检测同 text_input/link）。
+    #[track_caller]
     fn config_rich(mut self, f: impl FnOnce(&mut rich::RichText)) -> Self {
         match self
             .widget
@@ -1157,12 +1168,14 @@ impl Element {
     /// 富文本 span 点击回调：文档中经 [`rich::Para::span_id`]/`styled_id` 标注 id 的
     /// 文字被点击时触发，携带该 id（词典交叉引用跳转）。未标 id 的文字不响应、
     /// 不显示手型。回调挂控件层，`RichDoc` 保持纯数据可 Clone。
+    #[track_caller]
     pub fn on_span_click(self, f: impl FnMut(&str, &mut EventCtx) + 'static) -> Self {
         self.config_rich(move |r| r.set_on_span_click(Box::new(f)))
     }
 
     /// 富文本内建右键「复制全部」菜单开关（默认开）。应用要挂自定义
     /// `on_context_menu` 时先关掉它，避免内建菜单抢占右键。
+    #[track_caller]
     pub fn copy_menu(self, on: bool) -> Self {
         self.config_rich(move |r| r.set_copy_menu(on))
     }
@@ -1201,6 +1214,7 @@ impl Element {
 
     /// 配置内含的 ImageView。`fit()`/`tint()` 是图片专属修饰符，链到其他控件属误用——
     /// debug 构建下 panic 提示，release 下静默忽略（与 text_input 的误用检测一致）。
+    #[track_caller]
     fn config_image(mut self, f: impl FnOnce(&mut ImageView)) -> Self {
         match self
             .widget
@@ -1213,40 +1227,49 @@ impl Element {
         self
     }
     /// 图片适配缩放模式（默认 Contain）。
+    #[track_caller]
     pub fn fit(self, fit: Fit) -> Self {
         self.config_image(|iv| iv.set_fit(fit))
     }
     /// 图片模板着色（单色图标随颜色变色）。
+    #[track_caller]
     pub fn tint(self, color: Color) -> Self {
         self.config_image(|iv| iv.set_tint(color))
     }
 
     /// 给按钮设置前置图标（嵌入字节）。链到非按钮属误用——debug panic，release 忽略。
+    #[track_caller]
     pub fn icon_bytes(self, bytes: &[u8]) -> Self {
         self.config_button_icon(ImageContent::from_bytes(bytes))
     }
     /// 给按钮设置前置图标（文件路径）。
+    #[track_caller]
     pub fn icon(self, path: impl AsRef<Path>) -> Self {
         self.config_button_icon(ImageContent::from_file(path))
     }
     /// 给按钮设置前置图标（原始非预乘 RGBA8）。
+    #[track_caller]
     pub fn icon_rgba(self, w: u32, h: u32, rgba: &[u8]) -> Self {
         self.config_button_icon(ImageContent::from_rgba(w, h, rgba))
     }
     /// 给按钮设置前置图标（SVG 字节，`svg` feature）。`target_width` 同 [`Element::image_svg`]。
     #[cfg(feature = "svg")]
+    #[track_caller]
     pub fn icon_svg(self, bytes: &[u8], target_width: Option<u32>) -> Self {
         self.config_button_icon(ImageContent::from_svg_bytes(bytes, target_width))
     }
     /// 给按钮设置前置图标（预组装内容原语，支持状态换图/着色）。
+    #[track_caller]
     pub fn icon_content(self, icon: ImageContent) -> Self {
         self.config_button_icon(icon)
     }
+    #[track_caller]
     fn config_button_icon(self, icon: ImageContent) -> Self {
-        self.config_button(|b| b.set_icon(icon), "icon()/icon_bytes()")
+        self.config_button(|b| b.set_icon(icon), "icon*()")
     }
 
     /// 小号变体（Button：紧凑内边距；CheckBox：14px 方框；Switch：36×20 轨道）。
+    #[track_caller]
     pub fn small(mut self) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
             if let Some(c) = a.downcast_mut::<CheckBox>() {
@@ -1263,6 +1286,7 @@ impl Element {
 
     /// 描边按钮（透明底 + 意图色边框/文字，hover 淡色叠层）。与 `.neutral()/.danger()/.accent()`
     /// 组合可得不同语义的描边按钮（如蓝色"检查更新"、红色"删除"次按钮）。仅 `Element::button(..)` 可用。
+    #[track_caller]
     pub fn outline(self) -> Self {
         self.config_button(|b| b.set_variant(ButtonVariant::Outline), "outline()")
     }
@@ -1270,6 +1294,7 @@ impl Element {
     /// 柔和描边按钮（中性灰边 + 意图色文字；hover 边框转意图主色）。
     /// 参考「灰边框、主色文字」的次级按钮惯例，成排放置比全意图色描边安静。
     /// 与 `.neutral()/.danger()/.accent()` 组合同 [`outline`](Self::outline)。
+    #[track_caller]
     pub fn outline_soft(self) -> Self {
         self.config_button(
             |b| b.set_variant(ButtonVariant::OutlineSoft),
@@ -1294,6 +1319,7 @@ impl Element {
     /// **适用于任意控件/容器**（像 `enabled`，挂在节点上）；命中取最深节点的提示。
     /// 超过 `TOOLTIP_MAX_W`（`app.rs`）自动按宽度换行为多行；调用方仍传一整句
     /// 不含显式换行的文本（含 `\n` 在 debug 下提示，排版结果未做专门测试）。
+    #[track_caller]
     pub fn tooltip(mut self, text: impl Into<String>) -> Self {
         let text = text.into();
         debug_assert!(!text.contains('\n'), "tooltip 仅支持单行文本");
@@ -1308,6 +1334,7 @@ impl Element {
         }
         self
     }
+    #[track_caller]
     fn config_button(mut self, f: impl FnOnce(&mut Button), who: &str) -> Self {
         match self
             .widget
@@ -1326,22 +1353,27 @@ impl Element {
     }
     /// 显式设置语义意图色。Button / CheckBox 通用。
     /// 注意：非 Primary intent 接管整组视觉，此时 `.bg()` 单点覆盖不生效。
+    #[track_caller]
     pub fn intent(self, i: Intent) -> Self {
         self.config_intent("intent()", i)
     }
     /// 危险意图（主题 danger 红，如"删除数据"）。Button / CheckBox 通用。
+    #[track_caller]
     pub fn danger(self) -> Self {
         self.config_intent("danger()", Intent::Danger)
     }
     /// 次要意图（中性灰）。主要用于 Button 的次要按钮。
+    #[track_caller]
     pub fn neutral(self) -> Self {
         self.config_intent("neutral()", Intent::Neutral)
     }
     /// 自定义意图基色（扩展点）：框架派生整组视觉。Button / CheckBox 通用。
+    #[track_caller]
     pub fn accent(self, color: Color) -> Self {
         self.config_intent("accent()", Intent::Custom(color))
     }
     /// intent 修饰符落点：依次尝试 Button / CheckBox，命中即设；用于其他控件属误用。
+    #[track_caller]
     fn config_intent(mut self, who: &str, i: Intent) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
             if let Some(b) = a.downcast_mut::<Button>() {
@@ -1369,6 +1401,7 @@ impl Element {
         Self::base(Layout::None).widget(Slider::new(value))
     }
 
+    #[track_caller]
     fn config_slider(mut self, f: impl FnOnce(&mut Slider)) -> Self {
         match self
             .widget
@@ -1382,6 +1415,7 @@ impl Element {
     }
 
     /// 在旋钮右侧显示当前值百分比（如 "65%"）。仅 `Element::slider(..)` 可用。
+    #[track_caller]
     pub fn show_value(self, on: bool) -> Self {
         self.config_slider(|s| s.set_show_value(on))
     }
@@ -1394,6 +1428,7 @@ impl Element {
 
     /// 配置内含的 TextInput。`password()/multiline()/wrap()` 是 text_input 专属修饰符；
     /// 链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略（无类型分裂代价）。
+    #[track_caller]
     fn config_text_input(mut self, f: impl FnOnce(&mut inputs::TextConfig)) -> Self {
         match self
             .widget
@@ -1409,6 +1444,7 @@ impl Element {
         self
     }
     /// 密码输入：显示掩码圆点、禁止复制/剪切明文。强制单行（密码不应多行）。
+    #[track_caller]
     pub fn password(self) -> Self {
         self.config_text_input(|c| {
             c.password = true;
@@ -1416,16 +1452,19 @@ impl Element {
         })
     }
     /// 多行输入（编辑/换行行为见 P4）。
+    #[track_caller]
     pub fn multiline(self) -> Self {
         self.config_text_input(|c| c.multiline = true)
     }
     /// 多行软换行开关（仅 multiline 生效）。
+    #[track_caller]
     pub fn wrap(self, on: bool) -> Self {
         self.config_text_input(|c| c.wrap = on)
     }
 
     /// 前置图标字形（如放大镜 `'\u{1F50D}'`）：在输入框左侧留出图标区并绘制，
     /// 文字/光标/点击命中相应右移。搜索框等用。仅 `Element::text_input(..)` 可用。
+    #[track_caller]
     pub fn leading_icon(self, glyph: char) -> Self {
         self.config_text_input(|c| c.leading = Some(glyph))
     }
@@ -1442,6 +1481,7 @@ impl Element {
     /// 分段控制器（绑定 `Signal<usize>` 选中索引 + 段标签）：连体多段单选，
     /// 选中段高亮。语义同 `radio` 组，外观更紧凑——适合"二/三选一"切换。
     /// 点击选段、悬停逐段高亮、聚焦后左右方向键移动选中。
+    #[track_caller]
     pub fn segmented(options: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
         let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
         debug_assert!(!opts.is_empty(), "Element::segmented 至少需要一段");
@@ -1506,6 +1546,7 @@ impl Element {
     ///     CheckMenuItem::check("显示特殊项", b),
     /// ]).stay_open();
     /// ```
+    #[track_caller]
     pub fn stay_open(mut self) -> Self {
         if let Some(m) = self
             .widget
@@ -1532,6 +1573,7 @@ impl Element {
     ///     })
     ///     .width(132);
     /// ```
+    #[track_caller]
     pub fn summary(mut self, f: impl Fn(&[&str]) -> String + 'static) -> Self {
         if let Some(m) = self
             .widget
@@ -1747,6 +1789,7 @@ impl Element {
 
     /// 重排完成回调：`(ctx, 原下标, 新下标)`。顺序未变化时不触发。
     /// 仅 [`Element::reorder_list`] 与 [`Element::reorder_list_signal`] 可用。
+    #[track_caller]
     pub fn on_reorder(mut self, f: impl FnMut(&mut EventCtx, usize, usize) + 'static) -> Self {
         match self
             .widget
@@ -1760,6 +1803,7 @@ impl Element {
     }
 
     /// 提交模式（见 [`CommitMode`]）。仅 [`Element::reorder_list`] 可用。
+    #[track_caller]
     pub fn commit_mode(mut self, mode: reorder::CommitMode) -> Self {
         match self
             .widget
@@ -2024,6 +2068,7 @@ impl Element {
 
     /// 等宽网格：把 `items` 按每行 `cols` 个排布，行/列间距 `gap`，列按权重均分等宽；
     /// 末行不足时用空白补齐以保持列对齐。常用于复选框组、卡片墙。
+    #[track_caller]
     pub fn grid(cols: usize, gap: i32, items: Vec<Element>) -> Self {
         debug_assert!(cols >= 1, "grid 至少需要 1 列");
         let cols = cols.max(1);
@@ -2439,15 +2484,24 @@ impl Element {
     /// Element::table_sortable(cols, rows, sort)
     ///     .sort_indicator(SortStyle { asc: Some("↑".into()), desc: Some("↓".into()), ..Default::default() })
     /// ```
+    #[track_caller]
     pub fn sort_indicator(mut self, style: SortStyle) -> Self {
         // 排序表格结构为 col[ header, divider, scroll ]，表头为首个子节点。
+        // `ok` 记录是否真的落到了 SortableHeader 上：任一层没命中都是误用（链错了元素），
+        // 而按下标钻子树的写法不会自然报错，故显式断言，否则 debug 下也悄无声息地不生效。
+        let mut ok = false;
         if let Some(header) = self.children.get_mut(0) {
             if let Some(a) = header.widget.as_any_mut() {
                 if let Some(h) = a.downcast_mut::<sortable_table::SortableHeader>() {
                     h.set_style(style);
+                    ok = true;
                 }
             }
         }
+        debug_assert!(
+            ok,
+            "sort_indicator() 只能用于 Element::table_sortable(..) / table_sortable_server(..)"
+        );
         self
     }
 
@@ -2471,28 +2525,36 @@ impl Element {
     ///         .child(Element::button("删除").outline().on_click(move |ctx| ctx.toast(format!("删除 {row}"))))
     /// })
     /// ```
+    #[track_caller]
     pub fn actions(
         mut self,
         title: impl Into<String>,
         weight: f32,
         build: impl Fn(usize) -> Element + 'static,
     ) -> Self {
+        const WHO: &str = "actions() 只能用于 Element::table_sortable(..) / \
+             table_sortable_server(..) / table_selectable(..)";
         let ac = sortable_table::action_col(title.into(), weight, build);
         // 结构 col[ header, divider, scroll ]。表头行可能直接挂 SortableHeader
         // （table_sortable/server），或其子行 subrow 挂 SortableHeader（table_selectable 的全选列在前）。
+        let mut header_ok = false;
         if let Some(header) = self.children.get_mut(0) {
-            if !sortable_table::set_header_actions(header, &ac) {
+            header_ok = sortable_table::set_header_actions(header, &ac);
+            if !header_ok {
                 if let Some(sub) = header.children.get_mut(1) {
-                    sortable_table::set_header_actions(sub, &ac);
+                    header_ok = sortable_table::set_header_actions(sub, &ac);
                 }
             }
         }
+        debug_assert!(header_ok, "{WHO}（未定位到表头）");
         // 正文：scroll 为末子，其首个子节点（内层 col）挂响应式正文 widget。
+        let mut body_ok = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
-                sortable_table::set_body_actions(body, &ac);
+                body_ok = sortable_table::set_body_actions(body, &ac);
             }
         }
+        debug_assert!(body_ok, "{WHO}（未定位到正文）");
         self
     }
 
@@ -2514,17 +2576,24 @@ impl Element {
     ///     _ => None,
     /// })
     /// ```
+    #[track_caller]
     pub fn cell_render(
         mut self,
         build: impl Fn(usize, usize, &str) -> Option<Element> + 'static,
     ) -> Self {
         let render: sortable_table::CellRender = Rc::new(build);
         // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
+        let mut ok = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
-                sortable_table::set_body_cell_render(body, &render);
+                ok = sortable_table::set_body_cell_render(body, &render);
             }
         }
+        debug_assert!(
+            ok,
+            "cell_render() 只能用于 Element::table_sortable(..) / \
+             table_sortable_server(..) / table_selectable(..)"
+        );
         self
     }
 
@@ -2538,13 +2607,20 @@ impl Element {
     /// ```ignore
     /// Element::table_sortable_server(cols, rows, sort, on_sort).cell_lines(2)
     /// ```
+    #[track_caller]
     pub fn cell_lines(mut self, lines: usize) -> Self {
         // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
+        let mut ok = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
-                sortable_table::set_body_cell_lines(body, lines);
+                ok = sortable_table::set_body_cell_lines(body, lines);
             }
         }
+        debug_assert!(
+            ok,
+            "cell_lines() 只能用于 Element::table_sortable(..) / \
+             table_sortable_server(..) / table_selectable(..)"
+        );
         self
     }
 
@@ -2560,14 +2636,21 @@ impl Element {
     /// Element::table_sortable_server(cols, rows, sort, on_sort)
     ///     .on_row_activate(move |ctx, disp| open_edit(disp))
     /// ```
+    #[track_caller]
     pub fn on_row_activate(mut self, on_activate: impl Fn(&mut EventCtx, usize) + 'static) -> Self {
         let cb: sortable_table::OnRowActivate = Rc::new(on_activate);
         // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
+        let mut ok = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
-                sortable_table::set_body_activate(body, &cb);
+                ok = sortable_table::set_body_activate(body, &cb);
             }
         }
+        debug_assert!(
+            ok,
+            "on_row_activate() 只能用于 Element::table_sortable(..) / table_sortable_server(..)；\
+             table_selectable(..) 因首列复选框语义冲突不支持整行激活"
+        );
         self
     }
 
@@ -2593,17 +2676,25 @@ impl Element {
     ///         MenuItem::run("删除", move || delete(disp), false),
     ///     ])
     /// ```
+    #[track_caller]
     pub fn on_row_context_menu(
         mut self,
         build: impl Fn(usize) -> Vec<crate::event::MenuItem> + 'static,
     ) -> Self {
         let cb: sortable_table::OnRowMenu = Rc::new(build);
         // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
+        let mut ok = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
-                sortable_table::set_body_menu(body, &cb);
+                ok = sortable_table::set_body_menu(body, &cb);
             }
         }
+        debug_assert!(
+            ok,
+            "on_row_context_menu() 只能用于 Element::table_sortable(..) / \
+             table_sortable_server(..) / table_selectable(..)；\
+             普通容器/控件请用 on_context_menu()"
+        );
         self
     }
 
