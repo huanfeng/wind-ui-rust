@@ -132,26 +132,6 @@ pub(crate) fn acquire(app_id: &str) -> bool {
     }
 }
 
-/// 只读探测:是否已有同 `app_id` 的实例在运行。**无副作用**——不建锁、不 bind、不改
-/// 任何状态,故可在 [`App::run`](crate::App::run) 之前的任意时刻调用,且不会影响随后
-/// 真正的 [`acquire`]。
-///
-/// 典型用途:让本进程在启动早期就知道自己多半是个「起来只为转发 argv 就退出」的二次
-/// 实例,从而跳过那些会打扰首实例的启动期副作用(日志轮转、抢占独占资源等)。
-///
-/// ⚠️ 结论是**当下**的快照,天然有竞态(探测后首实例可能退出、也可能刚起来)。只可用于
-/// 上述「省事」类决策,真正的单实例仲裁仍以 `run` 内的 [`acquire`] 为准。
-pub fn instance_running(app_id: &str) -> bool {
-    #[cfg(windows)]
-    {
-        win::instance_running(app_id)
-    }
-    #[cfg(not(windows))]
-    {
-        unix::instance_running(app_id)
-    }
-}
-
 /// 二次实例:把 argv 转发给首实例。返回是否成功送达(失败时调用方应回退为正常启动)。
 pub(crate) fn forward(app_id: &str, argv: &[String]) -> bool {
     #[cfg(windows)]

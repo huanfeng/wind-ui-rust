@@ -60,23 +60,6 @@ pub(crate) fn acquire(app_id: &str) -> bool {
     }
 }
 
-/// 只读探测(见 [`super::instance_running`]):message-only 窗口在 = 首实例在跑。
-///
-/// 不拿命名 Mutex 做判据——`CreateMutexW` 会真的把锁建出来,那是有副作用的。找窗口与
-/// [`forward`] 的判据一致:窗口在,argv 就送得到。
-///
-/// ⚠️ 窗口由 `install_listener` 在**建主窗口之后**才创建(Mutex 则在之前),故首实例启动
-/// 的头一小段里本函数返回 false。对「省事」类决策无碍(最坏就是多做一次它本可跳过的事)。
-pub(crate) fn instance_running(app_id: &str) -> bool {
-    let cls = wide(&class_name(app_id));
-    unsafe {
-        match FindWindowW(PCWSTR(cls.as_ptr()), PCWSTR::null()) {
-            Ok(hwnd) => !hwnd.is_invalid(),
-            Err(_) => false,
-        }
-    }
-}
-
 /// 二次实例:把 argv 发给首实例的 message 窗口(WM_COPYDATA 系统跨进程 marshal)。
 ///
 /// 返回是否成功送达。首实例正处于退出中(消息泵已停但进程未死)时送达会失败,

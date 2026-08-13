@@ -15,9 +15,8 @@ pub mod platform;
 pub mod render;
 pub mod signal;
 pub(crate) mod single_instance;
-/// 单实例对外面:启动早期的闸门 [`claim_instance`] 与无副作用的只读探测
-/// [`instance_running`]。模块其余部分是内部实现。
-pub use single_instance::{claim_instance, instance_running, InstanceRole};
+/// 单实例对外面:启动早期的闸门 [`claim_instance`]。模块其余部分是内部实现。
+pub use single_instance::{claim_instance, InstanceRole};
 pub mod spec;
 pub mod style;
 pub(crate) mod sync;
