@@ -18,11 +18,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::Layout;
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, NodeId, Widget};
 use crate::event::{CursorShape, Event, Key, MouseButton, PointerKind};
 use crate::geometry::{Point, Rect, Size};
 use crate::render::{Canvas, Paint};
+use crate::signal::Signal;
 use crate::style::{Brush, Shadow, Style};
 use crate::text::TextEngine;
 
@@ -113,6 +115,79 @@ pub(super) type ReorderCtl = Rc<RefCell<Ctl>>;
 
 pub(super) fn new_ctl() -> ReorderCtl {
     Rc::new(RefCell::new(Ctl::new()))
+}
+
+/// 构造一枚绑定到 `ctl` 的拖动手柄元素。
+///
+/// 数据驱动模式下每次重建行都要现造一枚——手柄 widget 与节点一一对应，
+/// 不能在多行间共享。
+pub(super) fn handle_element(ctl: &ReorderCtl) -> super::Element {
+    super::Element::base(Layout::None).widget(DragHandle::new(ctl.clone()))
+}
+
+// ----------------------------------------------------------------- RowSource
+
+/// 行数据源：绑定数据的版本变化时，按新数据重建列容器的子节点。
+///
+/// 做成**非泛型 trait 对象内嵌进 [`ReorderList`]**，而不是像 `DynList` 那样独立成一个
+/// widget——重排与重建都必须挂在同一个列容器上，而一个节点只能挂一个 widget。
+/// `ReorderList` 因此保持非泛型，泛型只落在本 trait 的实现里。
+pub(super) trait RowSource {
+    /// 数据版本变了就重建 children；返回是否真的重建过。
+    fn sync(&mut self, ctx: &mut EventCtx) -> bool;
+}
+
+/// `Signal<Vec<T>>` 驱动的行源：每行由 `row_fn(item, handle)` 构建，
+/// 手柄元素放在行内哪个位置由调用方决定（见 `Element::reorder_list_signal`）。
+struct SignalRows<T: Clone + 'static> {
+    data: Signal<Vec<T>>,
+    row_fn: Rc<dyn Fn(T, super::Element) -> super::Element>,
+    ctl: ReorderCtl,
+    last_version: u64,
+}
+
+impl<T: Clone + 'static> RowSource for SignalRows<T> {
+    fn sync(&mut self, ctx: &mut EventCtx) -> bool {
+        let ver = self.data.version();
+        if ver == self.last_version {
+            return false;
+        }
+        self.last_version = ver;
+
+        let self_id = ctx.id();
+        let items = self.data.get();
+        let tree = ctx.tree_mut();
+        let old: Vec<NodeId> = tree
+            .get(self_id)
+            .map(|n| n.children.clone())
+            .unwrap_or_default();
+        for c in old {
+            tree.remove(c);
+        }
+        if let Some(n) = tree.get_mut(self_id) {
+            n.children.clear();
+        }
+        for item in items {
+            let el = (self.row_fn)(item, handle_element(&self.ctl));
+            let child = el.build(tree);
+            tree.add_child(self_id, child);
+        }
+        true
+    }
+}
+
+/// 装箱一个信号行源，供 `Element::reorder_list_signal` 注入 [`ReorderList`]。
+pub(super) fn signal_rows<T: Clone + 'static>(
+    data: Signal<Vec<T>>,
+    row_fn: Rc<dyn Fn(T, super::Element) -> super::Element>,
+    ctl: ReorderCtl,
+) -> Box<dyn RowSource> {
+    Box::new(SignalRows {
+        last_version: data.version(),
+        data,
+        row_fn,
+        ctl,
+    })
 }
 
 /// 目标插入位 = 中心线在被拖行视觉中心**之上**的其他行数量。
@@ -306,6 +381,8 @@ pub struct ReorderList {
     ctl: ReorderCtl,
     mode: CommitMode,
     on_reorder: Option<OnReorder>,
+    /// 数据驱动时的行源（`Element::reorder_list_signal`）；静态行为 `None`。
+    source: Option<Box<dyn RowSource>>,
 }
 
 impl ReorderList {
@@ -314,6 +391,7 @@ impl ReorderList {
             ctl,
             mode,
             on_reorder: None,
+            source: None,
         }
     }
     pub(super) fn set_on_reorder(&mut self, f: OnReorder) {
@@ -321,6 +399,18 @@ impl ReorderList {
     }
     pub(super) fn set_mode(&mut self, mode: CommitMode) {
         self.mode = mode;
+    }
+    pub(super) fn set_source(&mut self, source: Box<dyn RowSource>) {
+        self.source = Some(source);
+    }
+
+    /// 数据版本变了就重建行。**拖动中一律不调**——重建会把槽位快照、补间下标与
+    /// 浮起样式指向的节点整批换掉，让位算法当场失准。版本不匹配会一直保留到落定，
+    /// 由 [`finish`](Self::finish) 末尾补做。
+    fn sync_source(&mut self, ctx: &mut EventCtx) {
+        if let Some(s) = self.source.as_mut() {
+            s.sync(ctx);
+        }
     }
 
     /// 本列表的直接子节点（行）。
@@ -443,6 +533,9 @@ impl ReorderList {
             }
         }
         ctx.mark_layout_dirty();
+        // 回调常在这里改数据信号（`Callback` 模式的全部意义）。**同一帧**就把新数据
+        // 落成子节点，否则本帧偏移已清零、children 却还是旧序，会闪回一帧老顺序再跳正。
+        self.sync_source(ctx);
     }
 }
 
@@ -539,6 +632,8 @@ impl Widget for ReorderList {
             (c.phase, c.cancel)
         };
         if phase == Phase::Idle {
+            // 空闲时才跟数据走：拖动中重建会打乱正在进行的让位（见 `sync_source`）。
+            self.sync_source(ctx);
             return;
         }
         // Esc：目标位归回原位，走同一套回落动画，结束后不提交。

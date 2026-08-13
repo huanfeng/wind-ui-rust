@@ -1668,7 +1668,7 @@ impl Element {
         let ctl = reorder::new_ctl();
         let mut container = Self::col().width_match();
         for row in rows {
-            let handle = Self::base(Layout::None).widget(reorder::DragHandle::new(ctl.clone()));
+            let handle = reorder::handle_element(&ctl);
             container = container.child(
                 Self::row()
                     .width_match()
@@ -1686,8 +1686,60 @@ impl Element {
         container
     }
 
+    /// **数据驱动的可手动排序列表**：行由 `Signal<Vec<T>>` 生成，信号变化即整体重建。
+    ///
+    /// 与 [`reorder_list`](Self::reorder_list) 的分工：
+    ///
+    /// - `reorder_list` 面向**固定若干行**，内部直接重排子节点，顺序只活在节点树里；
+    ///   应用无法把顺序**推回**控件（「恢复默认」「重新载入配置」这类反向同步做不到）。
+    /// - 本方法把顺序的真相源交给数据信号：拖拽只经 [`on_reorder`](Self::on_reorder)
+    ///   上报意图，由应用改信号，控件据此重建行。因此反向同步天然成立。
+    ///
+    /// 手柄的位置由 `row_fn` 的第二个参数交还给调用方，**必须**把它放进返回的元素树里，
+    /// 否则该行拖不动。之所以不像 `reorder_list` 那样自动前置：行若有整体选中背景/
+    /// 左缘指示条，手柄并排在外会被排除在选中视觉之外；更要紧的是——
+    ///
+    /// > **手柄不能是 `clickable()` 容器的后代**。`Clickable` 消费 `Down`/`Up`，
+    /// > 冒泡在它那里就断了，事件根本到不了列表（见 `Tree::dispatch_pointer` 的
+    /// > `consumed → break`）。整行可点的列表请把手柄放进 `stack` 里当同级覆盖层，
+    /// > 与可点行并列而非嵌套。
+    ///
+    /// 提交模式固定为 [`CommitMode::Callback`]——children 归数据管，控件不越权重排。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// use windui::prelude::*;
+    /// let order = signal(vec!["拼音".to_string(), "五笔".to_string()]);
+    /// let o = order;
+    /// Element::reorder_list_signal(order, |name, handle| {
+    ///     Element::row().width_match().cross(Align::Center)
+    ///         .child(handle)
+    ///         .child(Element::label(name).weight(1.0))
+    /// })
+    /// .on_reorder(move |_ctx, from, to| {
+    ///     o.update(|v| { let x = v.remove(from); v.insert(to.min(v.len()), x); });
+    /// })
+    /// ```
+    pub fn reorder_list_signal<T: Clone + 'static>(
+        data: Signal<Vec<T>>,
+        row_fn: impl Fn(T, Element) -> Element + 'static,
+    ) -> Self {
+        let ctl = reorder::new_ctl();
+        let row_fn: std::rc::Rc<dyn Fn(T, Element) -> Element> = std::rc::Rc::new(row_fn);
+        let mut container = Self::col().width_match();
+        for item in data.get() {
+            container = container.child(row_fn(item, reorder::handle_element(&ctl)));
+        }
+        let source = reorder::signal_rows(data, row_fn, ctl.clone());
+        let mut list = reorder::ReorderList::new(ctl, reorder::CommitMode::Callback);
+        list.set_source(source);
+        container.widget = Box::new(list);
+        container.reactive = true;
+        container
+    }
+
     /// 重排完成回调：`(ctx, 原下标, 新下标)`。顺序未变化时不触发。
-    /// 仅 [`Element::reorder_list`] 可用。
+    /// 仅 [`Element::reorder_list`] 与 [`Element::reorder_list_signal`] 可用。
     pub fn on_reorder(mut self, f: impl FnMut(&mut EventCtx, usize, usize) + 'static) -> Self {
         match self
             .widget
@@ -3262,6 +3314,161 @@ mod tests {
             tree.get(tree.root.unwrap()).unwrap().children,
             rows,
             "Callback 模式下控件不得自行重排 children"
+        );
+    }
+
+    // ---- 数据驱动重排（reorder_list_signal） ----
+
+    /// 数据信号驱动的三行等高列表；`hook` 收到 (from, to) 且**在回调里按实参改数据**
+    /// ——这正是数据驱动模式约定的用法，也是「同帧重建」断言的前提。
+    fn reorder_signal_tree(data: Signal<Vec<u32>>) -> (Tree, AnimOff) {
+        let guard = AnimOff::new();
+        let d = data;
+        // 行内第二个子节点的高度编码数据值（`v * 2`），供断言反查是哪一项——
+        // 比从节点树里挖标签文本稳，也不依赖文本引擎。
+        let el = Element::reorder_list_signal(data, |v, handle| {
+            Element::row()
+                .width_match()
+                .height(40)
+                .child(handle)
+                .child(Element::leaf().weight(1.0).height(v as i32 * 2))
+        })
+        .on_reorder(move |_ctx, from, to| {
+            d.update(|v| {
+                let x = v.remove(from);
+                v.insert(to.min(v.len()), x);
+            })
+        });
+        (layout(el), guard)
+    }
+
+    /// 各行第一个子节点就是手柄（本组测试的行构建函数把它放在行首）。
+    fn signal_handle_center(tree: &Tree, row: usize) -> Point {
+        let rows = tree.get(tree.root.unwrap()).unwrap().children.clone();
+        let handle = tree.get(rows[row]).unwrap().children[0];
+        let b = tree.abs_bounds(handle);
+        Point::new(b.x + b.w / 2, b.y + b.h / 2)
+    }
+
+    /// 各行当前承载的数据值（从行内第二个子节点的高度反解），用来断言「重建结果
+    /// 跟着数据走」而不只是节点数对得上。
+    fn signal_row_values(tree: &Tree) -> Vec<u32> {
+        tree.get(tree.root.unwrap())
+            .unwrap()
+            .children
+            .iter()
+            .map(|&r| {
+                let body = tree.get(r).unwrap().children[1];
+                (tree.get(body).unwrap().bounds.h / 2) as u32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reorder_signal_rebuilds_rows_when_data_changes() {
+        // 反向同步：应用改数据（「恢复默认」「重新载入配置」）→ 行随之重建。
+        // 这正是 reorder_list 的 Children 模式做不到、非引入本构造器不可的那件事。
+        let data = signal(vec![1u32, 2, 3]);
+        let (mut tree, _anim) = reorder_signal_tree(data);
+        assert_eq!(signal_row_values(&tree), vec![1, 2, 3]);
+
+        data.set(vec![3, 1]);
+        relayout(&mut tree);
+        assert_eq!(
+            signal_row_values(&tree),
+            vec![3, 1],
+            "行必须跟着数据重建（含行数变化）"
+        );
+    }
+
+    #[test]
+    fn reorder_signal_commits_and_rebuilds_in_same_frame() {
+        let data = signal(vec![1u32, 2, 3]);
+        let (mut tree, _anim) = reorder_signal_tree(data);
+        let (mut hover, mut cap) = (None, None);
+        let start = signal_handle_center(&tree, 0);
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        let to_pos = Point::new(start.x, 110);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, to_pos, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, to_pos, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        // 只跑一次 relayout：回落提交与按新数据重建必须发生在**同一帧**，否则会
+        // 闪回一帧旧顺序（偏移已清零、children 还没换）。
+        relayout(&mut tree);
+
+        assert_eq!(data.get(), vec![2, 3, 1], "回调应把首项挪到末位");
+        assert_eq!(
+            signal_row_values(&tree),
+            vec![2, 3, 1],
+            "提交同帧就应重建出新顺序"
+        );
+        assert!(
+            tree.get(tree.root.unwrap())
+                .unwrap()
+                .children
+                .iter()
+                .all(|&r| tree.get(r).unwrap().offset.y == 0 && !tree.get(r).unwrap().raised),
+            "重建后的新行不得残留偏移或浮起态"
+        );
+    }
+
+    #[test]
+    fn reorder_signal_defers_rebuild_while_dragging() {
+        // 拖动中重建会把槽位快照、补间下标与浮起样式指向的节点整批换掉，让位当场失准。
+        // 故拖动期间的数据变更必须压到落定之后再落地。
+        let data = signal(vec![1u32, 2, 3]);
+        let (mut tree, _anim) = reorder_signal_tree(data);
+        let (mut hover, mut cap) = (None, None);
+        let start = signal_handle_center(&tree, 0);
+
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, start, MouseButton::Left),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(start.x, start.y + 20),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+
+        // 拖动中来了一次外部数据变更（如后台刷新）。
+        data.set(vec![7, 8]);
+        relayout(&mut tree);
+        assert_eq!(signal_row_values(&tree), vec![1, 2, 3], "拖动中不得重建行");
+
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Up,
+                Point::new(start.x, start.y + 20),
+                MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        relayout(&mut tree);
+        assert_eq!(
+            signal_row_values(&tree),
+            vec![7, 8],
+            "落定后应补上拖动期间积压的数据变更"
         );
     }
 

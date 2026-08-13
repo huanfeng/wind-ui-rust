@@ -100,6 +100,19 @@ fn scheme_row(name: &str, sub: &str, on: Signal<bool>) -> Element {
         .child(Element::switch(on))
 }
 
+/// 数据驱动重排演示的出厂顺序。
+fn default_dict_order() -> Vec<String> {
+    ["系统词库", "用户词库", "网络流行语", "专业术语"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// 某项在当前顺序中的下标（找不到当 0）。副标题借它显示实时优先级。
+fn pos_of(order: &[String], name: &str) -> usize {
+    order.iter().position(|x| x == name).unwrap_or(0)
+}
+
 fn main() {
     let name = signal(String::from("我的设备"));
     let pwd = signal(String::from("hunter2"));
@@ -267,6 +280,8 @@ fn main() {
     let scheme_c = signal(true);
     let order_msg = signal(String::from("（按住左侧手柄上下拖动即可调整顺序）"));
     let om = order_msg;
+    // 数据驱动重排演示：顺序存在信号里，故「恢复默认」这类反向同步才做得到。
+    let dict_order = signal(default_dict_order());
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -290,6 +305,56 @@ fn main() {
                         .font_size(12.0)
                         .fg_role(Role::TextMuted)
                         .height(18),
+                ),
+        ))
+        .child(card(
+            "数据驱动重排 reorder_list_signal（顺序的真相源在信号里，可被「恢复默认」推回）",
+            Element::col()
+                .width_match()
+                .spacing(6)
+                .child(Element::reorder_list_signal(dict_order, {
+                    let d = dict_order;
+                    move |name: String, handle| {
+                        // 手柄由行自己安放——这里放行首，整行可点的场景则应放进
+                        // stack 覆盖层（手柄不能是 clickable 容器的后代）。
+                        let sub = format!("优先级 {}", pos_of(&d.get(), &name) + 1);
+                        Element::row()
+                            .width_match()
+                            .cross(Align::Center)
+                            .child(handle)
+                            .child(
+                                Element::col()
+                                    .weight(1.0)
+                                    .spacing(2)
+                                    .padding_xy(8, 6)
+                                    .child(
+                                        Element::label(name)
+                                            .font_size(14.0)
+                                            .fg_role(Role::Text),
+                                    )
+                                    .child(
+                                        Element::label(sub)
+                                            .font_size(11.0)
+                                            .fg_role(Role::TextMuted)
+                                            .height(16),
+                                    ),
+                            )
+                    }
+                })
+                .on_reorder({
+                    let d = dict_order;
+                    move |_ctx, from, to| {
+                        d.update(|v| {
+                            let x = v.remove(from);
+                            v.insert(to.min(v.len()), x);
+                        })
+                    }
+                }))
+                .child(
+                    Element::button("恢复默认顺序")
+                        .small()
+                        .outline_soft()
+                        .on_click(move |_| dict_order.set(default_dict_order())),
                 ),
         ))
         .child(card(

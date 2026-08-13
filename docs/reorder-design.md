@@ -241,10 +241,51 @@ Idle ──手柄Down──▶ Pressed ──位移>4px──▶ Dragging ──
 | 模式 | 行为 | 适用 |
 |------|------|------|
 | `Children`（默认） | 内部直接重排 `node.children`，**不重建行** → 行内控件状态天然保留，不要求 `T: Clone` | 固定若干设置行 |
-| `Callback` | 不动 children，只回调 `on_reorder(ctx, from, to)`，由应用改 `Signal<Vec<T>>` 触发 `DynList` 重建 | 配 `list_signal` 的动态列表 |
+| `Callback` | 不动 children，只回调 `on_reorder(ctx, from, to)`，由应用改 `Signal<Vec<T>>` 触发重建 | `reorder_list_signal` 的动态列表 |
 
 两档都会调 `on_reorder`，区别只在"children 由谁负责"。
 `Element::reorder_list_signal` 内部自动选 `Callback`。
+
+### 8.1 为什么必须有数据驱动的一档
+
+`Children` 模式下**顺序只活在节点树里**，应用没有把顺序**推回**控件的通道。
+「恢复默认」「配置重新载入」「后台刷新」这类反向同步于是全部落空——用户点了恢复默认，
+勾选状态回去了、顺序还留在他上次拖出来的样子。凡顺序需要持久化的场景（本控件的主战场）
+都会碰到这一条，所以数据驱动不是可选的加强档，而是完整度的下限。
+
+### 8.2 `RowSource`：把重建塞进同一个 widget
+
+`DynList` 与 `ReorderList` 都要挂在列容器上，而一个节点只能挂一个 widget（§8 开头）。
+两条出路：外面再套一层 `host_signal` 宿主（调用方每次都得手写一次 epoch 信号的样板），
+或者把"按信号重建 children"抽成非泛型接口内嵌进 `ReorderList`。取后者：
+
+```rust
+pub(super) trait RowSource {
+    /// 数据版本变了就重建 children；返回是否真的重建过。
+    fn sync(&mut self, ctx: &mut EventCtx) -> bool;
+}
+```
+
+泛型只落在实现 `SignalRows<T>` 上，`ReorderList` 保持非泛型（否则 `on_reorder`
+/`commit_mode` 的 `downcast_mut::<ReorderList>()` 会因类型参数不定而失效）。
+
+两处调用时机是这套的关键，各自都有非它不可的理由：
+
+| 时机 | 条件 | 理由 |
+|------|------|------|
+| `on_update` 开头 | **仅 `Phase::Idle`** | 拖动中重建会把槽位快照、补间下标与浮起样式所指的节点整批换掉，让位算法当场失准。积压的版本差会一直留到落定后补做 |
+| `finish()` 末尾 | 无条件 | 回调刚在这里改完数据，而本帧偏移已清零、children 还是旧序——不在同帧补上重建，就会闪一帧旧顺序再跳正 |
+
+### 8.3 手柄位置交还调用方
+
+`reorder_list` 自动前置手柄，`reorder_list_signal` 则把手柄作为 `row_fn` 的第二个参数
+交回去。不是为了灵活性，是**被事件模型逼出来的**：
+
+- 行若有整体选中背景/左缘指示条，手柄并排在外会被排除在选中视觉之外，高亮凭空缩进一截。
+- 更硬的一条：**手柄不能是 `clickable()` 容器的后代**。`Clickable` 对 `Down`/`Up` 一律
+  返回 `true`，而 `dispatch_pointer` 是 `consumed → break`——冒泡在它那里就断了，
+  `ReorderList` 永远收不到 `Down`，拖动根本起不来。整行可点的列表必须把手柄放进 `stack`
+  当**同级覆盖层**（与可点行并列，不是嵌套），让手柄那条冒泡链绕开 `Clickable`。
 
 ## 9. 第 3 层：Builder API
 
@@ -253,10 +294,15 @@ Idle ──手柄Down──▶ Pressed ──位移>4px──▶ Dragging ──
 Element::reorder_list(vec![row_a, row_b, row_c])
     .on_reorder(|ctx, from, to| { /* 持久化顺序 */ })
 
-// 数据驱动：控件只上报意图，children 交由上游重建负责
-Element::reorder_list(rows)
-    .commit_mode(CommitMode::Callback)
-    .on_reorder(move |_ctx, from, to| items.update(|v| { let x = v.remove(from); v.insert(to, x); }))
+// 数据驱动（顺序真相源在信号里）——手柄由行自己安放
+Element::reorder_list_signal(order, |item, handle| {
+    Element::row().width_match().cross(Align::Center)
+        .child(handle)
+        .child(row_of(item).weight(1.0))
+})
+.on_reorder(move |_ctx, from, to| {
+    order.update(|v| { let x = v.remove(from); v.insert(to.min(v.len()), x); })
+})
 ```
 
 | 修饰符 | 作用 | 状态 |
@@ -268,12 +314,18 @@ Element::reorder_list(rows)
 | `.whole_row_drag()` | 整行可拖（仅当行内无交互控件时） | P2 |
 | `.indicator_mode(Line)` | 改用插入指示线 | P2 |
 
+数据驱动构造器（手柄位置由调用方决定，见 §8.3）：
+
+| 构造器 | 作用 | 状态 |
+|--------|------|------|
+| `reorder_list_signal(data, row_fn)` | `Signal<Vec<T>>` 驱动，信号变化即整体重建；固定 `Callback` 模式 | P0.5 |
+
 手柄图形是**自绘 2×3 圆点**，不提供 `handle_glyph`：盲文点字符 `⠿` 的字体覆盖不可靠，
 缺字会渲染成豆腐块。项目里 `chevron_right` 等也是自绘的，遵循同一取舍。
 
-没有 `reorder_list_signal`：`DynList` 与 `ReorderList` 都要挂在容器节点上，而一个节点
-只能有一个 widget（见 §8）。数据驱动场景用 `Callback` 模式 + 上游重建宿主表达，
-控件本身保持非泛型。真正的一体化构造器留待 P1，需要先给 `DynList` 补"整体重建"变体。
+`reorder_list_signal` 不靠 `DynList`：两者都要挂在容器节点上，而一个节点只能有一个
+widget（见 §8）。它把重建能力做成非泛型的 `RowSource` 内嵌进 `ReorderList`，
+控件本身仍保持非泛型（见 §8.2）。
 
 命名遵循既有约定：构造器 = 控件名（名词），修饰符 = 属性名不加 `set_`。
 
@@ -356,10 +408,14 @@ L2 控件：
 核心 `offset`/`raised` + `ReorderList` 手柄拖 + 空位腾挪动画 + `Esc` 取消 +
 `ReorderTheme` + `fullshowcase` 控件页卡片 + 契约单测。
 
+### P0.5 —— 已交付
+
+`reorder_list_signal`（`RowSource` + 手柄位置交还调用方）+ `fullshowcase` 数据驱动卡片
++ 三条契约单测（数据变更重建 / 提交同帧重建 / 拖动中延后重建）。
+
 ### P1
 
-边缘自动滚动、键盘拾起模式、右键菜单四项移动、`.arrows()`、`.handle_trailing()`、
-`reorder_list_signal`（需先给 `DynList` 补整体重建变体），
+边缘自动滚动、键盘拾起模式、右键菜单四项移动、`.arrows()`、`.handle_trailing()`，
 并把 `examples/settings.rs` 里那对静态 ▲▼ 假 UI 改成真拖拽。
 
 ### P2
@@ -375,5 +431,7 @@ L2 控件：
 | 软件光栅拖动掉帧（整窗重绘 + 多行补间） | 只对**受影响区间**的行建补间；拖动中无补间活跃时不续帧（`offset` 进签名 → 每帧都会被判为结构变化而整窗重绘，按住不动却满帧重绘是纯浪费）；性能须 `--release` 实测（debug 慢约 5 倍）；大列表留指示线模式兜底 |
 | 拖动中 relayout 冲掉视觉状态 | `offset` 独立于 `bounds`，relayout 不影响——这正是不改 `bounds.y` 的理由 |
 | 手柄与滚动容器抢事件 | 冒泡链天然分层，`ReorderList` 消费即止（见 §6.2） |
+| **手柄嵌在 `clickable()` 行内则拖不动** | `Clickable` 对 `Down`/`Up` 一律返回 `true`，`dispatch_pointer` 遇 consumed 即 break，列表收不到事件。这是两个控件都"按约定行事"却互斥的组合，无法在控件内部化解（若让 `Clickable` 感知拖动状态就成了跨控件耦合）。对策是布局层面绕开：`reorder_list_signal` 把手柄交给调用方安放，整行可点时放进 `stack` 当同级覆盖层（见 §8.3） |
+| 拖动中上游数据变更 | `RowSource::sync` 仅在 `Phase::Idle` 执行，版本差积压到落定后补做（见 §8.2） |
 | 浮起行超出滚动容器被裁剪 | 与主流实现一致（裁在列表内），不做跨容器浮层 |
 | `Callback` 模式下应用忘记改数据 | 文档明确；`reorder_list_signal` 封装好默认行为 |
