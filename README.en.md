@@ -37,6 +37,8 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 ## Features
 
 - **Imperative Builder API** — pure-Rust method chaining, type-safe, zero parsing overhead.
+- **Copy-handle state** — state is a `Signal<T>`: closures `move`-capture it directly, no `clone()` ceremony; `set()` schedules a repaint automatically. Data changes drive subtree rebuilds (`list_signal`), so dynamic lists need no hand-written diffing.
+- **Runtime theme switching** — grab a handle with `App::theme_handle()` and call `set(Theme::dark())` inside any callback to reskin the whole tree; colors expressed as a `Role` (`fg_role` / `bg_role`) follow along.
 - **One codebase, two platforms** — widget tree, layout, events, animation, theming are all platform-agnostic; switching platforms requires zero changes.
 - **Retained mode + dirty triggering** — no redraw when idle, blocks on the event loop, zero CPU usage.
 - **High-quality text** — native shaping (DirectWrite / Core Text) + grayscale anti-aliasing, crisp CJK; auto line-wrapping labels; **color emoji** (incl. ZWJ sequences and skin-tone modifiers), text fields accept emoji input.
@@ -44,6 +46,7 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **Clean focus ring** — the focus ring shows only during keyboard Tab navigation, never on mouse-only interaction.
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
 - **Touch / trackpad** — pan scrolling + fling inertia + edge bounce.
+- **Optional GPU acceleration (Windows)** — large windows can opt into the Direct2D backend (`App::accelerated(true)`): geometry, gradients, shadows and glyph rasterization run on the GPU, while text still goes through DirectWrite (system font cache, ClearType). Software rendering is the default; RDP sessions, machines without a GPU and off-screen screenshots fall back automatically and never panic.
 - **Automatic screenshots** — `--screenshot` renders one frame off-screen to PNG (`--scale 1.5` for high-DPI), ideal for automated regression.
 
 ## Preview
@@ -76,21 +79,22 @@ All screenshots below are captured automatically via off-screen rendering (`--sc
 ## Quick start
 
 ```rust
-use std::cell::Cell;
-use std::rc::Rc;
 use windui::prelude::*;
 
 fn main() {
-    let on = Rc::new(Cell::new(true));
+    // State is a Signal<T>: a Copy handle, captured directly by closures;
+    // writing to it schedules a repaint automatically.
+    let on = signal(true);
+
     let ui = Element::col()
         .fill()
         .padding(20)
         .spacing(12)
         .bg(Color::hex(0xF5F6FA))
-        .child(Element::label("Hello, windui!").font_size(22.0).height(32).width_match())
-        .child(Element::checkbox("Enable feature", on.clone()))
-        .child(Element::button("OK").on_click(|ctx| {
-            println!("clicked");
+        .child(Element::label("Hello, windui!").font_size(22.0).width_match())
+        .child(Element::checkbox("Enable feature", on))
+        .child(Element::button("OK").on_click(move |ctx| {
+            println!("checkbox = {}", on.get());
             ctx.request_close();
         }));
 
@@ -102,29 +106,34 @@ fn main() {
 
 | Category | Widgets |
 |----------|---------|
-| Layout | `col` / `row` (LinearLayout, with weight), `stack` (FrameLayout) |
-| Text | `label` (auto-wrap), `link` (clickable) |
-| Button | `button` (hover/press/focus states + click/Enter/Space activation) |
-| Form | `checkbox` / `switch` / `radio` (exclusive group) / `slider` (drag+keyboard) / `text_input` (CJK editing + password + multiline) / `dropdown` / `stepper` |
-| Feedback | `progress` (determinate/indeterminate) / `tooltip` |
-| Container | `scroll` (wheel/touch + clip + scrollbar) / `tabs` / `divider` / `dialog` (modal) / `visible_when` |
-| Navigation | `segmented` / `nav_row` / `collapsible` / `accordion` |
-| List | `list` (single-select / scroll / highlight / icons / disabled state) |
-| Image | `image` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
-| System | System tray (icon + left/double click + native context menu), frameless window (custom title bar), file drop, clipboard |
+| Layout | `col` / `row` (LinearLayout, with weight), `stack` (FrameLayout), `grid` (equal-width grid), `flex_spacer` |
+| Text | `label` (auto-wrap), `label_rc` (signal-bound), `link` (clickable), `rich` (rich text: styled spans / collapsible sections) |
+| Button | `button` (hover/press/focus states + click/Enter/Space activation), `icon_button` |
+| Form | `checkbox` / `switch` / `radio` (exclusive group) / `slider` (drag+keyboard) / `text_input` (CJK editing + password + multiline) / `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` |
+| Feedback | `progress` (determinate/indeterminate) / `tooltip` / `toast` (centered transient overlay) / `badge` |
+| Container | `scroll` (wheel/touch + clip + scrollbar) / `tabs` / `tabs_pill` / `divider` / `dialog` (modal) / `dialog_panel` (titled) / `visible_when` |
+| Navigation | `segmented` / `nav_row` (drill-in) / `collapsible` / `accordion` · `accordion_multi` |
+| List | `list` / `list_pill` (sidebar style) / `list_icons` (single-select / scroll / highlight / icons / disabled state) / `list_signal` (data-driven dynamic list) / `reorder_list` (drag to reorder) |
+| Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select) |
+| Image | `image` / `image_svg` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
+| System | System tray (icon + left/double click + native context menu), global hotkeys (Windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
 
-Form widgets bind two-way to external state via `Rc<Cell<T>>` / `Rc<RefCell<String>>`.
+Widget state binds uniformly to `Signal<T>` — a `Copy` handle created by `signal(initial)`:
+`checkbox` / `switch` take `Signal<bool>`, `dropdown` / `list` / `tabs` take `Signal<usize>`,
+`text_input` takes `Signal<String>`. Writing via `set()` schedules a repaint automatically, with
+no manual dirty marking. See [`docs/API_GUIDE.md`](docs/API_GUIDE.md) §3.2.
 
 ## Build & run
 
 ```bash
 cargo run --release --example fullshowcase                  # run the comprehensive demo window
+cargo run --release --example ime -- --accelerated          # enable the Direct2D GPU backend (Windows)
 cargo run --example fullshowcase -- --screenshot out.png    # render off-screen to PNG
 cargo test                                                  # run unit tests
 cargo clippy --all-targets                                  # lint
 ```
 
-Examples: `fullshowcase` (comprehensive), `animation`, `theming`, `image`, `list`, `dropdown`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `file_drop`, `ime_settings`, plus `phase0`–`phase5` staged demos.
+Examples: `fullshowcase` (comprehensive), `settings` (settings window: sidebar + tables + dialogs), `dyn_list` (data-driven dynamic list), `about` (cards + toasts), `background_task` (cross-thread updates), `animation`, `theming` (TOML themes + runtime switching), `image`, `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `hotkey` (global hotkeys + start hidden), `file_drop`, `ime`, `ime_settings`, plus `phase0`–`phase5` staged demos.
 
 ## Architecture
 

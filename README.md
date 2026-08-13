@@ -37,6 +37,8 @@
 ## 特性
 
 - **命令式 Builder API** — 纯 Rust 链式构建，类型安全、零解析开销。
+- **Copy 句柄状态** — 状态是 `Signal<T>`，闭包里 `move` 直接捕获、不用 `clone()` 前戏；`set()` 自动触发重绘。数据变化驱动子树重建（`list_signal`），动态列表不用手写 diff。
+- **运行期换主题** — `App::theme_handle()` 拿句柄，回调里 `set(Theme::dark())` 即整树热切换；用 `Role` 表达的颜色（`fg_role`/`bg_role`）自动跟随。
 - **一份代码，两个平台** — 控件树、布局、事件、动画、主题全平台无关；切换平台零改动。
 - **Retained 模式 + 脏触发** — 空闲不重绘、阻塞在事件循环，零 CPU 占用。
 - **高质量文字** — 平台原生排版（DirectWrite / Core Text）+ 灰度抗锯齿，CJK 清晰；Label 自动换行；**彩色 emoji**（含 ZWJ 组合序列、肤色修饰），文本框可输入 emoji。
@@ -77,21 +79,21 @@
 ## 快速开始
 
 ```rust
-use std::cell::Cell;
-use std::rc::Rc;
 use windui::prelude::*;
 
 fn main() {
-    let on = Rc::new(Cell::new(true));
+    // 状态是 Signal<T>：Copy 句柄，闭包直接捕获，写入自动触发重绘
+    let on = signal(true);
+
     let ui = Element::col()
         .fill()
         .padding(20)
         .spacing(12)
         .bg(Color::hex(0xF5F6FA))
-        .child(Element::label("Hello, windui!").font_size(22.0).height(32).width_match())
-        .child(Element::checkbox("启用功能", on.clone()))
-        .child(Element::button("确定").on_click(|ctx| {
-            println!("clicked");
+        .child(Element::label("Hello, windui!").font_size(22.0).width_match())
+        .child(Element::checkbox("启用功能", on))
+        .child(Element::button("确定").on_click(move |ctx| {
+            println!("checkbox = {}", on.get());
             ctx.request_close();
         }));
 
@@ -103,18 +105,21 @@ fn main() {
 
 | 类别 | 控件 |
 |------|------|
-| 布局 | `col` / `row`（LinearLayout，支持 weight）、`stack`（FrameLayout） |
-| 文本 | `label`（自动换行）、`link`（可点击链接） |
-| 按钮 | `button`（hover/press/focus 三态 + 点击/回车/空格激活） |
-| 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行）/ `dropdown` / `stepper` |
-| 反馈 | `progress`（确定/不确定）/ `tooltip`（悬停提示） |
-| 容器 | `scroll`（滚轮/触摸+裁剪+滚动条）/ `tabs` / `divider` / `dialog`（模态）/ `visible_when`（条件可见） |
-| 导航 | `segmented`（连体多段单选）/ `nav_row` / `collapsible` / `accordion`（手风琴） |
-| 列表 | `list`（单选/滚动/高亮/图标/禁用态） |
-| 图片 | `image` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
+| 布局 | `col` / `row`（LinearLayout，支持 weight）、`stack`（FrameLayout）、`grid`（等宽网格）、`flex_spacer` |
+| 文本 | `label`（自动换行）、`label_rc`（绑信号）、`link`（可点击链接）、`rich`（富文本：多样式 span / 折叠段） |
+| 按钮 | `button`（hover/press/focus 三态 + 点击/回车/空格激活）、`icon_button`（纯图标） |
+| 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行）/ `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` |
+| 反馈 | `progress`（确定/不确定）/ `tooltip`（悬停提示）/ `toast`（居中轻提示）/ `badge`（胶囊徽章） |
+| 容器 | `scroll`（滚轮/触摸+裁剪+滚动条）/ `tabs` / `tabs_pill` / `divider` / `dialog`（模态）/ `dialog_panel`（带标题栏）/ `visible_when`（条件可见） |
+| 导航 | `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴） |
+| 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
+| 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
+| 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
 | 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键（Windows）、启动即隐藏、关闭转隐藏、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
 
-表单控件通过 `Rc<Cell<T>>` / `Rc<RefCell<String>>` 与外部状态双向绑定。
+控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
+`Signal<bool>`、`dropdown`/`list`/`tabs` 绑 `Signal<usize>`、`text_input` 绑 `Signal<String>`。
+`set()` 写入即自动触发重绘，无需手动标脏。用法见 [`docs/API_GUIDE.md`](docs/API_GUIDE.md) §3.2。
 
 ## 构建与运行
 
@@ -126,7 +131,7 @@ cargo test                                                  # 运行单元测试
 cargo clippy --all-targets                                  # 静态检查
 ```
 
-示例一览：`fullshowcase`（综合）、`animation`、`theming`、`image`、`list`、`dropdown`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`hotkey`（全局热键 + 启动即隐藏）、`file_drop`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
+示例一览：`fullshowcase`（综合）、`settings`（设置窗：侧栏 + 表格 + 对话框）、`dyn_list`（数据驱动动态列表）、`about`（卡片 + Toast）、`background_task`（跨线程更新）、`animation`、`theming`（TOML 主题 + 运行期切换）、`image`、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`hotkey`（全局热键 + 启动即隐藏）、`file_drop`、`ime`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
 
 ## 架构
 

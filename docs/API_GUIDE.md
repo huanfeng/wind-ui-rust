@@ -7,38 +7,37 @@
 
 ## 1. 设计哲学
 
-windui 是一个**轻量、命令式、retained-mode** 的 Windows 桌面 GUI 库。五条核心原则，决定了所有 API 的样子：
+windui 是一个**轻量、命令式、retained-mode** 的跨平台桌面 GUI 库（Windows 与 macOS 均已支持）。五条核心原则，决定了所有 API 的样子：
 
 1. **命令式 Builder，零解析**。UI 用纯 Rust 链式调用构建，无 DSL、无宏、无运行时解析。类型即文档，编译期即校验。
-2. **共享可变状态用 `Rc<Cell<T>>`**。控件不持有"模型"，而是绑定到外部状态单元。你改 cell、UI 下一帧自然反映。这是贯穿全库的统一心智模型。
+2. **共享可变状态用 `Signal<T>`**。控件不持有"模型"，而是绑定到一个 `Copy` 的状态句柄。你 `set` 信号、框架自动请求重绘，UI 下一帧反映。这是贯穿全库的统一心智模型（见 §3.2）。
 3. **retained + 空闲零 CPU**。控件树常驻，无事件/无脏区时不重绘、不唤醒。动画按需驱动（见 §8）。
-4. **样式两层**：控件不硬编码颜色/间距，全部走 `Theme`（全局调色板 + 每控件覆盖层），可映射 TOML。单点视觉调整走内联 `Style` 修饰符。
-5. **平台差异收口在平台层**。控件与核心层平台无关，为后续 macOS 预留（见 DESIGN.md 跨平台缝合）。
+4. **样式两层**：控件不硬编码颜色/间距，全部走 `Theme`（全局调色板 + 每控件覆盖层），可映射 TOML。单点视觉调整走内联 `Style` 修饰符。主题可在运行期热切换（见 §7.3）。
+5. **平台差异收口在平台层**。控件与核心层平台无关，Windows 与 macOS 共用同一份 UI 代码（见 DESIGN.md 跨平台缝合）；少数尚未拉齐的能力见 §11。
 
 ---
 
 ## 2. 三分钟上手
 
 ```rust
-use std::cell::Cell;
-use std::rc::Rc;
 use windui::prelude::*;
 
 fn main() {
-    // 1) 状态：外部持有，控件绑定
-    let count = Rc::new(Cell::new(0i64));
+    // 1) 状态：signal() 造一个 Copy 句柄，控件与回调都直接绑它
+    let count = signal(0i64);
+    let text = signal(String::from("计数：0"));
 
     // 2) UI：命令式 Builder 组装控件树
-    let c = count.clone();
     let ui = Element::col()
         .fill()
         .padding(24)
         .spacing(12)
         .bg(Color::hex(0xF5F6FA))
         .child(Element::label("计数器").font_size(20.0))
+        .child(Element::label_rc(text).font_size(14.0))   // 绑信号的动态标签
         .child(Element::button("点我 +1").on_click(move |_| {
-            c.set(c.get() + 1);
-            println!("count = {}", c.get());
+            count.update(|v| *v += 1);                    // 写入自动请求重绘
+            text.set(format!("计数：{}", count.get()));
         }));
 
     // 3) 窗口：配置并运行
@@ -49,7 +48,48 @@ fn main() {
 }
 ```
 
-`use windui::prelude::*;` 引入最常用的 `App / Element / Color / Insets / Point / Rect / Size / Align / Axis / Dimension / Style / Theme`。
+注意闭包里**没有** `let c = count.clone();` 这类前戏——`Signal<T>` 是 `Copy` 的，`move` 闭包
+直接按值捕获，同一个信号可被任意多个闭包捕获且都指向同一份存储。
+
+`use windui::prelude::*;` 引入最常用的 `App / Element / signal / Signal / Color / Insets /
+Point / Rect / Size / Align / Axis / Dimension / Role / Style / Theme / Intent / Sender`。
+
+### 2.1 两段式 App（需要运行期句柄时）
+
+`App` 的多数方法是消费型 builder（`mut self -> Self`），可以一路链下去。但两个方法是
+`&mut self`——[`channel`](#85-跨线程更新)（跨线程消息通道）与
+[`theme_handle`](#73-运行期换主题)（运行期主题句柄）——它们要在链式消费**之前**取出，
+所以写成两段式：
+
+```rust
+use windui::prelude::*;
+
+fn main() {
+    let progress = signal(0.0f32);
+
+    // 第一段：可变绑定，取运行期句柄
+    let mut app = App::new("下载", 360, 180);
+    let theme = app.theme_handle();                       // &mut self
+    let tx = app.channel::<f32>(move |p| progress.set(p)); // &mut self
+
+    std::thread::spawn(move || {
+        let _ = tx.send(0.5);
+    });
+
+    let ui = Element::col()
+        .fill()
+        .padding(20)
+        .spacing(12)
+        .child(Element::progress(progress).width_match())
+        .child(Element::button("暗色").on_click(move |_| theme.set(Theme::dark())));
+
+    // 第二段：消费型链式收尾，content/run 必须在最后
+    app.content(ui).run();
+}
+```
+
+顺序约束只有一条：**`channel` / `theme_handle` 必须在 `content` / `run` 之前**——后两者
+消费 `App`，之后就没有 `&mut self` 可借了。
 
 ---
 
@@ -67,29 +107,62 @@ fn main() {
 
 容器用 `.child()` / `.children()` 嵌套子节点。最终把根 `Element` 交给 `App::content()`，由框架 `build` 成内部节点树。
 
-### 3.2 状态绑定：`Rc<Cell<T>>` 模型
+### 3.2 状态绑定：`Signal<T>` 模型
 
-控件**不存数据**，只持有一个指向外部状态的共享引用。改状态 → UI 反映。各控件对应的状态类型：
+控件**不存数据**，只持有一个指向外部状态的句柄。改状态 → UI 反映。
+
+```rust
+use windui::prelude::*;
+
+let dark = signal(false);              // 自由函数 signal(初值) 创建，从 prelude 引入
+Element::switch(dark);                 // 控件读写它——直接传，不用 clone
+Element::label("仅暗色时显示").visible_when(move || dark.get());
+```
+
+`Signal<T>` 有三个性质，用之前先记住：
+
+1. **它是 `Copy` 的**。句柄本身只是运行时 arena 里的一个下标，按值传进控件、按值被
+   `move` 闭包捕获都不消耗原变量。这是相对旧 `Rc<Cell<T>>` 模型最大的人体工学改进——
+   再也不用在每个闭包前写 `let d = dark.clone();`。
+2. **写入自动触发重绘**。`set` / `update` 内部会请求重绘，**不需要**手写
+   `ctx.mark_dirty()`（自定义 `Widget` 里改自有非信号状态时才需要，见 §9）。
+3. **只能在 UI 线程用**。存储是线程局部的，`Signal<T>` 刻意实现为 `!Send`——句柄搬进
+   别的线程是**编译错误**而非运行期静默丢值。后台线程更新状态见 §8.5。
+
+API 面只有五个方法：
+
+```rust
+let n = signal(0i64);
+n.set(3);                     // 写入（丢弃旧值）
+n.update(|v| *v += 1);        // 原地改（省一次 clone；T 不必是 Clone）
+let v: i64 = n.get();         // 读（克隆一份，要求 T: Clone）
+let cur = n.with(|v| *v);     // 借用读（免 clone，T 不必是 Clone）
+let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（变更检测用）
+```
+
+各控件对应的状态类型：
 
 | 控件 | 状态类型 | 含义 |
 |------|----------|------|
-| `checkbox` / `switch` | `Rc<Cell<bool>>` | 开关 |
-| `radio` / `dropdown` / `list` / `tabs` | `Rc<Cell<usize>>` | 选中索引 |
-| `slider` / `progress` | `Rc<Cell<f32>>` | 0.0–1.0 |
-| `stepper` | `Rc<Cell<f64>>` | 数值 |
-| `text_input` | `Rc<RefCell<String>>` | 文本 |
-| `dialog` / `visible_when` | `Rc<Cell<bool>>` / 闭包 | 显隐 |
+| `checkbox` / `switch` / `collapsible` / `dialog` / `dialog_panel` | `Signal<bool>` | 开关 / 显隐 |
+| `radio` / `dropdown` / `segmented` / `list` / `list_pill` / `tabs` / `tabs_pill` | `Signal<usize>` | 选中索引 |
+| `accordion` | `Signal<i32>` | 选中面板，`-1` = 全收起 |
+| `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
+| `stepper` | `Signal<f64>` | 数值 |
+| `text_input` / `label_rc` / `rich_rc` | `Signal<String>`（`rich_rc` 为 `Signal<RichDoc>`） | 文本 |
+| `list_signal` / `host_signal` / `reorder_list_signal` | `Signal<Vec<T>>` | 动态数据源（见 §6.5） |
+| `dropdown_reactive` | `Signal<Vec<String>>` | 动态选项 |
+| `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
+| `table_selectable` | `Vec<Signal<bool>>` | 每行一个选中信号 |
+| `table_sortable` / `_server` | `Signal<Option<(usize, SortOrder)>>` | 排序列 + 方向 |
+| `visible_when` / `enabled_when` | 闭包 `Fn() -> bool` | 派生显隐 / 启用 |
+| `enabled` | `Signal<bool>` | 启用态（沿父链继承） |
 
-**惯用法**：状态在 `main`（或你的 App 结构）里创建，`.clone()` 进控件和回调。`Rc::clone` 只增引用计数，开销极小。
+**惯用法**：状态在 `main`（或你的 App 结构）里创建，直接按值传进控件和回调。需要"一处改、
+多处联动"时，把同一个信号传给多个控件即可——它们读的是同一份存储。
 
-```rust
-let dark = Rc::new(Cell::new(false));
-Element::switch(dark.clone());                    // 控件读写它
-Element::label("x").visible_when({                // 另一处按它显隐
-    let d = dark.clone();
-    move || d.get()
-});
-```
+> **例外**：系统托盘的勾选项 `TrayMenuItem::check(label, checked, cb)` 目前仍收
+> `Rc<Cell<bool>>`（原生菜单在平台层构建，尚未迁到 Signal）。见 `examples/tray.rs`。
 
 ---
 
@@ -100,7 +173,8 @@ Element::label("x").visible_when({                // 另一处按它显隐
 - **构造器 = 控件名（名词）**：`col`、`row`、`button`、`dropdown`…，全小写蛇形。
 - **布局/样式修饰符 = 属性名**：`width`、`padding`、`bg`、`corner`…，设置型方法**不加** `set_` 前缀（builder 惯例）。
 - **颜色用缩写**：背景 `bg`、前景 `fg`，全库一致（`Element::bg`、`App::bg`、`Style.bg`、`EventCtx::set_bg`）。
-- **文本标签统一 `impl Into<String>`**：`button`、`label`、`dropdown`、`list`、`tabs` 的标题/选项均可传 `&str` 或 `String`。
+- **文本标签基本都是 `impl Into<String>`**：`button`、`label`、`checkbox`、`dropdown`、`list`、`tabs` 等的标题/选项均可传 `&str` 或 `String`（少数破例见 §11）。
+- **状态参数一律 `Signal<T>`**：`checkbox(label, Signal<bool>)`、`dropdown(options, Signal<usize>)`……第一个参数是内容、第二个是状态，顺序全库一致。
 - **事件回调 = `on_<动作>`**：目前 `on_click`。回调签名见 §7。
 - **`xxx_xy(h, v)`** = 水平/垂直两参版本：`padding_xy`、`margin_xy`。注意这里 `h`=horizontal、`v`=vertical（与 `size(w, h)` 的 `h`=height 不同名同义，按方法语境区分）。
 - **`xxx_match` / `fill`** = 撑满父容器：`width_match`、`height_match`、`fill`（= 两者）。
@@ -121,22 +195,69 @@ Element::stack()                     // 层叠（Frame，后者覆盖前者）
 Element::leaf()                      // 叶子（自定义控件载体，见 §9）
 Element::scroll()                    // 垂直滚动容器（支持鼠标滚轮 + 触摸滑动/惯性）
 Element::divider()                   // 分隔线
-Element::tabs(selected, vec![("标签", page_element), ...])
+Element::tabs(selected, vec![("标签", page_element), ...])       // selected: Signal<usize>
 Element::tabs_icons(selected, vec![("标签", icon, page), ...])  // 带图标的标签（icon: ImageContent）
+Element::tabs_pill(selected, vec![("标签", page), ...])         // 胶囊风格标签页（签名同 tabs，仅视觉不同）
 Element::grid(cols, gap, items)      // 等宽网格：每行 cols 个、列按权重均分、末行补空对齐
 Element::dialog(show, content)       // 模态遮罩 + 居中内容（show: Signal<bool>）
 Element::dialog_panel(show, "标题", width, on_close, body, footer)  // 带标题栏/关闭×/底栏的对话框面板
 Element::flex_spacer()               // 弹性空白：占满主轴剩余空间（把兄弟推到另一端，如底栏左/右分布）
-Element::table(vec![("列名", weight), ...], rows)   // 数据表格（只读）：固定表头 + 滚动正文 + 斑马纹
-Element::table_custom(columns, rows_of_elements)    // 表格（单元格为任意 Element，可点/可编辑）
-Element::table_editable(columns, cells, |ctx, r, c| { /* 弹编辑框 */ })  // 可编辑表格（见下）
 ```
+
+### 表格族
+
+```rust
+// 只读：columns 为 (列标题, 权重)，rows 为每行单元格文本
+Element::table(vec![("列名", 2.0), ("大小", 1.0)], vec![vec!["a.txt", "12"]])
+// 单元格为任意 Element（可点/可编辑）。注意 columns 这里是 Vec<(String, f32)>，不收 &str
+Element::table_custom(vec![("列名".to_string(), 2.0)], rows_of_elements)
+// 可编辑：cells: Vec<Vec<Signal<String>>>，点格触发 on_edit(ctx, row, col)
+Element::table_editable(columns, cells, |ctx, r, c| { /* 弹编辑框 */ })
+// 客户端排序：点表头在 无 → 升序 → 降序 → 无 间循环；sort: Signal<Option<(usize, SortOrder)>>
+Element::table_sortable(columns, rows, sort)
+// 服务端排序/分页：前端不排序，rows: Signal<Vec<Vec<String>>> 由 on_sort 回调里重新拉取写回
+Element::table_sortable_server(columns, rows, sort, |ctx, new_sort| { /* 拉数据后 rows.set(..) */ })
+// 可多选：首列复选框 + 表头三态全选；selected: Vec<Signal<bool>>（长度 == rows，按原始行下标索引）
+Element::table_selectable(columns, rows, selected, sort)
+```
+
+扩展修饰符（链在上述表格返回的元素上）：
+
+```rust
+.sort_indicator(SortStyle { asc: Some("↑".into()), ..Default::default() })  // 排序箭头样式
+.actions("操作", 1.6, |row| Element::button("删除"))   // 尾部追加操作列
+.cell_render(|row, col, text| None)                     // 自定义数据单元格；None 回退默认文本
+.cell_lines(2)                                          // 默认文本格最多显示几行
+.on_row_activate(|ctx, row| { /* 双击行 */ })
+.on_row_context_menu(|row| vec![MenuItem::run("删除", || {}, false)])
+```
+
+> ⚠️ **适用矩阵**：这些修饰符只对部分表格变体生效。误用时 **debug 构建下 `panic` 报错提示、
+> release 下静默忽略**（口径同 §5 的 text_input 专属修饰符），panic 位置指向你的调用行。
+> 照下表核对：
+>
+> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` |
+> |---|---|---|---|---|---|---|
+> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
+> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
+> | `cell_render` / `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
+> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） |
+> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
+>
+> `table` / `table_editable` 内部会转成 `table_custom` 的结构，三者都不带响应式表头/正文
+> widget，因此整列扩展点都不适用——需要排序或行级交互，请直接从 `table_sortable` 起步。
+>
+> **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
+> 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
+> 后仍锁定同一数据行，可直接索引 `selected[row]`），服务端表格（`table_sortable_server`）
+> 是当前页内的**显示下标**。
+
 > **可编辑表格**：`cells: Vec<Vec<Signal<String>>>`（每格一个信号，显示自动跟随）。点单元格触发
 > `on_edit(ctx, row, col)`，由 app 据 (row,col) 弹出编辑框（如 `dialog_panel` + `text_input` 绑定临时
 > Signal），确认后 `cells[r][c].set(新值)`，表格下一帧自动刷新——**编辑入口与提交解耦，非即时**。
 > 完整示例见 `examples/settings.rs`。
 > `grid` 适合复选框组、卡片墙；`dialog_panel` 内的 `body` 自行设宽高（表格类用 `.height(360)`）；
-> `table` 需置于限高容器内（正文区滚动）。`flex_spacer` 用于「左按钮 … 右按钮」的底栏布局。
+> 表格类均需置于限高容器内（正文区滚动）。`flex_spacer` 用于「左按钮 … 右按钮」的底栏布局。
 
 ### 基础控件
 ```rust
@@ -155,10 +276,13 @@ Element::tag_field("输入…", vec![chip1, chip2])  // 多值标签字段（仿
 Element::checkbox("启用", state)                 // state: Signal<bool>
 //  .danger() / .accent(color)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
 //  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）
-Element::switch(state)                            // state: Rc<Cell<bool>>
-Element::radio("选项", group, index)             // group: Rc<Cell<usize>>
-Element::slider(value)                            // value: Rc<Cell<f32>> (0..=1)
-Element::dropdown(vec!["A", "B"], selected)       // selected: Rc<Cell<usize>>
+Element::switch(state)                            // state: Signal<bool>
+Element::radio("选项", group, index)             // group: Signal<usize>
+Element::slider(value)                            // value: Signal<f32> (0..=1)
+Element::dropdown(vec!["A", "B"], selected)       // selected: Signal<usize>
+Element::dropdown_reactive(options, selected)     // 选项也绑信号：options: Signal<Vec<String>>
+Element::dropdown_items(vec![item1, item2], selected)       // 富内容项（副标题/徽章/尾随图标）
+Element::dropdown_items_reactive(items, selected)           // items: Signal<Vec<DropdownItem>>
 Element::check_menu("列表显示", vec![             // 下拉式复选菜单：外观同 dropdown，面板是菜单
     CheckMenuItem::check("隐藏未启用", flag)      //   开关项（flag: Signal<bool>）
         .on_change(|v| save(v)),                  //   翻转后通知（收到新值，默认翻转已执行）
@@ -166,12 +290,44 @@ Element::check_menu("列表显示", vec![             // 下拉式复选菜单�
     CheckMenuItem::action("恢复默认", || {}),     //   动作项：点了执行并关闭
 ]).summary(|on| format!("显示 ({})", on.len()))   // 收起态文案（默认恒为标题；用摘要建议配 .width）
 //  默认点击即关（同普通菜单）；.stay_open() 改为开关点了不关、可连点，点面板外才收起
-Element::stepper(value, min, max, step)           // value: Rc<Cell<f64>>
-Element::list(vec!["行1", "行2"], selected)       // selected: Rc<Cell<usize>>
+Element::stepper(value, min, max, step)           // value: Signal<f64>；min/max/step: f64
+Element::list(vec!["行1", "行2"], selected)       // selected: Signal<usize>
+Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选中为内缩圆角 pill（侧栏导航）
 Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
-Element::progress(value)                          // value: Rc<Cell<f32>> (确定进度)
+Element::progress(value)                          // value: Signal<f32> (确定进度)
 Element::progress_indeterminate()                 // 不确定进度（忙碌动画）
+Element::label_rc(text)                           // 动态标签：text: Signal<String>，信号变即刷新
 ```
+
+### 导航 / 分组
+
+```rust
+Element::segmented(vec!["亮", "暗", "跟随"], selected)   // 连体多段单选（selected: Signal<usize>）
+                                                         //   语义同 radio 组，外观更紧凑；聚焦后左右键移动
+Element::nav_row("键盘设置").on_click(|ctx| { /* 钻入子页 */ })  // 左标签 + 右 chevron 的导航行，无持久选中态
+Element::collapsible("高级选项", expanded, body)         // 可折叠分组（expanded: Signal<bool>）
+                                                         //   body 经 visible_when 显隐，收起时不占布局
+Element::accordion(selected, vec![("面板一", body1), ("面板二", body2)])
+//   手风琴（单开互斥）：selected: Signal<i32>，-1 = 全收起，初值即默认展开项
+Element::accordion_multi(vec![("面板一", body1), ("面板二", body2)])
+//   手风琴（多开）：各面板独立展开，初始全部收起，无需外部状态
+```
+
+### 富文本
+
+```rust
+Element::rich(
+    RichDoc::new()
+        .style("headword", SpanStyle::new().size(26.0).bold())
+        .para(Para::new().styled("headword", "apple").text("  n. 苹果"))
+        .section("例句", collapsed, |s| s.para("An apple a day…")),   // collapsed: Signal<bool>
+)
+    .on_span_click(|id, ctx| { /* 点了标了 id 的 span（词典交叉引用跳转） */ })
+    .copy_menu(false)      // 关掉内建的右键「复制全部」（要挂自定义 on_context_menu 时先关）
+Element::rich_rc(doc)      // 动态富文本：doc: Signal<RichDoc>，整篇换文档（词典切词条）
+```
+`rich` 是**单个自绘节点**，内部按 span 排版并做基线对齐、折叠段带高度动画。
+`on_span_click` / `copy_menu` 是 rich 专属修饰符（误用检测同 text_input）。
 
 ### 文本输入
 ```rust
@@ -197,7 +353,7 @@ Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（le
 - **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
   ```rust
   Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon(path) / .icon_rgba(w,h,&rgba)
-  Element::button("提交").icon(path).enabled(can_submit.clone())  // 禁用时背景/图标/文字一起置灰
+  Element::button("提交").icon(path).enabled(can_submit)  // 禁用时背景/图标/文字一起置灰
   Element::button("删除").icon(path).disabled(true)               // 静态禁用
   ```
 
@@ -208,12 +364,21 @@ Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（le
 - **换图**：`ImageContent::on_state(state, image)` 为特定状态备专图，命中用专图、否则回退基图。
 ```rust
 // 高级用法：预组装内容原语，再交给控件
-let icon = ImageContent::from_bytes(base).tint(Color::WHITE)
-    .on_state(VisualState::Disabled, gray_png);
+// on_state 的第二参是 Image（不是字节），故先解码；ImageContent 未实现 Clone，
+// 一个实例只能交给一个控件——要两处用就组装两份。
+let icon = ImageContent::from_bytes(base)
+    .tint(Color::WHITE)
+    .on_state(VisualState::Disabled, Image::from_bytes(gray_png)?);
 Element::button("X").icon_content(icon);
-Element::image_content(icon);   // 也可作独立控件
 ```
-> **禁用是核心级通用能力**：`.enabled(Rc<Cell<bool>>)` / `.disabled(bool)` 可用于**任意控件或容器**。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
+
+也可以不经按钮、直接作独立控件：
+
+```rust
+let pic = ImageContent::from_bytes(base).tint(Color::WHITE);
+Element::image_content(pic);
+```
+> **禁用是核心级通用能力**：`.enabled(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)` 可用于**任意控件或容器**。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 
@@ -252,16 +417,21 @@ Element::button("复制").on_click(|ctx| ctx.toast_ok("已添加到剪贴板"));
 
 ### 文件拖放
 ```rust
-Element::col().fill().on_drop_files(|ctx, paths| {   // paths: &[PathBuf]
-    for p in paths { /* ... */ }
-    ctx.mark_dirty();                                // 改了状态记得请求重绘
+Element::col().fill().on_drop_files(move |_ctx, paths| {   // paths: &[PathBuf]
+    let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    dropped.set(names.join("\n"));                   // 写信号即自动重绘
 })
 ```
 - **任意元素可接收**：`.on_drop_files(f)` 挂到 `.fill()` 根容器即"全窗接收"；落点会路由到落点下的元素，再沿父链冒泡到首个设了回调的节点（禁用子树不接收）。
-- 平台经 `WM_DROPFILES` 解出路径 + 落点交宿主路由（`Tree::dispatch_files`）；回调签名 `FnMut(&mut EventCtx, &[PathBuf])`，可读写共享状态、`mark_dirty`。完整示例见 `examples/file_drop.rs`。
+- 平台经 `WM_DROPFILES` 解出路径 + 落点交宿主路由（`Tree::dispatch_files`）；回调签名 `FnMut(&mut EventCtx, &[PathBuf])`，可读写信号（自动重绘）；改的若是自有的非信号状态，则显式 `ctx.mark_dirty()`。完整示例见 `examples/file_drop.rs`。
 
 ### 系统托盘
 ```rust
+use std::cell::Cell;
+use std::rc::Rc;
+
+// ⚠️ 托盘勾选项是全库唯一还没迁到 Signal 的状态入口——原生菜单在平台层构建，
+//    这里仍收 Rc<Cell<bool>>。UI 控件一律用 signal()。
 let notify_on = Rc::new(Cell::new(true));
 App::new("…", w, h).tray(
     Tray::new()
@@ -354,6 +524,29 @@ App::new("…", w, h).accelerated(true).content(ui).run();
 ```
 尺寸语义由 `Dimension` 表达（`Fixed` / `Match` / `Weight`）。`weight` 仅在线性容器主轴有意义。
 
+> ⚠️ **陷阱一：横向占剩余空间用 `.weight(n)`，不要用 `.width_match()` / `.fill()`。**
+> 在 `row` 里，`width_match` 的语义是"取父容器的宽"，它**不知道**兄弟节点已经占掉了多少——
+> 侧栏 240px + 正文 `width_match` 会算出 240 + 全宽，直接溢出父宽。`weight` 才是"瓜分剩余"。
+> 同理，`col` 里纵向占剩余高度也用 `weight`。
+> ```rust
+> Element::row().fill()
+>     .child(sidebar.width(240))
+>     .child(content.weight(1.0))   // ✅ 占掉侧栏之外的全部宽度
+> //  .child(content.fill())        // ❌ 溢出：会再要一整个父宽
+> ```
+> 见 `examples/settings.rs` 的侧栏 + 正文布局。
+>
+> ⚠️ **陷阱二：`Label` 不要手写 `.height(N)`。**
+> Label 的 `measure` 会在可用宽度内换行并算出实际内容高度，写死高度等于给它一个**上界**——
+> 长文案、多行文案会被静默截断（不报错、不省略号，就是看不见）。想让标题在容器宽度内自动
+> 换行，给宽度约束（`.width_match()` / `.weight(1.0)`）即可，高度交给它自己。
+> 只有确定是单行短文本、且要与兄弟对齐基线时，固定高度才有意义。
+>
+> ⚠️ **陷阱三：拖动手柄不能是 `clickable()` 容器的后代。**
+> `reorder_list` / `reorder_list_signal` 的手柄靠事件冒泡到列表控件；而 `clickable()` 容器
+> 会消费 `Down`/`Up`，冒泡到它那里就断了，手柄直接拖不动。整行可点的列表请把手柄放进
+> `stack` 里当**同级覆盖层**，与可点行并列而非嵌套。
+
 ### 6.3 间距
 ```rust
 .padding(n) / .padding_xy(h, v)   // 内边距
@@ -368,6 +561,80 @@ App::new("…", w, h).accelerated(true).content(ui).run();
 - **触摸**：直接手指滑动、松手惯性滑行、撞界轻微回弹（见 DESIGN.md / 跨平台缝合）
 
 第三方无需做任何事，把可滚内容放进 `scroll()` 即可。
+
+### 6.5 动态列表（数据驱动的子树重建）
+
+行数会变的列表——搜索结果、过滤后的任务、异步加载到的记录——**不要**在回调里手工增删节点。
+windui 的做法是：把整份数据放进一个 `Signal<Vec<T>>`，UI 声明"这段子树由这个信号生成"，
+然后每次变化只做一件事：`set` 新的 `Vec`。
+
+```rust
+use windui::prelude::*;
+
+#[derive(Clone)]
+struct Task { name: String, done: bool }
+
+fn main() {
+    let all = vec![
+        Task { name: "修复登录崩溃".into(), done: false },
+        Task { name: "撰写发布说明".into(), done: true },
+    ];
+    let hide_done = signal(false);
+    let tasks = signal(all.clone());        // 视图数据信号
+
+    let filter_btn = Element::button("隐藏已完成").on_click(move |_| {
+        let hide = !hide_done.get();
+        hide_done.set(hide);
+        // 重算整份视图数据后整体写回——列表自己会跟上
+        let mut v = all.clone();
+        if hide { v.retain(|t| !t.done); }
+        tasks.set(v);
+    });
+
+    let list = Element::list_signal(
+        tasks,
+        |t: &Task| t.name.clone(),          // key_fn：预留给后续 diff 优化，现在随便给
+        |t: Task| Element::label(t.name).width_match().padding(8),
+    );
+
+    let ui = Element::col().fill().padding(16).spacing(10)
+        .child(filter_btn)
+        .child(list.weight(1.0));
+
+    App::new("任务", 420, 400).content(ui).run();
+}
+```
+
+**机制**：`list_signal` 建出的节点被标记为**响应式**（`Element::reactive()` 做的就是这个标记），
+框架在每次 layout 之前，对所有已注册的响应式节点调一次 `Widget::on_update`。控件在那里比对
+绑定信号的 `version()`（每次 `set`/`update` 自增）与自己缓存的版本号：不等就清空旧子节点、
+用 `row_fn` 重建一批新的。所以你只需保证"信号里的 `Vec` 就是当前该显示的内容"，重建时机
+不用管。
+
+当前实现是**全量重建**，不做 keyed diff（`key_fn` 是给后续优化预留的参数，传
+`|_| ()` 也合法）。因此行内控件的临时状态（未提交的输入、悬停）会随重建丢失——需要保留的
+状态请放进信号里，由数据携带。
+
+这一族 API 一览：
+
+| API | 容器形态 | 用途 |
+|---|---|---|
+| `Element::list_signal(data, key_fn, row_fn)` | **滚动**容器 | 行数会变的长列表 |
+| `Element::host_signal(data, build_fn)` | 普通 `col` | 整段结构随状态重建（如列集随类别切换的表格） |
+| `Element::reorder_list_signal(data, row_fn)` | `col` + 拖动手柄 | 顺序真相源在信号里的可拖拽排序列表 |
+| `Element::dropdown_reactive(options, selected)` | 下拉 | 选项列表异步到达 |
+| `Element::label_rc(sig)` / `rich_rc(doc)` | 叶子 | 单个文本/文档跟随信号 |
+| `Element::reactive()` | 任意 | 自定义控件手动接入（须自行实现 `on_update`） |
+
+> **`list_signal` 还是 `host_signal`？** 前者内部是 `scroll`，按**无限高度**测量子元素——
+> 如果重建出来的子树里有靠 `weight` 占剩余高度的东西（典型是表格正文），高度会崩塌成 0。
+> 这种"内容自带滚动或不需要滚动"的场景用 `host_signal`，它是普通 `col`，`weight`/`fill`
+> 能拿到确定高度。
+>
+> `reorder_list_signal` 的 `row_fn` 签名是 `Fn(T, Element) -> Element`：第二个参数是框架给的
+> **拖动手柄**，你**必须**把它放进返回的元素树里，否则该行拖不动（另见 §6.2 陷阱三）。
+
+完整可运行示例：`examples/dyn_list.rs`（排序 + 过滤）、`examples/fullshowcase.rs` 的排序页。
 
 ---
 
@@ -424,7 +691,78 @@ let s = theme.to_toml()?;
 
 **选择原则**：成体系的视觉（品牌色、统一圆角）走 `Theme`；个别节点的一次性微调走内联 `Style` 修饰符。
 
-### 7.3 图标字体（私用区回退字体）
+### 7.3 运行期换主题
+
+`App::theme(t)` 是**启动期一次性**注入。要在窗口运行中切换（暗色开关、用户选主题），
+用 `App::theme_handle()` 取一个句柄，克隆进回调即可：
+
+```rust
+use windui::prelude::*;
+
+fn main() {
+    let dark = signal(false);
+
+    let mut app = App::new("设置", 480, 360);
+    let theme = app.theme_handle();          // &mut self，须在 content/run 之前取（见 §2.1）
+
+    let toggle = {
+        let th = theme.clone();              // ThemeHandle 是 Clone（不是 Copy），每个闭包一份
+        Element::button("切换暗色").neutral().on_click(move |_| {
+            let on = !dark.get();
+            dark.set(on);
+            th.set(if on { Theme::dark() } else { Theme::default() });
+        })
+    };
+
+    let ui = Element::col()
+        .fill()
+        .padding(20)
+        .spacing(12)
+        .bg_role(Role::Bg)                   // ← 用角色而非固定色，换主题才会跟随
+        .child(Element::label("外观").font_size(20.0).fg_role(Role::Text))
+        .child(toggle);
+
+    app.content(ui).run();
+}
+```
+
+`ThemeHandle` 三个方法：
+
+```rust
+theme.set(Theme::dark());                              // 整体替换
+theme.update(|t| t.palette.accent = Color::hex(0x2E9E5B));  // 就地改一处（快照→改→写回）
+let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
+```
+
+三者都会请求重绘，下一帧整树跟随。
+
+**关键：想跟随主题的颜色必须用 `Role` 表达。** 控件内建视觉（按钮底色、输入框边框等）
+在 paint 期读 `theme::current()`，天然跟随；但你自己写在节点上的 `.bg(Color::hex(..))`
+是**定格色**，换主题不会动。要跟随就改用角色修饰符：
+
+```rust
+.fg_role(Role::Text)                  // 文字色
+.bg_role(Role::Surface)               // 背景色
+.bg_role_alpha(Role::Accent, 0.12)    // 角色色 + 透明度（做淡底强调块，明暗主题都成立）
+.border_role(Role::Border, 1)         // 边框色 + 宽度
+```
+
+`Role` 枚举（`windui::style::Role`，prelude 已导出）：`Bg` / `Surface` / `SurfaceAlt` /
+`Border` / `Divider` / `Track` / `Text` / `TextMuted` / `TextDisabled` / `Placeholder` /
+`Accent` / `AccentHover` / `AccentActive` / `OnAccent` / `Danger`，另有四个带控件覆盖层回退的
+角色：`AccordionBorder` / `AccordionHeaderBg` / `InputBg` / `InputBorder`。角色在 **paint 期**
+解析成具体颜色——这正是它能跟随换主题的原因。
+
+> ⚠️ 反过来说：**构建期不要取色**。像 `let c = theme::current().palette.text;` 然后
+> `.fg(c)` 这样，取到的是构建那一刻的颜色，换主题后不会更新。自己封装组合控件时尤其
+> 容易犯——把 `Role` 一路传下去，别在中途解析成 `Color`。
+>
+> 内置的 `Theme::default()`（亮）与 `Theme::dark()`（暗）可直接用；自定义主题走
+> `Theme::from_toml(..)`，同样能在运行期 `set` 进去（见 `examples/theming.rs`）。
+
+完整示例：`examples/fullshowcase.rs`（右上角"暗色/亮色"按钮）、`examples/theming.rs`。
+
+### 7.4 图标字体（私用区回退字体）
 
 7.1 提到 `font_family` 在字体未安装时会静默回退——图标字体正是最容易撞上这条的场景。
 注册一个私用区回退字体可以绕开安装：
@@ -466,7 +804,7 @@ Element::button("保存").on_click(|ctx: &mut EventCtx| {
 
 **受控复选框 `on_toggle`**：CheckBox 默认点击即翻转绑定的 `state`。需在翻转前介入（如弹确认对话框）时用 `.on_toggle(cb)`——设置后点击/键盘激活**不再自动翻转** `state`，改调回调，由你决定是否 `state.set(..)`。渲染始终跟随 `state` 当前值，确认前框不会勾上、零闪烁。
 ```rust
-Element::checkbox("删除数据", state.clone()).on_toggle(move |_ctx| {
+Element::checkbox("删除数据", state).on_toggle(move |_ctx| {
     if confirm() { state.set(true); }   // 确认后才置真；否则保持不变
 })
 ```
@@ -508,28 +846,67 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
 
 ### 8.5 跨线程更新
 
-windui 的控件状态（`Rc<Cell<T>>`）只能在 UI 线程访问。需要从后台线程更新 UI 时，使用两种机制：
-
-**`App::channel`**：建立类型化消息通道。`on_message` 回调在 UI 线程执行，可安全写 `Rc` 状态；返回的 `Sender` 可 `Clone` 到任意后台线程，`send` 一次即唤醒 UI 渲染一帧。`Sender: Send + Sync + Clone`，无消息时不唤醒（事件驱动、空闲零 CPU）。
-
-**`App::on_interval`**：注册 UI 线程定时回调，间隔内不占 CPU（平台定时器驱动）。可多次调用注册多个定时器。
-
-注意：`channel` 需在 `on_interval`/`content`/`run` 之前调用（`channel` 签名为 `&mut self`，其余为 `self` 消费链）。
+**信号只能在 UI 线程使用。** `Signal<T>` 的存储是线程局部的，句柄刻意实现为 `!Send`——
+把它 `move` 进 `std::thread::spawn` 是**编译错误**，不是运行期静默丢值：
 
 ```rust
-let mut app = App::new("示例", 360, 180);
-
-// 后台 send=唤醒一帧；on_message 在 UI 线程写 Rc 状态
-let tx = app.channel::<f32>(move |p| progress.set(p));
-std::thread::spawn(move || { let _ = tx.send(0.5); });
-
-// UI 线程定时回调（间隔内零 CPU）
-app.on_interval(Duration::from_millis(100), move || { /* 读写 Rc 状态 */ })
-   .content(ui)
-   .run();
+let s = signal(1i32);
+std::thread::spawn(move || s.set(42));   // ❌ 编译失败：Signal 不是 Send
 ```
 
-UI 状态（`Rc<Cell<T>>`、`Rc<RefCell<String>>`）只在 `on_message` / `on_interval` 回调里写，框架自动在下一帧读取并渲染。完整示例见 `examples/background_task.rs`。
+正确做法是让后台线程发**消息**，回到 UI 线程再写信号。两种机制：
+
+**`App::channel`**：建立类型化消息通道，签名
+`channel<Msg: Send + 'static>(&mut self, on_message: impl FnMut(Msg) + 'static) -> Sender<Msg>`。
+`on_message` 回调在 UI 线程执行，可安全写信号；返回的 `Sender` 是 `Send + Sync + Clone`，可克隆
+到任意后台线程，`send` 一次即唤醒 UI 渲染一帧。无消息时不唤醒（事件驱动、空闲零 CPU）。
+
+**`App::on_interval`**：注册 UI 线程定时回调（`on_interval(Duration, impl FnMut() + 'static)`），
+间隔内不占 CPU（平台定时器驱动）。可多次调用注册多个定时器。
+
+注意 `channel` 是 `&mut self`，须在 `content`/`run` 之前调用（见 §2.1 两段式写法）。
+
+```rust
+use std::time::Duration;
+use windui::prelude::*;
+
+fn main() {
+    let progress = signal(0.0f32);
+    let clock = signal(String::from("已运行 0 秒"));
+    let ticks = signal(0u32);
+
+    let mut app = App::new("后台任务", 360, 180);
+
+    // 后台线程只持有 Sender（Send）；on_message 在 UI 线程写信号
+    let tx = app.channel::<f32>(move |p| progress.set(p));
+    std::thread::spawn(move || {
+        for i in 1..=100 {
+            std::thread::sleep(Duration::from_millis(40));
+            if tx.send(i as f32 / 100.0).is_err() {
+                break;                       // 窗口已关，通道断开
+            }
+        }
+    });
+
+    let ui = Element::col()
+        .fill()
+        .padding(20)
+        .spacing(12)
+        .child(Element::progress(progress).width_match())
+        .child(Element::label_rc(clock).width_match());
+
+    // on_interval 的回调也在 UI 线程，可直接写信号
+    app.on_interval(Duration::from_secs(1), move || {
+        ticks.update(|v| *v += 1);
+        clock.set(format!("已运行 {} 秒", ticks.get()));
+    })
+    .content(ui)
+    .run();
+}
+```
+
+信号只在 `on_message` / `on_interval` / 控件回调里写，框架自动在下一帧读取并渲染。
+完整示例见 `examples/background_task.rs`。
 
 ### 8.6 阻塞式原生调用的时机
 
@@ -562,7 +939,9 @@ use windui::render::{Canvas, Paint};
 use windui::style::Style;
 use windui::text::TextEngine;
 
-struct Dot { on: std::rc::Rc<std::cell::Cell<bool>> }
+use windui::signal::{signal, Signal};
+
+struct Dot { on: Signal<bool> }
 
 impl Widget for Dot {
     // ① 测量：返回内容固有尺寸（不含 padding）
@@ -570,21 +949,25 @@ impl Widget for Dot {
         Size::new(24, 24)
     }
 
-    // ② 绘制：bounds=节点全矩形, content=扣 padding 后的内容矩形
-    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool,
+    // ② 绘制：bounds=节点全矩形, content=扣 padding 后的内容矩形，
+    //    focused=本节点是否持有键盘焦点，enabled=有效启用态（已并入父链继承，据此置灰）
+    fn paint(&self, _bounds: Rect, content: Rect, _focused: bool, enabled: bool,
              canvas: &mut dyn Canvas, _style: &Style) {
-        let c = if self.on.get() { Color::hex(0x2ECC71) } else { Color::hex(0xCCCCCC) };
+        let c = match (self.on.get(), enabled) {
+            (_, false) => Color::hex(0xE0E0E0),   // 禁用置灰
+            (true, _) => Color::hex(0x2ECC71),
+            (false, _) => Color::hex(0xCCCCCC),
+        };
         let cx = content.x as f32 + content.w as f32 / 2.0;
         let cy = content.y as f32 + content.h as f32 / 2.0;
         canvas.fill_circle(cx, cy, 10.0, &Paint::fill(c));
     }
 
     // ③ 事件：返回是否消费（消费则停止冒泡）
-    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+    fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
         if let Event::Pointer(p) = ev {
             if p.kind == PointerKind::Up && p.button == windui::event::MouseButton::Left {
-                self.on.set(!self.on.get());
-                ctx.mark_dirty();   // 请求重绘
+                self.on.set(!self.on.get());   // 写信号自动请求重绘，无需 ctx.mark_dirty()
                 return true;
             }
         }
@@ -595,10 +978,17 @@ impl Widget for Dot {
 }
 
 // 使用
-let dot = Element::leaf().widget(Dot { on: state.clone() });
+let state = signal(false);
+let dot = Element::leaf().widget(Dot { on: state });
 ```
 
 **三阶段契约**：`measure`（算固有尺寸）→ 框架 `arrange`（定位，你不参与）→ `paint`（在分配到的 `bounds`/`content` 内绘制）。坐标在 `on_event` 收到的是**逻辑坐标**（已 ÷DPI scale）。
+
+⚠️ `paint` 是 **6 参**（`bounds, content, focused, enabled, canvas, style`）。漏掉 `enabled`
+不会有友好的报错，只会是一条"方法不属于该 trait"的编译错误——照本节抄即可。
+
+**何时还需要 `ctx.mark_dirty()`**：只有当控件改的是**自身持有的非信号状态**（hover/press
+标志、拖动偏移等）时才需要显式请求重绘。改 `Signal` 一律自动触发。
 
 **`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()`、`set_bg()`。
 
@@ -611,14 +1001,20 @@ let dot = Element::leaf().widget(Dot { on: state.clone() });
 ## 10. 第三方开发规范（Do / Don't）
 
 **Do**
-- ✅ 状态用 `Rc<Cell<T>>`（`String` 用 `Rc<RefCell<String>>`），在外部创建、`clone` 进控件与回调。
-- ✅ 成体系视觉走 `Theme`，一次性微调走内联 `Style` 修饰符。
+- ✅ 状态用 `signal(初值)` 造 `Signal<T>`，在外部创建、按值传进控件与回调（`Copy`，不用 `clone`）。
+- ✅ 成体系视觉走 `Theme`，一次性微调走内联 `Style` 修饰符；要跟随运行期换主题的颜色用 `Role`（`fg_role`/`bg_role`/`border_role`）。
 - ✅ 自定义控件实现 `Widget`，`paint` 读 `theme::current()` 而非硬编码颜色（与内建控件一致）。
 - ✅ 滚动内容放进 `Element::scroll()`，触摸/惯性自动可用。
-- ✅ 回调里只改 cell 状态，靠 `mark_dirty()` / 下一帧反映，不要试图直接操作节点树。
+- ✅ 行数会变的列表交给 `list_signal` / `host_signal`，把整份数据 `set` 回信号（见 §6.5）。
+- ✅ 回调里只改信号状态，靠下一帧反映，不要试图直接操作节点树。
+- ✅ 横向/纵向"占剩余空间"用 `.weight(n)`。
 
 **Don't**
-- ❌ 不要在 `on_click`/`on_event` 里长时间阻塞（同步渲染，会卡 UI 线程）。
+- ❌ 不要在 `on_click`/`on_event` 里长时间阻塞（同步渲染，会卡 UI 线程）；要弹原生模态框走 §8.6。
+- ❌ 不要给 `Label` 写死 `.height(N)`——它会自己算换行后的内容高度，写死会让长文案被静默截断。
+- ❌ 不要用 `.width_match()` / `.fill()` 表达"占父容器的剩余宽度"——那是"取父容器全宽"，会溢出（见 §6.2）。
+- ❌ 不要在构建期把 `Role` 解析成 `Color` 再 `.fg(c)`——那样换主题不跟随。
+- ❌ 不要把 `Signal` 搬进后台线程（编译不过），跨线程更新走 `App::channel`（见 §8.5）。
 - ❌ 不要把 text_input 专属修饰符（`password/multiline/wrap`）链到其他控件——debug 期会 panic 提示误用。
 - ❌ 不要假设 `Widget` 能访问父/子节点——它是纯内容接口，跨节点协调走共享状态。
 - ❌ 不要在控件里写死颜色/间距/字号——破坏主题一致性。
@@ -628,13 +1024,37 @@ let dot = Element::leaf().widget(Dot { on: state.clone() });
 ## 11. 已知约束
 
 **功能约束**
-- 仅 Windows（架构预留 macOS 边界，未实现）。
-- CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。
+- CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。Windows 上可 opt-in Direct2D GPU 后端（见 §5）。
 - `list` 当前每行是独立 Tab 停靠点，超长列表会拉长焦点链（计划：单 Tab 停靠 + 方向键导航）。
+- `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
+- 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
+- `Signal` 只能在 UI 线程使用（`!Send`），跨线程更新走 `App::channel`（见 §8.5）。
 
-> 命名一致性已收敛：背景/前景统一 `bg`/`fg`；所有文本标签统一 `impl Into<String>`；
-> text_input 专属修饰符误用在 debug 期 panic 提示。框架处于早期，以"最新设计 + 统一"为准，
-> **不承诺向后兼容**——API 可能继续演进，第三方请跟随本指南最新版。
+**平台状态**
+
+Windows 与 macOS 均已支持——控件树、布局、事件、动画、主题是同一份平台无关代码，
+两平台间无需改动。以下几项尚未拉齐：
+
+| 能力 | Windows | macOS |
+|---|---|---|
+| 窗口 / 事件循环 / 文字 / 触摸 / 剪贴板 / 托盘 / 文件拖放 / 无边框窗口 | ✓ | ✓ |
+| 全局热键（`App::hotkey`） | ✓ | ✗ debug 期 panic、release 静默忽略 |
+| `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
+| 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
+| Direct2D GPU 后端（`App::accelerated`） | ✓ | — 不适用（macOS 恒软渲染） |
+
+**命名一致性**
+
+背景/前景统一 `bg`/`fg`；控件状态统一 `Signal<T>`；text_input / link / rich 的专属修饰符
+误用在 debug 期 panic 提示。文本标签**绝大多数**收 `impl Into<String>`（`button`、`label`、
+`checkbox`、`dropdown`、`list`、`tabs`、`nav_row`、`badge` 等构造器都可以传 `&str`），但有
+少数破例仍收裸 `String`：`Element::table_custom(columns: Vec<(String, f32)>, ..)`，以及
+widget 层的直接构造器（`Button::new(String)` / `Label::new(String)` / `NavRow::new(String)`
+等——这一层通常经 `Element::` 构造器间接使用，很少直接碰）。碰上编译错误时补一个
+`.to_string()` / `.into()` 即可。
+
+框架处于早期，以"最新设计 + 统一"为准，**不承诺向后兼容**——API 可能继续演进，
+第三方请跟随本指南最新版。
 
 ---
 
