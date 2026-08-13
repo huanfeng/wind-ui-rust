@@ -11,11 +11,6 @@
 
 use windui::prelude::*;
 
-const BG: u32 = 0xEEF1F5;
-const CARD: u32 = 0xFFFFFF;
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
-
 /// 优先级（数值越小越紧急）。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Priority {
@@ -110,10 +105,10 @@ fn compute(sort_by_name: bool, hide_done: bool) -> Vec<Task> {
 
 /// 单行任务卡片。
 fn task_row(task: Task) -> Element {
-    let name_color = if task.done {
-        Color::hex(SUB)
+    let name_role = if task.done {
+        Role::TextMuted
     } else {
-        Color::hex(FG)
+        Role::Text
     };
     let badge_text = format!("优先级：{}", task.priority.label());
     let done_text = if task.done { " ✓ 已完成" } else { "" };
@@ -136,7 +131,7 @@ fn task_row(task: Task) -> Element {
             // 任务名
             Element::label(format!("{}{}", task.name, done_text))
                 .font_size(14.0)
-                .fg(name_color)
+                .fg_role(name_role)
                 .weight(1.0),
         )
         .child(
@@ -196,28 +191,28 @@ fn main() {
         |t: &Task| t.name, // key_fn（暂未做 diff 优化，用于未来接入）
         |t: Task| {
             task_row(t)
-                .bg(Color::hex(CARD))
-                .border(Color::hex(0xDDE1E7), 1)
+                .bg_role(Role::Surface)
+                .border_role(Role::Border, 1)
                 .corner(6.0)
         },
     );
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(20)
         .spacing(12)
         .child(
             Element::label("动态任务列表")
                 .font_size(22.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(32)
                 .width_match(),
         )
         .child(
             Element::label("点击下方按钮排序或筛选，列表即时刷新（无整窗重建）")
                 .font_size(13.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(20)
                 .width_match(),
         )
@@ -225,7 +220,7 @@ fn main() {
         .child(list.weight(1.0));
 
     App::new("windui — 响应式动态列表", 480, 560)
-        .bg(Color::hex(BG))
+        .screenshot_from_args()
         .content(ui)
         .run();
 }

@@ -11,10 +11,6 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x1E2A3A;
-const SUB: u32 = 0x6B7A8D;
-const CARD: u32 = 0xFFFFFF;
-const BG: u32 = 0xEFF2F7;
 const ACCENT: u32 = 0x4C8BF5;
 
 /// 初始长文本：包含短行、长行、空行，模拟真实用户输入。
@@ -45,14 +41,14 @@ const APPEND_TEXT: &str = "\n\n--- 追加段落 ---\n\
 fn section(title: &str, body: Element) -> Element {
     Element::col()
         .width_match()
-        .bg(Color::hex(CARD))
+        .bg_role(Role::Surface)
         .corner(10.0)
         .padding(16)
         .spacing(10)
         .child(
             Element::label(title)
                 .font_size(15.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width_match(),
         )
         .child(Element::divider())
@@ -62,7 +58,7 @@ fn section(title: &str, body: Element) -> Element {
 fn hint(text: &str) -> Element {
     Element::label(text)
         .font_size(12.0)
-        .fg(Color::hex(SUB))
+        .fg_role(Role::TextMuted)
         .width_match()
 }
 
@@ -210,20 +206,20 @@ Home/End 跳行首尾、Ctrl+A 全选，\
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(20)
         .spacing(0)
         .child(
             Element::label("多行文本输入 — 滚动压测")
                 .font_size(22.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(36)
                 .width_match(),
         )
         .child(
             Element::label("验证长内容垂直滚动、软换行、光标追踪、动态追加等场景")
                 .font_size(13.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(22)
                 .width_match(),
         )
@@ -239,7 +235,7 @@ Home/End 跳行首尾、Ctrl+A 全选，\
         );
 
     App::new("multiline_demo — 多行滚动压测", 560, 700)
-        .bg(Color::hex(BG))
+        .screenshot_from_args()
         .content(ui)
         .run();
 }

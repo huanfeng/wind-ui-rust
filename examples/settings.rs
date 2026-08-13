@@ -7,18 +7,18 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x1F2328;
-const MUTED: u32 = 0x8A9099;
-const ACCENT: u32 = 0x4C8BF5;
-
-/// 彩色圆角图标方块 + 居中白色字形。
-fn icon_box(bg: Color, glyph: &str, size: i32) -> Element {
-    Element::stack().size(size, size).corner(10.0).bg(bg).child(
-        Element::label(glyph)
-            .font_size((size as f32) * 0.42)
-            .fg(Color::WHITE)
-            .align(Align::Center),
-    )
+/// 语义色圆角图标方块 + 居中反色字形。
+fn icon_box(bg: Role, glyph: &str, size: i32) -> Element {
+    Element::stack()
+        .size(size, size)
+        .corner(10.0)
+        .bg_role(bg)
+        .child(
+            Element::label(glyph)
+                .font_size((size as f32) * 0.42)
+                .fg_role(Role::OnAccent)
+                .align(Align::Center),
+        )
 }
 
 /// 左侧竖色条 + 标题的小节头。
@@ -30,14 +30,13 @@ fn section_title(title: &str) -> Element {
             Element::leaf()
                 .size(4, 18)
                 .corner(2.0)
-                .bg(Color::hex(ACCENT)),
+                .bg_role(Role::Accent),
         )
         .child(
             Element::label(title)
                 .font_size(16.0)
                 .font_weight(700)
-                .fg(Color::hex(FG))
-                .height(22),
+                .fg_role(Role::Text),
         )
 }
 
@@ -45,9 +44,9 @@ fn section_title(title: &str) -> Element {
 fn card(body: Element) -> Element {
     Element::col()
         .width_match()
-        .bg(Color::WHITE)
+        .bg_role(Role::Surface)
         .corner(12.0)
-        .border(Color::hex(0xEAECEF), 1)
+        .border_role(Role::Border, 1)
         .padding(20)
         .spacing(14)
         .child(body)
@@ -71,12 +70,12 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
                 .child(
                     Element::icon_button("\u{25B2}")
                         .size(22, 18)
-                        .fg(Color::hex(MUTED)),
+                        .fg_role(Role::TextMuted),
                 )
                 .child(
                     Element::icon_button("\u{25BC}")
                         .size(22, 18)
-                        .fg(Color::hex(MUTED)),
+                        .fg_role(Role::TextMuted),
                 ),
         )
         .child(
@@ -91,28 +90,25 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
                             Element::label(name)
                                 .font_size(15.0)
                                 .font_weight(600)
-                                .fg(Color::hex(FG))
-                                .height(20),
+                                .fg_role(Role::Text),
                         )
                         .child(Element::badge_intent(tag, Intent::Neutral))
                         .child(
                             Element::label("v1.0")
                                 .font_size(12.0)
-                                .fg(Color::hex(MUTED))
-                                .height(18),
+                                .fg_role(Role::TextMuted),
                         ),
                 )
                 .child(
                     Element::label(desc)
                         .font_size(12.5)
-                        .fg(Color::hex(MUTED))
-                        .height(18),
+                        .fg_role(Role::TextMuted),
                 ),
         )
         .child(
             Element::icon_button("\u{24D8}")
                 .size(26, 26)
-                .fg(Color::hex(MUTED)),
+                .fg_role(Role::TextMuted),
         )
         .child(status)
         .child(Element::button("方案设置").small().outline().neutral())
@@ -131,14 +127,12 @@ fn dropdown_row(title: &str, desc: &str, options: Vec<&str>, sel: Signal<usize>)
                     Element::label(title)
                         .font_size(15.0)
                         .font_weight(600)
-                        .fg(Color::hex(FG))
-                        .height(20),
+                        .fg_role(Role::Text),
                 )
                 .child(
                     Element::label(desc)
                         .font_size(12.5)
-                        .fg(Color::hex(MUTED))
-                        .height(18),
+                        .fg_role(Role::TextMuted),
                 ),
         )
         .child(Element::dropdown(options, sel).width(180))
@@ -155,15 +149,13 @@ fn nav_placeholder(title: &str) -> Element {
                 Element::label(title)
                     .font_size(24.0)
                     .font_weight(700)
-                    .fg(Color::hex(FG))
-                    .height(32),
+                    .fg_role(Role::Text),
             )
             .child(card(
                 Element::label("（此页为导航切换占位演示）")
                     .font_size(14.0)
-                    .fg(Color::hex(MUTED))
-                    .width_match()
-                    .height(22),
+                    .fg_role(Role::TextMuted)
+                    .width_match(),
             )),
     )
 }
@@ -193,15 +185,15 @@ fn main() {
     let sidebar = Element::col()
         .width(210)
         .height_match()
-        .bg(Color::WHITE)
-        .border(Color::hex(0xEAECEF), 1)
+        .bg_role(Role::Surface)
+        .border_role(Role::Border, 1)
         .padding(14)
         .spacing(14)
         .child(
             Element::row()
                 .cross(Align::Center)
                 .spacing(10)
-                .child(icon_box(Color::hex(ACCENT), "W", 40))
+                .child(icon_box(Role::Accent, "W", 40))
                 .child(
                     Element::col()
                         .weight(1.0)
@@ -210,14 +202,12 @@ fn main() {
                             Element::label("windui")
                                 .font_size(15.0)
                                 .font_weight(700)
-                                .fg(Color::hex(FG))
-                                .height(20),
+                                .fg_role(Role::Text),
                         )
                         .child(
                             Element::label("v0.0.0-alpha")
                                 .font_size(11.5)
-                                .fg(Color::hex(MUTED))
-                                .height(16),
+                                .fg_role(Role::TextMuted),
                         ),
                 )
                 .child(
@@ -276,14 +266,12 @@ fn main() {
                         Element::label("方案设置")
                             .font_size(24.0)
                             .font_weight(700)
-                            .fg(Color::hex(FG))
-                            .height(32),
+                            .fg_role(Role::Text),
                     )
                     .child(
                         Element::label("启用、排序与方案专属设置")
                             .font_size(13.0)
-                            .fg(Color::hex(MUTED))
-                            .height(20),
+                            .fg_role(Role::TextMuted),
                     )
                     .child(Element::flex_spacer())
                     .child(
@@ -312,9 +300,8 @@ fn main() {
                     .child(
                         Element::label("使用箭头调整顺序，快捷键切换时按此顺序循环")
                             .font_size(12.5)
-                            .fg(Color::hex(MUTED))
-                            .width_match()
-                            .height(18),
+                            .fg_role(Role::TextMuted)
+                            .width_match(),
                     )
                     .child(Element::divider())
                     .child(scheme_row("五笔", "码表", true, "内置 · 五笔86版输入方案"))
@@ -406,9 +393,8 @@ fn main() {
             .child(
                 Element::label("点单元格编辑，长度 1–8 个字符")
                     .font_size(12.5)
-                    .fg(Color::hex(MUTED))
-                    .width_match()
-                    .height(18),
+                    .fg_role(Role::TextMuted)
+                    .width_match(),
             )
             .child(table_w),
         Element::row()
@@ -475,14 +461,13 @@ fn main() {
 
     let root = Element::stack()
         .fill()
-        .bg(Color::hex(0xF0F2F4))
+        .bg_role(Role::Bg)
         .child(Element::row().fill().child(sidebar).child(content))
         .child(table_dialog)
         .child(pairs_dialog)
         .child(edit_dialog);
 
     App::new("应用设置 — windui 示例", 1000, 680)
-        .bg(Color::hex(0xF0F2F4))
         .screenshot_from_args()
         .content(root)
         .run();

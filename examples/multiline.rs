@@ -5,14 +5,10 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x2D3436;
-const CARD: u32 = 0xFFFFFF;
-const BG: u32 = 0xEEF1F5;
-
 fn label(t: &str) -> Element {
     Element::label(t)
         .font_size(13.0)
-        .fg(Color::hex(0x636E72))
+        .fg_role(Role::TextMuted)
         .height(20)
         .width_match()
 }
@@ -28,13 +24,13 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(18)
         .spacing(12)
         .child(
             Element::label("多行 / 密码 文本框")
                 .font_size(22.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
@@ -44,7 +40,7 @@ fn main() {
                 .multiline()
                 .width_match()
                 .height(96)
-                .bg(Color::hex(CARD)),
+                .bg_role(Role::Surface),
         )
         .child(label("不换行多行（长行水平滚动）"))
         .child(
@@ -53,7 +49,7 @@ fn main() {
                 .wrap(false)
                 .width_match()
                 .height(72)
-                .fg(Color::hex(FG)),
+                .fg_role(Role::Text),
         )
         .child(label("密码"))
         .child(
@@ -63,7 +59,6 @@ fn main() {
         );
 
     App::new("windui — 多行/密码", 420, 360)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

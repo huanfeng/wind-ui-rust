@@ -14,22 +14,17 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
-const CARD: u32 = 0xFFFFFF;
-const BG: u32 = 0xEEF1F5;
-
 fn card(title: &str, body: Element) -> Element {
     Element::col()
         .width_match()
-        .bg(Color::hex(CARD))
+        .bg_role(Role::Surface)
         .corner(10.0)
         .padding(16)
         .spacing(10)
         .child(
             Element::label(title)
                 .font_size(15.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(22)
                 .width_match(),
         )
@@ -45,7 +40,7 @@ fn row(label: &str, control: Element) -> Element {
         .child(
             Element::label(label)
                 .font_size(14.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width(96)
                 .height(20),
         )
@@ -144,7 +139,7 @@ fn main() {
         Element::col().padding(12).child(
             Element::label(s)
                 .font_size(13.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(20),
         )
     };
@@ -167,7 +162,7 @@ fn main() {
         Element::list(vec!["收件箱", "已发送", "草稿箱", "垃圾箱"], listsel)
             .width_match()
             .height(150)
-            .bg(Color::hex(0xF6F8FA))
+            .bg_role(Role::SurfaceAlt)
             .corner(8.0),
     );
 
@@ -201,7 +196,7 @@ fn main() {
         .child(
             Element::label("动画总览")
                 .font_size(24.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .height(34)
                 .weight(1.0),
         )
@@ -209,7 +204,7 @@ fn main() {
         .child(
             Element::label_signal(anim_label)
                 .font_size(13.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(18)
                 .width(150),
         );
@@ -225,7 +220,7 @@ fn main() {
         .child(list)
         .child(accordion);
 
-    let ui = Element::stack().fill().bg(Color::hex(BG)).child(
+    let ui = Element::stack().fill().bg_role(Role::Bg).child(
         Element::col()
             .fill()
             .padding(18)
@@ -233,7 +228,6 @@ fn main() {
     );
 
     App::new("windui — 动画总览", 520, 820)
-        .bg(Color::hex(BG))
         .animations(true) // 强制开启：无视系统"显示动画"设置
         .screenshot_from_args()
         .content(ui)

@@ -10,8 +10,6 @@
 use windui::prelude::*;
 
 const TITLE_BG: u32 = 0x2D3436;
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
 
 fn main() {
     // 标题栏：整条可拖（window_drag），按钮为可聚焦控件故落在按钮上不拖、可点。
@@ -33,13 +31,13 @@ fn main() {
 
     let body = Element::col()
         .fill()
-        .bg(Color::hex(0xFFFFFF))
+        .bg_role(Role::Surface)
         .padding(24)
         .spacing(10)
         .child(
             Element::label("自定义标题栏")
                 .font_size(20.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(28)
                 .width_match(),
         )
@@ -48,7 +46,7 @@ fn main() {
                 "拖动深色标题栏移动窗口；右上角按钮最小化/最大化/关闭；窗口边缘可缩放。",
             )
             .font_size(13.0)
-            .fg(Color::hex(SUB))
+            .fg_role(Role::TextMuted)
             .width_match()
             .weight(1.0),
         );

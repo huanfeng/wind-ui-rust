@@ -5,8 +5,6 @@
 
 use windui::prelude::*;
 
-const BG: u32 = 0xEEF1F5;
-
 fn main() {
     let sel = signal(2usize);
     let items = vec![
@@ -24,13 +22,13 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(20)
         .spacing(10)
         .child(
             Element::label("列表（单选）")
                 .font_size(22.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
@@ -38,13 +36,12 @@ fn main() {
             Element::list(items, sel)
                 .width_match()
                 .weight(1.0)
-                .bg(Color::WHITE)
+                .bg_role(Role::Surface)
                 .corner(10.0)
-                .border(Color::hex(0xE2E6EA), 1),
+                .border_role(Role::Border, 1),
         );
 
     App::new("windui — 列表", 300, 360)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

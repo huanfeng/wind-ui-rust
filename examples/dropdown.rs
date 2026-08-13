@@ -12,12 +12,10 @@
 
 use windui::prelude::*;
 
-const BG: u32 = 0xEEF1F5;
-
 fn label(t: &str) -> Element {
     Element::label(t)
         .font_size(13.0)
-        .fg(Color::hex(0x636E72))
+        .fg_role(Role::TextMuted)
         .height(20)
         .width_match()
 }
@@ -44,13 +42,13 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(20)
         .spacing(10)
         .child(
             Element::label("下拉选择")
                 .font_size(22.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
@@ -100,7 +98,6 @@ fn main() {
         );
 
     App::new("windui — 下拉选择", 320, 540)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

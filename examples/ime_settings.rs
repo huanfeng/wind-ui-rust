@@ -10,18 +10,11 @@
 
 use windui::prelude::*;
 
-const BG: u32 = 0xEEF1F5;
-const SIDEBAR: u32 = 0xF7F8FA;
-const CARD: u32 = 0xFFFFFF;
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x8A9099;
-const HEAD: u32 = 0x9AA0A6;
-
 /// 分组小标题（灰色小号，左对齐）。
 fn section_header(text: &str) -> Element {
     Element::label(text)
         .font_size(12.0)
-        .fg(Color::hex(HEAD))
+        .fg_role(Role::TextMuted)
         .height(22)
         .width_match()
 }
@@ -35,7 +28,7 @@ fn setting_row(label: &str, indent: i32, control: Element) -> Element {
         .child(
             Element::label(label)
                 .font_size(14.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width(180 - indent)
                 .margin_xy(indent / 2, 0),
         )
@@ -60,13 +53,13 @@ fn main() {
     let sidebar = Element::col()
         .width(170)
         .height_match()
-        .bg(Color::hex(SIDEBAR))
+        .bg_role(Role::SurfaceAlt)
         .padding(10)
         .spacing(4)
         .child(
             Element::label("输入法设置")
                 .font_size(15.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(34)
                 .width_match(),
         )
@@ -92,7 +85,7 @@ fn main() {
             .child(
                 Element::label("常用")
                     .font_size(20.0)
-                    .fg(Color::hex(FG))
+                    .fg_role(Role::Text)
                     .height(34)
                     .width_match(),
             )
@@ -122,13 +115,13 @@ fn main() {
                     .child(
                         Element::label("显示输入指示器")
                             .font_size(14.0)
-                            .fg(Color::hex(FG))
+                            .fg_role(Role::Text)
                             .margin_xy(12, 0),
                     )
                     .child(
                         Element::label("(?)")
                             .font_size(13.0)
-                            .fg(Color::hex(SUB))
+                            .fg_role(Role::TextMuted)
                             .height(20)
                             .tooltip(
                                 "开启后，输入时在光标附近显示当前输入状态（中/英、全/半角等）",
@@ -166,7 +159,7 @@ fn main() {
             .child(
                 Element::label_signal(status)
                     .font_size(13.0)
-                    .fg(Color::hex(SUB))
+                    .fg_role(Role::TextMuted)
                     .height(20)
                     .width_match(),
             ),
@@ -174,12 +167,11 @@ fn main() {
 
     let ui = Element::row()
         .fill()
-        .bg(Color::hex(CARD))
+        .bg_role(Role::Surface)
         .child(sidebar)
         .child(content);
 
     App::new("输入法设置 — windui 示例", 720, 520)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

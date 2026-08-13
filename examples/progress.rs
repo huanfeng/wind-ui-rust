@@ -5,12 +5,10 @@
 
 use windui::prelude::*;
 
-const BG: u32 = 0xEEF1F5;
-
 fn label(t: &str) -> Element {
     Element::label(t)
         .font_size(13.0)
-        .fg(Color::hex(0x636E72))
+        .fg_role(Role::TextMuted)
         .height(20)
         .width_match()
 }
@@ -22,13 +20,13 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(BG))
+        .bg_role(Role::Bg)
         .padding(22)
         .spacing(10)
         .child(
             Element::label("进度条")
                 .font_size(22.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
@@ -42,7 +40,6 @@ fn main() {
         .child(Element::progress_indeterminate().width_match());
 
     App::new("windui — 进度条", 320, 280)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

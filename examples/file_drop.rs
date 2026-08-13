@@ -7,9 +7,6 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
-
 fn main() {
     // 拖放结果绑定到动态标签：回调写入，下一帧显示。
     let report = signal(String::from("把任意文件从资源管理器拖到这里…"));
@@ -18,7 +15,7 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(0xFFFFFF))
+        .bg_role(Role::Surface)
         .padding(24)
         .spacing(12)
         .on_drop_files(move |ctx, paths| {
@@ -35,14 +32,14 @@ fn main() {
         .child(
             Element::label("文件拖放")
                 .font_size(22.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
         .child(
             Element::label("把任意文件从资源管理器拖到本窗口任意位置")
                 .font_size(13.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(18)
                 .width_match(),
         )
@@ -50,13 +47,12 @@ fn main() {
         .child(
             Element::label_signal(report)
                 .font_size(14.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .width_match()
                 .weight(1.0),
         );
 
     App::new("windui — 文件拖放", 480, 380)
-        .bg(Color::hex(0xFFFFFF))
         .screenshot_from_args()
         .content(ui)
         .run();

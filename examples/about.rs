@@ -27,8 +27,8 @@ fn card(icon_bg: Color, glyph: &str, title: &str, desc: &str) -> Element {
         .spacing(14)
         .padding(16)
         .corner(12.0)
-        .bg(Color::WHITE)
-        .border(Color::hex(0xE6E8EB), 1)
+        .bg_role(Role::Surface)
+        .border_role(Role::Border, 1)
         .child(icon_box(icon_bg, glyph, 40))
         .child(
             Element::col()
@@ -38,16 +38,14 @@ fn card(icon_bg: Color, glyph: &str, title: &str, desc: &str) -> Element {
                     Element::label(title)
                         .font_size(15.0)
                         .font_weight(600)
-                        .fg(Color::hex(0x1F2328))
-                        .width_match()
-                        .height(20),
+                        .fg_role(Role::Text)
+                        .width_match(),
                 )
                 .child(
                     Element::label(desc)
                         .font_size(12.5)
-                        .fg(Color::hex(0x8A9099))
-                        .width_match()
-                        .height(18),
+                        .fg_role(Role::TextMuted)
+                        .width_match(),
                 ),
         )
 }
@@ -66,9 +64,8 @@ fn main() {
                     Element::label("windui")
                         .font_size(26.0)
                         .font_weight(700)
-                        .fg(Color::hex(0x1F2328))
-                        .width_match()
-                        .height(34),
+                        .fg_role(Role::Text)
+                        .width_match(),
                 )
                 .child(
                     Element::row()
@@ -80,9 +77,8 @@ fn main() {
                 .child(
                     Element::label("轻量、快速的跨平台 GUI 库")
                         .font_size(13.5)
-                        .fg(Color::hex(0x8A9099))
-                        .width_match()
-                        .height(20),
+                        .fg_role(Role::TextMuted)
+                        .width_match(),
                 ),
         );
 
@@ -138,27 +134,25 @@ fn main() {
         .spacing(22)
         .padding(28)
         .corner(16.0)
-        .bg(Color::WHITE)
-        .border(Color::hex(0xEAECEF), 1)
+        .bg_role(Role::Surface)
+        .border_role(Role::Border, 1)
         .child(header)
         .child(grid)
         .child(
             Element::label("© 2026 windui Contributors · MIT License")
                 .font_size(12.5)
-                .fg(Color::hex(0xAEB4BC))
+                .fg_role(Role::TextMuted)
                 .width_match()
-                .height(18)
                 .text_align(Align::Center),
         );
 
     let ui = Element::col()
         .fill()
         .padding(16)
-        .bg(Color::hex(0xF0F2F4))
+        .bg_role(Role::Bg)
         .child(panel);
 
     App::new("关于 — windui 示例", 620, 560)
-        .bg(Color::hex(0xF0F2F4))
         .screenshot_from_args()
         .content(ui)
         .run();

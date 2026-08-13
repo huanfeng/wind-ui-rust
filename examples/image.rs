@@ -7,11 +7,6 @@
 
 use windui::prelude::*;
 
-const FG: u32 = 0x2D3436;
-const SUB: u32 = 0x636E72;
-const CARD: u32 = 0xFFFFFF;
-const BG: u32 = 0xEEF1F5;
-
 /// 生成 w×h 的对角渐变 RGBA8（左上洋红 → 右下青）。
 fn gradient(w: u32, h: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity((w * h * 4) as usize);
@@ -53,14 +48,14 @@ fn solid(size: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
 fn card(title: &str, body: Element) -> Element {
     Element::col()
         .width_match()
-        .bg(Color::hex(CARD))
+        .bg_role(Role::Surface)
         .corner(10.0)
         .padding(16)
         .spacing(10)
         .child(
             Element::label(title)
                 .font_size(16.0)
-                .fg(Color::hex(FG))
+                .fg_role(Role::Text)
                 .height(24)
                 .width_match(),
         )
@@ -75,13 +70,13 @@ fn demo(label: &str, img: Element) -> Element {
         .child(
             img.width(96)
                 .height(72)
-                .bg(Color::hex(0xF6F8FA))
-                .border(Color::hex(0xDDDDDD), 1),
+                .bg_role(Role::SurfaceAlt)
+                .border_role(Role::Border, 1),
         )
         .child(
             Element::label(label)
                 .font_size(12.0)
-                .fg(Color::hex(SUB))
+                .fg_role(Role::TextMuted)
                 .height(16),
         )
 }
@@ -132,7 +127,7 @@ fn main() {
                 .child(
                     Element::label("圆形")
                         .font_size(12.0)
-                        .fg(Color::hex(SUB))
+                        .fg_role(Role::TextMuted)
                         .height(16),
                 ),
         )
@@ -183,7 +178,7 @@ fn main() {
     )
     .height(150)
     .width_match()
-    .bg(Color::hex(0xF6F8FA))
+    .bg_role(Role::SurfaceAlt)
     .corner(8.0);
 
     // SVG（矢量）：内联字面量含 `#` 颜色，故用 br##"..."## 定界。
@@ -236,7 +231,7 @@ fn main() {
         .child(card("SVG 矢量（resvg 光栅化 + 着色）", svg_body))
         .child(card("列表行图标（list_icons）", icon_list));
 
-    let ui = Element::stack().fill().bg(Color::hex(BG)).child(
+    let ui = Element::stack().fill().bg_role(Role::Bg).child(
         Element::col()
             .fill()
             .padding(18)
@@ -244,7 +239,7 @@ fn main() {
             .child(
                 Element::label("图片支持")
                     .font_size(24.0)
-                    .fg(Color::hex(0x1A1A2E))
+                    .fg_role(Role::Text)
                     .height(34)
                     .width_match(),
             )
@@ -252,7 +247,6 @@ fn main() {
     );
 
     App::new("windui — 图片示例", 480, 760)
-        .bg(Color::hex(BG))
         .screenshot_from_args()
         .content(ui)
         .run();

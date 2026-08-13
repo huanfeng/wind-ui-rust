@@ -90,12 +90,7 @@ fn scheme_row(name: &str, sub: &str, on: Signal<bool>) -> Element {
                 .weight(1.0)
                 .spacing(2)
                 .child(Element::label(name).font_size(14.0).fg_role(Role::Text))
-                .child(
-                    Element::label(sub)
-                        .font_size(11.0)
-                        .fg_role(Role::TextMuted)
-                        .height(16),
-                ),
+                .child(Element::label(sub).font_size(11.0).fg_role(Role::TextMuted)),
         )
         .child(Element::switch(on))
 }
@@ -233,21 +228,18 @@ fn main() {
                 Element::label("轻量 Windows 桌面 GUI 框架")
                     .font_size(15.0)
                     .fg_role(Role::Text)
-                    .height(22)
                     .width_match(),
             )
             .child(
                 Element::label("Win32 窗口 + GDI 呈现 + tiny-skia 图形 + DirectWrite 文字")
                     .font_size(13.0)
                     .fg_role(Role::TextMuted)
-                    .height(20)
                     .width_match(),
             )
             .child(
                 Element::label("目标内存占用 2–5MB，无运行时、无 GC。")
                     .font_size(13.0)
                     .fg_role(Role::TextMuted)
-                    .height(20)
                     .width_match(),
             )
             .child(Element::button("打开对话框").on_click(move |_| about_show.set(true))),
@@ -304,7 +296,6 @@ fn main() {
                     Element::label_signal(order_msg)
                         .font_size(12.0)
                         .fg_role(Role::TextMuted)
-                        .height(18),
                 ),
         ))
         .child(card(
@@ -336,7 +327,6 @@ fn main() {
                                         Element::label(sub)
                                             .font_size(11.0)
                                             .fg_role(Role::TextMuted)
-                                            .height(16),
                                     ),
                             )
                     }
@@ -467,7 +457,6 @@ fn main() {
                         .font_size(14.0)
                         .fg_role(Role::Text)
                         .weight(1.0)
-                        .height(20),
                 )
                 .child(Element::label("›").font_size(20.0).fg(Color::hex(0x8A9099))),
         ))
@@ -663,26 +652,26 @@ fn main() {
                         Element::nav_row("拼音纠错设置").on_click(move |_| m.set("已进入：拼音纠错设置".into()))
                     }),
             ))
-            .child(Element::label_signal(nav_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
+            .child(Element::label_signal(nav_msg).font_size(13.0).fg_role(Role::TextMuted).width_match()),
         ))
         .child(card(
             "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
             Element::col()
                 .width_match()
                 .spacing(12)
-                .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
+                .child(Element::label("单开互斥（展开一个自动收起其它）").font_size(13.0).fg_role(Role::TextMuted).width_match())
                 .child(Element::accordion(
                     acc_sel,
                     vec![
-                        ("什么是双拼？", Element::label("双拼用两键拼出一个音节，减少击键。").width_match().height(28).padding_xy(12, 0)),
-                        ("如何切换方案？", Element::label("在“高级设置 → 双拼方案设定”里选择。").width_match().height(28).padding_xy(12, 0)),
-                        ("支持自定义吗？", Element::label("支持，导入自定义码表即可。").width_match().height(28).padding_xy(12, 0)),
+                        ("什么是双拼？", Element::label("双拼用两键拼出一个音节，减少击键。").width_match().padding_xy(12, 4)),
+                        ("如何切换方案？", Element::label("在“高级设置 → 双拼方案设定”里选择。").width_match().padding_xy(12, 4)),
+                        ("支持自定义吗？", Element::label("支持，导入自定义码表即可。").width_match().padding_xy(12, 4)),
                     ],
                 ))
-                .child(Element::label("多开独立（各面板互不影响）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
+                .child(Element::label("多开独立（各面板互不影响）").font_size(13.0).fg_role(Role::TextMuted).width_match())
                 .child(Element::accordion_multi(vec![
-                    ("常规", Element::label("常规设置项……").width_match().height(28).padding_xy(12, 0)),
-                    ("外观", Element::label("外观设置项……").width_match().height(28).padding_xy(12, 0)),
+                    ("常规", Element::label("常规设置项……").width_match().padding_xy(12, 4)),
+                    ("外观", Element::label("外观设置项……").width_match().padding_xy(12, 4)),
                 ])),
         ))
         .child(card(
@@ -701,9 +690,9 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(Element::label("确定 45%").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
+                .child(Element::label("确定 45%").font_size(13.0).fg_role(Role::TextMuted).width_match())
                 .child(Element::progress(prog).width_match())
-                .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg_role(Role::TextMuted).height(18).width_match())
+                .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg_role(Role::TextMuted).width_match())
                 .child(Element::progress_indeterminate().width_match()),
         ))
         .child(card(
@@ -749,19 +738,19 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(Element::link("打开 windui 官网（用系统浏览器）").url("https://example.com").font_size(14.0).height(20))
+                .child(Element::link("打开 windui 官网（用系统浏览器）").url("https://example.com").font_size(14.0))
                 .child(
                     Element::row()
                         .spacing(20)
                         .cross(Align::Center)
-                        .child(Element::link("无下划线样式").underline(false).font_size(14.0).height(20))
-                        .child(Element::link("已禁用链接").url("https://example.com").disabled(true).font_size(14.0).height(20)),
+                        .child(Element::link("无下划线样式").underline(false).font_size(14.0))
+                        .child(Element::link("已禁用链接").url("https://example.com").disabled(true).font_size(14.0)),
                 )
-                .child(Element::link("点我计数（自定义 on_click）").font_size(14.0).height(20).on_click(move |_| {
+                .child(Element::link("点我计数（自定义 on_click）").font_size(14.0).on_click(move |_| {
                     ln.set(ln.get() + 1);
                     lm.set(format!("已点击 {} 次", ln.get()));
                 }))
-                .child(Element::label_signal(link_msg).font_size(13.0).fg_role(Role::TextMuted).height(18).width_match()),
+                .child(Element::label_signal(link_msg).font_size(13.0).fg_role(Role::TextMuted).width_match()),
         ))
         .child(card(
             "标签省略（max_lines + truncate）",
@@ -789,8 +778,7 @@ fn main() {
             .child(
                 Element::label(label)
                     .font_size(12.0)
-                    .fg_role(Role::TextMuted)
-                    .height(16),
+                    .fg_role(Role::TextMuted),
             )
     };
     let images_body = Element::col()
@@ -993,7 +981,6 @@ fn main() {
                             Element::label_signal(sel_count)
                                 .font_size(13.0)
                                 .fg_role(Role::TextMuted)
-                                .height(18)
                                 .weight(1.0),
                         )
                 }),
@@ -1068,14 +1055,12 @@ fn main() {
                 Element::label("windui v0.1")
                     .font_size(20.0)
                     .fg_role(Role::Text)
-                    .height(28)
                     .width_match(),
             )
             .child(
                 Element::label("一个用 Rust 编写的轻量桌面 GUI 框架，适合做内存友好的小工具。")
                     .font_size(14.0)
                     .fg_role(Role::TextMuted)
-                    .height(44)
                     .width_match(),
             )
             .child(
@@ -1122,8 +1107,5 @@ fn main() {
         )
         .child(dialog);
 
-    app.bg(Theme::default().palette.bg)
-        .screenshot_from_args()
-        .content(ui)
-        .run();
+    app.screenshot_from_args().content(ui).run();
 }
