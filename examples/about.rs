@@ -139,13 +139,11 @@ fn main() {
         .child(header)
         .child(grid)
         .child(
-            // 版权行要比卡片说明再弱一档，而 Role 只到 TextMuted（没有 text_subtle
-            // 这类三级弱化色）。用 opacity 在语义色基础上再压一档：既跟随主题，
-            // 又拿回原设计的三级层次。
+            // 版权行比卡片说明再弱一档：TextSubtle 就是为这类"在场即可、不参与
+            // 阅读"的字准备的（此前没有这一档时只能用 opacity 压 TextMuted）。
             Element::label("© 2026 windui Contributors · MIT License")
                 .font_size(12.5)
-                .fg_role(Role::TextMuted)
-                .opacity(0.7)
+                .fg_role(Role::TextSubtle)
                 .width_match()
                 .text_align(Align::Center),
         );
