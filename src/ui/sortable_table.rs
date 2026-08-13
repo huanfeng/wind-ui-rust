@@ -1666,29 +1666,16 @@ mod tests {
         );
     }
 
-    /// 从根 DFS 累加各层局部 bounds 偏移，求目标节点的**绝对**中心点（bounds 是局部坐标，
-    /// 需累加祖先 origin 才对得上 hit_test 的绝对命中）。找不到返回 None。
+    /// 目标节点的**绝对**中心点（bounds 是局部坐标，需累加祖先 origin 才对得上
+    /// hit_test 的绝对命中）。找不到返回 None。
+    ///
+    /// 走 `abs_bounds` 而非自己沿父链累加 `bounds`：后者会漏掉 [`Node::offset`]
+    /// （绘制/命中偏移），一旦某行带上 offset 就会静默点错位置，而失败现象看起来
+    /// 像是表格逻辑出了问题。
     fn abs_center(tree: &Tree, target: crate::core::NodeId) -> Option<Point> {
-        fn walk(
-            tree: &Tree,
-            id: crate::core::NodeId,
-            ox: i32,
-            oy: i32,
-            target: crate::core::NodeId,
-        ) -> Option<Point> {
-            let n = tree.get(id)?;
-            let (x, y) = (ox + n.bounds.x, oy + n.bounds.y);
-            if id == target {
-                return Some(Point::new(x + n.bounds.w / 2, y + n.bounds.h / 2));
-            }
-            for &c in &n.children {
-                if let Some(p) = walk(tree, c, x, y, target) {
-                    return Some(p);
-                }
-            }
-            None
-        }
-        walk(tree, tree.root?, 0, 0, target)
+        tree.get(target)?;
+        let b = tree.abs_bounds(target);
+        Some(Point::new(b.x + b.w / 2, b.y + b.h / 2))
     }
 
     #[test]
