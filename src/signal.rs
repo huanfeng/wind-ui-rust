@@ -4,6 +4,9 @@
 //! 闭包直接捕获、无需 `.clone()`，消灭"Rc clone 病"。写值经 [`Signal::set`]/[`Signal::update`]
 //! 自动触发重绘（接入失效通道，见 `notify_changed`），无需手写 `ctx.mark_dirty()`。
 //!
+//! 存储是线程局部的，所以句柄是 `!Send` + `!Sync`——只能在创建它的线程（UI 线程）
+//! 上使用，跨线程更新状态请走 `App::channel`，详见 [`Signal`] 的线程约束一节。
+//!
 //! 设计与分期见 `.omc/plans/signal-state-binding.md`。Phase 1：原语 + 自动 dirty。
 //! 释放作用域（动态列表回收 slot）留作后续；当前单一全局运行时随线程存活（静态树可接受）。
 
@@ -108,9 +111,48 @@ pub(crate) fn end_event() -> bool {
 }
 
 /// `Copy` 状态句柄。指向运行时存储，可自由按值传入控件/闭包，无需 clone。
+///
+/// # 线程约束
+///
+/// 信号的存储是 **线程局部** 的（见本模块的 `RT`），所以句柄**只能在创建它的线程**
+/// （即 UI 线程）上读写。为此 `Signal<T>` 刻意实现为 `!Send` + `!Sync`——把句柄搬进
+/// 另一个线程会编译失败，而不是在运行时静默丢值。
+///
+/// ```compile_fail,E0277
+/// use windui::prelude::*;
+/// let s = signal(1i32);
+/// std::thread::spawn(move || s.set(42)); // Signal 不是 Send，编译失败
+/// ```
+///
+/// 借引用共享同样不行（`!Sync`）：
+///
+/// ```compile_fail,E0277
+/// use windui::prelude::*;
+/// let s = signal(1i32);
+/// std::thread::scope(|sc| {
+///     sc.spawn(|| s.get()); // &Signal 要求 Sync，编译失败
+/// });
+/// ```
+///
+/// 后台线程要更新状态，走消息通道回到 UI 线程再写信号：用 `App::channel` 取得
+/// `Sender<Msg>`（`Send`，可 move 进工作线程），在 UI 线程执行的 `on_message`
+/// 回调里对信号 `set`/`update`：
+///
+/// ```no_run
+/// use windui::prelude::*;
+/// let count = signal(0u32);
+/// let mut app = App::new("demo", 320, 200);
+/// let tx = app.channel::<u32>(move |n| count.set(n)); // 回调在 UI 线程跑
+/// std::thread::spawn(move || {
+///     let _ = tx.send(42); // 跨线程送的是消息，不是信号句柄
+/// });
+/// ```
 pub struct Signal<T> {
     key: SlotKey,
     _t: PhantomData<fn() -> T>,
+    /// 负标记：裸指针使 `Signal` 成为 `!Send` + `!Sync`，把"只能在 UI 线程用"
+    /// 变成编译期约束。零大小，不影响 `Copy`。
+    _not_send: PhantomData<*const ()>,
 }
 
 /// 句柄相等 = 指向同一 slot（含代际）。供以 Signal 为身份键的场景
@@ -135,6 +177,7 @@ pub fn signal<T: 'static>(value: T) -> Signal<T> {
     Signal {
         key,
         _t: PhantomData,
+        _not_send: PhantomData,
     }
 }
 
@@ -155,18 +198,26 @@ impl<T: 'static> Signal<T> {
     }
 
     /// 写入新值并触发重绘。
+    ///
+    /// 句柄失效（slot 已回收）时 debug 断言失败、release 静默丢弃——与 [`Signal::with`]
+    /// 的 panic 对齐，避免"读会炸、写静默"的语义分裂。当前 slot 永不回收（`free` 只出不进、
+    /// `generation` 不自增），该分支不可达；护栏是留给日后实现释放作用域的。
     pub fn set(&self, value: T) {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
                 slot.value = Some(Box::new(value));
                 slot.version = slot.version.wrapping_add(1);
+            } else {
+                debug_assert!(false, "signal 句柄已失效");
             }
         });
         notify_changed();
     }
 
     /// 原地修改并触发重绘（避免 get→改→set 的一次 clone）。
+    ///
+    /// 失效语义同 [`Signal::set`]。
     pub fn update(&self, f: impl FnOnce(&mut T)) {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
@@ -174,7 +225,11 @@ impl<T: 'static> Signal<T> {
                 if let Some(v) = slot.value.as_mut().and_then(|b| b.downcast_mut::<T>()) {
                     f(v);
                     slot.version = slot.version.wrapping_add(1);
+                } else {
+                    debug_assert!(false, "signal 值类型与句柄不符");
                 }
+            } else {
+                debug_assert!(false, "signal 句柄已失效");
             }
         });
         notify_changed();
