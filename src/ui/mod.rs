@@ -1064,6 +1064,10 @@ impl Element {
     /// 即菜单内的复选开关）点击后会原地重跑本构建器刷新勾选态，故 `build` 须为 `Fn`
     /// （可重入），捕获的可变状态放 `Cell`/`RefCell`/`Signal`。
     ///
+    /// `build` 是**生成器**而非事件回调（"每次要用时重建"，不是"发生了什么之后调"），
+    /// 因此不收 `&mut EventCtx`——它的产出是一份数据。要在菜单里做事的是各项的**动作**，
+    /// 那里有 ctx（见 [`MenuItem::run`](crate::event::MenuItem::run)）。
+    ///
     /// ⚠ 挂了菜单的节点会**吞命中**（同 `on_drop`/`tooltip`）：透明的纯布局容器一旦挂上
     /// 就开始拦截指针事件、遮住其下内容。挂在本就吞命中的节点上（有背景 / `clickable()` /
     /// 真实控件）。表格数据行用 [`on_row_context_menu`](Self::on_row_context_menu)。
@@ -1190,8 +1194,11 @@ impl Element {
     /// 富文本 span 点击回调：文档中经 [`rich::Para::span_id`]/`styled_id` 标注 id 的
     /// 文字被点击时触发，携带该 id（词典交叉引用跳转）。未标 id 的文字不响应、
     /// 不显示手型。回调挂控件层，`RichDoc` 保持纯数据可 Clone。
+    ///
+    /// 签名 `FnMut(&mut EventCtx, &str)`——`ctx` 恒在首位（全库一致），其后才是这个
+    /// 回调真正关心的数据。
     #[track_caller]
-    pub fn on_span_click(self, f: impl FnMut(&str, &mut EventCtx) + 'static) -> Self {
+    pub fn on_span_click(self, f: impl FnMut(&mut EventCtx, &str) + 'static) -> Self {
         self.config_rich(move |r| r.set_on_span_click(Box::new(f)))
     }
 
@@ -1347,6 +1354,9 @@ impl Element {
     /// 启用条件（闭包，运行期求值）。镜像 [`visible_when`](Self::visible_when)，但不影响布局：
     /// 条件为 false 时该元素（及子树）置灰、不可交互，仍占位参与测量/绘制。
     /// 适合设置项联动（如「细节项随开关置灰」），避免隐藏导致的分隔线残留与高度抖动。
+    ///
+    /// 是 `Fn` 不是 `FnMut`：同 [`visible_when`](Self::visible_when)，它是每帧被反复
+    /// 求值的纯谓词，不是"发生了什么之后调一次"的动作回调。
     pub fn enabled_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
         self.en_cond = Some(Box::new(f));
         self
@@ -1521,6 +1531,7 @@ impl Element {
     ///
     /// 契约：闭包**必须是纯函数**（仅读状态、无副作用）。它在每帧的
     /// measure/arrange/paint/hit-test/焦点收集中被多次调用，且帧内值不应变化。
+    /// 反复求值正是它必须是 `Fn` 而非 `FnMut` 的原因。
     pub fn visible_when(mut self, f: impl Fn() -> bool + 'static) -> Self {
         self.vis_cond = Some(Box::new(f));
         self
@@ -1592,10 +1603,10 @@ impl Element {
     /// # use windui::prelude::*;
     /// # let (hide, special) = (signal(false), signal(false));
     /// Element::check_menu("列表显示", vec![
-    ///     CheckMenuItem::check("隐藏未启用", hide).on_change(|v| println!("{v}")),
+    ///     CheckMenuItem::check("隐藏未启用", hide).on_change(|_ctx, v| println!("{v}")),
     ///     CheckMenuItem::check("显示特殊方案", special),
     ///     CheckMenuItem::separator(),
-    ///     CheckMenuItem::action("全部展开", || {}),
+    ///     CheckMenuItem::action("全部展开", |_ctx| {}),
     /// ]).width(132);
     /// ```
     pub fn check_menu(title: impl Into<String>, items: Vec<select::CheckMenuItem>) -> Self {
@@ -1642,6 +1653,9 @@ impl Element {
     ///     })
     ///     .width(132);
     /// ```
+    ///
+    /// 是**生成器**不是事件回调（每次渲染现算文案），故无 `on_` 前缀、无 `ctx`，
+    /// 且必须是 `Fn`（要反复调用）。
     #[track_caller]
     pub fn summary(mut self, f: impl Fn(&[&str]) -> String + 'static) -> Self {
         if let Some(m) = self
@@ -2591,6 +2605,10 @@ impl Element {
     /// 性能：操作列不改变重建触发条件——排序/换页才重建，悬停/选择不重建；`build` 只在重建时
     /// 按行调用一次。大数据集请配合 [`table_sortable_server`](Self::table_sortable_server) 分页。
     ///
+    /// `build` 是**生成器**（每次重建按行产出控件），不是事件回调，故无 `on_` 前缀、
+    /// 无 `ctx`，且必须是 `Fn`（每行各调一次、跨重建反复调用）。要响应交互的是它
+    /// 生成的控件自己的 `on_click`。
+    ///
     /// # 示例
     /// ```ignore
     /// Element::table_sortable(cols, rows, sort).actions("操作", 1.6, move |row| {
@@ -2640,6 +2658,9 @@ impl Element {
     /// 排序仍基于单元格**文本**（渲染与排序键解耦）；自定义格与操作列同款包裹
     /// （水平内边距 + 垂直居中，不强制 20px 行高，较高控件不被压扁）。行下标语义同
     /// [`actions`](Self::actions)：客户端表格为原始行下标，服务端表格为页内显示下标。
+    ///
+    /// `build` 与 [`actions`](Self::actions) 同属**生成器**：无 `on_` 前缀、无 `ctx`、
+    /// 必须是 `Fn`（每格各调一次）。
     ///
     /// # 示例
     /// ```ignore
@@ -2711,8 +2732,11 @@ impl Element {
     ///     .on_row_activate(move |ctx, disp| open_edit(disp))
     /// ```
     #[track_caller]
-    pub fn on_row_activate(mut self, on_activate: impl Fn(&mut EventCtx, usize) + 'static) -> Self {
-        let cb: sortable_table::OnRowActivate = Rc::new(on_activate);
+    pub fn on_row_activate(
+        mut self,
+        on_activate: impl FnMut(&mut EventCtx, usize) + 'static,
+    ) -> Self {
+        let cb: sortable_table::OnRowActivate = Rc::new(RefCell::new(on_activate));
         // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
         let mut ok = false;
         if let Some(scroll) = self.children.last_mut() {
@@ -2738,16 +2762,18 @@ impl Element {
     /// 都反映右击当刻的数据。回调挂在行容器上，右击行内任何位置（含空白、自定义单元格、
     /// 操作列）都能弹。
     ///
-    /// 项的动作是无参 `Fn()`（见 [`MenuItem::run`](crate::event::MenuItem::run)），拿不到
-    /// `EventCtx`；需要弹原生文件对话框等阻塞调用时用 [`crate::app::defer_blocking`]。
+    /// `build` 是**生成器**（每次右击重跑一遍产出项），不是事件回调，故无 `ctx`
+    /// 参数、也必须是 `Fn`（要留存起来重复调用）。项的**动作**照常拿得到
+    /// `&mut EventCtx`（见 [`MenuItem::run`](crate::event::MenuItem::run)），弹原生
+    /// 对话框写 `ctx.defer_blocking(..)`。
     ///
     /// # 示例
     /// ```ignore
     /// Element::table_sortable_server(cols, rows, sort, on_sort)
     ///     .on_row_context_menu(move |disp| vec![
-    ///         MenuItem::run("编辑…", move || open_edit(disp), false),
+    ///         MenuItem::run("编辑…", move |_ctx| open_edit(disp), false),
     ///         MenuItem::separator(),
-    ///         MenuItem::run("删除", move || delete(disp), false),
+    ///         MenuItem::run("删除", move |_ctx| delete(disp), false),
     ///     ])
     /// ```
     #[track_caller]

@@ -258,25 +258,25 @@ fn ime_menu_items() -> Vec<MenuItem> {
         MenuItem::submenu(
             "输入方案",
             vec![
-                MenuItem::run("全拼", || {}, true).icon("拼"),
-                MenuItem::run("双拼", || {}, false).icon("双"),
-                MenuItem::run("五笔", || {}, false).icon("笔"),
+                MenuItem::run("全拼", |_ctx| {}, true).icon("拼"),
+                MenuItem::run("双拼", |_ctx| {}, false).icon("双"),
+                MenuItem::run("五笔", |_ctx| {}, false).icon("笔"),
             ],
         )
         .icon("⌨"),
         MenuItem::submenu(
             "字符集与字形",
             vec![
-                MenuItem::run("简体中文", || {}, true).icon("简"),
-                MenuItem::run("繁体中文（台湾）", || {}, false).icon("繁"),
-                MenuItem::run("繁体中文（香港）", || {}, false).icon("港"),
+                MenuItem::run("简体中文", |_ctx| {}, true).icon("简"),
+                MenuItem::run("繁体中文（台湾）", |_ctx| {}, false).icon("繁"),
+                MenuItem::run("繁体中文（香港）", |_ctx| {}, false).icon("港"),
                 MenuItem::separator(),
                 MenuItem::submenu(
                     "字形风格",
                     vec![
-                        MenuItem::run("宋体风格", || {}, false).icon("宋"),
-                        MenuItem::run("黑体风格", || {}, true).icon("黑"),
-                        MenuItem::run("楷体风格", || {}, false).icon("楷"),
+                        MenuItem::run("宋体风格", |_ctx| {}, false).icon("宋"),
+                        MenuItem::run("黑体风格", |_ctx| {}, true).icon("黑"),
+                        MenuItem::run("楷体风格", |_ctx| {}, false).icon("楷"),
                     ],
                 )
                 .icon("字"),
@@ -286,23 +286,27 @@ fn ime_menu_items() -> Vec<MenuItem> {
         MenuItem::submenu(
             "标点符号",
             vec![
-                MenuItem::run("中文标点", || {}, true),
-                MenuItem::run("英文标点", || {}, false),
+                MenuItem::run("中文标点", |_ctx| {}, true),
+                MenuItem::run("英文标点", |_ctx| {}, false),
             ],
         )
         .icon("⌨"),
         MenuItem::separator(),
-        MenuItem::run("模糊音", || {}, false).icon("✓"),
-        MenuItem::run("云输入", || {}, false).icon("✓"),
-        MenuItem::run("双拼模式", || {}, false).icon("○"),
+        MenuItem::run("模糊音", |_ctx| {}, false).icon("✓"),
+        MenuItem::run("云输入", |_ctx| {}, false).icon("✓"),
+        MenuItem::run("双拼模式", |_ctx| {}, false).icon("○"),
         MenuItem::separator(),
-        MenuItem::run("表情与符号", || {}, false)
+        MenuItem::run("表情与符号", |_ctx| {}, false)
             .icon("😊")
             .shortcut("⌃⌘Space"),
-        MenuItem::submenu("剪贴板历史", vec![MenuItem::run("清空历史", || {}, false)]).icon("📋"),
-        MenuItem::submenu("工具箱", vec![MenuItem::run("截图取字", || {}, false)]).icon("🔧"),
+        MenuItem::submenu(
+            "剪贴板历史",
+            vec![MenuItem::run("清空历史", |_ctx| {}, false)],
+        )
+        .icon("📋"),
+        MenuItem::submenu("工具箱", vec![MenuItem::run("截图取字", |_ctx| {}, false)]).icon("🔧"),
         MenuItem::separator(),
-        MenuItem::run("输入法设置…", || {}, false).icon("⚙"),
+        MenuItem::run("输入法设置…", |_ctx| {}, false).icon("⚙"),
     ]
 }
 

@@ -12,13 +12,14 @@
   激活那样把可选表格排除在外。菜单**每次右击重建**，`with_check` / `with_enabled` 才能反映
   右击当刻的数据；回调挂在行容器上，行内空白、自定义单元格、操作列上右击都能弹。
   表格行是控件内部构建的，应用侧拿不到行 `Element`，故这条接线只能由框架提供。
-- **无 `ctx` 的延迟执行 `app::defer_blocking`**：把含阻塞式原生调用（文件对话框、
-  `MessageBoxW` 等）的流程排到事件分发**完全返回**之后执行，是 `EventCtx::defer_blocking`
-  的自由函数版本。菜单项动作是无参 `Fn()`（`MenuItem::run`），执行时虽已不在控件的
-  `on_event` 里、却仍在平台消息回调栈内，直接同步弹原生模态框会与对话框自身的消息泵冲突；
-  右键菜单里的"导出到文件…"这类项此前**无法表达**，只能靠把动作挪回工具栏按钮绕开。
-  复用既有的 `DialogRequest::Custom` 通道交付（平台已在正确时机轮询它），
-  `AppHandler::take_dialog_request` 的默认实现即取该队列，自定义 handler 覆盖时记得回退到它。
+- **菜单项里也能做阻塞式原生调用**：右键菜单里的"导出到文件…"这类项此前**无法表达**——
+  动作是无参 `Fn()`，执行时虽已不在控件的 `on_event` 里、却仍在平台消息回调栈内，直接同步弹
+  原生模态框会与对话框自身的消息泵冲突。现在菜单动作收 `&mut EventCtx`（见 Changed 段），
+  写 `ctx.defer_blocking(f)` 即可把流程排到事件分发**完全返回**之后执行。
+  本轮曾先落地一个无 `ctx` 的自由函数 `app::defer_blocking` 作为过渡，同版内即因根因被修掉而
+  标记废弃；其配套的 `app::take_deferred` 保留：复用既有的 `DialogRequest::Custom` 通道交付
+  （平台已在正确时机轮询它），`AppHandler::take_dialog_request` 的默认实现即取该队列，
+  自定义 handler 覆盖时记得回退到它。
 - **私用区回退字体 `text::register_private_use_font`**：注册一个 `.ttf` 后，文本里落在
   Unicode 私用区的码位改用它渲染，其余字符不受影响。图标字体（Font Awesome、Material
   Icons 等）的字形全部落在私用区，注册后即可把图标码位当普通文字放进任何 `label`/`button`，
@@ -164,6 +165,38 @@
   与既有的 `Element::icon_content` 对齐，同一份 API 里"图标给的是图片内容"始终是这个词。
   `Dropdown::with_items` / `with_items_reactive` **不在此列**：它们是真正的"带配置构造"，用法正确。
   **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除）。
+- **回调签名立法：`&mut EventCtx` 一律作第一参数（硬破坏）**：此前同一个库里 ctx 的位置各行
+  其是——`on_reorder(|ctx, from, to|)` 在前，`on_span_click(|id, ctx|)` 在后，用户每碰一个新
+  回调都得翻文档。ctx 是"环境/能力袋"而非数据，位置直觉同 `&mut self`；固定在首位后，读签名时
+  后面的参数才是这个回调真正关心的数据。
+  同名函数无法重载，**没有 deprecated 别名可过渡**，是编译期硬失败（`E0631` 闭包参数类型不符）。
+  **迁移**：`on_span_click(|id, ctx| ..)` → `on_span_click(|ctx, id| ..)`；
+  自定义控件直接持有 `rich::SpanClickFn` 的同步改为 `Box<dyn FnMut(&mut EventCtx, &str)>`。
+- **菜单项动作补上 `&mut EventCtx`（硬破坏）**：`MenuItem::run` 的动作闭包过去是无参 `Fn()`，
+  于是库里存在"这个回调能弹对话框、那个不能"的分层——菜单里想写"导出到文件…"就没有 `ctx`，
+  只能绕道自由函数 `app::defer_blocking`，文档还要专门开一节讲"三个入口"。
+  宿主执行菜单动作时其实握着 `&mut Tree` 与发起菜单的目标节点，缺的只是一条借出 `EventCtx`
+  的通道；新增内部的 `Tree::run_detached(id, f)` 补上，副作用（对话框、toast、关窗、焦点、
+  嵌套菜单）汇总成 `DispatchResult` 走宿主既有的 `apply_dispatch_effects` 消费——与指针/键盘
+  分发同一条路径，日后给 `DispatchResult` 加字段不会独独漏掉菜单这一路。
+  动作仍是 `Fn` 而非 `FnMut`：项会被克隆进浮层的每一级面板、粘滞项还要在原地重建后再执行
+  同一份动作，独占可变借用无处安放；要改状态用 `Signal`（`Copy` + 内部可变，正为此而设）。
+  受影响的签名：`MenuAction::Run(Rc<dyn Fn()>)` → `Run(MenuActionFn)`（即
+  `Rc<dyn Fn(&mut EventCtx)>`）、`MenuItem::run`、`MenuItem::trailing_icon`（及其废弃别名
+  `with_trailing_icon`）、`MenuItem::on_trailing_click` 字段、`DropdownItem::trailing_icon`、
+  `CheckMenuItem::action`、`CheckMenuItem::on_change`（新签名 `Fn(&mut EventCtx, bool)`，
+  ctx 在前、新值在后）。
+  **迁移**：`MenuItem::run("x", || f(), false)` → `MenuItem::run("x", |_ctx| f(), false)`；
+  `CheckMenuItem::on_change(|v| ..)` → `on_change(|_ctx, v| ..)`；其余同理补一个前置参数。
+  需要阻塞式原生调用的地方，把 `windui::app::defer_blocking(f)` 换成 `ctx.defer_blocking(f)`。
+- **自由函数 `app::defer_blocking` 标记 `#[deprecated(since = "0.12.0")]`**：它存在的唯一理由
+  是"菜单项动作拿不到 `ctx`"，上一条已经补上，改用 `ctx.defer_blocking(f)`。托盘菜单项另有
+  自己的 `TrayCtx`。`app::take_deferred` 保留不变——已经写下的老代码那条队列仍需被排空。
+  `docs/API_GUIDE.md` §8.6 的"三个入口"随之收敛为两个。
+- **`on_row_activate` 由 `Fn` 放宽为 `FnMut`**：一次性动作回调统一 `FnMut`（用户常需在闭包里
+  改捕获的状态），只有需要留存多份/反复调用的闭包才用 `Fn`。内部类型
+  `OnRowActivate` 相应从 `Rc<dyn Fn(..)>` 改为 `Rc<RefCell<dyn FnMut(..)>>`，与既有的
+  `OnSort` 同款。对下游是**放宽**：原本能传的闭包全都还能传，无需迁移。
 
 ### Fixed
 - **软后端投影外缘的直角硬边**：阴影 pixmap 的模糊余量按 `2×半径` 留，而 3 趟 box-blur 每趟

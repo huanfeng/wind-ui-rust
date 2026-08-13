@@ -207,11 +207,23 @@ pub enum Event {
 
 /// 浮层菜单/下拉项的动作。两种：向焦点控件合成按键（右键菜单复用控件键盘处理、
 /// 可移植），或运行任意闭包（下拉选择设置绑定值等）。
+///
+/// `Run` 的闭包与控件回调同形，收 `&mut EventCtx` 作第一参数——菜单项能做的事
+/// 因此与 `on_click` 齐平（`ctx.defer_blocking` 弹原生对话框、`ctx.toast`、
+/// `ctx.request_close`）。宿主在浮层里经 `Tree::run_detached` 借出这个 ctx。
+///
+/// 闭包是 `Fn` 而非 `FnMut`：菜单项会被克隆进浮层的每一级面板（`MenuItem: Clone`，
+/// 动作存 `Rc`），粘滞项还要在原地重建后再执行同一份动作，独占可变借用无处安放。
+/// 需要在动作里改状态时用 `Signal`（`Copy` 且内部可变，正是为此）。
 #[derive(Clone)]
 pub enum MenuAction {
     SendKey(KeyEvent),
-    Run(std::rc::Rc<dyn Fn()>),
+    Run(MenuActionFn),
 }
+
+/// 菜单项动作闭包：与控件回调同形（`ctx` 在首位），`Rc` 是因为项会被克隆进浮层的
+/// 每一级面板（详见 [`MenuAction`]）。
+pub type MenuActionFn = std::rc::Rc<dyn Fn(&mut crate::core::EventCtx)>;
 
 /// 一个浮层菜单/下拉项。支持图标、尾随快捷键、分隔线与级联子菜单。
 #[derive(Clone)]
@@ -237,7 +249,8 @@ pub struct MenuItem {
     /// 尾随可独立点击的图标（字符/emoji，None=无图标）。
     pub trailing_icon: Option<String>,
     /// 点击尾随图标的回调，与主项 `action` 完全独立；`None` 则图标不可点击（仅展示）。
-    pub on_trailing_click: Option<std::rc::Rc<dyn Fn()>>,
+    /// 签名与 [`MenuAction::Run`] 一致（ctx 在前、`Fn` 的理由同上）。
+    pub on_trailing_click: Option<MenuActionFn>,
     /// 粘滞项：点击执行 `action` 后菜单保持展开（复选菜单的开关项）。
     /// 默认 `false`——单选下拉/右键菜单里"点中即完成决定"，理应关闭。
     /// 粘滞项每次点击只翻转一个状态，决定要到点面板外才算完成，故不关。
@@ -257,7 +270,7 @@ pub struct MenuItem {
 
 /// 空动作（分隔线/子菜单父项占位，永不执行）。
 fn noop_action() -> MenuAction {
-    MenuAction::Run(std::rc::Rc::new(|| {}))
+    MenuAction::Run(std::rc::Rc::new(|_| {}))
 }
 
 impl MenuItem {
@@ -290,8 +303,13 @@ impl MenuItem {
             ..Self::base(MenuAction::SendKey(key))
         }
     }
-    /// 便捷构造：标签 + 闭包动作。
-    pub fn run(label: impl Into<String>, f: impl Fn() + 'static, checked: bool) -> Self {
+    /// 便捷构造：标签 + 闭包动作。动作收 `&mut EventCtx`（见 [`MenuAction::Run`]），
+    /// 与 `on_click` 同形——菜单项里要弹原生对话框写 `ctx.defer_blocking(..)` 即可。
+    pub fn run(
+        label: impl Into<String>,
+        f: impl Fn(&mut crate::core::EventCtx) + 'static,
+        checked: bool,
+    ) -> Self {
         Self {
             label: label.into(),
             checked,
@@ -349,7 +367,12 @@ impl MenuItem {
         self
     }
     /// 设置尾随可独立点击的图标：点击只触发 `on_click`，不触发本项的 `action`。
-    pub fn trailing_icon(mut self, icon: impl Into<String>, on_click: impl Fn() + 'static) -> Self {
+    /// 回调签名同 [`MenuItem::run`] 的动作。
+    pub fn trailing_icon(
+        mut self,
+        icon: impl Into<String>,
+        on_click: impl Fn(&mut crate::core::EventCtx) + 'static,
+    ) -> Self {
         self.trailing_icon = Some(icon.into());
         self.on_trailing_click = Some(std::rc::Rc::new(on_click));
         self
@@ -421,7 +444,7 @@ impl MenuItem {
     pub fn with_trailing_icon(
         self,
         icon: impl Into<String>,
-        on_click: impl Fn() + 'static,
+        on_click: impl Fn(&mut crate::core::EventCtx) + 'static,
     ) -> Self {
         self.trailing_icon(icon, on_click)
     }

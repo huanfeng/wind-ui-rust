@@ -36,17 +36,21 @@ thread_local! {
 /// **完全返回**之后执行——[`EventCtx::defer_blocking`](crate::core::EventCtx::defer_blocking)
 /// 的无 `ctx` 版本。
 ///
-/// 存在的理由：右键菜单项、托盘菜单项的动作是无参 `Fn()`（见
-/// [`MenuItem::run`](crate::event::MenuItem::run)），执行时虽已不在控件的 `on_event` 里，
-/// 却仍在平台的消息回调栈内，直接同步弹原生模态框会与对话框自己的消息泵冲突。菜单项
-/// 里想"导出到文件…"就只能经此排队。
+/// 它当初存在是因为菜单项动作是无参 `Fn()`、拿不到 `ctx`；0.12.0 起
+/// [`MenuItem::run`](crate::event::MenuItem::run) 的动作也收 `&mut EventCtx`，
+/// 这个缺口没有了。
 ///
 /// 闭包按排入顺序执行；同一轮排入多个会在同一次取走中依次跑完。
+#[deprecated(
+    since = "0.12.0",
+    note = "改用 `ctx.defer_blocking(f)`：菜单项动作现在也收 `&mut EventCtx`（MenuItem::run 签名变更），自由函数版本存在的唯一理由——「有些回调拿不到 ctx」——已经消失。托盘菜单项另有 `TrayCtx`"
+)]
 pub fn defer_blocking(f: impl FnOnce() + 'static) {
     DEFERRED.with(|d| d.borrow_mut().push(Box::new(f)));
 }
 
-/// 取走全部延迟闭包，打包成一个 [`DialogRequest::Custom`]（无待执行项时返回 None）。
+/// 取走全部延迟闭包（由已废弃的 [`defer_blocking`] 排入），打包成一个
+/// [`DialogRequest::Custom`]（无待执行项时返回 None）。
 ///
 /// 复用 `DialogRequest` 通道而不是另开一条平台回调：平台侧已经在"事件分发完全返回"
 /// 这一时机轮询它，正是延迟闭包需要的时机，多开一条只会多一处要同步的时序约定。
@@ -1599,8 +1603,9 @@ impl UiHost {
                             .clone()
                     });
                 if let Some(f) = trailing_hit {
+                    let target = self.menu.as_ref().map(|m| m.target);
                     self.close_menu();
-                    f();
+                    self.run_menu_action(target, |ctx| f(ctx));
                     return true;
                 }
                 // 命中项：叶子执行并关闭；子菜单父项/禁用项保持展开。
@@ -1641,17 +1646,22 @@ impl UiHost {
         if !item.is_actionable() {
             return true;
         }
+        let target = self.menu.as_ref().map(|m| m.target);
         // 粘滞项（复选菜单的开关）：执行后菜单留在原地并刷新勾选态，可连点多个开关。
         if item.stay_open {
             if let MenuAction::Run(f) = item.action {
-                f();
-            }
-            if let Some(m) = self.menu.as_mut() {
-                m.refresh_items();
+                // 先刷新再落副作用：动作若自己又请求了新菜单，`apply_dispatch_effects`
+                // 会把浮层整个换掉，此时再按旧重建器刷新就是刷一个已经不在的菜单。
+                let res = target.map(|t| self.tree.run_detached(t, |ctx| f(ctx)));
+                if let Some(m) = self.menu.as_mut() {
+                    m.refresh_items();
+                }
+                if let Some(res) = res {
+                    self.apply_dispatch_effects(res, FocusSource::Pointer, None);
+                }
             }
             return true;
         }
-        let target = self.menu.as_ref().map(|m| m.target);
         self.close_menu();
         match item.action {
             MenuAction::SendKey(key) => {
@@ -1662,9 +1672,30 @@ impl UiHost {
                     }
                 }
             }
-            MenuAction::Run(f) => f(),
+            MenuAction::Run(f) => self.run_menu_action(target, |ctx| f(ctx)),
         }
         true
+    }
+
+    /// 执行一个菜单动作闭包：借目标控件的 `EventCtx` 跑它（见 `Tree::run_detached`），
+    /// 副作用交给 `apply_dispatch_effects` 落地——与指针/键盘分发同一条消费路径，
+    /// 将来给 `DispatchResult` 加字段时不会独独漏掉菜单这一路。
+    ///
+    /// `repaint`/`damage` 刻意丢弃：菜单路径本就整窗重绘（`close_menu` 与粘滞刷新
+    /// 都置 `needs_full`），再合并一次局部脏区没有意义。
+    ///
+    /// `target` 是弹出菜单时记下的控件（`ContextMenu::target`），已随浮层关闭取出；
+    /// 它可能已失效，`run_detached` 对死节点是安全的。
+    fn run_menu_action(
+        &mut self,
+        target: Option<NodeId>,
+        f: impl FnOnce(&mut crate::core::EventCtx),
+    ) {
+        let Some(t) = target.or(self.tree.root) else {
+            return;
+        };
+        let res = self.tree.run_detached(t, f);
+        self.apply_dispatch_effects(res, FocusSource::Pointer, None);
     }
 
     /// 在第 `k` 级的第 `i` 项上展开子菜单：截断更深层后压入新级。返回是否压入。
@@ -2053,7 +2084,7 @@ impl UiHost {
                 let text = self.toasts[i].req.text.clone();
                 let item = MenuItem::run(
                     "复制内容",
-                    move || {
+                    move |_ctx| {
                         use crate::core::ClipboardProvider;
                         crate::platform::Clipboard.set_text(&text);
                     },
@@ -2837,7 +2868,8 @@ impl AppHandler for UiHost {
         self.pending_window_op.take()
     }
 
-    /// 控件经 `EventCtx` 请求的对话框优先；没有则取延迟闭包队列（菜单项等无 ctx 的入口）。
+    /// 控件经 `EventCtx` 请求的对话框优先；没有则取延迟闭包队列（已废弃的自由函数
+    /// `defer_blocking` 的遗留入口）。
     fn take_dialog_request(&mut self) -> Option<DialogRequest> {
         self.pending_dialog.take().or_else(take_deferred)
     }
@@ -3085,7 +3117,10 @@ mod tests {
 
     /// `defer_blocking` 排入的闭包由 `take_dialog_request` 取走，且**取走时还没跑**——
     /// 它必须等到平台在事件分发完全返回后才 `run()`，这正是它存在的意义。
+    ///
+    /// 自由函数已废弃（改用 `ctx.defer_blocking`），但队列还得为老代码工作，故继续测。
     #[test]
+    #[allow(deprecated)]
     fn deferred_closures_run_only_when_dialog_request_is_executed() {
         use std::cell::Cell as StdCell;
         let hits: Rc<StdCell<usize>> = Rc::new(StdCell::new(0));
@@ -3269,10 +3304,10 @@ mod tests {
         let selected = std::rc::Rc::new(std::cell::Cell::new(false));
         let trashed = std::rc::Rc::new(std::cell::Cell::new(false));
         let (sel, trash) = (selected.clone(), trashed.clone());
-        let item = MenuItem::run("团队版", move || sel.set(true), false)
+        let item = MenuItem::run("团队版", move |_ctx| sel.set(true), false)
             .subtitle("多人协作 + 权限管理")
             .badge("New", crate::theme::Intent::Danger)
-            .trailing_icon("🗑", move || trash.set(true));
+            .trailing_icon("🗑", move |_ctx| trash.set(true));
 
         let level = app.build_level(vec![item], 20, 20, 0, None, None);
         app.menu = Some(ContextMenu {
@@ -3321,9 +3356,9 @@ mod tests {
         let rebuild: Rc<dyn Fn() -> Vec<MenuItem>> = Rc::new(move || {
             let r = ran_cb.clone();
             vec![
-                MenuItem::run("甲", move || a.set(!a.get()), a.get()).stay_open(),
-                MenuItem::run("乙", move || b.set(!b.get()), b.get()).stay_open(),
-                MenuItem::run("执行", move || r.set(true), false),
+                MenuItem::run("甲", move |_ctx| a.set(!a.get()), a.get()).stay_open(),
+                MenuItem::run("乙", move |_ctx| b.set(!b.get()), b.get()).stay_open(),
+                MenuItem::run("执行", move |_ctx| r.set(true), false),
             ]
         });
 
@@ -3373,6 +3408,54 @@ mod tests {
         assert!(app.menu.is_none(), "动作项点击后菜单须关闭");
     }
 
+    /// 回调签名立法的核心回归：菜单项动作拿得到真正的 `EventCtx`，且它请求的副作用
+    /// 走的是与控件回调同一条宿主消费路径（toast 上屏、`defer_blocking` 经
+    /// `pending_dialog` 出口交给平台）。这正是过去必须绕道自由函数
+    /// `app::defer_blocking` 的那个缺口。
+    #[test]
+    fn menu_action_gets_ctx_and_its_requests_reach_the_host() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        let app = App::new("t", 400, 300).content(Element::col());
+        let mut app = app.into_handler_for_test();
+        let target = app.tree.root.unwrap();
+
+        let ran = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ran_cb = ran.clone();
+        let item = MenuItem::run(
+            "导出…",
+            move |ctx| {
+                let r = ran_cb.clone();
+                ctx.toast("开始导出");
+                ctx.defer_blocking(move || r.set(true));
+            },
+            false,
+        );
+
+        let level = app.build_level(vec![item], 20, 20, 0, None, None);
+        let rect = level.rect;
+        app.menu = Some(ContextMenu {
+            levels: vec![level],
+            target,
+            rebuild: None,
+        });
+        app.handle_menu_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(rect.x + 20, rect.y + MENU_VPAD + MENU_ITEM_H / 2),
+            MouseButton::Left,
+        ));
+
+        assert!(app.menu.is_none(), "动作项点击后菜单须关闭");
+        assert_eq!(app.toasts.len(), 1, "ctx.toast 应经宿主上屏");
+        assert!(!ran.get(), "延迟闭包在取走前不得执行");
+        let req = app
+            .take_dialog_request()
+            .expect("ctx.defer_blocking 应产出对话框请求");
+        req.run();
+        assert!(ran.get(), "平台执行请求后闭包才跑");
+    }
+
     #[test]
     fn sticky_refresh_preserves_panel_geometry() {
         // 面板宽度/位置不随重建变化：项文本变宽也不重新测量，否则指针下的项会在
@@ -3391,7 +3474,7 @@ mod tests {
             } else {
                 "短"
             };
-            vec![MenuItem::run(label, move || wide.set(!wide.get()), wide.get()).stay_open()]
+            vec![MenuItem::run(label, move |_ctx| wide.set(!wide.get()), wide.get()).stay_open()]
         });
 
         let level = app.build_level(rebuild(), 20, 20, 0, None, None);
@@ -3750,7 +3833,7 @@ mod tests {
     /// 整组为空时那条线就孤在那儿。让每个调用方自己回溯上一项，必然有漏网的分支。
     #[test]
     fn separators_collapse_around_empty_groups() {
-        let item = |s: &str| MenuItem::run(s, || {}, false);
+        let item = |s: &str| MenuItem::run(s, |_ctx| {}, false);
         let labels = |v: &Vec<MenuItem>| -> Vec<String> {
             v.iter()
                 .map(|i| {
@@ -3812,7 +3895,7 @@ mod tests {
     fn refresh_normalizes_every_level_not_just_the_root() {
         // 用不捕获环境的 fn：`rebuild` 要求 'static，捕获局部闭包会借用超期。
         fn item(s: &str) -> MenuItem {
-            MenuItem::run(s, || {}, false)
+            MenuItem::run(s, |_ctx| {}, false)
         }
         let labels = |v: &[MenuItem]| -> Vec<String> {
             v.iter()
@@ -3892,20 +3975,22 @@ mod tests {
             _ if active || it.checked => pal.accent,
             _ => pal.text,
         };
-        let del = MenuItem::run("删除", || {}, false).danger();
+        let del = MenuItem::run("删除", |_ctx| {}, false).danger();
         assert_eq!(pick(&del, false), pal.danger, "常态应为危险色");
         assert_eq!(
             pick(&del, true),
             pal.danger,
             "悬停仍应是危险色，不该变成 accent"
         );
-        let del_off = MenuItem::run("删除", || {}, false).danger().enabled(false);
+        let del_off = MenuItem::run("删除", |_ctx| {}, false)
+            .danger()
+            .enabled(false);
         assert_eq!(
             pick(&del_off, false),
             pal.text_disabled,
             "禁用胜过 intent——不可点的项不该还在喊危险"
         );
-        let plain = MenuItem::run("复制", || {}, false);
+        let plain = MenuItem::run("复制", |_ctx| {}, false);
         assert_eq!(pick(&plain, false), pal.text);
         assert_eq!(pick(&plain, true), pal.accent, "普通项悬停仍走强调色");
     }

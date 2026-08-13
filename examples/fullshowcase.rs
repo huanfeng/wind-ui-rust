@@ -162,7 +162,7 @@ fn main() {
                             CheckMenuItem::check("隐藏未启用", hide_disabled),
                             CheckMenuItem::check("显示特殊项", show_special),
                             CheckMenuItem::separator(),
-                            CheckMenuItem::action("恢复默认", || {}),
+                            CheckMenuItem::action("恢复默认", |_ctx| {}),
                         ],
                     )
                     .summary(|on| match on.len() {
@@ -407,7 +407,7 @@ fn main() {
                         ))
                     }),
             )
-            .on_span_click(|id, ctx| ctx.toast(format!("跳转词条：{id}")))
+            .on_span_click(|ctx, id| ctx.toast(format!("跳转词条：{id}")))
             .width_match(),
         ))
         .child(card(

@@ -33,7 +33,7 @@ pub struct DropdownItem {
     pub label: String,
     pub subtitle: Option<String>,
     pub badge: Option<(String, Intent)>,
-    pub trailing_icon: Option<(String, Rc<dyn Fn()>)>,
+    pub trailing_icon: Option<(String, crate::event::MenuActionFn)>,
 }
 
 impl DropdownItem {
@@ -56,7 +56,13 @@ impl DropdownItem {
         self
     }
     /// 尾随可独立点击的图标（仅展开态列表项）：点击只触发 `on_click`，不选中该项。
-    pub fn trailing_icon(mut self, icon: impl Into<String>, on_click: impl Fn() + 'static) -> Self {
+    /// 回调签名同 [`MenuItem::run`](crate::event::MenuItem::run) 的动作（`ctx` 在前，
+    /// `Fn` 是因为项要被克隆进浮层）。
+    pub fn trailing_icon(
+        mut self,
+        icon: impl Into<String>,
+        on_click: impl Fn(&mut EventCtx) + 'static,
+    ) -> Self {
         self.trailing_icon = Some((icon.into(), Rc::new(on_click)));
         self
     }
@@ -234,7 +240,7 @@ impl Dropdown {
                     .enumerate()
                     .map(|(i, o)| {
                         let sel = self.selected;
-                        MenuItem::run(o, move || sel.set(i), i == cur)
+                        MenuItem::run(o, move |_ctx| sel.set(i), i == cur)
                     })
                     .collect()
             }
@@ -247,7 +253,7 @@ impl Dropdown {
                     .enumerate()
                     .map(|(i, it)| {
                         let sel = self.selected;
-                        let mut mi = MenuItem::run(it.label, move || sel.set(i), i == cur);
+                        let mut mi = MenuItem::run(it.label, move |_ctx| sel.set(i), i == cur);
                         if let Some(sub) = it.subtitle {
                             mi = mi.subtitle(sub);
                         }
@@ -255,7 +261,7 @@ impl Dropdown {
                             mi = mi.badge(text, intent);
                         }
                         if let Some((icon, cb)) = it.trailing_icon {
-                            mi = mi.trailing_icon(icon, move || (*cb)());
+                            mi = mi.trailing_icon(icon, move |ctx| (*cb)(ctx));
                         }
                         mi
                     })
@@ -413,7 +419,11 @@ impl Widget for Dropdown {
 }
 
 /// 收起态文案生成器：入参是已开启的开关项标签（按声明顺序）。见 [`CheckMenu`]。
+/// 生成器（每次渲染现算文案）而非事件回调，故无 `ctx`、且是 `Fn`（要反复调用）。
 type SummaryFn = Rc<dyn Fn(&[&str]) -> String>;
+
+/// 开关项翻转后的通知：`ctx` 在首位，其后是已生效的新值。见 [`CheckMenuItem::on_change`]。
+type CheckChangeFn = Rc<dyn Fn(&mut EventCtx, bool)>;
 
 /// [`CheckMenu`] 的一项：开关项 / 普通动作项 / 分隔线。
 #[derive(Clone)]
@@ -423,13 +433,13 @@ pub enum CheckMenuItem {
         label: String,
         state: Signal<bool>,
         /// 翻转后通知（收到的是**新值**，默认翻转已经执行完）。用于落盘等副作用。
-        on_change: Option<Rc<dyn Fn(bool)>>,
+        on_change: Option<CheckChangeFn>,
         enabled: bool,
     },
     /// 普通动作项：点击执行并关闭菜单（与右键菜单的项同语义）。
     Action {
         label: String,
-        on_click: Rc<dyn Fn()>,
+        on_click: crate::event::MenuActionFn,
         enabled: bool,
     },
     /// 分隔线（不可命中）。
@@ -446,8 +456,10 @@ impl CheckMenuItem {
             enabled: true,
         }
     }
-    /// 动作项：点击执行 `f` 并关闭菜单。
-    pub fn action(label: impl Into<String>, f: impl Fn() + 'static) -> Self {
+    /// 动作项：点击执行 `f` 并关闭菜单。回调签名同
+    /// [`MenuItem::run`](crate::event::MenuItem::run) 的动作（`ctx` 在前，`Fn` 是因为
+    /// 项要被克隆进浮层、粘滞时还要重建后再执行）。
+    pub fn action(label: impl Into<String>, f: impl Fn(&mut EventCtx) + 'static) -> Self {
         Self::Action {
             label: label.into(),
             on_click: Rc::new(f),
@@ -460,7 +472,9 @@ impl CheckMenuItem {
     }
     /// 开关翻转后的通知（仅 `Check` 项有效）。回调收到新值，**不需要**自己再 `set`
     /// ——与 `CheckBox::on_toggle`「取代默认翻转」不同，这里是翻转之后的副作用钩子。
-    pub fn on_change(mut self, f: impl Fn(bool) + 'static) -> Self {
+    /// 签名 `Fn(&mut EventCtx, bool)`：`ctx` 恒在首位，新值跟在后面。`Fn` 而非 `FnMut`
+    /// 的理由同 [`CheckMenuItem::action`]（项被克隆进浮层）。
+    pub fn on_change(mut self, f: impl Fn(&mut EventCtx, bool) + 'static) -> Self {
         if let Self::Check { on_change, .. } = &mut self {
             *on_change = Some(Rc::new(f));
         }
@@ -559,11 +573,11 @@ impl CheckMenu {
                     let (st, cb) = (*state, on_change.clone());
                     let mut mi = MenuItem::run(
                         label.clone(),
-                        move || {
+                        move |ctx| {
                             let v = !st.get();
                             st.set(v);
                             if let Some(f) = &cb {
-                                f(v);
+                                f(ctx, v);
                             }
                         },
                         st.get(),
@@ -579,7 +593,7 @@ impl CheckMenu {
                     enabled,
                 } => {
                     let f = on_click.clone();
-                    MenuItem::run(label.clone(), move || f(), false).enabled(*enabled)
+                    MenuItem::run(label.clone(), move |ctx| f(ctx), false).enabled(*enabled)
                 }
                 CheckMenuItem::Separator => MenuItem::separator(),
             })
@@ -691,6 +705,20 @@ mod tests {
     use super::*;
     use crate::signal::signal;
 
+    /// 跑一个菜单项的动作。动作收 `&mut EventCtx`，宿主经 `Tree::run_detached` 借出，
+    /// 这里借一棵只有根节点的空树复现同一时机。
+    fn run_action(item: &MenuItem) {
+        let mut tree = crate::core::Tree::new();
+        let id = crate::ui::Element::col().build(&mut tree);
+        tree.root = Some(id);
+        match &item.action {
+            crate::event::MenuAction::Run(f) => {
+                tree.run_detached(id, |ctx| f(ctx));
+            }
+            _ => panic!("应为 Run 动作"),
+        }
+    }
+
     #[test]
     fn reactive_dropdown_reflects_option_signal() {
         let opts = signal(vec!["甲".to_string(), "乙".to_string()]);
@@ -722,7 +750,7 @@ mod tests {
             CheckMenuItem::check("甲", a),
             CheckMenuItem::separator(),
             CheckMenuItem::check("乙", b),
-            CheckMenuItem::action("执行", || {}),
+            CheckMenuItem::action("执行", |_ctx| {}),
         ];
         let built = CheckMenu::build_menu_items(&items, false);
         assert_eq!(built.len(), 4);
@@ -733,9 +761,7 @@ mod tests {
         assert!(!built[3].stay_open, "动作项恒为点击即关");
 
         // 触发开关项的动作 → Signal 翻转；重建后 checked 随之刷新（rebuild 的作用）。
-        if let crate::event::MenuAction::Run(f) = &built[0].action {
-            f();
-        }
+        run_action(&built[0]);
         assert!(a.get());
         assert!(CheckMenu::build_menu_items(&items, false)[0].checked);
     }
@@ -747,7 +773,7 @@ mod tests {
         let items = vec![
             CheckMenuItem::check("甲", signal(false)),
             CheckMenuItem::separator(),
-            CheckMenuItem::action("执行", || {}),
+            CheckMenuItem::action("执行", |_ctx| {}),
         ];
         let built = CheckMenu::build_menu_items(&items, true);
         assert!(built[0].stay_open, "开关项在粘滞模式下点了不关");
@@ -766,11 +792,9 @@ mod tests {
         let s = signal(false);
         let seen = Rc::new(Cell::new(None::<bool>));
         let sink = seen.clone();
-        let items = vec![CheckMenuItem::check("x", s).on_change(move |v| sink.set(Some(v)))];
+        let items = vec![CheckMenuItem::check("x", s).on_change(move |_ctx, v| sink.set(Some(v)))];
         let built = CheckMenu::build_menu_items(&items, false);
-        if let crate::event::MenuAction::Run(f) = &built[0].action {
-            f();
-        }
+        run_action(&built[0]);
         assert_eq!(seen.get(), Some(true));
         assert!(s.get(), "默认翻转已执行，回调无需自己 set");
     }

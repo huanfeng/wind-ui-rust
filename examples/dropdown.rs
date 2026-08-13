@@ -37,7 +37,9 @@ fn main() {
         DropdownItem::new("团队版")
             .subtitle("多人协作 + 权限管理")
             .badge("New", Intent::Danger)
-            .trailing_icon("🗑", || println!("点击了团队版的尾随图标（未选中该项）")),
+            .trailing_icon("🗑", |_ctx| {
+                println!("点击了团队版的尾随图标（未选中该项）")
+            }),
     ];
 
     let ui = Element::col()
@@ -64,11 +66,11 @@ fn main() {
                 "列表显示",
                 vec![
                     CheckMenuItem::check("隐藏未启用", hide_disabled)
-                        .on_change(|v| println!("隐藏未启用 → {v}")),
+                        .on_change(|_ctx, v| println!("隐藏未启用 → {v}")),
                     CheckMenuItem::check("显示特殊方案", show_special),
                     CheckMenuItem::check("紧凑行高", compact).enabled(false),
                     CheckMenuItem::separator(),
-                    CheckMenuItem::action("全部展开", || {
+                    CheckMenuItem::action("全部展开", |_ctx| {
                         println!("执行「全部展开」并关闭菜单")
                     }),
                 ],

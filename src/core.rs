@@ -2217,6 +2217,51 @@ impl Tree {
         res
     }
 
+    /// 在事件分发之外的时机为节点 `id` 借一个 [`EventCtx`] 执行 `f`，副作用按
+    /// `dispatch_key` 同款方式汇总成 [`DispatchResult`] 交宿主消费。
+    ///
+    /// 存在的理由：菜单项的动作闭包（[`MenuAction::Run`](crate::event::MenuAction::Run)）
+    /// 由宿主在浮层里执行，那时早已不在任何控件的 `on_event` 栈内，却仍需要
+    /// `ctx.defer_blocking` / `ctx.toast` / `ctx.request_close` 这些能力——没有这条
+    /// 通道，"能弹对话框的回调"和"不能弹的回调"就会分成两等。
+    ///
+    /// 与 [`Tree::call_on_event`] 的三点不同：
+    /// - **不取出目标节点的 widget**（调用者不是该控件自身），故闭包内经
+    ///   `ctx.tree_mut()` 触碰目标节点是安全的，无 `call_on_event` 的那条禁令；
+    /// - **不套 `signal::begin_event()` 括号**：括号会把信号写入降级成本节点局部
+    ///   脏区，而菜单动作写的多半是别处读的共享状态（勾选态、列表数据）。留在括号外
+    ///   即走 `Signal::set` 的"非事件期强制整窗"路径，宁可多画一帧；
+    /// - 不产出 `consumed`（这里没有待消费的事件），指针捕获请求也被丢弃——浮层已
+    ///   关闭，捕获无处安放。
+    ///
+    /// `id` 允许已失效（目标控件在菜单弹出后被重建）：`EventCtx` 的几何查询对死节点
+    /// 返回零矩形，动作照常执行。
+    pub(crate) fn run_detached(
+        &mut self,
+        id: NodeId,
+        f: impl FnOnce(&mut EventCtx),
+    ) -> DispatchResult {
+        let mut ctx = EventCtx {
+            tree: self,
+            self_id: id,
+            out: EventOutcome::default(),
+        };
+        f(&mut ctx);
+        let o = ctx.out;
+        DispatchResult {
+            repaint: o.repaint,
+            damage: o.damage,
+            close: o.close,
+            focus: o.focus,
+            consumed: false,
+            menu: o.menu,
+            open_url: o.open_url,
+            window_op: o.window_op,
+            toast: o.toast,
+            dialog: o.dialog,
+        }
+    }
+
     /// 分发键盘事件到焦点节点。
     pub fn dispatch_key(&mut self, ev: KeyEvent, focus: Option<NodeId>) -> DispatchResult {
         let mut res = DispatchResult::default();
@@ -3887,9 +3932,9 @@ mod tests {
         assert_eq!(menu.items.len(), 3, "三个选项");
         assert!(menu.items[0].checked, "当前项 A 应勾选");
         assert!(!menu.items[1].checked);
-        // 运行第三项动作 → 选中索引变 2。
+        // 运行第三项动作 → 选中索引变 2。动作收 ctx，按宿主的执行方式借一个（run_detached）。
         if let crate::event::MenuAction::Run(f) = &menu.items[2].action {
-            f();
+            tree.run_detached(dd, |ctx| f(ctx));
         } else {
             panic!("下拉项应为 Run 动作");
         }
@@ -3933,9 +3978,9 @@ mod tests {
         use crate::ui::Element;
         let tree_el = Element::col().fill().on_context_menu(|| {
             vec![
-                MenuItem::run("剪切", || {}, false).icon("✂"),
+                MenuItem::run("剪切", |_ctx| {}, false).icon("✂"),
                 MenuItem::separator(),
-                MenuItem::submenu("更多", vec![MenuItem::run("子项", || {}, false)]).icon("⋯"),
+                MenuItem::submenu("更多", vec![MenuItem::run("子项", |_ctx| {}, false)]).icon("⋯"),
             ]
         });
         let mut tree = layout(tree_el, 200, 200);
@@ -3967,7 +4012,7 @@ mod tests {
         let (o_build, o_click) = (on.clone(), on.clone());
         let tree_el = Element::col().fill().on_context_menu(move || {
             let o = o_click.clone();
-            vec![MenuItem::run("开关", move || o.set(!o.get()), o_build.get()).stay_open()]
+            vec![MenuItem::run("开关", move |_ctx| o.set(!o.get()), o_build.get()).stay_open()]
         });
         let mut tree = layout(tree_el, 200, 200);
         let (mut h, mut cap) = (None, None);
@@ -3982,8 +4027,9 @@ mod tests {
         assert!(!menu.items[0].checked, "初始未勾选");
         let rebuild = menu.rebuild.clone().expect("应交付重建器");
         // 模拟宿主：执行粘滞项动作后重跑重建器 → 勾选态跟着翻。
+        let root = tree.root.unwrap();
         if let crate::event::MenuAction::Run(f) = &menu.items[0].action {
-            f();
+            tree.run_detached(root, |ctx| f(ctx));
         }
         assert!(rebuild()[0].checked, "重建后勾选态应反映新值");
     }

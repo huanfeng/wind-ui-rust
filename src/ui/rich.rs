@@ -1298,8 +1298,8 @@ pub struct RichText {
     doc_version: Cell<u64>,
 }
 
-/// span 点击回调类型：携带被点 span 的 id。
-pub type SpanClickFn = Box<dyn FnMut(&str, &mut EventCtx)>;
+/// span 点击回调类型：`ctx` 在前（全库回调统一），其后是被点 span 的 id。
+pub type SpanClickFn = Box<dyn FnMut(&mut EventCtx, &str)>;
 
 impl RichText {
     pub fn new(doc: RichDoc) -> Self {
@@ -1948,7 +1948,7 @@ impl Widget for RichText {
                     if let (Some(a), Some(b)) = (pressed_id, over_id) {
                         if a == b {
                             if let Some(cb) = self.on_span_click.as_mut() {
-                                cb(&a, ctx);
+                                cb(ctx, &a);
                             }
                         }
                     }
@@ -2285,7 +2285,7 @@ mod tests {
             SpanStyle::new().underline(),
         ));
         let (mut tree, _node) = build(
-            Element::rich(doc).on_span_click(move |id, _| {
+            Element::rich(doc).on_span_click(move |_, id| {
                 assert_eq!(id, "fruit");
                 h2.set(h2.get() + 1);
             }),

@@ -148,7 +148,10 @@ pub(super) type CellRender = Rc<dyn Fn(usize, usize, &str) -> Option<Element>>;
 
 /// 行激活回调（双击整行触发）：携带行下标（语义同操作列/单元格渲染——客户端表格为原始
 /// 行下标，服务端表格为页内显示下标）。多行共享。落点在操作列按钮上时不触发（按钮先吃掉 Down）。
-pub(super) type OnRowActivate = Rc<dyn Fn(&mut EventCtx, usize)>;
+///
+/// `Rc<RefCell<dyn FnMut>>` 而非 `Rc<dyn Fn>`：一次性动作回调对外一律 `FnMut`
+/// （用户常在闭包里改捕获的状态），共享靠 `Rc`、可变靠 `RefCell`——与 [`OnSort`] 同款。
+pub(super) type OnRowActivate = Rc<RefCell<dyn FnMut(&mut EventCtx, usize)>>;
 
 /// 行右键菜单构建（右击整行触发）：`行下标 -> 菜单项`，返回空表示该行不弹菜单。
 /// 行下标语义同操作列/单元格渲染。多行共享（每行按自己的下标各调一次）。
@@ -364,7 +367,7 @@ impl Widget for HoverRow {
                     self.armed = false;
                     if p.button == MouseButton::Left && ctx.bounds().contains(p.pos) {
                         if let Some(cb) = self.activate.clone() {
-                            (cb)(ctx, self.idx);
+                            (cb.borrow_mut())(ctx, self.idx);
                         }
                     }
                     true
@@ -1778,7 +1781,7 @@ mod tests {
             )
             .on_row_context_menu(move |idx| {
                 seen_c.set(Some(idx));
-                vec![crate::event::MenuItem::run("删除", || {}, false)]
+                vec![crate::event::MenuItem::run("删除", |_ctx| {}, false)]
             })
             .width(400)
             .height(300),
@@ -1818,7 +1821,7 @@ mod tests {
             Element::table_sortable(vec![("v", 1.0)], vec![vec!["a"]], sort)
                 .on_row_context_menu(move |_| {
                     calls_c.set(calls_c.get() + 1);
-                    vec![crate::event::MenuItem::run("x", || {}, false)]
+                    vec![crate::event::MenuItem::run("x", |_ctx| {}, false)]
                 })
                 .width(400)
                 .height(300),
@@ -1850,7 +1853,7 @@ mod tests {
             .on_row_context_menu(|idx| {
                 vec![crate::event::MenuItem::run(
                     format!("行{idx}"),
-                    || {},
+                    |_ctx| {},
                     false,
                 )]
             })

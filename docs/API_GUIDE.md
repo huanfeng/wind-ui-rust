@@ -176,7 +176,9 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 - **颜色用缩写**：背景 `bg`、前景 `fg`，全库一致（`Element::bg`、`App::bg`、`Style.bg`、`EventCtx::set_bg`）。
 - **文本标签基本都是 `impl Into<String>`**：`button`、`label`、`checkbox`、`dropdown`、`list`、`tabs` 等的标题/选项均可传 `&str` 或 `String`（少数破例见 §11）。
 - **状态参数一律 `Signal<T>`**：`checkbox(label, Signal<bool>)`、`dropdown(options, Signal<usize>)`……第一个参数是内容、第二个是状态，顺序全库一致。
-- **事件回调 = `on_<动作>`**：目前 `on_click`。回调签名见 §7。
+- **事件回调 = `on_<动作>`**：`on_click`、`on_toggle`、`on_row_activate`……签名规则见 §8.1。
+  只有"发生了什么之后调"的才叫 `on_`；"每次渲染/构建时调"的**生成器**（`summary`、`actions`、
+  `cell_render`、`on_context_menu` 的 `build` 参数）返回内容而非响应事件，故不带前缀、不收 `ctx`。
 - **`xxx_xy(h, v)`** = 水平/垂直两参版本：`padding_xy`、`margin_xy`。注意这里 `h`=horizontal、`v`=vertical（与 `size(w, h)` 的 `h`=height 不同名同义，按方法语境区分）。
 - **`xxx_match` / `fill`** = 撑满父容器：`width_match`、`height_match`、`fill`（= 两者）。
 - **getter 不加 `get_`**（Rust 惯例）：`EventCtx::bounds()`、`id()`、`scroll_metrics()`。
@@ -231,7 +233,7 @@ Element::table_selectable(columns, rows, selected, sort)
 .cell_render(|row, col, text| None)                     // 自定义数据单元格；None 回退默认文本
 .cell_lines(2)                                          // 默认文本格最多显示几行
 .on_row_activate(|ctx, row| { /* 双击行 */ })
-.on_row_context_menu(|row| vec![MenuItem::run("删除", || {}, false)])
+.on_row_context_menu(|row| vec![MenuItem::run("删除", |_ctx| {}, false)])
 ```
 
 > ⚠️ **适用矩阵**：这些修饰符只对部分表格变体生效。误用时 **debug 构建下 `panic` 报错提示、
@@ -287,9 +289,9 @@ Element::dropdown_items(vec![item1, item2], selected)       // 富内容项（�
 Element::dropdown_items_signal(items, selected)           // items: Signal<Vec<DropdownItem>>
 Element::check_menu("列表显示", vec![             // 下拉式复选菜单：外观同 dropdown，面板是菜单
     CheckMenuItem::check("隐藏未启用", flag)      //   开关项（flag: Signal<bool>）
-        .on_change(|v| save(v)),                  //   翻转后通知（收到新值，默认翻转已执行）
+        .on_change(|_ctx, v| save(v)),             //   翻转后通知（收到新值，默认翻转已执行）
     CheckMenuItem::separator(),
-    CheckMenuItem::action("恢复默认", || {}),     //   动作项：点了执行并关闭
+    CheckMenuItem::action("恢复默认", |_ctx| {}),  //   动作项：点了执行并关闭
 ]).summary(|on| format!("显示 ({})", on.len()))   // 收起态文案（默认恒为标题；用摘要建议配 .width）
 //  默认点击即关（同普通菜单）；.stay_open() 改为开关点了不关、可连点，点面板外才收起
 Element::stepper(value, min, max, step)           // value: Signal<f64>；min/max/step: f64
@@ -324,7 +326,7 @@ Element::rich(
         .para(Para::new().styled("headword", "apple").text("  n. 苹果"))
         .section("例句", collapsed, |s| s.para("An apple a day…")),   // collapsed: Signal<bool>
 )
-    .on_span_click(|id, ctx| { /* 点了标了 id 的 span（词典交叉引用跳转） */ })
+    .on_span_click(|ctx, id| { /* 点了标了 id 的 span（词典交叉引用跳转） */ })
     .copy_menu(false)      // 关掉内建的右键「复制全部」（要挂自定义 on_context_menu 时先关）
 Element::rich_signal(doc)      // 动态富文本：doc: Signal<RichDoc>，整篇换文档（词典切词条）
 ```
@@ -802,7 +804,18 @@ Element::button("保存").on_click(|ctx: &mut EventCtx| {
     ctx.request_close();      // 关窗
 });
 ```
-`on_click` 接 `FnMut + 'static`（可改捕获的状态）。`visible_when` 接 `Fn`（纯查询）。
+**回调签名的四条规矩**（全库一致，看一个就会用其余的）：
+
+1. **`&mut EventCtx` 恒为第一参数**。它是"能力袋"不是数据，位置直觉同 `&mut self`；
+   固定在首位后，后面的参数才是这个回调真正关心的数据——
+   `on_span_click(|ctx, id| ..)`、`on_reorder(|ctx, from, to| ..)`、`on_row_activate(|ctx, row| ..)`。
+2. **一次性动作回调是 `FnMut`**：`on_click` / `on_toggle` / `on_row_activate` / `on_reorder` /
+   `on_sort` / `on_edit` / `on_drop_files` / `on_span_click`，闭包里可以改捕获的状态。
+3. **`Fn` 只用于要被反复调用或留存多份的闭包**，且每处都在文档里写明理由：
+   `visible_when` / `enabled_when`（每帧求值的纯谓词）、`summary` / `actions` / `cell_render` /
+   `on_context_menu` 的 `build`（生成器）、`MenuItem::run` 的动作（项会被克隆进浮层各级面板）。
+4. **每个回调都拿得到 `ctx`**——包括菜单项动作（见 §8.2）。库里没有"这个回调能弹对话框、
+   那个不能"的分层。生成器是例外，它产出的是数据，不响应事件。
 
 **受控复选框 `on_toggle`**：CheckBox 默认点击即翻转绑定的 `state`。需在翻转前介入（如弹确认对话框）时用 `.on_toggle(cb)`——设置后点击/键盘激活**不再自动翻转** `state`，改调回调，由你决定是否 `state.set(..)`。渲染始终跟随 `state` 当前值，确认前框不会勾上、零闪烁。
 ```rust
@@ -815,29 +828,34 @@ Element::checkbox("删除数据", state).on_toggle(move |_ctx| {
 文本输入已内建右键菜单（剪切/复制/粘贴/全选）。自定义控件可在 `on_event` 里：
 ```rust
 ctx.show_context_menu(pos, vec![
-    MenuItem::run("操作", || { /* ... */ }, false),
+    MenuItem::run("操作", |ctx| { /* ... */ }, false),
 ]);
 ```
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
+动作闭包收 `&mut EventCtx`（宿主在浮层里借给它），与 `on_click` 同形——`ctx.toast(..)`、
+`ctx.defer_blocking(..)`、`ctx.request_close()` 都能用。它是 `Fn` 不是 `FnMut`：项会被克隆进
+浮层的每一级面板、粘滞项还要重建后再执行同一份动作，要改状态请用 `Signal`。
 
 任意元素/容器挂菜单用 `Element::on_context_menu(build)`（命中沿父链冒泡到首个设了回调的节点）；
 **表格数据行**用 `Element::on_row_context_menu(|行下标| items)`——行是控件内部构建的，应用拿不到行元素：
 ```rust
 Element::table_sortable_server(cols, rows, sort, on_sort)
     .on_row_context_menu(move |disp| vec![
-        MenuItem::run("编辑…", move || open_edit(disp), false),
+        MenuItem::run("编辑…", move |_ctx| open_edit(disp), false),
         MenuItem::separator(),
-        MenuItem::run("删除", move || del(disp), false),
+        MenuItem::run("删除", move |_ctx| del(disp), false),
     ])
 ```
 `table_sortable` / `table_sortable_server` / `table_selectable` 三类都支持（右键与首列复选框不冲突）。
 菜单项**每次右击现取现建**，`check` / `enabled` 因而总反映右击当刻的数据。
 
-⚠ 两个坑：
-- `on_context_menu` 会让节点**吞命中**（同 `on_drop`/`tooltip`）。挂到原本透明的纯布局容器上，
-  它会开始拦截指针事件、遮住其下内容——挂在已吞命中的节点（有背景/`clickable()`/表格行）上。
-- 菜单项动作是无参 `Fn()`，**拿不到 `EventCtx`**。要弹原生文件对话框等阻塞调用，
-  用 `windui::app::defer_blocking(f)`（`EventCtx::defer_blocking` 的自由函数版本，见 §8.6）。
+⚠ 一个坑：`on_context_menu` 会让节点**吞命中**（同 `on_drop`/`tooltip`）。挂到原本透明的
+纯布局容器上，它会开始拦截指针事件、遮住其下内容——挂在已吞命中的节点（有背景/`clickable()`/
+表格行）上。
+
+`on_context_menu` / `on_row_context_menu` 的 `build` 参数是**生成器**（每次右击、以及粘滞项
+点击后重跑一遍产出项），不是事件回调：它不收 `ctx`，且必须是 `Fn`。要在菜单里做事的是各项的
+**动作**，那里有 `ctx`。
 
 ### 8.3 焦点与键盘
 - Tab / Shift+Tab 在 `focusable()` 控件间导航（框架自动维护焦点环）。
@@ -913,17 +931,23 @@ fn main() {
 ### 8.6 阻塞式原生调用的时机
 
 原生模态框（文件对话框、`MessageBoxW`）**不能在事件回调栈内同步弹**——它自带消息泵，
-会与还没返回的事件分发冲突（表现为鼠标捕获错乱、对话框卡死）。框架给了三个入口：
+会与还没返回的事件分发冲突（表现为鼠标捕获错乱、对话框卡死）。框架给了两个入口：
 
 | 场景 | 用什么 |
 |---|---|
-| 控件回调里（有 `ctx`），弹一个文件对话框 | `ctx.request_pick_file(dlg, on_result)` / `request_save_file` 等 |
-| 控件回调里，需要连弹多个（选文件→校验→选目录→确认） | `ctx.defer_blocking(f)` |
-| **没有 `ctx`**：右键/托盘菜单项的 `MenuItem::run` 动作 | `windui::app::defer_blocking(f)` |
+| 弹一个文件对话框 | `ctx.request_pick_file(dlg, on_result)` / `request_save_file` 等 |
+| 需要连弹多个（选文件→校验→选目录→确认），或任意阻塞流程 | `ctx.defer_blocking(f)` |
 
-三者都在事件分发**完全返回**后才执行闭包，闭包内可放心直接同步调 `PickDialog::pick_file()`
-等阻塞 API。自由函数版按排入顺序执行；若你实现了自定义 `AppHandler` 并覆盖了
-`take_dialog_request`，记得回退到 `crate::app::take_deferred()`，否则菜单项排入的闭包不会跑。
+两者都在事件分发**完全返回**后才执行闭包，闭包内可放心直接同步调 `PickDialog::pick_file()`
+等阻塞 API。
+
+**哪里有 `ctx`**：所有控件回调，以及菜单项动作（`MenuItem::run` 的闭包，见 §8.2）。
+0.12.0 之前菜单动作拿不到 `ctx`，得绕道自由函数 `windui::app::defer_blocking(f)`——
+它现在已 `#[deprecated]`，一律改用 `ctx.defer_blocking(f)`。托盘菜单项另有自己的
+`TrayCtx`（显隐窗口 / 退出 / 气泡通知）。
+
+> 若你实现了自定义 `AppHandler` 并覆盖了 `take_dialog_request`，且代码里还留着已废弃的自由
+> 函数，记得回退到 `crate::app::take_deferred()`，否则那条队列排入的闭包不会跑。
 
 ---
 
