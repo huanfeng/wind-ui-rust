@@ -62,10 +62,19 @@ impl ListRow {
             sel: Cell::new(Transition::new(on)),
         }
     }
-    /// 附带前置图标。
-    pub fn with_icon(mut self, icon: ImageContent) -> Self {
+    /// 前置图标（图片内容）。
+    pub fn icon_content(mut self, icon: ImageContent) -> Self {
         self.icon = Some(icon);
         self
+    }
+
+    /// 改名为 [`ListRow::icon_content`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `icon_content`：`with_` 在 Rust 生态里表示「带某配置构造」而非链式设属性；用 `_content` 后缀与 `Element::icon_content` 对齐，区别于收字形串的 `MenuItem::icon`"
+    )]
+    pub fn with_icon(self, icon: ImageContent) -> Self {
+        self.icon_content(icon)
     }
     /// 启用 pill 选中样式：选中/悬停底为内缩圆角矩形、去掉左缘强调条。
     pub fn pill(mut self) -> Self {
@@ -276,7 +285,7 @@ mod tests {
         let group = signal(0);
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
         let row = ListRow::new("Inbox".into(), group, 0)
-            .with_icon(ImageContent::new(Some(red)).fit(Fit::Fill));
+            .icon_content(ImageContent::new(Some(red)).fit(Fit::Fill));
         let mut pm = Pixmap::new(200, ROW_H as u32).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
         {

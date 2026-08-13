@@ -118,6 +118,53 @@
   方法名与同名 `pub` 字段（`icon`/`enabled` 等）共存合法且无歧义：`self.icon` 取字段、
   `item.icon(..)` 调方法，`stay_open` 字段与方法早已如此共存。
   **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除），去掉 `with_` 前缀即可。
+- **启用 / 可见两条轴的形态对称化（部分破坏性）**：这两条轴表达的是同一件事——"这个节点这一帧
+  算不算数"，此前却各长各的。`enabled` 收 `Signal<bool>`、`disabled` 收 `bool`、`visible` 收 `bool`
+  而没有信号版，于是"下一个该传什么"无从预测：想按信号显隐只能退回 `visible_when(move || s.get())`
+  绕一圈，而 `enabled(true)` 这种最直觉的写法根本不存在。现在每条轴一律三形态、命名规则相同：
+
+  | 轴 | 静态 | 信号 | 闭包 |
+  |---|---|---|---|
+  | 启用 | `enabled(bool)` | `enabled_signal(Signal<bool>)` | `enabled_when(\|\| ..)` |
+  | 可见 | `visible(bool)` | `visible_signal(Signal<bool>)` | `visible_when(\|\| ..)` |
+
+  三形态可叠加，取与；`disabled(bool)` 保留为 `enabled(!v)` 的取反便捷式（调用点常读作
+  "这个按钮是禁用的"）。`_signal` 后缀沿用本版第一批定下的命名基准。
+  **迁移（硬破坏，无法用 `#[deprecated]` 别名过渡——同名函数不能按参数类型重载）**：
+  `enabled(sig)` → `enabled_signal(sig)`。旧调用点会在编译期报 `E0308`（expected `bool`,
+  found `Signal<bool>`），不会静默改变行为。其余形态与旧代码兼容。
+- **`Element::disabled(true)` 不再泄漏信号槽**：旧实现是 `self.enabled = Some(signal(false))`——
+  信号槽的回收尚未实现，于是每一次**常量**禁用都在全局 arena 里占掉一个永不释放的槽位；
+  在按帧重建子树的场景（表格行、`list_signal`）里这是随时间线性增长的泄漏。改为落在新增的
+  `Node::enabled_static: bool` 上，与可见轴的 `Node::visible` 一一对应，不分配任何东西。
+  `Node` 同时新增 `vis_signal` 字段承载 `visible_signal`；两个新字段对**用字面量构造 `Node`**
+  的下游是 `E0063`（该结构体字段全 `pub` 且非 `#[non_exhaustive]`），正常经 `Element::build`
+  的用法不受影响。
+- **`Element::accordion` 的选中模型改用 `Option`（破坏性）**：`Signal<i32>` 以 `-1` 当"全部收起"
+  的哨兵，`-2`、`-7` 这些值则是未定义区——类型允许、语义没有。它的文档还自称与
+  `Element::tabs` 的 `Signal<usize>` "同构"，而两者类型根本不同。改为 `Signal<Option<usize>>`：
+  `None` = 全收起，`Some(i)` = 展开第 i 个，非法状态直接不可表示。与 `tabs` 的差别也因此说得清了
+  ——标签页恒有一页选中，手风琴可以全收起，正好差一个 `Option`。
+  `ExpandState::Single { sel }`（`pub`）随之改为同样的类型。
+  **迁移（硬破坏，同上，参数类型变化无法用别名过渡）**：`signal(-1)` → `signal(None)`，
+  `signal(0i32)` → `signal(Some(0usize))`；读取处 `sel.get() == 0` → `sel.get() == Some(0)`。
+- **排序状态从裸元组提升为命名类型 `SortKey`**：`(usize, SortOrder)` 这个"哪一列 + 什么方向"的
+  概念在四处公开签名里重复出现却没有名字，谁是列、谁是方向全靠位置约定，读代码时要回签名里数。
+  新增 `pub struct SortKey { pub column: usize, pub order: SortOrder }`（`Copy + Eq + Debug`，
+  已进 prelude），便捷构造 `SortKey::asc(col)` / `SortKey::desc(col)` / `SortKey::new(col, ord)`。
+  `table_sortable` / `table_sortable_server` / `table_selectable` 的 `sort` 参数与
+  `table_sortable_server` 的 `on_sort` 回调参数一并从 `Option<(usize, SortOrder)>` 换成
+  `Option<SortKey>`。
+  **迁移（硬破坏，类型变化）**：`Some((0, SortOrder::Asc))` → `Some(SortKey::asc(0))`；
+  解构处 `Some((col, ord))` → `Some(SortKey { column: col, order: ord })`。
+- **`ListRow` / `TabItem` / `TabBar` 去掉 `with_` 前缀**：`ListRow::with_icon` /
+  `TabItem::with_icon` → `icon_content`，`TabBar::with_style` → `style`。理由同上一条
+  `MenuItem` 的收敛（`with_*` 在 Rust 生态里表示"带某配置构造"而非链式设属性）。
+  两个图标方法没有跟着叫 `icon`：它们收的是 `ImageContent`（图片/SVG/RGBA），而 `MenuItem::icon`
+  收的是 `impl Into<String>`（字形/emoji）——同名不同义比带个旧前缀更容易踩。`_content` 后缀
+  与既有的 `Element::icon_content` 对齐，同一份 API 里"图标给的是图片内容"始终是这个词。
+  `Dropdown::with_items` / `with_items_reactive` **不在此列**：它们是真正的"带配置构造"，用法正确。
+  **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除）。
 
 ### Fixed
 - **软后端投影外缘的直角硬边**：阴影 pixmap 的模糊余量按 `2×半径` 留，而 3 趟 box-blur 每趟

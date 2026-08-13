@@ -40,7 +40,7 @@ pub mod prelude {
     pub use crate::theme::{Intent, Len, TableTheme, Theme};
     pub use crate::ui::{
         CheckMenuItem, CommitMode, DropdownItem, Element, ImageContent, ImageView, Link, Para,
-        RichColor, RichDoc, SortOrder, SortStyle, SpanStyle, Truncate, WindowButton,
+        RichColor, RichDoc, SortKey, SortOrder, SortStyle, SpanStyle, Truncate, WindowButton,
         WindowButtonKind,
     };
 }

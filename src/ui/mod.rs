@@ -45,7 +45,7 @@ pub use reorder::{CommitMode, DragHandle, ReorderList};
 pub use rich::{Para, RichColor, RichDoc, RichText, SpanStyle};
 pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
-pub use sortable_table::SortStyle;
+pub use sortable_table::{SortKey, SortStyle};
 pub use stepper::Stepper;
 pub use window_buttons::{WindowButton, WindowButtonKind};
 
@@ -69,8 +69,8 @@ pub enum Truncate {
     Middle, // te…xt
 }
 
-/// 表格排序方向。配合 [`Element::table_sortable`] 的受控排序状态
-/// `Signal<Option<(列下标, SortOrder)>>` 使用。
+/// 表格排序方向。与列下标一起构成 [`SortKey`]，配合 [`Element::table_sortable`]
+/// 的受控排序状态 `Signal<Option<SortKey>>` 使用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
     /// 升序（数值从小到大 / 字符串字典序）。
@@ -815,6 +815,7 @@ pub struct Element {
     widget: Box<dyn Widget>,
     children: Vec<Element>,
     visible: bool,
+    vis_signal: Option<Signal<bool>>,
     vis_cond: Option<Box<dyn Fn() -> bool>>,
     clip_children: bool,
     click: Option<ClickFn>,
@@ -822,6 +823,7 @@ pub struct Element {
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
     focusable: Option<bool>,
+    enabled_static: bool,
     enabled: Option<Signal<bool>>,
     en_cond: Option<Box<dyn Fn() -> bool>>,
     tooltip: Option<String>,
@@ -847,6 +849,7 @@ impl Element {
             widget: Box::new(EmptyWidget),
             children: Vec::new(),
             visible: true,
+            vis_signal: None,
             vis_cond: None,
             clip_children: false,
             click: None,
@@ -854,6 +857,7 @@ impl Element {
             context_menu: None,
             window_drag: false,
             focusable: None,
+            enabled_static: true,
             enabled: None,
             en_cond: None,
             tooltip: None,
@@ -1320,9 +1324,23 @@ impl Element {
         )
     }
 
-    /// 启用标志（绑定 `Signal<bool>`，运行期可切换）。**适用于任意控件/容器**：
-    /// 核心据此拦事件、跳 Tab、令控件置灰；禁用沿父链继承（禁用容器即禁用其全部子节点）。
-    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
+    /// 静态启用标志。**适用于任意控件/容器**：核心据此拦事件、跳 Tab、令控件置灰；
+    /// 禁用沿父链继承（禁用容器即禁用其全部子节点）。
+    ///
+    /// 启用轴与可见轴形态一致，按状态来源三选一：
+    ///
+    /// | | 静态 | 信号 | 闭包 |
+    /// |---|---|---|---|
+    /// | 启用 | `enabled(bool)` | [`enabled_signal`](Self::enabled_signal) | [`enabled_when`](Self::enabled_when) |
+    /// | 可见 | [`visible`](Self::visible) | [`visible_signal`](Self::visible_signal) | [`visible_when`](Self::visible_when) |
+    ///
+    /// 三者可叠加，取与。`enabled(false)` 与 [`disabled(true)`](Self::disabled) 等价。
+    pub fn enabled(mut self, on: bool) -> Self {
+        self.enabled_static = on;
+        self
+    }
+    /// 启用信号（绑定 `Signal<bool>`，运行期可切换）。语义同 [`enabled`](Self::enabled)。
+    pub fn enabled_signal(mut self, flag: Signal<bool>) -> Self {
         self.enabled = Some(flag);
         self
     }
@@ -1345,12 +1363,10 @@ impl Element {
         self
     }
 
-    /// 静态禁用（`true`=禁用）。`false` 为默认启用、无操作。适用于任意控件/容器。
-    pub fn disabled(mut self, on: bool) -> Self {
-        if on {
-            self.enabled = Some(crate::signal::signal(false));
-        }
-        self
+    /// 静态禁用（`true`=禁用）：[`enabled`](Self::enabled) 的取反便捷式，适用于任意控件/容器。
+    /// 调用点常读作「这个按钮是禁用的」而非「启用为假」，故两者并存。
+    pub fn disabled(self, on: bool) -> Self {
+        self.enabled(!on)
     }
     #[track_caller]
     fn config_button(mut self, f: impl FnOnce(&mut Button), who: &str) -> Self {
@@ -1485,6 +1501,20 @@ impl Element {
     #[track_caller]
     pub fn leading_icon(self, glyph: char) -> Self {
         self.config_text_input(|c| c.leading = Some(glyph))
+    }
+
+    /// 静态可见标志。不可见的节点本帧不显示、不命中，且**不占布局**
+    /// （区别于禁用——见 [`enabled`](Self::enabled) 处的三形态对照表）。
+    pub fn visible(mut self, v: bool) -> Self {
+        self.visible = v;
+        self
+    }
+
+    /// 可见信号（绑定 `Signal<bool>`，运行期可切换）。等价于
+    /// `visible_when(move || flag.get())`，但省掉闭包、与 [`enabled_signal`](Self::enabled_signal) 对称。
+    pub fn visible_signal(mut self, flag: Signal<bool>) -> Self {
+        self.vis_signal = Some(flag);
+        self
     }
 
     /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。
@@ -1863,7 +1893,7 @@ impl Element {
     ) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, (label, icon)) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(label.into(), selected, i).with_icon(icon);
+            let row = list::ListRow::new(label.into(), selected, i).icon_content(icon);
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -1899,10 +1929,15 @@ impl Element {
     }
 
     /// 手风琴（多面板折叠卡片）：带边框/圆角的卡片，逐面板「标题头 + 可折叠内容」，
-    /// 面板间分隔线。**单开互斥**版——`selected` 共享选中索引，`-1` = 全收起，初值即
-    /// 默认展开项（与 [`Element::tabs`] 的 `Signal<usize>` 选中模型同构）。
-    /// 点击某面板头展开它会自动收起其它面板。
-    pub fn accordion(selected: Signal<i32>, panels: Vec<(impl Into<String>, Element)>) -> Self {
+    /// 面板间分隔线。**单开互斥**版——`selected` 共享选中面板下标，`None` = 全收起，
+    /// 初值即默认展开项。点击某面板头展开它会自动收起其它面板。
+    ///
+    /// 与 [`Element::tabs`] 的 `Signal<usize>` 差一个 `Option`：标签页恒有一页选中，
+    /// 手风琴可以全收起。
+    pub fn accordion(
+        selected: Signal<Option<usize>>,
+        panels: Vec<(impl Into<String>, Element)>,
+    ) -> Self {
         Self::accordion_impl(panels, |i| nav::ExpandState::Single {
             sel: selected,
             index: i,
@@ -2004,7 +2039,7 @@ impl Element {
         let mut items = Vec::new();
         let mut content = Element::stack().fill().weight(1.0);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
-            items.push(containers::TabItem::new(title.into()).with_icon(icon));
+            items.push(containers::TabItem::new(title.into()).icon_content(icon));
             let sel2 = selected;
             content = content.child(page.fill().visible_when(move || sel2.get() == i));
         }
@@ -2035,7 +2070,7 @@ impl Element {
         style: containers::TabStyle,
     ) -> Self {
         let bar = Element::base(Layout::None)
-            .widget(containers::TabBar::new(items, selected).with_style(style))
+            .widget(containers::TabBar::new(items, selected).style(style))
             .width_match();
         Element::col().fill().spacing(16).child(bar).child(content)
     }
@@ -2345,7 +2380,7 @@ impl Element {
     ///
     /// # 示例
     /// ```ignore
-    /// let sort = signal(Some((0usize, SortOrder::Asc)));
+    /// let sort = signal(Some(SortKey::asc(0)));
     /// Element::table_sortable(
     ///     vec![("名称", 2.0), ("大小", 1.0)],
     ///     vec![vec!["a.txt", "12"], vec!["b.txt", "3"]],
@@ -2355,7 +2390,7 @@ impl Element {
     pub fn table_sortable(
         columns: Vec<(impl Into<String>, f32)>,
         rows: Vec<Vec<impl Into<String>>>,
-        sort: Signal<Option<(usize, SortOrder)>>,
+        sort: Signal<Option<SortKey>>,
     ) -> Self {
         let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
         let data: Vec<Vec<String>> = rows
@@ -2415,8 +2450,8 @@ impl Element {
     pub fn table_sortable_server(
         columns: Vec<(impl Into<String>, f32)>,
         rows: Signal<Vec<Vec<String>>>,
-        sort: Signal<Option<(usize, SortOrder)>>,
-        on_sort: impl FnMut(&mut EventCtx, Option<(usize, SortOrder)>) + 'static,
+        sort: Signal<Option<SortKey>>,
+        on_sort: impl FnMut(&mut EventCtx, Option<SortKey>) + 'static,
     ) -> Self {
         let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
         let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
@@ -2473,7 +2508,7 @@ impl Element {
         columns: Vec<(impl Into<String>, f32)>,
         rows: Vec<Vec<impl Into<String>>>,
         selected: Vec<Signal<bool>>,
-        sort: Signal<Option<(usize, SortOrder)>>,
+        sort: Signal<Option<SortKey>>,
     ) -> Self {
         let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
         let data: Vec<Vec<String>> = rows
@@ -2969,10 +3004,6 @@ impl Element {
         self.children.extend(cs);
         self
     }
-    pub fn visible(mut self, v: bool) -> Self {
-        self.visible = v;
-        self
-    }
 
     /// 递归落入 arena，返回根 NodeId。
     pub fn build(mut self, tree: &mut Tree) -> NodeId {
@@ -3004,7 +3035,9 @@ impl Element {
             widget,
             style: self.style,
             visible: self.visible,
+            vis_signal: self.vis_signal,
             vis_cond: self.vis_cond,
+            enabled_static: self.enabled_static,
             enabled: self.enabled,
             en_cond: self.en_cond,
             on_drop: self.on_drop,
@@ -4287,6 +4320,66 @@ mod tests {
         );
         let node = tree.hit_test(Point::new(10, 10)).expect("应命中控件");
         assert_eq!(tree.node_tooltip(node), None);
+    }
+
+    /// 启用/可见两轴的三形态（静态 / 信号 / 闭包）各自能独立关掉节点，且互为取与。
+    #[test]
+    fn enabled_and_visible_three_forms_each_gate() {
+        let en = signal(true);
+        let vis = signal(true);
+        let cond_en = signal(true);
+        let cond_vis = signal(true);
+        let tree = layout(
+            Element::col()
+                .fill()
+                .child(Element::button("静态").enabled(false).visible(false))
+                .child(
+                    Element::button("信号")
+                        .enabled_signal(en)
+                        .visible_signal(vis),
+                )
+                .child(
+                    Element::button("闭包")
+                        .enabled_when(move || cond_en.get())
+                        .visible_when(move || cond_vis.get()),
+                ),
+        );
+        let kids = tree.get(tree.root.unwrap()).unwrap().children.clone();
+        let node = |i: usize| tree.get(kids[i]).unwrap();
+        assert!(!node(0).own_enabled(), "enabled(false) 应禁用");
+        assert!(!node(0).effective_visible(), "visible(false) 应隐藏");
+        // 信号/闭包形态默认放行，翻转后各自关掉自己那一路。
+        assert!(node(1).own_enabled() && node(1).effective_visible());
+        assert!(node(2).own_enabled() && node(2).effective_visible());
+        en.set(false);
+        vis.set(false);
+        assert!(!node(1).own_enabled(), "enabled_signal(false) 应禁用");
+        assert!(!node(1).effective_visible(), "visible_signal(false) 应隐藏");
+        cond_en.set(false);
+        cond_vis.set(false);
+        assert!(!node(2).own_enabled(), "enabled_when 假值应禁用");
+        assert!(!node(2).effective_visible(), "visible_when 假值应隐藏");
+    }
+
+    /// 常量禁用只落静态位，不得为此分配信号——signal 槽尚未回收，
+    /// 每个 `.disabled(true)` 占一个永不释放的槽是纯泄漏。
+    #[test]
+    fn static_disable_allocates_no_signal() {
+        for el in [
+            Element::button("A").disabled(true),
+            Element::button("B").enabled(false),
+        ] {
+            let mut tree = Tree::new();
+            let id = el.build(&mut tree);
+            let n = tree.get(id).unwrap();
+            assert!(n.enabled.is_none(), "静态禁用不应挂信号");
+            assert!(!n.enabled_static, "静态禁用应落在 enabled_static 上");
+            assert!(!n.own_enabled());
+        }
+        // disabled(false) 是显式启用，与默认一致。
+        let mut tree = Tree::new();
+        let id = Element::button("C").disabled(false).build(&mut tree);
+        assert!(tree.get(id).unwrap().own_enabled());
     }
 
     #[test]

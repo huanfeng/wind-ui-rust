@@ -1,6 +1,6 @@
 //! 可排序数据表格的响应式驱动（`Element::table_sortable` 内部使用）。
 //!
-//! 两个响应式 widget 共享同一个 `Signal<Option<(列下标, SortOrder)>>` 排序状态：
+//! 两个响应式 widget 共享同一个 `Signal<Option<SortKey>>` 排序状态：
 //! - [`SortableHeader`]：挂在表头行上，排序状态变化时重建表头单元格（刷新箭头）。
 //! - [`SortableBody`]：挂在滚动正文上，排序状态变化时按列重排并重建数据行。
 //!
@@ -25,8 +25,44 @@ use crate::text::TextEngine;
 
 use super::{Element, SortOrder, Truncate, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y, TABLE_HEADER_PAD_Y};
 
-/// 受控排序状态：`None` 无排序；`Some((列下标, 方向))` 按该列排序。
-pub(super) type SortState = Signal<Option<(usize, SortOrder)>>;
+/// 排序键：按**哪一列**、以**什么方向**排。表格排序状态一律用 `Option<SortKey>`
+/// 承载——`None` 即未排序，故本类型自身不含"无排序"表示。
+///
+/// 从裸元组 `(usize, SortOrder)` 提升为命名类型：该二元组此前在四处公开签名里重复，
+/// 谁是列、谁是方向全靠位置约定，误传顺序编译期也发现不了（两字段类型不同，这里靠的是
+/// 字段名而非类型）。
+///
+/// # 示例
+/// ```
+/// use windui::prelude::*;
+/// let sort = signal(Some(SortKey::asc(0)));
+/// assert_eq!(sort.get(), Some(SortKey::new(0, SortOrder::Asc)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortKey {
+    /// 排序列下标（对应 `columns` 的下标）。
+    pub column: usize,
+    /// 排序方向。
+    pub order: SortOrder,
+}
+
+impl SortKey {
+    /// 指定列与方向。
+    pub const fn new(column: usize, order: SortOrder) -> Self {
+        Self { column, order }
+    }
+    /// 按该列升序。
+    pub const fn asc(column: usize) -> Self {
+        Self::new(column, SortOrder::Asc)
+    }
+    /// 按该列降序。
+    pub const fn desc(column: usize) -> Self {
+        Self::new(column, SortOrder::Desc)
+    }
+}
+
+/// 受控排序状态：`None` 无排序；`Some(SortKey)` 按该列该方向排序。
+pub(super) type SortState = Signal<Option<SortKey>>;
 
 /// 操作列配置：在表格尾部追加一列，单元格由 `build(行下标)` 按行生成任意控件
 /// （如 查看/编辑/删除 按钮组）。表头显示 `title`（不可排序），列宽按 `weight` 参与分配。
@@ -102,7 +138,7 @@ fn resolve_sort_style(ov: &SortStyle) -> ResolvedSort {
 
 /// 排序意图变更回调（服务端排序模式）：点表头更新 `sort` 后触发，携带新排序状态，
 /// 由应用据此重新拉取"当前页 + 该排序"的数据并写回正文数据信号。多个表头单元格共享。
-pub(super) type OnSort = Rc<RefCell<dyn FnMut(&mut EventCtx, Option<(usize, SortOrder)>)>>;
+pub(super) type OnSort = Rc<RefCell<dyn FnMut(&mut EventCtx, Option<SortKey>)>>;
 
 /// 自定义单元格渲染：`(行下标, 列下标, 单元格文本) -> Option<Element>`。
 /// 返回 `Some` 时该格用自定义控件（徽章/彩色标签等），`None` 回退默认文本渲染。
@@ -131,15 +167,15 @@ fn cmp_cells(a: &str, b: &str) -> Ordering {
 }
 
 /// 依当前排序状态求行序（返回原始行下标的排列）。`None` 时保持原序（稳定）。
-pub(super) fn sorted_order(rows: &[Vec<String>], sort: Option<(usize, SortOrder)>) -> Vec<usize> {
+pub(super) fn sorted_order(rows: &[Vec<String>], sort: Option<SortKey>) -> Vec<usize> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    if let Some((col, ord)) = sort {
+    if let Some(key) = sort {
         // sort_by 稳定：等值行保持原相对次序。
         order.sort_by(|&a, &b| {
-            let va = rows[a].get(col).map(String::as_str).unwrap_or("");
-            let vb = rows[b].get(col).map(String::as_str).unwrap_or("");
+            let va = rows[a].get(key.column).map(String::as_str).unwrap_or("");
+            let vb = rows[b].get(key.column).map(String::as_str).unwrap_or("");
             let c = cmp_cells(va, vb);
-            match ord {
+            match key.order {
                 SortOrder::Asc => c,
                 SortOrder::Desc => c.reverse(),
             }
@@ -149,14 +185,13 @@ pub(super) fn sorted_order(rows: &[Vec<String>], sort: Option<(usize, SortOrder)
 }
 
 /// 点击第 `ci` 列表头后的下一排序状态。循环：非活动列 → 升序；升序 → 降序；降序 → 取消。
-pub(super) fn next_sort(
-    current: Option<(usize, SortOrder)>,
-    ci: usize,
-) -> Option<(usize, SortOrder)> {
+pub(super) fn next_sort(current: Option<SortKey>, ci: usize) -> Option<SortKey> {
     match current {
-        Some((c, SortOrder::Asc)) if c == ci => Some((ci, SortOrder::Desc)),
-        Some((c, SortOrder::Desc)) if c == ci => None,
-        _ => Some((ci, SortOrder::Asc)),
+        Some(k) if k.column == ci => match k.order {
+            SortOrder::Asc => Some(SortKey::desc(ci)),
+            SortOrder::Desc => None,
+        },
+        _ => Some(SortKey::asc(ci)),
     }
 }
 
@@ -173,8 +208,10 @@ fn header_cell(
     rs: &ResolvedSort,
 ) -> Element {
     let glyph = match sort.get() {
-        Some((c, SortOrder::Asc)) if c == ci => rs.asc.clone(),
-        Some((c, SortOrder::Desc)) if c == ci => rs.desc.clone(),
+        Some(k) if k.column == ci => match k.order {
+            SortOrder::Asc => rs.asc.clone(),
+            SortOrder::Desc => rs.desc.clone(),
+        },
         _ => String::new(),
     };
     // 定宽箭头槽：始终预留，仅活动列显示字形。颜色未定死时用 TextMuted 角色随主题热切换。
@@ -1324,16 +1361,16 @@ mod tests {
     fn sorted_order_numeric_column_compares_as_numbers() {
         // 数值列："1280" < "20480" 数值序，而非 "1280" > "20480" 的字典序。
         let r = rows(&[&["a", "1280"], &["b", "3"], &["c", "20480"], &["d", "12"]]);
-        let asc = sorted_order(&r, Some((1, SortOrder::Asc)));
+        let asc = sorted_order(&r, Some(SortKey::asc(1)));
         assert_eq!(col_values(&r, &asc, 1), ["3", "12", "1280", "20480"]);
-        let desc = sorted_order(&r, Some((1, SortOrder::Desc)));
+        let desc = sorted_order(&r, Some(SortKey::desc(1)));
         assert_eq!(col_values(&r, &desc, 1), ["20480", "1280", "12", "3"]);
     }
 
     #[test]
     fn sorted_order_string_column_lexicographic() {
         let r = rows(&[&["banana"], &["apple"], &["cherry"]]);
-        let asc = sorted_order(&r, Some((0, SortOrder::Asc)));
+        let asc = sorted_order(&r, Some(SortKey::asc(0)));
         assert_eq!(col_values(&r, &asc, 0), ["apple", "banana", "cherry"]);
     }
 
@@ -1343,22 +1380,16 @@ mod tests {
         // 无排序：原序。
         assert_eq!(sorted_order(&r, None), [0, 1, 2]);
         // 等值列升序：稳定，等值行保持原相对次序。
-        assert_eq!(sorted_order(&r, Some((1, SortOrder::Asc))), [0, 1, 2]);
+        assert_eq!(sorted_order(&r, Some(SortKey::asc(1))), [0, 1, 2]);
     }
 
     #[test]
     fn next_sort_cycles_none_asc_desc_none() {
-        assert_eq!(next_sort(None, 0), Some((0, SortOrder::Asc)));
-        assert_eq!(
-            next_sort(Some((0, SortOrder::Asc)), 0),
-            Some((0, SortOrder::Desc))
-        );
-        assert_eq!(next_sort(Some((0, SortOrder::Desc)), 0), None);
+        assert_eq!(next_sort(None, 0), Some(SortKey::asc(0)));
+        assert_eq!(next_sort(Some(SortKey::asc(0)), 0), Some(SortKey::desc(0)));
+        assert_eq!(next_sort(Some(SortKey::desc(0)), 0), None);
         // 点另一列：从该列升序重新开始（不继承前列方向）。
-        assert_eq!(
-            next_sort(Some((0, SortOrder::Desc)), 1),
-            Some((1, SortOrder::Asc))
-        );
+        assert_eq!(next_sort(Some(SortKey::desc(0)), 1), Some(SortKey::asc(1)));
     }
 
     /// 布局一个 400×300 的可排序表格，返回 tree。
@@ -1450,11 +1481,11 @@ mod tests {
         );
         // 首列表头在左上（含内边距），点击落在其可点击区。
         click(&mut tree, Point::new(40, 18));
-        assert_eq!(sort.get(), Some((0, SortOrder::Asc)), "首次点击→升序");
+        assert_eq!(sort.get(), Some(SortKey::asc(0)), "首次点击→升序");
         // 再次布局让响应式表头/正文按新状态重建，再点同列。
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
         click(&mut tree, Point::new(40, 18));
-        assert_eq!(sort.get(), Some((0, SortOrder::Desc)), "再点同列→降序");
+        assert_eq!(sort.get(), Some(SortKey::desc(0)), "再点同列→降序");
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
         click(&mut tree, Point::new(40, 18));
         assert_eq!(sort.get(), None, "三点同列→取消排序");
@@ -1462,7 +1493,7 @@ mod tests {
 
     #[test]
     fn body_rebuilds_row_count_after_sort_change() {
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let mut tree = layout(
             Element::table_sortable(
                 vec![("名称", 1.0)],
@@ -1474,7 +1505,7 @@ mod tests {
         );
         // 改排序方向 → 下次布局触发正文 on_update 重建（clear+rebuild），不 panic 即路径健康；
         // 行序正确性由 sorted_order 单测覆盖。
-        sort.set(Some((0, SortOrder::Desc)));
+        sort.set(Some(SortKey::desc(0)));
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
     }
 
@@ -1519,7 +1550,7 @@ mod tests {
     #[test]
     fn sort_indicator_builder_reaches_header_widget() {
         // .sort_indicator(..) 应能定位表头并设入覆盖，且首次布局用该覆盖构建（不 panic 即链路通）。
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let el = Element::table_sortable(
             vec![("名称", 1.0), ("大小", 1.0)],
             vec![vec!["a", "2"], vec!["b", "1"]],
@@ -1630,7 +1661,7 @@ mod tests {
             .height(300),
         );
         sel[0].set(true); // 选中原始行 0（值 3）
-        sort.set(Some((0, SortOrder::Asc))); // 升序：显示序 1,2,3 → 行0 落到末尾
+        sort.set(Some(SortKey::asc(0))); // 升序：显示序 1,2,3 → 行0 落到末尾
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
         assert!(
             sel[0].get(),
@@ -1642,7 +1673,7 @@ mod tests {
     #[test]
     fn hovering_body_row_requests_repaint() {
         // 悬停正文行：Move 派发经祖先链到达行的 HoverRow → 置 hover + 请求重绘。
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let mut tree = layout(
             Element::table_sortable(
                 vec![("名称", 2.0), ("大小", 1.0)],
@@ -1927,7 +1958,7 @@ mod tests {
         // 仍回报该行的原始下标（可直接用作数据/选择索引）。
         use std::cell::Cell as StdCell;
         use std::rc::Rc;
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let seen: Rc<StdCell<Option<usize>>> = Rc::new(StdCell::new(None));
         let seen_c = seen.clone();
         let mut tree = layout(
@@ -1970,7 +2001,7 @@ mod tests {
     fn cell_render_customizes_cells_and_reports_original_row() {
         use std::cell::RefCell as StdRefCell;
         // 升序显示 1,2,3 → 显示序 = 原始行 1,2,0；renderer 应按原始行下标逐格询问。
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let seen: Rc<StdRefCell<Vec<(usize, usize, String)>>> =
             Rc::new(StdRefCell::new(Vec::new()));
         let seen_c = seen.clone();
@@ -2050,7 +2081,7 @@ mod tests {
         let sort = signal(None);
         let rows = signal(vec![vec!["a".to_string(), "2".to_string()]]);
         // 记录回调收到的排序意图（应与 sort 同步）。
-        let seen: Rc<StdCell<Option<(usize, SortOrder)>>> = Rc::new(StdCell::new(None));
+        let seen: Rc<StdCell<Option<SortKey>>> = Rc::new(StdCell::new(None));
         let fired = Rc::new(StdCell::new(0u32));
         let (seen_c, fired_c) = (seen.clone(), fired.clone());
         let mut tree = layout(
@@ -2068,16 +2099,16 @@ mod tests {
         );
         // 点首列表头：更新 sort → 升序，并触发回调携带同一值。
         click(&mut tree, Point::new(40, 18));
-        assert_eq!(sort.get(), Some((0, SortOrder::Asc)), "sort 信号更新");
+        assert_eq!(sort.get(), Some(SortKey::asc(0)), "sort 信号更新");
         assert_eq!(fired.get(), 1, "on_sort 回调被触发一次");
-        assert_eq!(seen.get(), Some((0, SortOrder::Asc)), "回调收到新排序意图");
+        assert_eq!(seen.get(), Some(SortKey::asc(0)), "回调收到新排序意图");
     }
 
     #[test]
     fn server_mode_body_renders_backend_order_without_internal_sort() {
         // 服务端模式：正文按数据信号给定顺序渲染，不做内部排序。
         // 给一份「已按后端逆序」的数据，前端应原样显示（若误做内部排序会被打乱）。
-        let sort = signal(Some((0usize, SortOrder::Asc)));
+        let sort = signal(Some(SortKey::asc(0)));
         let rows = signal(vec![
             vec!["c".to_string()],
             vec!["b".to_string()],

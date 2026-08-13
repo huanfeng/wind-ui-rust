@@ -235,13 +235,19 @@ impl Widget for EmptyWidget {
 }
 
 impl Node {
-    /// 该帧是否有效可见（静态 visible 与可见条件取与）。
+    /// 该帧是否有效可见：静态标志、可见信号、可见条件闭包三者取与
+    /// （对应 `Element::visible` / `visible_signal` / `visible_when`）。
     pub fn effective_visible(&self) -> bool {
-        self.visible && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
+        self.visible
+            && self.vis_signal.as_ref().is_none_or(|s| s.get())
+            && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
-    /// 本节点自身启用态（不含父链继承）：静态/响应式启用标志与启用条件闭包取与。
+    /// 本节点自身启用态（不含父链继承）：静态标志、启用信号、启用条件闭包三者取与
+    /// （对应 `Element::enabled` / `enabled_signal` / `enabled_when`）。与
+    /// [`effective_visible`](Self::effective_visible) 三形态一一对应。
     pub fn own_enabled(&self) -> bool {
-        self.enabled.as_ref().is_none_or(|c| c.get())
+        self.enabled_static
+            && self.enabled.as_ref().is_none_or(|c| c.get())
             && self.en_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
 }
@@ -292,10 +298,15 @@ pub struct Node {
     pub widget: Box<dyn Widget>,
     pub style: Style,
     pub visible: bool,
+    /// 运行期可见信号（None=无约束）。与 `visible`/`vis_cond` 取与。
+    pub vis_signal: Option<Signal<bool>>,
     /// 运行期可见条件（如 Tab 页绑定选中项、Dialog 绑定显示标志）。
     /// 与 `visible` 取与：返回 false 则该帧不参与测量/布局/绘制/命中。
     pub vis_cond: Option<Box<dyn Fn() -> bool>>,
-    /// 自身启用标志（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
+    /// 静态启用标志（`Element::enabled(bool)` / `disabled(bool)`）。是 `visible`
+    /// 在启用轴上的对应物——常量禁用不必为此占用一个信号槽。
+    pub enabled_static: bool,
+    /// 自身启用信号（None=无约束）。禁用沿父链继承：核心据有效启用态拦事件、
     /// 跳焦点，并把启用态传入 `Widget::paint` 供控件置灰。
     pub enabled: Option<Signal<bool>>,
     /// 运行期启用条件（如设置项的 enabled_when 联动）。与 `enabled` 取与：

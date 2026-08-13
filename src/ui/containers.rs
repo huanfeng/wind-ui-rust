@@ -633,10 +633,19 @@ impl TabItem {
     pub fn new(label: String) -> Self {
         Self { label, icon: None }
     }
-    /// 附带前置图标。
-    pub fn with_icon(mut self, icon: ImageContent) -> Self {
+    /// 前置图标（图片内容）。
+    pub fn icon_content(mut self, icon: ImageContent) -> Self {
         self.icon = Some(icon);
         self
+    }
+
+    /// 改名为 [`TabItem::icon_content`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `icon_content`：`with_` 在 Rust 生态里表示「带某配置构造」而非链式设属性；用 `_content` 后缀与 `Element::icon_content` 对齐，区别于收字形串的 `MenuItem::icon`"
+    )]
+    pub fn with_icon(self, icon: ImageContent) -> Self {
+        self.icon_content(icon)
     }
 }
 
@@ -707,9 +716,18 @@ impl TabBar {
     }
 
     /// 设定视觉风格（默认 [`TabStyle::Underline`]）。
-    pub fn with_style(mut self, style: TabStyle) -> Self {
+    pub fn style(mut self, style: TabStyle) -> Self {
         self.style = style;
         self
+    }
+
+    /// 改名为 [`TabBar::style`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `style`：`with_` 在 Rust 生态里表示「带某配置构造」（Vec::with_capacity）而非链式设属性"
+    )]
+    pub fn with_style(self, style: TabStyle) -> Self {
+        self.style(style)
     }
 
     /// 逐项度量。文字**恒按选中字重**测量：选中态会把字重提到 600，若按各自当前
@@ -1107,7 +1125,8 @@ mod tests {
         let w0 = bar(&["Home"], g).measure(Size::ZERO, &style, &mut te).w;
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
         let iconed = TabBar::new(
-            vec![TabItem::new("Home".into()).with_icon(ImageContent::new(Some(red)).fit(Fit::Fill))],
+            vec![TabItem::new("Home".into())
+                .icon_content(ImageContent::new(Some(red)).fit(Fit::Fill))],
             g,
         );
         let w1 = iconed.measure(Size::ZERO, &style, &mut te).w;

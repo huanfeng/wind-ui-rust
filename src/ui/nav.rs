@@ -365,9 +365,12 @@ impl Widget for CollapsibleHeader {
 /// 手风琴面板的展开状态模型：单开共享索引 / 多开独立布尔。
 #[derive(Clone)]
 pub enum ExpandState {
-    /// 单开互斥：共享选中索引，`-1` = 全收起。本面板展开 ⟺ `sel == index`。
+    /// 单开互斥：共享选中索引，`None` = 全收起。本面板展开 ⟺ `sel == Some(index)`。
     /// 点击展开本面板会把 `sel` 置为本索引，其它面板因 `sel != 其索引` 自动收起。
-    Single { sel: Signal<i32>, index: usize },
+    Single {
+        sel: Signal<Option<usize>>,
+        index: usize,
+    },
     /// 多开独立：本面板自己的展开布尔，互不影响。
     Multi(Signal<bool>),
 }
@@ -375,16 +378,19 @@ pub enum ExpandState {
 impl ExpandState {
     pub fn is_expanded(&self) -> bool {
         match self {
-            ExpandState::Single { sel, index } => sel.get() == *index as i32,
+            ExpandState::Single { sel, index } => sel.get() == Some(*index),
             ExpandState::Multi(f) => f.get(),
         }
     }
     fn toggle(&self) {
         match self {
             ExpandState::Single { sel, index } => {
-                let i = *index as i32;
-                // 已展开 → 收起（置 -1）；否则展开本面板（互斥收起其它）。
-                sel.set(if sel.get() == i { -1 } else { i });
+                // 已展开 → 收起（置 None）；否则展开本面板（互斥收起其它）。
+                sel.set(if sel.get() == Some(*index) {
+                    None
+                } else {
+                    Some(*index)
+                });
             }
             ExpandState::Multi(f) => f.set(!f.get()),
         }
@@ -595,7 +601,7 @@ mod tests {
 
     /// 构造一个三面板手风琴（标题 A/B/C）。初始全收起时各面板头依次纵向排布
     /// （header 40 高 + 面板间 1px 分隔线），body 收起不占位。
-    fn three_panel_accordion(sel: Signal<i32>) -> Element {
+    fn three_panel_accordion(sel: Signal<Option<usize>>) -> Element {
         Element::accordion(
             sel,
             vec![
@@ -610,24 +616,28 @@ mod tests {
     #[test]
     fn accordion_single_open_is_mutually_exclusive() {
         // 全收起时布局：header0 0..40, 分隔 40..41, header1 41..81, 分隔 81..82, header2 82..122。
-        let sel = signal(-1);
+        let sel = signal(None);
         let (mut tree, _root) = build(three_panel_accordion(sel));
         click(&mut tree, Point::new(40, 20)); // 点 A 头
-        assert_eq!(sel.get(), 0, "点击 A 应展开（selected=0）");
+        assert_eq!(sel.get(), Some(0), "点击 A 应展开（selected=Some(0)）");
         click(&mut tree, Point::new(40, 60)); // 点 B 头（互斥切换）
-        assert_eq!(sel.get(), 1, "单开互斥：展开 B 后 selected 应为 1");
+        assert_eq!(
+            sel.get(),
+            Some(1),
+            "单开互斥：展开 B 后 selected 应为 Some(1)"
+        );
         click(&mut tree, Point::new(40, 60)); // 再点 B 头
-        assert_eq!(sel.get(), -1, "再次点击已展开面板应收起为 -1");
+        assert_eq!(sel.get(), None, "再次点击已展开面板应收起为 None");
     }
 
     #[test]
     fn accordion_default_open_shows_initial_panel() {
-        // 初值 1 → 面板 B 展开：root 子节点 [h0,b0,div,h1,b1,div,h2,b2]，b1 可见、b0 不可见。
-        let sel = signal(1);
+        // 初值 Some(1) → 面板 B 展开：root 子节点 [h0,b0,div,h1,b1,div,h2,b2]，b1 可见、b0 不可见。
+        let sel = signal(Some(1));
         let (tree, root) = build(three_panel_accordion(sel));
         let kids = tree.get(root).unwrap().children.clone();
         let vis = |t: &Tree, n: NodeId| t.get(n).unwrap().effective_visible();
-        assert!(vis(&tree, kids[4]), "default_open=1 时 body B 应可见");
+        assert!(vis(&tree, kids[4]), "default_open=Some(1) 时 body B 应可见");
         assert!(!vis(&tree, kids[1]), "body A 应不可见");
     }
 
@@ -650,7 +660,7 @@ mod tests {
 
     #[test]
     fn accordion_key_enter_toggles() {
-        let sel = signal(-1);
+        let sel = signal(None);
         let (mut tree, root) = build(three_panel_accordion(sel));
         let header0 = tree.get(root).unwrap().children[0];
         tree.dispatch_key(
@@ -662,6 +672,6 @@ mod tests {
             },
             Some(header0),
         );
-        assert_eq!(sel.get(), 0, "回车应展开聚焦的面板头");
+        assert_eq!(sel.get(), Some(0), "回车应展开聚焦的面板头");
     }
 }

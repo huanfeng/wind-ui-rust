@@ -146,7 +146,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 |------|----------|------|
 | `checkbox` / `switch` / `collapsible` / `dialog` / `dialog_panel` | `Signal<bool>` | 开关 / 显隐 |
 | `radio` / `dropdown` / `segmented` / `list` / `list_pill` / `tabs` / `tabs_pill` | `Signal<usize>` | 选中索引 |
-| `accordion` | `Signal<i32>` | 选中面板，`-1` = 全收起 |
+| `accordion` | `Signal<Option<usize>>` | 选中面板，`None` = 全收起 |
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
 | `stepper` | `Signal<f64>` | 数值 |
 | `text_input` / `label_rc` / `rich_rc` | `Signal<String>`（`rich_rc` 为 `Signal<RichDoc>`） | 文本 |
@@ -154,9 +154,10 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `dropdown_reactive` | `Signal<Vec<String>>` | 动态选项 |
 | `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
 | `table_selectable` | `Vec<Signal<bool>>` | 每行一个选中信号 |
-| `table_sortable` / `_server` | `Signal<Option<(usize, SortOrder)>>` | 排序列 + 方向 |
+| `table_sortable` / `_server` | `Signal<Option<SortKey>>` | 排序列 + 方向（`SortKey { column, order }`） |
+| `visible_signal` / `enabled_signal` | `Signal<bool>` | 显隐 / 启用态（启用沿父链继承） |
 | `visible_when` / `enabled_when` | 闭包 `Fn() -> bool` | 派生显隐 / 启用 |
-| `enabled` | `Signal<bool>` | 启用态（沿父链继承） |
+| `visible` / `enabled` / `disabled` | `bool` | 静态显隐 / 启用 |
 
 **惯用法**：状态在 `main`（或你的 App 结构）里创建，直接按值传进控件和回调。需要"一处改、
 多处联动"时，把同一个信号传给多个控件即可——它们读的是同一份存储。
@@ -213,7 +214,8 @@ Element::table(vec![("列名", 2.0), ("大小", 1.0)], vec![vec!["a.txt", "12"]]
 Element::table_custom(vec![("列名".to_string(), 2.0)], rows_of_elements)
 // 可编辑：cells: Vec<Vec<Signal<String>>>，点格触发 on_edit(ctx, row, col)
 Element::table_editable(columns, cells, |ctx, r, c| { /* 弹编辑框 */ })
-// 客户端排序：点表头在 无 → 升序 → 降序 → 无 间循环；sort: Signal<Option<(usize, SortOrder)>>
+// 客户端排序：点表头在 无 → 升序 → 降序 → 无 间循环；sort: Signal<Option<SortKey>>
+//   SortKey { column, order }，便捷构造 SortKey::asc(0) / ::desc(0) / ::new(col, ord)
 Element::table_sortable(columns, rows, sort)
 // 服务端排序/分页：前端不排序，rows: Signal<Vec<Vec<String>>> 由 on_sort 回调里重新拉取写回
 Element::table_sortable_server(columns, rows, sort, |ctx, new_sort| { /* 拉数据后 rows.set(..) */ })
@@ -308,7 +310,7 @@ Element::nav_row("键盘设置").on_click(|ctx| { /* 钻入子页 */ })  // 左�
 Element::collapsible("高级选项", expanded, body)         // 可折叠分组（expanded: Signal<bool>）
                                                          //   body 经 visible_when 显隐，收起时不占布局
 Element::accordion(selected, vec![("面板一", body1), ("面板二", body2)])
-//   手风琴（单开互斥）：selected: Signal<i32>，-1 = 全收起，初值即默认展开项
+//   手风琴（单开互斥）：selected: Signal<Option<usize>>，None = 全收起，初值即默认展开项
 Element::accordion_multi(vec![("面板一", body1), ("面板二", body2)])
 //   手风琴（多开）：各面板独立展开，初始全部收起，无需外部状态
 ```
@@ -353,7 +355,7 @@ Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（le
 - **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
   ```rust
   Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon(path) / .icon_rgba(w,h,&rgba)
-  Element::button("提交").icon(path).enabled(can_submit)  // 禁用时背景/图标/文字一起置灰
+  Element::button("提交").icon(path).enabled_signal(can_submit)  // 禁用时背景/图标/文字一起置灰
   Element::button("删除").icon(path).disabled(true)               // 静态禁用
   ```
 
@@ -378,7 +380,7 @@ Element::button("X").icon_content(icon);
 let pic = ImageContent::from_bytes(base).tint(Color::WHITE);
 Element::image_content(pic);
 ```
-> **禁用是核心级通用能力**：`.enabled(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)` 可用于**任意控件或容器**。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
+> **禁用是核心级通用能力**：`.enabled(bool)` / `.enabled_signal(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)`（= `enabled(!v)`）可用于**任意控件或容器**。启用轴与可见轴形态一一对应（`visible` / `visible_signal` / `visible_when`），三形态可叠加、取与。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 

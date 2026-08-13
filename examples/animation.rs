@@ -82,7 +82,7 @@ fn main() {
     let step = signal(3.0f64);
     let listsel = signal(0usize);
     let tab = signal(0usize);
-    let acc = signal(0i32);
+    let acc = signal(Some(0usize));
 
     let toggles = card(
         "开关 / 勾选 / 单选（点击看过渡）",

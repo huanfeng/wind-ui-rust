@@ -265,7 +265,7 @@ fn main() {
                                  // 可折叠分组 + 导航行演示。
     let adv_expand = signal(true);
     // 手风琴：单开互斥共享索引（初值 0 = 默认展开第一面板）。
-    let acc_sel = signal(0i32);
+    let acc_sel = signal(Some(0usize));
     let nav_msg = signal(String::from("（点下方导航行试试）"));
     // 富文本演示：例句组折叠态 + 长释义 clamp 展开态。
     let rich_collapsed = signal(false);
@@ -883,12 +883,8 @@ fn main() {
         ))
         .child(card(
             "可排序表格 table_sortable（点表头循环 无→升→降；数值列按数值比较）",
-            Element::table_sortable(
-                file_cols(),
-                file_rows(),
-                signal(Some((0usize, SortOrder::Asc))),
-            )
-            .height(200),
+            Element::table_sortable(file_cols(), file_rows(), signal(Some(SortKey::asc(0))))
+                .height(200),
         ))
         .child(card(
             "操作列 .actions（末列自定义控件：查看/编辑/删除；回调按原始行下标绑定，排序后仍正确）",
@@ -896,7 +892,7 @@ fn main() {
                 // 窄窗下用两数据列 + 操作列，避免挤压换行；操作列做法与列数无关。
                 vec![("名称", 2.0), ("大小(KB)", 1.0)],
                 file_rows().into_iter().map(|r| vec![r[0], r[1]]).collect(),
-                signal(Some((0usize, SortOrder::Asc))),
+                signal(Some(SortKey::asc(0))),
             )
             // 尾列由闭包按行生成按钮组；row 为原始行下标（Copy），各按钮 move 捕获它绑定回调。
             // 用 .small() 紧凑按钮，让三枚操作按钮在窄列内并排不溢出。
@@ -976,7 +972,7 @@ fn main() {
                         file_cols(),
                         file_rows(),
                         sel.clone(),
-                        signal(Some((0usize, SortOrder::Asc))),
+                        signal(Some(SortKey::asc(0))),
                     )
                     .height(200),
                 )
@@ -1011,9 +1007,10 @@ fn main() {
                     .map(|r| r.into_iter().map(String::from).collect())
                     .collect();
                 // 「后端」按排序意图返回当前页（此处演示：全量排序后取全部；真实为 LIMIT/OFFSET）。
-                let backend = move |s: Option<(usize, SortOrder)>| -> Vec<Vec<String>> {
+                let backend = move |s: Option<SortKey>| -> Vec<Vec<String>> {
                     let mut rows = full.clone();
-                    if let Some((col, ord)) = s {
+                    if let Some(key) = s {
+                        let col = key.column;
                         rows.sort_by(|a, b| {
                             let c = match (a[col].parse::<f64>(), b[col].parse::<f64>()) {
                                 (Ok(x), Ok(y)) => {
@@ -1021,7 +1018,7 @@ fn main() {
                                 }
                                 _ => a[col].cmp(&b[col]),
                             };
-                            if matches!(ord, SortOrder::Desc) {
+                            if matches!(key.order, SortOrder::Desc) {
                                 c.reverse()
                             } else {
                                 c
@@ -1030,7 +1027,7 @@ fn main() {
                     }
                     rows
                 };
-                let sort = signal(Some((1usize, SortOrder::Asc)));
+                let sort = signal(Some(SortKey::asc(1)));
                 let page = signal(backend(sort.get())); // 当前页数据信号
                 Element::table_sortable_server(
                     file_cols(),
