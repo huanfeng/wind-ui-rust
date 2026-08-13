@@ -61,6 +61,16 @@
   同一个构建器要留两份（弹出时建项、粘滞项点击后重建），`FnMut` 独占交不出第二份，
   故 `core::MenuFn` 由 `Box<dyn FnMut>` 改为 `Rc<dyn Fn>`。
   迁移：构建器捕获的可变状态改放 `Cell`/`RefCell`/`Signal`（本来也该如此——它每次右击都跑）。
+- **`Signal<T>` 改为 `!Send` + `!Sync`（破坏性）**：此前它的字段全是 `Send`，于是自动实现了
+  `Send`，而运行时存储是 thread_local——句柄 move 进别的线程后 `set()`，查不到 slot 就走空
+  分支，不 panic 不报错、值直接丢掉，UI 侧毫无线索。这是从 `Rc<Cell<T>>` 迁到 `Signal` 时
+  丢掉的编译期保护（`Rc` 是 `!Send`，同样的错误代码在旧模型下根本编译不过）。
+  加零大小的 `PhantomData<*const ()>` 负标记补回，`Copy`/型变/8 字节布局均不受影响。
+  迁移：跨线程更新状态走 `App::channel` 拿 `Sender<Msg>`（`Msg: Send`，可 move 进工作线程），
+  在 UI 线程执行的 `on_message` 回调里写信号——回调本身不要求 `Send`，故能捕获信号。
+  因此报错的下游代码本就在静默丢值，编译失败是把运行期的哑故障提前到了编译期。
+  另：`set`/`update` 在 slot 缺失时补 `debug_assert`，与 `with`/`get` 的 panic 对齐，
+  消除"读会炸、写静默"的分裂（当前 slot 永不回收，该分支不可达，是留给日后释放作用域的护栏）。
 
 ## [0.11.1] - 2026-08-11
 
