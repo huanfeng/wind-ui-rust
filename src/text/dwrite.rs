@@ -4,10 +4,16 @@
 //! 1. `IDWriteTextLayout` 排版，`GetMetrics` 取尺寸。
 //! 2. 把目标区域的**真实背景**从 pixmap 拷入离屏 GDI 位图（BGRA）。
 //! 3. 自实现的 `IDWriteTextRenderer` 回调用**文字颜色**在该背景上 `DrawGlyphRun` 抗锯齿混合。
-//! 4. 读回位图，仅把 RGB 被字形改动的像素（含抗锯齿边缘）写回 pixmap，背景像素跳过。
+//! 4. 读回位图，仅把 RGB 相对拷入值发生改变的像素（含抗锯齿边缘）写回 pixmap，其余跳过。
 //!
-//! 注：背景拷入把预乘 RGBA 当直通使用，故仅在**不透明背景**（alpha=255）下颜色精确；
-//! 半透明背景区域的文字颜色为近似（当前 UI 以不透明为主）。
+//! 背景**不透明**（alpha=255）时，预乘 RGB 即直通 RGB，拷入的就是真背景，DirectWrite
+//! 混出的 RGB 直接就是最终颜色，输出恒不透明——这是绝大多数文字走的路径。
+//!
+//! 背景**非不透明**（alpha<255，`Element::opacity` 的离屏层是极端情形 alpha=0）时没有
+//! "真背景"可给：预乘 RGB 不是颜色，而离屏层的真实底色要到 `pop_layer` 才知道。此时改
+//! 拷入**探针色**（每通道取与文字色相距最远的黑或白），从混合结果反解每通道覆盖率，
+//! 再由我们自己做标准预乘 source-over——见 [`glyph_backdrop`] 与
+//! [`composite_glyph_over_translucent`]。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -162,6 +168,86 @@ pub fn register_private_use_font(path: &str, family: &str) -> Result<()> {
 
 /// 文本测量缓存容量上限；满则整体清空（周期性重测，命中率仍极高）。
 const MEASURE_CACHE_CAP: usize = 4096;
+
+/// 交给 DirectWrite 当"背景"用的 RGB。
+///
+/// - 目标像素**不透明**：预乘 RGB 就是直通 RGB，直接给真背景——DirectWrite 用系统
+///   校准的 gamma 在真色上抗锯齿，混出的结果即最终颜色，无需我们反推任何东西。
+/// - 目标像素**非不透明**：给探针色。每通道取 0 或 255 中离文字色更远的那个，使
+///   `|c − p| ≥ 128` 恒成立，覆盖率总能被稳定反解（见
+///   [`composite_glyph_over_translucent`]）。
+///
+/// 探针必须逐通道选而不是整体选黑或白：ClearType 的覆盖率本就是逐通道的，且逐通道
+/// 选才能保证**每个**通道都有足够大的分母。
+///
+/// 顺带解决一条老边界：判"该像素是否被字形覆盖"用的是"RGB 相对拷入值是否变化"。
+/// 拷入真背景时，文字色恰好等于背景色就无从分辨——纯黑文字画在（预乘 RGB 恒为 0 的）
+/// 透明层上正是这种情况，整段文字会被判成背景而**整体跳过**。探针与文字色永远相距
+/// ≥128，该判据于是重新可靠。
+fn glyph_backdrop(color: Color, dst: PremultipliedColorU8) -> (u8, u8, u8) {
+    if dst.alpha() == 255 {
+        (dst.red(), dst.green(), dst.blue())
+    } else {
+        let probe = |c: u8| if c >= 128 { 0 } else { 255 };
+        (probe(color.r), probe(color.g), probe(color.b))
+    }
+}
+
+/// 非不透明背景上的文字合成：从探针背景上的混合结果反解覆盖率，做预乘 source-over。
+///
+/// `dst` 为目标像素（预乘）、`color` 文字色（直通）、`backdrop` 拷给 DirectWrite 的探针色、
+/// `new` 为 DirectWrite 混出的 RGB。
+///
+/// DirectWrite 在探针色 `p` 上混出 `n = c·α + p·(1−α)`，故 `α = (n − p) / (c − p)`，
+/// 分母由 [`glyph_backdrop`] 保证 `|c − p| ≥ 128`。三通道各解一个 α（ClearType 的覆盖率
+/// 本就逐通道不同）后**取平均**得单一覆盖率 `a`，再乘进文字色自身的 alpha，做标准
+/// 预乘 source-over：
+///
+/// ```text
+/// out.rgb = c·a + dst.rgb·(1 − a)   （dst.rgb 已预乘，故这就是预乘输出）
+/// out.a   = a + dst.a·(1 − a)
+/// ```
+///
+/// ## 为什么必须先把三个覆盖率并成一个
+///
+/// 次像素抗锯齿要求每个通道有各自的 alpha，而 RGBA 只有一个——**离屏层上留不住
+/// ClearType**。曾试过"RGB 逐通道、alpha 取三者最大"，结果是低覆盖通道被那个大 alpha
+/// 遮掉了背景、却只补回自己那点文字色：某白底浅灰字的 R 通道实测比正确值暗了 109。
+/// 并成一个覆盖率即退化为灰度抗锯齿——浏览器给 `opacity` 子树的也是这个取舍，且取
+/// **平均**能让总墨量守恒（取 max 会整体加粗）。
+///
+/// 单一 `a` 同时保住预乘不变式 `rgb ≤ a`：`c ≤ 255` 且 `t ↦ 255t + dst.a·(1−t)` 单调递增。
+fn composite_glyph_over_translucent(
+    dst: PremultipliedColorU8,
+    color: Color,
+    backdrop: (u8, u8, u8),
+    new: (u8, u8, u8),
+) -> PremultipliedColorU8 {
+    let fa = color.a as u32;
+    // 单通道有效覆盖率（0..=255）：反解 α 后乘进文字色 alpha。
+    let coverage = |c: u8, p: u8, n: u8| -> u32 {
+        let den = c as i32 - p as i32;
+        if den == 0 {
+            return 0; // 探针保证不会发生；防御性兜底，按"未覆盖"处理。
+        }
+        let a = ((n as i32 - p as i32) * 255 / den).clamp(0, 255) as u32;
+        a * fa / 255
+    };
+    let a = (coverage(color.r, backdrop.0, new.0)
+        + coverage(color.g, backdrop.1, new.1)
+        + coverage(color.b, backdrop.2, new.2))
+        / 3;
+    let over = |c: u8, d: u8| ((c as u32 * a + d as u32 * (255 - a)) / 255) as u8;
+    let out_a = (a + dst.alpha() as u32 * (255 - a) / 255).min(255) as u8;
+    PremultipliedColorU8::from_rgba(
+        over(color.r, dst.red()),
+        over(color.g, dst.green()),
+        over(color.b, dst.blue()),
+        out_a,
+    )
+    // 上面的不变式论证保证 from_rgba 恒为 Some；真越界时保留目标像素而非 panic。
+    .unwrap_or(dst)
+}
 
 /// DirectWrite 文字引擎。
 ///
@@ -553,8 +639,9 @@ impl TextEngine for DWriteEngine {
         let ox = vis0;
         let oy = prect.y + (prect.h - th).max(0) / 2;
 
-        // 1. 把真实背景从 pixmap 拷入位图（BGRA）；DirectWrite 将在其上抗锯齿混合，
-        //    gamma 由 DirectWrite 自己正确处理（不再由我们反推覆盖率）。
+        // 1. 把背景从 pixmap 拷入位图（BGRA），DirectWrite 将在其上抗锯齿混合。
+        //    不透明处拷真背景（gamma 由 DirectWrite 自己正确处理）；非不透明处拷探针色，
+        //    留待读回时反解覆盖率（见 `glyph_backdrop`）。
         {
             let px = pixmap.pixels();
             for y in 0..ch {
@@ -564,11 +651,12 @@ impl TextEngine for DWriteEngine {
                     let off = (y * stride_px + x) as usize;
                     let bgra = if sx >= 0 && sx < pw && sy >= 0 && sy < ph {
                         let p = px[(sy * pw + sx) as usize];
-                        // 预乘 RGBA → BGRA（不透明像素预乘=直通；半透明近似）
+                        let (br, bg, bb) = glyph_backdrop(color, p);
+                        // GDI 的 DrawGlyphRun 只看 RGB，alpha 通道原样带着即可。
                         ((p.alpha() as u32) << 24)
-                            | ((p.red() as u32) << 16)
-                            | ((p.green() as u32) << 8)
-                            | (p.blue() as u32)
+                            | ((br as u32) << 16)
+                            | ((bg as u32) << 8)
+                            | (bb as u32)
                     } else {
                         0
                     };
@@ -625,25 +713,29 @@ impl TextEngine for DWriteEngine {
                     let nb = (new & 0xFF) as u8;
                     let ng = ((new >> 8) & 0xFF) as u8;
                     let nr = ((new >> 16) & 0xFF) as u8;
-                    // RGB 未变 = 背景未被字形覆盖，保持原预乘值。
-                    if nr == d.red() && ng == d.green() && nb == d.blue() {
+                    let bd = glyph_backdrop(color, d);
+                    // RGB 相对拷入值未变 = 该像素未被字形覆盖，保持原预乘值。
+                    if (nr, ng, nb) == bd {
                         continue;
                     }
-                    // 文字像素：DirectWrite 已在背景上混出不透明文字色 (nr,ng,nb)；
-                    // 再按 fg.alpha 与原背景二次混合，使 fg.alpha 乘进有效覆盖率（半透明文字色）。
-                    // fg.alpha=255 时下式退化为 new，逐像素等同旧逻辑（不透明文字零回归）。
-                    let fa = color.a as u32;
-                    let bg_a = d.alpha() as u32;
-                    let mix = |n: u8, b: u8| ((n as u32 * fa + b as u32 * (255 - fa)) / 255) as u8;
-                    let fr = mix(nr, d.red());
-                    let fgc = mix(ng, d.green());
-                    let fb = mix(nb, d.blue());
-                    // 输出 alpha 取背景 alpha（文字混入不透明背景仍不透明），按其预乘写回。
-                    let pr = (fr as u32 * bg_a / 255) as u8;
-                    let pg = (fgc as u32 * bg_a / 255) as u8;
-                    let pb = (fb as u32 * bg_a / 255) as u8;
-                    if let Some(p) = PremultipliedColorU8::from_rgba(pr, pg, pb, bg_a as u8) {
-                        px[idx] = p;
+                    if d.alpha() == 255 {
+                        // 不透明背景：DirectWrite 已在真背景上混出不透明文字色 (nr,ng,nb)；
+                        // 再按 fg.alpha 与原背景二次混合，使 fg.alpha 乘进有效覆盖率
+                        // （半透明文字色）。alpha=255 处预乘即直通，输出恒不透明。
+                        let fa = color.a as u32;
+                        let mix =
+                            |n: u8, b: u8| ((n as u32 * fa + b as u32 * (255 - fa)) / 255) as u8;
+                        if let Some(p) = PremultipliedColorU8::from_rgba(
+                            mix(nr, d.red()),
+                            mix(ng, d.green()),
+                            mix(nb, d.blue()),
+                            255,
+                        ) {
+                            px[idx] = p;
+                        }
+                    } else {
+                        // 非不透明背景（离屏层等）：从探针背景反解覆盖率后自行 source-over。
+                        px[idx] = composite_glyph_over_translucent(d, color, bd, (nr, ng, nb));
                     }
                 }
             }
@@ -1079,5 +1171,279 @@ mod private_use_font_tests {
             .expect("注册系统字体");
         assert!(eng.measure_cache.is_empty(), "换字体须清空测量缓存");
         assert!(eng.metrics_cache.is_empty(), "换字体须清空基线缓存");
+    }
+}
+
+/// 合成算术的纯函数测试：不碰 DirectWrite，也不需要图形环境。
+///
+/// 端到端用例（`layer_backdrop_tests`）证明"文字出现了"，这一组证明"数值是对的"——
+/// 覆盖率反解、预乘不变式、以及**不透明背景恒等**这条零回归的硬约束。
+#[cfg(test)]
+mod glyph_composite_tests {
+    use super::{composite_glyph_over_translucent, glyph_backdrop, Color};
+    use tiny_skia::PremultipliedColorU8;
+
+    fn premul(r: u8, g: u8, b: u8, a: u8) -> PremultipliedColorU8 {
+        PremultipliedColorU8::from_rgba(r, g, b, a).unwrap()
+    }
+    fn rgba(c: PremultipliedColorU8) -> (u8, u8, u8, u8) {
+        (c.red(), c.green(), c.blue(), c.alpha())
+    }
+
+    /// 不透明目标像素照旧拿到真背景——这条保证不透明路径的输入没变。
+    #[test]
+    fn opaque_pixel_gets_the_real_background() {
+        let d = premul(30, 60, 90, 255);
+        assert_eq!(glyph_backdrop(Color::hex(0xFFFFFF), d), (30, 60, 90));
+    }
+
+    /// 非不透明目标像素拿探针色：每通道与文字色相距 ≥128。
+    #[test]
+    fn translucent_pixel_gets_a_far_probe() {
+        let transparent = premul(0, 0, 0, 0);
+        for hex in [0x000000, 0xFFFFFF, 0x7F80A0, 0x3366CC] {
+            let c = Color::hex(hex);
+            let (pr, pg, pb) = glyph_backdrop(c, transparent);
+            for (ch, p) in [(c.r, pr), (c.g, pg), (c.b, pb)] {
+                assert!(p == 0 || p == 255, "探针只能取黑或白，实得 {p}");
+                assert!(
+                    (ch as i32 - p as i32).abs() >= 128,
+                    "文字色 {ch} 与探针 {p} 相距不足 128，覆盖率会失精"
+                );
+            }
+        }
+    }
+
+    /// 全覆盖 → 目标像素变成完全不透明的文字色，与原背景无关。
+    #[test]
+    fn full_coverage_yields_opaque_text_color() {
+        let transparent = premul(0, 0, 0, 0);
+        for hex in [0x000000, 0xFFFFFF, 0x3366CC] {
+            let c = Color::hex(hex);
+            let bd = glyph_backdrop(c, transparent);
+            // 全覆盖即 DirectWrite 混出文字色本身。
+            let out = composite_glyph_over_translucent(transparent, c, bd, (c.r, c.g, c.b));
+            assert_eq!(
+                rgba(out),
+                (c.r, c.g, c.b, 255),
+                "全覆盖应得不透明文字色 {hex:#08X}"
+            );
+        }
+    }
+
+    /// 半覆盖 → alpha 落在中段，预乘 RGB 随之减半。
+    #[test]
+    fn half_coverage_yields_half_alpha() {
+        let transparent = premul(0, 0, 0, 0);
+        let c = Color::hex(0xFFFFFF);
+        let bd = glyph_backdrop(c, transparent); // (0,0,0)
+        let out = composite_glyph_over_translucent(transparent, c, bd, (128, 128, 128));
+        let (r, g, b, a) = rgba(out);
+        assert!((120..=136).contains(&a), "半覆盖 alpha 应在中段，实得 {a}");
+        assert_eq!((r, g, b), (a, a, a), "白字预乘后 RGB 应等于 alpha");
+    }
+
+    /// 纯黑文字在透明层上：预乘 RGB 恒为 0，可见性全靠 alpha——探针把它救了回来。
+    #[test]
+    fn pure_black_text_survives_on_a_transparent_layer() {
+        let transparent = premul(0, 0, 0, 0);
+        let c = Color::hex(0x000000);
+        let bd = glyph_backdrop(c, transparent);
+        assert_eq!(bd, (255, 255, 255), "黑字的探针必须是白");
+        assert_eq!(
+            rgba(composite_glyph_over_translucent(
+                transparent,
+                c,
+                bd,
+                (0, 0, 0)
+            )),
+            (0, 0, 0, 255),
+            "全覆盖的黑字应为不透明黑"
+        );
+        let half = composite_glyph_over_translucent(transparent, c, bd, (128, 128, 128));
+        assert!(
+            (120..=136).contains(&half.alpha()),
+            "半覆盖的黑字 alpha 应在中段，实得 {}",
+            half.alpha()
+        );
+    }
+
+    /// 文字色自身半透明时，有效覆盖率随之打折。
+    #[test]
+    fn foreground_alpha_scales_the_coverage() {
+        let transparent = premul(0, 0, 0, 0);
+        let opaque_fg = Color::rgba(255, 255, 255, 255);
+        let half_fg = Color::rgba(255, 255, 255, 128);
+        let bd = glyph_backdrop(opaque_fg, transparent);
+        let full = composite_glyph_over_translucent(transparent, opaque_fg, bd, (255, 255, 255));
+        let faded = composite_glyph_over_translucent(transparent, half_fg, bd, (255, 255, 255));
+        assert_eq!(full.alpha(), 255);
+        assert!(
+            (124..=132).contains(&faded.alpha()),
+            "半透明文字色应把覆盖率折半，实得 {}",
+            faded.alpha()
+        );
+    }
+
+    /// 已有半透明内容之上叠字：alpha 只增不减（source-over 的基本性质）。
+    #[test]
+    fn compositing_never_lowers_the_destination_alpha() {
+        let c = Color::hex(0xFFFFFF);
+        for bg_a in [0u8, 1, 64, 128, 254] {
+            let d = premul(0, 0, 0, bg_a);
+            let bd = glyph_backdrop(c, d);
+            for n in [0u8, 40, 128, 200, 255] {
+                let out = composite_glyph_over_translucent(d, c, bd, (n, n, n));
+                assert!(
+                    out.alpha() >= bg_a,
+                    "alpha 不应下降：bg_a={bg_a} n={n} 实得 {}",
+                    out.alpha()
+                );
+            }
+        }
+    }
+
+    /// 预乘不变式在整个输入空间上成立——越界会让 `from_rgba` 返回 None，
+    /// 进而静默丢弃该像素（表现为字形上的洞）。
+    #[test]
+    fn output_is_always_valid_premultiplied() {
+        let c = Color::rgba(200, 30, 90, 170);
+        for bg_a in [0u8, 1, 77, 128, 200, 254] {
+            let d = premul(bg_a / 3, bg_a / 2, bg_a, bg_a);
+            let bd = glyph_backdrop(c, d);
+            for n in 0..=255u8 {
+                let out = composite_glyph_over_translucent(d, c, bd, (n, n / 2, 255 - n));
+                let a = out.alpha();
+                assert!(
+                    out.red() <= a && out.green() <= a && out.blue() <= a,
+                    "预乘越界 bg_a={bg_a} n={n}: {:?}",
+                    rgba(out)
+                );
+            }
+        }
+    }
+}
+
+/// 端到端：真实 DirectWrite 画进**透明离屏层**（`Element::opacity` 的载体）。
+///
+/// ★ 回归：读回阶段曾把输出 alpha 直接取自目标像素原有 alpha（"文字混入不透明背景
+/// 仍不透明"）。该前提在透明层上不成立——`bg_a == 0` 时每个文字像素都被写成
+/// `(0,0,0,0)`，整段文字被抹平，于是任何 `.opacity()` 子树里的文字**完全消失**，
+/// 且与 alpha 取值无关（0.99 与 0.65 一样全没）。
+#[cfg(test)]
+mod layer_backdrop_tests {
+    use super::{Color, DWriteEngine, Rect};
+    use crate::spec::Align;
+    use crate::text::{TextEngine, TextStyle};
+    use tiny_skia::Pixmap;
+
+    const W: u32 = 140;
+    const H: u32 = 30;
+
+    /// 在指定背景上画一行字，返回结果 pixmap。`fill=None` 即全透明层。
+    fn draw(fill: Option<tiny_skia::Color>, color: Color) -> Pixmap {
+        let mut pm = Pixmap::new(W, H).unwrap();
+        if let Some(c) = fill {
+            pm.fill(c);
+        }
+        let mut eng = DWriteEngine::new();
+        eng.set_scale(1.0);
+        eng.draw(
+            &mut pm,
+            "Wg吗",
+            Rect::new(0, 0, W as i32, H as i32),
+            color,
+            Align::Start,
+            &TextStyle::new(18.0),
+            None,
+        );
+        pm
+    }
+
+    /// 与初始背景不同的像素数（"画上去了多少墨"）。
+    fn ink(pm: &Pixmap, bg: tiny_skia::PremultipliedColorU8) -> usize {
+        pm.pixels()
+            .iter()
+            .filter(|p| {
+                p.red() != bg.red()
+                    || p.green() != bg.green()
+                    || p.blue() != bg.blue()
+                    || p.alpha() != bg.alpha()
+            })
+            .count()
+    }
+
+    /// 全透明层的初始像素值。
+    fn transparent() -> tiny_skia::PremultipliedColorU8 {
+        tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap()
+    }
+
+    /// 浅色文字画在全透明层上必须留下不透明度可见的墨。
+    #[test]
+    fn light_text_on_transparent_layer_is_visible() {
+        let pm = draw(None, Color::hex(0xE6E6E6));
+        let n = ink(&pm, transparent());
+        assert!(n > 20, "透明层上的文字不应被抹平，实得着墨像素 {n}");
+        assert!(
+            pm.pixels().iter().any(|p| p.alpha() > 200),
+            "字心应接近不透明"
+        );
+    }
+
+    /// 纯黑文字是最狠的边界：它与"透明黑"背景的 RGB 完全相同，若判据是
+    /// 「RGB 未变即未被字形覆盖」，整段文字会被判成背景而整体跳过。
+    #[test]
+    fn pure_black_text_on_transparent_layer_is_visible() {
+        let pm = draw(None, Color::hex(0x000000));
+        let n = ink(&pm, transparent());
+        assert!(n > 20, "纯黑文字在透明层上不应消失，实得着墨像素 {n}");
+        // 预乘形态：RGB 恒为 0，可见性完全体现在 alpha 上。
+        assert!(
+            pm.pixels().iter().any(|p| p.alpha() > 200),
+            "黑字字心 alpha 应接近 255"
+        );
+    }
+
+    /// 预乘不变式：任何通道都不得超过 alpha，否则合成到父层会溢出成亮边。
+    #[test]
+    fn transparent_layer_output_stays_premultiplied() {
+        for c in [0x000000, 0xE6E6E6, 0x3366CC] {
+            let pm = draw(None, Color::hex(c));
+            for p in pm.pixels() {
+                let a = p.alpha();
+                assert!(
+                    p.red() <= a && p.green() <= a && p.blue() <= a,
+                    "预乘越界：rgba=({},{},{},{}) 文字色 {c:#08X}",
+                    p.red(),
+                    p.green(),
+                    p.blue(),
+                    a
+                );
+            }
+        }
+    }
+
+    /// 不透明背景仍走原路径：输出恒不透明，且确实画上了字。
+    #[test]
+    fn text_on_opaque_background_stays_opaque() {
+        let white = tiny_skia::PremultipliedColorU8::from_rgba(255, 255, 255, 255).unwrap();
+        let pm = draw(Some(tiny_skia::Color::WHITE), Color::hex(0x000000));
+        assert!(ink(&pm, white) > 20, "不透明白底上应画出黑字");
+        assert!(
+            pm.pixels().iter().all(|p| p.alpha() == 255),
+            "不透明背景上的输出必须逐像素保持 alpha=255"
+        );
+    }
+
+    /// 半透明背景（0 < a < 255）：文字应把该处推向更不透明，而非维持原 alpha。
+    #[test]
+    fn text_on_translucent_background_raises_alpha() {
+        let half = tiny_skia::Color::from_rgba8(0, 0, 0, 128);
+        let pm = draw(Some(half), Color::hex(0xFFFFFF));
+        let max_a = pm.pixels().iter().map(|p| p.alpha()).max().unwrap();
+        assert!(
+            max_a > 200,
+            "字心应把半透明背景推向不透明，实得最大 alpha {max_a}"
+        );
     }
 }
