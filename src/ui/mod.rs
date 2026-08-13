@@ -2288,7 +2288,7 @@ impl Element {
         let mut body = Element::col().width_match();
         for (disp, &ri) in order.iter().enumerate() {
             body = body.child(sortable_table::body_row(
-                disp, ri, &data[ri], &weights, None, None, 1, None,
+                disp, ri, &data[ri], &weights, None, None, 1, None, None,
             ));
         }
         body.widget = Box::new(sortable_table::SortableBody::new(data, weights, sort));
@@ -2349,7 +2349,7 @@ impl Element {
         let mut body = Element::col().width_match();
         for (disp, row) in initial.iter().enumerate() {
             body = body.child(sortable_table::body_row(
-                disp, disp, row, &weights, None, None, 1, None,
+                disp, disp, row, &weights, None, None, 1, None, None,
             ));
         }
         body.widget = Box::new(sortable_table::PagedBody::new(rows, weights));
@@ -2559,6 +2559,42 @@ impl Element {
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
                 sortable_table::set_body_activate(body, &cb);
+            }
+        }
+        self
+    }
+
+    /// 整行**右键菜单**：右击某数据行时调用 `build(行下标)` 取菜单项并弹出级联浮层，
+    /// 返回空 `Vec` 则不弹。行下标语义同 [`actions`](Self::actions)：客户端表格
+    /// （[`table_sortable`](Self::table_sortable) / [`table_selectable`](Self::table_selectable)）
+    /// 为原始行下标，服务端表格（[`table_sortable_server`](Self::table_sortable_server)）
+    /// 为页内显示下标。三类表格均支持——右键不与首列复选框争语义（复选框只吃左键）。
+    ///
+    /// 菜单项**每次右击现取现建**：这样勾选态（`with_check`）、禁用态（`with_enabled`）
+    /// 都反映右击当刻的数据。回调挂在行容器上，右击行内任何位置（含空白、自定义单元格、
+    /// 操作列）都能弹。
+    ///
+    /// 项的动作是无参 `Fn()`（见 [`MenuItem::run`](crate::event::MenuItem::run)），拿不到
+    /// `EventCtx`；需要弹原生文件对话框等阻塞调用时用 [`crate::app::defer_blocking`]。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// Element::table_sortable_server(cols, rows, sort, on_sort)
+    ///     .on_row_context_menu(move |disp| vec![
+    ///         MenuItem::run("编辑…", move || open_edit(disp), false),
+    ///         MenuItem::separator(),
+    ///         MenuItem::run("删除", move || delete(disp), false),
+    ///     ])
+    /// ```
+    pub fn on_row_context_menu(
+        mut self,
+        build: impl Fn(usize) -> Vec<crate::event::MenuItem> + 'static,
+    ) -> Self {
+        let cb: sortable_table::OnRowMenu = Rc::new(build);
+        // 结构 col[ header, divider, scroll ]：scroll 为末子，其首个子节点挂响应式正文 widget。
+        if let Some(scroll) = self.children.last_mut() {
+            if let Some(body) = scroll.children.get_mut(0) {
+                sortable_table::set_body_menu(body, &cb);
             }
         }
         self

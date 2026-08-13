@@ -28,6 +28,42 @@ use crate::theme::Theme;
 thread_local! {
     /// 构建期收集所有 `Element::dialog` 注册的显示 Signal，供 ESC / WM_CLOSE 优先关闭对话框。
     static MODAL_SIGNALS: RefCell<Vec<Signal<bool>>> = const { RefCell::new(Vec::new()) };
+    /// 待执行的延迟闭包（[`defer_blocking`] 排入，平台在事件分发完全返回后取走执行）。
+    static DEFERRED: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 把一段包含阻塞式原生调用（文件对话框、`MessageBoxW` 等）的流程延迟到事件分发
+/// **完全返回**之后执行——[`EventCtx::defer_blocking`](crate::core::EventCtx::defer_blocking)
+/// 的无 `ctx` 版本。
+///
+/// 存在的理由：右键菜单项、托盘菜单项的动作是无参 `Fn()`（见
+/// [`MenuItem::run`](crate::event::MenuItem::run)），执行时虽已不在控件的 `on_event` 里，
+/// 却仍在平台的消息回调栈内，直接同步弹原生模态框会与对话框自己的消息泵冲突。菜单项
+/// 里想"导出到文件…"就只能经此排队。
+///
+/// 闭包按排入顺序执行；同一轮排入多个会在同一次取走中依次跑完。
+pub fn defer_blocking(f: impl FnOnce() + 'static) {
+    DEFERRED.with(|d| d.borrow_mut().push(Box::new(f)));
+}
+
+/// 取走全部延迟闭包，打包成一个 [`DialogRequest::Custom`]（无待执行项时返回 None）。
+///
+/// 复用 `DialogRequest` 通道而不是另开一条平台回调：平台侧已经在"事件分发完全返回"
+/// 这一时机轮询它，正是延迟闭包需要的时机，多开一条只会多一处要同步的时序约定。
+///
+/// 公开是给自定义 [`AppHandler`](crate::platform::AppHandler) 用的：覆盖了
+/// `take_dialog_request` 就绕过了默认实现，得在自己的实现里回退到本函数，
+/// 否则 [`defer_blocking`] 排入的闭包永远不会执行。
+pub fn take_deferred() -> Option<DialogRequest> {
+    let pending: Vec<Box<dyn FnOnce()>> = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    if pending.is_empty() {
+        return None;
+    }
+    Some(DialogRequest::Custom(Box::new(move || {
+        for f in pending {
+            f();
+        }
+    })))
 }
 
 /// 注册一个对话框显示信号（由 `Element::dialog` 在构建期调用）。
@@ -2732,8 +2768,9 @@ impl AppHandler for UiHost {
         self.pending_window_op.take()
     }
 
+    /// 控件经 `EventCtx` 请求的对话框优先；没有则取延迟闭包队列（菜单项等无 ctx 的入口）。
     fn take_dialog_request(&mut self) -> Option<DialogRequest> {
-        self.pending_dialog.take()
+        self.pending_dialog.take().or_else(take_deferred)
     }
 
     fn cursor(&self) -> CursorShape {
@@ -2975,6 +3012,29 @@ mod tests {
     fn on_interval_registers() {
         let app = App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), || {});
         assert_eq!(app.intervals.len(), 1);
+    }
+
+    /// `defer_blocking` 排入的闭包由 `take_dialog_request` 取走，且**取走时还没跑**——
+    /// 它必须等到平台在事件分发完全返回后才 `run()`，这正是它存在的意义。
+    #[test]
+    fn deferred_closures_run_only_when_dialog_request_is_executed() {
+        use std::cell::Cell as StdCell;
+        let hits: Rc<StdCell<usize>> = Rc::new(StdCell::new(0));
+        let (a, b) = (hits.clone(), hits.clone());
+        defer_blocking(move || a.set(a.get() + 1));
+        defer_blocking(move || b.set(b.get() + 10));
+
+        let mut host = App::new("t", 100, 100)
+            .content(Element::col())
+            .into_handler_for_test();
+        let req = host.take_dialog_request().expect("应取到延迟闭包请求");
+        assert_eq!(hits.get(), 0, "取走时不该已经执行");
+        req.run();
+        assert_eq!(hits.get(), 11, "两个闭包应按排入顺序都跑到");
+        assert!(
+            host.take_dialog_request().is_none(),
+            "队列已取空，不应重复交付"
+        );
     }
 
     /// 默认（未开 hide_on_close）：关闭请求获准 → 真关，不留窗口操作。

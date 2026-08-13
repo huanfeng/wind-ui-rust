@@ -6,6 +6,19 @@
 ## [Unreleased]
 
 ### Added
+- **表格行右键菜单 `Element::on_row_context_menu`**：右击数据行时按行下标现取现建菜单项并
+  弹级联浮层，返回空 `Vec` 则不弹。三类表格（`table_sortable` / `table_sortable_server` /
+  `table_selectable`）均支持——右键与首列复选框不争语义（复选框只吃左键），故不像整行双击
+  激活那样把可选表格排除在外。菜单**每次右击重建**，`with_check` / `with_enabled` 才能反映
+  右击当刻的数据；回调挂在行容器上，行内空白、自定义单元格、操作列上右击都能弹。
+  表格行是控件内部构建的，应用侧拿不到行 `Element`，故这条接线只能由框架提供。
+- **无 `ctx` 的延迟执行 `app::defer_blocking`**：把含阻塞式原生调用（文件对话框、
+  `MessageBoxW` 等）的流程排到事件分发**完全返回**之后执行，是 `EventCtx::defer_blocking`
+  的自由函数版本。菜单项动作是无参 `Fn()`（`MenuItem::run`），执行时虽已不在控件的
+  `on_event` 里、却仍在平台消息回调栈内，直接同步弹原生模态框会与对话框自身的消息泵冲突；
+  右键菜单里的"导出到文件…"这类项此前**无法表达**，只能靠把动作挪回工具栏按钮绕开。
+  复用既有的 `DialogRequest::Custom` 通道交付（平台已在正确时机轮询它），
+  `AppHandler::take_dialog_request` 的默认实现即取该队列，自定义 handler 覆盖时记得回退到它。
 - **私用区回退字体 `text::register_private_use_font`**：注册一个 `.ttf` 后，文本里落在
   Unicode 私用区的码位改用它渲染，其余字符不受影响。图标字体（Font Awesome、Material
   Icons 等）的字形全部落在私用区，注册后即可把图标码位当普通文字放进任何 `label`/`button`，

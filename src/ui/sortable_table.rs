@@ -114,6 +114,14 @@ pub(super) type CellRender = Rc<dyn Fn(usize, usize, &str) -> Option<Element>>;
 /// 行下标，服务端表格为页内显示下标）。多行共享。落点在操作列按钮上时不触发（按钮先吃掉 Down）。
 pub(super) type OnRowActivate = Rc<dyn Fn(&mut EventCtx, usize)>;
 
+/// 行右键菜单构建（右击整行触发）：`行下标 -> 菜单项`，返回空表示该行不弹菜单。
+/// 行下标语义同操作列/单元格渲染。多行共享（每行按自己的下标各调一次）。
+///
+/// 回调挂在**行容器**上而非各单元格：右击行内任何位置（含空白与自定义单元格）都能弹，
+/// 由框架沿父链冒泡到行节点。落在操作列按钮上时按钮若不接右键，仍冒泡到行——
+/// 与双击激活"按钮先吃掉 Down"的行为不同，右键在分发层就只发给接右键的节点。
+pub(super) type OnRowMenu = Rc<dyn Fn(usize) -> Vec<crate::event::MenuItem>>;
+
 /// 单元格值比较：两侧都能解析为数值时按数值比，否则按字符串（区分大小写）。
 fn cmp_cells(a: &str, b: &str) -> Ordering {
     match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
@@ -391,7 +399,8 @@ fn data_cell(
 /// 构建一行正文：`disp` 为显示位置（决定斑马纹），`orig` 为该行下标（传给操作列/单元格生成器），
 /// `cells` 为该行各列文本。结构与 `table_custom` 一致：`col[ row(单元格…), divider ]`。
 /// 行挂 `HoverRow` widget，悬停时整行轻微高亮。`actions` 为 `Some` 时在末尾追加操作单元格；
-/// `render` 为 `Some` 时逐格询问自定义渲染（`None` 回退默认文本）。
+/// `render` 为 `Some` 时逐格询问自定义渲染（`None` 回退默认文本）；`menu` 为 `Some` 时整行
+/// 可右键弹出上下文菜单。
 pub(super) fn body_row(
     disp: usize,
     orig: usize,
@@ -401,6 +410,7 @@ pub(super) fn body_row(
     render: Option<&CellRender>,
     lines: usize,
     activate: Option<&OnRowActivate>,
+    menu: Option<&OnRowMenu>,
 ) -> Element {
     let mut tr = Element::row().width_match().cross(Align::Stretch);
     // 斑马纹随显示位置交替（而非原始行号），排序后视觉仍规整。
@@ -415,10 +425,26 @@ pub(super) fn body_row(
         tr = tr.child(action_cell((a.build)(orig), a.weight));
     }
     tr.widget = Box::new(HoverRow::with_activate(orig, activate.cloned()));
+    tr = with_row_menu(tr, orig, menu);
     Element::col()
         .width_match()
         .child(tr)
         .child(Element::divider())
+}
+
+/// 给行容器挂上下文菜单（`menu` 为 `None` 时原样返回）。
+///
+/// 单独成函数是为了让两种行（[`body_row`] / [`select_body_row`]）走同一条接线：
+/// 菜单项按**该行自己的下标**现取现构建，右键当刻的数据才是对的——把 `Vec<MenuItem>`
+/// 在建行时就算好并存起来的话，行数据变了菜单还是旧的。
+fn with_row_menu(row: Element, idx: usize, menu: Option<&OnRowMenu>) -> Element {
+    match menu {
+        Some(m) => {
+            let m = m.clone();
+            row.on_context_menu(move || m(idx))
+        }
+        None => row,
+    }
 }
 
 /// 清空某节点的全部子节点（递归释放子树 arena slot）。
@@ -541,7 +567,9 @@ pub(super) struct SortableBody {
     cell_lines: usize,
     /// 整行双击激活回调（由 `Element::on_row_activate` 设置）。
     activate: Option<OnRowActivate>,
-    /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate` 置位——初始 eager 行不含它们，需重建一次）。
+    /// 整行右键菜单构建（由 `Element::on_row_context_menu` 设置）。
+    menu: Option<OnRowMenu>,
+    /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate`/`set_menu` 置位——初始 eager 行不含它们，需重建一次）。
     force: bool,
     last_version: u64,
 }
@@ -557,6 +585,7 @@ impl SortableBody {
             render: None,
             cell_lines: 1,
             activate: None,
+            menu: None,
             force: false,
         }
     }
@@ -564,6 +593,12 @@ impl SortableBody {
     /// 设置整行双击激活回调；置 `force` 令首次 on_update 重建（把激活能力纳入）。
     pub(super) fn set_activate(&mut self, activate: OnRowActivate) {
         self.activate = Some(activate);
+        self.force = true;
+    }
+
+    /// 设置整行右键菜单构建；置 `force` 令首次 on_update 重建（把菜单纳入）。
+    pub(super) fn set_menu(&mut self, menu: OnRowMenu) {
+        self.menu = Some(menu);
         self.force = true;
     }
 
@@ -608,6 +643,7 @@ impl Widget for SortableBody {
                 self.render.as_ref(),
                 self.cell_lines,
                 self.activate.as_ref(),
+                self.menu.as_ref(),
             );
             let id = el.build(tree);
             tree.add_child(self_id, id);
@@ -648,7 +684,9 @@ pub(super) struct PagedBody {
     cell_lines: usize,
     /// 整行双击激活回调（由 `Element::on_row_activate` 设置）。生成器收到当前页内显示下标。
     activate: Option<OnRowActivate>,
-    /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate` 置位）。
+    /// 整行右键菜单构建（由 `Element::on_row_context_menu` 设置）。生成器收到当前页内显示下标。
+    menu: Option<OnRowMenu>,
+    /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate`/`set_menu` 置位）。
     force: bool,
     last_version: u64,
 }
@@ -663,6 +701,7 @@ impl PagedBody {
             render: None,
             cell_lines: 1,
             activate: None,
+            menu: None,
             force: false,
         }
     }
@@ -670,6 +709,12 @@ impl PagedBody {
     /// 设置整行双击激活回调；置 `force` 令首次 on_update 重建（把激活能力纳入）。
     pub(super) fn set_activate(&mut self, activate: OnRowActivate) {
         self.activate = Some(activate);
+        self.force = true;
+    }
+
+    /// 设置整行右键菜单构建；置 `force` 令首次 on_update 重建（把菜单纳入）。
+    pub(super) fn set_menu(&mut self, menu: OnRowMenu) {
+        self.menu = Some(menu);
         self.force = true;
     }
 
@@ -714,6 +759,7 @@ impl Widget for PagedBody {
                 self.render.as_ref(),
                 self.cell_lines,
                 self.activate.as_ref(),
+                self.menu.as_ref(),
             );
             let id = el.build(tree);
             tree.add_child(self_id, id);
@@ -771,6 +817,7 @@ pub(super) fn select_body_row(
     actions: Option<&ActionCol>,
     render: Option<&CellRender>,
     lines: usize,
+    menu: Option<&OnRowMenu>,
 ) -> Element {
     let mut tr = Element::row().width_match().cross(Align::Stretch);
     if disp % 2 == 1 {
@@ -785,6 +832,7 @@ pub(super) fn select_body_row(
         tr = tr.child(action_cell((a.build)(orig), a.weight));
     }
     tr.widget = Box::new(SelectableRow::new(row_sel));
+    tr = with_row_menu(tr, orig, menu);
     Element::col()
         .width_match()
         .child(tr)
@@ -1012,6 +1060,8 @@ pub(super) struct SelectableBody {
     render: Option<CellRender>,
     /// 默认文本格最多显示行数（由 `Element::cell_lines` 设置，默认 1）。
     cell_lines: usize,
+    /// 整行右键菜单构建（由 `Element::on_row_context_menu` 设置）。生成器收到原始行下标。
+    menu: Option<OnRowMenu>,
     built: bool,
     last_version: u64,
 }
@@ -1032,8 +1082,15 @@ impl SelectableBody {
             actions: None,
             render: None,
             cell_lines: 1,
+            menu: None,
             built: false,
         }
+    }
+
+    /// 设置整行右键菜单构建；置 `built=false` 令首次 on_update 把菜单纳入。
+    pub(super) fn set_menu(&mut self, menu: OnRowMenu) {
+        self.menu = Some(menu);
+        self.built = false;
     }
 
     /// 设置尾部操作列；置 `built=false` 令首次 on_update 把操作列纳入。
@@ -1081,6 +1138,7 @@ impl Widget for SelectableBody {
                 self.actions.as_ref(),
                 self.render.as_ref(),
                 self.cell_lines,
+                self.menu.as_ref(),
             );
             let id = el.build(tree);
             tree.add_child(self_id, id);
@@ -1189,6 +1247,29 @@ pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> b
     }
     if let Some(b) = a.downcast_mut::<PagedBody>() {
         b.set_activate(activate.clone());
+        return true;
+    }
+    false
+}
+
+/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入整行右键菜单并返回 true。
+///
+/// 与整行双击激活不同，可选表格**也支持**：右键不与首列复选框争语义（复选框只吃左键），
+/// 而"右击某行做点什么"在多选表格里同样成立。
+pub(super) fn set_body_menu(el: &mut Element, menu: &OnRowMenu) -> bool {
+    let Some(a) = el.widget.as_any_mut() else {
+        return false;
+    };
+    if let Some(b) = a.downcast_mut::<SortableBody>() {
+        b.set_menu(menu.clone());
+        return true;
+    }
+    if let Some(b) = a.downcast_mut::<PagedBody>() {
+        b.set_menu(menu.clone());
+        return true;
+    }
+    if let Some(b) = a.downcast_mut::<SelectableBody>() {
+        b.set_menu(menu.clone());
         return true;
     }
     false
@@ -1632,6 +1713,130 @@ mod tests {
             &mut capture,
         );
         assert_eq!(seen.get(), Some(0), "双击释放（Up）时应激活并回报行下标 0");
+    }
+
+    /// 定位某类表格正文中第 `n` 行首个数据单元格的中心点。
+    fn body_cell_center(tree: &Tree, n: usize) -> Point {
+        let root = tree.root.unwrap();
+        let scroll = *tree.get(root).unwrap().children.last().unwrap();
+        let body = tree.get(scroll).unwrap().children[0];
+        let row = tree.get(body).unwrap().children[n];
+        let tr = tree.get(row).unwrap().children[0];
+        let cell = tree.get(tr).unwrap().children[0];
+        abs_center(tree, cell).unwrap()
+    }
+
+    #[test]
+    fn right_click_body_row_opens_menu_with_row_index() {
+        // 右击整行 → 弹上下文菜单，且构建器收到的是**该行**的下标；左键不弹。
+        use std::cell::Cell as StdCell;
+        let sort = signal(None);
+        let seen: Rc<StdCell<Option<usize>>> = Rc::new(StdCell::new(None));
+        let seen_c = seen.clone();
+        let mut tree = layout(
+            Element::table_sortable(
+                vec![("名称", 2.0), ("大小", 1.0)],
+                vec![vec!["a", "2"], vec!["b", "1"]],
+                sort,
+            )
+            .on_row_context_menu(move |idx| {
+                seen_c.set(Some(idx));
+                vec![crate::event::MenuItem::run("删除", || {}, false)]
+            })
+            .width(400)
+            .height(300),
+        );
+        let at = body_cell_center(&tree, 1);
+        let (mut hover, mut capture) = (None, None);
+
+        // 左键按下不弹菜单（右键菜单不该抢正常点击）。
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert!(res.menu.is_none(), "左键按下不应弹上下文菜单");
+        assert_eq!(seen.get(), None, "左键不应调用菜单构建器");
+
+        // 右键按下：弹菜单，构建器收到第二行的下标 1。
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Right),
+            &mut hover,
+            &mut capture,
+        );
+        let menu = res.menu.expect("右击正文行应弹上下文菜单");
+        assert_eq!(menu.items.len(), 1);
+        assert_eq!(menu.items[0].label, "删除");
+        assert_eq!(seen.get(), Some(1), "菜单构建器应收到被右击那一行的下标");
+    }
+
+    #[test]
+    fn row_menu_builder_runs_on_every_right_click() {
+        // 菜单项现取现建：同一行右击两次应各调一次构建器（勾选/禁用态才能反映当刻数据）。
+        use std::cell::Cell as StdCell;
+        let sort = signal(None);
+        let calls: Rc<StdCell<usize>> = Rc::new(StdCell::new(0));
+        let calls_c = calls.clone();
+        let mut tree = layout(
+            Element::table_sortable(vec![("v", 1.0)], vec![vec!["a"]], sort)
+                .on_row_context_menu(move |_| {
+                    calls_c.set(calls_c.get() + 1);
+                    vec![crate::event::MenuItem::run("x", || {}, false)]
+                })
+                .width(400)
+                .height(300),
+        );
+        let at = body_cell_center(&tree, 0);
+        let (mut hover, mut capture) = (None, None);
+        for _ in 0..2 {
+            tree.dispatch_pointer(
+                PointerEvent::single(PointerKind::Down, at, MouseButton::Right),
+                &mut hover,
+                &mut capture,
+            );
+        }
+        assert_eq!(calls.get(), 2, "每次右击都应重新构建菜单项");
+    }
+
+    #[test]
+    fn selectable_table_rows_also_support_context_menu() {
+        // 可多选表格不支持整行双击激活（与首列复选框冲突），但右键菜单不冲突——复选框只吃左键。
+        let sort = signal(None);
+        let sel: Vec<Signal<bool>> = (0..2).map(|_| signal(false)).collect();
+        let mut tree = layout(
+            Element::table_selectable(
+                vec![("v", 1.0)],
+                vec![vec!["a"], vec!["b"]],
+                sel.clone(),
+                sort,
+            )
+            .on_row_context_menu(|idx| {
+                vec![crate::event::MenuItem::run(
+                    format!("行{idx}"),
+                    || {},
+                    false,
+                )]
+            })
+            .width(400)
+            .height(300),
+        );
+        // 首列是复选框列，取第二个子节点（首个数据格）。
+        let root = tree.root.unwrap();
+        let scroll = *tree.get(root).unwrap().children.last().unwrap();
+        let body = tree.get(scroll).unwrap().children[0];
+        let row = tree.get(body).unwrap().children[0];
+        let tr = tree.get(row).unwrap().children[0];
+        let cell = tree.get(tr).unwrap().children[1];
+        let at = abs_center(&tree, cell).unwrap();
+        let (mut hover, mut capture) = (None, None);
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Right),
+            &mut hover,
+            &mut capture,
+        );
+        let menu = res.menu.expect("可选表格的行也应能右键弹菜单");
+        assert_eq!(menu.items[0].label, "行0");
+        assert!(!sel[0].get(), "右键不应顺带勾选该行");
     }
 
     #[test]

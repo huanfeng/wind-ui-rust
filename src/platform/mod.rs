@@ -380,8 +380,11 @@ pub trait AppHandler {
 
     /// 取出并清除待执行的原生文件对话框请求。平台在事件分发**完全返回**（OS 侧鼠标
     /// 捕获已同步）之后才调用，避免在事件回调栈内重入阻塞式模态对话框。
+    ///
+    /// 默认实现取 [`crate::app::defer_blocking`] 的队列——自定义 handler 不覆盖本方法
+    /// 也能让菜单项里排入的延迟闭包跑起来（覆盖时记得回退到它，见 `UiHost`）。
     fn take_dialog_request(&mut self) -> Option<DialogRequest> {
-        None
+        crate::app::take_deferred()
     }
 }
 

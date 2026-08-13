@@ -480,6 +480,25 @@ ctx.show_context_menu(pos, vec![
 ```
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
 
+任意元素/容器挂菜单用 `Element::on_context_menu(build)`（命中沿父链冒泡到首个设了回调的节点）；
+**表格数据行**用 `Element::on_row_context_menu(|行下标| items)`——行是控件内部构建的，应用拿不到行元素：
+```rust
+Element::table_sortable_server(cols, rows, sort, on_sort)
+    .on_row_context_menu(move |disp| vec![
+        MenuItem::run("编辑…", move || open_edit(disp), false),
+        MenuItem::separator(),
+        MenuItem::run("删除", move || del(disp), false),
+    ])
+```
+`table_sortable` / `table_sortable_server` / `table_selectable` 三类都支持（右键与首列复选框不冲突）。
+菜单项**每次右击现取现建**，`with_check` / `with_enabled` 因而总反映右击当刻的数据。
+
+⚠ 两个坑：
+- `on_context_menu` 会让节点**吞命中**（同 `on_drop`/`tooltip`）。挂到原本透明的纯布局容器上，
+  它会开始拦截指针事件、遮住其下内容——挂在已吞命中的节点（有背景/`clickable()`/表格行）上。
+- 菜单项动作是无参 `Fn()`，**拿不到 `EventCtx`**。要弹原生文件对话框等阻塞调用，
+  用 `windui::app::defer_blocking(f)`（`EventCtx::defer_blocking` 的自由函数版本，见 §8.6）。
+
 ### 8.3 焦点与键盘
 - Tab / Shift+Tab 在 `focusable()` 控件间导航（框架自动维护焦点环）。
 - 自定义控件实现 `Widget::focusable() -> true` 即加入导航链。
@@ -511,6 +530,21 @@ app.on_interval(Duration::from_millis(100), move || { /* 读写 Rc 状态 */ })
 ```
 
 UI 状态（`Rc<Cell<T>>`、`Rc<RefCell<String>>`）只在 `on_message` / `on_interval` 回调里写，框架自动在下一帧读取并渲染。完整示例见 `examples/background_task.rs`。
+
+### 8.6 阻塞式原生调用的时机
+
+原生模态框（文件对话框、`MessageBoxW`）**不能在事件回调栈内同步弹**——它自带消息泵，
+会与还没返回的事件分发冲突（表现为鼠标捕获错乱、对话框卡死）。框架给了三个入口：
+
+| 场景 | 用什么 |
+|---|---|
+| 控件回调里（有 `ctx`），弹一个文件对话框 | `ctx.request_pick_file(dlg, on_result)` / `request_save_file` 等 |
+| 控件回调里，需要连弹多个（选文件→校验→选目录→确认） | `ctx.defer_blocking(f)` |
+| **没有 `ctx`**：右键/托盘菜单项的 `MenuItem::run` 动作 | `windui::app::defer_blocking(f)` |
+
+三者都在事件分发**完全返回**后才执行闭包，闭包内可放心直接同步调 `PickDialog::pick_file()`
+等阻塞 API。自由函数版按排入顺序执行；若你实现了自定义 `AppHandler` 并覆盖了
+`take_dialog_request`，记得回退到 `crate::app::take_deferred()`，否则菜单项排入的闭包不会跑。
 
 ---
 
