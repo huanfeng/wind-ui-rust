@@ -8,7 +8,7 @@
 //! 展开截屏（复选菜单：开关 + 禁用项 + 分隔线 + 动作项）：
 //!   cargo run --example dropdown -- --screenshot artifacts/check_menu_open.png --click 120 317
 //! 连点截屏（.stay_open()：展开后连点两个开关，菜单不关）：
-//!   cargo run --example dropdown -- --screenshot artifacts/check_menu_sticky.png --click 120 397 --click 120 300 --click 120 330
+//!   cargo run --example dropdown -- --screenshot artifacts/check_menu_sticky.png --click 120 397 --click 120 422 --click 120 451
 
 use windui::prelude::*;
 
