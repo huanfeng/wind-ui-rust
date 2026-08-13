@@ -18,6 +18,16 @@ fn accent_a(a: u8) -> Color {
     Color::rgba(0x3B, 0x82, 0xF6, a)
 }
 
+/// 本稿的设置行比库默认更紧凑：标签小一号、加中等字重，副标题也更小。
+/// 尺寸不进 `setting_row` 的签名，故一次性设在主题上，全窗设置行随之统一。
+fn compact_form(t: &mut Theme) {
+    t.form.row_height = Some(50);
+    t.form.label_size = Some(13.0);
+    t.form.label_weight = Some(500);
+    t.form.desc_size = Some(11.0);
+    t.form.row_pad_y = Some(13);
+}
+
 /// 亮色主题（设计浅色稿配色）。
 fn light_theme() -> Theme {
     let mut t = Theme::default();
@@ -35,6 +45,7 @@ fn light_theme() -> Theme {
     p.border = hex(0xE3E7EC);
     p.divider = hex(0xECEEF2);
     p.track = hex(0xD7DCE3);
+    compact_form(&mut t);
     t
 }
 
@@ -55,6 +66,7 @@ fn dark_theme() -> Theme {
     p.border = hex(0x28324A);
     p.divider = hex(0x222C40);
     p.track = hex(0x2B3550);
+    compact_form(&mut t);
     t
 }
 
@@ -312,32 +324,6 @@ fn ime_menu_items() -> Vec<MenuItem> {
 
 // ============================ 3 · 设置界面 ============================
 
-/// 设置行：左标签（+可选副标题）+ 右控件。
-fn setting_row(label: &str, sub: Option<&str>, control: Element) -> Element {
-    let mut left = Element::col().weight(1.0).spacing(2).child(
-        Element::label(label)
-            .font_size(13.0)
-            .font_weight(500)
-            .fg_role(Role::Text)
-            .height(18),
-    );
-    if let Some(s) = sub {
-        left = left.child(
-            Element::label(s)
-                .font_size(11.0)
-                .fg_role(Role::TextMuted)
-                .height(15),
-        );
-    }
-    Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .padding_xy(0, 13)
-        .spacing(12)
-        .child(left)
-        .child(control)
-}
-
 fn settings_section_header(title: &str) -> Element {
     Element::label(title)
         .font_size(11.0)
@@ -386,33 +372,32 @@ fn build_settings(
     let general = Element::col()
         .width_match()
         .child(settings_section_header("基本设置"))
-        .child(setting_row(
+        .child(Element::setting_row_desc(
             "默认中文输入",
-            Some("启动后自动进入中文模式"),
+            "启动后自动进入中文模式",
             Element::switch(signal(true)),
         ))
         .child(Element::divider())
-        .child(setting_row(
+        .child(Element::setting_row_desc(
             "模糊音纠错",
-            Some("z/zh、c/ch、s/sh 不区分"),
+            "z/zh、c/ch、s/sh 不区分",
             Element::switch(signal(false)),
         ))
         .child(Element::divider())
-        .child(setting_row(
+        .child(Element::setting_row_desc(
             "中英混输",
-            Some("自动识别英文单词"),
+            "自动识别英文单词",
             Element::switch(signal(true)),
         ))
         .child(settings_section_header("候选词"))
-        .child(setting_row(
+        .child(Element::setting_row(
             "每页候选数量",
-            None,
             Element::dropdown(vec!["5 个", "9 个"], cand_count).width(110),
         ))
         .child(Element::divider())
-        .child(setting_row(
+        .child(Element::setting_row_desc(
             "智能联想",
-            Some("根据上下文优化排序"),
+            "根据上下文优化排序",
             Element::switch(signal(true)),
         ));
 
@@ -564,21 +549,19 @@ fn build_settings(
                 .padding_xy(0, 4)
                 .child(Element::segmented(vec!["横向", "竖向", "网格"], seg_arrange).width_match()),
         )
-        .child(setting_row(
+        .child(Element::setting_row(
             "候选字号",
-            None,
             Element::dropdown(vec!["小", "中", "大"], cand_size).width(110),
         ))
         .child(Element::divider())
-        .child(setting_row(
+        .child(Element::setting_row_desc(
             "毛玻璃效果",
-            Some("候选窗口背景模糊"),
+            "候选窗口背景模糊",
             Element::switch(signal(true)),
         ))
         .child(Element::divider())
-        .child(setting_row(
+        .child(Element::setting_row(
             "窗口圆角",
-            None,
             Element::dropdown(vec!["直角", "圆润", "胶囊"], win_corner).width(110),
         ));
 
@@ -593,7 +576,7 @@ fn build_settings(
     let mut shortcuts = Element::col().width_match().padding_xy(0, 8);
     for (label, key) in keys {
         shortcuts = shortcuts
-            .child(setting_row(label, None, key_chip(key)))
+            .child(Element::setting_row(label, key_chip(key)))
             .child(Element::divider());
     }
 
@@ -709,6 +692,11 @@ fn main() {
     let start_dark = !std::env::args().any(|a| a == "--light");
     let dark = signal(start_dark);
 
+    // 主题先于建树装好：setting_row 等组合子在构造期读主题定行高/字号，
+    // 晚装会让 compact_form 的紧凑度量静默失效。
+    let mut app = App::new("中文输入法界面 · 复刻", 960, 820).theme(theme_for(start_dark));
+    let th = app.theme_handle();
+
     // 可选 `--tab N` 指定初始标签页（截图各页用）。
     let tab_init = std::env::args()
         .skip_while(|a| a != "--tab")
@@ -735,9 +723,6 @@ fn main() {
     );
 
     // 页面：标题 + 主题切换 + 三组件分节。
-    let mut app = App::new("中文输入法界面 · 复刻", 960, 820).theme(theme_for(start_dark));
-    let th = app.theme_handle();
-
     let th_d = th.clone();
     let d_d = dark;
     let th_l = th.clone();
@@ -808,9 +793,8 @@ fn main() {
                 .spacing(12)
                 .child(field("词条", "奥利给", true))
                 .child(field("自定义编码 · 可选", "aolg", false))
-                .child(setting_row(
+                .child(Element::setting_row(
                     "设为高频词",
-                    None,
                     Element::switch(signal(true)),
                 )),
             Element::row()

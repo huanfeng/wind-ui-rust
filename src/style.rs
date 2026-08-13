@@ -12,11 +12,18 @@ pub enum Role {
     Bg,
     Surface,
     SurfaceAlt,
+    /// 与当前主题明暗相反的实底条块（深色标题栏、浅底上的深色横幅）。
+    SurfaceInverse,
+    /// [`Role::SurfaceInverse`] 之上的前景，二者成对使用。
+    OnSurfaceInverse,
     Border,
     Divider,
     Track,
     Text,
     TextMuted,
+    /// 三级弱化文字（版权行、脚注），比 `TextMuted` 更淡但仍是可读正文——
+    /// 既非禁用（`TextDisabled`）也非待填写（`Placeholder`）。
+    TextSubtle,
     TextDisabled,
     Placeholder,
     Accent,
@@ -24,6 +31,10 @@ pub enum Role {
     AccentActive,
     OnAccent,
     Danger,
+    /// 成功 / 已完成语义色。与 [`crate::theme::Intent::Success`] 同源于 `palette.success`。
+    Success,
+    /// 警告 / 需注意语义色。与 [`crate::theme::Intent::Warning`] 同源于 `palette.warning`。
+    Warning,
     /// 手风琴卡片边框（含控件覆盖层回退）。
     AccordionBorder,
     /// 手风琴面板头背景。
@@ -42,11 +53,14 @@ impl Role {
             Role::Bg => p.bg,
             Role::Surface => p.surface,
             Role::SurfaceAlt => p.surface_alt,
+            Role::SurfaceInverse => p.surface_inverse,
+            Role::OnSurfaceInverse => p.on_surface_inverse,
             Role::Border => p.border,
             Role::Divider => p.divider,
             Role::Track => p.track,
             Role::Text => p.text,
             Role::TextMuted => p.text_muted,
+            Role::TextSubtle => p.text_subtle,
             Role::TextDisabled => p.text_disabled,
             Role::Placeholder => p.placeholder,
             Role::Accent => p.accent,
@@ -54,6 +68,8 @@ impl Role {
             Role::AccentActive => p.accent_active,
             Role::OnAccent => p.on_accent,
             Role::Danger => p.danger,
+            Role::Success => p.success,
+            Role::Warning => p.warning,
             Role::AccordionBorder => t.accordion.border(p),
             Role::AccordionHeaderBg => t.accordion.header_bg(p),
             Role::InputBg => t.input.bg(p),
@@ -257,6 +273,20 @@ mod tests {
         assert_eq!(Role::Divider.resolve(&light), light.palette.divider);
         assert_eq!(Role::Accent.resolve(&light), light.palette.accent);
         assert_eq!(Role::Text.resolve(&light), light.palette.text);
+    }
+
+    /// 补齐的语义角色必须真的接到 palette 上：漏接一条 `resolve` 分支不会报错，
+    /// 只会让该角色悄悄取到别的颜色。亮暗两套主题各验一遍。
+    #[test]
+    fn new_semantic_roles_resolve_in_both_themes() {
+        for t in [Theme::default(), Theme::dark()] {
+            let p = &t.palette;
+            assert_eq!(Role::Success.resolve(&t), p.success);
+            assert_eq!(Role::Warning.resolve(&t), p.warning);
+            assert_eq!(Role::TextSubtle.resolve(&t), p.text_subtle);
+            assert_eq!(Role::SurfaceInverse.resolve(&t), p.surface_inverse);
+            assert_eq!(Role::OnSurfaceInverse.resolve(&t), p.on_surface_inverse);
+        }
     }
 
     #[test]

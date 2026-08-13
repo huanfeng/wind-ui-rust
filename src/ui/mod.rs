@@ -937,6 +937,12 @@ impl Element {
             Intent::Danger => shell
                 .bg_role_alpha(Role::Danger, 0.15)
                 .child(label.fg_role(Role::Danger)),
+            Intent::Success => shell
+                .bg_role_alpha(Role::Success, 0.15)
+                .child(label.fg_role(Role::Success)),
+            Intent::Warning => shell
+                .bg_role_alpha(Role::Warning, 0.15)
+                .child(label.fg_role(Role::Warning)),
             Intent::Custom(c) => shell.bg(c.scale_alpha(0.15)).child(label.fg(c)),
         }
     }
@@ -2152,6 +2158,192 @@ impl Element {
     /// 弹性空白：主轴方向占据剩余空间，把其后的兄弟元素推到另一端（如底栏「左按钮 … 右按钮」）。
     pub fn flex_spacer() -> Self {
         Element::stack().weight(1.0)
+    }
+
+    /// **表单行**：固定宽的标签列 + 紧随其后的控件。
+    ///
+    /// 经典表单排布——所有标签占同一宽度的一列，控件左缘因此对齐成一条竖线。
+    /// 控件想占满剩余宽度就自己 `.width_match()`（如文本框、滑块），想保持原生尺寸
+    /// 就什么都不做（如开关、复选框）。
+    ///
+    /// 控件要贴到行右缘（设置页那种「标签……开关」的排布）用
+    /// [`setting_row`](Self::setting_row)；标签下还要一行说明用
+    /// [`setting_row_desc`](Self::setting_row_desc)。
+    ///
+    /// 行高、标签列宽、间距全部取自 [`FormTheme`]，**不进签名**：同一应用里的表单行
+    /// 必须整齐划一，逐行传尺寸只会让每处各写一个近似值。要整体调紧就改主题。
+    ///
+    /// # 可用的修饰符
+    ///
+    /// 返回的是拼好的 `row` 容器，**不是挂了 widget 的控件**。因此：
+    ///
+    /// - **可以**链容器/样式类修饰符：`.padding()` / `.margin_xy()` / `.bg_role()` /
+    ///   `.corner()` / `.width()` / `.visible_when()` / `.enabled(false)`（禁用沿父链
+    ///   继承，会一并禁掉行内控件）等。
+    /// - **不能**链控件专属修饰符：`.intent()` / `.small()` / `.outline()` /
+    ///   `.on_click()` 之类要 downcast 到具体 widget，挂到这里在 debug 下会
+    ///   `debug_assert` 失败、release 下静默无效。要改控件外观请**加在传进来的
+    ///   `control` 上**，那才是真控件。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let volume = signal(0.6f32);
+    /// let dark = signal(false);
+    /// let form = Element::col()
+    ///     .child(Element::field("音量", Element::slider(volume).width_match()))
+    ///     // 意图色/尺寸加在控件上，不是加在 field 上。
+    ///     .child(Element::field("主题", Element::switch(dark).small()));
+    /// ```
+    ///
+    /// [`FormTheme`]: crate::theme::FormTheme
+    pub fn field(label: impl Into<String>, control: Element) -> Self {
+        let th = crate::theme::current();
+        let f = &th.form;
+        Element::row()
+            .width_match()
+            .height(f.row_height())
+            .cross(Align::Center)
+            .spacing(f.gap())
+            .child(Self::form_label(label, f, &th.metrics).width(f.label_width()))
+            .child(control)
+    }
+
+    /// **设置行**：标签占住左侧，控件贴到行右缘。
+    ///
+    /// 设置页的主流排布（macOS 系统设置 / Windows 设置皆然）：标签左对齐、控件右对齐，
+    /// 中间留白随窗宽伸缩。与 [`field`](Self::field) 的差别只有这一点——那边是
+    /// 固定标签列、控件紧跟标签；这里标签块吃掉剩余宽度，把控件推到右边。
+    ///
+    /// 行高同样取 [`FormTheme::row_height`]——放开关的行与放下拉的行必须一样高，
+    /// 否则整列参差不齐。需要两行文字请用 [`setting_row_desc`](Self::setting_row_desc)，
+    /// 那一种才按内容撑高。
+    ///
+    /// 可用/不可用的修饰符与 [`field`](Self::field) 完全相同，见那里的说明。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let hide_bar = signal(false);
+    /// let row = Element::setting_row("隐藏状态栏", Element::switch(hide_bar));
+    /// ```
+    ///
+    /// [`FormTheme::row_height`]: crate::theme::FormTheme::row_height
+    pub fn setting_row(label: impl Into<String>, control: Element) -> Self {
+        Self::setting_row_inner(label.into(), None, control)
+    }
+
+    /// 带副标题的[设置行](Self::setting_row)：标签下方再排一行小号弱化说明。
+    ///
+    /// 这一种**不定高**：高度由内容加 [`FormTheme::row_pad_y`](crate::theme::FormTheme::row_pad_y)
+    /// 撑出来。副标题长短不一，定高只会把它挤出去。
+    ///
+    /// 做成独立构造器而非给 `setting_row` 加一个 `Option` 参数：`Option<impl Into<String>>`
+    /// 的 `None` 推断不出类型（调用方得写 `None::<&str>`），而退成 `Option<&str>` 又会让
+    /// 这一个参数破例不收 `String`。两个各自说得清的签名比一个别扭的签名好，
+    /// 也免得没有副标题的行——占多数——为此多写一个 `None`。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let fuzzy = signal(true);
+    /// let row = Element::setting_row_desc(
+    ///     "模糊音纠错",
+    ///     "z/zh、c/ch、s/sh 不区分",
+    ///     Element::switch(fuzzy),
+    /// );
+    /// ```
+    pub fn setting_row_desc(
+        label: impl Into<String>,
+        desc: impl Into<String>,
+        control: Element,
+    ) -> Self {
+        Self::setting_row_inner(label.into(), Some(desc.into()), control)
+    }
+
+    /// `setting_row` / `setting_row_desc` 的共同骨架。
+    fn setting_row_inner(label: String, desc: Option<String>, control: Element) -> Self {
+        let th = crate::theme::current();
+        let f = &th.form;
+        // 左块吃掉剩余宽度，控件因此被推到右缘——比「标签定宽 + flex_spacer」少一个
+        // 节点，且长标签能在整个左区换行而不是撞上定宽边界。
+        let mut left = Element::col()
+            .weight(1.0)
+            .spacing(2)
+            .child(Self::form_label(label, f, &th.metrics).width_match());
+        let mut row = Element::row()
+            .width_match()
+            .cross(Align::Center)
+            .spacing(f.gap());
+        match desc {
+            // 带副标题：高度按内容撑开（副标题长短不一，定高会把它挤出去）。
+            Some(d) => {
+                left = left.child(
+                    Element::label(d)
+                        .font_size(f.desc_size(&th.metrics))
+                        .fg_role(crate::style::Role::TextMuted)
+                        .width_match(),
+                );
+                row = row.padding_xy(0, f.row_pad_y());
+            }
+            // 单行：定高，与 `field` 同一档，整列才对得齐。
+            None => row = row.height(f.row_height()),
+        }
+        row.child(left).child(control)
+    }
+
+    /// 表单族共用的标签：字号/字重/文字色统一走 [`FormTheme`](crate::theme::FormTheme)。
+    fn form_label(
+        text: impl Into<String>,
+        f: &crate::theme::FormTheme,
+        m: &crate::theme::Metrics,
+    ) -> Self {
+        Element::label(text)
+            .font_size(f.label_size(m))
+            .font_weight(f.label_weight())
+            .fg_role(crate::style::Role::Text)
+    }
+
+    /// **卡片**：标题 + 分隔线 + 内容，铺在 `Surface` 底色上的圆角容器。
+    ///
+    /// 分组内容的默认外壳。标题**不设固定高**，长标题在卡片宽度内换行、分隔线随之下移。
+    ///
+    /// 底色/圆角/内边距/标题字号取自 [`CardTheme`]。想要描边卡片就在返回值上链
+    /// `.border_role(Role::Border, 1)`——那是样式修饰符，对这种组合容器有效
+    /// （可用/不可用的修饰符同 [`field`](Self::field)）。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let notify = signal(true);
+    /// let ui = Element::card(
+    ///     "通知",
+    ///     Element::col()
+    ///         .width_match()
+    ///         .child(Element::field("推送", Element::switch(notify))),
+    /// )
+    /// .border_role(Role::Border, 1); // 样式修饰符可以链
+    /// ```
+    ///
+    /// [`CardTheme`]: crate::theme::CardTheme
+    pub fn card(title: impl Into<String>, body: Element) -> Self {
+        let th = crate::theme::current();
+        let c = &th.card;
+        Element::col()
+            .width_match()
+            .bg_role(crate::style::Role::Surface)
+            .corner(c.corner(&th.metrics))
+            .padding(c.pad())
+            .spacing(c.gap())
+            .child(
+                Element::label(title)
+                    .font_size(c.title_size(&th.metrics))
+                    .font_weight(c.title_weight())
+                    .fg_role(crate::style::Role::Text)
+                    .width_match(),
+            )
+            .child(Element::divider())
+            .child(body)
     }
 
     /// 等宽网格：把 `items` 按每行 `cols` 个排布，行/列间距 `gap`，列按权重均分等宽；
@@ -4042,6 +4234,121 @@ mod tests {
             "hover 移开容器后容器应收到 Leave，实得 {}",
             leaves.get()
         );
+    }
+
+    /// `field` 的标签列宽与行高必须来自主题，且改主题真的改得动——这正是把尺寸
+    /// 从签名里拿掉的理由，接不上主题就等于换了个地方硬编码。
+    #[test]
+    fn field_lays_out_label_column_from_theme() {
+        let th = crate::theme::current();
+        let (lw, gap, h) = (th.form.label_width(), th.form.gap(), th.form.row_height());
+        // 套一层填充容器：`layout` 会把根拉满窗口，直接量根就量不到行的固有高度。
+        let row_of = |el: Element| {
+            let tree = layout(Element::col().fill().child(el));
+            let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+            (tree.get(row).unwrap().bounds, {
+                let kids = tree.get(row).unwrap().children.clone();
+                kids.iter()
+                    .map(|k| tree.get(*k).unwrap().bounds)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let (row, kids) = row_of(Element::field("音量", Element::leaf().width(40).height(20)));
+        assert_eq!(kids.len(), 2, "field = 标签 + 控件");
+        assert_eq!(row.h, h, "行高应取主题");
+        assert_eq!(kids[0].w, lw, "标签列宽应取主题");
+        assert_eq!(kids[1].x, lw + gap, "控件紧跟标签列（列宽 + 间距）");
+
+        // 换主题后重建，尺寸随之改变。
+        let mut t2 = crate::theme::Theme::default();
+        t2.form.label_width = Some(60);
+        t2.form.row_height = Some(28);
+        crate::theme::set_current(std::rc::Rc::new(t2));
+        let (row, kids) = row_of(Element::field("音量", Element::leaf().width(40).height(20)));
+        assert_eq!(row.h, 28);
+        assert_eq!(kids[0].w, 60);
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// `setting_row` 的立身之本是「控件贴右缘」。左块靠 `weight(1.0)` 吃掉剩余宽度，
+    /// 一旦丢了这个权重控件就会缩回标签旁边，与 `field` 再无区别。
+    #[test]
+    fn setting_row_pins_control_to_trailing_edge() {
+        let tree = layout(Element::col().fill().child(Element::setting_row(
+            "隐藏状态栏",
+            Element::leaf().width(40).height(20),
+        )));
+        let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let kids = tree.get(row).unwrap().children.clone();
+        assert_eq!(kids.len(), 2, "setting_row = 左块 + 控件");
+        let ctl = tree.get(kids[1]).unwrap().bounds;
+        assert_eq!(ctl.x + ctl.w, 200, "控件右缘应贴住 200px 宽的行右缘");
+        // 单行设置行定高，与 field 同一档：一列表单行必须等高。
+        let f = crate::theme::current();
+        assert_eq!(
+            tree.get(row).unwrap().bounds.h,
+            f.form.row_height(),
+            "单行 setting_row 应取主题行高"
+        );
+
+        // 带副标题的行反过来按内容撑高，否则副标题会被定高挤掉。
+        let tree = layout(Element::col().fill().child(Element::setting_row_desc(
+            "隐藏状态栏",
+            "启动后自动隐藏",
+            Element::leaf().width(40).height(20),
+        )));
+        let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let left = tree.get(row).unwrap().children[0];
+        let (h, left_h) = (
+            tree.get(row).unwrap().bounds.h,
+            tree.get(left).unwrap().bounds.h,
+        );
+        assert_eq!(
+            h,
+            left_h + 2 * f.form.row_pad_y(),
+            "副标题行 = 内容 + 内边距"
+        );
+        assert!(h > f.form.row_height(), "两行文字应撑得比单行行高更高");
+    }
+
+    /// 带副标题的行：说明排在标签**下方**（同一左块内），且用弱化文字色——
+    /// 副标题若与标签同色同号，两行字会读成两个并列标签。
+    #[test]
+    fn setting_row_desc_stacks_muted_description_under_label() {
+        let el = Element::setting_row_desc("模糊音纠错", "z/zh 不区分", Element::leaf().width(40));
+        let left = &el.children[0];
+        assert_eq!(left.children.len(), 2, "左块 = 标签 + 副标题");
+        assert_eq!(
+            left.children[1].style.fg_role,
+            Some(crate::style::Role::TextMuted),
+            "副标题应为弱化文字色"
+        );
+        assert!(
+            left.children[1].style.font_size < left.children[0].style.font_size,
+            "副标题字号应小于标签"
+        );
+        // 无副标题时左块只有标签，不留空节点占位。
+        let plain = Element::setting_row("模糊音纠错", Element::leaf().width(40));
+        assert_eq!(plain.children[0].children.len(), 1);
+    }
+
+    /// 卡片 = 标题 + 分隔线 + 内容，底色走角色延迟解析（运行期换主题跟随）。
+    #[test]
+    fn card_stacks_title_divider_and_body() {
+        use crate::style::{Brush, Role};
+        let el = Element::card("通知", Element::label("正文"));
+        assert_eq!(el.children.len(), 3, "卡片 = 标题 + 分隔线 + 内容");
+        assert!(
+            matches!(el.style.bg, Some(Brush::Role(Role::Surface))),
+            "卡片底色应为 Surface 角色（换主题自动跟随）"
+        );
+        assert!(
+            matches!(el.children[1].style.bg, Some(Brush::Role(Role::Divider))),
+            "第二个子节点应是分隔线"
+        );
+        // 标题不设死高：长标题要能在卡片宽度内换行，分隔线随之下移。
+        assert_eq!(el.children[0].height, crate::spec::Dimension::Wrap);
     }
 
     #[test]

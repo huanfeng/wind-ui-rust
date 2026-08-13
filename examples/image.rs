@@ -45,24 +45,6 @@ fn solid(size: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
     [r, g, b, 255].repeat((size * size) as usize)
 }
 
-fn card(title: &str, body: Element) -> Element {
-    Element::col()
-        .width_match()
-        .bg_role(Role::Surface)
-        .corner(10.0)
-        .padding(16)
-        .spacing(10)
-        .child(
-            Element::label(title)
-                .font_size(16.0)
-                .fg_role(Role::Text)
-                .height(24)
-                .width_match(),
-        )
-        .child(Element::divider())
-        .child(body)
-}
-
 /// 一个带标题的固定框图片演示单元。
 fn demo(label: &str, img: Element) -> Element {
     Element::col()
@@ -225,11 +207,11 @@ fn main() {
     let body = Element::col()
         .width_match()
         .spacing(14)
-        .child(card("适配模式（源图 4:3，框 96×72）", fit_row))
-        .child(card("圆角裁剪 & 占位", corner_row))
-        .child(card("状态：正常/禁用 + 单色图标着色", state_row))
-        .child(card("SVG 矢量（resvg 光栅化 + 着色）", svg_body))
-        .child(card("列表行图标（list_icons）", icon_list));
+        .child(Element::card("适配模式（源图 4:3，框 96×72）", fit_row))
+        .child(Element::card("圆角裁剪 & 占位", corner_row))
+        .child(Element::card("状态：正常/禁用 + 单色图标着色", state_row))
+        .child(Element::card("SVG 矢量（resvg 光栅化 + 着色）", svg_body))
+        .child(Element::card("列表行图标（list_icons）", icon_list));
 
     let ui = Element::stack().fill().bg_role(Role::Bg).child(
         Element::col()

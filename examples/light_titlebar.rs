@@ -10,6 +10,9 @@
 
 use windui::prelude::*;
 
+// 整套配色**刻意不走 `Role`**：本示例演示的是"安装器风格的浅色界面"这一具体设计，
+// 它不该随应用主题变化（安装向导在暗色系统上通常也保持浅色）。需要跟随主题的界面
+// 请用 `Role::Bg` / `Role::Text` / `Role::TextSubtle` 等角色，别照抄这里的常量。
 const BG: u32 = 0xF5F6F7; // 窗口浅色底
 const FG: u32 = 0x1F2329; // 主文字
 const SUB: u32 = 0x9AA0A6; // 次要文字

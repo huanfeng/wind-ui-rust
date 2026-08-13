@@ -293,15 +293,27 @@ impl App {
     }
 
     /// 设置主题（默认使用内置默认主题）。窗口背景未显式设置时随主题 palette.bg。
+    ///
+    /// 主题会**当场**装进当前线程，而不是等到 `run()`。因为一部分组合子
+    /// （`Element::field` / `card` / `badge` / `tag_field` / `dialog_panel` 等）在
+    /// **构造期**就要读主题定尺寸和颜色，若等到 `run()` 才装，它们读到的是默认主题，
+    /// 自定义主题里的行高、圆角、徽章色会静默失效——编译通过、也不报错，只是没生效。
+    ///
+    /// 因此控件树须在本方法**之后**构造。链式写法天然满足
+    /// （`App::new(..).theme(t).content(build_ui())`：参数在 `.theme(t)` 之后才求值）；
+    /// 若先把树建进变量再传，请把建树挪到 `.theme(t)` 之后，或自行先调
+    /// [`theme::set_current`](crate::theme::set_current)。
     pub fn theme(mut self, t: Theme) -> Self {
         // 尊重 App::bg 的显式指定：`.bg(c).theme(t)` 与 `.theme(t).bg(c)` 结果一致。
         if !self.bg_explicit {
             self.cfg.bg = t.palette.bg;
         }
+        let rc = Rc::new(t.clone());
         // 已有运行期句柄时同步初值，保证 theme()/theme_handle() 任意调用序结果一致。
         if let Some(h) = &self.theme_src {
-            *h.inner.borrow_mut() = Rc::new(t.clone());
+            *h.inner.borrow_mut() = rc.clone();
         }
+        crate::theme::set_current(rc);
         self.theme = Some(t);
         self
     }

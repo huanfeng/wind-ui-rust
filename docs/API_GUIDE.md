@@ -207,6 +207,26 @@ Element::dialog_panel(show, "标题", width, on_close, body, footer)  // 带标�
 Element::flex_spacer()               // 弹性空白：占满主轴剩余空间（把兄弟推到另一端，如底栏左/右分布）
 ```
 
+### 表单脚手架
+
+「标签 + 控件」的一行和「标题 + 内容」的卡片，是设置类小工具里重复最多的两块样板。
+
+```rust
+Element::field("音量", Element::slider(v).width_match())   // 固定标签列 + 紧随其后的控件
+Element::setting_row("隐藏状态栏", Element::switch(hide))   // 标签占左、控件贴右缘
+Element::setting_row_desc("模糊音纠错", "z/zh 不区分", Element::switch(fuzzy))  // 标签下加一行说明
+Element::card("通知", body)                                 // 标题 + 分隔线 + 内容的圆角卡片
+```
+
+- `field` 与 `setting_row` 的差别只有控件的落点：前者紧跟固定宽的标签列（表单感，控件左缘对齐成一条竖线），后者贴右缘（设置页感）。两者都**定高**，一列行才对得齐。
+- `setting_row_desc` 是唯一**不定高**的一种——副标题长短不一，定高会把它挤出去，故改由上下内边距撑开。
+- 行高、标签列宽、间距、字号一律走主题（`theme.form`，见 §7.2），**不进签名**：一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值。卡片的圆角/内边距/标题字号同理走 `theme.card`。
+- 想要描边卡片：`Element::card("标题", body).border_role(Role::Border, 1)`。
+
+> **这几个构造器返回的是拼好的容器，不是挂了 widget 的控件**（`badge` / `chip` / `grid` / `dialog_panel` 同理）。因此**可以**链容器/样式类修饰符（`.padding()` / `.margin_xy()` / `.bg_role()` / `.corner()` / `.width()` / `.visible_when()` / `.enabled(false)`），但**不能**链控件专属修饰符（`.intent()` / `.small()` / `.outline()` / `.on_click()`）——后者要 downcast 到具体 widget，挂到组合容器上在 debug 下会 `debug_assert` 失败、release 下静默无效。要改控件外观请加在**传进去的那个 control 上**。
+>
+> 另外它们在**构造期**读主题定尺寸，故自定义主题必须在建树**之前**装好，见 §7.2 末尾。
+
 ### 表格族
 
 ```rust
@@ -673,7 +693,12 @@ Element::label("标题")
 控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层：
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
 - `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
-- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list`，每个字段是 `Option<Color>`，`None` 时回退到 palette。
+- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
+
+其中 `form`（[表单脚手架](#表单脚手架)的行高、标签列宽、间距、标签字号字重、副标题字号）
+与 `card`（卡片圆角、内边距、标题字号）承载的是**尺寸**而非颜色。这些量刻意不进构造器签名：
+一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值，最终对不齐。
+`examples/ime.rs`、`examples/settings.rs`、`examples/ime_settings.rs` 各演示了一套自定义表单度量。
 
 注入主题：
 ```rust
@@ -694,6 +719,25 @@ let s = theme.to_toml()?;
 ```
 
 **选择原则**：成体系的视觉（品牌色、统一圆角）走 `Theme`；个别节点的一次性微调走内联 `Style` 修饰符。
+
+> ⚠️ **主题要在建树之前装好。** 颜色走 `Role` 的部分是 paint 期解析、随时跟得上；但
+> **尺寸**（`form` 的行高、`card` 的圆角、`tag_field`/`accordion` 的圆角）以及 `badge`/`chip`
+> 的配色是在 `Element` **构造那一刻**读主题的。`App::theme(t)` 会当场把主题装进当前线程，
+> 所以链式写法天然正确：
+>
+> ```rust
+> App::new("App", 480, 360).theme(theme).content(build_ui()).run();
+> //                        ^^^^^^^^^^^^ 先执行  ^^^^^^^^^^^^ 后求值，读得到 theme
+> ```
+>
+> 但如果你**先把树建进变量再传**，顺序就反了，自定义度量会静默失效（编译通过、不报错、
+> 只是没生效）。这时把建树挪到 `App::theme(..)` 之后即可：
+>
+> ```rust
+> let app = App::new("App", 480, 360).theme(theme);   // 先装主题
+> let ui = build_ui();                                // 再建树
+> app.content(ui).run();
+> ```
 
 ### 7.3 运行期换主题
 
@@ -751,11 +795,32 @@ let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
 .border_role(Role::Border, 1)         // 边框色 + 宽度
 ```
 
-`Role` 枚举（`windui::style::Role`，prelude 已导出）：`Bg` / `Surface` / `SurfaceAlt` /
-`Border` / `Divider` / `Track` / `Text` / `TextMuted` / `TextDisabled` / `Placeholder` /
-`Accent` / `AccentHover` / `AccentActive` / `OnAccent` / `Danger`，另有四个带控件覆盖层回退的
-角色：`AccordionBorder` / `AccordionHeaderBg` / `InputBg` / `InputBorder`。角色在 **paint 期**
-解析成具体颜色——这正是它能跟随换主题的原因。
+`Role` 枚举（`windui::style::Role`，prelude 已导出）：
+
+| 分组 | 角色 |
+| --- | --- |
+| 表面 | `Bg` / `Surface` / `SurfaceAlt` / `SurfaceInverse` / `OnSurfaceInverse` |
+| 文字 | `Text` / `TextMuted` / `TextSubtle` / `TextDisabled` / `Placeholder` |
+| 线条 | `Border` / `Divider` / `Track` |
+| 强调 | `Accent` / `AccentHover` / `AccentActive` / `OnAccent` |
+| 语义 | `Danger` / `Success` / `Warning` |
+| 控件专属（带覆盖层回退） | `AccordionBorder` / `AccordionHeaderBg` / `InputBg` / `InputBorder` |
+
+角色在 **paint 期**解析成具体颜色——这正是它能跟随换主题的原因。
+
+几个容易选错的：
+
+- **`TextSubtle`** 是比 `TextMuted` 更弱的第三档正文（版权行、脚注、时间戳）。它**不是**
+  `TextDisabled`（那表示不可交互）、也**不是** `Placeholder`（那表示待填写）——这两个借来用，
+  语义会骗人。四档的强弱顺序由单元测试锁住。
+- **`SurfaceInverse` / `OnSurfaceInverse`** 是与当前主题**明暗相反**的实底条块及其前景
+  （亮色主题下是深色横幅，暗色主题下就翻成浅色）。如果你要的是「不论主题都恒为深色」的
+  标题栏（不少工具软件如此），那是一个固定设计而非角色，直接写死颜色更诚实——
+  `examples/frameless.rs`、`examples/light_titlebar.rs` 即刻意如此。
+- **`Success` / `Warning`** 与 `Danger` 同族，都取自 palette 的语义色槽；控件级用法见
+  `Intent::Success` / `Intent::Warning`（同一个色槽的另一条访问路径，不是第二套体系）。
+  取值刻意保证对表面 ≥ 3:1，因为语义色经常直接当**前景**用（状态文字、标签边框），
+  饱和亮黄当 warning 会糊得看不清。
 
 > ⚠️ 反过来说：**构建期不要取色**。像 `let c = theme::current().palette.text;` 然后
 > `.fg(c)` 这样，取到的是构建那一刻的颜色，换主题后不会更新。自己封装组合控件时尤其

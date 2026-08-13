@@ -27,11 +27,12 @@ impl Priority {
             Priority::Low => "低",
         }
     }
-    fn color(self) -> Color {
+    /// 优先级配色走主题语义角色，换主题（含明暗切换）自动跟随。
+    fn role(self) -> Role {
         match self {
-            Priority::High => Color::hex(0xE17055),
-            Priority::Medium => Color::hex(0xFDAA0D),
-            Priority::Low => Color::hex(0x00B894),
+            Priority::High => Role::Danger,
+            Priority::Medium => Role::Warning,
+            Priority::Low => Role::Success,
         }
     }
 }
@@ -125,7 +126,7 @@ fn task_row(task: Task) -> Element {
                 .width(4)
                 .height(28)
                 .corner(2.0)
-                .bg(task.priority.color()),
+                .bg_role(task.priority.role()),
         )
         .child(
             // 任务名
@@ -138,10 +139,10 @@ fn task_row(task: Task) -> Element {
             // 优先级 badge：显式固定宽度，保证 measure/paint max_w 一致，避免换行抖动。
             Element::label(badge_text)
                 .font_size(11.0)
-                .fg(task.priority.color())
+                .fg_role(task.priority.role())
                 .padding_xy(6, 2)
                 .corner(4.0)
-                .border(task.priority.color(), 1)
+                .border_role(task.priority.role(), 1)
                 .width(84),
         )
 }

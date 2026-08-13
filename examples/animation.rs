@@ -14,39 +14,6 @@
 
 use windui::prelude::*;
 
-fn card(title: &str, body: Element) -> Element {
-    Element::col()
-        .width_match()
-        .bg_role(Role::Surface)
-        .corner(10.0)
-        .padding(16)
-        .spacing(10)
-        .child(
-            Element::label(title)
-                .font_size(15.0)
-                .fg_role(Role::Text)
-                .height(22)
-                .width_match(),
-        )
-        .child(Element::divider())
-        .child(body)
-}
-
-fn row(label: &str, control: Element) -> Element {
-    Element::row()
-        .width_match()
-        .height(40)
-        .cross(Align::Center)
-        .child(
-            Element::label(label)
-                .font_size(14.0)
-                .fg_role(Role::Text)
-                .width(96)
-                .height(20),
-        )
-        .child(control)
-}
-
 fn main() {
     // 运行期动画开关：Button 点击翻转并调 anim::set_enabled，状态写入动态标签。
     let anim_on = signal(true);
@@ -79,21 +46,21 @@ fn main() {
     let tab = signal(0usize);
     let acc = signal(Some(0usize));
 
-    let toggles = card(
+    let toggles = Element::card(
         "开关 / 勾选 / 单选（点击看过渡）",
         Element::col()
             .width_match()
             .spacing(8)
-            .child(row("Switch A", Element::switch(sw1)))
-            .child(row("Switch B", Element::switch(sw2)))
-            .child(row(
+            .child(Element::field("Switch A", Element::switch(sw1)))
+            .child(Element::field("Switch B", Element::switch(sw2)))
+            .child(Element::field(
                 "CheckBox",
                 Element::row()
                     .spacing(16)
                     .child(Element::checkbox("自动更新", chk1))
                     .child(Element::checkbox("Beta", chk2)),
             ))
-            .child(row(
+            .child(Element::field(
                 "Radio",
                 Element::row()
                     .spacing(16)
@@ -103,28 +70,28 @@ fn main() {
             )),
     );
 
-    let selects = card(
+    let selects = Element::card(
         "分段 / 下拉 / 步进（选中切换看滑动）",
         Element::col()
             .width_match()
             .spacing(10)
-            .child(row(
+            .child(Element::field(
                 "分段",
                 Element::segmented(vec!["简体", "繁体", "其它"], seg).height(32),
             ))
-            .child(row(
+            .child(Element::field(
                 "下拉",
                 Element::dropdown(vec!["北京", "上海", "广州"], dd)
                     .width(140)
                     .height(32),
             ))
-            .child(row(
+            .child(Element::field(
                 "步进",
                 Element::stepper(step, 0.0, 10.0, 1.0).width(120),
             )),
     );
 
-    let buttons = card(
+    let buttons = Element::card(
         "按钮 / 链接（hover/press 看淡变）",
         Element::row()
             .spacing(12)
@@ -143,7 +110,7 @@ fn main() {
                 .height(20),
         )
     };
-    let tabs = card(
+    let tabs = Element::card(
         "标签页（切换看指示条展宽滑动）",
         Element::tabs(
             tab,
@@ -157,7 +124,7 @@ fn main() {
         .height(96),
     );
 
-    let list = card(
+    let list = Element::card(
         "列表（选中看底色 + 左缘条淡入）",
         Element::list(vec!["收件箱", "已发送", "草稿箱", "垃圾箱"], listsel)
             .width_match()
@@ -166,7 +133,7 @@ fn main() {
             .corner(8.0),
     );
 
-    let accordion = card(
+    let accordion = Element::card(
         "手风琴（展开仍为瞬时，属 Phase C 待做）",
         Element::accordion(
             acc,

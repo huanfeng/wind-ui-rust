@@ -38,42 +38,8 @@ fn solid(size: u32, hex: u32) -> Vec<u8> {
     [r, g, b, 255].repeat((size * size) as usize)
 }
 
-/// 一行设置项：左标签 + 右控件。
-fn row(label: &str, control: Element) -> Element {
-    Element::row()
-        .width_match()
-        .height(40)
-        .cross(Align::Center)
-        .spacing(12)
-        .child(
-            Element::label(label)
-                .font_size(14.0)
-                .fg_role(Role::Text)
-                .width(110),
-        )
-        .child(control)
-}
-
 /// 行高与限宽演示用的中文长句：这两项的差别只有在多行正文上才看得出来。
 const CJK_SAMPLE: &str = "行高决定中文正文的呼吸感。这段字用来对比：未设行高时按字体自带行距排版，设为 1.8 后行与行之间明显松开，长段落的可读性差别很大。";
-
-fn card(title: &str, body: Element) -> Element {
-    Element::col()
-        .width_match()
-        .bg_role(Role::Surface)
-        .corner(10.0)
-        .padding(16)
-        .spacing(8)
-        // 标题不固定高度，让 Label 在 width_match 宽度内自适应换行（长标题换行后分隔线随之下移）。
-        .child(
-            Element::label(title)
-                .font_size(16.0)
-                .fg_role(Role::Text)
-                .width_match(),
-        )
-        .child(Element::divider())
-        .child(body)
-}
 
 /// 可排序列表的一行：名称 + 副标题 + 右侧开关。
 ///
@@ -130,26 +96,26 @@ fn main() {
     let settings_body = Element::col()
         .width_match()
         .spacing(14)
-        .child(card(
+        .child(Element::card(
             "常规",
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row(
+                .child(Element::field(
                     "设备名称",
                     Element::text_input(name, "输入名称").width_match(),
                 ))
-                .child(row(
+                .child(Element::field(
                     "访问密码",
                     Element::text_input(pwd, "输入密码")
                         .password()
                         .width_match(),
                 ))
-                .child(row(
+                .child(Element::field(
                     "界面语言",
                     Element::dropdown(vec!["简体中文", "English", "日本語"], lang).width_match(),
                 ))
-                .child(row(
+                .child(Element::field(
                     "列表显示",
                     Element::check_menu(
                         "列表显示",
@@ -166,17 +132,26 @@ fn main() {
                     })
                     .width_match(),
                 ))
-                .child(row("深色主题", Element::switch(dark)))
-                .child(row("接收通知", Element::checkbox("启用推送通知", notify)))
-                .child(row("测试版", Element::checkbox("加入 Beta 通道", beta))),
+                .child(Element::field("深色主题", Element::switch(dark)))
+                .child(Element::field(
+                    "接收通知",
+                    Element::checkbox("启用推送通知", notify),
+                ))
+                .child(Element::field(
+                    "测试版",
+                    Element::checkbox("加入 Beta 通道", beta),
+                )),
         ))
-        .child(card(
+        .child(Element::card(
             "渲染",
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row("音量", Element::slider(volume).width_match()))
-                .child(row(
+                .child(Element::field(
+                    "音量",
+                    Element::slider(volume).width_match(),
+                ))
+                .child(Element::field(
                     "质量",
                     Element::row()
                         .spacing(16)
@@ -185,7 +160,7 @@ fn main() {
                         .child(Element::radio("高", quality, 2)),
                 )),
         ))
-        .child(card(
+        .child(Element::card(
             "备注",
             Element::text_input(notes, "输入备注")
                 .multiline()
@@ -219,7 +194,7 @@ fn main() {
     }
 
     let about_show = show_about;
-    let about = Element::col().fill().spacing(12).child(card(
+    let about = Element::col().fill().spacing(12).child(Element::card(
         "关于 windui",
         Element::col()
             .width_match()
@@ -277,7 +252,7 @@ fn main() {
     let components_body = Element::col()
         .width_match()
         .spacing(14)
-        .child(card(
+        .child(Element::card(
             "拖拽重排 reorder_list（按住手柄拖动；行内开关照常可点，拖动中按 Esc 取消）",
             Element::col()
                 .width_match()
@@ -298,7 +273,7 @@ fn main() {
                         .fg_role(Role::TextMuted)
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "数据驱动重排 reorder_list_signal（顺序的真相源在信号里，可被「恢复默认」推回）",
             Element::col()
                 .width_match()
@@ -347,7 +322,7 @@ fn main() {
                         .on_click(move |_| dict_order.set(default_dict_order())),
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "富文本 RichText（span 混排基线对齐 + 胶囊 + 分隔线 + 可折叠例句组）",
             Element::rich(
                 RichDoc::new()
@@ -400,7 +375,7 @@ fn main() {
             .on_span_click(|ctx, id| ctx.toast(format!("跳转词条：{id}")))
             .width_match(),
         ))
-        .child(card(
+        .child(Element::card(
             "按钮风格（intent：primary / neutral / danger + accent 扩展）",
             Element::row()
                 .spacing(10)
@@ -411,7 +386,7 @@ fn main() {
                 .child(Element::button("品牌").accent(Color::hex(0x2E9E5B)))
                 .child(Element::button("禁用").danger().disabled(true)),
         ))
-        .child(card(
+        .child(Element::card(
             "轻提示 Toast（居中浮层 + 淡入淡出 + 定时消失，回调内 ctx.toast*）",
             Element::row()
                 .spacing(10)
@@ -428,7 +403,7 @@ fn main() {
                         .on_click(|ctx| ctx.toast_err("操作失败，请重试")),
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "描边按钮 Outline + 胶囊徽章 Badge",
             Element::row()
                 .spacing(10)
@@ -440,7 +415,7 @@ fn main() {
                 .child(Element::badge_intent("稳定", Intent::Custom(Color::hex(0x2EA043))))
                 .child(Element::badge_intent("废弃", Intent::Danger)),
         ))
-        .child(card(
+        .child(Element::card(
             "可点击容器 clickable（hover/press 叠层 + 键盘激活 + 手型光标）",
             Element::row()
                 .clickable()
@@ -460,7 +435,7 @@ fn main() {
                 )
                 .child(Element::label("›").font_size(20.0).fg(Color::hex(0x8A9099))),
         ))
-        .child(card(
+        .child(Element::card(
             "图标按钮 IconButton / 标签 chip / 标签字段 tag_field",
             Element::row()
                 .width_match()
@@ -481,7 +456,7 @@ fn main() {
                     .weight(1.0),
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "网格 grid（每行 2 列等宽）",
             Element::grid(
                 2,
@@ -506,66 +481,66 @@ fn main() {
                 ],
             ),
         ))
-        .child(card(
+        .child(Element::card(
             "复选框增强（受控点击拦截 + 危险 / 自定义强调色）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("危险项", {
+                .child(Element::field("危险项", {
                     let s = signal(true);
                     Element::checkbox("删除我的所有数据", s).danger()
                 }))
-                .child(row("自定义色", {
+                .child(Element::field("自定义色", {
                     let s = signal(true);
                     Element::checkbox("绿色强调（accent 覆盖）", s).accent(Color::hex(0x00A86B))
                 }))
-                .child(row("浅色自适应", {
+                .child(Element::field("浅色自适应", {
                     let s = signal(true);
                     Element::checkbox("浅色 accent（对勾自动转深）", s).accent(Color::hex(0xFFD54F))
                 }))
-                .child(row("受控", {
+                .child(Element::field("受控", {
                     let s = signal(false);
                     let s2 = s;
                     // 受控：点击不自动翻转，交回调决定（此处演示直接翻转；真实场景可先弹确认再 set）。
                     Element::checkbox("点击交给 app 决定", s).on_toggle(move |_| s2.set(!s2.get()))
                 })),
         ))
-        .child(card(
+        .child(Element::card(
             "复选框尺寸（Normal 18px vs Small 14px）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("默认", {
+                .child(Element::field("默认", {
                     let s = signal(true);
                     Element::checkbox("Normal（18px）", s)
                 }))
-                .child(row("小尺寸", {
+                .child(Element::field("小尺寸", {
                     let s = signal(true);
                     Element::checkbox("Small（14px）", s).small()
                 }))
-                .child(row("小+危险", {
+                .child(Element::field("小+危险", {
                     let s = signal(true);
                     Element::checkbox("Small danger", s).small().danger()
                 }))
-                .child(row("小+自定义色", {
+                .child(Element::field("小+自定义色", {
                     let s = signal(false);
                     Element::checkbox("Small accent", s).small().accent(Color::hex(0x00A86B))
                 }))
-                .child(row("小+禁用", {
+                .child(Element::field("小+禁用", {
                     Element::checkbox("Small disabled", signal(true)).small().disabled(true)
                 })),
         ))
-        .child(card(
+        .child(Element::card(
             "开关尺寸（Normal 44×24 vs Small 36×20）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("默认", Element::switch(signal(true))))
-                .child(row("小尺寸", Element::switch(signal(true)).small()))
-                .child(row("小+关态", Element::switch(signal(false)).small()))
-                .child(row("小+禁用", Element::switch(signal(true)).small().disabled(true))),
+                .child(Element::field("默认", Element::switch(signal(true))))
+                .child(Element::field("小尺寸", Element::switch(signal(true)).small()))
+                .child(Element::field("小+关态", Element::switch(signal(false)).small()))
+                .child(Element::field("小+禁用", Element::switch(signal(true)).small().disabled(true))),
         ))
-        .child(card(
+        .child(Element::card(
             "文字行高（line_height：倍数，随字号与 DPI 缩放）",
             Element::col()
                 .width_match()
@@ -575,7 +550,7 @@ fn main() {
                 .child(Element::label("行高 1.8").font_size(12.0).fg_role(Role::TextMuted))
                 .child(Element::label(CJK_SAMPLE).width_match().line_height(1.8)),
         ))
-        .child(card(
+        .child(Element::card(
             "正文限宽（max_width：在上界内换行，而非排完再裁）",
             Element::col()
                 .width_match()
@@ -585,7 +560,7 @@ fn main() {
                 .child(Element::label("限宽 320").font_size(12.0).fg_role(Role::TextMuted))
                 .child(Element::label(CJK_SAMPLE).width_match().max_width(320)),
         ))
-        .child(card(
+        .child(Element::card(
             "单边边框（Edges：不参与布局，替代 1px 色块）",
             Element::col()
                 .width_match()
@@ -619,20 +594,20 @@ fn main() {
                         .border_role(Role::Border, 1),
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "分段控制器（连体多段单选，点击/方向键切换）",
             Element::col()
                 .width_match()
                 .spacing(6)
-                .child(row("简繁切换", Element::segmented(vec!["简体", "繁体"], zh_form)))
-                .child(row("半全角", Element::segmented(vec!["半角", "全角"], width_mode)))
-                .child(row("输入方案", Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin)))
-                .child(row(
+                .child(Element::field("简繁切换", Element::segmented(vec!["简体", "繁体"], zh_form)))
+                .child(Element::field("半全角", Element::segmented(vec!["半角", "全角"], width_mode)))
+                .child(Element::field("输入方案", Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin)))
+                .child(Element::field(
                     "禁用态",
                     Element::segmented(vec!["开", "关"], signal(0usize)).disabled(true),
                 )),
         ))
-        .child(card(
+        .child(Element::card(
             "可折叠分组 + 导航行（点标题展开/收起，行尾 > 钻入子页）",
             Element::col().width_match().spacing(4).child(Element::collapsible(
                 "高级设置",
@@ -654,7 +629,7 @@ fn main() {
             ))
             .child(Element::label_signal(nav_msg).font_size(13.0).fg_role(Role::TextMuted).width_match()),
         ))
-        .child(card(
+        .child(Element::card(
             "手风琴 Accordion（卡片多面板；单开互斥 / 多开独立）",
             Element::col()
                 .width_match()
@@ -674,18 +649,18 @@ fn main() {
                     ("外观", Element::label("外观设置项……").width_match().padding_xy(12, 4)),
                 ])),
         ))
-        .child(card(
+        .child(Element::card(
             "悬停提示 Tooltip（任意元素 .tooltip(...)，停留约 0.5s 弹出）",
             Element::col()
                 .width_match()
                 .spacing(10)
-                .child(row("按钮", Element::button("悬停我").tooltip("这是按钮的悬停说明")))
-                .child(row(
+                .child(Element::field("按钮", Element::button("悬停我").tooltip("这是按钮的悬停说明")))
+                .child(Element::field(
                     "帮助图标",
                     Element::label("(?)").font_size(14.0).fg_role(Role::TextMuted).tooltip("把鼠标停在元素上片刻即可看到提示"),
                 )),
         ))
-        .child(card(
+        .child(Element::card(
             "进度条",
             Element::col()
                 .width_match()
@@ -695,15 +670,15 @@ fn main() {
                 .child(Element::label("不确定（忙碌动画）").font_size(13.0).fg_role(Role::TextMuted).width_match())
                 .child(Element::progress_indeterminate().width_match()),
         ))
-        .child(card(
+        .child(Element::card(
             "数字步进",
             Element::col()
                 .width_match()
                 .spacing(10)
-                .child(row("数量", Element::stepper(qty, 0.0, 99.0, 1.0).width(120)))
-                .child(row("缩放", Element::stepper(zoom, 0.5, 3.0, 0.25).width(120))),
+                .child(Element::field("数量", Element::stepper(qty, 0.0, 99.0, 1.0).width(120)))
+                .child(Element::field("缩放", Element::stepper(zoom, 0.5, 3.0, 0.25).width(120))),
         ))
-        .child(card(
+        .child(Element::card(
             "列表",
             Element::list(
                 vec!["收件箱", "已发送", "草稿箱", "垃圾邮件", "归档", "重要", "已加星标"],
@@ -714,26 +689,26 @@ fn main() {
             .bg_role(Role::SurfaceAlt)
             .corner(8.0),
         ))
-        .child(card(
+        .child(Element::card(
             "禁用态（核心统一管理：不可交互 + 置灰 + 跳 Tab）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("按钮", Element::button("不可点").disabled(true)))
-                .child(row("开关", Element::switch(signal(true)).disabled(true)))
-                .child(row("勾选", Element::checkbox("已禁用", signal(true)).disabled(true)))
-                .child(row("滑块", Element::slider(signal(0.5)).disabled(true).width_match()))
-                .child(row(
+                .child(Element::field("按钮", Element::button("不可点").disabled(true)))
+                .child(Element::field("开关", Element::switch(signal(true)).disabled(true)))
+                .child(Element::field("勾选", Element::checkbox("已禁用", signal(true)).disabled(true)))
+                .child(Element::field("滑块", Element::slider(signal(0.5)).disabled(true).width_match()))
+                .child(Element::field(
                     "下拉",
                     Element::dropdown(vec!["选项 A", "选项 B"], signal(0)).disabled(true).width_match(),
                 ))
-                .child(row("步进", Element::stepper(signal(3.0), 0.0, 9.0, 1.0).disabled(true).width(120)))
-                .child(row(
+                .child(Element::field("步进", Element::stepper(signal(3.0), 0.0, 9.0, 1.0).disabled(true).width(120)))
+                .child(Element::field(
                     "输入",
                     Element::text_input(signal("只读内容".into()), "").disabled(true).width_match(),
                 )),
         ))
-        .child(card(
+        .child(Element::card(
             "链接（链接色 + 下划线 + 悬停手型，点击/回车激活）",
             Element::col()
                 .width_match()
@@ -752,15 +727,15 @@ fn main() {
                 }))
                 .child(Element::label_signal(link_msg).font_size(13.0).fg_role(Role::TextMuted).width_match()),
         ))
-        .child(card(
+        .child(Element::card(
             "标签省略（max_lines + truncate）",
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(row("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(row("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(row("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(row("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg_role(Role::Text).weight(1.0))),
+                .child(Element::field("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg_role(Role::Text).weight(1.0))),
         ));
     let components = Element::scroll().fill().child(components_body);
 
@@ -784,7 +759,7 @@ fn main() {
     let images_body = Element::col()
         .width_match()
         .spacing(14)
-        .child(card(
+        .child(Element::card(
             "适配模式（源图 4:3）",
             Element::row()
                 .spacing(10)
@@ -801,7 +776,7 @@ fn main() {
                     Element::image_rgba(64, 48, &grad).fit(Fit::Fill),
                 )),
         ))
-        .child(card(
+        .child(Element::card(
             "圆角 & 占位 & 图标",
             Element::row()
                 .spacing(12)
@@ -820,7 +795,7 @@ fn main() {
                         .disabled(true),
                 ),
         ))
-        .child(card(
+        .child(Element::card(
             "SVG 矢量（resvg）",
             Element::row()
                 .spacing(12)
@@ -856,7 +831,7 @@ fn main() {
     let tables_body = Element::col()
         .width_match()
         .spacing(14)
-        .child(card(
+        .child(Element::card(
             "数据表格 table（固定表头 + 滚动 + 斑马纹 + 行悬停高亮）",
             Element::table(
                 vec![("字符", 1.0), ("半角", 1.0), ("全角", 1.0)],
@@ -869,12 +844,12 @@ fn main() {
             )
             .height(160),
         ))
-        .child(card(
+        .child(Element::card(
             "可排序表格 table_sortable（点表头循环 无→升→降；数值列按数值比较）",
             Element::table_sortable(file_cols(), file_rows(), signal(Some(SortKey::asc(0))))
                 .height(200),
         ))
-        .child(card(
+        .child(Element::card(
             "操作列 .actions（末列自定义控件：查看/编辑/删除；回调按原始行下标绑定，排序后仍正确）",
             Element::table_sortable(
                 // 窄窗下用两数据列 + 操作列，避免挤压换行；操作列做法与列数无关。
@@ -910,7 +885,7 @@ fn main() {
             })
             .height(200),
         ))
-        .child(card(
+        .child(Element::card(
             "自定义单元格 .cell_render（首列边框徽章、末列彩色标签；返回 None 的列走默认文本）",
             Element::table_sortable(
                 vec![("编码", 1.0), ("词条", 2.0), ("类型", 1.0)],
@@ -950,7 +925,7 @@ fn main() {
             })
             .height(200),
         ))
-        .child(card(
+        .child(Element::card(
             "可排序 + 多选 table_selectable（复选框首列 + 全选三态 + 选中行高亮）",
             Element::col()
                 .width_match()
@@ -985,7 +960,7 @@ fn main() {
                         )
                 }),
         ))
-        .child(card(
+        .child(Element::card(
             "服务端排序 table_sortable_server（前端不排序：点表头→回调重拉当前页）",
             {
                 // 模拟「后端」全量数据（真实场景在服务器；此处放内存演示解耦流程）。

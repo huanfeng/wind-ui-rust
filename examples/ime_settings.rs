@@ -6,7 +6,8 @@
 //!
 //! 用到的控件：SegmentedControl（简/繁等二三选一）、Switch（开关项）、
 //! Collapsible（侧栏可折叠分组）、list（侧栏选中高亮）、NavRow（钻入子页 >）。
-//! `setting_row` / `section_header` 是本示例的局部便捷器（纯组合，不入库）。
+//! 设置行走库里的 `Element::setting_row`（标签占左、控件贴右）；`section_header`
+//! 仍是本示例的局部便捷器（各家分组小标题的设计差异大，未入库）。
 
 use windui::prelude::*;
 
@@ -19,24 +20,14 @@ fn section_header(text: &str) -> Element {
         .width_match()
 }
 
-/// 一行设置项：左标签 + 弹性留白 + 右侧控件（右对齐）。`indent` 为左缩进（子项用）。
-fn setting_row(label: &str, indent: i32, control: Element) -> Element {
-    Element::row()
-        .width_match()
-        .height(44)
-        .cross(Align::Center)
-        .child(
-            Element::label(label)
-                .font_size(14.0)
-                .fg_role(Role::Text)
-                .width(180 - indent)
-                .margin_xy(indent / 2, 0),
-        )
-        .child(Element::label("").weight(1.0))
-        .child(control)
-}
-
 fn main() {
+    // 设置行比库默认略高（44 而非 40），给分段控件留出呼吸感。行高走主题而非逐行传参，
+    // 故这一处改动对全窗所有 setting_row 一起生效。
+    // 主题必须在**建树之前**装好：setting_row 在构造期读主题定行高。
+    let mut theme = Theme::default();
+    theme.form.row_height = Some(44);
+    let app = App::new("输入法设置 — windui 示例", 720, 520).theme(theme);
+
     // —— 状态 ——
     let nav_sel = signal(0usize); // 侧栏选中项（常用）
     let attr_expand = signal(true); // 侧栏"属性设置"展开
@@ -90,22 +81,22 @@ fn main() {
                     .width_match(),
             )
             .child(section_header("默认状态"))
-            .child(setting_row(
+            .child(Element::setting_row(
                 "简体 / 繁体",
-                0,
                 Element::segmented(vec!["简体", "繁体"], zh_form),
             ))
-            .child(setting_row(
+            .child(Element::setting_row(
                 "半角 / 全角",
-                0,
                 Element::segmented(vec!["半角", "全角"], width_mode),
             ))
-            .child(setting_row(
+            .child(Element::setting_row(
                 "中文 / 英文",
-                0,
                 Element::segmented(vec!["中文", "英文"], cn_en),
             ))
-            .child(setting_row("隐藏状态栏", 0, Element::switch(hide_bar)))
+            .child(Element::setting_row(
+                "隐藏状态栏",
+                Element::switch(hide_bar),
+            ))
             // 带 (?) 悬停提示的禁用子项：还原原界面的帮助图标。
             .child(
                 Element::row()
@@ -130,23 +121,21 @@ fn main() {
                     .child(Element::label("").weight(1.0))
                     .child(Element::switch(signal(false)).disabled(true)),
             )
-            .child(setting_row(
+            .child(Element::setting_row(
                 "全屏隐藏状态栏",
-                0,
                 Element::switch(fullscreen_hide),
             ))
             .child(Element::divider())
             .child(section_header("输入习惯"))
-            .child(setting_row(
+            .child(Element::setting_row(
                 "输入方案",
-                0,
                 Element::segmented(vec!["全拼", "双拼", "笔画"], pinyin),
             ))
             .child(
                 Element::nav_row("双拼方案设定")
                     .on_click(move |_| s1.set("已进入：双拼方案设定".into())),
             )
-            .child(setting_row("拼音纠错", 0, Element::switch(fuzzy)))
+            .child(Element::setting_row("拼音纠错", Element::switch(fuzzy)))
             .child(
                 Element::nav_row("拼音纠错设置")
                     .on_click(move |_| s2.set("已进入：拼音纠错设置".into())),
@@ -171,8 +160,5 @@ fn main() {
         .child(sidebar)
         .child(content);
 
-    App::new("输入法设置 — windui 示例", 720, 520)
-        .screenshot_from_args()
-        .content(ui)
-        .run();
+    app.screenshot_from_args().content(ui).run();
 }

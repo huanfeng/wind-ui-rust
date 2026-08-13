@@ -9,6 +9,9 @@
 
 use windui::prelude::*;
 
+/// 深色标题栏底色。**刻意不走 `Role`**：本示例演示的是「不论主题明暗，标题栏恒为深色」
+/// 这一具体设计（很多工具软件如此），走 `Role::SurfaceInverse` 反而会在暗色主题下翻成浅色。
+/// 需要跟随主题翻转的反色条块才用 `Role::SurfaceInverse` / `Role::OnSurfaceInverse`。
 const TITLE_BG: u32 = 0x2D3436;
 
 fn main() {

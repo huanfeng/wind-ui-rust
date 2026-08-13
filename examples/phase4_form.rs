@@ -5,21 +5,6 @@
 
 use windui::prelude::*;
 
-fn field(label: &str, control: Element) -> Element {
-    Element::row()
-        .width_match()
-        .height(36)
-        .cross(Align::Center)
-        .spacing(12)
-        .child(
-            Element::label(label)
-                .font_size(14.0)
-                .fg(Color::hex(0x2D3436))
-                .width(96),
-        )
-        .child(control)
-}
-
 fn main() {
     let name = signal(String::from("windui"));
     let enabled = signal(true);
@@ -39,16 +24,16 @@ fn main() {
                 .width_match()
                 .height(32),
         )
-        .child(field(
+        .child(Element::field(
             "名称",
             Element::text_input(name, "请输入名称").width(220),
         ))
-        .child(field(
+        .child(Element::field(
             "启用功能",
             Element::checkbox("开启高级模式", enabled),
         ))
-        .child(field("深色主题", Element::switch(dark)))
-        .child(field(
+        .child(Element::field("深色主题", Element::switch(dark)))
+        .child(Element::field(
             "渲染模式",
             Element::row()
                 .spacing(16)
@@ -56,7 +41,7 @@ fn main() {
                 .child(Element::radio("均衡", mode, 1))
                 .child(Element::radio("高质量", mode, 2)),
         ))
-        .child(field("音量", Element::slider(volume).width(220)))
+        .child(Element::field("音量", Element::slider(volume).width(220)))
         .child(
             Element::row()
                 .width_match()

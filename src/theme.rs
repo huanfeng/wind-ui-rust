@@ -28,8 +28,20 @@ pub struct Palette {
     pub surface: Color,
     /// 次级表面（斑马纹等）。
     pub surface_alt: Color,
+    /// 反色表面：与当前主题**明暗相反**的实底条块（深色标题栏、浅底上的深色横幅）。
+    /// 取值即本主题的 `text`——正文色天生就是"在 bg 上对比最强的那一档"，
+    /// 用它当反色底能保证与页面其余部分同属一套色相，不像另起一个中性灰那样显得外来。
+    pub surface_inverse: Color,
+    /// 反色表面之上的前景。取值即本主题的 `bg`，与 `surface_inverse` 互为对方的底。
+    pub on_surface_inverse: Color,
     pub text: Color,
     pub text_muted: Color,
+    /// 三级弱化文字：比 `text_muted` 更淡，但**不是**禁用也**不是**占位——
+    /// 版权行、脚注、时间戳这类"在场即可、不参与阅读"的字。
+    /// 借用 `text_disabled` 会把可读内容说成不可交互，借用 `placeholder` 则暗示"待填写"，
+    /// 二者语义都不对；没有这一档时正文的视觉层级只有两级，长页面里分不出主次。
+    /// 亮度介于 `text_muted` 与 `text_disabled` 之间（见 `text_tiers_are_ordered` 测试）。
+    pub text_subtle: Color,
     pub text_disabled: Color,
     pub border: Color,
     /// 关闭态轨道（开关 / 滑块）。
@@ -37,6 +49,15 @@ pub struct Palette {
     pub placeholder: Color,
     pub divider: Color,
     pub danger: Color,
+    /// 成功 / 已完成语义色（状态圆点、通过标记、低优先级）。
+    /// 与 `danger` 同为语义色槽，[`Intent::Success`] 由它派生整组视觉。
+    pub success: Color,
+    /// 警告 / 需注意语义色（非阻断提示、中优先级标记）。
+    ///
+    /// 取值刻意比"品牌琥珀"暗一档：警告色经常直接当**前景**用（标签文字、边框），
+    /// 而饱和的亮黄在浅色表面上只有 1.9:1，字一上去就糊。这里的取值对白底约 3.2:1，
+    /// 与 `danger` 的 3.8:1 同量级，既保住琥珀色相又能当字用。
+    pub warning: Color,
 }
 
 impl Default for Palette {
@@ -49,14 +70,19 @@ impl Default for Palette {
             bg: Color::hex(0xF3F3F3),
             surface: Color::WHITE,
             surface_alt: Color::hex(0xF6F8FA),
+            surface_inverse: Color::hex(0x2D3436),
+            on_surface_inverse: Color::hex(0xF3F3F3),
             text: Color::hex(0x2D3436),
             text_muted: Color::hex(0x636E72),
+            text_subtle: Color::hex(0x8A9099),
             text_disabled: Color::hex(0xB0B6BD),
             border: Color::hex(0xCFD4DC),
             track: Color::hex(0xCFD4DC),
             placeholder: Color::hex(0xAAB0B8),
             divider: Color::hex(0xE2E6EA),
             danger: Color::hex(0xE5484D),
+            success: Color::hex(0x2EA043),
+            warning: Color::hex(0xD97706),
         }
     }
 }
@@ -72,14 +98,21 @@ impl Palette {
             bg: Color::hex(0x111827),
             surface: Color::hex(0x1B2333),
             surface_alt: Color::hex(0x232C3E),
+            // 暗色下的"反色"是**浅色**条块，故与亮色主题互为镜像：底取 text、字取 bg。
+            surface_inverse: Color::hex(0xE6E8EC),
+            on_surface_inverse: Color::hex(0x111827),
             text: Color::hex(0xE6E8EC),
             text_muted: Color::hex(0x9AA3B2),
+            text_subtle: Color::hex(0x76808F),
             text_disabled: Color::hex(0x5A6172),
             border: Color::hex(0x2C3650),
             track: Color::hex(0x2B3344),
             placeholder: Color::hex(0x6B7280),
             divider: Color::hex(0x242C3C),
             danger: Color::hex(0xE5484D),
+            // 暗底上不必压暗，取更亮的一档以拉开与背景的对比。
+            success: Color::hex(0x3FB950),
+            warning: Color::hex(0xD29922),
         }
     }
 }
@@ -94,6 +127,10 @@ pub enum Intent {
     Neutral,
     /// 危险操作：palette.danger。
     Danger,
+    /// 成功 / 已完成：palette.success。
+    Success,
+    /// 警告 / 需注意：palette.warning。
+    Warning,
     /// 扩展点：任意基色，派生整组视觉。
     Custom(Color),
 }
@@ -132,6 +169,18 @@ impl Intent {
                 active: p.danger.darken(D),
                 fg: p.danger.pick_fg(p.text, p.on_accent),
             },
+            Intent::Success => IntentColors {
+                bg: p.success,
+                hover: p.success.lighten(L),
+                active: p.success.darken(D),
+                fg: p.success.pick_fg(p.text, p.on_accent),
+            },
+            Intent::Warning => IntentColors {
+                bg: p.warning,
+                hover: p.warning.lighten(L),
+                active: p.warning.darken(D),
+                fg: p.warning.pick_fg(p.text, p.on_accent),
+            },
             Intent::Custom(c) => IntentColors {
                 bg: c,
                 hover: c.lighten(L),
@@ -149,6 +198,8 @@ impl Intent {
             Intent::Primary => p.accent,
             Intent::Neutral => p.text_muted,
             Intent::Danger => p.danger,
+            Intent::Success => p.success,
+            Intent::Warning => p.warning,
             Intent::Custom(c) => c,
         };
         (fg.scale_alpha(0.15), fg)
@@ -889,6 +940,106 @@ impl ReorderTheme {
     }
 }
 
+/// 表单行覆盖层（[`Element::field`] / [`Element::setting_row`] /
+/// [`Element::setting_row_desc`]）。
+///
+/// 行高、标签列宽、间距这些**刻意不进构造器签名**：一个应用里的表单行必须整齐划一，
+/// 而逐行传尺寸的 API 只会让每处调用各写一个近似值，最终对不齐。放进主题后
+/// 「把所有表单行调紧一点」是改一处，不是改四十处。
+///
+/// [`Element::field`]: crate::ui::Element::field
+/// [`Element::setting_row`]: crate::ui::Element::setting_row
+/// [`Element::setting_row_desc`]: crate::ui::Element::setting_row_desc
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FormTheme {
+    /// `field` 的标签列宽（逻辑 px）。默认 110。
+    pub label_width: Option<i32>,
+    /// 单行表单行（`field` / `setting_row`）的行高（逻辑 px）。默认 40。
+    ///
+    /// 单行行**定高**而非按内容撑开：一列表单行必须等高才成其为"一列"，
+    /// 按内容撑开会让放开关的行比放下拉的行矮一截，整列参差不齐。
+    pub row_height: Option<i32>,
+    /// 标签与控件之间的水平间距。默认 12。
+    pub gap: Option<i32>,
+    /// `setting_row_desc` 的上下内边距。默认 12。
+    ///
+    /// 带副标题的行是唯一**不定高**的一种——副标题让内容高度本就因行而异，
+    /// 定高只会把它挤出去。故这一种用内边距把高度撑出来，与上面的 `row_height` 分工。
+    pub row_pad_y: Option<i32>,
+    /// 标签字号（回退 `metrics.font_md`）。
+    pub label_size: Option<f32>,
+    /// 标签字重。默认 400（库默认字重）；设置类界面常用 500 让标签压过控件文字。
+    pub label_weight: Option<u16>,
+    /// 副标题字号（回退 `metrics.font_sm - 1`，即比正文小两档）。
+    pub desc_size: Option<f32>,
+}
+
+impl FormTheme {
+    pub fn label_width(&self) -> i32 {
+        self.label_width.unwrap_or(110)
+    }
+    pub fn row_height(&self) -> i32 {
+        self.row_height.unwrap_or(40)
+    }
+    pub fn gap(&self) -> i32 {
+        self.gap.unwrap_or(12)
+    }
+    pub fn row_pad_y(&self) -> i32 {
+        self.row_pad_y.unwrap_or(12)
+    }
+    pub fn label_size(&self, m: &Metrics) -> f32 {
+        self.label_size.unwrap_or(m.font_md)
+    }
+    pub fn label_weight(&self) -> u16 {
+        self.label_weight.unwrap_or(crate::text::WEIGHT_NORMAL)
+    }
+    pub fn desc_size(&self, m: &Metrics) -> f32 {
+        self.desc_size.unwrap_or(m.font_sm - 1.0)
+    }
+}
+
+/// 卡片容器覆盖层（[`Element::card`]）。
+///
+/// 刻意**不含底色**：卡片底就是 `palette.surface`，走 [`Role::Surface`] 延迟解析
+/// 才能在运行期换主题时跟着变。个别卡片要换底色，在返回的元素上链 `.bg_role(..)`
+/// 即可——那是每实例的一次性微调，不该为它开一个全局主题槽。
+///
+/// [`Element::card`]: crate::ui::Element::card
+/// [`Role::Surface`]: crate::style::Role::Surface
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CardTheme {
+    /// 卡片圆角（回退 `metrics.corner_lg`）。
+    pub corner: Option<f32>,
+    /// 卡片内边距。默认 16。
+    pub pad: Option<i32>,
+    /// 卡片内元素间距（标题/分隔线/内容之间）。默认 10。
+    pub gap: Option<i32>,
+    /// 标题字号（回退 `metrics.font_lg`）。
+    pub title_size: Option<f32>,
+    /// 标题字重。默认 400。
+    pub title_weight: Option<u16>,
+}
+
+impl CardTheme {
+    pub fn corner(&self, m: &Metrics) -> f32 {
+        self.corner.unwrap_or(m.corner_lg)
+    }
+    pub fn pad(&self) -> i32 {
+        self.pad.unwrap_or(16)
+    }
+    pub fn gap(&self) -> i32 {
+        self.gap.unwrap_or(10)
+    }
+    pub fn title_size(&self, m: &Metrics) -> f32 {
+        self.title_size.unwrap_or(m.font_lg)
+    }
+    pub fn title_weight(&self) -> u16 {
+        self.title_weight.unwrap_or(crate::text::WEIGHT_NORMAL)
+    }
+}
+
 /// 悬停提示浮层覆盖层（深底浅字）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -986,6 +1137,8 @@ pub struct Theme {
     pub segment: SegmentTheme,
     pub table: TableTheme,
     pub nav: NavTheme,
+    pub form: FormTheme,
+    pub card: CardTheme,
     pub accordion: AccordionTheme,
     pub reorder: ReorderTheme,
     pub anim: AnimTheme,
@@ -1052,6 +1205,66 @@ mod tests {
         assert_eq!(d.metrics.corner_md, Metrics::default().corner_md);
     }
 
+    /// 四档文字色必须**单调**地越来越弱（对背景的对比度递减）。这条不成立时
+    /// `text_subtle` 就没有存在意义——它的全部价值就是在 muted 与 disabled 之间
+    /// 插进一档，调色时手一滑把它调到 muted 之外，视觉层级会反过来。
+    #[test]
+    fn text_tiers_are_ordered_from_strong_to_weak() {
+        for (name, th) in [("light", Theme::default()), ("dark", Theme::dark())] {
+            let p = &th.palette;
+            let c = |x: Color| contrast_ratio(x, p.bg);
+            let tiers = [
+                ("text", c(p.text)),
+                ("text_muted", c(p.text_muted)),
+                ("text_subtle", c(p.text_subtle)),
+                ("text_disabled", c(p.text_disabled)),
+            ];
+            for w in tiers.windows(2) {
+                assert!(
+                    w[0].1 > w[1].1,
+                    "{name} 主题 {} ({:.2}) 应比 {} ({:.2}) 对比更强",
+                    w[0].0,
+                    w[0].1,
+                    w[1].0,
+                    w[1].1
+                );
+            }
+        }
+    }
+
+    /// 反色表面与它的前景是成对的，必须自身可读——这对色的唯一用途就是
+    /// "深色标题栏配白字"，配错了整条标题栏都看不清。
+    #[test]
+    fn inverse_surface_pair_is_readable() {
+        for (name, th) in [("light", Theme::default()), ("dark", Theme::dark())] {
+            let p = &th.palette;
+            let ratio = contrast_ratio(p.on_surface_inverse, p.surface_inverse);
+            assert!(ratio >= 4.5, "{name} 主题反色对比度 {ratio:.2} < 4.5");
+            // 反色表面还得真的与常规表面相反，否则它只是第三种灰。
+            assert!(
+                contrast_ratio(p.surface_inverse, p.surface) >= 4.5,
+                "{name} 主题 surface_inverse 与 surface 不够对立"
+            );
+        }
+    }
+
+    /// 语义色经常直接当前景用（状态文字、标签边框），故须对表面达到
+    /// WCAG 图形/大字阈值 3:1。饱和亮黄当 warning 是最常见的踩雷点。
+    #[test]
+    fn semantic_colors_are_usable_as_foreground() {
+        for (name, th) in [("light", Theme::default()), ("dark", Theme::dark())] {
+            let p = &th.palette;
+            for (which, c) in [
+                ("danger", p.danger),
+                ("success", p.success),
+                ("warning", p.warning),
+            ] {
+                let ratio = contrast_ratio(c, p.surface);
+                assert!(ratio >= 3.0, "{name} 主题 {which} 对表面 {ratio:.2} < 3.0");
+            }
+        }
+    }
+
     #[test]
     fn toml_roundtrip_preserves_palette() {
         let mut t = Theme::default();
@@ -1060,6 +1273,32 @@ mod tests {
         let back = Theme::from_toml(&s).expect("反序列化");
         assert_eq!(back.palette.accent, Color::hex(0xFF8800));
         assert_eq!(back.metrics.corner_md, t.metrics.corner_md);
+    }
+
+    /// 新增的语义色槽必须一并进 TOML：`#[serde(default)]` 让漏写字段静默回退默认，
+    /// 于是"忘了加字段"和"用户没配这一项"长得一模一样，只能靠往返测试钉住。
+    #[test]
+    fn toml_roundtrip_covers_new_semantic_slots() {
+        let mut t = Theme::default();
+        t.palette.success = Color::hex(0x00FF01);
+        t.palette.warning = Color::hex(0x00FF02);
+        t.palette.text_subtle = Color::hex(0x00FF03);
+        t.palette.surface_inverse = Color::hex(0x00FF04);
+        t.palette.on_surface_inverse = Color::hex(0x00FF05);
+        let back = Theme::from_toml(&t.to_toml().expect("序列化")).expect("反序列化");
+        assert_eq!(back.palette.success, Color::hex(0x00FF01));
+        assert_eq!(back.palette.warning, Color::hex(0x00FF02));
+        assert_eq!(back.palette.text_subtle, Color::hex(0x00FF03));
+        assert_eq!(back.palette.surface_inverse, Color::hex(0x00FF04));
+        assert_eq!(back.palette.on_surface_inverse, Color::hex(0x00FF05));
+
+        // 部分覆盖：只写 success，其余回退默认。
+        let p = Theme::from_toml("[palette]\nsuccess = \"#123456\"\n")
+            .expect("部分 TOML")
+            .palette;
+        assert_eq!(p.success, Color::hex(0x123456));
+        assert_eq!(p.warning, Palette::default().warning);
+        assert_eq!(p.text_subtle, Palette::default().text_subtle);
     }
 
     #[test]
@@ -1091,6 +1330,11 @@ mod tests {
         assert_eq!(Intent::Primary.colors(&p).fg, p.on_accent);
         assert_eq!(Intent::Neutral.colors(&p).bg, p.border);
         assert_eq!(Intent::Danger.colors(&p).bg, p.danger);
+        // Success/Warning 与 Danger 同源于 palette 语义色槽——不是另起一套并行体系。
+        assert_eq!(Intent::Success.colors(&p).bg, p.success);
+        assert_eq!(Intent::Warning.colors(&p).bg, p.warning);
+        assert_eq!(Intent::Success.badge_colors(&p).1, p.success);
+        assert_eq!(Intent::Warning.badge_colors(&p).1, p.warning);
         let custom = Color::hex(0x2E9E5B);
         assert_eq!(
             Intent::Custom(custom).colors(&p).bg,

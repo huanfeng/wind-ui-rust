@@ -114,28 +114,10 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
         .child(Element::button("方案设置").small().outline().neutral())
 }
 
-/// 主方案设置行：标题/描述 + 右侧下拉。
+/// 主方案设置行：标题/描述 + 右侧下拉。库里的 `setting_row_desc` 加一个定宽下拉即可，
+/// 字号/字重走本例注入的 `FormTheme`。
 fn dropdown_row(title: &str, desc: &str, options: Vec<&str>, sel: Signal<usize>) -> Element {
-    Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .child(
-            Element::col()
-                .weight(1.0)
-                .spacing(3)
-                .child(
-                    Element::label(title)
-                        .font_size(15.0)
-                        .font_weight(600)
-                        .fg_role(Role::Text),
-                )
-                .child(
-                    Element::label(desc)
-                        .font_size(12.5)
-                        .fg_role(Role::TextMuted),
-                ),
-        )
-        .child(Element::dropdown(options, sel).width(180))
+    Element::setting_row_desc(title, desc, Element::dropdown(options, sel).width(180))
 }
 
 /// 导航占位页（演示左侧栏切换内容）。
@@ -161,6 +143,15 @@ fn nav_placeholder(title: &str) -> Element {
 }
 
 fn main() {
+    // 本稿的设置行标题比库默认更重更大，且行间距由外层 col 统一给，故行本身不留上下内边距。
+    // 主题必须在**建树之前**装好：setting_row_desc 在构造期读主题定字号。
+    let mut theme = Theme::default();
+    theme.form.label_size = Some(15.0);
+    theme.form.label_weight = Some(600);
+    theme.form.desc_size = Some(12.5);
+    theme.form.row_pad_y = Some(0);
+    let app = App::new("应用设置 — windui 示例", 1000, 680).theme(theme);
+
     let nav = signal(0usize);
     let main_scheme = signal(0usize);
     let pinyin_scheme = signal(0usize);
@@ -211,10 +202,11 @@ fn main() {
                         ),
                 )
                 .child(
+                    // 在线状态点：走 Success 语义角色，换主题自动跟随。
                     Element::leaf()
                         .size(8, 8)
                         .corner(4.0)
-                        .bg(Color::hex(0x2EA043)),
+                        .bg_role(Role::Success),
                 ),
         )
         .child(
@@ -467,8 +459,5 @@ fn main() {
         .child(pairs_dialog)
         .child(edit_dialog);
 
-    App::new("应用设置 — windui 示例", 1000, 680)
-        .screenshot_from_args()
-        .content(root)
-        .run();
+    app.screenshot_from_args().content(root).run();
 }

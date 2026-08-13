@@ -6,6 +6,40 @@
 ## [Unreleased]
 
 ### Added
+- **表单脚手架 `Element::field` / `setting_row` / `setting_row_desc` / `card`**：「标签 + 控件」
+  的一行和「标题 + 内容」的卡片此前在 6 个示例里各写了一遍，实现几乎逐字相同，只差行高与
+  标签宽度——正是这个库自称的核心场景（做小工具）里重复最多的样板。
+  `field` 是固定标签列 + 紧随其后的控件（表单感，控件左缘对齐成一条竖线），`setting_row`
+  把控件贴到行右缘（设置页感），二者的差别只有这一点；两者都**定高**，一列行才对得齐。
+  `setting_row_desc` 在标签下加一行弱化说明，是唯一**不定高**的一种——副标题长短不一，
+  定高只会把它挤出去，故改由上下内边距撑开。副标题做成独立构造器而非 `Option` 参数：
+  `Option<impl Into<String>>` 的 `None` 推断不出类型，退成 `Option<&str>` 又会让这一个参数
+  破例不收 `String`，且占多数的无副标题行还得白写一个 `None`。
+  行高/标签列宽/间距/字号一律走新的 `FormTheme` 与 `CardTheme` 覆盖层，**不进签名**：
+  一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值。
+  这几个构造器返回的是拼好的容器而非挂了 widget 的控件，故只接受容器/样式类修饰符，
+  控件专属修饰符（`.intent()` / `.small()` / `.outline()`）须加在传入的 `control` 上——
+  rustdoc 与 `docs/API_GUIDE.md` 均明确列出了可用与不可用的两类（`badge`/`chip`/`grid`/
+  `dialog_panel` 同属此类，此前从签名上看不出来）。
+- **`FormTheme` / `CardTheme` 主题覆盖层**：表单行的行高、标签列宽、水平间距、标签字号字重、
+  副标题字号、带副标题行的上下内边距；卡片的圆角、内边距、元素间距、标题字号字重。
+  全部 `Option` 回退 palette/metrics 并接入 TOML。卡片刻意**不含底色槽**——底色走
+  `Role::Surface` 延迟解析才能在运行期换主题时跟着变，个别卡片换色链 `.bg_role(..)` 即可。
+- **语义色角色补全 `Role::Success` / `Role::Warning`**：此前只有 `Danger` 一个语义色，
+  优先级三色、状态圆点这类需求只能留硬编码。新增 `palette.success` / `palette.warning`
+  两个色槽，亮暗两套各给取值，并同步扩展 `Intent::Success` / `Intent::Warning`——
+  与 `Danger` 一样是「一个色槽、两条访问路径」（`Role` 供直接上色、`Intent` 供控件语义），
+  不是第二套并行体系。取值刻意保证对表面 ≥ 3:1（有单元测试锁住）：语义色经常直接当**前景**
+  用（状态文字、标签边框），而饱和亮黄在浅色表面上只有约 1.9:1，字一上去就糊。
+- **三级弱化文字 `Role::TextSubtle`**：比 `TextMuted` 更淡但仍是可读正文（版权行、脚注、
+  时间戳）。此前这类文字只能压成 `TextMuted`，正文的视觉层级从三档降成两档；借
+  `TextDisabled` 会把可读内容说成不可交互，借 `Placeholder` 则暗示「待填写」，语义都不对。
+  四档文字色的强弱顺序由单元测试锁住，防止后续调色把层级调反。
+- **反色表面 `Role::SurfaceInverse` / `Role::OnSurfaceInverse`**：与当前主题**明暗相反**的
+  实底条块及其前景（亮色主题下是深色横幅，暗色主题下翻成浅色）。取值即本主题的
+  `text` / `bg`——正文色天生就是「在 bg 上对比最强的那一档」，用它当反色底能保证与页面其余
+  部分同属一套色相。注意「不论主题都恒为深色」的标题栏是一个固定设计而非角色，
+  仍应写死颜色（`examples/frameless.rs` / `light_titlebar.rs` 即刻意如此，已补注释说明）。
 - **表格行右键菜单 `Element::on_row_context_menu`**：右击数据行时按行下标现取现建菜单项并
   弹级联浮层，返回空 `Vec` 则不弹。三类表格（`table_sortable` / `table_sortable_server` /
   `table_selectable`）均支持——右键与首列复选框不争语义（复选框只吃左键），故不像整行双击
@@ -62,6 +96,17 @@
   `Option` 回退内置默认并接入 TOML（`#[serde(default)]`，旧 TOML 无需改动）。
 
 ### Changed
+- **`App::theme(t)` 现在**当场**把主题装进当前线程**，而不是等到 `run()`。一部分组合子
+  （`Element::field` / `card` / `badge` / `chip` / `tag_field` / `dialog_panel`）在**构造期**
+  就要读主题定尺寸和颜色；此前主题要到 `run()` 才装，这些构造器读到的一律是默认主题，
+  自定义主题里的行高、圆角、徽章色会**静默失效**——编译通过、不报错、只是没生效。
+  链式写法（`App::new(..).theme(t).content(build_ui())`）因此自动正确；若先把树建进变量
+  再传，请把建树挪到 `.theme(t)` 之后（`examples/ime.rs` / `settings.rs` / `ime_settings.rs`
+  已照此调整）。
+- **`Role` 与 `Intent` 各新增变体（破坏性）**：两者都是公开的非 `non_exhaustive` 枚举，
+  下游对它们做穷举 `match` 的代码需补分支。`Role` 加了 `SurfaceInverse` /
+  `OnSurfaceInverse` / `TextSubtle` / `Success` / `Warning`，`Intent` 加了 `Success` /
+  `Warning`；`Palette` 相应新增五个色槽（`#[serde(default)]`，旧 TOML 无需改动）。
 - **`MenuItem` 新增 `pub intent: Option<Intent>` 字段（破坏性）**：该结构体字段全 `pub` 且非
   `#[non_exhaustive]`，下游用**字面量构造**或穷尽解构 `MenuItem` 的代码会 `E0063` / `E0027`。
   迁移：改用 `MenuItem::run` / `key` / `separator` / `submenu` 四个便捷构造加链式设置器
