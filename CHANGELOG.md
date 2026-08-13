@@ -6,6 +6,23 @@
 ## [Unreleased]
 
 ### Added
+- **动态文案 `TextContent`：控件文案可直接绑 `Signal<String>`**。此前全库只有
+  `Element::label_signal` 一条路径能让文字跟随状态，`button`/`link`/`badge`/`checkbox` 等
+  的文案都是构建后不可变的 `impl Into<String>`——于是"切换类按钮"（播放/暂停、展开/收起、
+  隐藏已完成/显示全部）这个最常见的需求根本做不了。`examples/dyn_list.rs` 的头部注释写着
+  两个按钮会在「按名称排序 / 按优先级排序」之间切换，实现却是写死的固定文案，说明与代码
+  对不上正是因为框架给不了。
+  改法不是给每个控件再加一个 `_signal` 构造器，而是把动态性下沉到**参数类型**：所有单条
+  文案参数从 `impl Into<String>` 放宽为 `impl Into<TextContent>`，`&str` / `String` /
+  `Signal<String>` 走同一个构造器。规则因此收敛成一句话——**凡是接受一段文案的参数都可以
+  传 `Signal<String>`**，不必记哪个控件有孪生构造器；`_signal` 后缀继续只用于参数类型确实
+  不同的场景（`list_signal` 收 `Signal<Vec<T>>`）。选它而不选修饰符方案（`.text_signal(s)`）
+  是因为绑错类型在**编译期**就过不去，不像修饰符只能靠 `debug_assert` 运行期喊停，而且
+  `button("占位").text_signal(s)` 里的占位串是个永不显示的死参数。
+  覆盖 `label` / `button` / `link` / `badge` / `badge_intent` / `checkbox` / `radio` /
+  `nav_row` / `icon_button`（图标按钮绑信号即"图标随状态换"）。文案在每次 measure 时现取，
+  所以换字会**重新测量宽度**而不是被旧尺寸裁掉：点击回调里写信号已由核心升级为
+  `DamageReq::Layout` 级失效，整窗帧必先 `layout_root`。
 - **表单脚手架 `Element::field` / `setting_row` / `setting_row_desc` / `card`**：「标签 + 控件」
   的一行和「标题 + 内容」的卡片此前在 6 个示例里各写了一遍，实现几乎逐字相同，只差行高与
   标签宽度——正是这个库自称的核心场景（做小工具）里重复最多的样板。
@@ -96,6 +113,11 @@
   `Option` 回退内置默认并接入 TOML（`#[serde(default)]`，旧 TOML 无需改动）。
 
 ### Changed
+- **`ui::DynLabel` 并入 `ui::Label`**（保留为 `#[deprecated]` 类型别名，`DynLabel::new(sig)`
+  仍能编译）。它本是 `Label` 的逐行复制——换行、`max_lines` 裁剪、上百行的截断算法各存了
+  两份，改一处得记得改两处；文案的动态性交给字段类型 `TextContent` 之后，这个孪生类型就
+  没有存在理由了。附带好处：`.max_lines()` / `.truncate()` 不必再"先试 `Label` 再试
+  `DynLabel`"两次 downcast，误用提示也只剩一条。`Element::label_signal` 不变。
 - **`App::theme(t)` 现在**当场**把主题装进当前线程**，而不是等到 `run()`。一部分组合子
   （`Element::field` / `card` / `badge` / `chip` / `tag_field` / `dialog_panel`）在**构造期**
   就要读主题定尺寸和颜色；此前主题要到 `run()` 才装，这些构造器读到的一律是默认主题，

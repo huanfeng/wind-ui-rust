@@ -15,6 +15,7 @@ use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::TextContent;
 
 /// 链接三态（与 Button 同构）。
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -26,7 +27,7 @@ enum LinkState {
 
 /// 链接文本控件：链接色 + 下划线，点击/回车激活。
 pub struct Link {
-    text: String,
+    text: TextContent,
     /// 激活时打开的 URL/路径（`on_click` 未设时生效）。
     url: Option<String>,
     /// 是否绘制下划线（默认 true）。
@@ -39,9 +40,9 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn new(text: String) -> Self {
+    pub fn new(text: impl Into<TextContent>) -> Self {
         Self {
-            text,
+            text: text.into(),
             url: None,
             underline: true,
             state: LinkState::Normal,
@@ -70,7 +71,12 @@ impl Link {
 
 impl Widget for Link {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        text.measure(&self.text, &crate::text::TextStyle::of(style), None)
+        // 绑信号时现取当前文案：换字即改测量宽度，下划线长度随之（见 paint）。
+        text.measure(
+            self.text.resolve().as_ref(),
+            &crate::text::TextStyle::of(style),
+            None,
+        )
     }
 
     fn paint(
@@ -82,6 +88,7 @@ impl Widget for Link {
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
+        let s = self.text.resolve();
         let th = crate::theme::current();
         let (pal, lk) = (&th.palette, &th.link);
         // 禁用：链接色降为 text_disabled；否则按三态取链接色。
@@ -105,7 +112,7 @@ impl Widget for Link {
         let color = anim.animate();
         self.color_anim.set(anim);
         canvas.draw_text(
-            &self.text,
+            s.as_ref(),
             content,
             color,
             style.text_align,
@@ -114,7 +121,7 @@ impl Widget for Link {
         if self.underline {
             // 下划线贴文字底缘；x 跟随文字（Start 对齐），长度取文字实测宽。
             let tw = canvas
-                .measure_text(&self.text, &crate::text::TextStyle::of(style))
+                .measure_text(s.as_ref(), &crate::text::TextStyle::of(style))
                 .w;
             let y = (content.y + content.h - 1) as f32;
             let x0 = content.x as f32;

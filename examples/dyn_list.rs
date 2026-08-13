@@ -1,4 +1,4 @@
-//! 响应式动态列表示例：演示 `Element::list_signal` 的排序与筛选。
+//! 响应式动态列表示例：演示 `Element::list_signal` 的排序与筛选，以及绑信号的按钮文案。
 //!
 //! 运行：cargo run --release --example dyn_list
 //!
@@ -6,8 +6,12 @@
 //! - 「按名称排序 / 按优先级排序」— 切换排序维度，列表行即时重排
 //! - 「隐藏已完成 / 显示全部」— 过滤已完成任务，行即时增删
 //!
-//! 每次点击只需对 Signal<Vec<Task>> 调 `.set()`，框架自动清空旧子节点并重建新子节点，
-//! 调用方不感知 reconciler 的存在。
+//! 两个按钮的文案说的都是"点下去会发生什么"，故每次点击后文案要翻转成相反的动作。
+//! 这靠给 `Element::button` 传 `Signal<String>` 实现（见 `TextContent`）——文案改了，
+//! 按钮宽度也跟着重新测量，无需重建控件。
+//!
+//! 列表本身则是每次点击对 Signal<Vec<Task>> 调 `.set()`，框架自动清空旧子节点并重建
+//! 新子节点，调用方不感知 reconciler 的存在。
 
 use windui::prelude::*;
 
@@ -155,23 +159,37 @@ fn main() {
     // 视图数据信号：初始值 = 按优先级排序、显示全部
     let tasks = signal(compute(false, false));
 
-    // 排序按钮
+    // 两个按钮的文案信号：初始文案 = 当前状态下点一下会做的事。
+    let sort_caption = signal(String::from("按名称排序"));
+    let filter_caption = signal(String::from("隐藏已完成"));
+
+    // 排序按钮：文案绑信号，翻转状态的同时把文案改成相反的动作。
     let sort_btn = {
-        Element::button("按优先级排序")
+        Element::button(sort_caption)
             .on_click(move |_| {
                 let by_name = !sort_by_name.get();
                 sort_by_name.set(by_name);
+                sort_caption.set(String::from(if by_name {
+                    "按优先级排序"
+                } else {
+                    "按名称排序"
+                }));
                 tasks.set(compute(by_name, hide_done.get()));
             })
             .intent(Intent::Primary)
     };
 
-    // 筛选按钮
+    // 筛选按钮：同上。文案长度不同（5 字 ↔ 4 字），按钮宽度随之重新测量。
     let filter_btn = {
-        Element::button("隐藏已完成")
+        Element::button(filter_caption)
             .on_click(move |_| {
                 let hide = !hide_done.get();
                 hide_done.set(hide);
+                filter_caption.set(String::from(if hide {
+                    "显示全部"
+                } else {
+                    "隐藏已完成"
+                }));
                 tasks.set(compute(sort_by_name.get(), hide));
             })
             .intent(Intent::Neutral)

@@ -2053,7 +2053,7 @@ impl Tree {
         // - Move(hover)：写的是自身悬停态，局部重绘即可；
         // - Key：打字高频，保留局部重绘避免整窗卡顿；
         // - 其余指针事件(Down/Up/Click 等)：可能写跨控件共享状态（计数器、enabled_when 门控），
-        //   升 Layout 使 apply_damage 直接置 needs_full，覆盖所有读者（含 DynLabel/en_cond）。
+        //   升 Layout 使 apply_damage 直接置 needs_full，覆盖所有读者（含绑信号的文案/en_cond）。
         if crate::signal::end_event() {
             let r = self.visual_bounds(id);
             let is_hover_or_key = matches!(

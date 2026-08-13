@@ -13,6 +13,7 @@ use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
 use crate::ui::ImageContent;
+use crate::ui::TextContent;
 
 /// 标签内图标与文字间距。
 const TAB_ICON_GAP: i32 = 8;
@@ -422,7 +423,7 @@ impl Widget for Clickable {
 
 /// 图标按钮内容：字形（draw_text）或图片（ImageContent）。
 enum IconKind {
-    Glyph(String),
+    Glyph(TextContent),
     Image(ImageContent),
 }
 
@@ -442,7 +443,7 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    pub fn glyph(g: impl Into<String>) -> Self {
+    pub fn glyph(g: impl Into<TextContent>) -> Self {
         Self::with(IconKind::Glyph(g.into()))
     }
     pub fn image(content: ImageContent) -> Self {
@@ -473,7 +474,11 @@ impl Widget for IconButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         match &self.kind {
             IconKind::Glyph(g) => {
-                let t = text.measure(g, &crate::text::TextStyle::of(style), None);
+                let t = text.measure(
+                    g.resolve().as_ref(),
+                    &crate::text::TextStyle::of(style),
+                    None,
+                );
                 let side = t.w.max(t.h).max(style.font_size as i32) + 2 * ICON_BTN_PAD;
                 Size::new(side.max(ICON_BTN_SIZE), side.max(ICON_BTN_SIZE))
             }
@@ -532,7 +537,7 @@ impl Widget for IconButton {
                     th.palette.text_disabled
                 };
                 canvas.draw_text(
-                    g,
+                    g.resolve().as_ref(),
                     bounds,
                     color,
                     Align::Center,

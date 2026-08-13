@@ -150,6 +150,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
 | `stepper` | `Signal<f64>` | 数值 |
 | `text_input` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
+| `label` / `button` / `link` / `badge` / `checkbox` / `radio` / `nav_row` / `icon_button` 的**文案参数** | `Signal<String>`（可选，也可给 `&str`） | 跟随状态变化的文案，见 §5「动态文案」 |
 | `list_signal` / `host_signal` / `reorder_list_signal` | `Signal<Vec<T>>` | 动态数据源（见 §6.5） |
 | `dropdown_signal` | `Signal<Vec<String>>` | 动态选项 |
 | `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
@@ -174,7 +175,9 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 - **构造器 = 控件名（名词）**：`col`、`row`、`button`、`dropdown`…，全小写蛇形。
 - **布局/样式修饰符 = 属性名**：`width`、`padding`、`bg`、`corner`…，设置型方法**不加** `set_` 前缀（builder 惯例）。
 - **颜色用缩写**：背景 `bg`、前景 `fg`，全库一致（`Element::bg`、`App::bg`、`Style.bg`、`EventCtx::set_bg`）。
-- **文本标签基本都是 `impl Into<String>`**：`button`、`label`、`checkbox`、`dropdown`、`list`、`tabs` 等的标题/选项均可传 `&str` 或 `String`（少数破例见 §11）。
+- **单条文案参数都是 `impl Into<TextContent>`**：`button`、`label`、`link`、`badge`、`checkbox`、`radio`、`nav_row`、`icon_button` 的文案可传 `&str`、`String`，也可以直接传 `Signal<String>` 让文案跟着状态变（见 §5「动态文案」）。
+  成组的文案（`dropdown`/`list`/`tabs` 的 `Vec<impl Into<String>>`、表格的列名与单元格）仍是 `impl Into<String>`：整组内容要动的场景归 `list_signal` 一族管（§6.5），不是逐条绑信号。
+- **`_signal` 后缀只用于「参数类型不同」的构造器**：`list_signal(Signal<Vec<T>>)`、`dropdown_signal(Signal<Vec<String>>, Signal<usize>)`……文案绑定不需要这个后缀，因为传信号和传字符串走的是**同一个**构造器。
 - **状态参数一律 `Signal<T>`**：`checkbox(label, Signal<bool>)`、`dropdown(options, Signal<usize>)`……第一个参数是内容、第二个是状态，顺序全库一致。
 - **事件回调 = `on_<动作>`**：`on_click`、`on_toggle`、`on_row_activate`……签名规则见 §8.1。
   只有"发生了什么之后调"的才叫 `on_`；"每次渲染/构建时调"的**生成器**（`summary`、`actions`、
@@ -188,7 +191,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 
 ## 5. 控件目录
 
-全部经 `Element::` 构造。`impl Into<String>` 处可传 `&str` 或 `String`。
+全部经 `Element::` 构造。`impl Into<String>` 处可传 `&str` 或 `String`；`impl Into<TextContent>` 处还可以传 `Signal<String>`（见本节「动态文案」）。
 
 ### 容器 / 布局
 ```rust
@@ -322,6 +325,37 @@ Element::progress(value)                          // value: Signal<f32> (确定�
 Element::progress_indeterminate()                 // 不确定进度（忙碌动画）
 Element::label_signal(text)                           // 动态标签：text: Signal<String>，信号变即刷新
 ```
+
+### 动态文案（文案跟随状态变化）
+
+切换类按钮（播放/暂停、展开/收起、隐藏已完成/显示全部）需要按钮上的字随状态翻转。
+把 `Signal<String>` 直接传给文案参数即可，**不需要**另找构造器：
+
+```rust
+let caption = signal(String::from("隐藏已完成"));
+let hide = signal(false);
+
+Element::button(caption).on_click(move |_| {          // 传信号，不是字符串
+    let next = !hide.get();
+    hide.set(next);
+    caption.set(String::from(if next { "显示全部" } else { "隐藏已完成" }));
+});
+```
+
+- **适用范围**：`label` / `button` / `link` / `badge` / `badge_intent` / `checkbox` /
+  `radio` / `nav_row` / `icon_button`（图标按钮传的是字形，绑信号即"图标随状态换"，
+  如 `▶` ↔ `⏸`）。签名里写 `impl Into<TextContent>` 的参数都算。
+- **宽度会跟着变**：文案在每次 measure 时现取，改了信号下一帧就重新测量，按钮/链接
+  的宽度、链接下划线的长度都随之更新——不是只换个字然后被旧尺寸裁掉。
+- **绑错类型编译不过**：`Element::button(signal(0i32))` 直接是编译错误（`Signal<i32>`
+  没有 `Into<TextContent>`）。这比本库其它修饰符的 `debug_assert` 运行期守卫更早拦下。
+  要显示数字就自己 `format!` 进一个 `Signal<String>`。
+- **`Element::label_signal(sig)` 仍在**，等价于 `Element::label(sig)`——它比 `TextContent`
+  出现得早，保留不动。新代码两种写法都行。
+
+> **一个反例**：`dropdown` / `list` / `tabs` 的选项是 `Vec<impl Into<String>>`，**不**支持
+> 逐条绑信号。整组内容会变的场景用 `list_signal` / `dropdown_signal`（§6.5）——那是重建
+> 子树的问题，不是换一段文字的问题。
 
 ### 导航 / 分组
 
@@ -648,6 +682,7 @@ fn main() {
 | `Element::reorder_list_signal(data, row_fn)` | `col` + 拖动手柄 | 顺序真相源在信号里的可拖拽排序列表 |
 | `Element::dropdown_signal(options, selected)` | 下拉 | 选项列表异步到达 |
 | `Element::label_signal(sig)` / `rich_signal(doc)` | 叶子 | 单个文本/文档跟随信号 |
+| 文案参数直接传 `Signal<String>` | 任意文本控件 | 单条文案跟随状态（按钮/链接/徽章…，见 §5「动态文案」） |
 | `Element::reactive()` | 任意 | 自定义控件手动接入（须自行实现 `on_update`） |
 
 > **`list_signal` 还是 `host_signal`？** 前者内部是 `scroll`，按**无限高度**测量子元素——
@@ -1137,12 +1172,11 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 **命名一致性**
 
 背景/前景统一 `bg`/`fg`；控件状态统一 `Signal<T>`；text_input / link / rich 的专属修饰符
-误用在 debug 期 panic 提示。文本标签**绝大多数**收 `impl Into<String>`（`button`、`label`、
-`checkbox`、`dropdown`、`list`、`tabs`、`nav_row`、`badge` 等构造器都可以传 `&str`），但有
-少数破例仍收裸 `String`：`Element::table_custom(columns: Vec<(String, f32)>, ..)`，以及
-widget 层的直接构造器（`Button::new(String)` / `Label::new(String)` / `NavRow::new(String)`
-等——这一层通常经 `Element::` 构造器间接使用，很少直接碰）。碰上编译错误时补一个
-`.to_string()` / `.into()` 即可。
+误用在 debug 期 panic 提示。单条文案统一收 `impl Into<TextContent>`（`button`、`label`、
+`link`、`checkbox`、`radio`、`nav_row`、`badge`、`icon_button`，可传 `&str` / `String` /
+`Signal<String>`）；成组文案收 `impl Into<String>`（`dropdown`、`list`、`tabs` 的选项等）。
+少数破例仍收裸 `String`：`Element::table_custom(columns: Vec<(String, f32)>, ..)`。碰上编译
+错误时补一个 `.to_string()` / `.into()` 即可。
 
 框架处于早期，以"最新设计 + 统一"为准，**不承诺向后兼容**——API 可能继续演进，
 第三方请跟随本指南最新版。

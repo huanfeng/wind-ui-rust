@@ -492,10 +492,10 @@ mod tests {
 
         let style = Style::default();
         let mut te = NullTextEngine;
-        let plain = Button::new("OK".into());
+        let plain = Button::new("OK");
         let w0 = plain.measure(Size::ZERO, &style, &mut te).w;
 
-        let mut iconed = Button::new("OK".into());
+        let mut iconed = Button::new("OK");
         iconed.set_icon(ImageContent::new(Image::from_rgba(4, 4, &[0u8; 64]).ok()));
         let w1 = iconed.measure(Size::ZERO, &style, &mut te).w;
 

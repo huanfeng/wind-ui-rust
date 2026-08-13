@@ -17,6 +17,7 @@ pub mod segmented;
 pub mod select;
 pub mod sortable_table;
 pub mod stepper;
+pub mod text_content;
 pub mod window_buttons;
 
 use std::cell::{Cell, RefCell};
@@ -47,6 +48,7 @@ pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
 pub use sortable_table::{SortKey, SortStyle};
 pub use stepper::Stepper;
+pub use text_content::TextContent;
 pub use window_buttons::{WindowButton, WindowButtonKind};
 
 /// 图标与文字之间的间距（Button 等）。
@@ -59,7 +61,8 @@ const TABLE_CELL_PAD_Y: i32 = 9;
 const TABLE_HEADER_PAD_Y: i32 = 10;
 const TABLE_CELL_CORNER: f32 = 4.0;
 
-/// 文本溢出时的省略方式。对 `Label`/`DynLabel` 生效；配合 `.max_lines(1)` 使用最为常见。
+/// 文本溢出时的省略方式。对 [`Label`] 生效（静态文案与绑信号的一并适用）；
+/// 配合 `.max_lines(1)` 使用最为常见。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Truncate {
     #[default]
@@ -79,7 +82,7 @@ pub enum SortOrder {
     Desc,
 }
 
-/// 文本控件（`Label`/`DynLabel`）前景色：启用取样式解析色；禁用统一降为 `text_disabled`，
+/// 文本控件（[`Label`]）前景色：启用取样式解析色；禁用统一降为 `text_disabled`，
 /// 使整行（标签 + 说明）随容器禁用一并置灰（控件自身早已响应禁用，此处补齐文字部分）。
 ///
 /// 契约提示：这是框架级语义——禁用子树内的**任何**文本一律置灰，暂无单节点豁免。
@@ -93,22 +96,28 @@ fn text_fg(enabled: bool, style: &Style, theme: &crate::theme::Theme) -> Color {
     }
 }
 
+/// 截断缓存键值：`(文案, content_w, fsize_bits, 截断串, 是否发生了截断)`。
+type TruncCacheEntry = (String, i32, u32, String, bool);
+
 /// 文本叶子控件。
+///
+/// 文案是 [`TextContent`]：传 `&str`/`String` 得到固定文案，传 `Signal<String>` 则文案
+/// 随信号变化（旧名 `DynLabel` 即此情形，已并入本类型）。
 pub struct Label {
-    text: String,
+    text: TextContent,
     /// 最大显示行数；超出部分按 `truncate` 处理（`None` = 不限）。
     pub max_lines: Option<usize>,
     /// 溢出省略方式（仅 `max_lines = Some(1)` 单行时精确截断；多行仅高度裁剪）。
     pub truncate: Truncate,
-    /// 截断结果缓存 `(content_w, fsize_bits) → (截断串, 是否发生了截断)`；
-    /// text 不可变故不入 key。
-    trunc_cache: RefCell<Option<(i32, u32, String, bool)>>,
+    /// 截断结果缓存 `(文案, content_w, fsize_bits) → (截断串, 是否发生了截断)`。
+    /// 文案进缓存键是为绑了信号的 Label：它的文案会变，不入 key 就会一直画上一次的截断串。
+    trunc_cache: RefCell<Option<TruncCacheEntry>>,
 }
 
 impl Label {
-    pub fn new(text: String) -> Self {
+    pub fn new(text: impl Into<TextContent>) -> Self {
         Self {
-            text,
+            text: text.into(),
             max_lines: None,
             truncate: Truncate::None,
             trunc_cache: RefCell::new(None),
@@ -118,17 +127,18 @@ impl Label {
     /// 计算截断后显示串（含省略号）及是否实际发生了截断；结果会被 paint 缓存，通常只算一次。
     fn compute_truncated(
         &self,
+        s: &str,
         canvas: &mut dyn Canvas,
         ts: &crate::text::TextStyle,
         avail_w: i32,
     ) -> (String, bool) {
-        let total_w = canvas.measure_text(&self.text, ts).w;
+        let total_w = canvas.measure_text(s, ts).w;
         if total_w <= avail_w {
-            return (self.text.clone(), false);
+            return (s.to_string(), false);
         }
         let ew = canvas.measure_text("…", ts).w;
         let avail = (avail_w - ew).max(0);
-        let chars: Vec<char> = self.text.chars().collect();
+        let chars: Vec<char> = s.chars().collect();
         let n = chars.len();
         // 前缀累计宽度表（O(N) 次 measure，之后 partition_point 二分）。
         let mut widths = vec![0i32; n + 1];
@@ -137,7 +147,7 @@ impl Label {
             acc.push(c);
             widths[i + 1] = canvas.measure_text(&acc, ts).w;
         }
-        let s = match self.truncate {
+        let out = match self.truncate {
             Truncate::End => {
                 // partition_point 返回第一个 > avail 的下标，该位置的字符本身已超宽，
                 // 需 -1 取最后一个能放下的字符数。
@@ -168,12 +178,16 @@ impl Label {
             }
             Truncate::None => unreachable!(),
         };
-        (s, true)
+        (out, true)
     }
 }
 
 impl Widget for Label {
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        // 绑了信号时这里现取当前值——文案变化因此**自然改变测量宽度**，无需控件自己
+        // 比对版本号：写信号已经把本帧顶成整窗帧（见 `Signal` 的失效通道），而整窗帧
+        // 必先 `layout_root` 重新 measure。
+        let s = self.text.resolve();
         // 在可用宽度内换行：宽度受限时折行，宽松时单行。
         // 已知限制：换行准确仅保证于显式宽度的 Label（width/width_match/weight）；
         // 纯 Wrap 宽度的多行 Label，draw 会在收敛后的窄宽重新换行，可能与 measure 行数不符。
@@ -182,7 +196,7 @@ impl Widget for Label {
         } else {
             None
         };
-        let full = text.measure(&self.text, &crate::text::TextStyle::of(style), max_w);
+        let full = text.measure(&s, &crate::text::TextStyle::of(style), max_w);
         if let Some(max_n) = self.max_lines {
             let line_h = text
                 .measure("Ay", &crate::text::TextStyle::of(style), None)
@@ -202,6 +216,7 @@ impl Widget for Label {
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
+        let s = self.text.resolve();
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
         let ts = &crate::text::TextStyle::of(style);
         let fsize = ts.size;
@@ -228,185 +243,13 @@ impl Widget for Label {
         }
 
         // 单行省略（max_lines = 1 且配置了截断模式）。
-        if self.truncate != Truncate::None && self.max_lines == Some(1) && !self.text.is_empty() {
-            let key_w = content.w;
-            let key_f = fsize.to_bits();
-            let cached: Option<(String, bool)> = {
-                let c = self.trunc_cache.borrow();
-                c.as_ref().and_then(|(cw, cf, s, t)| {
-                    if *cw == key_w && *cf == key_f {
-                        Some((s.clone(), *t))
-                    } else {
-                        None
-                    }
-                })
-            };
-            let (text_str, _truncated) = if let Some(hit) = cached {
-                hit
-            } else {
-                let (s, t) = self.compute_truncated(canvas, ts, content.w);
-                *self.trunc_cache.borrow_mut() = Some((key_w, key_f, s.clone(), t));
-                (s, t)
-            };
-            canvas.draw_text(&text_str, paint_rect, fg, style.text_align, ts);
-        } else {
-            canvas.draw_text(&self.text, paint_rect, fg, style.text_align, ts);
-        }
-
-        if need_clip {
-            canvas.restore();
-        }
-    }
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
-    fn text_truncated(&self) -> Option<bool> {
-        if self.truncate == Truncate::None || self.max_lines != Some(1) {
-            return None;
-        }
-        Some(
-            self.trunc_cache
-                .borrow()
-                .as_ref()
-                .map(|(_, _, _, t)| *t)
-                .unwrap_or(false),
-        )
-    }
-}
-
-/// 截断缓存键值：`(text_clone, content_w, fsize_bits, 截断串, 是否发生了截断)`。
-type TruncCacheEntry = (String, i32, u32, String, bool);
-
-/// 动态文本标签：绑定 `Signal<String>`，只读显示，内容随绑定变化而更新。
-pub struct DynLabel {
-    text: Signal<String>,
-    pub max_lines: Option<usize>,
-    pub truncate: Truncate,
-    trunc_cache: RefCell<Option<TruncCacheEntry>>,
-}
-
-impl DynLabel {
-    pub fn new(text: Signal<String>) -> Self {
-        Self {
-            text,
-            max_lines: None,
-            truncate: Truncate::None,
-            trunc_cache: RefCell::new(None),
-        }
-    }
-
-    fn compute_truncated(
-        &self,
-        s: &str,
-        canvas: &mut dyn Canvas,
-        ts: &crate::text::TextStyle,
-        avail_w: i32,
-    ) -> (String, bool) {
-        let total_w = canvas.measure_text(s, ts).w;
-        if total_w <= avail_w {
-            return (s.to_string(), false);
-        }
-        let ew = canvas.measure_text("…", ts).w;
-        let avail = (avail_w - ew).max(0);
-        let chars: Vec<char> = s.chars().collect();
-        let n = chars.len();
-        let mut widths = vec![0i32; n + 1];
-        let mut acc = String::new();
-        for (i, &c) in chars.iter().enumerate() {
-            acc.push(c);
-            widths[i + 1] = canvas.measure_text(&acc, ts).w;
-        }
-        let out = match self.truncate {
-            Truncate::End => {
-                let cut = widths
-                    .partition_point(|&w| w <= avail)
-                    .saturating_sub(1)
-                    .min(n);
-                format!("{}…", chars[..cut].iter().collect::<String>())
-            }
-            Truncate::Start => {
-                let threshold = total_w - avail;
-                let cut = widths.partition_point(|&w| w < threshold).min(n);
-                format!("…{}", chars[cut..].iter().collect::<String>())
-            }
-            Truncate::Middle => {
-                let lcut = widths
-                    .partition_point(|&w| w <= avail / 2)
-                    .saturating_sub(1)
-                    .min(n);
-                let right_avail = (avail - widths[lcut]).max(0);
-                let threshold = total_w - right_avail;
-                let rcut = widths.partition_point(|&w| w < threshold).min(n);
-                let left: String = chars[..lcut].iter().collect();
-                let right: String = chars[rcut..].iter().collect();
-                format!("{left}…{right}")
-            }
-            Truncate::None => unreachable!(),
-        };
-        (out, true)
-    }
-}
-
-impl Widget for DynLabel {
-    fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let s = self.text.get();
-        let max_w = if avail.w > 0 {
-            Some(avail.w as f32)
-        } else {
-            None
-        };
-        let full = text.measure(&s, &crate::text::TextStyle::of(style), max_w);
-        if let Some(max_n) = self.max_lines {
-            let line_h = text
-                .measure("Ay", &crate::text::TextStyle::of(style), None)
-                .h
-                .max(1);
-            Size::new(full.w, full.h.min(max_n as i32 * line_h))
-        } else {
-            full
-        }
-    }
-    fn paint(
-        &self,
-        _bounds: Rect,
-        content: Rect,
-        _focused: bool,
-        enabled: bool,
-        canvas: &mut dyn Canvas,
-        style: &Style,
-    ) {
-        let s = self.text.get();
-        // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
-        let ts = &crate::text::TextStyle::of(style);
-        let fsize = ts.size;
-        // 禁用态：文字降为 text_disabled（与 Label 一致，随容器禁用置灰）。
-        let fg = text_fg(enabled, style, &crate::theme::current());
-
-        let (paint_rect, need_clip) = if let Some(max_n) = self.max_lines {
-            let line_h = canvas.measure_text("Ay", ts).h.max(1);
-            let clipped = Rect::new(
-                content.x,
-                content.y,
-                content.w,
-                content.h.min(max_n as i32 * line_h),
-            );
-            (clipped, true)
-        } else {
-            (content, false)
-        };
-
-        if need_clip {
-            canvas.save();
-            canvas.clip_rect(paint_rect);
-        }
-
         if self.truncate != Truncate::None && self.max_lines == Some(1) && !s.is_empty() {
             let key_w = content.w;
             let key_f = fsize.to_bits();
             let cached: Option<(String, bool)> = {
                 let c = self.trunc_cache.borrow();
                 c.as_ref().and_then(|(ks, cw, cf, out, t)| {
-                    if ks.as_str() == s.as_str() && *cw == key_w && *cf == key_f {
+                    if ks.as_str() == s.as_ref() && *cw == key_w && *cf == key_f {
                         Some((out.clone(), *t))
                     } else {
                         None
@@ -417,7 +260,8 @@ impl Widget for DynLabel {
                 hit
             } else {
                 let (out, t) = self.compute_truncated(&s, canvas, ts, content.w);
-                *self.trunc_cache.borrow_mut() = Some((s.clone(), key_w, key_f, out.clone(), t));
+                *self.trunc_cache.borrow_mut() =
+                    Some((s.to_string(), key_w, key_f, out.clone(), t));
                 (out, t)
             };
             canvas.draw_text(&text_str, paint_rect, fg, style.text_align, ts);
@@ -445,6 +289,14 @@ impl Widget for DynLabel {
         )
     }
 }
+
+/// 旧名：绑定 `Signal<String>` 的只读文本控件。已并入 [`Label`]——文案的动态性现在
+/// 由字段类型 [`TextContent`] 承担，不再需要一个孪生 widget 类型。
+#[deprecated(
+    since = "0.12.0",
+    note = "并入 `Label`：`Label::new(signal)` 与旧 `DynLabel::new(signal)` 等价，且 max_lines()/truncate() 等修饰符不再需要按两种类型分别 downcast"
+)]
+pub type DynLabel = Label;
 
 /// 按钮三态。
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -476,7 +328,7 @@ impl ButtonSize {
 /// 禁用态由核心层统一管理（`Element::enabled/disabled`）：禁用时核心拦事件、跳 Tab，
 /// 并把启用态传入 paint，按钮据此置灰。
 pub struct Button {
-    label: String,
+    label: TextContent,
     icon: Option<ImageContent>,
     state: BtnState,
     on_click: Option<ClickFn>,
@@ -503,9 +355,9 @@ pub enum ButtonVariant {
 }
 
 impl Button {
-    pub fn new(label: String) -> Self {
+    pub fn new(label: impl Into<TextContent>) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             state: BtnState::Normal,
             on_click: None,
@@ -547,7 +399,13 @@ impl Button {
 
 impl Widget for Button {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let s = text.measure(&self.label, &crate::text::TextStyle::of(style), None);
+        // 绑了信号的按钮在这里现取当前文案，故换字必然改变按钮宽度——点击已把本帧
+        // 顶成整窗帧（`DamageReq::Layout`），整窗帧必先 layout_root 重新 measure。
+        let s = text.measure(
+            self.label.resolve().as_ref(),
+            &crate::text::TextStyle::of(style),
+            None,
+        );
         // 图标为正方形，边长取文字高度；加图标宽 + 间距。
         let icon_extra = if self.icon.is_some() {
             s.h + ICON_GAP
@@ -567,6 +425,7 @@ impl Widget for Button {
         canvas: &mut dyn Canvas,
         style: &Style,
     ) {
+        let label = self.label.resolve();
         let t = crate::theme::current();
         let (pal, bt) = (&t.palette, &t.button);
         let vstate = self.visual_state(enabled);
@@ -689,7 +548,7 @@ impl Widget for Button {
         // 无图标：文字整体居中（原行为）。
         let Some(icon) = self.icon.as_ref() else {
             canvas.draw_text(
-                &self.label,
+                label.as_ref(),
                 bounds,
                 fg,
                 Align::Center,
@@ -698,7 +557,7 @@ impl Widget for Button {
             return;
         };
         // 有图标：图标 + 文字作为整体水平居中，图标在左、垂直居中。
-        let ts = canvas.measure_text(&self.label, &crate::text::TextStyle::of(style));
+        let ts = canvas.measure_text(label.as_ref(), &crate::text::TextStyle::of(style));
         let ih = ts.h; // 图标正方形边长 = 文字高
         let total_w = ih + ICON_GAP + ts.w;
         let start_x = bounds.x + ((bounds.w - total_w) / 2).max(0);
@@ -717,7 +576,7 @@ impl Widget for Button {
         // 文字紧随图标右侧，垂直方向交给 draw_text 居中。
         let text_rect = Rect::new(start_x + ih + ICON_GAP, bounds.y, ts.w + 2, bounds.h);
         canvas.draw_text(
-            &self.label,
+            label.as_ref(),
             text_rect,
             fg,
             Align::Start,
@@ -891,13 +750,26 @@ impl Element {
     }
 
     /// 文本标签。
-    pub fn label(text: impl Into<String>) -> Self {
-        Self::base(Layout::None).widget(Label::new(text.into()))
+    ///
+    /// 文案收 [`TextContent`]：传 `&str`/`String` 是固定文案，传 `Signal<String>` 则
+    /// 文案随信号变化（写信号即换字，连宽度一并重新测量）。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let status = signal(String::from("就绪"));
+    /// let ui = Element::label(status);
+    /// status.set(String::from("同步中…")); // 下一帧显示新文案
+    /// ```
+    pub fn label(text: impl Into<TextContent>) -> Self {
+        Self::base(Layout::None).widget(Label::new(text))
     }
 
     /// 动态标签（绑定 `Signal<String>`，只读显示）。
+    ///
+    /// 等价于 `Element::label(signal)`——自 [`TextContent`] 起，所有收文案的构造器都
+    /// 直接接受 `Signal<String>`，本构造器只是它出现之前就存在的显式写法，保留不动。
     pub fn label_signal(text: Signal<String>) -> Self {
-        Self::base(Layout::None).widget(DynLabel::new(text))
+        Self::label(text)
     }
 
     /// 改名为 [`Element::label_signal`]。
@@ -911,20 +783,20 @@ impl Element {
 
     /// 胶囊徽章/标签（如版本号 `v0.0.0-alpha`、状态 `新`）：小字号 + pill 圆角 +
     /// 意图色淡底 + 意图色文字。默认 Primary（强调色）。颜色在构造期据当前主题解析。
-    pub fn badge(text: impl Into<String>) -> Self {
+    pub fn badge(text: impl Into<TextContent>) -> Self {
         Self::badge_intent(text, Intent::Primary)
     }
 
     /// 指定语义意图的徽章（Primary=强调蓝 / Neutral=灰 / Danger=红 / Custom=自定义基色）。
     /// 内置三意图的颜色走主题角色延迟解析（运行期换主题自动跟随）；
     /// `Custom` 为调用方给定的固定基色，本就不随主题。
-    pub fn badge_intent(text: impl Into<String>, intent: Intent) -> Self {
+    pub fn badge_intent(text: impl Into<TextContent>, intent: Intent) -> Self {
         use crate::style::Role;
         let shell = Element::row()
             .cross(Align::Center)
             .padding_xy(9, 3)
             .corner(999.0);
-        let label = Element::label(text.into()).font_size(12.0).font_weight(600);
+        let label = Element::label(text).font_size(12.0).font_weight(600);
         match intent {
             Intent::Primary => shell
                 .bg_role_alpha(Role::Accent, 0.15)
@@ -947,7 +819,8 @@ impl Element {
         }
     }
 
-    /// Label/DynLabel 专属配置入口。
+    /// Label 专属配置入口。静态文案与信号绑定的 label 现已是同一个 widget 类型，
+    /// 故只需一次 downcast（合并前要先试 `Label` 再试 `DynLabel`）。
     #[track_caller]
     fn config_label(mut self, f: impl FnOnce(&mut Label)) -> Self {
         if let Some(a) = self.widget.as_any_mut() {
@@ -956,19 +829,6 @@ impl Element {
                 return self;
             }
         }
-        debug_assert!(false, "max_lines()/truncate() 只能用于 Element::label(..)");
-        self
-    }
-    #[track_caller]
-    fn config_dynlabel(mut self, f: impl FnOnce(&mut DynLabel)) -> Self {
-        if let Some(a) = self.widget.as_any_mut() {
-            if let Some(l) = a.downcast_mut::<DynLabel>() {
-                f(l);
-                return self;
-            }
-        }
-        // max_lines()/truncate() 先试 Label 再落到这里，故本条是两种 label 都没命中时的
-        // 终态提示——只提 label_rc 会把用了 label(..) 的调用方指向错误的构造器。
         debug_assert!(
             false,
             "max_lines()/truncate() 只能用于 Element::label(..) / label_signal(..)"
@@ -977,44 +837,42 @@ impl Element {
     }
 
     /// 限制显示行数（超出高度裁剪；配合 `.truncate()` 可在末行加省略号）。
-    /// 同时适用于 `label` 和 `label_signal`。
+    /// 静态文案与绑信号的 label 一并适用。
     #[track_caller]
-    pub fn max_lines(mut self, n: usize) -> Self {
-        if self
-            .widget
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<Label>())
-            .is_some()
-        {
-            return self.config_label(|l| l.max_lines = Some(n));
-        }
-        self.config_dynlabel(|l| l.max_lines = Some(n))
+    pub fn max_lines(self, n: usize) -> Self {
+        self.config_label(|l| l.max_lines = Some(n))
     }
 
     /// 文本溢出省略方式（`max_lines(1)` 时精确截断，多行仅高度裁剪）。
-    /// 同时适用于 `label` 和 `label_signal`。
+    /// 静态文案与绑信号的 label 一并适用。
     #[track_caller]
-    pub fn truncate(mut self, mode: Truncate) -> Self {
-        if self
-            .widget
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<Label>())
-            .is_some()
-        {
-            return self.config_label(|l| l.truncate = mode);
-        }
-        self.config_dynlabel(|l| l.truncate = mode)
+    pub fn truncate(self, mode: Truncate) -> Self {
+        self.config_label(|l| l.truncate = mode)
     }
 
     /// 交互按钮。配合 `.on_click(...)` 设置回调。
-    pub fn button(label: impl Into<String>) -> Self {
-        Self::base(Layout::None).widget(Button::new(label.into()))
+    ///
+    /// 文案收 [`TextContent`]：传 `Signal<String>` 即得"切换类按钮"（播放/暂停、
+    /// 展开/收起、隐藏已完成/显示全部），点击时改信号，按钮上的字与按钮宽度一起更新。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let playing = signal(false);
+    /// let caption = signal(String::from("播放"));
+    /// let btn = Element::button(caption).on_click(move |_| {
+    ///     let next = !playing.get();
+    ///     playing.set(next);
+    ///     caption.set(String::from(if next { "暂停" } else { "播放" }));
+    /// });
+    /// ```
+    pub fn button(label: impl Into<TextContent>) -> Self {
+        Self::base(Layout::None).widget(Button::new(label))
     }
 
     /// 纯图标按钮（字形）：无文字、方形、hover/press 圆底 + 点击/键盘激活 + 手型光标。
     /// 用于 ⓘ 信息、▲▼ 调序、× 关闭等工具图标。字形随 `.fg()` 取色，`.size()` 调尺寸，
     /// `.tooltip()` 加说明。配合 `.on_click(...)` 设回调。
-    pub fn icon_button(glyph: impl Into<String>) -> Self {
+    pub fn icon_button(glyph: impl Into<TextContent>) -> Self {
         Self::base(Layout::None).widget(containers::IconButton::glyph(glyph))
     }
 
@@ -1113,8 +971,8 @@ impl Element {
     /// 可点击链接文本：链接色 + 下划线，hover/press 三态，点击/回车激活。
     /// 链 `.url(...)` 设置点击打开的地址，或 `.on_click(...)` 自定义动作（两者皆设时回调优先）。
     /// 悬停显示手型光标；禁用态由核心层统一管理（不可点 + 置灰 + 跳 Tab）。
-    pub fn link(text: impl Into<String>) -> Self {
-        Self::base(Layout::None).widget(link::Link::new(text.into()))
+    pub fn link(text: impl Into<TextContent>) -> Self {
+        Self::base(Layout::None).widget(link::Link::new(text))
     }
 
     /// 配置内含的 Link。`url()/underline()` 是 link 专属修饰符，链到其他控件属误用——
@@ -1398,8 +1256,8 @@ impl Element {
     }
 
     /// 复选框（绑定 `Signal<bool>`）。
-    pub fn checkbox(label: impl Into<String>, state: Signal<bool>) -> Self {
-        Self::base(Layout::None).widget(CheckBox::new(label.into(), state))
+    pub fn checkbox(label: impl Into<TextContent>, state: Signal<bool>) -> Self {
+        Self::base(Layout::None).widget(CheckBox::new(label, state))
     }
     /// 显式设置语义意图色。Button / CheckBox 通用。
     /// 注意：非 Primary intent 接管整组视觉，此时 `.bg()` 单点覆盖不生效。
@@ -1443,8 +1301,8 @@ impl Element {
         Self::base(Layout::None).widget(Switch::new(state))
     }
     /// 单选按钮（共享 `Signal<usize>` 组状态 + 本项索引）。
-    pub fn radio(label: impl Into<String>, group: Signal<usize>, index: usize) -> Self {
-        Self::base(Layout::None).widget(RadioButton::new(label.into(), group, index))
+    pub fn radio(label: impl Into<TextContent>, group: Signal<usize>, index: usize) -> Self {
+        Self::base(Layout::None).widget(RadioButton::new(label, group, index))
     }
     /// 滑块（绑定 `Signal<f32>`，值域 0.0..=1.0）。
     pub fn slider(value: Signal<f32>) -> Self {
@@ -1926,9 +1784,9 @@ impl Element {
 
     /// 带 chevron 的导航行：左标签 + 右侧 `>`，悬停高亮，点击/回车触发 `.on_click(...)`。
     /// 适合"钻入子页 / 打开子设置"的设置行。无持久选中态——需要选中高亮的导航用 `list`。
-    pub fn nav_row(label: impl Into<String>) -> Self {
+    pub fn nav_row(label: impl Into<TextContent>) -> Self {
         Self::base(Layout::None)
-            .widget(nav::NavRow::new(label.into()))
+            .widget(nav::NavRow::new(label))
             .width_match()
             .height(nav::NAV_ROW_H)
     }
@@ -2298,7 +2156,7 @@ impl Element {
         f: &crate::theme::FormTheme,
         m: &crate::theme::Metrics,
     ) -> Self {
-        Element::label(text)
+        Element::label(text.into())
             .font_size(f.label_size(m))
             .font_weight(f.label_weight())
             .fg_role(crate::style::Role::Text)
@@ -2336,7 +2194,7 @@ impl Element {
             .padding(c.pad())
             .spacing(c.gap())
             .child(
-                Element::label(title)
+                Element::label(title.into())
                     .font_size(c.title_size(&th.metrics))
                     .font_weight(c.title_weight())
                     .fg_role(crate::style::Role::Text)
@@ -3989,8 +3847,12 @@ mod tests {
     }
 
     /// 记录 `draw_text` 颜色实参的最小 Canvas，用于在 paint 级守护"禁用置灰"接线。
+    #[derive(Default)]
     struct CaptureCanvas {
         last_text_color: std::cell::Cell<Option<Color>>,
+        /// 本次绘制画过的全部文本：供"文案随信号变"的断言读取（有些控件除了文案
+        /// 还会画装饰字形，如 NavRow 右侧的 chevron，故不能只留最后一条）。
+        texts: RefCell<Vec<String>>,
     }
     impl crate::render::Canvas for CaptureCanvas {
         fn dpi_scale(&self) -> f32 {
@@ -4032,13 +3894,14 @@ mod tests {
         }
         fn draw_text(
             &mut self,
-            _text: &str,
+            text: &str,
             _rect: Rect,
             color: Color,
             _align: crate::spec::Align,
             _ts: &crate::text::TextStyle,
         ) {
             self.last_text_color.set(Some(color));
+            self.texts.borrow_mut().push(text.to_string());
         }
         fn measure_text(&mut self, _: &str, _: &crate::text::TextStyle) -> Size {
             Size::ZERO
@@ -4115,7 +3978,7 @@ mod tests {
     #[test]
     fn label_text_truncated_reflects_actual_overflow_and_gates_tooltip() {
         use crate::core::Widget;
-        let mut label = Label::new("这是一段用来测试截断状态的说明文字".to_string());
+        let mut label = Label::new("这是一段用来测试截断状态的说明文字");
         label.max_lines = Some(1);
         label.truncate = Truncate::End;
         let style = Style::default();
@@ -4135,7 +3998,7 @@ mod tests {
         assert_eq!(label.text_truncated(), Some(true));
 
         // 未配置 truncate/max_lines(1) 的普通 Label：截断概念不适用 → None。
-        let plain = Label::new("短文本".to_string());
+        let plain = Label::new("短文本");
         assert_eq!(plain.text_truncated(), None);
     }
 
@@ -4151,15 +4014,13 @@ mod tests {
         let disabled_col = crate::theme::current().palette.text_disabled;
 
         let paint_color = |draw: &dyn Fn(&mut CaptureCanvas)| {
-            let mut cv = CaptureCanvas {
-                last_text_color: std::cell::Cell::new(None),
-            };
+            let mut cv = CaptureCanvas::default();
             draw(&mut cv);
             cv.last_text_color.get()
         };
 
         // Label：启用取 style.fg，禁用取 text_disabled。
-        let label = Label::new("x".into());
+        let label = Label::new("x");
         assert_eq!(
             paint_color(&|cv| label.paint(r, r, false, true, cv, &style)),
             Some(Color::hex(0x123456))
@@ -4169,8 +4030,8 @@ mod tests {
             Some(disabled_col)
         );
 
-        // DynLabel：独立覆盖（不依赖"共用同一函数"的隐含推理）。
-        let dl = DynLabel::new(crate::signal::signal(String::from("y")));
+        // 绑信号的 label：独立覆盖（不依赖"共用同一函数"的隐含推理）。
+        let dl = Label::new(crate::signal::signal(String::from("y")));
         assert_eq!(
             paint_color(&|cv| dl.paint(r, r, false, true, cv, &style)),
             Some(Color::hex(0x123456))
@@ -4729,5 +4590,181 @@ mod tests {
         let res = tree.dispatch_files(Point::new(50, 50), vec![PathBuf::from("a.txt")]);
         assert!(!res.consumed, "禁用子树不接收拖放");
         assert_eq!(got.get(), 0);
+    }
+
+    // ---- 动态文案（TextContent 绑 Signal<String>）----
+
+    /// 绑信号的控件在测量时现取文案：改信号 + 重排 → 节点宽度跟着变。
+    /// 覆盖 button / link / label / checkbox 四个控件（各自独立断言，不靠"共用同一
+    /// 载体类型"的隐含推理——真正共用的是 `TextContent`，但每个控件都得自己在
+    /// measure 里 resolve 一次，漏掉哪个都只有该控件不跟随）。
+    fn measured_width_after(el: Element, caption: Signal<String>, next: &str) -> (i32, i32) {
+        // 控件挂在行容器里：根节点会被拉伸到窗口宽，只有非根的 Wrap 宽度节点才反映测量值。
+        let mut tree = Tree::new();
+        let root = Element::row().fill().child(el).build(&mut tree);
+        tree.root = Some(root);
+        let relayout = |tree: &mut Tree| {
+            tree.layout_root(Size::new(400, 200), &mut crate::text::NullTextEngine)
+        };
+        relayout(&mut tree);
+        let child = tree.get(root).unwrap().children[0];
+        let before = tree.get(child).unwrap().bounds.w;
+        caption.set(String::from(next));
+        relayout(&mut tree);
+        let after = tree.get(child).unwrap().bounds.w;
+        (before, after)
+    }
+
+    #[test]
+    fn button_caption_signal_changes_measured_width() {
+        let caption = signal(String::from("播放"));
+        let (before, after) = measured_width_after(Element::button(caption), caption, "暂停播放");
+        assert!(
+            after > before,
+            "按钮文案变长后应重新测量出更大的宽度（{before} → {after}）"
+        );
+    }
+
+    #[test]
+    fn link_caption_signal_changes_measured_width() {
+        let caption = signal(String::from("展开"));
+        let (before, after) = measured_width_after(
+            Element::link(caption).url("https://example.com"),
+            caption,
+            "收起全部细节",
+        );
+        assert!(
+            after > before,
+            "链接文案变长后应重新测量（{before} → {after}）"
+        );
+    }
+
+    #[test]
+    fn label_caption_signal_changes_measured_width() {
+        let caption = signal(String::from("就绪"));
+        let (before, after) =
+            measured_width_after(Element::label(caption), caption, "同步中，请稍候");
+        assert!(
+            after > before,
+            "标签文案变长后应重新测量（{before} → {after}）"
+        );
+    }
+
+    #[test]
+    fn checkbox_caption_signal_changes_measured_width() {
+        let caption = signal(String::from("启用"));
+        let state = signal(false);
+        let (before, after) =
+            measured_width_after(Element::checkbox(caption, state), caption, "启用后台同步");
+        assert!(
+            after > before,
+            "复选框文案变长后应重新测量（{before} → {after}）"
+        );
+    }
+
+    #[test]
+    fn painted_text_follows_signal_in_every_bound_widget() {
+        // 测量之外还得确认真的画的是新串（只测宽度的话，把文案缓存进截断结果里的实现
+        // 也能蒙混过关），且**每个**控件都得自己在 paint 里 resolve 一次——漏掉哪个
+        // 就只有那个控件不跟随，故逐个独立断言而非抽样。
+        let caption = signal(String::from("播放"));
+        let style = Style::default();
+        let r = Rect::new(0, 0, 200, 30);
+        let group = signal(0usize);
+        let checked = signal(false);
+        let widgets: Vec<Box<dyn Widget>> = vec![
+            Box::new(Label::new(caption)),
+            Box::new(Button::new(caption)),
+            Box::new(link::Link::new(caption)),
+            Box::new(CheckBox::new(caption, checked)),
+            Box::new(RadioButton::new(caption, group, 0)),
+            Box::new(nav::NavRow::new(caption)),
+            Box::new(containers::IconButton::glyph(caption)),
+        ];
+        let painted = |w: &dyn Widget| {
+            let mut cv = CaptureCanvas::default();
+            w.paint(r, r, false, true, &mut cv, &style);
+            let t = cv.texts.borrow().clone();
+            t
+        };
+        for w in &widgets {
+            let got = painted(w.as_ref());
+            assert!(
+                got.iter().any(|t| t == "播放"),
+                "初始文案应画出信号当前值，实得 {got:?}"
+            );
+        }
+        caption.set(String::from("暂停"));
+        for w in &widgets {
+            let got = painted(w.as_ref());
+            assert!(
+                got.iter().any(|t| t == "暂停"),
+                "改信号后应画出新文案，实得 {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn truncation_cache_keyed_by_text_not_stale() {
+        // 截断缓存的 key 必须含文案：否则绑信号的 label 换了文案仍画上一次的截断串。
+        let caption = signal(String::from("AAAAAAAAAAAAAAAAAAAA"));
+        let label = Label {
+            text: TextContent::from(caption),
+            max_lines: Some(1),
+            truncate: Truncate::End,
+            trunc_cache: RefCell::new(None),
+        };
+        let style = Style::default();
+        let r = Rect::new(0, 0, 40, 20);
+        let painted = |draw: &dyn Fn(&mut WidthCanvas)| {
+            let mut cv = WidthCanvas;
+            draw(&mut cv);
+        };
+        // 先画一次把截断结果写进缓存。
+        painted(&|cv| label.paint(r, r, false, true, cv, &style));
+        let first = label.trunc_cache.borrow().clone().unwrap();
+        caption.set(String::from("BBBBBBBBBBBBBBBBBBBB"));
+        painted(&|cv| label.paint(r, r, false, true, cv, &style));
+        let second = label.trunc_cache.borrow().clone().unwrap();
+        assert_ne!(first.0, second.0, "缓存键里的文案应随信号更新");
+        assert!(
+            second.3.starts_with('B'),
+            "换文案后应重算截断串，实得 {}",
+            second.3
+        );
+    }
+
+    #[test]
+    fn click_writing_signal_requests_relayout_not_just_repaint() {
+        // 文案变化会改变测量宽度，光重绘不够。点击回调里写信号时，核心把失效强度
+        // 升到 `DamageReq::Layout`（宿主据此置 needs_full → 整窗帧必先 layout_root
+        // 重新 measure）。这条链是动态文案能"改宽度"的前提，故在此锁住。
+        let caption = signal(String::from("播放"));
+        let mut tree = Tree::new();
+        let root = Element::button(caption)
+            .width(120)
+            .height(30)
+            .on_click(move |_| caption.set(String::from("暂停")))
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 60), &mut crate::text::NullTextEngine);
+        let mut hover = None;
+        let mut capture = None;
+        let at = Point::new(10, 10);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert!(
+            matches!(res.damage, crate::core::DamageReq::Layout(_)),
+            "点击回调里写信号应升级为 Layout 级失效（仅 Rect 会导致文案变了却不重排）"
+        );
+        assert_eq!(caption.get(), "暂停");
     }
 }

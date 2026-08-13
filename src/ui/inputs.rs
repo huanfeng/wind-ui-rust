@@ -16,6 +16,7 @@ use crate::style::Style;
 use crate::text::TextEngine;
 use crate::theme::Intent;
 use crate::ui::containers::VScrollbar;
+use crate::ui::TextContent;
 
 const BOX_SIZE: i32 = 18;
 const BOX_SIZE_SMALL: i32 = 14;
@@ -39,7 +40,7 @@ pub enum CheckBoxSize {
 type LayoutKey = (String, i32, Option<String>, u32, u16, Option<u32>);
 
 pub struct CheckBox {
-    label: String,
+    label: TextContent,
     state: Signal<bool>,
     /// 勾选填充补间（0=未选、1=选中）：驱动方框底色 white↔accent + 对勾淡入。
     fill: Cell<Transition<f32>>,
@@ -54,10 +55,10 @@ pub struct CheckBox {
 }
 
 impl CheckBox {
-    pub fn new(label: String, state: Signal<bool>) -> Self {
+    pub fn new(label: impl Into<TextContent>, state: Signal<bool>) -> Self {
         let init = if state.get() { 1.0 } else { 0.0 };
         Self {
-            label,
+            label: label.into(),
             state,
             fill: Cell::new(Transition::new(init)),
             primed: Cell::new(false),
@@ -98,7 +99,7 @@ impl Widget for CheckBox {
         };
         let fsize = self.font_size(style);
         let t = text.measure(
-            &self.label,
+            self.label.resolve().as_ref(),
             &crate::text::TextStyle::of(style).with_size(fsize),
             None,
         );
@@ -203,7 +204,7 @@ impl Widget for CheckBox {
             bounds.h,
         );
         canvas.draw_text(
-            &self.label,
+            self.label.resolve().as_ref(),
             text_rect,
             text_color,
             Align::Start,
@@ -385,7 +386,7 @@ impl Widget for Switch {
 // ---------------- RadioButton ----------------
 
 pub struct RadioButton {
-    label: String,
+    label: TextContent,
     group: Signal<usize>,
     index: usize,
     /// 选中补间（0=未选、1=选中）：驱动外环色 + 环厚 + 中心点半径。
@@ -395,10 +396,10 @@ pub struct RadioButton {
 }
 
 impl RadioButton {
-    pub fn new(label: String, group: Signal<usize>, index: usize) -> Self {
+    pub fn new(label: impl Into<TextContent>, group: Signal<usize>, index: usize) -> Self {
         let init = if group.get() == index { 1.0 } else { 0.0 };
         Self {
-            label,
+            label: label.into(),
             group,
             index,
             sel: Cell::new(Transition::new(init)),
@@ -417,7 +418,11 @@ impl RadioButton {
 
 impl Widget for RadioButton {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let t = text.measure(&self.label, &crate::text::TextStyle::of(style), None);
+        let t = text.measure(
+            self.label.resolve().as_ref(),
+            &crate::text::TextStyle::of(style),
+            None,
+        );
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
     fn paint(
@@ -476,7 +481,7 @@ impl Widget for RadioButton {
             bounds.h,
         );
         canvas.draw_text(
-            &self.label,
+            self.label.resolve().as_ref(),
             text_rect,
             text_color,
             Align::Start,

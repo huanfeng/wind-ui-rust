@@ -19,6 +19,7 @@ use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::TextContent;
 
 /// 行高（逻辑 px），NavRow 与 CollapsibleHeader 共用。
 pub const NAV_ROW_H: i32 = 40;
@@ -127,15 +128,15 @@ fn hover_amount(anim: &Cell<Transition<f32>>, hover: bool) -> f32 {
 /// 导航行：左标签 + 右侧 `>`，悬停高亮，点击/回车触发回调（钻入子页）。
 /// 无持久选中态——选中高亮的导航请用 `Element::list`。
 pub struct NavRow {
-    label: String,
+    label: TextContent,
     state: State,
     on_click: Option<ClickFn>,
 }
 
 impl NavRow {
-    pub fn new(label: String) -> Self {
+    pub fn new(label: impl Into<TextContent>) -> Self {
         Self {
-            label,
+            label: label.into(),
             state: State::Normal,
             on_click: None,
         }
@@ -191,7 +192,7 @@ impl Widget for NavRow {
             bounds.h,
         );
         canvas.draw_text(
-            &self.label,
+            self.label.resolve().as_ref(),
             tr,
             text_color,
             Align::Start,
