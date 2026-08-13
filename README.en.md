@@ -107,7 +107,7 @@ fn main() {
 | Category | Widgets |
 |----------|---------|
 | Layout | `col` / `row` (LinearLayout, with weight), `stack` (FrameLayout), `grid` (equal-width grid), `flex_spacer` |
-| Text | `label` (auto-wrap), `label_rc` (signal-bound), `link` (clickable), `rich` (rich text: styled spans / collapsible sections) |
+| Text | `label` (auto-wrap), `label_signal` (signal-bound), `link` (clickable), `rich` (rich text: styled spans / collapsible sections) |
 | Button | `button` (hover/press/focus states + click/Enter/Space activation), `icon_button` |
 | Form | `checkbox` / `switch` / `radio` (exclusive group) / `slider` (drag+keyboard) / `text_input` (CJK editing + password + multiline) / `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` |
 | Feedback | `progress` (determinate/indeterminate) / `tooltip` / `toast` (centered transient overlay) / `badge` |

@@ -34,7 +34,7 @@ fn main() {
         .spacing(12)
         .bg(Color::hex(0xF5F6FA))
         .child(Element::label("计数器").font_size(20.0))
-        .child(Element::label_rc(text).font_size(14.0))   // 绑信号的动态标签
+        .child(Element::label_signal(text).font_size(14.0))   // 绑信号的动态标签
         .child(Element::button("点我 +1").on_click(move |_| {
             count.update(|v| *v += 1);                    // 写入自动请求重绘
             text.set(format!("计数：{}", count.get()));
@@ -149,9 +149,9 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `accordion` | `Signal<Option<usize>>` | 选中面板，`None` = 全收起 |
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
 | `stepper` | `Signal<f64>` | 数值 |
-| `text_input` / `label_rc` / `rich_rc` | `Signal<String>`（`rich_rc` 为 `Signal<RichDoc>`） | 文本 |
+| `text_input` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
 | `list_signal` / `host_signal` / `reorder_list_signal` | `Signal<Vec<T>>` | 动态数据源（见 §6.5） |
-| `dropdown_reactive` | `Signal<Vec<String>>` | 动态选项 |
+| `dropdown_signal` | `Signal<Vec<String>>` | 动态选项 |
 | `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
 | `table_selectable` | `Vec<Signal<bool>>` | 每行一个选中信号 |
 | `table_sortable` / `_server` | `Signal<Option<SortKey>>` | 排序列 + 方向（`SortKey { column, order }`） |
@@ -282,9 +282,9 @@ Element::switch(state)                            // state: Signal<bool>
 Element::radio("选项", group, index)             // group: Signal<usize>
 Element::slider(value)                            // value: Signal<f32> (0..=1)
 Element::dropdown(vec!["A", "B"], selected)       // selected: Signal<usize>
-Element::dropdown_reactive(options, selected)     // 选项也绑信号：options: Signal<Vec<String>>
+Element::dropdown_signal(options, selected)     // 选项也绑信号：options: Signal<Vec<String>>
 Element::dropdown_items(vec![item1, item2], selected)       // 富内容项（副标题/徽章/尾随图标）
-Element::dropdown_items_reactive(items, selected)           // items: Signal<Vec<DropdownItem>>
+Element::dropdown_items_signal(items, selected)           // items: Signal<Vec<DropdownItem>>
 Element::check_menu("列表显示", vec![             // 下拉式复选菜单：外观同 dropdown，面板是菜单
     CheckMenuItem::check("隐藏未启用", flag)      //   开关项（flag: Signal<bool>）
         .on_change(|v| save(v)),                  //   翻转后通知（收到新值，默认翻转已执行）
@@ -298,7 +298,7 @@ Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选
 Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
 Element::progress(value)                          // value: Signal<f32> (确定进度)
 Element::progress_indeterminate()                 // 不确定进度（忙碌动画）
-Element::label_rc(text)                           // 动态标签：text: Signal<String>，信号变即刷新
+Element::label_signal(text)                           // 动态标签：text: Signal<String>，信号变即刷新
 ```
 
 ### 导航 / 分组
@@ -326,7 +326,7 @@ Element::rich(
 )
     .on_span_click(|id, ctx| { /* 点了标了 id 的 span（词典交叉引用跳转） */ })
     .copy_menu(false)      // 关掉内建的右键「复制全部」（要挂自定义 on_context_menu 时先关）
-Element::rich_rc(doc)      // 动态富文本：doc: Signal<RichDoc>，整篇换文档（词典切词条）
+Element::rich_signal(doc)      // 动态富文本：doc: Signal<RichDoc>，整篇换文档（词典切词条）
 ```
 `rich` 是**单个自绘节点**，内部按 span 排版并做基线对齐、折叠段带高度动画。
 `on_span_click` / `copy_menu` 是 rich 专属修饰符（误用检测同 text_input）。
@@ -624,8 +624,8 @@ fn main() {
 | `Element::list_signal(data, key_fn, row_fn)` | **滚动**容器 | 行数会变的长列表 |
 | `Element::host_signal(data, build_fn)` | 普通 `col` | 整段结构随状态重建（如列集随类别切换的表格） |
 | `Element::reorder_list_signal(data, row_fn)` | `col` + 拖动手柄 | 顺序真相源在信号里的可拖拽排序列表 |
-| `Element::dropdown_reactive(options, selected)` | 下拉 | 选项列表异步到达 |
-| `Element::label_rc(sig)` / `rich_rc(doc)` | 叶子 | 单个文本/文档跟随信号 |
+| `Element::dropdown_signal(options, selected)` | 下拉 | 选项列表异步到达 |
+| `Element::label_signal(sig)` / `rich_signal(doc)` | 叶子 | 单个文本/文档跟随信号 |
 | `Element::reactive()` | 任意 | 自定义控件手动接入（须自行实现 `on_update`） |
 
 > **`list_signal` 还是 `host_signal`？** 前者内部是 `scroll`，按**无限高度**测量子元素——
@@ -831,7 +831,7 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
     ])
 ```
 `table_sortable` / `table_sortable_server` / `table_selectable` 三类都支持（右键与首列复选框不冲突）。
-菜单项**每次右击现取现建**，`with_check` / `with_enabled` 因而总反映右击当刻的数据。
+菜单项**每次右击现取现建**，`check` / `enabled` 因而总反映右击当刻的数据。
 
 ⚠ 两个坑：
 - `on_context_menu` 会让节点**吞命中**（同 `on_drop`/`tooltip`）。挂到原本透明的纯布局容器上，
@@ -895,7 +895,7 @@ fn main() {
         .padding(20)
         .spacing(12)
         .child(Element::progress(progress).width_match())
-        .child(Element::label_rc(clock).width_match());
+        .child(Element::label_signal(clock).width_match());
 
     // on_interval 的回调也在 UI 线程，可直接写信号
     app.on_interval(Duration::from_secs(1), move || {

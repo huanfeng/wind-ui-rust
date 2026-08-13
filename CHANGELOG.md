@@ -92,7 +92,6 @@
   因此报错的下游代码本就在静默丢值，编译失败是把运行期的哑故障提前到了编译期。
   另：`set`/`update` 在 slot 缺失时补 `debug_assert`，与 `with`/`get` 的 panic 对齐，
   消除"读会炸、写静默"的分裂（当前 slot 永不回收，该分支不可达，是留给日后释放作用域的护栏）。
-
 - **绑信号的构造统一 `_signal` 后缀**：`Element::label_rc` → `label_signal`、`rich_rc` → `rich_signal`、
   `dropdown_reactive` → `dropdown_signal`、`dropdown_items_reactive` → `dropdown_items_signal`。
   同一个概念此前有三套后缀：`_rc` 是 `Rc<Cell<T>>` 时代的残留，参数早已换成 `Signal<T>`（`Copy` 句柄），

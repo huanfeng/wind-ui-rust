@@ -106,7 +106,7 @@ fn main() {
 | 类别 | 控件 |
 |------|------|
 | 布局 | `col` / `row`（LinearLayout，支持 weight）、`stack`（FrameLayout）、`grid`（等宽网格）、`flex_spacer` |
-| 文本 | `label`（自动换行）、`label_rc`（绑信号）、`link`（可点击链接）、`rich`（富文本：多样式 span / 折叠段） |
+| 文本 | `label`（自动换行）、`label_signal`（绑信号）、`link`（可点击链接）、`rich`（富文本：多样式 span / 折叠段） |
 | 按钮 | `button`（hover/press/focus 三态 + 点击/回车/空格激活）、`icon_button`（纯图标） |
 | 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行）/ `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` |
 | 反馈 | `progress`（确定/不确定）/ `tooltip`（悬停提示）/ `toast`（居中轻提示）/ `badge`（胶囊徽章） |
