@@ -20,6 +20,7 @@ pub(crate) fn class_name(app_id: &str) -> String {
 }
 
 /// Unix socket 路径(macOS/Linux):`$TMPDIR`(回退 /tmp)下 `{app_id}_si.sock`。
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn socket_path(app_id: &str) -> std::path::PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR")
         .or_else(|_| std::env::var("TMPDIR"))
