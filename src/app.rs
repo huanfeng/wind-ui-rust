@@ -1432,10 +1432,34 @@ impl UiHost {
         self.toasts.retain(|t| !t.expired(now_ms));
     }
 
+    /// 清各级悬停高亮。返回是否有变化（有则请求重绘）。
+    ///
+    /// **不收起已展开的子菜单**：指针滑出面板不等于放弃选择，桌面惯例是保持展开到点别处；
+    /// 且展开了子菜单的父项仍由 `child_spawn` 维持高亮（见菜单绘制处的 `active` 判定），
+    /// 清 hover 不会让那一项也跟着灭掉。
+    fn clear_menu_hover(&mut self) -> bool {
+        let Some(m) = self.menu.as_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for lvl in m.levels.iter_mut() {
+            if lvl.hover.is_some() {
+                lvl.hover = None;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 按指针位置更新悬停路径：设置所在层悬停项，并按需展开/收起其级联子菜单。
     fn menu_hover_update(&mut self, pos: Point) -> bool {
         let Some(k) = self.menu.as_ref().and_then(|m| m.level_at(pos)) else {
-            return false;
+            // 指针移到所有面板之外：清掉残留高亮。
+            //
+            // ★ 此前这里直接 return false——什么都不改，于是最后停留过的那一项一直亮着，
+            //   指针早已在菜单外，看着像"这一项被选中了"。控件树里的 hover 有 Enter/Leave
+            //   兜底，菜单浮层不走那条路（它有独立命中逻辑），得在这里自己收。
+            return self.clear_menu_hover();
         };
         let item_idx = self.menu.as_ref().unwrap().levels[k].item_at(pos);
         let mut changed = false;
@@ -3864,6 +3888,85 @@ mod tests {
         let plain = MenuItem::run("复制", || {}, false);
         assert_eq!(pick(&plain, false), pal.text);
         assert_eq!(pick(&plain, true), pal.accent, "普通项悬停仍走强调色");
+    }
+
+    /// 指针移出菜单面板后不留残影高亮。
+    ///
+    /// ★ 回归：`menu_hover_update` 在指针落到所有面板之外时直接返回，什么都不改——最后
+    /// 停留过的那一项就一直亮着，指针早已在别处，看着像"这一项被选中了"。控件树里的 hover
+    /// 有 Enter/Leave 兜底，菜单浮层走独立命中逻辑，不在那条路上，得自己收。
+    /// 鼠标移出**整个窗口**时平台层派发的 `Move(-1,-1)`（见 win32 `clear_hover`）同样走这里。
+    #[test]
+    fn moving_off_the_menu_clears_the_hovered_item() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let app = App::new("t", 200, 200).content(Element::col().width(200).height(200).child(
+            Element::dropdown(vec!["甲", "乙", "丙"], crate::signal::signal(0usize)).width(120),
+        ));
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 200).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 200));
+
+        let on_ctl = Point::new(40, 12);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            on_ctl,
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            on_ctl,
+            MouseButton::Left,
+        ));
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 200));
+        let panel = handler.menu.as_ref().expect("应已展开菜单").levels[0].rect;
+
+        // 停在某一项上 → 该层有 hover。
+        let on_item = Point::new(panel.x + panel.w / 2, panel.y + 12);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            on_item,
+            MouseButton::Left,
+        ));
+        assert!(
+            handler.menu.as_ref().unwrap().levels[0].hover.is_some(),
+            "指针停在项上应有悬停高亮（否则这条测试没测到东西）"
+        );
+
+        // 移到面板外（仍在窗口内）→ 高亮清掉，菜单不关。
+        let off = Point::new(panel.right() + 20, panel.y + 12);
+        let repaint = handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            off,
+            MouseButton::Left,
+        ));
+        assert!(
+            handler.menu.as_ref().unwrap().levels[0].hover.is_none(),
+            "指针移出面板后不该残留高亮"
+        );
+        assert!(repaint, "高亮变化应请求重绘，否则残影还在屏上");
+        assert!(handler.menu.is_some(), "移出面板只清高亮，不该顺手关掉菜单");
+
+        // 鼠标移出整个窗口：平台层发 Move(-1,-1)，同样要清掉。
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            on_item,
+            MouseButton::Left,
+        ));
+        assert!(handler.menu.as_ref().unwrap().levels[0].hover.is_some());
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            Point::new(-1, -1),
+            MouseButton::Left,
+        ));
+        assert!(
+            handler.menu.as_ref().unwrap().levels[0].hover.is_none(),
+            "鼠标离开窗口（Move(-1,-1)）也应清掉菜单高亮"
+        );
     }
 
     #[test]
