@@ -329,9 +329,15 @@ impl ContextMenu {
         let mut keep = self.levels.len();
         for k in 0..self.levels.len() {
             let next_spawn = self.levels.get(k + 1).and_then(|l| l.spawn);
-            let sub = next_spawn
-                .and_then(|i| items.get(i))
-                .map(|it| it.submenu.clone());
+            // 子级同样要规范化，理由同上：`spawn` 记的是规范化后列表里的位置。
+            // `submenu` 字段存的始终是原始列表（`build_level` 只规范化本级、不动各项的
+            // `submenu`），漏了这一步就只有根层干净——子菜单的孤立分隔线会在每次刷新后
+            // 复现，且下标错位会把已展开的孙级菜单静默关掉。
+            let sub = next_spawn.and_then(|i| items.get(i)).map(|it| {
+                let mut s = it.submenu.clone();
+                normalize_separators(&mut s);
+                s
+            });
             self.levels[k].has_icons = items.iter().any(|it| it.icon.is_some());
             self.levels[k].content_h =
                 items.iter().map(menu_item_height).sum::<i32>() + 2 * MENU_VPAD;
@@ -3747,6 +3753,86 @@ mod tests {
         let once = labels(&v);
         normalize_separators(&mut v);
         assert_eq!(labels(&v), once);
+    }
+
+    /// 刷新要规范化**每一级**，不能只管根层。
+    ///
+    /// `submenu` 字段里存的始终是原始列表——`build_level` 只规范化它拿到的那一级，
+    /// 不会回头去改各项的 `submenu`。所以刷新时若只规范化根层，子级会拿到带孤立分隔线的
+    /// 原始列表：本该修掉的空组线在每次粘滞项刷新后复现，而且 `spawn` 记的是规范化后的
+    /// 下标，按同一下标去原始列表里取会错位——取到分隔线（`submenu` 为空）就走截断分支，
+    /// 把已经展开的孙级菜单静默关掉。
+    #[test]
+    fn refresh_normalizes_every_level_not_just_the_root() {
+        // 用不捕获环境的 fn：`rebuild` 要求 'static，捕获局部闭包会借用超期。
+        fn item(s: &str) -> MenuItem {
+            MenuItem::run(s, || {}, false)
+        }
+        let labels = |v: &[MenuItem]| -> Vec<String> {
+            v.iter()
+                .map(|i| {
+                    if i.separator {
+                        "—".into()
+                    } else {
+                        i.label.clone()
+                    }
+                })
+                .collect()
+        };
+        // 子菜单首项是空组遗留的孤立分隔线——正是规范化该收掉的东西。
+        fn build() -> Vec<MenuItem> {
+            vec![
+                item("X"),
+                MenuItem::submenu(
+                    "更多",
+                    vec![
+                        MenuItem::separator(),
+                        item("G1"),
+                        MenuItem::submenu("深", vec![item("D1")]),
+                    ],
+                ),
+            ]
+        }
+        let host = App::new("t", 60, 60)
+            .content(Element::col())
+            .into_handler_for_test();
+        let target = host.tree.root.expect("根节点");
+        // 模拟三级已展开：根 → "更多" → "深"。父级下标取自**规范化后**的列表：
+        // 规范化后子菜单是 ["G1", "深"]，故"深"在下标 1。
+        let lvl = |items: Vec<MenuItem>, spawn: Option<usize>| MenuLevel {
+            items,
+            rect: Rect::new(0, 0, 100, 100),
+            hover: None,
+            has_icons: false,
+            spawn,
+            content_h: 0,
+            scroll: 0,
+        };
+        let mut sub = build()[1].submenu.clone();
+        normalize_separators(&mut sub);
+        let mut menu = ContextMenu {
+            levels: vec![
+                lvl(build(), None),
+                lvl(sub, Some(1)),
+                lvl(vec![item("D1")], Some(1)),
+            ],
+            target,
+            rebuild: Some(Rc::new(build)),
+        };
+
+        menu.refresh_items();
+
+        assert_eq!(menu.levels.len(), 3, "三级都该活着——孙级不能被静默关掉");
+        assert_eq!(
+            labels(&menu.levels[1].items),
+            ["G1", "深"],
+            "子级的孤立分隔线该在刷新后依然是收掉的状态"
+        );
+        assert_eq!(
+            labels(&menu.levels[2].items),
+            ["D1"],
+            "孙级内容应被正确换入"
+        );
     }
 
     /// `danger()` 项用 palette.danger 上色，且**悬停时不退回强调色**；禁用则一律灰。
