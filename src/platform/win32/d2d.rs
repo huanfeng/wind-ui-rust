@@ -1587,44 +1587,198 @@ fn d2d_color(c: Color) -> D2D1_COLOR_F {
 /// GPU 图，需先把它改造成**可复用**的离屏后端——截图会依次渲染初始帧、点击帧、
 /// 悬停帧，每帧重建一整条 D3D/D2D 设备链并不合理。那是独立的一步，届时连同
 /// `run_offscreen` 的后端选择一起放开。
-#[cfg(test)]
-mod offscreen {
+/// 离屏 D2D 渲染：设备链与各类缓存建一次，可反复渲染多帧并把像素取回 `Pixmap`。
+///
+/// 存在的理由是**这条路径原本无法验证**：窗口后端的像素在 swapchain 里读不回来，
+/// 而离屏截图（`run_offscreen`）恒走软渲染。于是 d2d.rs 的一千五百行长期零测试，
+/// 软硬两路画得像不像全靠肉眼看。取回 `Pixmap` 后，既有的截图比对与墨量判据即可
+/// 原样用在 GPU 路径上。
+///
+/// 走的是与窗口后端**同一个** `D2DTarget`/`D2DCanvas`，只把呈现目标从 swapchain 换成
+/// 离屏位图——否则测出来的不是生产行为。缓存（渐变/字体/排版/图片/阴影）跨帧复用，
+/// 与窗口后端同构：截图要连渲初始帧、点击帧、悬停帧，每帧重建设备链既慢又测不出
+/// 缓存相关的行为。
+pub(crate) mod offscreen {
     use super::*;
     use tiny_skia::Pixmap;
     use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
 
-    /// 离屏跑一次 D2D 绘制，把结果取回 `Pixmap`（RGBA 预乘，与软后端同格式）。
-    ///
-    /// 存在的理由是**这条路径此前无法验证**：窗口后端的像素在 swapchain 里，读不回来；
-    /// 离屏截图（`run_offscreen`）又恒走软渲染。于是 d2d.rs 的一千五百行长期零测试，
-    /// 软硬两路画得像不像，全靠肉眼看。取回 `Pixmap` 后，既有的截图比对与墨量判据即可
-    /// 原样用在 GPU 路径上。
-    ///
-    /// 走的是与窗口后端**同一个** `D2DTarget`/`D2DCanvas`，只把呈现目标从 swapchain 换成
-    /// 离屏位图——否则测出来的不是生产行为。
-    ///
-    /// 设备优先硬件、失败退 WARP（软件光栅化器）：CI 与远程桌面上没有可用 GPU，若只试
-    /// 硬件，测试会在那些环境里静默跳过，而"跳过"和"通过"在报告里长得一模一样。
-    /// 两者都失败返回 `None`（无 D2D 运行时，绝不 panic）。
-    ///
-    /// 暂门控在 `cfg(test)`：现阶段唯一的用途就是测试。要让 `--screenshot` 也能出 GPU 图，
-    /// 需要先把它改造成可复用的离屏后端——截图会依次渲染初始帧、点击帧、悬停帧，每帧重建
-    /// 一整条 D3D/D2D 设备链是不合理的。那是独立的一步，届时连同 `run_offscreen` 的后端
-    /// 选择一起放开。
-    pub(crate) fn render_offscreen(
+    pub(crate) struct OffscreenBackend {
+        ctx: ID2D1DeviceContext,
+        bake_ctx: ID2D1DeviceContext,
+        dwrite_factory: IDWriteFactory,
+        solid: ID2D1SolidColorBrush,
+        /// 渲染目标位图（与窗口后端的后备缓冲同格式：BGRA8 预乘、96 DPI）。
+        target: ID2D1Bitmap1,
+        /// CPU 可读的暂存位图。D2D 不允许直接 Map 渲染目标，须先 CopyFromBitmap。
+        staging: ID2D1Bitmap1,
         w: u32,
         h: u32,
-        scale: f32,
-        bg: Color,
-        draw: impl FnOnce(&mut dyn Canvas),
-    ) -> Option<Pixmap> {
-        unsafe { render_offscreen_inner(w, h, scale, bg, draw) }
+        grad_cache: HashMap<GradKey, ID2D1Brush>,
+        format_cache: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+        layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
+        image_cache: HashMap<usize, ID2D1Bitmap1>,
+        shadow_effect: Option<ID2D1Effect>,
+        shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
+    }
+
+    impl OffscreenBackend {
+        /// 建一个 `w×h` 的离屏后端。无可用 D2D 运行时返回 `None`（绝不 panic）。
+        pub(crate) fn new(w: u32, h: u32) -> Option<Self> {
+            if w == 0 || h == 0 {
+                return None;
+            }
+            unsafe { Self::create(w, h) }
+        }
+
+        unsafe fn create(w: u32, h: u32) -> Option<Self> {
+            let (d2d_device, dwrite_factory) = offscreen_device()?;
+            let ctx = d2d_device.CreateDeviceContext(Default::default()).ok()?;
+            let bake_ctx = d2d_device.CreateDeviceContext(Default::default()).ok()?;
+            let size = D2D_SIZE_U {
+                width: w,
+                height: h,
+            };
+            let pixel_format = D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            };
+            let props = |options| D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: pixel_format,
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: options,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            };
+            let target: ID2D1Bitmap1 = ctx
+                .CreateBitmap(
+                    size,
+                    None,
+                    0,
+                    &props(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+                )
+                .ok()?;
+            let staging: ID2D1Bitmap1 = ctx
+                .CreateBitmap(
+                    size,
+                    None,
+                    0,
+                    &props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+                )
+                .ok()?;
+            let solid = ctx
+                .CreateSolidColorBrush(&d2d_color(Color::rgba(0, 0, 0, 255)), None)
+                .ok()?;
+            Some(Self {
+                ctx,
+                bake_ctx,
+                dwrite_factory,
+                solid,
+                target,
+                staging,
+                w,
+                h,
+                grad_cache: HashMap::new(),
+                format_cache: HashMap::new(),
+                layout_cache: HashMap::new(),
+                image_cache: HashMap::new(),
+                shadow_effect: None,
+                shadow_cache: HashMap::new(),
+            })
+        }
+
+        /// 物理像素尺寸。
+        pub(crate) fn size(&self) -> Size {
+            Size::new(self.w as i32, self.h as i32)
+        }
+
+        /// 渲染一帧并取回像素。`render` 拿到的是与窗口后端同一个 `RenderTarget`，
+        /// 故 `AppHandler::render` 可直接传进来。
+        pub(crate) fn frame(
+            &mut self,
+            bg: Color,
+            render: impl FnOnce(&mut dyn RenderTarget, Size),
+        ) -> Option<Pixmap> {
+            let size = self.size();
+            unsafe {
+                self.ctx.SetTarget(&self.target);
+                // 与 try_create_inner 同样的初始状态，否则测的不是生产配置。
+                self.ctx
+                    .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+                self.ctx.BeginDraw();
+                self.ctx.Clear(Some(&d2d_color(bg)));
+                {
+                    let mut target = D2DTarget {
+                        ctx: &self.ctx,
+                        solid: &self.solid,
+                        grad_cache: &mut self.grad_cache,
+                        dwrite_factory: &self.dwrite_factory,
+                        format_cache: &mut self.format_cache,
+                        layout_cache: &mut self.layout_cache,
+                        image_cache: &mut self.image_cache,
+                        bake_ctx: &self.bake_ctx,
+                        shadow_effect: &mut self.shadow_effect,
+                        shadow_cache: &mut self.shadow_cache,
+                    };
+                    render(&mut target, size);
+                }
+                // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear。
+                self.ctx.SetTransform(&Matrix3x2::identity());
+                self.ctx.EndDraw(None, None).ok()?;
+                // 解绑后再读回：target 仍被 ctx 持有时 CopyFromBitmap 的行为不保证。
+                self.ctx.SetTarget(None);
+                self.read_back()
+            }
+        }
+
+        /// 便利入口：直接拿 `Canvas` 画。仅测试使用——生产路径（截图）走 `frame`，
+        /// 它接的是 `AppHandler::render` 那个签名。
+        #[cfg(test)]
+        pub(crate) fn draw(
+            &mut self,
+            scale: f32,
+            bg: Color,
+            f: impl FnOnce(&mut dyn Canvas),
+        ) -> Option<Pixmap> {
+            self.frame(bg, |target, _| {
+                // D2D 自带 DirectWrite 文字栈，engine 被忽略，传 Null 桩即可。
+                let mut engine = crate::text::NullTextEngine;
+                let mut canvas = target.make_canvas(&mut engine, scale);
+                f(&mut *canvas);
+            })
+        }
+
+        unsafe fn read_back(&self) -> Option<Pixmap> {
+            self.staging.CopyFromBitmap(None, &self.target, None).ok()?;
+            let mapped = self.staging.Map(D2D1_MAP_OPTIONS_READ).ok()?;
+            let (w, h) = (self.w as usize, self.h as usize);
+            let mut pm = Pixmap::new(self.w, self.h)?;
+            {
+                let dst = pm.data_mut();
+                for y in 0..h {
+                    let src_row = mapped.bits.add(y * mapped.pitch as usize);
+                    for x in 0..w {
+                        let s = src_row.add(x * 4);
+                        let d = (y * w + x) * 4;
+                        // D2D 是 BGRA 预乘，tiny-skia 是 RGBA 预乘：换 R/B 两通道即可。
+                        dst[d] = *s.add(2);
+                        dst[d + 1] = *s.add(1);
+                        dst[d + 2] = *s;
+                        dst[d + 3] = *s.add(3);
+                    }
+                }
+            }
+            self.staging.Unmap().ok()?;
+            Some(pm)
+        }
     }
 
     /// 建离屏用的 D2D 设备链。先硬件后 WARP，返回 (d2d_device, dwrite_factory)。
-    /// 不复用 `shared_device()`：那份是窗口后端的进程状态，测试不该与它相互影响，
-    /// 且它只试硬件、拿不到 WARP 回退。
+    ///
+    /// 不复用 `shared_device()`：那份是窗口后端的进程状态，离屏渲染不该与它相互影响，
+    /// 且它只试硬件、拿不到 WARP 回退。CI 与远程桌面上没有可用 GPU，只试硬件的话
+    /// 验证会在那些环境里静默跳过，而"跳过"和"通过"在报告里长得一模一样。
     unsafe fn offscreen_device() -> Option<(ID2D1Device, IDWriteFactory)> {
         for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
             let mut d3d: Option<ID3D11Device> = None;
@@ -1662,124 +1816,11 @@ mod offscreen {
         }
         None
     }
-
-    unsafe fn render_offscreen_inner(
-        w: u32,
-        h: u32,
-        scale: f32,
-        bg: Color,
-        draw: impl FnOnce(&mut dyn Canvas),
-    ) -> Option<Pixmap> {
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let (d2d_device, dwrite_factory) = offscreen_device()?;
-        let context = d2d_device.CreateDeviceContext(Default::default()).ok()?;
-        let bake_ctx = d2d_device.CreateDeviceContext(Default::default()).ok()?;
-
-        let size = D2D_SIZE_U {
-            width: w,
-            height: h,
-        };
-        let pixel_format = D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        };
-        // 渲染目标位图：与窗口后端的后备缓冲同格式（BGRA8 预乘、96 DPI）。
-        let target: ID2D1Bitmap1 = context
-            .CreateBitmap(
-                size,
-                None,
-                0,
-                &D2D1_BITMAP_PROPERTIES1 {
-                    pixelFormat: pixel_format,
-                    dpiX: 96.0,
-                    dpiY: 96.0,
-                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                    colorContext: std::mem::ManuallyDrop::new(None),
-                },
-            )
-            .ok()?;
-        context.SetTarget(&target);
-        // 与 try_create_inner 同样的初始状态，否则测的不是生产配置。
-        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-        let solid = context
-            .CreateSolidColorBrush(&d2d_color(Color::rgba(0, 0, 0, 255)), None)
-            .ok()?;
-
-        context.BeginDraw();
-        context.Clear(Some(&d2d_color(bg)));
-        {
-            let mut grad_cache = HashMap::new();
-            let mut format_cache = HashMap::new();
-            let mut layout_cache = HashMap::new();
-            let mut image_cache = HashMap::new();
-            let mut shadow_effect = None;
-            let mut shadow_cache = HashMap::new();
-            let mut target_wrap = D2DTarget {
-                ctx: &context,
-                solid: &solid,
-                grad_cache: &mut grad_cache,
-                dwrite_factory: &dwrite_factory,
-                format_cache: &mut format_cache,
-                layout_cache: &mut layout_cache,
-                image_cache: &mut image_cache,
-                bake_ctx: &bake_ctx,
-                shadow_effect: &mut shadow_effect,
-                shadow_cache: &mut shadow_cache,
-            };
-            // D2D 自带 DirectWrite 文字栈，engine 被忽略，传 Null 桩即可。
-            let mut engine = crate::text::NullTextEngine;
-            let mut canvas = target_wrap.make_canvas(&mut engine, scale);
-            draw(&mut *canvas);
-        }
-        context.SetTransform(&Matrix3x2::identity());
-        context.EndDraw(None, None).ok()?;
-        // 解绑后再读回：target 仍被 context 持有时 CopyFromBitmap 的行为不保证。
-        context.SetTarget(None);
-
-        // CPU 可读的暂存位图 → 拷贝 → Map 读出。D2D 不允许直接 Map 渲染目标。
-        let staging: ID2D1Bitmap1 = context
-            .CreateBitmap(
-                size,
-                None,
-                0,
-                &D2D1_BITMAP_PROPERTIES1 {
-                    pixelFormat: pixel_format,
-                    dpiX: 96.0,
-                    dpiY: 96.0,
-                    bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                    colorContext: std::mem::ManuallyDrop::new(None),
-                },
-            )
-            .ok()?;
-        staging.CopyFromBitmap(None, &target, None).ok()?;
-        let mapped = staging.Map(D2D1_MAP_OPTIONS_READ).ok()?;
-
-        let mut pm = Pixmap::new(w, h)?;
-        {
-            let dst = pm.data_mut();
-            for y in 0..h as usize {
-                let src_row = mapped.bits.add(y * mapped.pitch as usize);
-                for x in 0..w as usize {
-                    let s = src_row.add(x * 4);
-                    let d = (y * w as usize + x) * 4;
-                    // D2D 是 BGRA 预乘，tiny-skia 是 RGBA 预乘：换 R/B 两通道即可。
-                    dst[d] = *s.add(2);
-                    dst[d + 1] = *s.add(1);
-                    dst[d + 2] = *s;
-                    dst[d + 3] = *s.add(3);
-                }
-            }
-        }
-        staging.Unmap().ok()?;
-        Some(pm)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::offscreen::render_offscreen;
+    use super::offscreen::OffscreenBackend;
     use super::*;
     use crate::geometry::Rect;
     use crate::spec::Align;
@@ -1810,8 +1851,10 @@ mod tests {
     /// 离屏渲染跑不起来即测试失败，不静默跳过——"跳过"和"通过"在报告里长得一样，
     /// 而这条路径正是因为长期无人验证才积了一千五百行零测试的债。
     fn render(w: u32, h: u32, scale: f32, draw: impl FnOnce(&mut dyn Canvas)) -> Pixmap {
-        render_offscreen(w, h, scale, Color::rgb(255, 255, 255), draw)
+        OffscreenBackend::new(w, h)
             .expect("D2D 离屏渲染不可用：硬件与 WARP 设备都没建起来")
+            .draw(scale, Color::rgb(255, 255, 255), draw)
+            .expect("离屏帧读回失败")
     }
 
     /// 端到端最小闭环：设备创建 → 绘制 → 读回 → 通道序。

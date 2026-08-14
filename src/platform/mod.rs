@@ -71,6 +71,72 @@ pub(crate) fn to_skia_color(c: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
 }
 
+/// 离屏截图的渲染后端：软光栅或 GPU。
+///
+/// `run_offscreen` 要连渲多帧（初始、右键、点击、悬停、动画收敛、基准），每帧都是
+/// 「清底 → 建 target → handler.render」这同一件事。收敛成一个类型，一是消掉六处
+/// 重复，二是让 GPU 路径**只需换一个构造**——否则每处都要写一遍 cfg 分支。
+enum Offscreen {
+    /// tiny-skia 软光栅：像素就地画在自己的 `Pixmap` 上。
+    Soft(Pixmap),
+    /// Direct2D GPU：画进离屏位图后把像素取回，`last` 持有最近一帧。
+    #[cfg(all(windows, feature = "d2d"))]
+    Gpu {
+        // 装箱：后端带六个缓存表，直接内联会让整个枚举跟着变胖，而软路径那一支
+        // 只需要一个 Pixmap。
+        backend: Box<crate::platform::win32::d2d::offscreen::OffscreenBackend>,
+        last: Pixmap,
+    },
+}
+
+impl Offscreen {
+    /// `gpu=true` 时尝试 GPU 后端，建不起来则回退软光栅并告警——截图路径宁可出图
+    /// 也不该失败，但必须让人知道出的不是 GPU 的图，否则「GPU 与软渲染一致」这个
+    /// 结论会建立在两张软渲染图上。
+    fn new(w: u32, h: u32, gpu: bool) -> Self {
+        #[cfg(all(windows, feature = "d2d"))]
+        if gpu {
+            if let Some(backend) =
+                crate::platform::win32::d2d::offscreen::OffscreenBackend::new(w, h)
+            {
+                return Offscreen::Gpu {
+                    backend: Box::new(backend),
+                    last: Pixmap::new(w, h).expect("分配 pixmap 失败"),
+                };
+            }
+            eprintln!("[windui] D2D 离屏设备创建失败，截图回退软渲染");
+        }
+        let _ = gpu;
+        Offscreen::Soft(Pixmap::new(w, h).expect("分配 pixmap 失败"))
+    }
+
+    /// 渲染一帧（清底 + 整树绘制）。
+    fn frame(&mut self, handler: &mut Box<dyn AppHandler>, size: Size, bg: Color) {
+        match self {
+            Offscreen::Soft(pm) => {
+                pm.fill(to_skia_color(bg));
+                let mut tgt = crate::render::PixmapTarget { pixmap: pm };
+                handler.render(&mut tgt, size);
+            }
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { backend, last } => {
+                // D2D 的 Clear(bg) 已完成清底，无需另行 fill。
+                if let Some(pm) = backend.frame(bg, |t, s| handler.render(t, s)) {
+                    *last = pm;
+                }
+            }
+        }
+    }
+
+    fn pixmap(&self) -> &Pixmap {
+        match self {
+            Offscreen::Soft(pm) => pm,
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { last, .. } => last,
+        }
+    }
+}
+
 /// 离屏渲染一帧并保存 PNG——**平台无关**逻辑，Windows 与 macOS 的 `run` 在
 /// `cfg.screenshot.is_some()` 时共用。无需窗口，适合自动化视觉回归。
 ///
@@ -82,13 +148,11 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     let pw = (cfg.width as f32 * s).round().max(1.0) as i32;
     let ph = (cfg.height as f32 * s).round().max(1.0) as i32;
     let size = Size::new(pw, ph);
-    let mut pixmap = Pixmap::new(pw as u32, ph as u32).expect("分配 pixmap 失败");
-    pixmap.fill(to_skia_color(cfg.bg));
     handler.set_scale(s);
-    let mut tgt = crate::render::PixmapTarget {
-        pixmap: &mut pixmap,
-    };
-    handler.render(&mut tgt, size);
+    // 截图后端随 `accelerated` 走：`--screenshot --accelerated` 出 GPU 图，
+    // 使 29 个 example 都能做软硬整页比对，而不必为每条差异手写单元测试。
+    let mut off = Offscreen::new(pw as u32, ph as u32, cfg.accelerated);
+    off.frame(handler, size, cfg.bg);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
         let pos = Point::new(
@@ -100,11 +164,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             pos,
             MouseButton::Right,
         ));
-        pixmap.fill(to_skia_color(cfg.bg));
-        let mut tgt = crate::render::PixmapTarget {
-            pixmap: &mut pixmap,
-        };
-        handler.render(&mut tgt, size);
+        off.frame(handler, size, cfg.bg);
     }
     // 可选：依次合成左键单击（Down+Up），捕获下拉展开等。多个 `--click` 按序回放，
     // 用于验证需要连续点击才能到达的状态（如复选菜单连点多个开关而菜单不关）。
@@ -123,11 +183,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             pos,
             MouseButton::Left,
         ));
-        pixmap.fill(to_skia_color(cfg.bg));
-        let mut tgt = crate::render::PixmapTarget {
-            pixmap: &mut pixmap,
-        };
-        handler.render(&mut tgt, size);
+        off.frame(handler, size, cfg.bg);
     }
     // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
     if let Some((lx, ly)) = cfg.screenshot_hover {
@@ -142,11 +198,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         ));
         // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
         std::thread::sleep(std::time::Duration::from_millis(650));
-        pixmap.fill(to_skia_color(cfg.bg));
-        let mut tgt = crate::render::PixmapTarget {
-            pixmap: &mut pixmap,
-        };
-        handler.render(&mut tgt, size);
+        off.frame(handler, size, cfg.bg);
     }
     // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
     // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
@@ -156,11 +208,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
-        pixmap.fill(to_skia_color(cfg.bg));
-        let mut tgt = crate::render::PixmapTarget {
-            pixmap: &mut pixmap,
-        };
-        handler.render(&mut tgt, size);
+        off.frame(handler, size, cfg.bg);
     }
     // 性能基准（WINDUI_BENCH=N）：首帧已暖（字体/阴影缓存已建），再渲染 N 帧打印稳态帧耗时。
     if let Ok(spec) = std::env::var("WINDUI_BENCH") {
@@ -168,11 +216,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         let mut total = 0.0f32;
         for i in 0..n {
             let t = std::time::Instant::now();
-            pixmap.fill(to_skia_color(cfg.bg));
-            let mut tgt = crate::render::PixmapTarget {
-                pixmap: &mut pixmap,
-            };
-            handler.render(&mut tgt, size);
+            off.frame(handler, size, cfg.bg);
             let ms = t.elapsed().as_secs_f32() * 1000.0;
             total += ms;
             eprintln!("[windui] bench frame {i}: {ms:.2} ms");
@@ -186,7 +230,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    pixmap.save_png(path).expect("保存 PNG 失败");
+    off.pixmap().save_png(path).expect("保存 PNG 失败");
     eprintln!("[windui] 截屏已保存: {}", path.display());
 }
 
