@@ -12,6 +12,7 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::Color;
+use crate::style::Shadow;
 
 /// 全局基础调色板。
 #[derive(Clone, Serialize, Deserialize)]
@@ -119,7 +120,12 @@ impl Palette {
 
 /// 控件语义意图色。内置三核心 + 开放扩展点 `Custom`——使用者传任意基色即可，
 /// 框架派生整组视觉（hover/active 变亮变暗、fg 按亮度自适应），零新增 palette 色槽。
+///
+/// `#[non_exhaustive]`：理由同 [`crate::style::Role`]——语义色持续演进，本版就补了
+/// `Success` / `Warning`。下游对它做穷尽 `match` 须留 `_` 兜底；`Custom(Color)` 已经
+/// 让"把所有 intent 一一列举"这件事失去意义（基色是无穷的），标注只是把这一点说清楚。
 #[derive(Clone, Copy)]
+#[non_exhaustive]
 pub enum Intent {
     /// 主操作：accent 家族（控件默认）。
     Primary,
@@ -437,14 +443,20 @@ const MENU_SHADOW_BLUR: f32 = 9.0;
 const MENU_SHADOW_ALPHA: u8 = 56;
 
 impl MenuTheme {
-    /// 投影参数 `(向下偏移, 模糊半径, 颜色)`。
-    pub fn shadow(&self) -> (f32, f32, Color) {
-        (
-            self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
-            self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
-            self.shadow_color
+    /// 组装浮层投影。返回 [`Shadow`] 而非三元组：同名的 [`ReorderTheme::shadow`] 早已
+    /// 返回 `Shadow`，两个 `shadow()` 同名不同型时，调用方拿到哪个全凭记忆。
+    /// `dx`/`spread` 恒为 0——菜单投影只需"正下方托一层"，两个分量留在类型里
+    /// 是为了与节点样式的 `style.shadow` 用同一个结构，浮层与普通节点的投影可互相搬。
+    pub fn shadow(&self) -> Shadow {
+        Shadow {
+            dx: 0.0,
+            dy: self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
+            blur: self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
+            spread: 0.0,
+            color: self
+                .shadow_color
                 .unwrap_or(Color::rgba(0, 0, 0, MENU_SHADOW_ALPHA)),
-        )
+        }
     }
     pub fn bg(&self, p: &Palette) -> Color {
         self.bg.unwrap_or(p.surface)
@@ -929,8 +941,8 @@ impl ReorderTheme {
         self.corner.unwrap_or(m.corner_md)
     }
     /// 组装被拖行的浮起投影（略向下偏移，模拟光从上方来）。
-    pub fn shadow(&self) -> crate::style::Shadow {
-        crate::style::Shadow {
+    pub fn shadow(&self) -> Shadow {
+        Shadow {
             dx: 0.0,
             dy: 2.0,
             blur: self.shadow_blur(),
@@ -1087,14 +1099,17 @@ pub struct ToastTheme {
 }
 
 impl ToastTheme {
-    /// 投影参数 `(向下偏移, 模糊半径, 颜色)`。默认与 [`MenuTheme::shadow`] 相同。
-    pub fn shadow(&self) -> (f32, f32, Color) {
-        (
-            self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
-            self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
-            self.shadow_color
+    /// 组装浮层投影（类型与理由同 [`MenuTheme::shadow`]）。默认值也与之相同。
+    pub fn shadow(&self) -> Shadow {
+        Shadow {
+            dx: 0.0,
+            dy: self.shadow_dy.unwrap_or(MENU_SHADOW_DY),
+            blur: self.shadow_blur.unwrap_or(MENU_SHADOW_BLUR),
+            spread: 0.0,
+            color: self
+                .shadow_color
                 .unwrap_or(Color::rgba(0, 0, 0, MENU_SHADOW_ALPHA)),
-        )
+        }
     }
     pub fn bg(&self, _p: &Palette) -> Color {
         self.bg.unwrap_or(Color::rgba(0x32, 0x32, 0x35, 235))

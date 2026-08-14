@@ -847,15 +847,15 @@ impl MenuHost {
         for (li, level) in menu.levels.iter().enumerate() {
             let r = level.rect;
             // 面板投影 + 圆角底 + 描边。投影参数走主题（见 `MenuTheme::shadow`）。
-            let (sh_dy, sh_blur, sh_col) = mt.shadow();
+            let sh = mt.shadow();
             canvas.draw_shadow(
-                r.x as f32,
-                r.y as f32 + sh_dy,
+                r.x as f32 + sh.dx,
+                r.y as f32 + sh.dy,
                 r.w as f32,
                 r.h as f32,
                 10.0,
-                sh_blur,
-                sh_col,
+                sh.blur,
+                sh.color,
             );
             canvas.fill_round_rect(
                 r.x as f32,

@@ -125,14 +125,16 @@
   链式写法（`App::new(..).theme(t).content(build_ui())`）因此自动正确；若先把树建进变量
   再传，请把建树挪到 `.theme(t)` 之后（`examples/ime.rs` / `settings.rs` / `ime_settings.rs`
   已照此调整）。
-- **`Role` 与 `Intent` 各新增变体（破坏性）**：两者都是公开的非 `non_exhaustive` 枚举，
-  下游对它们做穷举 `match` 的代码需补分支。`Role` 加了 `SurfaceInverse` /
-  `OnSurfaceInverse` / `TextSubtle` / `Success` / `Warning`，`Intent` 加了 `Success` /
-  `Warning`；`Palette` 相应新增五个色槽（`#[serde(default)]`，旧 TOML 无需改动）。
-- **`MenuItem` 新增 `pub intent: Option<Intent>` 字段（破坏性）**：该结构体字段全 `pub` 且非
-  `#[non_exhaustive]`，下游用**字面量构造**或穷尽解构 `MenuItem` 的代码会 `E0063` / `E0027`。
+- **`Role` 与 `Intent` 各新增变体（破坏性）**：下游对它们做穷举 `match` 的代码需补分支。
+  `Role` 加了 `SurfaceInverse` / `OnSurfaceInverse` / `TextSubtle` / `Success` / `Warning`，
+  `Intent` 加了 `Success` / `Warning`；`Palette` 相应新增五个色槽（`#[serde(default)]`，
+  旧 TOML 无需改动）。两者本版同时加了 `#[non_exhaustive]`（见下文），**这是最后一次**
+  因新增语义色而破坏下游。
+- **`MenuItem` 新增 `pub intent: Option<Intent>` 字段（破坏性）**：下游用**字面量构造**或
+  穷尽解构 `MenuItem` 的代码会 `E0063` / `E0027`。
   迁移：改用 `MenuItem::run` / `key` / `separator` / `submenu` 四个便捷构造加链式设置器
-  （它们已收敛到共同底座，日后再加字段不会波及调用方）；确需字面量的补 `intent: None`。
+  （它们已收敛到共同底座）。本版同时给 `MenuItem` 加了 `#[non_exhaustive]`（见下文），
+  字面量构造这条路已被封死，**这是最后一次**因新增字段而破坏下游。
 - **菜单浮层投影默认值收敛**：偏移 6 → 3、模糊半径 18 → 9、黑色不透明度 43% → 22%，与
   `ReorderTheme` 既有的投影分量对齐（alpha 同为 56）。投影是用来把浮层从背景里托起来的，
   不该成为画面里最显眼的东西；大面积低对比渐变又正是远程桌面这类有损通道最先牺牲的部分。
@@ -264,6 +266,51 @@
   改捕获的状态），只有需要留存多份/反复调用的闭包才用 `Fn`。内部类型
   `OnRowActivate` 相应从 `Rc<dyn Fn(..)>` 改为 `Rc<RefCell<dyn FnMut(..)>>`，与既有的
   `OnSort` 同款。对下游是**放宽**：原本能传的闭包全都还能传，无需迁移。
+- **`TrayMenuItem::check` 的勾选态改收 `Signal<bool>`（硬破坏）**：这是全库最后一处在公共
+  签名里要 `Rc<Cell<bool>>` 的地方——同一个 `impl` 块里紧挨着的 `TrayMenuItem::enabled`
+  早在 0.4.1 就是 `Signal<bool>` 了，于是同一份托盘菜单里"勾选绑这个、灰显绑那个"要维护
+  两份同义状态，`examples/tray.rs` 也因此成了全库唯一还写 `Rc::new(Cell::new(..))` 的示例。
+  语义完全不变：勾选态仍是**菜单弹出时现读**，回调里自行翻转，框架不代改。
+  线程约束成立：`Signal` 的存储是线程局部的，而 `Signal` 的 `!Send` 使 `Tray` → `App` 一路
+  `!Send`，`App::run` 只能在建 `Tray` 的那个线程消费它并在那里建窗口；Win32 保证窗口消息
+  只由建窗线程派发（`build_menu` / `run_item` 都在 `wnd_proc` 内），macOS 侧 `pop_menu`
+  另有 `MainThreadMarker` 钉在主线程。这条不变量已加编译期护栏（`Tray` 一旦变成 `Send`
+  即编译失败）。
+  **迁移**：`Rc::new(Cell::new(true))` → `signal(true)`，传参去掉 `.clone()`，
+  回调里的 `.get()` / `.set(..)` 写法不变；同一个信号可以直接同时喂给 `check` 和 `enabled`。
+- **`Role` 与 `Intent` 加 `#[non_exhaustive]`（破坏性）**：本版给这两个枚举分别加了五个和
+  两个变体（见上文），而**每加一个都是下游的破坏性变更**——语义色恰恰是最会持续演进的
+  那类枚举，这个代价没有尽头。标注之后再补变体就只是新增。
+  `#[non_exhaustive]` 只约束**下游 crate**，本 crate 内部的 `match` 仍须穷尽（忘了给新角色
+  接上 `Role::resolve` 会当场编译失败，这正是想要的）。`Intent::Custom(Color)` 其实早已让
+  "把所有 intent 一一列举"失去意义（基色是无穷的），标注只是把这一点写进类型。
+  **迁移**：下游对 `Role` / `Intent` 做穷尽 `match` 的代码报 `E0004`（non-exhaustive patterns），
+  补一条 `_ => ..` 兜底分支即可；构造与比较不受影响。
+- **`MenuItem` 加 `#[non_exhaustive]`（破坏性）**：字段全 `pub` 且此前无标注，本版已因它
+  破坏过两次（加 `intent` 字段导致 `E0063`、`on_trailing_click` 换类型）。菜单项的可选修饰
+  只会越来越多，故把字面量构造这条路封住，日后加字段不再波及调用方。
+  一并补上 `MenuItem::trailing_icon_display(icon)`：字段文档里"有尾随图标但 `on_trailing_click`
+  为 `None`（纯展示）"是个受支持的状态，而唯一的设置器 `trailing_icon(icon, on_click)` 必须
+  同时收回调——这个字段组合此前只有字面量写得出来，封住字面量就等于把它变成不可达。
+  自查过全部 14 个字段，其余都已被四个构造器 + 链式设置器覆盖。
+  **迁移**：下游 `MenuItem { .. }` 报 `E0639`（cannot create non-exhaustive struct using
+  struct expression），改用 `MenuItem::run` / `key` / `separator` / `submenu` 四个便捷构造
+  加链式设置器；穷尽解构 `let MenuItem { label, .. } = it` 需补 `..`。**读字段不受影响**。
+- **`Element::icon(path)` 改名 `icon_file(path)`**：同一个 `Element` 上并列着
+  `icon(文件路径)` / `icon_bytes` / `icon_rgba` / `icon_svg` / `icon_content`，最短的名字
+  给了**唯一会碰文件系统、唯一可能失败**的那个形态（路径写错即无图标），最容易被当成
+  "通用图标入口"误用。改名后 `icon` 这个词在本库里只表示"图标这个概念"，不特指某种来源。
+  **迁移**：旧名保留为 `#[deprecated]` 转发别名（计划 0.13 移除），改叫 `icon_file` 即可，
+  签名与行为不变。注意与 `MenuItem::icon` / `DropdownItem::icon` 无关，那两个收的是字形。
+- **`MenuTheme::shadow()` / `ToastTheme::shadow()` 改返回 `style::Shadow`（硬破坏）**：
+  它们原返回 `(f32, f32, Color)` 三元组，而同名的 `ReorderTheme::shadow()` 早就返回
+  `Shadow`——同名不同型，调用方拿到哪个全凭记忆，解构位置写反了还是编译得过（两个都是
+  `f32`）。统一到 `Shadow` 而非反过来，是因为它同时是节点样式 `style.shadow` 的类型：
+  浮层投影与普通节点投影从此可以互相搬。`dx` / `spread` 在这两个浮层上恒为 0
+  （菜单/toast 只需"正下方托一层"），保留分量是为了共用同一个结构。
+  **迁移**：`let (dy, blur, col) = th.menu.shadow();` → `let sh = th.menu.shadow();`，
+  取 `sh.dy` / `sh.blur` / `sh.color`。`MenuTheme` / `ToastTheme` 的三个 `shadow_*` 字段
+  与 TOML 键不变。
 
 ### Fixed
 - **软后端投影外缘的直角硬边**：阴影 pixmap 的模糊余量按 `2×半径` 留，而 3 趟 box-blur 每趟

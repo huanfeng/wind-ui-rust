@@ -258,15 +258,15 @@ impl ToastHost {
             let x = ((ws.w - panel_w) / 2).max(0);
             let corner = tt.corner(&theme.metrics);
             // 柔和投影（透明度跟随淡入淡出）。参数与菜单浮层同源，见 ToastTheme::shadow。
-            let (sh_dy, sh_blur, sh_col) = tt.shadow();
+            let sh = tt.shadow();
             canvas.draw_shadow(
-                x as f32,
-                y as f32 + sh_dy,
+                x as f32 + sh.dx,
+                y as f32 + sh.dy,
                 panel_w as f32,
                 panel_h as f32,
                 corner,
-                sh_blur,
-                sh_col.scale_alpha(alpha),
+                sh.blur,
+                sh.color.scale_alpha(alpha),
             );
             canvas.fill_round_rect(
                 x as f32,

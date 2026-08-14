@@ -7,7 +7,14 @@ use crate::theme::Theme;
 
 /// 主题角色：背景/边框/文字延迟解析到当前主题的对应颜色。
 /// 用 Role 而非写死颜色的节点，在运行期换主题时会自动跟随刷新（paint 期解析）。
+///
+/// `#[non_exhaustive]`：语义色是会持续补齐的一组，本版就加了五个（`SurfaceInverse` /
+/// `OnSurfaceInverse` / `TextSubtle` / `Success` / `Warning`）。没有这个标注的话，
+/// 每补一个角色都是下游的破坏性变更；标上之后下游的 `match` 必须留 `_` 兜底分支，
+/// 新角色便只是新增。本 crate 内部的 `match` 不受影响，仍须穷尽——
+/// 忘记给新角色接上 `resolve` 会当场编译失败，正是想要的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Role {
     Bg,
     Surface,

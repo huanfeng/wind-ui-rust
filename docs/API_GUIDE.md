@@ -163,9 +163,6 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 **惯用法**：状态在 `main`（或你的 App 结构）里创建，直接按值传进控件和回调。需要"一处改、
 多处联动"时，把同一个信号传给多个控件即可——它们读的是同一份存储。
 
-> **例外**：系统托盘的勾选项 `TrayMenuItem::check(label, checked, cb)` 目前仍收
-> `Rc<Cell<bool>>`（原生菜单在平台层构建，尚未迁到 Signal）。见 `examples/tray.rs`。
-
 ---
 
 ## 4. API 命名规范
@@ -410,9 +407,9 @@ Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（le
 - **`.fit()` 是图片专属**修饰符（误用检测同 text_input）。圆角直接用通用 `.corner()`，无需新方法。
 - **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
   ```rust
-  Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon(path) / .icon_rgba(w,h,&rgba)
-  Element::button("提交").icon(path).enabled_signal(can_submit)  // 禁用时背景/图标/文字一起置灰
-  Element::button("删除").icon(path).disabled(true)               // 静态禁用
+  Element::button("新建").icon_bytes(include_bytes!("plus.png"))  // 或 .icon_file(path) / .icon_rgba(w,h,&rgba)
+  Element::button("提交").icon_file(path).enabled_signal(can_submit)  // 禁用时背景/图标/文字一起置灰
+  Element::button("删除").icon_file(path).disabled(true)          // 静态禁用
   ```
 
 ### 图片的状态处理
@@ -485,12 +482,8 @@ Element::col().fill().on_drop_files(move |_ctx, paths| {   // paths: &[PathBuf]
 
 ### 系统托盘
 ```rust
-use std::cell::Cell;
-use std::rc::Rc;
-
-// ⚠️ 托盘勾选项是全库唯一还没迁到 Signal 的状态入口——原生菜单在平台层构建，
-//    这里仍收 Rc<Cell<bool>>。UI 控件一律用 signal()。
-let notify_on = Rc::new(Cell::new(true));
+// 勾选态与禁用态都绑 Signal<bool>，与 UI 控件同一套状态原语。
+let notify_on = signal(true);
 App::new("…", w, h).tray(
     Tray::new()
         .tooltip("后台运行中")
@@ -500,12 +493,13 @@ App::new("…", w, h).tray(
         .menu(vec![
             TrayMenuItem::item("显示窗口", |ctx| ctx.show_window()),
             TrayMenuItem::separator(),       // 分隔线
-            TrayMenuItem::check("启用通知", notify_on.clone(), move |ctx| { /* 翻转状态 */ }),  // 勾选项
+            TrayMenuItem::check("启用通知", notify_on, move |ctx| { /* 翻转状态 */ }),  // 勾选项
+            TrayMenuItem::item("弹个气泡", |ctx| ctx.notify("你好", "…")).enabled(notify_on),  // 灰显绑同一个信号
             TrayMenuItem::item("退出", |ctx| ctx.quit()),
         ]),
 ).content(ui).run();
 ```
-- **右键菜单走原生 `TrackPopupMenu`**（真 OS 弹出，显示在托盘旁）；支持**勾选项**（`check` 绑 `Rc<Cell<bool>>`，弹出时按当前值显示对勾）与**分隔线**。
+- **右键菜单走原生 `TrackPopupMenu`**（真 OS 弹出，显示在托盘旁）；支持**勾选项**（`check` 绑 `Signal<bool>`，弹出时按当前值显示对勾）与**分隔线**。勾选态/禁用态都是**弹出时现读**，所以在别处改信号，下次右键就能看到。托盘构建器因此是 `!Send` 的——信号存储线程局部，`Tray` 只能留在建它的 UI 线程，跨线程搬运编译期即失败。
 - 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。**拿不到窗口句柄**，理由同下文 `HotkeyCtx`：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（`AGENTS.md` 铁律 6）。这几个方法只记录意图，由平台层在借用释放后执行。
 - 一个回调内可**按顺序调用多个**，逐条生效（如先 `notify(..)` 再 `show_window()`）。例外是 `quit()`：它之后的调用不再执行（窗口已销毁）。
 - `quit()` 是应用的真实出口，刻意**不受 `hide_on_close()` 影响**。
@@ -843,6 +837,10 @@ let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
 
 角色在 **paint 期**解析成具体颜色——这正是它能跟随换主题的原因。
 
+`Role` 与 `Intent` 都是 `#[non_exhaustive]`：语义色是会持续补齐的一组（本版就各加了
+五个和两个），标注之后再补就不是破坏性变更了。代价是你对它们做 `match` 必须留一条
+`_ =>` 兜底分支。
+
 几个容易选错的：
 
 - **`TextSubtle`** 是比 `TextMuted` 更弱的第三档正文（版权行、脚注、时间戳）。它**不是**
@@ -932,6 +930,12 @@ ctx.show_context_menu(pos, vec![
 ]);
 ```
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
+
+`MenuItem` 是 `#[non_exhaustive]` 的：**只能**经 `run` / `key` / `separator` / `submenu`
+四个构造器建，再链设置器改属性（`icon` / `shortcut` / `check` / `subtitle` / `badge` /
+`trailing_icon` / `trailing_icon_display` / `stay_open` / `enabled` / `intent` / `danger`），
+字面量 `MenuItem { .. }` 不再可用。字段读取不受影响。菜单项的可选修饰只会越来越多，
+封住字面量这条路，日后加字段才不必每次都破坏下游。
 动作闭包收 `&mut EventCtx`（宿主在浮层里借给它），与 `on_click` 同形——`ctx.toast(..)`、
 `ctx.defer_blocking(..)`、`ctx.request_close()` 都能用。它是 `Fn` 不是 `FnMut`：项会被克隆进
 浮层的每一级面板、粘滞项还要重建后再执行同一份动作，要改状态请用 `Signal`。

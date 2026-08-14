@@ -1,16 +1,14 @@
 //! 系统托盘图标（Shell_NotifyIcon）：图标 + 提示 + 左键/双击回调 + 原生右键菜单。
 //!
 //! 右键菜单走原生 `TrackPopupMenu`（真 OS 弹出，显示在托盘旁，窗口外），支持
-//! 勾选项（`checked` 绑定 `Rc<Cell<bool>>`，菜单弹出时按当前值显示对勾）与分隔线。
+//! 勾选项（`checked` 绑定 `Signal<bool>`，菜单弹出时按当前值显示对勾）与分隔线。
 //! 气泡通知经 `TrayCtx::notify`（Shell_NotifyIcon 的 NIF_INFO）。
 //!
 //! 回调拿到 `TrayCtx`（显隐窗口 / 退出 / 气泡通知）。托盘状态存于 `WindowState`，
 //! 窗口销毁时 `TrayState::drop` 自动 `NIM_DELETE` 并释放自建图标。
 
-use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::rc::Rc;
 
 use crate::signal::Signal;
 
@@ -112,7 +110,8 @@ type TrayFn = Box<dyn FnMut(&mut TrayCtx)>;
 enum ItemKind {
     Action {
         label: String,
-        checked: Option<Rc<Cell<bool>>>,
+        /// 勾选态绑定（None=从不打勾）；菜单弹出时读当前值。
+        checked: Option<Signal<bool>>,
         /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
         enabled: Option<Signal<bool>>,
         cb: TrayFn,
@@ -139,9 +138,13 @@ impl TrayMenuItem {
     }
     /// 勾选项：`checked` 绑定状态，菜单弹出时按当前值显示对勾；点击触发回调
     /// （回调内自行翻转 `checked` 即可，框架不自动改）。
+    ///
+    /// `Signal<bool>` 是 `!Send` 的（存储线程局部），故整个 `Tray` 也是 `!Send`——
+    /// 托盘菜单在 UI 线程构建、勾选态也在 UI 线程的菜单弹出路径上读取，
+    /// 把构建好的 `Tray` 搬到别的线程会在编译期就被拦下。
     pub fn check(
         label: impl Into<String>,
-        checked: Rc<Cell<bool>>,
+        checked: Signal<bool>,
         cb: impl FnMut(&mut TrayCtx) + 'static,
     ) -> Self {
         Self {
@@ -319,7 +322,7 @@ impl TrayState {
                     ..
                 } => {
                     let mut flags = MF_STRING;
-                    if checked.as_ref().is_some_and(|c| c.get()) {
+                    if checked.is_some_and(|c| c.get()) {
                         flags |= MF_CHECKED;
                     }
                     // 禁用：灰显且不可选（TPM_RETURNCMD 不会返回灰显项 id，故回调天然不触发）。
@@ -486,4 +489,57 @@ unsafe fn hicon_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<HICON> {
     let _ = DeleteObject(HGDIOBJ(hbm_color.0));
     let _ = DeleteObject(HGDIOBJ(hbm_mask.0));
     hicon
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signal::signal;
+
+    /// 编译期护栏：`Tray` 必须保持 `!Send`。
+    ///
+    /// 勾选态与禁用态都绑 `Signal<bool>`，而信号的存储是**线程局部**的——句柄搬到别的
+    /// 线程再读，读到的是那个线程的槽位表。`!Send` 让「构建 Tray 的线程」与「弹菜单读
+    /// 勾选态的线程」必然是同一个：`Tray` 只能原地交给 `App::tray`，`App` 因此也 `!Send`，
+    /// `App::run` 在同一线程消费它并在那里建窗口，而 Win32 保证窗口消息只由建它的
+    /// 线程派发（`build_menu` / `run_item` 都在 `wnd_proc` 里）。
+    ///
+    /// 一旦 `Tray` 变成 `Send`，下面两条 impl 同时适用，方法解析出歧义，编译失败。
+    const _: fn() = || {
+        trait AmbiguousIfSend<A> {
+            fn tag() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        struct Invalid;
+        impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
+        let _ = <Tray as AmbiguousIfSend<_>>::tag;
+    };
+
+    /// 勾选态是**弹出时现读**而非构建时快照：构建完菜单项后翻转信号，
+    /// 下一次弹出就该显示新状态（这正是 `check` 收信号而非 `bool` 的全部理由）。
+    #[test]
+    fn check_binds_the_signal_instead_of_snapshotting_its_value() {
+        let on = signal(false);
+        let it = TrayMenuItem::check("启用通知", on, |_| {});
+        let ItemKind::Action { checked, .. } = &it.kind else {
+            unreachable!("check() 建的就是 Action 项");
+        };
+        assert_eq!(checked.map(|c| c.get()), Some(false));
+        on.set(true);
+        assert_eq!(checked.map(|c| c.get()), Some(true));
+    }
+
+    /// 普通项不带勾选绑定（`None` = 从不打勾）；分隔线根本没有这组字段。
+    #[test]
+    fn item_and_separator_carry_no_check_binding() {
+        let it = TrayMenuItem::item("显示窗口", |_| {});
+        let ItemKind::Action { checked, .. } = &it.kind else {
+            unreachable!()
+        };
+        assert!(checked.is_none());
+        assert!(matches!(
+            TrayMenuItem::separator().kind,
+            ItemKind::Separator
+        ));
+    }
 }

@@ -1135,10 +1135,24 @@ impl Element {
     pub fn icon_bytes(self, bytes: &[u8]) -> Self {
         self.config_button_icon(ImageContent::from_bytes(bytes))
     }
-    /// 给按钮设置前置图标（文件路径）。
+    /// 给按钮设置前置图标（**运行期读文件**）。
+    ///
+    /// 名字带 `_file` 而不叫 `icon`：这一族里 `icon_bytes` / `icon_rgba` / `icon_svg` /
+    /// `icon_content` 都是纯内存操作，只有它会碰文件系统、也只有它会在路径写错或文件
+    /// 缺失时失败（失败即无图标，不 panic）。最短的名字给了唯一可能失败的形态，
+    /// 会被当成"通用图标入口"误用。
+    #[track_caller]
+    pub fn icon_file(self, path: impl AsRef<Path>) -> Self {
+        self.config_button_icon(ImageContent::from_file(path))
+    }
+    /// 改名为 [`Element::icon_file`]。
+    #[deprecated(
+        since = "0.12.0",
+        note = "改名为 `icon_file`：`icon` 是这一族里唯一读文件、唯一可能失败的形态，最短的名字给它容易被误当成通用入口"
+    )]
     #[track_caller]
     pub fn icon(self, path: impl AsRef<Path>) -> Self {
-        self.config_button_icon(ImageContent::from_file(path))
+        self.icon_file(path)
     }
     /// 给按钮设置前置图标（原始非预乘 RGBA8）。
     #[track_caller]

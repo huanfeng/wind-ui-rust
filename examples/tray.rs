@@ -5,9 +5,6 @@
 //! - 右键托盘图标：弹原生菜单（显示/隐藏、启用通知[勾选]、弹气泡[通知关时灰显]、退出）。
 //! - 关闭窗口即退出（托盘图标随之清理）。
 
-use std::cell::Cell;
-use std::rc::Rc;
-
 use windui::prelude::*;
 
 /// 生成 size×size 纯色 RGBA8（演示图标，免捆绑资源）。
@@ -21,11 +18,9 @@ fn solid(size: u32, hex: u32) -> Vec<u8> {
 }
 
 fn main() {
-    // TrayMenuItem::check 的 checked 参数仍为 Rc<Cell<bool>>（驱动菜单对勾显示）。
-    let notify_on = Rc::new(Cell::new(true));
-    let n2 = notify_on.clone();
-    // TrayMenuItem::enabled 参数自 0.4.1 起改为 Signal<bool>（驱动菜单项灰显）。
-    let notify_sig = signal(true);
+    // 一个 Signal 同时驱动菜单对勾（check）与另一项的灰显（enabled）——
+    // 二者自 0.12.0 起收的都是 Signal<bool>，不必再维护两份同义状态。
+    let notify_on = signal(true);
 
     let tray = Tray::new()
         .tooltip("windui 托盘示例")
@@ -36,20 +31,19 @@ fn main() {
             TrayMenuItem::item("显示窗口", |ctx| ctx.show_window()),
             TrayMenuItem::item("隐藏到托盘", |ctx| ctx.hide_window()),
             TrayMenuItem::separator(),
-            // 勾选项：菜单弹出时按 notify_on 当前值显示对勾；点击时同步翻转 Rc 与 Signal。
-            TrayMenuItem::check("启用通知", notify_on.clone(), move |ctx| {
-                let next = !n2.get();
-                n2.set(next);
-                notify_sig.set(next);
+            // 勾选项：菜单弹出时按 notify_on 当前值显示对勾；点击时翻转它。
+            TrayMenuItem::check("启用通知", notify_on, move |ctx| {
+                let next = !notify_on.get();
+                notify_on.set(next);
                 if next {
                     ctx.notify("通知已开启", "右键菜单可再次切换");
                 }
             }),
-            // 禁用态演示：通知关闭时该项灰显不可点（enabled 绑定 notify_sig，弹出时读当前值）。
+            // 禁用态演示：通知关闭时该项灰显不可点（enabled 绑定同一个信号，弹出时读当前值）。
             TrayMenuItem::item("弹个气泡", |ctx| {
                 ctx.notify("你好", "这是来自托盘的气泡通知")
             })
-            .enabled(notify_sig),
+            .enabled(notify_on),
             TrayMenuItem::separator(),
             TrayMenuItem::item("退出", |ctx| ctx.quit()),
         ]);

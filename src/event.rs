@@ -226,7 +226,32 @@ pub enum MenuAction {
 pub type MenuActionFn = std::rc::Rc<dyn Fn(&mut crate::core::EventCtx)>;
 
 /// 一个浮层菜单/下拉项。支持图标、尾随快捷键、分隔线与级联子菜单。
+///
+/// `#[non_exhaustive]`：字段全 `pub`，本版已因加字段破坏过两次（`intent` 让字面量构造
+/// 报 `E0063`、`on_trailing_click` 换类型）。菜单项的可选修饰只会越来越多，故封住
+/// 字面量构造这条路——下游一律走 [`MenuItem::run`] / [`key`](MenuItem::key) /
+/// [`separator`](MenuItem::separator) / [`submenu`](MenuItem::submenu) 四个便捷构造
+/// 加链式设置器（它们收敛到同一个底座，日后加字段不波及调用方）。
+/// 字段读取不受影响，仍可 `item.label` / `item.checked`。
+///
+/// 下游的字面量构造会报 `E0639`：
+///
+/// ```compile_fail,E0639
+/// # use windui::prelude::*;
+/// let _ = MenuItem {
+///     label: String::from("复制"),
+///     ..todo!()
+/// };
+/// ```
+///
+/// 改用便捷构造 + 链式设置器：
+///
+/// ```
+/// # use windui::prelude::*;
+/// let _ = MenuItem::run("复制", |_ctx| {}, false).shortcut("Ctrl+C");
+/// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct MenuItem {
     pub label: String,
     pub action: MenuAction,
@@ -375,6 +400,17 @@ impl MenuItem {
     ) -> Self {
         self.trailing_icon = Some(icon.into());
         self.on_trailing_click = Some(std::rc::Rc::new(on_click));
+        self
+    }
+    /// 设置尾随图标但**不接回调**：纯展示（状态点、锁形标记等），点击该图标等同于点本项。
+    /// 图标要能独立点击用 [`MenuItem::trailing_icon`]。
+    ///
+    /// 单独成一个设置器，是因为 `trailing_icon` 必须同时收回调，于是
+    /// 「有图标、无回调」这个字段组合此前只有字面量构造才写得出来——而字面量构造已被
+    /// `#[non_exhaustive]` 封住。
+    pub fn trailing_icon_display(mut self, icon: impl Into<String>) -> Self {
+        self.trailing_icon = Some(icon.into());
+        self.on_trailing_click = None;
         self
     }
     /// 标记为粘滞项：点击执行后菜单保持展开（见 [`MenuItem::stay_open`]）。
