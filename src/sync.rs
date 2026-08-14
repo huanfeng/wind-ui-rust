@@ -34,16 +34,28 @@ impl<Msg> Sender<Msg> {
     }
 }
 
+/// 类型擦除的通道排空器（供 UiHost 每帧调用）：借宿主的树与 App 级 `self_id` 逐条
+/// 派送积压消息，每条产出一份 [`DispatchResult`] 交宿主消费。
+///
+/// 为什么把树传进来而不是让 pump 只调回调：`on_message` 收 `&mut EventCtx`，而
+/// `EventCtx` 只能由 [`Tree::run_detached`] 借出。**逐条**借（而非整批借一次）是为了
+/// 让每条消息的副作用互不覆盖——`DispatchResult` 里 toast/dialog 都是 `Option`，
+/// 一批消息共用一份就只剩最后一条的 toast，"三个任务完成弹三条提示"会静默丢两条。
+pub(crate) type ChannelPump =
+    Box<dyn FnMut(&mut crate::core::Tree, crate::core::NodeId) -> Vec<crate::core::DispatchResult>>;
+
 /// 建一个 typed channel：返回发送端 + 类型擦除的排空 pump（供 UiHost 每帧调用）。
 pub(crate) fn new_channel<Msg: Send + 'static>(
     waker: Waker,
-    mut on_message: impl FnMut(Msg) + 'static,
-) -> (Sender<Msg>, Box<dyn FnMut()>) {
+    mut on_message: impl FnMut(&mut crate::core::EventCtx, Msg) + 'static,
+) -> (Sender<Msg>, ChannelPump) {
     let (tx, rx) = std::sync::mpsc::channel::<Msg>();
-    let pump: Box<dyn FnMut()> = Box::new(move || {
+    let pump: ChannelPump = Box::new(move |tree, id| {
+        let mut out = Vec::new();
         while let Ok(m) = rx.try_recv() {
-            on_message(m);
+            out.push(tree.run_detached(id, |ctx| on_message(ctx, m)));
         }
+        out
     });
     (Sender { tx, waker }, pump)
 }
@@ -123,26 +135,54 @@ mod tests {
         assert_send_sync::<Waker>();
     }
 
+    /// 一棵只有根节点的最小树，供 pump 借出 `EventCtx`。
+    fn tiny_tree() -> (crate::core::Tree, crate::core::NodeId) {
+        let mut tree = crate::core::Tree::new();
+        let id = crate::ui::Element::col().build(&mut tree);
+        tree.root = Some(id);
+        (tree, id)
+    }
+
     #[test]
     fn channel_pump_drains_in_order_across_thread() {
         let shared = WakerShared::new();
         let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u32>::new()));
         let g2 = got.clone();
-        let (tx, mut pump) = new_channel::<u32>(shared.waker(), move |m| g2.borrow_mut().push(m));
+        let (tx, mut pump) =
+            new_channel::<u32>(shared.waker(), move |_ctx, m| g2.borrow_mut().push(m));
         let t = std::thread::spawn(move || {
             tx.send(1).unwrap();
             tx.send(2).unwrap();
             tx.send(3).unwrap();
         });
         t.join().unwrap();
-        pump();
+        let (mut tree, root) = tiny_tree();
+        let out = pump(&mut tree, root);
         assert_eq!(*got.borrow(), vec![1, 2, 3]);
+        assert_eq!(out.len(), 3, "每条消息各产出一份可消费的副作用");
+    }
+
+    /// 逐条借 ctx 而非整批借一次：`DispatchResult` 的 toast/dialog 是 `Option`，
+    /// 共用一份会让一批消息里只剩最后一条的提示。
+    #[test]
+    fn each_message_gets_its_own_dispatch_result() {
+        let shared = WakerShared::new();
+        let (tx, mut pump) = new_channel::<u32>(shared.waker(), |ctx, m| ctx.toast(m.to_string()));
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+        let (mut tree, root) = tiny_tree();
+        let out = pump(&mut tree, root);
+        let texts: Vec<String> = out
+            .into_iter()
+            .filter_map(|r| r.toast.map(|t| t.text))
+            .collect();
+        assert_eq!(texts, vec!["1".to_string(), "2".to_string()]);
     }
 
     #[test]
     fn send_after_receiver_dropped_errs() {
         let shared = WakerShared::new();
-        let (tx, pump) = new_channel::<u32>(shared.waker(), |_| {});
+        let (tx, pump) = new_channel::<u32>(shared.waker(), |_ctx, _m: u32| {});
         drop(pump); // 接收端 rx 随 pump 一起销毁
         assert!(tx.send(9).is_err(), "接收端关闭后 send 返回 Err");
     }

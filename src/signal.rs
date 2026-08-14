@@ -254,7 +254,8 @@ pub(crate) fn end_event() -> bool {
 /// use windui::prelude::*;
 /// let count = signal(0u32);
 /// let mut app = App::new("demo", 320, 200);
-/// let tx = app.channel::<u32>(move |n| count.set(n)); // 回调在 UI 线程跑
+/// // 回调在 UI 线程跑，除信号外还收一个 EventCtx（可 toast、可关窗）
+/// let tx = app.channel::<u32>(move |_ctx, n| count.set(n));
 /// std::thread::spawn(move || {
 ///     let _ = tx.send(42); // 跨线程送的是消息，不是信号句柄
 /// });

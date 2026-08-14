@@ -775,9 +775,22 @@ unsafe extern "system" fn wnd_proc(
             if let Some(state) = state_from(hwnd) {
                 state.paint(hwnd);
             }
-            // 帧路径也消费热键操作：pump/interval/信号驱动的改绑（非事件路径）
-            // 经 request_repaint 唤帧后在此落地，不必等下一次用户事件。
-            apply_hotkey_ops(hwnd);
+            // 帧路径也消费意图：`App::channel` 的 `on_message` 与 `on_interval` 的回调都
+            // 拿得到 `EventCtx`，它们请求的窗口操作/对话框/关窗与热键改绑都产生在**帧内**
+            // （pump 在 render 起始排空，定时器回调靠 InvalidateRect 汇到这一帧），
+            // 事件路径的消费点等不到它们——不在此落地就要拖到用户下一次点键盘鼠标，
+            // 表现为"后台任务完成了却半天不关窗"。
+            //
+            // 顺序与指针路径一致：窗口操作（含热键队列）→ 对话框 → 关窗。三者都在
+            // `state` 借用之外执行（铁律 6）：run_window_op 与阻塞式对话框都会同步重入本函数。
+            apply_window_op(hwnd);
+            apply_dialog_request(hwnd);
+            if state_from(hwnd)
+                .map(|s| s.handler.wants_close())
+                .unwrap_or(false)
+            {
+                let _ = DestroyWindow(hwnd);
+            }
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -1015,6 +1028,11 @@ unsafe extern "system" fn wnd_proc(
                 //
                 // 两段式：上面的 state 借用已在取出 (allow, repaint) 的块结束时释放。
                 apply_window_op(hwnd);
+                // 拦截器（`App::on_close_request`）现在收 `EventCtx`，"挡下这次关闭 +
+                // `ctx.defer_blocking` 弹原生确认框"是它的正规用法——确认框必须等到
+                // 事件分发完全返回后才能弹，而这里正是 WM_CLOSE 的返回前一刻。
+                // 不在此消费的话，那个闭包要拖到下一次用户事件才跑，看起来像点了没反应。
+                apply_dialog_request(hwnd);
             }
             LRESULT(0)
         }

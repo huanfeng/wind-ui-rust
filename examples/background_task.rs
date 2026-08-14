@@ -13,8 +13,15 @@ fn main() {
     let mut app = App::new("后台任务", 360, 180);
 
     // 后台线程：每 40ms 发一次进度，channel 驱动 UI（有更新才唤醒一帧）。
+    // on_message 收 ctx：写信号刷 UI 之外，完成时还能弹一条宿主级 toast
+    // ——轻提示是宿主浮层，没有信号可绑，不给 ctx 就表达不出来。
     let pc = progress;
-    let tx = app.channel::<f32>(move |p| pc.set(p));
+    let tx = app.channel::<f32>(move |ctx, p| {
+        pc.set(p);
+        if p >= 1.0 {
+            ctx.toast_ok("下载完成");
+        }
+    });
     std::thread::spawn(move || {
         for i in 1..=100 {
             std::thread::sleep(Duration::from_millis(40));
@@ -35,7 +42,7 @@ fn main() {
 
     // on_interval：每秒更新秒表文本。
     let (tk, ck) = (ticks, clock);
-    app.on_interval(Duration::from_millis(1000), move || {
+    app.on_interval(Duration::from_millis(1000), move |_ctx| {
         tk.set(tk.get() + 1);
         ck.set(format!("已运行 {} 秒", tk.get()));
     })

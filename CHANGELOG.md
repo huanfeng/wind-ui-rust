@@ -344,6 +344,29 @@
   **迁移**：`let (dy, blur, col) = th.menu.shadow();` → `let sh = th.menu.shadow();`，
   取 `sh.dy` / `sh.blur` / `sh.color`。`MenuTheme` / `ToastTheme` 的三个 `shadow_*` 字段
   与 TOML 键不变。
+- **App 级回调收 `&mut EventCtx`（破坏性）**：`App::on_close_request`、`App::channel` 的
+  `on_message`、`App::on_interval` 的回调三者都多一个 `ctx` 参数。
+  `EventCtx` 是控件通往宿主能力的唯一通道（toast、对话框、剪贴板、焦点、窗口显隐、
+  `tree_mut` 改控件树），而这三个回调恰恰处在最需要它的时机上——后台任务完成要弹一条轻提示、
+  定时器到点要关窗、关闭请求要拦下来问一句"确认退出吗"。此前它们只能写信号，而 toast 是
+  **宿主浮层**、关窗与对话框是**宿主能力**，都没有信号可绑：这些场景不是难写，是**表达不出来**，
+  于是只能绕道已废弃的自由函数 `app::defer_blocking`，或干脆放弃。
+  ctx 的 `self_id` 取**根节点**（这些回调不属于任何控件），后果写进了各自的 rustdoc：
+  `ctx.bounds()` 是整个客户区、`mark_dirty()` 相当于整窗失效、`capture()` 无效
+  （没有指针事件可捕获，请求被丢弃）。
+  `on_close_request` **保留 `-> bool`**：它的返回值被平台在 `WM_CLOSE` /
+  `windowShouldClose:` 里同步等待，改成任何"异步决定"的形状都骗不过这个约束。
+  弹确认框的正确流程是「返回 `false` 挡下这一次 + 另起一条路把确认送回来」，两种写法
+  （应用内 `Element::dialog`，或 `ctx.defer_blocking` + `App::channel` 回程）都带可运行示例
+  写进了 `on_close_request` 的 rustdoc 与 `docs/API_GUIDE.md` §8.7。
+  配套修好了副作用的交付时机：`on_message` / `on_interval` 的回调产生在**帧内**，而窗口操作、
+  对话框请求、关窗意图此前只在指针/键盘路径被消费，于是"后台任务完成后 `ctx.request_close()`"
+  要拖到用户下一次点鼠标才生效；win32 的帧路径（`WM_PAINT`）与 `WM_CLOSE` 取消分支现在也消费
+  这几条意图。macOS 侧对应的消费点尚未补齐（toast、改树、焦点等不经平台的效果两端一致）。
+  **迁移**：闭包各加一个参数即可，不用 ctx 就写 `|_ctx, msg|` / `|_ctx|`；行为不变。
+  `App::single_instance` 的回调**刻意不动**（仍是 `FnMut(Vec<String>)`）：它不由主窗口驱动
+  （Windows 上跑在独立 message-only 窗口的 `wndproc` 里、可能在任意嵌套消息泵中到达），
+  够不着宿主状态；需要 ctx 的话在应用侧用 `App::channel` 转一道即可，rustdoc 给了写法与代价。
 
 ### Fixed
 - **软后端投影外缘的直角硬边**：阴影 pixmap 的模糊余量按 `2×半径` 留，而 3 趟 box-blur 每趟

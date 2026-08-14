@@ -20,9 +20,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::sync::{new_channel, Sender, WakerShared};
+use crate::sync::{new_channel, ChannelPump, Sender, WakerShared};
 
-use crate::core::{DamageReq, DispatchResult, NodeId, Tree};
+use crate::core::{DamageReq, DispatchResult, EventCtx, NodeId, Tree};
 use crate::event::{CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, DialogRequest, WindowConfig};
@@ -111,6 +111,14 @@ fn close_topmost_modal() -> bool {
 
 type RenderClosure = Box<dyn FnMut(&mut dyn crate::render::RenderTarget, Size)>;
 
+/// App 级回调：不在任何控件的事件时机上，却同样收 [`EventCtx`]（`on_interval` 等）。
+/// 宿主以根节点为 `self_id` 借出（见 `UiHost::apply_app_effects`）。
+type AppCallback = Box<dyn FnMut(&mut EventCtx)>;
+
+/// 关闭请求拦截器（[`App::on_close_request`]）：返回 true 放行、false 取消。
+/// 与 [`AppCallback`] 分开是因为它多一个返回值——那个 `bool` 被平台同步等待。
+type CloseHandler = Box<dyn FnMut(&mut EventCtx) -> bool>;
+
 /// 应用构建器。命令式 API 的根入口。
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
 /// 控件 paint 期读 `theme::current()` 自动跟随；用 `Brush::Role`/`bg_role` 等
@@ -197,11 +205,11 @@ pub struct App {
     content: Option<Element>,
     theme: Option<Theme>,
     theme_src: Option<ThemeHandle>,
-    pumps: Vec<Box<dyn FnMut()>>,
-    intervals: Vec<(Duration, Box<dyn FnMut()>)>,
+    pumps: Vec<ChannelPump>,
+    intervals: Vec<(Duration, AppCallback)>,
     waker_shared: Option<Arc<WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-    close_handler: Option<Box<dyn FnMut() -> bool>>,
+    close_handler: Option<CloseHandler>,
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
@@ -519,6 +527,36 @@ impl App {
     /// 单实例 + 二次运行激活/传参。`app_id` 唯一标识（建议含变体后缀，使 dev/release 互不干扰）。
     /// 仅首实例会被调用 `on_second_instance`（收到另一进程 argv 时，在 UI 线程）；
     /// 二次实例：argv 已转发给首实例，`run()` 直接返回、不建窗口。
+    ///
+    /// 把窗口带到前台**不需要**你动手：平台层在本回调返回后就会激活主窗口。
+    ///
+    /// # 为什么这个回调不收 `EventCtx`
+    ///
+    /// 与 [`App::channel`] / [`App::on_interval`] / [`App::on_close_request`] 不同，本回调
+    /// 不是由主窗口驱动的：Windows 上它跑在一个独立的 message-only 窗口的 `wndproc` 里
+    /// （`WM_COPYDATA`），macOS/Linux 上跑在 libdispatch 派回主线程的块里。两处都够不着
+    /// 主窗口的宿主状态，而 `WM_COPYDATA` 又可能在任意嵌套消息泵里到达（托盘菜单的模态
+    /// 循环、文件对话框），此刻去借宿主状态就是重入。
+    ///
+    /// 需要 ctx 的话自己搭一段回程即可——这正是通道存在的意义：
+    ///
+    /// ```no_run
+    /// use windui::prelude::*;
+    ///
+    /// let mut app = App::new("单实例", 320, 160);
+    /// let tx = app.channel::<Vec<String>>(|ctx, argv| {
+    ///     ctx.toast(format!("又启动了一次：{} 个参数", argv.len()));
+    /// });
+    /// app.single_instance("myapp_dev", move |argv| {
+    ///     let _ = tx.send(argv);
+    /// })
+    /// .content(Element::col().fill())
+    /// .run();
+    /// ```
+    ///
+    /// 代价是回调改为在**下一帧**执行：通道靠出帧排空，而窗口隐藏时（托盘常驻应用）不出帧，
+    /// 消息会积压到窗口再次显示。库不替你做这层转发正是因为这个代价——多数
+    /// `single_instance` 应用恰恰是托盘应用。
     pub fn single_instance(
         mut self,
         app_id: impl Into<String>,
@@ -534,7 +572,80 @@ impl App {
     /// 注册关闭请求拦截器。ESC 无对话框时，以及用户点击窗口关闭按钮时，
     /// 框架先调用此回调：返回 `true` 允许关闭，返回 `false` 取消关闭。
     /// 常用于"有未保存数据时弹提示"场景。
-    pub fn on_close_request(mut self, f: impl FnMut() -> bool + 'static) -> Self {
+    ///
+    /// 回调收 [`EventCtx`]（`self_id` 为根节点，见 [`App::on_interval`] 的同款说明），
+    /// 故可以在挡下关闭的同时给出反馈——`ctx.toast(..)` 提示、`ctx.tree_mut()` 改树。
+    ///
+    /// # 弹确认框：必须异步，不能在这里同步弹
+    ///
+    /// 本回调的返回值是**同步**的（平台在 `WM_CLOSE` / `windowShouldClose:` 里等这个
+    /// `bool`），而任何原生模态框自带消息泵，在这里同步弹会与宿主的泵冲突。正确形状是
+    /// **先返回 `false` 挡住这一次，再另起一条路把"确认"送回来**。两条路，按需要选：
+    ///
+    /// **一、应用内模态（推荐，全同步、无额外管道）**：库自带的 `Element::dialog` 是画在
+    /// 自己窗口里的，没有第二个消息泵的问题。拦截器把它打开并返回 `false`，对话框的
+    /// "退出"按钮再 `ctx.request_close()`——那是"应用已决定关闭"的入口，不再经过本拦截器，
+    /// 不会绕回来打转：
+    ///
+    /// ```no_run
+    /// use windui::prelude::*;
+    ///
+    /// let dirty = signal(true);          // 有未保存的更改
+    /// let asking = signal(false);        // 确认框是否显示
+    ///
+    /// let ui = Element::col().fill().child(Element::dialog(
+    ///     asking,
+    ///     Element::col()
+    ///         .padding(20)
+    ///         .spacing(12)
+    ///         .child(Element::label("有未保存的更改，确认退出？"))
+    ///         .child(Element::button("退出").on_click(move |ctx| {
+    ///             dirty.set(false);      // 放行下一次关闭请求
+    ///             ctx.request_close();
+    ///         })),
+    /// ));
+    ///
+    /// App::new("编辑器", 480, 320)
+    ///     .on_close_request(move |_ctx| {
+    ///         if dirty.get() {
+    ///             asking.set(true);      // 弹自家对话框
+    ///             return false;          // 挡下这一次
+    ///         }
+    ///         true
+    ///     })
+    ///     .content(ui)
+    ///     .run();
+    /// ```
+    ///
+    /// **二、原生 `MessageBoxW` 一类的阻塞流程**：用 `ctx.defer_blocking(f)` 把它排到事件
+    /// 分发**完全返回**之后执行；那个闭包不收 `ctx`（它跑在宿主的分发之外），所以确认结果
+    /// 要经 [`App::channel`] 的 `Sender` 回到 UI 线程，在 `on_message` 里用 ctx 收尾：
+    ///
+    /// ```no_run
+    /// use windui::prelude::*;
+    ///
+    /// let mut app = App::new("编辑器", 480, 320);
+    /// // 回程通道：确认结果从阻塞闭包送回 UI 线程，那里才有 ctx 能真正关窗。
+    /// let tx = app.channel::<bool>(|ctx, ok| {
+    ///     if ok {
+    ///         ctx.request_close();
+    ///     }
+    /// });
+    /// app.on_close_request(move |ctx| {
+    ///     let tx = tx.clone();
+    ///     ctx.defer_blocking(move || {
+    ///         let ok = true;             // 此处换成真正的原生确认框
+    ///         let _ = tx.send(ok);
+    ///     });
+    ///     false                          // 先挡下，等回程消息再关
+    /// })
+    /// .content(Element::col().fill())
+    /// .run();
+    /// ```
+    ///
+    /// 两条路都不适用时还有第三种：把"已确认"记在信号里、由拦截器下次直接放行——但那要求
+    /// 用户再点一次关闭，通常不是想要的交互。
+    pub fn on_close_request(mut self, f: impl FnMut(&mut EventCtx) -> bool + 'static) -> Self {
         self.close_handler = Some(Box::new(f));
         self
     }
@@ -602,11 +713,33 @@ impl App {
             .waker()
     }
 
-    /// 注册 typed 消息通道。`on_message` 在 UI 线程调用（可写 Rc 状态）。
+    /// 注册 typed 消息通道。`on_message` 在 UI 线程调用（可写信号），并收一个
+    /// [`EventCtx`]——后台任务完成后的**宿主级**反馈（`ctx.toast(..)` 轻提示、
+    /// `ctx.request_close()`、`ctx.defer_blocking(..)`）只有它能表达：toast 是宿主
+    /// 浮层而非控件状态，没有信号可以绑。
+    ///
     /// 返回的 `Sender` 可 Clone 到任意后台线程；`send` 唤醒 UI 一帧。
+    /// 每条消息各借一次 ctx，故一批消息里每条都能弹自己的 toast（不会互相覆盖）。
+    ///
+    /// ```no_run
+    /// use windui::prelude::*;
+    ///
+    /// let done = signal(0u32);
+    /// let mut app = App::new("后台任务", 320, 160);
+    /// let tx = app.channel::<u32>(move |ctx, n| {
+    ///     done.set(n);                       // 写信号：UI 自己刷新
+    ///     ctx.toast_ok(format!("第 {n} 项完成"));  // 宿主浮层：只有 ctx 能给
+    /// });
+    /// std::thread::spawn(move || {
+    ///     for i in 1..=3 {
+    ///         let _ = tx.send(i);
+    ///     }
+    /// });
+    /// app.content(Element::col().fill()).run();
+    /// ```
     pub fn channel<Msg: Send + 'static>(
         &mut self,
-        on_message: impl FnMut(Msg) + 'static,
+        on_message: impl FnMut(&mut EventCtx, Msg) + 'static,
     ) -> Sender<Msg> {
         let waker = self.shared_waker();
         let (tx, pump) = new_channel(waker, on_message);
@@ -615,7 +748,28 @@ impl App {
     }
 
     /// 注册 UI 线程定时回调（平台定时器，间隔内零 CPU）。可多次调用。
-    pub fn on_interval(mut self, every: Duration, cb: impl FnMut() + 'static) -> Self {
+    ///
+    /// 回调收 [`EventCtx`]，于是"到点了给个提示 / 到点了关窗"这类定时器也能表达，
+    /// 不再只能写信号。ctx 的 `self_id` 是**根节点**（定时器不属于任何控件）：
+    /// `ctx.bounds()` 因此是整个客户区、`ctx.mark_dirty()` 相当于整窗失效，
+    /// 而 `ctx.capture()` 无效（没有指针事件可捕获，请求会被丢弃）。
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use windui::prelude::*;
+    ///
+    /// let left = signal(3u32);
+    /// App::new("倒计时", 240, 120)
+    ///     .on_interval(Duration::from_secs(1), move |ctx| {
+    ///         left.update(|v| *v = v.saturating_sub(1));
+    ///         if left.get() == 0 {
+    ///             ctx.toast("时间到");
+    ///         }
+    ///     })
+    ///     .content(Element::col().fill())
+    ///     .run();
+    /// ```
+    pub fn on_interval(mut self, every: Duration, cb: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.intervals.push((every, Box::new(cb)));
         self
     }
@@ -678,15 +832,15 @@ struct UiHost {
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
     /// 跨线程通道的排空回调：渲染前在 UI 线程依次调用，把后台数据写入控件状态。
-    pumps: Vec<Box<dyn FnMut()>>,
+    pumps: Vec<ChannelPump>,
     /// 定时器回调列表（与 interval_durs 下标对应）。
-    interval_cbs: Vec<Box<dyn FnMut()>>,
+    interval_cbs: Vec<AppCallback>,
     /// 定时器间隔列表（平台据此注册 SetTimer/NSTimer）。
     interval_durs: Vec<std::time::Duration>,
     /// 帧耗时浮层开关（环境变量 WINDUI_FPS 非空时开启）。
     show_fps: bool,
     /// 关闭请求拦截器：返回 true 允许关闭，false 取消。None 时默认允许。
-    close_handler: Option<Box<dyn FnMut() -> bool>>,
+    close_handler: Option<CloseHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
 }
@@ -707,12 +861,54 @@ impl UiHost {
             return false;
         }
         // 无对话框时询问 close_handler，默认允许关闭。
-        let allowed = self.close_handler.as_mut().map(|h| h()).unwrap_or(true);
+        let allowed = self.ask_close_handler();
         if allowed && self.hide_on_close {
             self.pending_window_op = Some(WindowOp::Hide);
             return false;
         }
         allowed
+    }
+
+    /// 询问关闭请求拦截器（[`App::on_close_request`]），无拦截器时默认放行。
+    ///
+    /// 闭包先 `take` 出来再借树：`run_detached` 要 `&mut self.tree`，而闭包挂在同一个
+    /// `self` 上，不取出就是两次可变借用。跑完放回，且**只在回调没自己换过拦截器时**
+    /// 放回（对齐 `call_on_event` 的取出—放回契约）。
+    ///
+    /// 树上没有根节点时借不出 `EventCtx`，回调整个跳过并放行关闭：那种状态下已经没有
+    /// 界面可保护，挡住关闭只会让窗口关不掉。
+    fn ask_close_handler(&mut self) -> bool {
+        let Some(mut h) = self.close_handler.take() else {
+            return true;
+        };
+        let Some(root) = self.tree.root else {
+            self.close_handler = Some(h);
+            return true;
+        };
+        let mut allowed = true;
+        let res = self.tree.run_detached(root, |ctx| allowed = h(ctx));
+        if self.close_handler.is_none() {
+            self.close_handler = Some(h);
+        }
+        self.apply_app_effects(res);
+        allowed
+    }
+
+    /// App 级回调（`on_interval` / `channel` 的 `on_message` / `on_close_request`）借
+    /// [`EventCtx`] 的统一时机：以**根节点**为 `self_id`（这些回调不属于任何控件），
+    /// 副作用交 `apply_dispatch_effects` 落地——与指针/键盘分发同一条消费路径。
+    ///
+    /// `self_id` 取根节点的后果，写进各自的 rustdoc 供调用方预期：`ctx.bounds()` 是整个
+    /// 客户区、`mark_dirty()` 等于整窗失效、`request_focus()` 把焦点落在根容器上；
+    /// `capture()` 无效（`run_detached` 丢弃捕获请求——没有指针事件可捕获）。
+    ///
+    /// 焦点来源按 `Pointer` 记：这些回调不在键盘导航中，不该点亮焦点环。
+    /// 完事置 `needs_relayout`——回调可以经 `ctx.tree_mut()` 改结构，交给 render 里的
+    /// 结构签名去判本帧走局部还是整窗（与键盘路径同款保守）。
+    fn apply_app_effects(&mut self, res: DispatchResult) {
+        let (_, damage, _) = self.apply_dispatch_effects(res, FocusSource::Pointer, None);
+        self.apply_damage(damage);
+        self.damage.needs_relayout = true;
     }
 
     /// 落地控件发出的关闭请求（`EventCtx::request_close`）：`hide_on_close` 时转为隐藏。
@@ -741,9 +937,9 @@ impl UiHost {
         bg: Color,
         bg_follows_theme: bool,
         hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
-        pumps: Vec<Box<dyn FnMut()>>,
-        intervals: Vec<(std::time::Duration, Box<dyn FnMut()>)>,
-        close_handler: Option<Box<dyn FnMut() -> bool>>,
+        pumps: Vec<ChannelPump>,
+        intervals: Vec<(std::time::Duration, AppCallback)>,
+        close_handler: Option<CloseHandler>,
         hide_on_close: bool,
     ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
@@ -909,18 +1105,41 @@ impl UiHost {
 
     /// 帧起始：排空跨线程通道、刷新主题快照与清屏色。
     fn begin_frame(&mut self) {
-        // 跨线程消息：渲染前在 UI 线程一次性排空所有通道，把后台数据写入控件状态。
-        // 契约：一帧 render 消费所有 pump 的全部积压消息（唤醒合并/批处理）——
-        // 多个 channel 共享单一 Waker，勿改成每 pump 独立 wake/独立帧。
-        for pump in self.pumps.iter_mut() {
-            pump();
-        }
+        self.drain_channels();
         // 从运行期句柄刷新主题快照（热切换下一帧生效），注入线程局部供控件读取。
         self.theme = self.theme_src.current();
         crate::theme::set_current(self.theme.clone());
         // 清屏色随主题（未经 App::bg 显式固定时）：暗色主题下窗口底色同步转暗。
         if self.bg_follows_theme {
             self.bg = self.theme.palette.bg;
+        }
+    }
+
+    /// 跨线程消息：渲染前在 UI 线程一次性排空所有通道，每条消息借一个 App 级
+    /// [`EventCtx`] 交给 `on_message`（见 [`Self::apply_app_effects`] 对 `self_id` 的说明），
+    /// 副作用与控件回调走同一条消费路径。
+    ///
+    /// 契约：一帧 render 消费所有 pump 的全部积压消息（唤醒合并/批处理）——
+    /// 多个 channel 共享单一 Waker，勿改成每 pump 独立 wake/独立帧。
+    ///
+    /// pump 先整体摘下来再跑：pump 要 `&mut self.tree`，而它产出的副作用要整个
+    /// `&mut self` 才能落地，同时持有两者过不了借用检查。运行期不会有人往 `pumps` 里
+    /// 追加（`App::channel` 只在建窗前可调），故直接装回去是安全的。
+    fn drain_channels(&mut self) {
+        let Some(root) = self.tree.root else {
+            return;
+        };
+        if self.pumps.is_empty() {
+            return;
+        }
+        let mut pumps = std::mem::take(&mut self.pumps);
+        let mut results = Vec::new();
+        for pump in pumps.iter_mut() {
+            results.append(&mut pump(&mut self.tree, root));
+        }
+        self.pumps = pumps;
+        for res in results {
+            self.apply_app_effects(res);
         }
     }
 
@@ -1212,13 +1431,20 @@ impl AppHandler for UiHost {
         self.interval_durs.clone()
     }
 
+    /// 第 `idx` 个定时器到点：借一个 App 级 `EventCtx` 跑对应回调（见 `apply_app_effects`）。
+    ///
+    /// `interval_cbs` 与 `tree` 是不相交字段，可同时借；副作用消费要整个 `&mut self`，
+    /// 故排在 `cb` 的借用结束之后。
     fn on_interval_fired(&mut self, idx: usize) -> bool {
-        if let Some(cb) = self.interval_cbs.get_mut(idx) {
-            cb();
-            true
-        } else {
-            false
-        }
+        let Some(root) = self.tree.root else {
+            return false;
+        };
+        let Some(cb) = self.interval_cbs.get_mut(idx) else {
+            return false;
+        };
+        let res = self.tree.run_detached(root, |ctx| cb(ctx));
+        self.apply_app_effects(res);
+        true
     }
 
     fn on_drop_files(&mut self, pos: Point, paths: Vec<std::path::PathBuf>) -> bool {
@@ -1394,7 +1620,7 @@ mod tests {
     #[test]
     fn channel_returns_sendable_sender() {
         let mut app = App::new("t", 100, 100);
-        let tx = app.channel::<u32>(|_| {});
+        let tx = app.channel::<u32>(|_ctx, _m| {});
         let h = std::thread::spawn(move || tx.send(5));
         assert!(h.join().unwrap().is_ok());
         assert_eq!(app.pumps.len(), 1);
@@ -1402,7 +1628,8 @@ mod tests {
 
     #[test]
     fn on_interval_registers() {
-        let app = App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), || {});
+        let app =
+            App::new("t", 100, 100).on_interval(std::time::Duration::from_millis(100), |_ctx| {});
         assert_eq!(app.intervals.len(), 1);
     }
 
@@ -1462,7 +1689,7 @@ mod tests {
     fn close_handler_takes_priority_over_hide_on_close() {
         let app = App::new("t", 100, 100)
             .hide_on_close()
-            .on_close_request(|| false)
+            .on_close_request(|_ctx| false)
             .content(Element::col());
         let mut app = app.into_handler_for_test();
         assert!(!app.on_close_request());
@@ -1470,6 +1697,100 @@ mod tests {
             app.take_window_op(),
             None,
             "拦截器拒绝时窗口应原样留着，既不关也不隐"
+        );
+    }
+
+    /// 关闭拦截器拿得到真正的 `EventCtx`，且它请求的副作用走的是与控件回调同一条宿主
+    /// 消费路径。这是"挡下这次关闭 + 弹确认框"这个流程的前提：`defer_blocking` 排出的
+    /// 闭包必须**在取走前不执行**（原生模态框只能在事件分发完全返回后弹），拦截器同时
+    /// 还能 toast 提示。ctx 的 `self_id` 是根节点——这些回调不属于任何控件。
+    #[test]
+    fn close_handler_gets_ctx_and_its_requests_reach_the_host() {
+        use std::cell::Cell as StdCell;
+        let ran: Rc<StdCell<bool>> = Rc::new(StdCell::new(false));
+        let seen_id: Rc<RefCell<Option<NodeId>>> = Rc::new(RefCell::new(None));
+        let (r, sid) = (ran.clone(), seen_id.clone());
+        let app = App::new("t", 100, 100)
+            .on_close_request(move |ctx| {
+                *sid.borrow_mut() = Some(ctx.id());
+                ctx.toast("有未保存的更改");
+                let r = r.clone();
+                ctx.defer_blocking(move || r.set(true));
+                false
+            })
+            .content(Element::col());
+        let mut app = app.into_handler_for_test();
+        let root = app.tree.root;
+
+        assert!(!app.on_close_request(), "拦截器返回 false 应挡下关闭");
+        assert_eq!(*seen_id.borrow(), root, "App 级回调的 self_id 是根节点");
+        assert_eq!(app.toast.items.len(), 1, "ctx.toast 应经宿主上屏");
+        assert!(!ran.get(), "延迟闭包在取走前不得执行");
+        app.take_dialog_request()
+            .expect("ctx.defer_blocking 应产出对话框请求")
+            .run();
+        assert!(ran.get(), "平台执行请求后闭包才跑");
+    }
+
+    /// 定时器回调的副作用同样到达宿主：toast 上屏、`request_close` 变成宿主的关窗意图
+    /// （平台在帧路径轮询 `wants_close`）。
+    #[test]
+    fn interval_callback_gets_ctx_and_its_requests_reach_the_host() {
+        let seen_id: Rc<RefCell<Option<NodeId>>> = Rc::new(RefCell::new(None));
+        let sid = seen_id.clone();
+        let app = App::new("t", 100, 100)
+            .on_interval(Duration::from_millis(10), move |ctx| {
+                *sid.borrow_mut() = Some(ctx.id());
+                ctx.toast("时间到");
+                ctx.request_close();
+            })
+            .content(Element::col());
+        let mut app = app.into_handler_for_test();
+        let root = app.tree.root;
+
+        assert!(app.on_interval_fired(0), "回调跑到即需重绘");
+        assert_eq!(*seen_id.borrow(), root, "App 级回调的 self_id 是根节点");
+        assert_eq!(app.toast.items.len(), 1, "ctx.toast 应经宿主上屏");
+        assert!(app.wants_close(), "ctx.request_close 应落成宿主关窗意图");
+        assert!(!app.on_interval_fired(9), "越界下标不该被当成跑过");
+    }
+
+    /// 通道消息的处理器拿得到 ctx，且**每条消息各一份副作用**：`DispatchResult` 的
+    /// toast 是 `Option`，一批消息共用一份就只剩最后一条，"三个任务完成弹三条提示"
+    /// 会静默丢两条。排空发生在 render 起始，故用真实的一帧来验。
+    #[test]
+    fn channel_messages_get_ctx_and_each_ones_toast_reaches_the_host() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let seen_id: Rc<RefCell<Option<NodeId>>> = Rc::new(RefCell::new(None));
+        let sid = seen_id.clone();
+        let mut app = App::new("t", 50, 50);
+        let tx = app.channel::<u32>(move |ctx, n| {
+            *sid.borrow_mut() = Some(ctx.id());
+            ctx.toast(format!("第 {n} 项完成"));
+        });
+        let app = app.content(Element::col());
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+
+        let mut handler = app.into_handler_for_test();
+        let root = handler.tree.root;
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(50, 50).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(50, 50));
+
+        assert_eq!(*seen_id.borrow(), root, "App 级回调的 self_id 是根节点");
+        let texts: Vec<String> = handler
+            .toast
+            .items
+            .iter()
+            .map(|t| t.req.text.clone())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["第 1 项完成".to_string(), "第 2 项完成".to_string()],
+            "两条消息各自的 toast 都该上屏，不能互相覆盖"
         );
     }
 
@@ -1758,7 +2079,7 @@ mod tests {
         let got = std::rc::Rc::new(std::cell::Cell::new(0u32));
         let g2 = got.clone();
         let mut app = App::new("t", 50, 50);
-        let tx = app.channel::<u32>(move |m| g2.set(m));
+        let tx = app.channel::<u32>(move |_ctx, m| g2.set(m));
         app = app.content(Element::col());
         tx.send(7).unwrap();
         let mut handler = app.into_handler_for_test();

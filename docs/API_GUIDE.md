@@ -70,7 +70,7 @@ fn main() {
     // 第一段：可变绑定，取运行期句柄
     let mut app = App::new("下载", 360, 180);
     let theme = app.theme_handle();                       // &mut self
-    let tx = app.channel::<f32>(move |p| progress.set(p)); // &mut self
+    let tx = app.channel::<f32>(move |_ctx, p| progress.set(p)); // &mut self
 
     std::thread::spawn(move || {
         let _ = tx.send(0.5);
@@ -583,7 +583,7 @@ App::new("查词", 480, 360)
 - **注册可能失败且不报错**：热键是全局独占资源，组合被其他程序占用时系统会拒绝，该热键静默失效，其余热键与应用不受影响——为一个热键冲突让整个应用起不来是不可接受的。
 - 回调拿 `HotkeyCtx`，**只有 `show_window()` / `hide_window()`，拿不到窗口句柄**。这是刻意的：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（见 `AGENTS.md` 铁律 6）。窗口操作降级为「意图」由平台层在借用释放后执行。
 - 控件回调里用 `EventCtx::show_window()` / `hide_window()`（与 `request_close()` 不同：隐藏只改可见性，关闭会销毁窗口并结束消息循环）。
-- `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。
+- `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
 > **平台状态**：全局热键当前**仅 Windows 实现**。macOS 上 `App::hotkey` 在 debug 期 panic、release 期静默忽略；托盘、`start_hidden`、窗口显隐在两平台均可用。macOS 热键需 Carbon `RegisterEventHotKey`，见 `src/platform/macos/hotkey.rs`。
@@ -1043,12 +1043,22 @@ std::thread::spawn(move || s.set(42));   // ❌ 编译失败：Signal 不是 Sen
 正确做法是让后台线程发**消息**，回到 UI 线程再写信号。两种机制：
 
 **`App::channel`**：建立类型化消息通道，签名
-`channel<Msg: Send + 'static>(&mut self, on_message: impl FnMut(Msg) + 'static) -> Sender<Msg>`。
+`channel<Msg: Send + 'static>(&mut self, on_message: impl FnMut(&mut EventCtx, Msg) + 'static) -> Sender<Msg>`。
 `on_message` 回调在 UI 线程执行，可安全写信号；返回的 `Sender` 是 `Send + Sync + Clone`，可克隆
 到任意后台线程，`send` 一次即唤醒 UI 渲染一帧。无消息时不唤醒（事件驱动、空闲零 CPU）。
 
-**`App::on_interval`**：注册 UI 线程定时回调（`on_interval(Duration, impl FnMut() + 'static)`），
+**`App::on_interval`**：注册 UI 线程定时回调
+（`on_interval(Duration, impl FnMut(&mut EventCtx) + 'static)`），
 间隔内不占 CPU（平台定时器驱动）。可多次调用注册多个定时器。
+
+**两个回调都收 `EventCtx`**，因为「写信号」只够表达控件自己的状态：后台任务完成要弹一条
+轻提示、定时器到点要关窗、拿到结果后要接着弹个原生对话框——toast 是宿主浮层、关窗与对话框
+是宿主能力，都没有信号可绑，没有 ctx 就**表达不出来**。ctx 的 `self_id` 是**根节点**
+（这些回调不属于任何控件）：`ctx.bounds()` 即整个客户区、`ctx.mark_dirty()` 相当于整窗失效，
+`ctx.capture()` 无效（没有指针事件可捕获）。其余方法（`toast*` / `tree_mut` / `request_close` /
+`defer_blocking` / 剪贴板 / 窗口显隐）与控件回调里完全一致。
+
+通道里**每条消息各借一次 ctx**，所以一批消息里每条都能弹自己的 toast，不会互相覆盖。
 
 注意 `channel` 是 `&mut self`，须在 `content`/`run` 之前调用（见 §2.1 两段式写法）。
 
@@ -1063,8 +1073,14 @@ fn main() {
 
     let mut app = App::new("后台任务", 360, 180);
 
-    // 后台线程只持有 Sender（Send）；on_message 在 UI 线程写信号
-    let tx = app.channel::<f32>(move |p| progress.set(p));
+    // 后台线程只持有 Sender（Send）；on_message 在 UI 线程写信号，
+    // 并可经 ctx 发出宿主级反馈（这里：完成时弹一条轻提示）
+    let tx = app.channel::<f32>(move |ctx, p| {
+        progress.set(p);
+        if p >= 1.0 {
+            ctx.toast_ok("下载完成");
+        }
+    });
     std::thread::spawn(move || {
         for i in 1..=100 {
             std::thread::sleep(Duration::from_millis(40));
@@ -1082,7 +1098,7 @@ fn main() {
         .child(Element::label_signal(clock).width_match());
 
     // on_interval 的回调也在 UI 线程，可直接写信号
-    app.on_interval(Duration::from_secs(1), move || {
+    app.on_interval(Duration::from_secs(1), move |_ctx| {
         ticks.update(|v| *v += 1);
         clock.set(format!("已运行 {} 秒", ticks.get()));
     })
@@ -1107,13 +1123,96 @@ fn main() {
 两者都在事件分发**完全返回**后才执行闭包，闭包内可放心直接同步调 `PickDialog::pick_file()`
 等阻塞 API。
 
-**哪里有 `ctx`**：所有控件回调，以及菜单项动作（`MenuItem::run` 的闭包，见 §8.2）。
-0.12.0 之前菜单动作拿不到 `ctx`，得绕道自由函数 `windui::app::defer_blocking(f)`——
-它现在已 `#[deprecated]`，一律改用 `ctx.defer_blocking(f)`。托盘菜单项另有自己的
-`TrayCtx`（显隐窗口 / 退出 / 气泡通知）。
+**哪里有 `ctx`**：所有控件回调，菜单项动作（`MenuItem::run` 的闭包，见 §8.2），
+以及 App 级回调——`App::channel` 的 `on_message`、`App::on_interval`、`App::on_close_request`
+（见 §8.5 / §8.7）。0.12.0 之前这些回调都拿不到 `ctx`，得绕道自由函数
+`windui::app::defer_blocking(f)`——它现在已 `#[deprecated]`，一律改用 `ctx.defer_blocking(f)`。
+托盘菜单项另有自己的 `TrayCtx`（显隐窗口 / 退出 / 气泡通知）；
+`App::single_instance` 的回调仍是无 ctx 的 `FnMut(Vec<String>)`，原因与变通见 §8.7 末尾。
 
 > 若你实现了自定义 `AppHandler` 并覆盖了 `take_dialog_request`，且代码里还留着已废弃的自由
 > 函数，记得回退到 `crate::app::take_deferred()`，否则那条队列排入的闭包不会跑。
+
+### 8.7 关闭请求与「确认退出」
+
+`App::on_close_request(|ctx| -> bool)` 在 ESC（无对话框时）与点击标题栏 × 时被调用，
+返回 `true` 放行、`false` 取消。回调收 `EventCtx`，但**返回值是同步的**——平台在
+`WM_CLOSE` / `windowShouldClose:` 里等这个 `bool`，而原生模态框自带消息泵，在这里同步弹
+必然与宿主的泵打架（§8.6）。所以「弹确认框」的正确形状永远是：
+**先返回 `false` 挡下这一次，再另起一条路把「确认」送回来**。
+
+**推荐：应用内模态**（全同步、无额外管道）。`Element::dialog` 画在自己窗口里，没有第二个
+消息泵；对话框的「退出」按钮走 `ctx.request_close()`，那是「应用已决定关闭」的入口，
+不再经过拦截器，不会绕回来打转：
+
+```rust
+use windui::prelude::*;
+
+fn main() {
+    let dirty = signal(true);      // 有未保存的更改
+    let asking = signal(false);    // 确认框是否显示
+
+    let ui = Element::col().fill().child(Element::dialog(
+        asking,
+        Element::col()
+            .padding(20)
+            .spacing(12)
+            .child(Element::label("有未保存的更改，确认退出？"))
+            .child(Element::button("退出").on_click(move |ctx| {
+                dirty.set(false);          // 放行下一次关闭请求
+                ctx.request_close();
+            })),
+    ));
+
+    App::new("编辑器", 480, 320)
+        .on_close_request(move |_ctx| {
+            if dirty.get() {
+                asking.set(true);
+                return false;              // 挡下这一次
+            }
+            true
+        })
+        .content(ui)
+        .run();
+}
+```
+
+**要原生 `MessageBoxW` 时**：`ctx.defer_blocking(f)` 把阻塞流程排到事件分发完全返回之后；
+那个闭包不收 ctx（它跑在分发之外），确认结果经 `App::channel` 的 `Sender` 回到 UI 线程，
+在 `on_message` 里用 ctx 收尾：
+
+```rust
+use windui::prelude::*;
+
+fn main() {
+    let mut app = App::new("编辑器", 480, 320);
+    let tx = app.channel::<bool>(|ctx, ok| {
+        if ok {
+            ctx.request_close();
+        }
+    });
+    app.on_close_request(move |ctx| {
+        let tx = tx.clone();
+        ctx.defer_blocking(move || {
+            let ok = true;                 // 此处换成真正的原生确认框
+            let _ = tx.send(ok);
+        });
+        false                              // 先挡下，等回程消息再关
+    })
+    .content(Element::col().fill())
+    .run();
+}
+```
+
+拦截器的其他常见用法：挡下关闭的同时 `ctx.toast("还有任务在跑")` 给个理由，
+或经 `ctx.tree_mut()` 改树。与 `hide_on_close()` 的优先级关系见 §5「全局热键与启动即隐藏」。
+
+**`App::single_instance` 的回调不收 ctx**：它不由主窗口驱动（Windows 上跑在独立的
+message-only 窗口的 `wndproc` 里，macOS/Linux 上跑在派回主线程的块里），够不着宿主状态；
+把窗口带到前台由平台层在回调返回后自动完成。需要 ctx 就自己搭一段回程——
+`app.channel::<Vec<String>>(|ctx, argv| ..)` 拿到 `Sender`，在 `single_instance` 的回调里
+`tx.send(argv)`。代价是延后到下一帧执行，而窗口隐藏时不出帧、消息会积压到窗口再显示为止
+（托盘常驻应用尤其要注意），库不替你做这层转发正是为此。
 
 ---
 
