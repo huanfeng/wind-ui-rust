@@ -62,6 +62,7 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 | `src/render/{mod,skia}.rs` | `Canvas` trait + tiny-skia 后端 |
 | `src/text/{mod,dwrite}.rs` | `TextEngine` + DirectWrite |
 | `src/platform/{mod,win32/mod,win32/clipboard}.rs` | `AppHandler` trait + Win32 窗口/消息循环/剪贴板 |
+| `src/testing.rs` | 给下游写测试用：借 `EventCtx` 跑回调并收回副作用 |
 
 **热点文件**（改动频繁且牵一发动全身，改前务必通读相关段落）：`src/ui/inputs.rs`、`src/platform/win32/mod.rs`、`src/core.rs`。
 

@@ -6,6 +6,17 @@
 ## [Unreleased]
 
 ### Added
+- **`testing` 模块：下游终于测得了收 `&mut EventCtx` 的回调**。`testing::run_with_ctx(f)`
+  借一棵最小树的 ctx 跑 `f`，把它请求的副作用（toast、对话框、关窗、菜单、URL、窗口操作、
+  重绘）按 `DispatchResult` 交回；`run_with_ctx_in(&mut tree, id, f)` 用调用方自己的树，
+  回调改到树上的东西跑完仍可断言、节点几何也是布局后的真值。
+  本版把回调普遍改成收 ctx（菜单动作、`App::channel` 的 on_message、`on_close_request`）之后，
+  下游就再也造不出这个参数了——`EventCtx` 字段私有、`Tree::run_detached` 是 `pub(crate)`，
+  于是"点这一项确实弹了 toast"这类断言只能退化成"把回调体抽成不收 ctx 的具名函数、再断言
+  那个函数"：测的是抽出来的那一半，回调本身有没有接对反而没人管。这个退化在下游已经发生过
+  两次，是本模块存在的直接原因。
+  `run_detached` 保持 `pub(crate)` 不变：ctx 借的是宿主对控件树的可变访问，把内部入口直接
+  放开等于敞开这条借用契约；包一层只暴露"跑一段闭包、收回副作用"这个受控形状。
 - **表单行限行 `FormTheme::label_max_lines` / `desc_max_lines`**：设了就同时启用**末尾省略**
   与**悬浮看全文**，`None`（默认）保持原样按内容换行。
   设置页的说明文字长度常由后端数据决定：真实数据里有四分之一的说明超出左列单行宽度，

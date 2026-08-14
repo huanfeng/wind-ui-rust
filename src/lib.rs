@@ -20,6 +20,7 @@ pub use single_instance::{claim_instance, InstanceRole};
 pub mod spec;
 pub mod style;
 pub(crate) mod sync;
+pub mod testing;
 pub mod text;
 pub mod theme;
 pub mod ui;

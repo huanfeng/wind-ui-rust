@@ -1294,6 +1294,23 @@ let dot = Element::leaf().widget(Dot { on: state });
 
 **持续动画**：在 `paint` 中调用 `windui::anim::request_repaint()` 即请求下一帧；框架会按显示器刷新率（≤60fps）驱动，停止请求即回到零 CPU 空闲。
 
+### 9.1 测试收 `EventCtx` 的回调
+
+`EventCtx` 由宿主在真实分发路径上借出，字段私有、你造不出来。要在单元测试里跑一段收 ctx 的回调（菜单动作、`App::channel` 的 on_message、`Widget::on_event`），用 `windui::testing`：
+
+```rust
+// 借一棵最小树的 ctx 跑闭包，副作用按 DispatchResult 交回
+let res = windui::testing::run_with_ctx(|ctx| action(ctx));
+assert_eq!(res.toast.map(|t| t.text).as_deref(), Some("已复制"));
+assert!(res.close);            // 关窗请求
+assert!(res.dialog.is_some()); // 原生对话框请求
+
+// 要真实几何 / 要在回调跑完后检查树，用自己的树
+let res = windui::testing::run_with_ctx_in(&mut tree, node_id, |ctx| ...);
+```
+
+没有它的话，"这一项点下去确实弹了 toast"只能退化成"把回调体抽成不收 ctx 的具名函数、再断言那个函数"——测的是抽出来的那一半，回调有没有接对反而没人管。**仅用于测试**：自己造的树没有宿主去消费这些副作用，toast 不会显示、关窗请求不会生效。
+
 ---
 
 ## 10. 第三方开发规范（Do / Don't）
@@ -1392,5 +1409,6 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
 | `windui::anim` | `request_repaint()`（驱动动画） |
+| `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.1） |
 
 更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表等）。

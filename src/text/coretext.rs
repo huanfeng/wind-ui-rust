@@ -310,7 +310,9 @@ impl TextEngine for CoreTextEngine {
                 Align::Center => prect.x as f64 + (prect.w as f64 - line_w) / 2.0,
                 Align::End => prect.x as f64 + prect.w as f64 - line_w,
             };
-            let baseline_from_top = prect.y as f64 + (prect.h as f64 - line_h) / 2.0 + ascent;
+            // 同折行分支：装不下时顶对齐而非居中溢出（行高大于容器高的窄行场景）。
+            let baseline_from_top =
+                prect.y as f64 + (prect.h as f64 - line_h).max(0.0) / 2.0 + ascent;
             let cg_y = phf - baseline_from_top;
             CGContext::set_text_position(Some(&ctx), text_x0, cg_y);
             unsafe { probe.draw(&ctx) };
@@ -333,7 +335,11 @@ impl TextEngine for CoreTextEngine {
                 )
             };
             let text_h = fit.height;
-            let top_from_top = prect.y as f64 + (prect.h as f64 - text_h) / 2.0;
+            // 装得下→垂直居中；装不下→顶对齐。`.max(0)` 是与 Windows 两条路径
+            // （dwrite `oy`、d2d `draw_text`）共有的约定，缺了它差值为负，文本会
+            // 以容器中心为中心向上下**溢出**——表格单元格放不下多行时，Windows 顶
+            // 对齐截断、macOS 却上下各露半行，同一份数据两个平台不一样高。
+            let top_from_top = prect.y as f64 + (prect.h as f64 - text_h).max(0.0) / 2.0;
             let path_rect = CGRect {
                 origin: CGPoint {
                     x: prect.x as f64,
