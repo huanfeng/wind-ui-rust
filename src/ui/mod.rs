@@ -112,6 +112,11 @@ pub struct Label {
     /// 截断结果缓存 `(文案, content_w, fsize_bits) → (截断串, 是否发生了截断)`。
     /// 文案进缓存键是为绑了信号的 Label：它的文案会变，不入 key 就会一直画上一次的截断串。
     trunc_cache: RefCell<Option<TruncCacheEntry>>,
+    /// 多行限行下文本是否溢出（排版高度超过 `max_lines` 封顶值），measure 期记下。
+    ///
+    /// 单行截断在 paint 期精确算（还要拼省略号），多行则只做高度裁剪、不重排文本，
+    /// 故它的"截没截"只能在 measure 那一刻比出来——那里恰好已经有完整排版高度与封顶值。
+    multiline_overflow: Cell<bool>,
 }
 
 impl Label {
@@ -121,6 +126,7 @@ impl Label {
             max_lines: None,
             truncate: Truncate::None,
             trunc_cache: RefCell::new(None),
+            multiline_overflow: Cell::new(false),
         }
     }
 
@@ -202,8 +208,13 @@ impl Widget for Label {
                 .measure("Ay", &crate::text::TextStyle::of(style), None)
                 .h
                 .max(1);
-            Size::new(full.w, full.h.min(max_n as i32 * line_h))
+            let cap = max_n as i32 * line_h;
+            // 排版高度超过封顶值 = 有内容被裁掉。记在这里而不是 paint 期：多行路径只做
+            // 高度裁剪、不重排文本，paint 拿不到"完整排版有多高"这个数。
+            self.multiline_overflow.set(full.h > cap);
+            Size::new(full.w, full.h.min(cap))
         } else {
+            self.multiline_overflow.set(false);
             full
         }
     }
@@ -277,16 +288,20 @@ impl Widget for Label {
         Some(self)
     }
     fn text_truncated(&self) -> Option<bool> {
-        if self.truncate == Truncate::None || self.max_lines != Some(1) {
-            return None;
+        // 不限行就不会被裁，交回 None 表示"这个问题对我不适用"。
+        let max_n = self.max_lines?;
+        // 单行 + 省略模式：paint 期按实际宽度精确算过（还拼了省略号），读那份缓存。
+        if max_n == 1 && self.truncate != Truncate::None {
+            return Some(
+                self.trunc_cache
+                    .borrow()
+                    .as_ref()
+                    .map(|(_, _, _, _, t)| *t)
+                    .unwrap_or(false),
+            );
         }
-        Some(
-            self.trunc_cache
-                .borrow()
-                .as_ref()
-                .map(|(_, _, _, _, t)| *t)
-                .unwrap_or(false),
-        )
+        // 其余限行情形（多行，或单行但只裁不加省略号）：看 measure 期比出的高度溢出。
+        Some(self.multiline_overflow.get())
     }
 }
 
@@ -4150,6 +4165,39 @@ mod tests {
         assert_eq!(plain.text_truncated(), None);
     }
 
+    /// **多行**限行的截断状态同样要如实反映，否则 tooltip 会无条件弹。
+    ///
+    /// 多行路径只做高度裁剪、不重排文本，paint 期拿不到"完整排版有多高"，故判断落在
+    /// measure：那里已经有完整排版高度与 `max_lines` 封顶值。此前这一支恒返回 `None`，
+    /// 于是 `Tree::node_tooltip` 的门控失效——两行说明哪怕一个字都没被裁，悬停也会弹出
+    /// 一个与可见文字一模一样的提示（下游的多行设置行正踩这个）。
+    #[test]
+    fn multiline_label_reports_truncation_from_measure() {
+        use crate::core::Widget;
+        use crate::text::LineAwareTextEngine;
+        let mut te = LineAwareTextEngine;
+        let style = Style::default();
+        let mut label = Label::new("这是一段需要折成好几行才放得下的较长说明文字");
+        label.max_lines = Some(2);
+
+        // 窄到必须折成三行以上 → 两行封顶必然裁掉内容。
+        label.measure(Size::new(60, 1000), &style, &mut te);
+        assert_eq!(label.text_truncated(), Some(true), "折行数超过上限即为截断");
+
+        // 给足宽度：一行就放得下，没有任何内容被裁。
+        label.measure(Size::new(4000, 1000), &style, &mut te);
+        assert_eq!(
+            label.text_truncated(),
+            Some(false),
+            "没裁到内容就不该报截断"
+        );
+
+        // 不限行的 Label：截断概念不适用。
+        let free = Label::new("同样的文字，但不限行");
+        free.measure(Size::new(60, 1000), &style, &mut te);
+        assert_eq!(free.text_truncated(), None);
+    }
+
     #[test]
     fn label_paint_wires_enabled_to_text_color() {
         use crate::core::Widget;
@@ -4960,6 +5008,7 @@ mod tests {
             max_lines: Some(1),
             truncate: Truncate::End,
             trunc_cache: RefCell::new(None),
+            multiline_overflow: Cell::new(false),
         };
         let style = Style::default();
         let r = Rect::new(0, 0, 40, 20);
