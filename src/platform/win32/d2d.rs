@@ -799,6 +799,26 @@ impl D2DCanvas<'_> {
         self.solid_brush(paint.color)
     }
 
+    /// 按当前层深度同步文字抗锯齿模式：**层内恒 GRAYSCALE、层外恒 ClearType**。
+    ///
+    /// ClearType 是子像素渲染，需要知道字形背后的真实底色才能做三通道混合。`PushLayer`
+    /// 开的是一张透明离屏层，层内没有底色可依——D2D 的应对不是降级，而是**整段文字直接
+    /// 不画**，且 `EndDraw` 不报错。于是 `opacity` 子树里的文字在 GPU 路径上会静默消失
+    /// （实测：同一段文字软路径 551 个墨像素、GPU 路径 0 个）。
+    ///
+    /// 之所以做成"由深度推导"而不是在 `draw_text` 里临时切换再恢复：那样恢复的是写死的
+    /// ClearType，而非"进入前的模式"。一旦半透明文字画在 `opacity` 子树内部（层套层），
+    /// 恢复动作就会把外层仍需的 GRAYSCALE 打回 ClearType，该层内后续所有文字随之消失。
+    /// 模式由状态推导，就不存在"该恢复成什么"的问题。
+    fn sync_text_aa(&self) {
+        let mode = if self.pushed_layers > 0 {
+            D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE
+        } else {
+            D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE
+        };
+        unsafe { self.ctx.SetTextAntialiasMode(mode) };
+    }
+
     /// 取/建渐变画刷。归一化端点 × 逻辑包围盒 → 逻辑坐标（与 path 同一变换空间，
     /// SetTransform 的 scale 会统一物理化）。stops<2 或构造失败返回 None。
     fn gradient_brush(
@@ -1014,6 +1034,9 @@ impl Drop for D2DCanvas<'_> {
             unsafe { self.ctx.PopLayer() };
             self.pushed_layers -= 1;
         }
+        // 层已清空，把文字抗锯齿模式一并复位。ctx 是跨帧复用的，若强制清理后模式停在
+        // GRAYSCALE，下一帧的正常文字就会平白丢掉 ClearType 的子像素清晰度。
+        self.sync_text_aa();
     }
 }
 
@@ -1328,31 +1351,23 @@ impl Canvas for D2DCanvas<'_> {
         // （origin 在 rect 顶部，超出部分由上层裁剪收口）。软硬两路同源，不得各写各的。
         let oy = rect.y as f32 + crate::text::block_offset_y(rect.h as f32, th);
         let origin = vec2(rect.x as f32, oy);
-        // 文字色复用 solid brush（取一次→立即绘制，符合 solid 共享约束）。
-        let brush = self.solid_brush(color);
+        // 半透明文字：alpha 全部交给合成层承载，brush 只管颜色。
+        //
+        // ENABLE_COLOR_FONT 路径（彩色 emoji 如 toast 的 ℹ）绕过 brush alpha，对它们
+        // 只有层的 opacity 有效；而普通文字的 brush alpha 是**生效**的——两处各乘一次
+        // 就成了双重削弱。实测半透明黑字的峰值黑度只有软路径的一半（192 : 384），
+        // toast 淡入淡出走的正是这条路（`scale_alpha` 把 alpha 乘进文字颜色）。
+        // 交给层承载是唯一对两类字形都成立的做法。
+        //
+        // 层内抗锯齿模式由 `push_layer`→`sync_text_aa` 按深度决定，此处不再手工切换：
+        // 手工切换要面对"恢复成什么"，而层套层时写死恢复 ClearType 会让外层文字消失。
         let semi = color.a < 255;
+        if semi {
+            self.push_layer(color.a as f32 / 255.0);
+        }
+        // 文字色复用 solid brush（取一次→立即绘制，符合 solid 共享约束）。
+        let brush = self.solid_brush(Color::rgba(color.r, color.g, color.b, 255));
         unsafe {
-            if semi {
-                // 半透明文字两个问题同时存在：
-                //   1. ENABLE_COLOR_FONT 路径（颜色 emoji 如 ℹ）绕过 brush alpha，brush 设透明无效。
-                //   2. ClearType 在透明离屏层内无法正确对齐背景，会产生子像素偏色（"更亮"感）。
-                // 修法：PushLayer 承载 opacity，层内切 GRAYSCALE（纯亮度，不依赖背景色）。
-                // ENABLE_COLOR_FONT 保持启用，保证 ℹ 等彩色 emoji 仍以彩色渲染，由层合成 alpha。
-                let opacity = color.a as f32 / 255.0;
-                let params = D2D1_LAYER_PARAMETERS1 {
-                    contentBounds: INFINITE_RECT,
-                    geometricMask: std::mem::ManuallyDrop::new(None),
-                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                    maskTransform: Matrix3x2::identity(),
-                    opacity,
-                    opacityBrush: std::mem::ManuallyDrop::new(None),
-                    layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-                };
-                self.ctx.PushLayer(&params, None);
-                self.pushed_layers += 1;
-                self.ctx
-                    .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            }
             // ENABLE_COLOR_FONT：让彩色 emoji（如工具栏 😊、toast ℹ）正常渲染而非单色轮廓。
             self.ctx.DrawTextLayout(
                 origin,
@@ -1360,12 +1375,9 @@ impl Canvas for D2DCanvas<'_> {
                 &brush,
                 D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
             );
-            if semi {
-                self.ctx
-                    .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
-                self.ctx.PopLayer();
-                self.pushed_layers -= 1;
-            }
+        }
+        if semi {
+            self.pop_layer();
         }
     }
 
@@ -1478,6 +1490,7 @@ impl Canvas for D2DCanvas<'_> {
         // layer 传 None：让 D2D 自行分配/复用层资源（device context 重载支持）。
         unsafe { self.ctx.PushLayer(&params, None) };
         self.pushed_layers += 1;
+        self.sync_text_aa();
     }
 
     fn pop_layer(&mut self) {
@@ -1485,6 +1498,7 @@ impl Canvas for D2DCanvas<'_> {
         if self.pushed_layers > 0 {
             unsafe { self.ctx.PopLayer() };
             self.pushed_layers -= 1;
+            self.sync_text_aa();
         }
     }
 
@@ -1867,5 +1881,176 @@ mod tests {
         assert!(ink(&pm, 20, 80) > 0, "正控：容器内应当有字");
         assert_eq!(ink(&pm, 20, 32), 0, "居中时容器上部应留白");
         assert_eq!(ink(&pm, 68, 80), 0, "居中时容器下部应留白");
+    }
+    /// 软路径渲染同一段绘制，用于软硬比对。
+    fn render_soft(w: u32, h: u32, scale: f32, draw: impl FnOnce(&mut dyn Canvas)) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::DWriteEngine::new();
+        let mut t = crate::render::PixmapTarget { pixmap: &mut pm };
+        {
+            let mut c = t.make_canvas(&mut eng, scale);
+            draw(&mut *c);
+        }
+        pm
+    }
+
+    /// 白底上离白最远的像素（峰值墨度，0=纯白、765=纯黑）。
+    ///
+    /// 取峰值而非平均：抗锯齿边缘像素占比高且随光栅化方式浮动，平均值会把"字画得对不对"
+    /// 和"边缘怎么过渡"混在一起；峰值反映的是字心的实际浓度，正是 alpha 是否被多乘一次
+    /// 的直接体现。
+    fn peak_ink(pm: &Pixmap) -> u32 {
+        let d = pm.data();
+        let mut peak = 0i32;
+        for i in (0..d.len()).step_by(4) {
+            peak = peak.max(765 - (d[i] as i32 + d[i + 1] as i32 + d[i + 2] as i32));
+        }
+        peak.max(0) as u32
+    }
+
+    fn text_at(c: &mut dyn Canvas, color: Color) {
+        c.draw_text(
+            "Hamburg",
+            Rect::new(4, 4, 150, 26),
+            color,
+            Align::Start,
+            &TextStyle::new(18.0),
+        );
+    }
+
+    /// `opacity` 子树内的文字必须画出来。
+    ///
+    /// ClearType 需要字形背后的真实底色做子像素混合，而 `PushLayer` 开的是透明离屏层；
+    /// D2D 对此的应对不是降级而是**整段文字不画**，且 EndDraw 不报错。修复前这里是 0。
+    #[test]
+    fn text_inside_opacity_layer_is_rendered() {
+        let pm = render(160, 60, 1.0, |c| {
+            c.push_layer(0.5);
+            text_at(c, Color::rgb(0, 0, 0));
+            c.pop_layer();
+        });
+        assert!(
+            peak_ink(&pm) > 0,
+            "opacity 子树内的文字在 GPU 路径上整段消失了（层内须切 GRAYSCALE）"
+        );
+    }
+
+    /// 半透明文字的浓度不得被多乘一次 alpha。
+    ///
+    /// 「50% 层 × 不透明字」与「50% alpha 的字」在数学上等价，软路径两者峰值墨度相同。
+    /// 修复前 GPU 的后者只有前者的一半（192 : 384）——brush alpha 与层 opacity 各乘了
+    /// 一次。toast 淡入淡出走的正是后一条路（`scale_alpha` 把 alpha 乘进文字颜色）。
+    #[test]
+    fn translucent_text_alpha_is_applied_once() {
+        let via_layer = render(160, 60, 1.0, |c| {
+            c.push_layer(0.5);
+            text_at(c, Color::rgb(0, 0, 0));
+            c.pop_layer();
+        });
+        let via_color = render(160, 60, 1.0, |c| text_at(c, Color::rgba(0, 0, 0, 128)));
+        let (a, b) = (peak_ink(&via_layer), peak_ink(&via_color));
+        let diff = a.abs_diff(b);
+        assert!(
+            diff * 10 <= a.max(b),
+            "两条等价路径的峰值墨度应基本一致，实测 层={a} 颜色={b}（差 {diff}）——             相差近半即 alpha 被 brush 与 layer 各乘了一次"
+        );
+    }
+
+    /// 软硬两路的半透明文字浓度应当对得上（各自的抗锯齿方式可以不同）。
+    #[test]
+    fn translucent_text_matches_software_path() {
+        let gpu = peak_ink(&render(160, 60, 1.0, |c| {
+            text_at(c, Color::rgba(0, 0, 0, 128))
+        }));
+        let soft = peak_ink(&render_soft(160, 60, 1.0, |c| {
+            text_at(c, Color::rgba(0, 0, 0, 128))
+        }));
+        let diff = gpu.abs_diff(soft);
+        assert!(
+            diff * 5 <= gpu.max(soft),
+            "GPU 与软路径的半透明文字浓度差过大：gpu={gpu} soft={soft}（差 {diff}）"
+        );
+    }
+
+    /// 层套层：半透明文字画在 `opacity` 子树内部时，外层文字不得受牵连而消失。
+    ///
+    /// 这是"手工切换抗锯齿模式"的失效场景——内层写死恢复 ClearType，会把外层仍需的
+    /// GRAYSCALE 打回去，此后该层内的文字全部静默丢失。
+    #[test]
+    fn nested_layer_does_not_break_outer_text() {
+        let pm = render(160, 60, 1.0, |c| {
+            c.push_layer(0.8);
+            // 先画一段半透明文字（内部会自建一层），再画不透明文字。
+            c.draw_text(
+                "Ag",
+                Rect::new(4, 4, 60, 26),
+                Color::rgba(0, 0, 0, 128),
+                Align::Start,
+                &TextStyle::new(18.0),
+            );
+            c.draw_text(
+                "Zw",
+                Rect::new(70, 4, 80, 26),
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(18.0),
+            );
+            c.pop_layer();
+        });
+        // 右半区（第二段文字）必须有墨。
+        let mut right_ink = 0;
+        let d = pm.data();
+        for y in 0..60u32 {
+            for x in 70..150u32 {
+                let i = ((y * 160 + x) * 4) as usize;
+                if d[i] != 255 || d[i + 1] != 255 || d[i + 2] != 255 {
+                    right_ink += 1;
+                }
+            }
+        }
+        assert!(
+            right_ink > 0,
+            "内层半透明文字之后，同一 opacity 层内的后续文字消失了"
+        );
+    }
+    /// 彩色 emoji 的半透明仍然生效——这是 `7ba1f15` 那次修复的目标场景，不能被回归。
+    ///
+    /// `ENABLE_COLOR_FONT` 路径下字形自带颜色、**绕过 brush**，所以当年 brush 设透明对
+    /// 它无效，alpha 才改由合成层承载。本次把 brush 的 alpha 一并去掉（改为层单独承载）
+    /// 之后，彩色字形这条路的行为必须原样保留：半透明时确实更淡，而不是失效成全不透明。
+    #[test]
+    fn color_emoji_alpha_still_applies() {
+        let draw = |alpha: u8| {
+            render(80, 60, 1.0, move |c| {
+                c.draw_text(
+                    "\u{1F60A}",
+                    Rect::new(4, 4, 70, 40),
+                    Color::rgba(0, 0, 0, alpha),
+                    Align::Start,
+                    &TextStyle::new(24.0),
+                )
+            })
+        };
+        // 墨量（离白距离之和）比峰值更适合彩色字形：emoji 的峰值可能落在某个饱和色上，
+        // 随 alpha 变化不线性，而总墨量随 alpha 单调。
+        let ink_sum = |pm: &Pixmap| -> u64 {
+            let d = pm.data();
+            let mut n = 0u64;
+            for i in (0..d.len()).step_by(4) {
+                n += (765 - (d[i] as i32 + d[i + 1] as i32 + d[i + 2] as i32)).max(0) as u64;
+            }
+            n
+        };
+        let opaque = ink_sum(&draw(255));
+        let half = ink_sum(&draw(128));
+        assert!(
+            opaque > 0,
+            "正控：不透明 emoji 应当画出来（字体缺失则本测试无意义）"
+        );
+        assert!(
+            half * 4 < opaque * 3,
+            "半透明 emoji 应明显淡于不透明：不透明={opaque} 半透明={half}——两者接近即 alpha 对彩色字形失效（7ba1f15 修的正是这个）"
+        );
     }
 }
