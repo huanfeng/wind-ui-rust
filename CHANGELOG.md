@@ -392,6 +392,23 @@
 - **`examples/theming.rs` 与 `examples/tray.rs` 接不上截屏回归**：另外 27 个 example 都链了
   `App::screenshot_from_args()`，这两个漏了，于是统一的 `--screenshot` 命令对它们无效——
   偏偏 `theming.rs` 演示的正是主题与边框单位，最需要看图对比。已补上。
+- **macOS：切走应用会让拖动态与输入法合成态永久悬挂**（以下三条均**未在 macOS 真机验证**，
+  开发机为 Windows，只保证 `cargo check --target aarch64-apple-darwin` 通过）。
+  `AppHandler::on_capture_lost` 在 macOS 后端从未被调用：Cocoa 有隐式捕获（`mouseDown:`
+  之后的 `mouseDragged:`/`mouseUp:` 自动续派发给同一 view），所以确实不需要 win32 那样的
+  `SetCapture`——但"按住不放时应用被切走、抬起事件从此不再送达"这件事一样会发生，
+  reorder 列表、滑块会永远卡在拖动态。现在 `windowDidResignKey:` 通知上层收尾，门控条件
+  （仅在上层自认持有捕获时才通知）与 win32 的 `WM_CAPTURECHANGED` 一致。
+- **macOS：合成中途切走应用后文本框光标再也不闪**。控件在输入法组合态期间不画自绘光标，
+  而 macOS 侧只有 `setMarkedText:`/`unmarkText`/`insertText:` 三条路会清合成态，切走应用
+  时一条都不走（win32 有 `WM_IME_ENDCOMPOSITION` 兜底）。现在同一个 `windowDidResignKey:`
+  里清合成态并 `discardMarkedText`。
+- **macOS：触控板慢速滚动整格丢失**。滚轮增量 `as i32` 直接截断，而触控板的精确增量单次
+  常不足 1 个框架单位，于是轻推毫无反应、动量尾段也提前断掉。改为累积亚像素残差后再取整
+  （同 `app/fling.rs` 的 `pan_residual`），新手势起手时清残差。同时把"macOS 的惯性滚动
+  由系统提供、`start_fling`/`cancel_fling` 刻意不实现"这条决策写进了 `AppHandler` 的
+  trait 文档与后端注释——它此前看着像漏实现，很容易被后人照 win32 又移植一遍自研惯性，
+  叠加成双倍速度。
 
 ## [0.11.1] - 2026-08-11
 

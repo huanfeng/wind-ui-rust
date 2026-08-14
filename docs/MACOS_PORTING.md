@@ -8,8 +8,14 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 > （`NSTextInputClient`）均已实现；`cargo build`/`cargo test`（122 通过）/`cargo clippy` 在 macOS 上全绿，
 > 截屏回归（`--screenshot`）渲染正确。Windows 侧不受影响（仅把平台无关的 `run_offscreen` 上移为共享函数）。
 >
-> 仍可改进：触控板用滚轮量映射（未接 `scrollWheel` 原生 momentum/惯性）；通知依赖
-> `NSUserNotification`（未打包 .app 时系统可能不展示）；动画驱动用 60Hz 定时器（非完全零唤醒空闲）。
+> 仍可改进：通知依赖 `NSUserNotification`（未打包 .app 时系统可能不展示）。
+>
+> **`AppHandler` 缝合面的对齐状况**（哪些回调 win32 调了而 macOS 没调）：
+> `set_ime_composing` / `capture_active` / `on_capture_lost` 已接齐（见 §4.1 与 §8）；
+> `on_pan` / `start_fling` / `cancel_fling` 在 macOS 上**刻意不接**（惯性由系统给，见 §4.1 末尾）；
+> 仅剩 `take_hotkey_ops` 未接——它依赖全局热键本身，而 macOS 的全局热键要从零实现 Carbon
+> `RegisterEventHotKey`（`platform/macos/hotkey.rs` 目前只是 debug 期提示的空壳）。
+> 运行期改绑/启停接口 `HotkeyHandle` 在 macOS 上因此无处落地，属独立一档的工作量。
 
 ---
 
@@ -90,16 +96,24 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 请求重绘 | `InvalidateRect` | `NSView::setNeedsDisplay` |
 | HiDPI | `GetDpiForWindow` / `WM_DPICHANGED` | `NSWindow::backingScaleFactor` → `handler.set_scale`；监听 `windowDidChangeBackingProperties` |
 | 鼠标 | `WM_LBUTTONDOWN`/`MOUSEMOVE`/`MOUSEWHEEL` | `mouseDown:`/`mouseDragged:`/`mouseMoved:`/`scrollWheel:` → `PointerEvent` |
-| 指针捕获 | `SetCapture`/`ReleaseCapture` + `capture_active()` | macOS 拖动期间默认续派发事件给同一 view，通常无需显式捕获；`on_capture_lost` 对应窗口失活 |
+| 指针捕获 | `SetCapture`/`ReleaseCapture` + `capture_active()` | ✅ 已接：AppKit 隐式续派发（`mouseDown:` 后的 `mouseDragged:`/`mouseUp:` 恒送同一 view，拖出窗口外照送），故**不做任何 OS 调用**，只镜像 `capture_active()`；`on_capture_lost` 挂在 `windowDidResignKey:`（对照 `WM_CAPTURECHANGED`） |
 | 键盘 | `WM_KEYDOWN` | `keyDown:`，特殊键映射到 `Key` |
-| 输入法 | `WM_IME_*` + `ImmSetCompositionWindow`（用 `ime_caret()`） | 实现 `NSTextInputClient`；`firstRectForCharacterRange:` 用 `ime_caret()` 定位候选窗 |
+| 输入法 | `WM_IME_*` + `ImmSetCompositionWindow`（用 `ime_caret()`） | ✅ 已接：`NSTextInputClient`；`firstRectForCharacterRange:` 用 `ime_caret()` 定位候选窗；合成态经 `setMarkedText:`/`unmarkText`/`insertText:`（+ 窗口失活兜底）上报 `set_ime_composing`。⚠️ 语义差见 §8 |
 | 光标形状 | `WM_SETCURSOR`（用 `cursor()`） | `NSView::resetCursorRects` 或 `NSCursor::set`，按 `cursor()` 选 arrow/pointingHand/iBeam |
 | 文件拖放 | `WM_DROPFILES`（用 `on_drop_files()`） | `NSDraggingDestination`：`draggingEntered:`/`performDragOperation:` |
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
 | 窗口操作 | `take_window_op()` → `ShowWindow(SW_MINIMIZE/MAXIMIZE...)` | `NSWindow::miniaturize`/`zoom`/`close` |
 
-触摸/惯性：触控板 `scrollWheel:` 原生带 momentum phase（`NSEvent::momentumPhase`），可直接转 `on_pan`，
-并**关掉自研 fling**（`start_fling` 返回 false）；或仅转发原生滚动。二选一，别叠加。
+**触摸/惯性（已定案，别再移植 win32 那套）**：触控板抬指后 AppKit 会继续投递
+`momentumPhase != None` 的 `scrollWheel:` 事件，动量/摩擦/衰减全由系统按用户的触控板设置算好，
+用户重新把手指放上触控板时系统自动中止。故 macOS 后端**只转发原生滚动**（走
+`PointerKind::Wheel`，与鼠标滚轮同一条路径），`on_pan` / `start_fling` / `cancel_fling`
+一律不调用——win32 的自研惯性状态机是为了补 `WM_TOUCH` 只给位置不给动量的缺口，
+移植过来会与系统动量叠加成双倍速度，并在松手瞬间因两套摩擦系数不同而跳一下。
+`app/fling.rs` 整套状态机在 macOS 上因此是永不激活的死代码，**不加 `#[cfg]` 门控**：
+它是平台无关的 `AppHandler` 实现体，门控只会把跨平台的单元测试一并切掉，而 `ScrollState`
+的静息成本是一个恒为 `None` 的 `Option`。动量阶段的事件与用户主动滚动不作区分也是有意的：
+下游（`ScrollWidget` / 菜单浮层）对滚轮只有"滚多少"这一个语义。
 
 `AppHandler` 的全部回调签名见 `src/platform/mod.rs`，含坐标单位约定（**物理像素，相对客户区左上角**）。
 
@@ -172,3 +186,28 @@ win32 的 `run_offscreen`（渲染一帧存 PNG、不开窗，供自动化截屏
 **风险点**：行高的基线处理两平台是分头实现的——Windows 走 `SetLineSpacing(UNIFORM, line, line * 0.8)`，macOS 走 Min/MaxLineHeight。0.8 这个基线系数只在 DirectWrite 侧验证过；CoreText 侧若表现为文字贴上沿或贴下沿，需要的是补一个基线偏移设定，而不是去调 0.8。
 
 **未做**：`letter_spacing` 与斜体尚未实现（两平台皆是）。它们与行高同属文字引擎特性，日后一并补时应同时补上本表。
+
+## 8. 未验证的窗口层改动（技术债登记）
+
+与 §7 同一处境：**在 Windows 上写就，只跑过 `cargo check --target aarch64-apple-darwin`，
+从未在 macOS 上运行**。编译通过不等于行为正确，故逐条登记验法。
+
+| 改动 | 位置 | 真机验法与预期 |
+|---|---|---|
+| `windowDidResignKey:` → `on_capture_lost` | `platform/macos/window.rs` | 跑 `examples/reorder.rs`，按住一行拖到列表中部**不松手**，Cmd+Tab 切走再切回：该行应已落回合法位置，不再跟随指针 |
+| `windowDidResignKey:` → 收掉合成态 | 同上 `abort_composition` | 跑 `examples/ime.rs`，拼音打到一半（候选窗已弹）时 Cmd+Tab 切走再切回：光标应恢复闪烁，候选窗不残留，已输入的拼音不会莫名上屏 |
+| 滚轮亚像素残差 | 同上 `on_wheel` | 触控板在长列表上**极慢**地推：应逐点跟手滚动，而不是"轻推没反应、猛推才动" |
+| 原生动量滚动 | 同上 `on_wheel` | 触控板两指快滑后抬手：列表应继续滑行并逐渐停下；滑行途中把两指放回触控板应**立即停住**而非加速 |
+| `phase()` 在滚轮事件上的取值 | 同上 | 鼠标滚轮的 `phase` 应恒为 `None`（走不到清残差分支）；仅用于清残差，取值即便有出入也只影响一格以内的滚动量 |
+
+**已知未消除的语义差（合成串不可见）**：Windows 的 IME 自己会在
+`ImmSetCompositionWindow` 指定处画出合成串及其光标，所以控件在合成态隐藏自绘光标是在
+**消除双光标**；macOS 把绘制 marked text 的责任完全交给客户端，而本后端不画——于是合成
+期间文本框里既没有合成串、也没有光标。这不是本轮引入的（下发链路一直如此），根治要上层
+先有"显示未提交合成串"的 API（`RichText` 的 span 模型可承载）。真机上若观感不可接受，
+短期缓解是让 macOS 后端不上报 `composing = true`（保留光标闪烁），代价是与 win32 行为分叉。
+
+**已知未覆盖的收尾路径（两平台同病）**：菜单浮层的滚动条拖拽状态（`app/menu.rs` 的
+`scrollbar_drag`）不走 `UiHost::capture`——菜单打开时 `on_pointer` 在进入控件树之前就
+被浮层截走了，故 `capture_active()` 恒为 false，捕获丢失时 `on_capture_lost` 直接早退，
+拖拽态不会被复位。这是 `app` 层的缺口，win32 上同样存在，不是 macOS 后端能修的。

@@ -288,11 +288,15 @@ pub trait AppHandler {
     }
     /// 当前是否处于指针捕获态。平台据此调用 OS 的 SetCapture/ReleaseCapture，
     /// 保证拖出窗口时仍能收到移动/抬起消息。
+    ///
+    /// macOS 无需对应的 OS 调用——`mouseDown:` 之后的 `mouseDragged:`/`mouseUp:` 由 AppKit
+    /// 隐式续派发给同一 view（拖出窗口外照送），后端只镜像本值以门控 `on_capture_lost`。
     fn capture_active(&self) -> bool {
         false
     }
     /// OS 抢走指针捕获（Alt+Tab 等）时调用，让逻辑捕获方收尾（如复位拖动态）。
-    /// 返回 true 表示需要重绘。
+    /// 返回 true 表示需要重绘。win32 由 `WM_CAPTURECHANGED` 触发，macOS 由
+    /// `windowDidResignKey:` 触发（切走应用/原生模态框接管时抬起事件不再送达）。
     fn on_capture_lost(&mut self) -> bool {
         false
     }
@@ -339,18 +343,25 @@ pub trait AppHandler {
     }
 
     /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）按 `dy` 物理像素平移，
-    /// 滚动手指下的容器。返回 true 表示需要重绘。
+    /// 滚动手指下的容器。返回 true 表示需要重绘。**仅 win32 后端调用**（触摸屏拖动滚动）；
+    /// macOS 触控板的两指滑动是滚轮事件，走 `PointerKind::Wheel` 而非本方法。
     fn on_pan(&mut self, _pos: Point, _dy: i32) -> bool {
         false
     }
 
     /// 触摸抬起时按释放速度启动惯性滑动（fling）。`pos` 为**物理像素**（相对客户区）、
     /// `vy` 为手指 y 速度（**物理像素/ms**）。返回 true 表示已启动（平台据此触发首帧）。
+    ///
+    /// **仅 win32 后端调用**：`WM_TOUCH` 只给位置不给动量，惯性必须自算。macOS 后端
+    /// 刻意不调本方法，触控板的动量由系统在 `scrollWheel:` 里续发（见
+    /// `platform/macos/window.rs::on_wheel`）——那不是漏实现，别去移植 win32 那套状态机。
     fn start_fling(&mut self, _pos: Point, _vy: f32) -> bool {
         false
     }
 
     /// 取消进行中的惯性滑动（新触摸按下/点击/滚轮打断时）。返回 true 表示需要重绘。
+    /// 同 [`start_fling`](Self::start_fling)，**仅 win32 后端调用**；macOS 的动量由系统
+    /// 在用户重新触摸触控板时自行中止，无需框架介入。
     fn cancel_fling(&mut self) -> bool {
         false
     }

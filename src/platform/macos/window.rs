@@ -17,9 +17,9 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSDragOperation,
-    NSDraggingDestination, NSDraggingInfo, NSEvent, NSGraphicsContext, NSPasteboardType, NSScreen,
-    NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase, NSGraphicsContext,
+    NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -56,6 +56,16 @@ struct ViewState {
     frameless: bool,
     /// 输入法合成进行中（有未提交的 marked text）：此间所有按键交输入法处理。
     composing: bool,
+    /// 逻辑捕获态镜像（每次指针事件后取 `handler.capture_active()`）。
+    ///
+    /// **macOS 没有 win32 `SetCapture` 的对应物，也不需要**：`mouseDown:` 之后的
+    /// `mouseDragged:` / `mouseUp:` 由 AppKit 隐式续派发给同一个 view，指针拖出窗口外
+    /// 照送。故此字段不驱动任何 OS 调用，只用来判断窗口失活时要不要通知上层收尾
+    /// （见 `notify_capture_lost`），语义对齐 win32 `WindowState::capturing` 的门控作用。
+    capturing: bool,
+    /// 滚轮增量的亚像素残差（见 `on_wheel`）：触控板慢速滑动单次增量常不足 1 个框架单位，
+    /// 直接取整会整格丢掉，残差留到下次事件补齐（同 `app/fling.rs` 的 `pan_residual`）。
+    wheel_residual: f32,
     /// 动画帧的一次性定时器（仅动画期间存在；空闲为 None → 零唤醒）。每帧续约前先废止旧的。
     frame_timer: Option<Retained<NSTimer>>,
     /// `on_interval` 的周期定时器（按 handler.intervals() 顺序，下标即回调 idx）。
@@ -208,6 +218,18 @@ define_class!(
 
     // 输入法客户端（对应 win32 的 WM_IME_* + ImmSetCompositionWindow）。我们不内联显示
     // 合成串（无对应上层 API），但跟踪合成态并把候选窗定位到光标处；提交文本经 insertText: 回灌。
+    //
+    // 合成态经 setMarkedText:/unmarkText/insertText: 三处上报给上层
+    // （dispatch_composing → AppHandler::set_ime_composing），与 win32 的
+    // WM_IME_START/ENDCOMPOSITION 对齐；控件据此在合成期间不画自绘光标。
+    //
+    // ⚠️ 两平台在这里有一处**未消除的语义差**：Windows 的 IME 自己会在
+    // ImmSetCompositionWindow 指定的位置画出合成串和它自带的光标，所以隐藏自绘光标是在
+    // 消除双光标；macOS 则把画 marked text 的责任完全交给客户端，而本后端不画——于是
+    // 合成期间文本框里既没有合成串也没有光标。这不是本次改动引入的（下发链路一直如此），
+    // 但根治需要上层给出「显示未提交合成串」的 API（RichText 的 span 模型可承载），
+    // 属于另一个量级的工作。真机上若观感不可接受，短期缓解是让 macOS 后端不上报
+    // composing=true（保留光标闪烁），代价是与 win32 的行为不再一致。
     unsafe impl NSTextInputClient for ContentView {
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
@@ -299,6 +321,19 @@ define_class!(
             allow
         }
 
+        // 窗口失去 key 状态（Cmd+Tab 切走、点到别的窗口、原生模态框接管）：打断逻辑
+        // 捕获与输入法合成。两者是同一类问题——"手离开了，却没有收尾事件送回来"，
+        // 收尾都必须由这里补上。对照 win32 的 WM_CAPTURECHANGED + WM_IME_ENDCOMPOSITION。
+        //
+        // 未经真机验证的边界：状态栏（托盘）菜单弹出时窗口是否也会 resignKey。若会，
+        // 表现是"托盘菜单一弹，进行中的拖动被取消"——与 win32 上 Alt+Tab 打断拖动同属
+        // 保守方向（宁可多收尾一次，不能卡在拖动态），故即便如此也不算错。
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _notification: &NSNotification) {
+            self.notify_capture_lost();
+            self.abort_composition();
+        }
+
         // 窗口即将销毁时退出应用（对照 win32 WM_DESTROY→PostQuitMessage）。
         // 注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
         #[unsafe(method(windowWillClose:))]
@@ -340,6 +375,8 @@ impl ContentView {
             scale: 1.0,
             frameless,
             composing: false,
+            capturing: false,
+            wheel_residual: 0.0,
             frame_timer: None,
             interval_timers: Vec::new(),
             color_space,
@@ -588,14 +625,49 @@ impl ContentView {
         });
     }
 
-    /// 滚轮 → Wheel 事件。框架约定一刻度 ±120（正=上滚）。
+    /// 滚轮 / 触控板两指滑动 → Wheel 事件。框架约定一刻度 ±120（正=上滚）。
+    ///
+    /// # 惯性由系统给，本后端**刻意不实现** `start_fling` / `cancel_fling`
+    ///
+    /// 触控板抬指后 AppKit 会继续投递 `momentumPhase != None` 的滚动事件——动量、摩擦、
+    /// 衰减全由系统按用户的触控板设置算好，并在用户重新把手指放上触控板时自动中止。
+    /// 这些事件在此与"手指仍在滑"的事件走同一条路径，于是列表自然滑行、再次触摸自然打断，
+    /// 无需框架介入。
+    ///
+    /// win32 那套自研惯性状态机（`Touch` + `start_fling`/`cancel_fling`）是为了补
+    /// `WM_TOUCH` **只给位置不给动量**的缺口，**不要移植到这里**：移过来只会与系统动量
+    /// 叠加成双倍速度，还会因两套摩擦系数不同而在松手瞬间跳一下。因此
+    /// `AppHandler::{on_pan, start_fling, cancel_fling}` 在 macOS 后端保持默认空实现，
+    /// `app/fling.rs` 的整套状态机在 macOS 上是永不激活的死代码（不加 `#[cfg]` 门控：
+    /// 它是平台无关的 `AppHandler` 实现体，门控只会把跨平台的单元测试也一并切掉）。
+    ///
+    /// 动量事件与用户主动滚动**不作区分**是有意的：下游（`ScrollWidget` / 菜单浮层）
+    /// 对滚轮只有"滚多少"这一个语义，没有任何逻辑会因"这是动量"而需要改判。
+    ///
+    /// **未经真机验证**。验法：Mac 触控板在长列表上两指快滑后抬手——预期列表继续滑行
+    /// 并逐渐停下；滑行途中再把两指放上触控板，预期立即停住而不是叠加加速。
     fn on_wheel(&self, ev: &NSEvent) {
+        // 新手势起手（手指刚落到触控板上）：清掉上一段的亚像素残差，免得方向相反的
+        // 旧残差把新手势的第一格吃掉。鼠标滚轮的 phase 恒为 None，走不到这里。
+        let phase = ev.phase();
+        if phase.contains(NSEventPhase::Began) || phase.contains(NSEventPhase::MayBegin) {
+            self.ivars().borrow_mut().wheel_residual = 0.0;
+        }
         let dy = ev.scrollingDeltaY();
-        // 触控板（精确增量）：按点位细粒度滚；鼠标滚轮（行增量）：每行约一刻度。
-        let delta = if ev.hasPreciseScrollingDeltas() {
-            (dy * 3.0) as i32
+        // 触控板（精确增量，单位=点）：按点位细粒度滚；鼠标滚轮（行增量）：约 3 行/刻度。
+        let raw = if ev.hasPreciseScrollingDeltas() {
+            dy as f32 * 3.0
         } else {
-            (dy * 40.0) as i32
+            dy as f32 * 40.0
+        };
+        // 亚像素累积后再取整：触控板慢速滑动单次增量常 <1，直接 `as i32` 截成 0 就把整个
+        // 事件丢了，表现为"轻推没反应、猛推才动"，动量尾段也会提前断掉。
+        let delta = {
+            let mut st = self.ivars().borrow_mut();
+            let total = raw + st.wheel_residual;
+            let whole = total.trunc();
+            st.wheel_residual = total - whole;
+            whole as i32
         };
         if delta == 0 {
             return;
@@ -723,7 +795,12 @@ impl ContentView {
     fn dispatch_pointer(&self, ev: PointerEvent) {
         let repaint = {
             let _guard = crate::platform::EventDispatchGuard::enter();
-            self.ivars().borrow_mut().handler.on_pointer(ev)
+            let mut st = self.ivars().borrow_mut();
+            let repaint = st.handler.on_pointer(ev);
+            // 同步逻辑捕获态镜像。win32 在这一步真的调 SetCapture/ReleaseCapture；
+            // macOS 不需要（AppKit 隐式续派发，见 ViewState::capturing），只记录状态。
+            st.capturing = st.handler.capture_active();
+            repaint
         };
         if repaint {
             self.setNeedsDisplay(true);
@@ -753,6 +830,56 @@ impl ContentView {
         };
         if repaint {
             self.setNeedsDisplay(true);
+        }
+    }
+
+    /// 窗口失去 key 状态时通知上层的逻辑捕获方收尾（复位拖动态）。对照 win32 的
+    /// `WM_CAPTURECHANGED`：那边是 OS 真把 `SetCapture` 抢走了，macOS 没有显式捕获可抢
+    /// （见 `ViewState::capturing`），但"手还按着、抬起事件却永远不会来"这件事一样会发生
+    /// ——按住 reorder 列表项拖到一半 Cmd+Tab 切走，`mouseUp:` 就此不再送达，
+    /// 上层会永远卡在拖动态。门控与 win32 一致：仅在上层自认持有捕获时才通知。
+    ///
+    /// **未经真机验证**（开发机为 Windows）。验法：Mac 上跑 `examples/reorder.rs`，
+    /// 按住一行拖到列表中部**不松手**，按 Cmd+Tab 切到别的应用再切回——预期该行已落回
+    /// 合法位置、不再跟随指针；若仍粘在指针上，说明本回调没被调用或 `capturing` 没镜像上。
+    fn notify_capture_lost(&self) {
+        let repaint = {
+            let mut st = self.ivars().borrow_mut();
+            if !st.capturing {
+                return;
+            }
+            st.capturing = false;
+            st.handler.on_capture_lost()
+        };
+        if repaint {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// 窗口失活时收掉未提交的输入法合成：清本地合成态、通知上层恢复自绘光标，
+    /// 再让输入上下文丢弃 marked text。不收的话，合成中途切走应用后 `composing`
+    /// 会一直为 true，而组合态期间 `TextInput` 不画自绘光标——焦点文本框的光标就此
+    /// 再也不闪（win32 侧由 `WM_IME_ENDCOMPOSITION` 保证不会出现这种悬挂）。
+    ///
+    /// 两段式：先在借用内改本地状态并释放借用，再调可能重入本视图回调的
+    /// `discardMarkedText`（它若反过来触发 `unmarkText:` 是幂等的）。
+    ///
+    /// **未经真机验证**。验法：Mac 上用拼音输入法在 `examples/ime.rs` 的文本框里打到一半
+    /// （候选窗已弹出）时 Cmd+Tab 切走再切回——预期光标恢复闪烁、候选窗未残留、
+    /// 已输入的拼音不会莫名其妙上屏。
+    fn abort_composition(&self) {
+        let was_composing = {
+            let mut st = self.ivars().borrow_mut();
+            let was = st.composing;
+            st.composing = false;
+            was
+        };
+        if !was_composing {
+            return;
+        }
+        self.dispatch_composing(false);
+        if let Some(ic) = self.inputContext() {
+            ic.discardMarkedText();
         }
     }
 
