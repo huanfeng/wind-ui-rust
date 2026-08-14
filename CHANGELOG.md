@@ -126,6 +126,15 @@
   `stats()` 返回 `{ live, free, capacity, peak }`；环境变量 `WINDUI_SIGNALS=1` 让活跃槽位
   每创下新高就往 stderr 打一行，健康的应用启动后即安静，泄漏表现为持续刷屏（值即报告
   步长，嫌吵调大；`0` 或不设即关闭）。
+- **意图色的角色变体 `Intent::CustomRole(Role)` / `Element::accent_role`**：`Intent::Custom`
+  收的是构建期给定的**定色**，运行期换主题不跟随，于是"想拿 palette 里内置意图之外的色槽
+  当基色"这件事只能退回硬编码——`examples/multiline_demo.rs` 的 `const ACCENT = 0x4C8BF5`
+  正是这么来的，它一字不差就是默认主题的 `palette.accent`，换暗色主题后按钮还是那个亮蓝。
+  新变体把基色的解析推迟到 paint 期（口径同 `Brush::Role`：从当前线程活动主题取，
+  故 `Role::InputBg` 这类落在覆盖层上的角色也解得出），派生规则与 `Custom` 完全共用。
+  命名跟随既有成对约定 `fg` / `fg_role`，故是 `accent` / `accent_role`，Button 与 CheckBox
+  通用；`badge_intent` 下 `CustomRole` 也与内置意图同路走 `bg_role_alpha` + `fg_role`。
+  `examples/multiline_demo.rs` 已迁到 `.accent_role(Role::Accent)`，常量删除。
 
 ### Changed
 - **`ui::DynLabel` 并入 `ui::Label`**（保留为 `#[deprecated]` 类型别名，`DynLabel::new(sig)`
@@ -380,6 +389,9 @@
   （与相邻的 `clickable()` 一致）。库内组合构造器给自己刚建的节点挂控件走不受守卫的内部
   入口，故 `table_*` / `list_signal` / `scroll` 等构造不受影响；但它们返回的节点从此也被
   守卫覆盖——`Element::scroll().widget(..)` 会报错而不是悄悄毁掉滚动。
+- **`examples/theming.rs` 与 `examples/tray.rs` 接不上截屏回归**：另外 27 个 example 都链了
+  `App::screenshot_from_args()`，这两个漏了，于是统一的 `--screenshot` 命令对它们无效——
+  偏偏 `theming.rs` 演示的正是主题与边框单位，最需要看图对比。已补上。
 
 ## [0.11.1] - 2026-08-11
 

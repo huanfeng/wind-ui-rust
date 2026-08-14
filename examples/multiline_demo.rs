@@ -11,8 +11,6 @@
 
 use windui::prelude::*;
 
-const ACCENT: u32 = 0x4C8BF5;
-
 /// 初始长文本：包含短行、长行、空行，模拟真实用户输入。
 const LONG_TEXT: &str = "\
 第一行：普通短文本。
@@ -117,7 +115,7 @@ DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
                         .spacing(8)
                         .child(
                             Element::button("追加段落")
-                                .accent(Color::hex(ACCENT))
+                                .accent_role(Role::Accent)
                                 .on_click(move |_| {
                                     t1_clone.update(|s| s.push_str(APPEND_TEXT));
                                 }),
@@ -169,7 +167,7 @@ Home/End 跳行首尾、Ctrl+A 全选，\
                         .spacing(8)
                         .child(
                             Element::button("追加段落")
-                                .accent(Color::hex(ACCENT))
+                                .accent_role(Role::Accent)
                                 .on_click(move |_| {
                                     t3_clone.update(|s| s.push_str(APPEND_TEXT));
                                 }),

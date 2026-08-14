@@ -69,6 +69,7 @@ fn main() {
         );
 
     App::new("windui — 托盘", 420, 240)
+        .screenshot_from_args()
         .bg(Color::hex(0xFFFFFF))
         .tray(tray)
         .content(ui)

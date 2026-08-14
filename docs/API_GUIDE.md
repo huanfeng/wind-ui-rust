@@ -344,8 +344,9 @@ Element::table_selectable(columns, rows, selected, sort)
 ```rust
 Element::label("文本")
 Element::button("确定").on_click(|ctx| { /* ... */ })
-//  .danger() / .neutral() / .accent(color) / .intent(Intent::X)   语义意图色（Button/CheckBox 通用）
-//  .outline()      描边变体（透明底 + 意图色边框/文字），可叠加 neutral/danger/accent
+//  .danger() / .neutral() / .intent(Intent::X)   语义意图色（Button/CheckBox 通用）
+//  .accent(color) / .accent_role(Role::X)        自定义意图基色：定色 / 跟随主题（成对，同 fg / fg_role）
+//  .outline()      描边变体（透明底 + 意图色边框/文字），可叠加 neutral/danger/accent(_role)
 //  .small()        紧凑内边距（密集工具栏用）
 Element::icon_button("\u{25B2}").on_click(|ctx| ...)   // 纯图标按钮（字形）：▲▼ 调序 / ⓘ 信息 / × 关闭
 Element::icon_button_content(image_content)            // 纯图标按钮（图片/SVG）
@@ -355,7 +356,7 @@ Element::badge_intent("废弃", Intent::Danger)    // 指定语义色的徽章
 Element::chip("分号(;)", |ctx| { /* 移除 */ })   // 可删标签：pill + × 删除按钮（点 × 触发回调）
 Element::tag_field("输入…", vec![chip1, chip2])  // 多值标签字段（仿输入框容器，承载一组 chip）
 Element::checkbox("启用", state)                 // state: Signal<bool>
-//  .danger() / .accent(color)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
+//  .danger() / .accent(color) / .accent_role(Role::X)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
 //  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）
 Element::switch(state)                            // state: Signal<bool>
 Element::radio("选项", group, index)             // group: Signal<usize>
@@ -911,6 +912,10 @@ let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
   `Intent::Success` / `Intent::Warning`（同一个色槽的另一条访问路径，不是第二套体系）。
   取值刻意保证对表面 ≥ 3:1，因为语义色经常直接当**前景**用（状态文字、标签边框），
   饱和亮黄当 warning 会糊得看不清。
+- **内置意图之外的基色**走 `Intent::Custom(Color)` / `Intent::CustomRole(Role)`，框架据此派生
+  整组视觉（hover 变亮、active 变暗、前景按亮度自适应）。两者只差基色何时确定：`Custom` 是
+  构建期给的**定色**，换主题不动；`CustomRole` 延迟到 paint 期从当前主题取角色，故跟随换主题。
+  控件上对应 `.accent(color)` 与 `.accent_role(role)`——与 `fg` / `fg_role` 是同一套成对约定。
 
 > ⚠️ 反过来说：**构建期不要取色**。像 `let c = theme::current().palette.text;` 然后
 > `.fg(c)` 这样，取到的是构建那一刻的颜色，换主题后不会更新。自己封装组合控件时尤其
@@ -1222,6 +1227,22 @@ let dot = Element::leaf().widget(Dot { on: state });
 - `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
 - 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
 - `Signal` 只能在 UI 线程使用（`!Send`），跨线程更新走 `App::channel`（见 §8.5）。
+- **离屏层上的文字没有 ClearType**：子树 `opacity()` 与半透明文字色都要经离屏层合成，
+  而次像素抗锯齿要求每个通道各有一个 alpha、RGBA 只有一个，层内因此退化为灰度抗锯齿
+  （浏览器给 `opacity` 子树的也是这个取舍）。小字号下会觉得比不透明路径略"细"。
+  两个后端都如此，与 GPU 与否无关。全不透明的常规路径不受影响。
+- **信号槽位回收只覆盖库内三处重建宿主**：`list_signal` / `host_signal` 的 `DynList`、
+  `reorder_list_signal` 的行源、可排序表格的表头与正文。作用域外的 `signal()` **永不回收**，
+  这是刻意的——应用状态没有所有者，也不该有。但若应用自己写了"按数据整批重建子树"的
+  控件，其构建期信号仍会一轮轮累积，须自持一个 `SignalScope` 管起来
+  （`WINDUI_SIGNALS=1` 可在活跃槽位创新高时打印，健康应用启动后应永久安静）。
+- **构造期读取的主题尺寸不跟随运行期换主题**：`card` / `field` / `setting_row` /
+  `setting_row_desc` 这类组合构建器在**构建时**就把 `CardTheme` / `FormTheme` 的行高、
+  内边距、间距、字号烘进 Element。颜色不受影响（走 `Role` 延迟解析，见 §7），
+  但换主题后要尺寸也跟着变，必须重建这棵子树。
+- **`#[non_exhaustive]` 的五个类型**（`MenuItem` / `DropdownItem` / `CheckMenuItem` /
+  `Role` / `Intent`）在下游不能用结构体字面量构造，穷尽 `match` 须留 `_` 兜底。
+  一律走构造器 + builder 链（`MenuItem::run(..).icon(..).danger()`）。
 
 **平台状态**
 
@@ -1238,8 +1259,14 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 
 **命名一致性**
 
-背景/前景统一 `bg`/`fg`；控件状态统一 `Signal<T>`；text_input / link / rich 的专属修饰符
-误用在 debug 期 panic 提示。单条文案统一收 `impl Into<TextContent>`（`button`、`label`、
+背景/前景统一 `bg`/`fg`，各自都有跟随主题的 `_role` 变体（`bg_role`/`fg_role`/`border_role`/
+`accent_role`）；控件状态统一 `Signal<T>`；控件专属修饰符误用在 debug 期 panic 提示、release
+静默忽略——覆盖 text_input（`password`/`multiline`/`wrap`）、link（`url`/`underline`）、
+rich（`max_lines`/`truncate`/`on_span_click`/`copy_menu`）、image（`fit`/`tint`）、
+slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一族
+（`intent`/`danger`/`neutral`/`accent`/`accent_role`）与表格扩展的一整组。
+属性设置器统一去掉 `with_` 前缀（`with_badge` → `badge` 等），旧名留 `#[deprecated]`
+过渡，编译期会提示新名。单条文案统一收 `impl Into<TextContent>`（`button`、`label`、
 `link`、`checkbox`、`radio`、`nav_row`、`badge`、`icon_button`，可传 `&str` / `String` /
 `Signal<String>`）；成组文案收 `impl Into<String>`（`dropdown`、`list`、`tabs` 的选项等）。
 少数破例仍收裸 `String`：`Element::table_custom(columns: Vec<(String, f32)>, ..)`。碰上编译

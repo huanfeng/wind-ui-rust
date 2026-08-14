@@ -794,7 +794,8 @@ impl Element {
 
     /// 指定语义意图的徽章（Primary=强调蓝 / Neutral=灰 / Danger=红 / Custom=自定义基色）。
     /// 内置三意图的颜色走主题角色延迟解析（运行期换主题自动跟随）；
-    /// `Custom` 为调用方给定的固定基色，本就不随主题。
+    /// `Custom` 为调用方给定的固定基色，本就不随主题——要随主题请传
+    /// [`Intent::CustomRole`]。
     pub fn badge_intent(text: impl Into<TextContent>, intent: Intent) -> Self {
         use crate::style::Role;
         let shell = Element::row()
@@ -821,6 +822,8 @@ impl Element {
                 .bg_role_alpha(Role::Warning, 0.15)
                 .child(label.fg_role(Role::Warning)),
             Intent::Custom(c) => shell.bg(c.scale_alpha(0.15)).child(label.fg(c)),
+            // CustomRole 跟内置意图同路：淡底与前景都走角色延迟解析，故也跟随换主题。
+            Intent::CustomRole(r) => shell.bg_role_alpha(r, 0.15).child(label.fg_role(r)),
         }
     }
 
@@ -1295,9 +1298,21 @@ impl Element {
         self.config_intent("neutral()", Intent::Neutral)
     }
     /// 自定义意图基色（扩展点）：框架派生整组视觉。Button / CheckBox 通用。
+    ///
+    /// 传的是**定色**，运行期换主题不跟随。要跟随主题请用
+    /// [`accent_role`](Self::accent_role)（与 `fg` / `fg_role` 同一套成对约定）。
     #[track_caller]
     pub fn accent(self, color: Color) -> Self {
         self.config_intent("accent()", Intent::Custom(color))
+    }
+    /// 自定义意图基色的主题角色版（扩展点）：基色延迟到绘制时按当前主题解析，
+    /// 运行期换主题自动跟随。Button / CheckBox 通用，其余同 [`accent`](Self::accent)。
+    ///
+    /// 内置意图（`primary`/`neutral`/`danger` 等）已覆盖的语义**不要**改用本方法绕道——
+    /// 它是给"想用 palette 里别的色槽当基色"准备的。
+    #[track_caller]
+    pub fn accent_role(self, role: crate::style::Role) -> Self {
+        self.config_intent("accent_role()", Intent::CustomRole(role))
     }
     /// intent 修饰符落点：依次尝试 Button / CheckBox，命中即设；用于其他控件属误用。
     #[track_caller]
@@ -1774,7 +1789,13 @@ impl Element {
         self
     }
 
-    /// 提交模式（见 [`CommitMode`]）。仅 [`Element::reorder_list`] 可用。
+    /// 提交模式（见 [`CommitMode`]）。[`Element::reorder_list`] 与
+    /// [`Element::reorder_list_signal`] 都接受——两者挂的是同一个控件，故设置器不区分。
+    ///
+    /// 真正该调它的只有 `reorder_list`（默认 [`CommitMode::Children`]，需要改数据驱动时
+    /// 换成 [`CommitMode::Callback`]）。`reorder_list_signal` 建出来就是 `Callback`，
+    /// **不要**再改回 `Children`：那会让顺序被落实两遍——控件先自行重排 `children`，
+    /// 回调改的数据信号紧接着又重建整批行。
     #[track_caller]
     pub fn commit_mode(mut self, mode: reorder::CommitMode) -> Self {
         match self
@@ -1783,7 +1804,10 @@ impl Element {
             .and_then(|a| a.downcast_mut::<reorder::ReorderList>())
         {
             Some(rl) => rl.set_mode(mode),
-            None => debug_assert!(false, "commit_mode() 只能用于 Element::reorder_list(..)"),
+            None => debug_assert!(
+                false,
+                "commit_mode() 只能用于 Element::reorder_list(..) / Element::reorder_list_signal(..)"
+            ),
         }
         self
     }

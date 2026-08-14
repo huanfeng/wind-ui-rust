@@ -137,8 +137,13 @@ pub enum Intent {
     Success,
     /// 警告 / 需注意：palette.warning。
     Warning,
-    /// 扩展点：任意基色，派生整组视觉。
+    /// 扩展点：任意基色，派生整组视觉。基色是**定色**，运行期换主题不跟随。
     Custom(Color),
+    /// 扩展点：任意主题角色作基色，派生整组视觉。与 [`Intent::Custom`] 的唯一差别是
+    /// 基色**延迟到解析时**才从当前主题取（同 [`crate::style::Brush::Role`]），
+    /// 因而运行期换主题自动跟随。适合借用内置意图之外的 palette 色槽
+    /// （`Role::AccentHover`、`Role::TextMuted` 等）。
+    CustomRole(crate::style::Role),
 }
 
 /// `Intent` 解析出的一组语义色。控件各取所需（Button 用全部，CheckBox 取 bg+fg）。
@@ -153,9 +158,20 @@ pub struct IntentColors {
 
 impl Intent {
     /// 解析为一组语义色。`Primary` 用 palette 精调的 accent 家族；其余 intent 由基色派生。
+    ///
+    /// [`Intent::CustomRole`] 的基色不取自参数 `p`，而是取自**当前线程活动主题**
+    /// （`theme::current()`，同 `Brush::Role` 的解析口径）——角色可能落在 palette 之外的
+    /// 覆盖层上（`Role::InputBg` 等），只有整个 `Theme` 才解得出。故本方法须在主题
+    /// 已就位的时机调用（布局/绘制期），这也是控件唯一调它的地方。
     pub fn colors(self, p: &Palette) -> IntentColors {
         const L: f32 = 0.10; // hover 变亮系数
         const D: f32 = 0.10; // active 变暗系数
+        let derive = |c: Color| IntentColors {
+            bg: c,
+            hover: c.lighten(L),
+            active: c.darken(D),
+            fg: c.pick_fg(p.text, p.on_accent),
+        };
         match self {
             Intent::Primary => IntentColors {
                 bg: p.accent,
@@ -187,12 +203,8 @@ impl Intent {
                 active: p.warning.darken(D),
                 fg: p.warning.pick_fg(p.text, p.on_accent),
             },
-            Intent::Custom(c) => IntentColors {
-                bg: c,
-                hover: c.lighten(L),
-                active: c.darken(D),
-                fg: c.pick_fg(p.text, p.on_accent),
-            },
+            Intent::Custom(c) => derive(c),
+            Intent::CustomRole(r) => derive(r.resolve(&current())),
         }
     }
 
@@ -207,6 +219,7 @@ impl Intent {
             Intent::Success => p.success,
             Intent::Warning => p.warning,
             Intent::Custom(c) => c,
+            Intent::CustomRole(r) => r.resolve(&current()),
         };
         (fg.scale_alpha(0.15), fg)
     }
@@ -1358,5 +1371,53 @@ mod tests {
         );
         // Custom 浅基色 → fg 取深色(text) 保证对比。
         assert_eq!(Intent::Custom(Color::hex(0xFFF0A0)).colors(&p).fg, p.text);
+    }
+
+    /// `CustomRole` 与 `Custom` 的唯一差别是基色何时确定：前者在解析时从**当前活动主题**
+    /// 取角色，故换主题后同一个 intent 解出不同的色；后者是定色，永远不动。
+    #[test]
+    fn custom_role_intent_follows_active_theme() {
+        use crate::style::Role;
+        let light = Theme::default();
+        let dark = Theme::dark();
+        // 用 `Role::Text` 而不是 `Role::Danger` 作探针：两套主题的 danger 刻意取同值
+        // （红就是红），角色解析换没换主题从结果上看不出来。
+        let fixed = Intent::Custom(light.palette.text);
+
+        set_current(Rc::new(light.clone()));
+        let p = &light.palette;
+        assert_eq!(
+            Intent::CustomRole(Role::Text).colors(p).bg,
+            p.text,
+            "亮色主题下解析出亮色主题的正文色"
+        );
+        // 派生规则与 Custom 共用：同一基色下两条路径必须给出同一组色。
+        assert_eq!(
+            Intent::CustomRole(Role::Text).colors(p).fg,
+            fixed.colors(p).fg
+        );
+        assert_eq!(Intent::CustomRole(Role::Text).badge_colors(p).1, p.text);
+
+        set_current(Rc::new(dark.clone()));
+        let dp = &dark.palette;
+        assert_ne!(dp.text, p.text, "前提：两套主题的正文色取值不同");
+        assert_eq!(
+            Intent::CustomRole(Role::Text).colors(dp).bg,
+            dp.text,
+            "换到暗色主题后同一个 intent 解出暗色主题的正文色"
+        );
+        assert_eq!(
+            fixed.colors(dp).bg,
+            p.text,
+            "对照：Custom 是定色，换主题后纹丝不动"
+        );
+
+        // 角色可以落在 palette 之外的覆盖层上——这正是解析要整个 Theme 而非 Palette 的原因。
+        assert_eq!(
+            Intent::CustomRole(Role::InputBg).colors(dp).bg,
+            dark.input.bg(dp)
+        );
+
+        set_current(Rc::new(Theme::default()));
     }
 }

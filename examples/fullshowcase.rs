@@ -96,6 +96,35 @@ fn main() {
     let settings_body = Element::col()
         .width_match()
         .spacing(14)
+        // 右键菜单放在默认页首屏：`--rclick` 在 `--click` 之前回放，切不了页，
+        // 菜单演示必须落在打开即可见的位置才截得到（见 platform::run_screenshot）。
+        .child(Element::card(
+            "右键菜单 on_context_menu（末项 MenuItem::danger 显红）",
+            Element::col()
+                .width_match()
+                .bg_role(Role::SurfaceAlt)
+                .corner(8.0)
+                .padding(14)
+                .child(
+                    Element::label("在这块区域右击：复制 / 重命名… / 删除…（危险项）")
+                        .font_size(13.0)
+                        .fg_role(Role::TextMuted)
+                        .width_match(),
+                )
+                .on_context_menu(|| {
+                    vec![
+                        MenuItem::run("复制", |ctx| ctx.toast("已复制"), false)
+                            .icon("⧉")
+                            .shortcut("Ctrl+C"),
+                        MenuItem::run("重命名…", |ctx| ctx.toast("重命名"), false).icon("✎"),
+                        MenuItem::separator(),
+                        // 危险项：intent 压过悬停，指向时仍是红的。
+                        MenuItem::run("删除…", |ctx| ctx.toast_err("已删除"), false)
+                            .icon("🗑")
+                            .danger(),
+                    ]
+                }),
+        ))
         .child(Element::card(
             "常规",
             Element::col()

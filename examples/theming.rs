@@ -144,5 +144,5 @@ fn main() {
         )
         .child(card);
 
-    app.theme(theme_dp).content(ui).run();
+    app.screenshot_from_args().theme(theme_dp).content(ui).run();
 }

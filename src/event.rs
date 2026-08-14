@@ -273,7 +273,10 @@ pub struct MenuItem {
     pub badge: Option<(String, crate::theme::Intent)>,
     /// 尾随可独立点击的图标（字符/emoji，None=无图标）。
     pub trailing_icon: Option<String>,
-    /// 点击尾随图标的回调，与主项 `action` 完全独立；`None` 则图标不可点击（仅展示）。
+    /// 点击尾随图标的回调，与主项 `action` 完全独立。`None` 则图标是**纯展示**的：
+    /// 图标区不再单独抢命中，点它等同于点本项（照常执行 `action` 并关闭菜单）——
+    /// 见 [`MenuItem::trailing_icon_display`]。注意"纯展示"说的是图标没有自己的动作，
+    /// 不是那一小块区域变得点不动。
     /// 签名与 [`MenuAction::Run`] 一致（ctx 在前、`Fn` 的理由同上）。
     pub on_trailing_click: Option<MenuActionFn>,
     /// 粘滞项：点击执行 `action` 后菜单保持展开（复选菜单的开关项）。
