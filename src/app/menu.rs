@@ -23,6 +23,9 @@ const MENU_SEP_H: i32 = 9;
 pub(super) const MENU_PAD_X: i32 = 12;
 pub(super) const MENU_VPAD: i32 = 6;
 const MENU_MIN_W: i32 = 140;
+/// 滚动条命中区宽度。刻意宽于可见滑块（5px）：细滑块难点中，留出横向容错。
+/// 纵向不留容错——见 [`MenuLevel::scrollbar_geom`]。
+const SCROLLBAR_HIT_W: i32 = 16;
 /// 下拉菜单面板最大可视高度（超出后启用滚动）。
 const MENU_MAX_H: i32 = 320;
 const MENU_FONT: f32 = 13.5;
@@ -116,6 +119,30 @@ impl MenuLevel {
             self.rect.w,
             (self.rect.h - 2 * MENU_VPAD).max(0),
         )
+    }
+    /// 滚动条的**轨道与滑块几何** `(轨道矩形, 滑块 y, 滑块高)`；内容未超高时为 `None`。
+    ///
+    /// 与 [`MenuLevel::item_clip`] 同一个用意：绘制与命中共取一处，免得分叉。此前
+    /// 命中判据只写了 `x >= right - 16`、完全不约束 y，而滑块只画在 `y+4` 起、高
+    /// `h-8` 的轨道内——点面板右缘顶/底那几像素会开始拖一个视觉上不在那里的滑块。
+    fn scrollbar_geom(&self) -> Option<(Rect, f32, f32)> {
+        let r = self.rect;
+        if self.content_h <= r.h {
+            return None;
+        }
+        // 命中区（16px）比可见滑块（5px）宽，是有意的：细滑块难点中，留出容错。
+        // 但纵向必须与轨道一致，否则就是"看不见却可拖"。
+        let track = Rect::new(
+            r.right() - SCROLLBAR_HIT_W,
+            r.y + 4,
+            SCROLLBAR_HIT_W,
+            r.h - 8,
+        );
+        let ratio = r.h as f32 / self.content_h as f32;
+        let thumb_h = (track.h as f32 * ratio).max(20.0);
+        let max_sc = self.max_scroll().max(1) as f32;
+        let thumb_y = track.y as f32 + (track.h as f32 - thumb_h) * (self.scroll as f32 / max_sc);
+        Some((track, thumb_y, thumb_h))
     }
     /// 命中点 → 项下标（分隔线不可命中）。
     fn item_at(&self, p: Point) -> Option<usize> {
@@ -514,17 +541,17 @@ impl UiHost {
                 // 滚动条命中检测：面板右侧 10px 区域内且该面板有滚动内容。
                 if let Some(k) = self.menu.active.as_ref().and_then(|m| m.level_at(ev.pos)) {
                     let level = &self.menu.active.as_ref().unwrap().levels[k];
-                    let r = level.rect;
-                    if level.content_h > r.h && ev.pos.x >= r.right() - 16 {
-                        // 命中滚动条（命中区 16px）：开始拖拽，不关闭菜单也不触发项。
-                        let track_h = (r.h - 8) as f32;
-                        let ratio = r.h as f32 / level.content_h as f32;
-                        let thumb_h = (track_h * ratio).max(20.0);
+                    // 命中滚动条：开始拖拽，不关闭菜单也不触发项。几何取自
+                    // scrollbar_geom，与绘制同源——纵向也必须落在轨道内。
+                    if let Some((track, _, thumb_h)) = level
+                        .scrollbar_geom()
+                        .filter(|(t, _, _)| t.contains(ev.pos))
+                    {
                         self.menu.scrollbar_drag = Some(MenuScrollbarDrag {
                             level: k,
                             start_y: ev.pos.y,
                             start_scroll: level.scroll,
-                            track_h,
+                            track_h: track.h as f32,
                             thumb_h,
                         });
                         self.swallow_up = true;
@@ -1035,14 +1062,8 @@ impl MenuHost {
                 }
             }
             canvas.restore();
-            // 内容超高时绘制右侧滚动指示条。
-            if level.content_h > r.h {
-                let track_h = (r.h - 8) as f32;
-                let ratio = r.h as f32 / level.content_h as f32;
-                let thumb_h = (track_h * ratio).max(20.0);
-                let max_sc = level.max_scroll().max(1) as f32;
-                let thumb_y =
-                    (r.y + 4) as f32 + (track_h - thumb_h) * (level.scroll as f32 / max_sc);
+            // 内容超高时绘制右侧滚动指示条（几何与命中同源，见 scrollbar_geom）。
+            if let Some((_, thumb_y, thumb_h)) = level.scrollbar_geom() {
                 canvas.fill_round_rect(
                     (r.right() - 8) as f32,
                     thumb_y,
@@ -1062,6 +1083,47 @@ mod tests {
     use crate::app::test_support::{dropdown_handler, key_ev};
     use crate::app::App;
     use crate::ui::Element;
+
+    /// 回归：滚动条的命中区纵向必须与轨道一致。此前判据只写了 `x >= right - 16`，
+    /// 完全不约束 y，而滑块只画在 `y+4` 起、高 `h-8` 的轨道内——点面板右缘最顶或
+    /// 最底那几像素，会开始拖一个视觉上不在那里的滑块。横向仍留 16px 容错（可见
+    /// 滑块只有 5px 宽，不留容错就太难点中），纵向不留。
+    #[test]
+    fn scrollbar_hit_area_matches_the_drawn_track_vertically() {
+        use crate::event::MenuItem;
+        use crate::geometry::Point;
+
+        let items: Vec<MenuItem> = (0..10)
+            .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+            .collect();
+        let level = MenuLevel {
+            items,
+            rect: Rect::new(40, 100, 160, 5 * MENU_ITEM_H + 2 * MENU_VPAD),
+            hover: None,
+            has_icons: false,
+            spawn: None,
+            content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
+            scroll: 0,
+        };
+        let (track, _, _) = level.scrollbar_geom().expect("内容超高应有滚动条");
+        let r = level.rect;
+        let x = r.right() - 3; // 落在 16px 命中区内
+
+        // 前置：这两个点确实在面板内、且横向落在旧判据 (x >= right-16) 的范围里，
+        // 否则本测试不修也会绿。
+        for y in [r.y + 1, r.bottom() - 2] {
+            assert!(r.contains(Point::new(x, y)), "前置：点应在面板矩形内");
+            assert!(x >= r.right() - SCROLLBAR_HIT_W, "前置：横向应落在命中区");
+            assert!(
+                !track.contains(Point::new(x, y)),
+                "y={y} 在轨道之外（轨道 {}..{}），不得判为命中滚动条",
+                track.y,
+                track.bottom()
+            );
+        }
+        // 轨道内照常命中，别把正常拖拽一起关掉。
+        assert!(track.contains(Point::new(x, track.y + track.h / 2)));
+    }
 
     /// 回归：命中判据必须与绘制裁剪同源。面板上下各 `MENU_VPAD` 的边带被 clip 掉，
     /// 而 `scroll == 0` 时首项恰好从裁剪线起画，边带里没有行——问题只在滚动之后
