@@ -28,7 +28,12 @@ const BADGE_H: i32 = 20;
 const BADGE_GAP: i32 = 8;
 
 /// 富内容选项：主文本 + 可选第二行说明 + 可选尾随徽章（纯展示）+ 可选尾随可点击图标。
+///
+/// 与 [`crate::event::MenuItem`] 一样标了 `#[non_exhaustive]`：两者常出现在同一份
+/// 菜单代码里，只有一个封住字面量构造反而是新的记忆负担。请用 [`DropdownItem::new`]
+/// 加链式设置器构造；四个字段都有对应设置器，日后加字段不会波及调用方。
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct DropdownItem {
     pub label: String,
     pub subtitle: Option<String>,
@@ -426,9 +431,16 @@ type SummaryFn = Rc<dyn Fn(&[&str]) -> String>;
 type CheckChangeFn = Rc<dyn Fn(&mut EventCtx, bool)>;
 
 /// [`CheckMenu`] 的一项：开关项 / 普通动作项 / 分隔线。
+///
+/// 枚举与各变体都标了 `#[non_exhaustive]`，理由同 [`DropdownItem`]：菜单项类型会随
+/// 需求长新变体和新字段。请用 [`CheckMenuItem::check`] / [`CheckMenuItem::action`] /
+/// [`CheckMenuItem::separator`] 三个构造器加 [`CheckMenuItem::on_change`] /
+/// [`CheckMenuItem::enabled`] 两个设置器构造，它们覆盖了全部字段。
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum CheckMenuItem {
     /// 开关项：绑定 `Signal<bool>`，点击原地翻转且**菜单不关闭**，可连点多个。
+    #[non_exhaustive]
     Check {
         label: String,
         state: Signal<bool>,
@@ -437,6 +449,7 @@ pub enum CheckMenuItem {
         enabled: bool,
     },
     /// 普通动作项：点击执行并关闭菜单（与右键菜单的项同语义）。
+    #[non_exhaustive]
     Action {
         label: String,
         on_click: crate::event::MenuActionFn,

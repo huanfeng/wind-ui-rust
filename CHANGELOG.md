@@ -296,6 +296,15 @@
   **迁移**：下游 `MenuItem { .. }` 报 `E0639`（cannot create non-exhaustive struct using
   struct expression），改用 `MenuItem::run` / `key` / `separator` / `submenu` 四个便捷构造
   加链式设置器；穷尽解构 `let MenuItem { label, .. } = it` 需补 `..`。**读字段不受影响**。
+- **`DropdownItem` 与 `CheckMenuItem` 一并加 `#[non_exhaustive]`（破坏性）**：它们与
+  `MenuItem` 常出现在同一份菜单代码里，只封住其中一个反而是新的记忆负担——用户得记住
+  "这个能写字面量、那个不能"。菜单项类型都会随需求长新字段和新变体，一次封齐。
+  `CheckMenuItem` 是枚举，故枚举本身与 `Check` / `Action` 两个变体都标了（前者禁止下游
+  穷尽 `match`，后者禁止变体的字面量构造）。
+  自查过字段覆盖：`DropdownItem` 的四个字段都有设置器（`trailing_icon` 的回调不是
+  `Option`，不存在 `MenuItem` 那种"纯展示"缺口）；`CheckMenuItem` 的
+  `check` / `action` / `separator` 三个构造器加 `on_change` / `enabled` 两个设置器覆盖全部字段。
+  **迁移**：改用构造器 + 链式设置器；对 `CheckMenuItem` 的穷尽 `match` 需补 `_ =>` 分支。
 - **`Element::icon(path)` 改名 `icon_file(path)`**：同一个 `Element` 上并列着
   `icon(文件路径)` / `icon_bytes` / `icon_rgba` / `icon_svg` / `icon_content`，最短的名字
   给了**唯一会碰文件系统、唯一可能失败**的那个形态（路径写错即无图标），最容易被当成
