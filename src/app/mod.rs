@@ -1048,7 +1048,20 @@ impl UiHost {
             self.focus.current = Some(f);
             match focus_from {
                 // 鼠标聚焦不显示焦点环，保持纯鼠标操作的纯净观感。
-                FocusSource::Pointer => self.focus.visible = false,
+                FocusSource::Pointer => {
+                    self.focus.visible = false;
+                    // 焦点在两个控件之间转移时必须整窗：**旧**焦点要重绘才能擦掉自己的
+                    // 光标与焦点环，而它没有收到本次事件，压根不在脏区里——脏区只来自
+                    // 被点中的那个控件。多个文本框互相点击时的光标竖条残留就是这么来的，
+                    // 新框画出光标、旧框的光标仍留在后备缓冲里，直到下一次全窗刷新。
+                    //
+                    // 不改成"把旧节点矩形并进脏区"，与下面 blur 分支同理：焦点环画在节点
+                    // 框外 1px，而此刻旧节点的 focused 已置 false，按它的脏区走会残留一圈。
+                    // 焦点转移是人手点击的频率，整窗一帧换取正确性是划算的。
+                    if old.is_some_and(|o| o != f) {
+                        self.damage.needs_full = true;
+                    }
+                }
                 // 键盘聚焦相反——本来就在键盘导航中。焦点环跨节点变化 → 整窗。
                 FocusSource::Keyboard => {
                     self.focus.visible = true;

@@ -378,4 +378,48 @@ mod tests {
             "关闭浮层的那一帧必须整窗，否则面板像素残留"
         );
     }
+    /// 鼠标在两个文本框之间点击 → 整窗刷新，否则旧框的光标竖条会残留。
+    ///
+    /// 旧焦点收不到本次事件，脏区里只有被点中的那个控件；若走局部重绘，新框画出光标、
+    /// 旧框的光标仍留在后备缓冲里，要等下一次全窗刷新才消失。macOS 实测发现，但成因与
+    /// 平台无关——三条焦点路径里只有"鼠标点到另一个可聚焦控件"漏了这一步（Tab 与点空白
+    /// 清焦点都已置 needs_full）。
+    #[test]
+    fn pointer_focus_transfer_repaints_full() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let a = crate::signal::signal(String::new());
+        let b = crate::signal::signal(String::new());
+        let app = App::new("t", 200, 120).content(
+            Element::col()
+                .width(200)
+                .height(120)
+                .child(Element::text_input(a, "甲").width(180).height(32))
+                .child(Element::text_input(b, "乙").width(180).height(32)),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 120).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 120));
+
+        let click = |h: &mut crate::app::UiHost, at: Point| {
+            h.on_pointer(PointerEvent::single(
+                PointerKind::Down,
+                at,
+                MouseButton::Left,
+            ));
+            h.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+        };
+        // 先点第一个框拿到焦点，把这帧的全窗消化掉。
+        click(&mut handler, Point::new(40, 16));
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 120));
+        // 再点第二个框：焦点从甲转到乙，甲的光标必须被擦掉。
+        click(&mut handler, Point::new(40, 48));
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 120));
+        assert!(
+            handler.damage.last_frame_full,
+            "焦点在两个文本框之间转移应整窗刷新，否则旧框光标残留"
+        );
+    }
 }
