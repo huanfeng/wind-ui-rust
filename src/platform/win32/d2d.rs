@@ -1566,3 +1566,306 @@ fn d2d_color(c: Color) -> D2D1_COLOR_F {
         a: c.a as f32 / 255.0,
     }
 }
+
+/// 离屏渲染：把一次 D2D 绘制取回 `Pixmap`。
+///
+/// 整体门控在 `cfg(test)`：现阶段唯一用途就是测试。要让 `--screenshot` 也能出
+/// GPU 图，需先把它改造成**可复用**的离屏后端——截图会依次渲染初始帧、点击帧、
+/// 悬停帧，每帧重建一整条 D3D/D2D 设备链并不合理。那是独立的一步，届时连同
+/// `run_offscreen` 的后端选择一起放开。
+#[cfg(test)]
+mod offscreen {
+    use super::*;
+    use tiny_skia::Pixmap;
+    use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_CPU_READ, D2D1_MAP_OPTIONS_READ};
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_WARP;
+
+    /// 离屏跑一次 D2D 绘制，把结果取回 `Pixmap`（RGBA 预乘，与软后端同格式）。
+    ///
+    /// 存在的理由是**这条路径此前无法验证**：窗口后端的像素在 swapchain 里，读不回来；
+    /// 离屏截图（`run_offscreen`）又恒走软渲染。于是 d2d.rs 的一千五百行长期零测试，
+    /// 软硬两路画得像不像，全靠肉眼看。取回 `Pixmap` 后，既有的截图比对与墨量判据即可
+    /// 原样用在 GPU 路径上。
+    ///
+    /// 走的是与窗口后端**同一个** `D2DTarget`/`D2DCanvas`，只把呈现目标从 swapchain 换成
+    /// 离屏位图——否则测出来的不是生产行为。
+    ///
+    /// 设备优先硬件、失败退 WARP（软件光栅化器）：CI 与远程桌面上没有可用 GPU，若只试
+    /// 硬件，测试会在那些环境里静默跳过，而"跳过"和"通过"在报告里长得一模一样。
+    /// 两者都失败返回 `None`（无 D2D 运行时，绝不 panic）。
+    ///
+    /// 暂门控在 `cfg(test)`：现阶段唯一的用途就是测试。要让 `--screenshot` 也能出 GPU 图，
+    /// 需要先把它改造成可复用的离屏后端——截图会依次渲染初始帧、点击帧、悬停帧，每帧重建
+    /// 一整条 D3D/D2D 设备链是不合理的。那是独立的一步，届时连同 `run_offscreen` 的后端
+    /// 选择一起放开。
+    pub(crate) fn render_offscreen(
+        w: u32,
+        h: u32,
+        scale: f32,
+        bg: Color,
+        draw: impl FnOnce(&mut dyn Canvas),
+    ) -> Option<Pixmap> {
+        unsafe { render_offscreen_inner(w, h, scale, bg, draw) }
+    }
+
+    /// 建离屏用的 D2D 设备链。先硬件后 WARP，返回 (d2d_device, dwrite_factory)。
+    /// 不复用 `shared_device()`：那份是窗口后端的进程状态，测试不该与它相互影响，
+    /// 且它只试硬件、拿不到 WARP 回退。
+    unsafe fn offscreen_device() -> Option<(ID2D1Device, IDWriteFactory)> {
+        for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+            let mut d3d: Option<ID3D11Device> = None;
+            let ok = D3D11CreateDevice(
+                None,
+                driver,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut d3d),
+                None,
+                None,
+            )
+            .is_ok();
+            if !ok {
+                continue;
+            }
+            let Some(d3d) = d3d else { continue };
+            let Ok(dxgi): windows::core::Result<IDXGIDevice> = d3d.cast() else {
+                continue;
+            };
+            let Ok(factory): windows::core::Result<ID2D1Factory1> =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)
+            else {
+                continue;
+            };
+            let Ok(device) = factory.CreateDevice(&dxgi) else {
+                continue;
+            };
+            let Ok(dwrite) = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) else {
+                continue;
+            };
+            return Some((device, dwrite));
+        }
+        None
+    }
+
+    unsafe fn render_offscreen_inner(
+        w: u32,
+        h: u32,
+        scale: f32,
+        bg: Color,
+        draw: impl FnOnce(&mut dyn Canvas),
+    ) -> Option<Pixmap> {
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (d2d_device, dwrite_factory) = offscreen_device()?;
+        let context = d2d_device.CreateDeviceContext(Default::default()).ok()?;
+        let bake_ctx = d2d_device.CreateDeviceContext(Default::default()).ok()?;
+
+        let size = D2D_SIZE_U {
+            width: w,
+            height: h,
+        };
+        let pixel_format = D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        };
+        // 渲染目标位图：与窗口后端的后备缓冲同格式（BGRA8 预乘、96 DPI）。
+        let target: ID2D1Bitmap1 = context
+            .CreateBitmap(
+                size,
+                None,
+                0,
+                &D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: pixel_format,
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    colorContext: std::mem::ManuallyDrop::new(None),
+                },
+            )
+            .ok()?;
+        context.SetTarget(&target);
+        // 与 try_create_inner 同样的初始状态，否则测的不是生产配置。
+        context.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+        let solid = context
+            .CreateSolidColorBrush(&d2d_color(Color::rgba(0, 0, 0, 255)), None)
+            .ok()?;
+
+        context.BeginDraw();
+        context.Clear(Some(&d2d_color(bg)));
+        {
+            let mut grad_cache = HashMap::new();
+            let mut format_cache = HashMap::new();
+            let mut layout_cache = HashMap::new();
+            let mut image_cache = HashMap::new();
+            let mut shadow_effect = None;
+            let mut shadow_cache = HashMap::new();
+            let mut target_wrap = D2DTarget {
+                ctx: &context,
+                solid: &solid,
+                grad_cache: &mut grad_cache,
+                dwrite_factory: &dwrite_factory,
+                format_cache: &mut format_cache,
+                layout_cache: &mut layout_cache,
+                image_cache: &mut image_cache,
+                bake_ctx: &bake_ctx,
+                shadow_effect: &mut shadow_effect,
+                shadow_cache: &mut shadow_cache,
+            };
+            // D2D 自带 DirectWrite 文字栈，engine 被忽略，传 Null 桩即可。
+            let mut engine = crate::text::NullTextEngine;
+            let mut canvas = target_wrap.make_canvas(&mut engine, scale);
+            draw(&mut *canvas);
+        }
+        context.SetTransform(&Matrix3x2::identity());
+        context.EndDraw(None, None).ok()?;
+        // 解绑后再读回：target 仍被 context 持有时 CopyFromBitmap 的行为不保证。
+        context.SetTarget(None);
+
+        // CPU 可读的暂存位图 → 拷贝 → Map 读出。D2D 不允许直接 Map 渲染目标。
+        let staging: ID2D1Bitmap1 = context
+            .CreateBitmap(
+                size,
+                None,
+                0,
+                &D2D1_BITMAP_PROPERTIES1 {
+                    pixelFormat: pixel_format,
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                    bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                    colorContext: std::mem::ManuallyDrop::new(None),
+                },
+            )
+            .ok()?;
+        staging.CopyFromBitmap(None, &target, None).ok()?;
+        let mapped = staging.Map(D2D1_MAP_OPTIONS_READ).ok()?;
+
+        let mut pm = Pixmap::new(w, h)?;
+        {
+            let dst = pm.data_mut();
+            for y in 0..h as usize {
+                let src_row = mapped.bits.add(y * mapped.pitch as usize);
+                for x in 0..w as usize {
+                    let s = src_row.add(x * 4);
+                    let d = (y * w as usize + x) * 4;
+                    // D2D 是 BGRA 预乘，tiny-skia 是 RGBA 预乘：换 R/B 两通道即可。
+                    dst[d] = *s.add(2);
+                    dst[d + 1] = *s.add(1);
+                    dst[d + 2] = *s;
+                    dst[d + 3] = *s.add(3);
+                }
+            }
+        }
+        staging.Unmap().ok()?;
+        Some(pm)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offscreen::render_offscreen;
+    use super::*;
+    use crate::geometry::Rect;
+    use crate::spec::Align;
+    use crate::text::TextStyle;
+    use tiny_skia::Pixmap;
+
+    /// 取像素（RGBA 预乘）。
+    fn px(pm: &Pixmap, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * pm.width() + x) * 4) as usize;
+        let d = pm.data();
+        [d[i], d[i + 1], d[i + 2], d[i + 3]]
+    }
+
+    /// 白底上 `[y0, y1)` 行区间的非白像素数（与 text 契约测试同一判据）。
+    fn ink(pm: &Pixmap, y0: u32, y1: u32) -> usize {
+        let mut n = 0;
+        for y in y0..y1.min(pm.height()) {
+            for x in 0..pm.width() {
+                let p = px(pm, x, y);
+                if p[0] != 255 || p[1] != 255 || p[2] != 255 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// 离屏渲染跑不起来即测试失败，不静默跳过——"跳过"和"通过"在报告里长得一样，
+    /// 而这条路径正是因为长期无人验证才积了一千五百行零测试的债。
+    fn render(w: u32, h: u32, scale: f32, draw: impl FnOnce(&mut dyn Canvas)) -> Pixmap {
+        render_offscreen(w, h, scale, Color::rgb(255, 255, 255), draw)
+            .expect("D2D 离屏渲染不可用：硬件与 WARP 设备都没建起来")
+    }
+
+    /// 端到端最小闭环：设备创建 → 绘制 → 读回 → 通道序。
+    ///
+    /// 顺带钉死 BGRA→RGBA 的换序：搞反了红会读成蓝，而"有色块"这类弱断言抓不住，
+    /// 必须断言具体通道。
+    #[test]
+    fn fills_and_reads_back_with_correct_channel_order() {
+        let pm = render(60, 60, 1.0, |c| {
+            c.fill_rect(10.0, 10.0, 30.0, 30.0, &Paint::fill(Color::rgb(255, 0, 0)));
+        });
+        assert_eq!(px(&pm, 20, 20), [255, 0, 0, 255], "矩形内应是红，不是蓝");
+        assert_eq!(px(&pm, 2, 2), [255, 255, 255, 255], "矩形外应保持背景白");
+    }
+
+    /// DPI 变换：`make_canvas` 的 `SetTransform(scale)` 把逻辑坐标放大到物理像素。
+    /// 漏掉会让内容缩在左上角——软硬两路同源的坑，用像素位置钉住。
+    #[test]
+    fn applies_dpi_scale_transform() {
+        let pm = render(80, 80, 2.0, |c| {
+            // 逻辑 (10,10,10,10) 在 scale=2 下应覆盖物理 (20,20)..(40,40)。
+            c.fill_rect(10.0, 10.0, 10.0, 10.0, &Paint::fill(Color::rgb(0, 0, 255)));
+        });
+        assert_eq!(
+            px(&pm, 30, 30),
+            [0, 0, 255, 255],
+            "物理 (30,30) 应在放大后的矩形内"
+        );
+        assert_eq!(
+            px(&pm, 15, 15),
+            [255, 255, 255, 255],
+            "物理 (15,15) 应在矩形外"
+        );
+    }
+
+    /// 纵向定位契约的 D2D 版，与 `text::text_block_contract` 同构：
+    /// 文本高于容器时顶对齐，容器顶边以上不得有墨。
+    ///
+    /// `draw_text` 现在走共享的 `block_offset_y`，这条测试是它在 GPU 路径上的锚。
+    #[test]
+    fn overflowing_text_is_top_aligned() {
+        let pm = render(120, 120, 1.0, |c| {
+            c.draw_text(
+                "AAA\nBBB\nCCC",
+                Rect::new(10, 40, 90, 16),
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        });
+        assert!(ink(&pm, 40, 120) > 0, "正控：容器顶边以下应当有字");
+        assert_eq!(ink(&pm, 0, 40), 0, "容器顶边以上不得有墨：装不下时须顶对齐");
+    }
+
+    /// 装得下时仍垂直居中（与软路径同一组断言）。
+    #[test]
+    fn fitting_text_stays_centered() {
+        let pm = render(120, 120, 1.0, |c| {
+            c.draw_text(
+                "Ag",
+                Rect::new(10, 20, 90, 60),
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        });
+        assert!(ink(&pm, 20, 80) > 0, "正控：容器内应当有字");
+        assert_eq!(ink(&pm, 20, 32), 0, "居中时容器上部应留白");
+        assert_eq!(ink(&pm, 68, 80), 0, "居中时容器下部应留白");
+    }
+}
