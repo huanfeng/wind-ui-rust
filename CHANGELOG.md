@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.12.0] - 2026-08-14
 
 ### Added
 - **`testing` 模块：下游终于测得了收 `&mut EventCtx` 的回调**。`testing::run_with_ctx(f)`
@@ -896,7 +896,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.9.0...v0.10.0
