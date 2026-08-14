@@ -132,7 +132,7 @@ type ShadowKey = (u32, u32, u32, u32, u32);
 /// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct GradKey {
-    /// 0 = 线性，1 = 径向。
+    /// 0 = 轴对齐线性（单位空间画刷），1 = 径向，2 = 斜轴线性（绝对坐标画刷）。
     kind: u8,
     /// 线性：(start, end)；径向：(center, (radius*1000, 0))。单位 1/1000 逻辑 px。
     a: (i32, i32),
@@ -842,12 +842,21 @@ impl D2DCanvas<'_> {
             .map(|s| (q(s.offset.clamp(0.0, 1.0)), rgba(s.color)))
             .collect();
         let key = match g {
-            // 线性：key 用**归一化端点**（位置/尺寸无关）→ 同一渐变样式跨控件/跨位置复用一个画刷，
-            // 缓存条目从"渐变元素数"降到"渐变样式数"（~十几个），根治每帧重建 thrash（D2D 内存暴涨主因）。
-            Gradient::Linear { start, end, .. } => GradKey {
+            // 轴对齐线性：key 用**归一化端点**（位置/尺寸无关）→ 同一渐变样式跨控件/跨位置
+            // 复用一个画刷，缓存条目从"渐变元素数"降到"渐变样式数"（~十几个），根治每帧
+            // 重建 thrash（D2D 内存暴涨主因）。绝大多数 UI 渐变都是水平或垂直的，走这条。
+            Gradient::Linear { start, end, .. } if linear_axis_aligned(*start, *end) => GradKey {
                 kind: 0,
                 a: (q(start.0), q(start.1)),
                 b: (q(end.0), q(end.1)),
+                stops: stop_keys,
+            },
+            // 斜轴线性：画刷按绝对坐标构造（见 `linear_axis_aligned`），故 key 也必须用绝对
+            // 端点——同一样式落在不同尺寸的矩形上是**不同**的画刷，共用一条会画错。
+            Gradient::Linear { start, end, .. } => GradKey {
+                kind: 2,
+                a: (q(x + start.0 * w), q(y + start.1 * h)),
+                b: (q(x + end.0 * w), q(y + end.1 * h)),
                 stops: stop_keys,
             },
             // 径向：半径取 min(w,h) 保圆，无法用单一画刷变换做到位置无关，故 key 保留绝对
@@ -878,7 +887,7 @@ impl D2DCanvas<'_> {
         // 线性画刷在单位空间 [0,1]² 定义，每次绘制用画刷变换映射到当前控件**逻辑**矩形
         // （DPI scale 由 context 的 SetTransform 再统一施加）。径向画刷已按绝对坐标构造，置单位变换。
         match g {
-            Gradient::Linear { .. } => unsafe {
+            Gradient::Linear { start, end, .. } if linear_axis_aligned(*start, *end) => unsafe {
                 brush.SetTransform(&Matrix3x2 {
                     M11: w,
                     M12: 0.0,
@@ -888,7 +897,8 @@ impl D2DCanvas<'_> {
                     M32: y,
                 });
             },
-            Gradient::Radial { .. } => unsafe {
+            // 斜轴线性与径向都已按绝对坐标构造，置单位变换。
+            Gradient::Linear { .. } | Gradient::Radial { .. } => unsafe {
                 brush.SetTransform(&Matrix3x2::identity());
             },
         }
@@ -928,10 +938,18 @@ impl D2DCanvas<'_> {
                 .ok()?;
             let brush: ID2D1Brush = match g {
                 Gradient::Linear { start, end, .. } => {
-                    // 单位空间 [0,1]² 端点；位置/尺寸由调用处的画刷变换施加（位置无关复用）。
-                    let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                        startPoint: vec2(start.0, start.1),
-                        endPoint: vec2(end.0, end.1),
+                    // 轴对齐：单位空间 [0,1]² 端点，位置/尺寸由调用处的画刷变换施加（位置无关复用）。
+                    // 斜轴：直接用绝对端点，画刷变换置单位——理由见 `linear_axis_aligned`。
+                    let props = if linear_axis_aligned(*start, *end) {
+                        D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: vec2(start.0, start.1),
+                            endPoint: vec2(end.0, end.1),
+                        }
+                    } else {
+                        D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: vec2(x + start.0 * w, y + start.1 * h),
+                            endPoint: vec2(x + end.0 * w, y + end.1 * h),
+                        }
                     };
                     self.ctx
                         .CreateLinearGradientBrush(&props, None, &coll)
@@ -1571,6 +1589,21 @@ fn vec2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
+/// 线性渐变的轴是否平行于某条坐标轴。决定画刷用单位空间还是绝对坐标构造。
+///
+/// 单位空间画刷靠 `SetTransform(diag(w,h))` 映射到目标矩形，好处是与位置/尺寸无关、
+/// 一条缓存能跨所有控件复用。但**非等比缩放不保持垂直关系**：单位空间里轴 `(1,1)` 的
+/// 等色线方向是 `(-1,1)`，被 `diag(w,h)` 变换后成了 `(-w,h)`，而正确的等色线应垂直于
+/// 变换后的轴 `(w,h)`、即 `(-h,w)`——两者只在 `w == h` 时相等。
+///
+/// 于是 100×70 的矩形上画 `(0,0)→(1,1)` 的渐变，GPU 侧的轴角度是 45° 而非正确的 35°：
+/// 实测右上角与左下角都取到 t=0.5，而软路径分别是 0.671 / 0.329。轴平行于坐标轴时
+/// 等色线也平行于另一条坐标轴，非等比缩放不改变正交关系，故那条路径安全、保留复用。
+fn linear_axis_aligned(start: (f32, f32), end: (f32, f32)) -> bool {
+    const EPS: f32 = 1e-6;
+    (start.0 - end.0).abs() < EPS || (start.1 - end.1).abs() < EPS
+}
+
 /// `Color`（非预乘 sRGB u8）→ D2D `D2D1_COLOR_F`（直通 RGBA / 255）。
 fn d2d_color(c: Color) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
@@ -2094,6 +2127,144 @@ mod tests {
         assert!(
             half * 4 < opaque * 3,
             "半透明 emoji 应明显淡于不透明：不透明={opaque} 半透明={half}——两者接近即 alpha 对彩色字形失效（7ba1f15 修的正是这个）"
+        );
+    }
+
+    // ---- 软硬一致性 ----
+    //
+    // GPU 与软光栅是两套独立实现（D2D vs tiny-skia，D2D1Shadow vs 自写 box-blur），
+    // 逐像素相同既不可能也不必要。判据按图元的性质分档：**纯色填充与裁剪必须一模一样**
+    // （没有任何抗锯齿参与，差一个像素就是几何算错了）；渐变只容许舍入级偏差；几何图元
+    // 允许边缘抗锯齿差异，但数量必须小；阴影两种模糊算法不同，只约束幅度。
+
+    /// 软硬两路画同一组图元，返回 (差异像素数, 最大通道差)。
+    fn parity(w: u32, h: u32, draw: impl Fn(&mut dyn Canvas)) -> (usize, u32) {
+        let g = render(w, h, 1.0, |c| draw(c));
+        let s = render_soft(w, h, 1.0, |c| draw(c));
+        let (gd, sd) = (g.data(), s.data());
+        let (mut n, mut maxd) = (0usize, 0u32);
+        for i in (0..gd.len()).step_by(4) {
+            let d = (0..3)
+                .map(|k| (gd[i + k] as i32 - sd[i + k] as i32).unsigned_abs())
+                .max()
+                .unwrap_or(0);
+            if d > 0 {
+                n += 1;
+                maxd = maxd.max(d);
+            }
+        }
+        (n, maxd)
+    }
+
+    /// 纯色填充与矩形裁剪：两路必须**逐像素相同**。
+    ///
+    /// 这两者不含任何抗锯齿（边界都落在整数像素上），差异只可能来自几何算错或
+    /// 色彩通道处理不同，没有"实现不同所以略有出入"的余地。它们是整套比对的地基：
+    /// 若这里就对不上，后面几档的阈值都失去意义。
+    #[test]
+    fn fill_and_clip_are_pixel_identical() {
+        let red = Color::rgb(200, 60, 60);
+        let (n, _) = parity(120, 90, move |c| {
+            c.fill_rect(10.0, 10.0, 60.0, 40.0, &Paint::fill(red))
+        });
+        assert_eq!(n, 0, "纯色填充必须软硬逐像素一致");
+
+        let (n, _) = parity(120, 90, move |c| {
+            c.save();
+            c.clip_rect(Rect::new(20, 20, 40, 30));
+            c.fill_rect(0.0, 0.0, 120.0, 90.0, &Paint::fill(red));
+            c.restore();
+        });
+        assert_eq!(n, 0, "矩形裁剪必须软硬逐像素一致");
+    }
+
+    /// 渐变：只容许舍入级偏差（≤2/255）。
+    ///
+    /// **斜轴那一档是本测试的重点**。线性画刷原先一律在单位空间 [0,1]² 构造、再用
+    /// `SetTransform(diag(w,h))` 映射到矩形，而非等比缩放不保持垂直关系：轴 `(1,1)`
+    /// 的等色线被缩放成 `(-w,h)`，正确的却是 `(-h,w)`。100×70 的矩形上，GPU 的轴角
+    /// 因此是 45° 而非 35°，右上/左下两角都取到 t=0.5（软路径为 0.671/0.329），
+    /// 最大通道差 43。修复后降到 1。
+    #[test]
+    fn gradients_match_software_within_rounding() {
+        use crate::render::Gradient;
+        let stops = || vec![(0.0, Color::rgb(255, 0, 0)), (1.0, Color::rgb(0, 0, 255))];
+
+        for (name, s, e) in [
+            ("水平", (0.0, 0.0), (1.0, 0.0)),
+            ("垂直", (0.0, 0.0), (0.0, 1.0)),
+            ("斜轴", (0.0, 0.0), (1.0, 1.0)),
+        ] {
+            // 刻意用非正方形矩形：w==h 时斜轴的缺陷不显形。
+            let (_, maxd) = parity(100, 70, move |c| {
+                let g = Gradient::linear(s, e, stops());
+                c.fill_rect(0.0, 0.0, 100.0, 70.0, &Paint::gradient(g))
+            });
+            assert!(
+                maxd <= 2,
+                "{name}线性渐变软硬最大通道差 {maxd} 超出舍入容差——轴向或插值不一致"
+            );
+        }
+
+        let (_, maxd) = parity(100, 70, |c| {
+            let g = Gradient::radial(
+                (0.5, 0.5),
+                0.8,
+                vec![(0.0, Color::rgb(255, 255, 0)), (1.0, Color::rgb(0, 128, 0))],
+            );
+            c.fill_rect(0.0, 0.0, 100.0, 70.0, &Paint::gradient(g))
+        });
+        assert!(maxd <= 2, "径向渐变软硬最大通道差 {maxd} 超出舍入容差");
+    }
+
+    /// 几何图元：差异只出现在抗锯齿边缘，数量必须小。
+    ///
+    /// 不比幅度而比**数量**：边缘像素的覆盖率算法两边本就不同（单像素可差 20+），
+    /// 但只要差异被限制在轮廓的一圈上、不蔓延到内部，形状就是对的。阈值 3% 相对
+    /// 实测的 0.4%~1.7% 留了一倍余量，真正的几何错位（错位一格就是整条边）会远超它。
+    #[test]
+    fn geometry_primitives_differ_only_at_edges() {
+        const W: u32 = 120;
+        const H: u32 = 90;
+        let red = Color::rgb(200, 60, 60);
+        let budget = (W * H) as usize * 3 / 100;
+        type Case = (&'static str, fn(&mut dyn Canvas, Color));
+        let cases: [Case; 4] = [
+            ("圆角矩形", |c, p| {
+                c.fill_round_rect(10.0, 10.0, 60.0, 40.0, 8.0, &Paint::fill(p))
+            }),
+            ("圆角描边", |c, p| {
+                c.stroke_round_rect(10.0, 10.0, 60.0, 40.0, 8.0, 2.0, &Paint::fill(p))
+            }),
+            ("直线", |c, p| {
+                c.draw_line(10.0, 10.0, 100.0, 70.0, 3.0, &Paint::fill(p))
+            }),
+            ("实心圆", |c, p| {
+                c.fill_circle(60.0, 45.0, 30.0, &Paint::fill(p))
+            }),
+        ];
+        for (name, f) in cases {
+            let (n, _) = parity(W, H, move |c| f(c, red));
+            assert!(
+                n <= budget,
+                "{name}软硬差异 {n} 像素超过预算 {budget}（占比 3%）——差异应只在抗锯齿边缘"
+            );
+        }
+    }
+
+    /// 投影：两种模糊算法（D2D1Shadow vs 自写 box-blur）衰减曲线不同，只约束幅度。
+    ///
+    /// 差异必然覆盖整片模糊区（实测约 59% 像素），比数量没有意义；但每个像素的偏差
+    /// 必须小到看不出来。阈值 16/255 约为 6%，相对实测的 7 留了一倍余量，而"阴影浓度
+    /// 差一档"或"少了一圈"这类真问题会远超它。
+    #[test]
+    fn shadow_matches_software_in_intensity() {
+        let (_, maxd) = parity(120, 90, |c| {
+            c.draw_shadow(20.0, 20.0, 60.0, 40.0, 8.0, 10.0, Color::rgba(0, 0, 0, 120))
+        });
+        assert!(
+            maxd <= 16,
+            "投影软硬最大通道差 {maxd} 过大，衰减曲线已肉眼可辨"
         );
     }
 }
