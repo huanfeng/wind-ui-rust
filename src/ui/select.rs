@@ -152,10 +152,36 @@ fn paint_field_chrome(
     text_color
 }
 
+/// 一列选项的来源：构建期定下的静态表，或绑定的信号。
+///
+/// 与 [`TextContent`](crate::ui::TextContent) 同一套心智——动态性是**字段的类型**，
+/// 不是控件的类型，所以 `Dropdown` 只有一个、读取路径只有一条。
+///
+/// 静态表刻意**不**包一层信号：那样等于为一个永不变的常量长期占住一个运行时槽位，
+/// 而它既没有 owner 也没人会去回收（见 `crate::signal` 的所有权模型）。
+enum Options<T> {
+    Static(Vec<T>),
+    Bound(Signal<Vec<T>>),
+}
+
+impl<T: Clone + 'static> Options<T> {
+    /// 借用当前选项表（静态表零拷贝，信号经运行时借出）。
+    fn with<R>(&self, f: impl FnOnce(&Vec<T>) -> R) -> R {
+        match self {
+            Options::Static(v) => f(v),
+            Options::Bound(sig) => sig.with(f),
+        }
+    }
+    /// 克隆一份当前选项表（构建菜单项时要按值消耗）。
+    fn get(&self) -> Vec<T> {
+        self.with(|v| v.clone())
+    }
+}
+
 /// 选项存储：纯文本（原有 `Vec<String>` 入口）或富内容（`DropdownItem`）。
 enum OptionSource {
-    Plain(Signal<Vec<String>>),
-    Rich(Signal<Vec<DropdownItem>>),
+    Plain(Options<String>),
+    Rich(Options<DropdownItem>),
 }
 
 pub struct Dropdown {
@@ -169,37 +195,27 @@ pub struct Dropdown {
 
 impl Dropdown {
     pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
-        Self::with_plain_signal(crate::signal::signal(options), selected)
+        Self::from_source(OptionSource::Plain(Options::Static(options)), selected)
     }
 
     /// 响应式选项：选项列表绑定外部 `Signal<Vec<String>>`，变更即重新测量/渲染。
     pub fn new_reactive(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
-        Self::with_plain_signal(options, selected)
+        Self::from_source(OptionSource::Plain(Options::Bound(options)), selected)
     }
 
     /// 富内容选项（副标题/徽章/尾随图标）。
     pub fn with_items(items: Vec<DropdownItem>, selected: Signal<usize>) -> Self {
-        Self::with_rich_signal(crate::signal::signal(items), selected)
+        Self::from_source(OptionSource::Rich(Options::Static(items)), selected)
     }
 
     /// 响应式富内容选项：绑定外部 `Signal<Vec<DropdownItem>>`。
     pub fn with_items_reactive(items: Signal<Vec<DropdownItem>>, selected: Signal<usize>) -> Self {
-        Self::with_rich_signal(items, selected)
+        Self::from_source(OptionSource::Rich(Options::Bound(items)), selected)
     }
 
-    fn with_plain_signal(options: Signal<Vec<String>>, selected: Signal<usize>) -> Self {
+    fn from_source(options: OptionSource, selected: Signal<usize>) -> Self {
         Self {
-            options: OptionSource::Plain(options),
-            selected,
-            hover: false,
-            border_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
-            primed: Cell::new(false),
-        }
-    }
-
-    fn with_rich_signal(options: Signal<Vec<DropdownItem>>, selected: Signal<usize>) -> Self {
-        Self {
-            options: OptionSource::Rich(options),
+            options,
             selected,
             hover: false,
             border_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),

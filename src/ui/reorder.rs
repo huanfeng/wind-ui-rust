@@ -144,6 +144,8 @@ struct SignalRows<T: Clone + 'static> {
     row_fn: Rc<dyn Fn(T, super::Element) -> super::Element>,
     ctl: ReorderCtl,
     last_version: u64,
+    /// 当前这批行构建期创建的信号，下轮重建整批回收（同 `DynList`）。
+    rows: crate::signal::SignalScope,
 }
 
 impl<T: Clone + 'static> RowSource for SignalRows<T> {
@@ -156,6 +158,10 @@ impl<T: Clone + 'static> RowSource for SignalRows<T> {
 
         let self_id = ctx.id();
         let items = self.data.get();
+        // 先拆字段：`rows.collect` 借 `&mut self.rows`，闭包里还要读 `row_fn`/`ctl`。
+        let Self {
+            row_fn, ctl, rows, ..
+        } = self;
         let tree = ctx.tree_mut();
         let old: Vec<NodeId> = tree
             .get(self_id)
@@ -167,11 +173,15 @@ impl<T: Clone + 'static> RowSource for SignalRows<T> {
         if let Some(n) = tree.get_mut(self_id) {
             n.children.clear();
         }
-        for item in items {
-            let el = (self.row_fn)(item, handle_element(&self.ctl));
-            let child = el.build(tree);
-            tree.add_child(self_id, child);
-        }
+        // 旧行节点已删，其构建期信号同刻回收。
+        rows.dispose();
+        rows.collect(|| {
+            for item in items {
+                let el = row_fn(item, handle_element(ctl));
+                let child = el.build(tree);
+                tree.add_child(self_id, child);
+            }
+        });
         true
     }
 }
@@ -187,6 +197,7 @@ pub(super) fn signal_rows<T: Clone + 'static>(
         data,
         row_fn,
         ctl,
+        rows: crate::signal::SignalScope::new(),
     })
 }
 

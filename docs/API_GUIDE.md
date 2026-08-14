@@ -129,7 +129,7 @@ Element::label("仅暗色时显示").visible_when(move || dark.get());
 3. **只能在 UI 线程用**。存储是线程局部的，`Signal<T>` 刻意实现为 `!Send`——句柄搬进
    别的线程是**编译错误**而非运行期静默丢值。后台线程更新状态见 §8.5。
 
-API 面只有五个方法：
+常用 API 只有五个方法：
 
 ```rust
 let n = signal(0i64);
@@ -162,6 +162,63 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 
 **惯用法**：状态在 `main`（或你的 App 结构）里创建，直接按值传进控件和回调。需要"一处改、
 多处联动"时，把同一个信号传给多个控件即可——它们读的是同一份存储。
+
+#### 信号的生命周期：谁拥有它、什么时候回收
+
+**绝大多数情况你不需要想这件事**：在 `main` 里建的信号是应用状态，活到进程退出就是对的，
+框架不会去回收它们。下面这一小节只关系到一种情形——**在会被反复重建的子树里创建信号**。
+
+信号的存储是一个线程局部 arena。所有权模型是两级的：
+
+- **默认无主**：任何作用域之外调用 `signal()` 创建的信号**永不回收**。应用状态走这条。
+- **归属作用域**：在 `SignalScope::collect(..)` 内创建的信号归该作用域所有，作用域回收
+  时整批释放，槽位可被后续 `signal()` 复用。
+
+本库有三处会按数据变化整批重建子树的宿主：`list_signal` / `host_signal`（`DynList`）、
+`reorder_list_signal` 的行源、以及可排序表格的表头与正文。**它们各自持有一个作用域**，
+重建时先回收上一轮再收集新一轮。所以：
+
+```rust
+// 安全：每次数据变化重建行时，上一轮的 caption 会被回收，不会累积
+Element::list_signal(tasks, |t| t.id, |t: Task| {
+    let caption = signal(format!("{} 项", t.count));   // 行内现造的信号
+    Element::button(caption).on_click(move |_| caption.set("已处理".into()))
+})
+```
+
+需要自己管一批临时信号时用 `SignalScope`（不在 prelude，从 `windui::signal` 引入）：
+
+```rust
+use windui::signal::SignalScope;
+
+let mut scope = SignalScope::new();
+let tmp = scope.collect(|| signal(0i32));   // 归 scope 所有
+scope.dispose();                            // 整批回收；析构时也会自动回收
+assert!(!tmp.is_alive());
+```
+
+单个信号可以 `sig.dispose()` 直接回收（幂等）。
+
+**回收后旧句柄会失效**。`Signal<T>` 是 `Copy` 的，复制出去的每一份指向同一个槽位，
+槽位一回收全部失效：
+
+| 操作 | 句柄已失效时 |
+|------|--------------|
+| `get()` / `with()` | **panic**（读一个已死的信号没有合理返回值可编） |
+| `set()` / `update()` | debug 断言、release 静默丢弃（写进没人看的状态是定义良好的空操作） |
+| `try_get()` / `try_with()` | 返回 `None` |
+| `is_alive()` | `false` |
+| `version()` | `0` |
+
+读写故意不对称：它让"控件子树刚被重建、其上一次点击排队的回调才跑到"这类竞态在 release
+里退化为无害的丢弃而不是崩溃。若某个句柄**可能**比它的作用域活得久（菜单动作闭包、toast
+回调、`App::channel` 的消息处理器都可能），读它请用 `try_get()` / `try_with()`。
+
+**观测**：`windui::signal::stats()` 随时返回 `{ live, free, capacity, peak }`。怀疑漏信号
+就在一次交互前后各取一次 `live` 比对；或者不改代码，设环境变量 `WINDUI_SIGNALS=1` 运行——
+活跃槽位每创下新高就往 stderr 打一行 `[windui] signals live=.. free=.. cap=.. peak=..`，
+健康的应用在启动阶段打几行就永久安静，泄漏则持续刷屏。变量值即报告步长，嫌吵调大即可
+（`=64` 表示活跃数每多 64 个才报一次）；`0` 或不设即关闭。
 
 ---
 

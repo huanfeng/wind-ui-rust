@@ -487,8 +487,17 @@ fn with_row_menu(row: Element, idx: usize, menu: Option<&OnRowMenu>) -> Element 
     }
 }
 
-/// 清空某节点的全部子节点（递归释放子树 arena slot）。
-fn clear_children(tree: &mut crate::core::Tree, id: crate::core::NodeId) {
+/// 清空某节点的全部子节点（递归释放子树 arena slot），并同刻回收这批子树在**构建期**
+/// 创建的信号。
+///
+/// 两件事绑在一个函数里是有意的：本表格的四个宿主（表头/正文/分页正文/可选正文）都会
+/// 按排序或数据变化整批重建行，节点与其构建期信号必须同生共死——只删节点会漏槽位，
+/// 只回收信号会让还挂着的节点读到已死的信号。
+fn clear_children(
+    tree: &mut crate::core::Tree,
+    id: crate::core::NodeId,
+    signals: &mut crate::signal::SignalScope,
+) {
     let old: Vec<_> = tree.get(id).map(|n| n.children.clone()).unwrap_or_default();
     for c in old {
         tree.remove(c);
@@ -496,6 +505,7 @@ fn clear_children(tree: &mut crate::core::Tree, id: crate::core::NodeId) {
     if let Some(n) = tree.get_mut(id) {
         n.children.clear();
     }
+    signals.dispose();
 }
 
 /// 响应式表头：首次布局构建单元格；排序状态变化时重建（刷新箭头方向）。
@@ -512,6 +522,8 @@ pub(super) struct SortableHeader {
     /// 是否已构建过单元格（首次 on_update 无条件构建）。
     built: bool,
     last_version: u64,
+    /// 当前这批表头单元格在构建期创建的信号，重建时整批回收（见 `clear_children`）。
+    cell_signals: crate::signal::SignalScope,
 }
 
 impl SortableHeader {
@@ -528,6 +540,7 @@ impl SortableHeader {
             style: SortStyle::default(),
             actions: None,
             built: false,
+            cell_signals: crate::signal::SignalScope::new(),
         }
     }
 
@@ -553,23 +566,28 @@ impl Widget for SortableHeader {
         self.last_version = ver;
         let rs = resolve_sort_style(&self.style);
         let self_id = ctx.id();
+        // 作用域暂时取出：`collect` 要 `&mut` 它，闭包里还要读 `self` 的其它字段。
+        let mut signals = std::mem::take(&mut self.cell_signals);
         let tree = ctx.tree_mut();
-        clear_children(tree, self_id);
-        for (ci, (title, w)) in self.columns.iter().enumerate() {
-            let mut el = header_cell(ci, title, *w, self.sort, self.on_sort.clone(), &rs);
-            // 直接 build+add_child 绕过了父级线性容器 build 循环的 weight→主轴维度转换
-            // （见 Element::build），此处手工复现：表头行恒为水平轴，故落到宽度。
-            el.width = Dimension::Weight(*w);
-            let id = el.build(tree);
-            tree.add_child(self_id, id);
-        }
-        // 尾部操作列表头（不可排序），与正文操作单元格同权重对齐。
-        if let Some(a) = &self.actions {
-            let mut el = action_header_cell(&a.title, a.weight);
-            el.width = Dimension::Weight(a.weight);
-            let id = el.build(tree);
-            tree.add_child(self_id, id);
-        }
+        clear_children(tree, self_id, &mut signals);
+        signals.collect(|| {
+            for (ci, (title, w)) in self.columns.iter().enumerate() {
+                let mut el = header_cell(ci, title, *w, self.sort, self.on_sort.clone(), &rs);
+                // 直接 build+add_child 绕过了父级线性容器 build 循环的 weight→主轴维度转换
+                // （见 Element::build），此处手工复现：表头行恒为水平轴，故落到宽度。
+                el.width = Dimension::Weight(*w);
+                let id = el.build(tree);
+                tree.add_child(self_id, id);
+            }
+            // 尾部操作列表头（不可排序），与正文操作单元格同权重对齐。
+            if let Some(a) = &self.actions {
+                let mut el = action_header_cell(&a.title, a.weight);
+                el.width = Dimension::Weight(a.weight);
+                let id = el.build(tree);
+                tree.add_child(self_id, id);
+            }
+        });
+        self.cell_signals = signals;
     }
 
     // 自身无视觉内容；背景/边框由容器 Style 处理（同 DynList）。
@@ -612,6 +630,8 @@ pub(super) struct SortableBody {
     /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate`/`set_menu` 置位——初始 eager 行不含它们，需重建一次）。
     force: bool,
     last_version: u64,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
+    cell_signals: crate::signal::SignalScope,
 }
 
 impl SortableBody {
@@ -627,6 +647,7 @@ impl SortableBody {
             activate: None,
             menu: None,
             force: false,
+            cell_signals: crate::signal::SignalScope::new(),
         }
     }
 
@@ -670,24 +691,28 @@ impl Widget for SortableBody {
         self.force = false;
         self.last_version = ver;
         let self_id = ctx.id();
+        let mut signals = std::mem::take(&mut self.cell_signals);
         let tree = ctx.tree_mut();
-        clear_children(tree, self_id);
+        clear_children(tree, self_id, &mut signals);
         let order = sorted_order(&self.rows, self.sort.get());
-        for (disp, &ri) in order.iter().enumerate() {
-            let el = body_row(
-                disp,
-                ri,
-                &self.rows[ri],
-                &self.weights,
-                self.actions.as_ref(),
-                self.render.as_ref(),
-                self.cell_lines,
-                self.activate.as_ref(),
-                self.menu.as_ref(),
-            );
-            let id = el.build(tree);
-            tree.add_child(self_id, id);
-        }
+        signals.collect(|| {
+            for (disp, &ri) in order.iter().enumerate() {
+                let el = body_row(
+                    disp,
+                    ri,
+                    &self.rows[ri],
+                    &self.weights,
+                    self.actions.as_ref(),
+                    self.render.as_ref(),
+                    self.cell_lines,
+                    self.activate.as_ref(),
+                    self.menu.as_ref(),
+                );
+                let id = el.build(tree);
+                tree.add_child(self_id, id);
+            }
+        });
+        self.cell_signals = signals;
     }
 
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
@@ -729,6 +754,8 @@ pub(super) struct PagedBody {
     /// 强制下次 on_update 重建（`set_actions`/`set_cell_render`/`set_cell_lines`/`set_activate`/`set_menu` 置位）。
     force: bool,
     last_version: u64,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
+    cell_signals: crate::signal::SignalScope,
 }
 
 impl PagedBody {
@@ -743,6 +770,7 @@ impl PagedBody {
             activate: None,
             menu: None,
             force: false,
+            cell_signals: crate::signal::SignalScope::new(),
         }
     }
 
@@ -786,24 +814,28 @@ impl Widget for PagedBody {
         self.force = false;
         self.last_version = ver;
         let self_id = ctx.id();
+        let mut signals = std::mem::take(&mut self.cell_signals);
         let tree = ctx.tree_mut();
-        clear_children(tree, self_id);
+        clear_children(tree, self_id, &mut signals);
         let data = self.rows.get();
-        for (disp, row) in data.iter().enumerate() {
-            let el = body_row(
-                disp,
-                disp,
-                row,
-                &self.weights,
-                self.actions.as_ref(),
-                self.render.as_ref(),
-                self.cell_lines,
-                self.activate.as_ref(),
-                self.menu.as_ref(),
-            );
-            let id = el.build(tree);
-            tree.add_child(self_id, id);
-        }
+        signals.collect(|| {
+            for (disp, row) in data.iter().enumerate() {
+                let el = body_row(
+                    disp,
+                    disp,
+                    row,
+                    &self.weights,
+                    self.actions.as_ref(),
+                    self.render.as_ref(),
+                    self.cell_lines,
+                    self.activate.as_ref(),
+                    self.menu.as_ref(),
+                );
+                let id = el.build(tree);
+                tree.add_child(self_id, id);
+            }
+        });
+        self.cell_signals = signals;
     }
 
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
@@ -1104,6 +1136,9 @@ pub(super) struct SelectableBody {
     menu: Option<OnRowMenu>,
     built: bool,
     last_version: u64,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
+    /// 注意与 `sel` 的区别：`sel` 是**调用方**的选择状态信号，不归本作用域管。
+    cell_signals: crate::signal::SignalScope,
 }
 
 impl SelectableBody {
@@ -1124,6 +1159,7 @@ impl SelectableBody {
             cell_lines: 1,
             menu: None,
             built: false,
+            cell_signals: crate::signal::SignalScope::new(),
         }
     }
 
@@ -1161,28 +1197,32 @@ impl Widget for SelectableBody {
         self.built = true;
         self.last_version = ver;
         let self_id = ctx.id();
+        let mut signals = std::mem::take(&mut self.cell_signals);
         let tree = ctx.tree_mut();
-        clear_children(tree, self_id);
+        clear_children(tree, self_id, &mut signals);
         let order = sorted_order(&self.rows, self.sort.get());
-        for (disp, &ri) in order.iter().enumerate() {
-            // 选择按原始行下标 ri 绑定（排序后仍按身份跟随）。越界回退（长度不匹配时容错）。
-            let Some(&row_sel) = self.sel.get(ri) else {
-                continue;
-            };
-            let el = select_body_row(
-                disp,
-                ri,
-                &self.rows[ri],
-                &self.weights,
-                row_sel,
-                self.actions.as_ref(),
-                self.render.as_ref(),
-                self.cell_lines,
-                self.menu.as_ref(),
-            );
-            let id = el.build(tree);
-            tree.add_child(self_id, id);
-        }
+        signals.collect(|| {
+            for (disp, &ri) in order.iter().enumerate() {
+                // 选择按原始行下标 ri 绑定（排序后仍按身份跟随）。越界回退（长度不匹配时容错）。
+                let Some(&row_sel) = self.sel.get(ri) else {
+                    continue;
+                };
+                let el = select_body_row(
+                    disp,
+                    ri,
+                    &self.rows[ri],
+                    &self.weights,
+                    row_sel,
+                    self.actions.as_ref(),
+                    self.render.as_ref(),
+                    self.cell_lines,
+                    self.menu.as_ref(),
+                );
+                let id = el.build(tree);
+                tree.add_child(self_id, id);
+            }
+        });
+        self.cell_signals = signals;
     }
 
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {

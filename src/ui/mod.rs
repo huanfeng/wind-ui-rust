@@ -1615,11 +1615,14 @@ impl Element {
         K: Eq + std::hash::Hash,
     {
         let row_fn = std::rc::Rc::new(row_fn);
-        // 构建初始子元素
-        let initial: Vec<Self> = data.get().into_iter().map(|item| row_fn(item)).collect();
+        // 构建初始子元素。圈进作用域交给 widget：首批行的构建期信号（`row_fn` 里现造的、
+        // 或行内控件内部造的）才能在第一次重建时随旧行一起回收，否则永久漏一代。
+        let mut rows = crate::signal::SignalScope::new();
+        let initial: Vec<Self> =
+            rows.collect(|| data.get().into_iter().map(|item| row_fn(item)).collect());
         // DynList widget 持有 Rc 副本，信号变更时重建子节点
         let row_fn_clone = row_fn.clone();
-        let widget = dyn_list::DynList::new(data, move |item: T| row_fn_clone(item));
+        let widget = dyn_list::DynList::with_scope(data, move |item: T| row_fn_clone(item), rows);
         let mut container = Self::scroll().fill();
         container.widget = Box::new(widget);
         container.reactive = true;
@@ -1638,9 +1641,12 @@ impl Element {
         T: Clone + 'static,
     {
         let build_fn = std::rc::Rc::new(build_fn);
-        let initial: Vec<Self> = data.get().into_iter().map(|item| build_fn(item)).collect();
+        // 首批子树的构建期信号交给 widget 的作用域，理由同 `list_signal`。
+        let mut rows = crate::signal::SignalScope::new();
+        let initial: Vec<Self> =
+            rows.collect(|| data.get().into_iter().map(|item| build_fn(item)).collect());
         let build_fn_clone = build_fn.clone();
-        let widget = dyn_list::DynList::new(data, move |item: T| build_fn_clone(item));
+        let widget = dyn_list::DynList::with_scope(data, move |item: T| build_fn_clone(item), rows);
         let mut container = Self::col().fill();
         container.widget = Box::new(widget);
         container.reactive = true;
@@ -3765,6 +3771,55 @@ mod tests {
             signal_row_values(&tree),
             vec![7, 8],
             "落定后应补上拖动期间积压的数据变更"
+        );
+    }
+
+    #[test]
+    fn list_signal_rebuild_reclaims_row_signals() {
+        // 根因回归：`row_fn` 里创建的信号曾随每次数据变化永久累积（运行时 arena 只增不减）。
+        // 现在 DynList 持有一个 SignalScope，重建时先整批回收上一轮，再收集新一轮。
+        use crate::signal::stats;
+
+        let data = signal(vec![1u8, 2, 3]);
+        let mut tree = Tree::new();
+        // 每行现造一个信号（放宽后的动态文案 API 让这种写法变得自然）。
+        let list = Element::list_signal(
+            data,
+            |_| (),
+            |n: u8| {
+                let caption = signal(format!("第 {n} 行"));
+                Element::label(caption)
+            },
+        );
+        let root = list.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+
+        // 先跑几轮让 arena 达到稳态（首批行的槽位也归 widget 的作用域管）。
+        for i in 0..3u8 {
+            data.set(vec![i, i + 1, i + 2]);
+            tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        }
+        let steady = stats();
+
+        for i in 0..20u8 {
+            data.set(vec![i, i + 1, i + 2]);
+            tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        }
+        let after = stats();
+
+        assert_eq!(
+            tree.get(root).unwrap().children.len(),
+            3,
+            "重建后行数仍正确"
+        );
+        assert_eq!(
+            after.live, steady.live,
+            "反复重建后活跃槽位数不应增长（每轮 3 个行信号曾在此永久累积）"
+        );
+        assert_eq!(
+            after.capacity, steady.capacity,
+            "槽位应被复用，arena 容量不应增长"
         );
     }
 

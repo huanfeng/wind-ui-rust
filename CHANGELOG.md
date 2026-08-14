@@ -111,6 +111,21 @@
   喊危险；危险项被指向时更要保持红，而不是变成中性的强调色）。
 - **`MenuTheme` 新增 `shadow_dy` / `shadow_blur` / `shadow_color`**：菜单浮层投影可按环境覆盖，
   `Option` 回退内置默认并接入 TOML（`#[serde(default)]`，旧 TOML 无需改动）。
+- **信号槽位回收：`signal::SignalScope` + `Signal::dispose` / `try_get` / `try_with` /
+  `is_alive` + `signal::stats`**。运行时 arena 此前只增不减（`free` 空闲链没有任何地方
+  `push`、`generation` 从不自增），创建过的每个槽位随线程活到进程退出。
+  所有权模型定为**两级**，而不是 leptos / floem 那样贯穿全库的隐式作用域树：作用域之外
+  创建的信号**默认无主、永不回收**（`main` 里的应用状态活到退出就是正确语义，回收它们没有
+  意义），只有 `SignalScope::collect(..)` 内创建的才归属该作用域、可整批回收。本库是保留
+  模式的控件树而非响应式图，没有一棵现成的所有权树可挂；隐式回收还会让"谁杀了我的信号"
+  不可追溯——菜单动作闭包、toast 回调、`App::channel` 的消息处理器都能合法地比控件节点
+  活得久。显式 `collect` 把边界写在代码里。
+  `Signal<T>` 仍是 `Copy`：回收的单位是**槽位**而非句柄，所以不需要给句柄加 `Drop`
+  做引用计数（`Copy` 出去的副本互不知情，本来也做不到）。调用方不必回到"每个闭包前先
+  clone 一遍"。
+  `stats()` 返回 `{ live, free, capacity, peak }`；环境变量 `WINDUI_SIGNALS=1` 让活跃槽位
+  每创下新高就往 stderr 打一行，健康的应用启动后即安静，泄漏表现为持续刷屏（值即报告
+  步长，嫌吵调大；`0` 或不设即关闭）。
 
 ### Changed
 - **`ui::DynLabel` 并入 `ui::Label`**（保留为 `#[deprecated]` 类型别名，`DynLabel::new(sig)`
@@ -334,6 +349,21 @@
   而 `submenu` 字段存的始终是原始列表，故子级仍拿到未规范化的项；且 `spawn` 记的是规范化后的
   下标，按同一下标去原始列表取会错位——取到分隔线（`submenu` 为空）即走截断分支，把已展开的
   孙级菜单无声关掉。改为取子级时就地规范化。
+- **重建子树时构建期信号永久累积**。三处会按数据变化整批重建子树的宿主——`list_signal` /
+  `host_signal` 的 `DynList`、`reorder_list_signal` 的行源、可排序表格的表头与三类正文——
+  都是"删掉旧子节点、按新数据重建"，但**只删节点不回收信号**：行构建期创建的每个信号
+  （调用方在 `row_fn` 里现造的、或 `accordion_multi` 逐面板分配的）每重建一轮就多留一批。
+  模块注释原本以"静态树可接受"为前提，而放宽后的动态文案 API（文案参数可收
+  `Signal<String>`）让"在 `row_fn` 里造信号"变成了自然写法，这个前提已不成立。
+  现在这三处各持有一个 `SignalScope`，回收与节点删除写在同一处（表格是 `clear_children`
+  同时做两件事），节点与其构建期信号同生共死。回归测试反复重建 20 轮后断言活跃槽位数与
+  arena 容量均不增长（改前是 73 vs 13）。
+  `list_signal` / `host_signal` 的**首批**行也纳入作用域并交给 widget，否则首轮永久漏一代。
+- **`Element::dropdown` / `with_items` 为静态选项表长期占用运行时槽位**：`Vec<String>` 被
+  包进一个 `signal()` 只为凑出统一的读取路径，而这个信号既没有 owner 也没人回收。改为
+  `Options::Static | Bound` 二选一（与 `TextContent` 同一套心智：动态性是**字段的类型**，
+  不是控件的类型），静态表直接按值存，读取路径仍只有一条。响应式入口
+  （`dropdown_signal` / `with_items_reactive`）行为不变。
 
 ## [0.11.1] - 2026-08-11
 
