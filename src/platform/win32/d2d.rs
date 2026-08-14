@@ -1324,9 +1324,9 @@ impl Canvas for D2DCanvas<'_> {
             // 顶对齐（纵向位置由 origin.y 控制），配合下方 (h-th).max(0) 实现"装得下居中、装不下顶对齐"。
             let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         }
-        // 纵向：装得下→垂直居中；装不下→顶对齐（origin 在 rect 顶部，超出部分由上层裁剪收口）。
-        // (h-th).max(0)/2 与 SkiaCanvas `oy = y + (h-th).max(0)/2` 完全一致。
-        let oy = rect.y as f32 + (rect.h as f32 - th).max(0.0) / 2.0;
+        // 纵向定位走 TextEngine::draw 的共享契约：装得下垂直居中、装不下顶对齐
+        // （origin 在 rect 顶部，超出部分由上层裁剪收口）。软硬两路同源，不得各写各的。
+        let oy = rect.y as f32 + crate::text::block_offset_y(rect.h as f32, th);
         let origin = vec2(rect.x as f32, oy);
         // 文字色复用 solid brush（取一次→立即绘制，符合 solid 共享约束）。
         let brush = self.solid_brush(color);

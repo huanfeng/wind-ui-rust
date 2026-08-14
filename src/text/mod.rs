@@ -238,3 +238,108 @@ impl TextEngine for LineAwareTextEngine {
     ) {
     }
 }
+
+/// 文本块距 `rect` 顶部的偏移——[`TextEngine::draw`] 纵向定位契约的参考实现。
+///
+/// 引擎内部可因整数/浮点取整差异内联等价表达式（DirectWrite 走 i32 截断除法，
+/// Core Text 走 f64），但**语义必须与本函数一致**：装得下垂直居中、装不下顶对齐。
+// 生产调用点是 d2d 的 `draw_text`；关掉 `d2d` feature 或非 Windows 目标下只剩
+// 契约测试用它，此时不算未使用。
+#[cfg_attr(not(all(windows, feature = "d2d")), allow(dead_code))]
+pub(crate) fn block_offset_y(rect_h: f32, text_h: f32) -> f32 {
+    (rect_h - text_h).max(0.0) / 2.0
+}
+
+/// 纵向定位契约的跨引擎测试：Windows 跑 DirectWrite、macOS 跑 Core Text，
+/// **同一份断言**。两边的实现细节可以不同，可观察的纵向行为不许不同。
+#[cfg(test)]
+mod text_block_contract {
+    use super::*;
+
+    /// 白底上 `[y0, y1)` 行区间内的非白像素数（墨量）。
+    ///
+    /// 判据用墨量而非"某个像素等于某色"：抗锯齿让边缘像素取值随引擎浮动，
+    /// 逐像素比对会把两个都正确的实现判成不一致，而"这片区域有没有字"是稳定的。
+    fn ink(pm: &Pixmap, y0: i32, y1: i32) -> usize {
+        let w = pm.width() as i32;
+        let data = pm.data();
+        let mut n = 0;
+        for y in y0.max(0)..y1.min(pm.height() as i32) {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                // 白底 (255,255,255)：任一通道偏离即算墨。
+                if data[i] != 255 || data[i + 1] != 255 || data[i + 2] != 255 {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn white(w: u32, h: u32) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        pm
+    }
+
+    /// 参考实现自身的两个分支。
+    #[test]
+    fn block_offset_y_clamps_at_zero() {
+        assert_eq!(block_offset_y(100.0, 40.0), 30.0, "装得下应居中");
+        assert_eq!(block_offset_y(16.0, 42.0), 0.0, "装不下应顶对齐而非负偏移");
+    }
+
+    /// 文本高于容器时**顶对齐**：容器顶边以上不得有墨。
+    ///
+    /// 这正是 macOS 表格多行文本与 Windows 不一致的那个缺陷——Core Text 侧缺
+    /// `.max(0)`，负偏移让文本以容器中心为中心上下对称溢出，容器上方于是出现半行字。
+    #[test]
+    fn overflowing_text_is_top_aligned() {
+        let mut eng = PlatformTextEngine::default();
+        eng.set_scale(1.0);
+        let mut pm = white(120, 120);
+        // 三行硬换行（不依赖各引擎的折行算法），容器只有 16px 高，必然装不下。
+        let rect = Rect::new(10, 40, 90, 16);
+        eng.draw(
+            &mut pm,
+            "AAA\nBBB\nCCC",
+            rect,
+            Color::rgb(0, 0, 0),
+            Align::Start,
+            &TextStyle::new(12.0),
+            None,
+        );
+        assert!(
+            ink(&pm, 40, 120) > 0,
+            "正控：容器顶边以下应当有字，否则本测试没测到绘制"
+        );
+        assert_eq!(
+            ink(&pm, 0, 40),
+            0,
+            "容器顶边以上不得有墨：装不下时须顶对齐，不得居中溢出"
+        );
+    }
+
+    /// 装得下时仍**垂直居中**：确认上面的钳制没把正常情形一起改成顶对齐。
+    #[test]
+    fn fitting_text_stays_centered() {
+        let mut eng = PlatformTextEngine::default();
+        eng.set_scale(1.0);
+        let mut pm = white(120, 120);
+        // 单行文本放进 60px 高的容器：上下应各留出可观的空白。
+        let rect = Rect::new(10, 20, 90, 60);
+        eng.draw(
+            &mut pm,
+            "Ag",
+            rect,
+            Color::rgb(0, 0, 0),
+            Align::Start,
+            &TextStyle::new(12.0),
+            None,
+        );
+        assert!(ink(&pm, 20, 80) > 0, "正控：容器内应当有字");
+        // 12px 字放进 60px 容器，居中后上下各约 24px 空白；留足余量取 12px。
+        assert_eq!(ink(&pm, 20, 32), 0, "居中时容器上部应留白");
+        assert_eq!(ink(&pm, 68, 80), 0, "居中时容器下部应留白");
+    }
+}
