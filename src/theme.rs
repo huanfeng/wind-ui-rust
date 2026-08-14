@@ -998,6 +998,20 @@ pub struct FormTheme {
     pub label_weight: Option<u16>,
     /// 副标题字号（回退 `metrics.font_sm - 1`，即比正文小两档）。
     pub desc_size: Option<f32>,
+    /// 标签最多显示几行（`None` = 不限，按内容换行）。
+    ///
+    /// 设了就同时启用**末尾省略**与**悬浮看全文**：截断意味着信息不完整，tooltip 是它
+    /// 唯一的兜底，两者拆开只会让人漏配后一半。tooltip 由 `Tree::node_tooltip` 按
+    /// `Label::text_truncated()` 自动门控——文字没被截断时不弹，故短标签不会因此多出
+    /// 一个与可见文字一模一样的提示（该门控仅对 `Some(1)` 精确，多行取保守策略恒弹）。
+    pub label_max_lines: Option<usize>,
+    /// 副标题最多显示几行（`None` = 不限，按内容换行）。语义同
+    /// [`label_max_lines`](Self::label_max_lines)。
+    ///
+    /// 设置页的说明文字长度由后端数据决定时尤其需要它：不限行数则长说明会把行撑成
+    /// 三四行，同一列里的行高从此参差；而 `setting_row_desc` 返回的是拼好的容器，
+    /// 调用方够不到内部那个 label，只能由主题这一侧给。
+    pub desc_max_lines: Option<usize>,
 }
 
 impl FormTheme {
@@ -1021,6 +1035,12 @@ impl FormTheme {
     }
     pub fn desc_size(&self, m: &Metrics) -> f32 {
         self.desc_size.unwrap_or(m.font_sm - 1.0)
+    }
+    pub fn label_max_lines(&self) -> Option<usize> {
+        self.label_max_lines
+    }
+    pub fn desc_max_lines(&self) -> Option<usize> {
+        self.desc_max_lines
     }
 }
 

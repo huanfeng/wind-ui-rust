@@ -278,6 +278,7 @@ Element::card("通知", body)                                 // 标题 + 分隔
 - `field` 与 `setting_row` 的差别只有控件的落点：前者紧跟固定宽的标签列（表单感，控件左缘对齐成一条竖线），后者贴右缘（设置页感）。两者都**定高**，一列行才对得齐。
 - `setting_row_desc` 是唯一**不定高**的一种——副标题长短不一，定高会把它挤出去，故改由上下内边距撑开。
 - 行高、标签列宽、间距、字号一律走主题（`theme.form`，见 §7.2），**不进签名**：一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值。卡片的圆角/内边距/标题字号同理走 `theme.card`。
+- **说明文字长度不可控时设 `theme.form.desc_max_lines`**（标签同理 `label_max_lines`）：限行后自动加末尾省略，并挂上悬浮看全文的 tooltip（没真截断就不弹）。默认 `None` = 不限，长说明会把行撑成三四行、同一列行高从此参差。这两项只能由主题给——返回的是拼好的容器，`.max_lines()` 链在上面只会打到容器身上。
 - 想要描边卡片：`Element::card("标题", body).border_role(Role::Border, 1)`。
 
 > **这几个构造器返回的是拼好的容器，不是挂了 widget 的控件**（`badge` / `chip` / `grid` / `dialog_panel` 同理）。因此**可以**链容器/样式类修饰符（`.padding()` / `.margin_xy()` / `.bg_role()` / `.corner()` / `.width()` / `.visible_when()` / `.enabled(false)`），但**不能**链控件专属修饰符（`.intent()` / `.small()` / `.outline()` / `.on_click()`）——后者要 downcast 到具体 widget，挂到组合容器上在 debug 下会 `debug_assert` 失败、release 下静默无效。要改控件外观请加在**传进去的那个 control 上**。

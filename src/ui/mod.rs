@@ -63,7 +63,7 @@ const TABLE_CELL_CORNER: f32 = 4.0;
 
 /// 文本溢出时的省略方式。对 [`Label`] 生效（静态文案与绑信号的一并适用）；
 /// 配合 `.max_lines(1)` 使用最为常见。
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Truncate {
     #[default]
     None, // 裁剪（默认行为）
@@ -2185,12 +2185,14 @@ impl Element {
         match desc {
             // 带副标题：高度按内容撑开（副标题长短不一，定高会把它挤出去）。
             Some(d) => {
-                left = left.child(
-                    Element::label(d)
-                        .font_size(f.desc_size(&th.metrics))
-                        .fg_role(crate::style::Role::TextMuted)
-                        .width_match(),
-                );
+                // 取 `TextSubtle` 而非 `TextMuted`：行标题已是正文档，说明再压一档才
+                // 拉得开层次；`TextMuted` 是**次级正文**的档位，用在这里会让说明与标题
+                // 显得同重。四档文字色的强弱顺序由 style.rs 的单测锁着。
+                let desc = Element::label(d.clone())
+                    .font_size(f.desc_size(&th.metrics))
+                    .fg_role(crate::style::Role::TextSubtle)
+                    .width_match();
+                left = left.child(Self::clamp_lines(desc, f.desc_max_lines(), &d));
                 row = row.padding_xy(0, f.row_pad_y());
             }
             // 单行：定高，与 `field` 同一档，整列才对得齐。
@@ -2205,10 +2207,31 @@ impl Element {
         f: &crate::theme::FormTheme,
         m: &crate::theme::Metrics,
     ) -> Self {
-        Element::label(text.into())
+        let text = text.into();
+        let el = Element::label(text.clone())
             .font_size(f.label_size(m))
             .font_weight(f.label_weight())
-            .fg_role(crate::style::Role::Text)
+            .fg_role(crate::style::Role::Text);
+        Self::clamp_lines(el, f.label_max_lines(), &text)
+    }
+
+    /// 表单族的行数限制：`None` 原样返回；`Some(n)` 加末尾省略并挂上看全文的 tooltip。
+    ///
+    /// 截断与 tooltip 绑成一件事——截断意味着信息不完整，而 tooltip 是它唯一的兜底。
+    /// 未真正截断时 `Tree::node_tooltip` 会按 `Label::text_truncated()` 自动不弹，
+    /// 故短文本不会平白多出一个与可见文字相同的提示。
+    ///
+    /// 含换行的文本**跳过 tooltip**（仍然限行）：`Element::tooltip` 只支持单行、多行会
+    /// `debug_assert` 拦下，而这里的 tooltip 是库替调用方加的，不该由它引爆——调用方
+    /// 显式调 `.tooltip()` 传多行才是该被拦住的误用。
+    fn clamp_lines(el: Element, max_lines: Option<usize>, full_text: &str) -> Self {
+        let Some(n) = max_lines else { return el };
+        let el = el.max_lines(n).truncate(crate::ui::Truncate::End);
+        if full_text.contains('\n') {
+            el
+        } else {
+            el.tooltip(full_text)
+        }
     }
 
     /// **卡片**：标题 + 分隔线 + 内容，铺在 `Surface` 底色上的圆角容器。
@@ -4300,15 +4323,18 @@ mod tests {
 
     /// 带副标题的行：说明排在标签**下方**（同一左块内），且用弱化文字色——
     /// 副标题若与标签同色同号，两行字会读成两个并列标签。
+    ///
+    /// 取 `TextSubtle` 这**第三档**而非 `TextMuted`：标题已是正文档，说明再压一档
+    /// 才拉得开层次；`TextMuted` 是次级正文的档位，用在这里两行字仍显得同重。
     #[test]
-    fn setting_row_desc_stacks_muted_description_under_label() {
+    fn setting_row_desc_stacks_subtle_description_under_label() {
         let el = Element::setting_row_desc("模糊音纠错", "z/zh 不区分", Element::leaf().width(40));
         let left = &el.children[0];
         assert_eq!(left.children.len(), 2, "左块 = 标签 + 副标题");
         assert_eq!(
             left.children[1].style.fg_role,
-            Some(crate::style::Role::TextMuted),
-            "副标题应为弱化文字色"
+            Some(crate::style::Role::TextSubtle),
+            "副标题应为三级弱化文字色"
         );
         assert!(
             left.children[1].style.font_size < left.children[0].style.font_size,
@@ -4317,6 +4343,60 @@ mod tests {
         // 无副标题时左块只有标签，不留空节点占位。
         let plain = Element::setting_row("模糊音纠错", Element::leaf().width(40));
         assert_eq!(plain.children[0].children.len(), 1);
+    }
+
+    /// 表单行的限行开关在主题上：不设即不限（保持"按内容换行"的既有默认），设了则
+    /// 末尾省略与看全文的 tooltip **一并**到位——截断意味着信息不完整，只配前一半
+    /// 等于把说明文字直接丢掉。说明文字长度常由后端数据决定，而 `setting_row_desc`
+    /// 返回的是拼好的容器、调用方够不到内部 label，这条路只能由主题给。
+    #[test]
+    fn form_rows_clamp_lines_only_when_theme_asks() {
+        fn label_at(el: &mut Element, path: &[usize]) -> (Option<usize>, Truncate, Option<String>) {
+            let mut cur = el;
+            for i in path {
+                cur = &mut cur.children[*i];
+            }
+            let tip = cur.tooltip.clone();
+            let l = cur
+                .widget
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<Label>())
+                .expect("该位置应是 label");
+            (l.max_lines, l.truncate, tip)
+        }
+        let long = "第一次按键直接上屏符号，再次按键改为另一形态，所见即所得";
+        let row = || Element::setting_row_desc("智能符号", long, Element::leaf().width(40));
+
+        // 默认主题：不限行、不省略、不挂提示。
+        let (ml, tr, tip) = label_at(&mut row(), &[0, 1]);
+        assert_eq!(
+            (ml, tr, tip),
+            (None, Truncate::None, None),
+            "默认应保持不限行"
+        );
+
+        let mut t = crate::theme::Theme::default();
+        t.form.label_max_lines = Some(1);
+        t.form.desc_max_lines = Some(1);
+        crate::theme::set_current(std::rc::Rc::new(t));
+
+        let (ml, tr, tip) = label_at(&mut row(), &[0, 1]);
+        assert_eq!(ml, Some(1), "副标题应按主题限行");
+        assert_eq!(tr, Truncate::End, "限行须配末尾省略，否则是硬裁");
+        assert_eq!(tip.as_deref(), Some(long), "截断后须能悬浮看全文");
+        // 标签走同一条路（`field` 的标签列同样会被长文本撑破）。
+        let (ml, _, tip) = label_at(&mut row(), &[0, 0]);
+        assert_eq!(ml, Some(1));
+        assert_eq!(tip.as_deref(), Some("智能符号"));
+
+        // 含换行的说明：仍限行，但不挂 tooltip——`Element::tooltip` 只收单行，
+        // 库替调用方加的提示不该把 debug_assert 引爆在人家头上。
+        let mut multi = Element::setting_row_desc("标题", "第一行\n第二行", Element::leaf());
+        let (ml, _, tip) = label_at(&mut multi, &[0, 1]);
+        assert_eq!(ml, Some(1), "多行文本同样限行");
+        assert_eq!(tip, None, "含换行时跳过 tooltip");
+
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 
     /// 卡片 = 标题 + 分隔线 + 内容，底色走角色延迟解析（运行期换主题跟随）。

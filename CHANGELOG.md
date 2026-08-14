@@ -6,6 +6,19 @@
 ## [Unreleased]
 
 ### Added
+- **表单行限行 `FormTheme::label_max_lines` / `desc_max_lines`**：设了就同时启用**末尾省略**
+  与**悬浮看全文**，`None`（默认）保持原样按内容换行。
+  设置页的说明文字长度常由后端数据决定：真实数据里有四分之一的说明超出左列单行宽度，
+  不限行就会把行撑成三四行，同一列的行高从此参差，末尾还会被卡片边缘裁掉半截。而
+  `setting_row_desc` 返回的是**拼好的容器**，调用方够不到内部那个 label——`.max_lines()`
+  加在返回值上只会打到容器身上，这条路只能由主题这一侧给。
+  截断与 tooltip 绑成一件事而非两个开关：截断意味着信息不完整，tooltip 是它唯一的兜底，
+  拆开只会让人漏配后一半、把说明文字直接丢掉。短文本不会因此多出一个与可见文字相同的
+  提示——`Tree::node_tooltip` 按 `Label::text_truncated()` 门控，没真截断就不弹。
+  含换行的文本仍限行但**跳过 tooltip**：`Element::tooltip` 只收单行、多行会 `debug_assert`
+  拦下，而这里的提示是库替调用方加的，不该由它引爆；调用方显式传多行才是该被拦的误用。
+- **`Truncate` 补 `Debug`**：断言里 `assert_eq!(tr, Truncate::End)` 此前编译不过。
+
 - **动态文案 `TextContent`：控件文案可直接绑 `Signal<String>`**。此前全库只有
   `Element::label_signal` 一条路径能让文字跟随状态，`button`/`link`/`badge`/`checkbox` 等
   的文案都是构建后不可变的 `impl Into<String>`——于是"切换类按钮"（播放/暂停、展开/收起、
@@ -137,6 +150,10 @@
   `examples/multiline_demo.rs` 已迁到 `.accent_role(Role::Accent)`，常量删除。
 
 ### Changed
+- **`setting_row_desc` 的说明文字改用 `Role::TextSubtle`**（原 `TextMuted`，视觉变更）。
+  行标题已是正文档，说明再压一档才拉得开层次；`TextMuted` 是**次级正文**的档位，用在这里
+  两行字仍显得同重。本版新增 `TextSubtle` 时讲的正是"版权行、脚注这类比 muted 更淡但仍
+  可读"的场景，而库自己这处最典型的用例没跟上。四档文字色的强弱顺序由单测锁着。
 - **`ui::DynLabel` 并入 `ui::Label`**（保留为 `#[deprecated]` 类型别名，`DynLabel::new(sig)`
   仍能编译）。它本是 `Label` 的逐行复制——换行、`max_lines` 裁剪、上百行的截断算法各存了
   两份，改一处得记得改两处；文案的动态性交给字段类型 `TextContent` 之后，这个孪生类型就
