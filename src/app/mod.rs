@@ -25,7 +25,7 @@ use crate::sync::{new_channel, ChannelPump, Sender, WakerShared};
 use crate::core::{DamageReq, DispatchResult, EventCtx, NodeId, Tree};
 use crate::event::{CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
-use crate::platform::{self, AppHandler, DialogRequest, WindowConfig};
+use crate::platform::{self, AppHandler, DialogRequest, Renderer, WindowConfig};
 use crate::render::Paint;
 use crate::signal::Signal;
 use crate::text::{PlatformTextEngine, TextEngine};
@@ -240,7 +240,7 @@ impl App {
                 start_hidden: false,
                 frameless: false,
                 animations: None,
-                accelerated: false,
+                renderer: Renderer::default(),
                 min_width: 0,
                 min_height: 0,
             },
@@ -293,10 +293,17 @@ impl App {
         self
     }
 
-    /// 启用 GPU 加速渲染（Direct2D 后端）。默认关闭走软渲染。仅对不透明大窗有意义；
-    /// RDP 远程会话、无可用 GPU、离屏截图等情形会自动回退软渲染（绝不 panic）。
-    pub fn accelerated(mut self, on: bool) -> Self {
-        self.cfg.accelerated = on;
+    /// 选择渲染后端。默认 [`Renderer::Software`]。
+    ///
+    /// - [`Renderer::Auto`]：GPU（Direct2D）优先，设备建不起来时自动回退软光栅。
+    /// - [`Renderer::Software`]：强制软光栅，内存敏感场景用。
+    /// - [`Renderer::Gpu`]：强制 GPU，拿不到就报错终止（测试与排障用）。
+    ///
+    /// GPU 路径在 Windows 上是更正统的一条：ClearType 的子像素混合由 Direct2D 直接
+    /// 完成，而软后端得自己把三通道覆盖率压进单通道 alpha。macOS 目前恒软光栅，
+    /// 本设置在那里只有 `Gpu` 会因无法满足而报错。
+    pub fn renderer(mut self, r: Renderer) -> Self {
+        self.cfg.renderer = r;
         self
     }
 
@@ -385,9 +392,26 @@ impl App {
                 self.cfg.screenshot_hover = Some((x, y));
             }
         }
-        // --accelerated：启用 GPU（Direct2D）后端，便于与软渲染对比测试（仅窗口模式生效）。
+        // --renderer <auto|software|gpu>：选渲染后端，便于同一个 example 出软/硬两份
+        // 截图做比对。`gpu` 拿不到 GPU 时报错终止，正是为了让比对结论可信——静默回退
+        // 会让人拿两张软渲染图得出"软硬一致"。
+        if let Some(v) = args
+            .iter()
+            .position(|a| a == "--renderer")
+            .and_then(|i| args.get(i + 1))
+        {
+            match v.as_str() {
+                "auto" => self.cfg.renderer = Renderer::Auto,
+                "software" | "soft" => self.cfg.renderer = Renderer::Software,
+                "gpu" => self.cfg.renderer = Renderer::Gpu,
+                other => eprintln!(
+                    "[windui] 无法识别的 --renderer {other}（可选 auto|software|gpu），沿用默认"
+                ),
+            }
+        }
+        // --accelerated：保留的旧写法，等价于 `--renderer auto`。
         if args.iter().any(|a| a == "--accelerated") {
-            self.cfg.accelerated = true;
+            self.cfg.renderer = Renderer::Auto;
         }
         self
     }

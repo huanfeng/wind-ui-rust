@@ -519,16 +519,26 @@ unsafe fn run_windowed(
         s.handler.set_scale(scale);
     }
 
-    // GPU 后端选择（窗口级显式 opt-in）：`cfg.accelerated` 为真（或调试环境变量
-    // WINDUI_D2D=1 强制）时尝试用 Direct2D 后端替换软后端。try_create 需要已就绪的
-    // HWND 与客户区尺寸，故在窗口创建并完成尺寸校正后切换。
-    // 强制软渲染条件：RDP 远程会话（flip-model swapchain 在远程桌面不可用）。
-    // 离屏截图走 run_offscreen，根本不到此处，恒软。设备创建失败保持软后端（绝不 panic）。
+    // GPU 后端选择：`cfg.renderer` 想要 GPU（或调试环境变量 WINDUI_D2D=1 强制）时，
+    // 尝试用 Direct2D 后端替换软后端。try_create 需要已就绪的 HWND 与客户区尺寸，
+    // 故在窗口创建并完成尺寸校正后切换。离屏截图走 run_offscreen，根本不到此处。
+    //
+    // 两处失败对 `Renderer::Auto` 都退软后端（绝不 panic）、对 `Renderer::Gpu` 都终止：
+    //   RDP 远程会话  —— flip-model swapchain 在远程桌面不可用，物理上给不了 GPU；
+    //   设备创建失败  —— 无可用适配器。
+    // Gpu 之所以终止而非回退，是因为它的用途就是"拿不到 GPU 要告诉我"；静默换一条路
+    // 会让基于它做的验证失去意义。
     #[cfg(feature = "d2d")]
     {
         let env_force = std::env::var("WINDUI_D2D").is_ok_and(|v| v != "0" && !v.is_empty());
         let is_remote = GetSystemMetrics(SM_REMOTESESSION) != 0;
-        if (cfg.accelerated || env_force) && !is_remote {
+        let want = cfg.renderer.wants_gpu() || env_force;
+        assert!(
+            !(cfg.renderer.requires_gpu() && is_remote),
+            "Renderer::Gpu 要求 GPU 渲染，但当前是 RDP 远程会话——flip-model swapchain \
+             在远程桌面不可用。需要自动回退请改用 Renderer::Auto"
+        );
+        if want && !is_remote {
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
@@ -538,7 +548,14 @@ unsafe fn run_windowed(
                         s.backend = Box::new(b);
                     }
                 }
-                None => eprintln!("[windui] D2D 设备创建失败，回退软渲染（Skia）"),
+                None => {
+                    assert!(
+                        !cfg.renderer.requires_gpu(),
+                        "Renderer::Gpu 要求 GPU 渲染，但 D2D 设备创建失败。\
+                         需要自动回退请改用 Renderer::Auto"
+                    );
+                    eprintln!("[windui] D2D 设备创建失败，回退软渲染（Skia）");
+                }
             }
         }
     }

@@ -31,7 +31,7 @@ pub mod prelude {
         CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, ToastKind,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
-    pub use crate::platform::{PickDialog, Tray, TrayCtx, TrayMenuItem};
+    pub use crate::platform::{PickDialog, Renderer, Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixmapTarget, RenderTarget};
     pub use crate::signal::{signal, Signal};

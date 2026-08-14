@@ -82,7 +82,7 @@
 > 并按"新控件/能力接入清单"（见 `AGENTS.md`）接入主题、示例与契约测试。
 
 > **进展更新（v0.4.0，2026-06-26）**：下列原 🔴/🟢-按需项已交付，本节决策矩阵据此勘误——
-> - **GPU / D2D 后端**：原红线①明确排除，现修订为**窗口级 opt-in**（`App::accelerated(true)`，默认仍软渲染、
+> - **GPU / D2D 后端**：原红线①明确排除，现修订为**窗口级 opt-in**（`App::renderer(Renderer::Auto)`，默认仍软渲染、
 >   文字仍走 DirectWrite）。详见 `docs/DESIGN.md` §8「GPU 后端（Direct2D）」。
 > - **Signals 响应式**：原判过度工程，实际作为 `Signal<T>` 状态原语落地（取代 `Rc<Cell>`/`Rc<RefCell>`，
 >   `set` 自动局部脏区），收益（统一状态 + 免手写 dirty）已验证。
@@ -117,7 +117,7 @@
 | 脏矩形局部重绘 + 增量布局 | ✅ 已交付（v0.4.0） | — | 交互失效系统：结构签名判定局部 vs 整窗，hover/拖动/点击/打字走 ~1ms 局部重绘 |
 | 多 UiHost + 单消息循环（多窗口） | 🟡 | P2 | 价值明确但改动大，与多窗口功能绑定 |
 | Signals 响应式数据流 | ✅ 已交付（v0.4.0） | — | 落地为 `Signal<T>` 状态原语（取代 `Rc<Cell>`/`Rc<RefCell>`，`set` 自动局部脏区）；非替换控件模型，恰为"可选层"形态 |
-| GPU / 软硬混合光栅 | ✅ 已交付（v0.4.0，opt-in） | — | Direct2D 后端，窗口级 `accelerated` opt-in、默认仍软；文字坚持 DirectWrite，不引 WGPU 字形图集 |
+| GPU / 软硬混合光栅 | ✅ 已交付（v0.4.0，opt-in） | — | Direct2D 后端，`App::renderer` 三档选择（Auto/Software/Gpu）、默认仍软；文字坚持 DirectWrite，不引 WGPU 字形图集 |
 
 ## 现状勘误（重要）
 

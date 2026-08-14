@@ -267,7 +267,7 @@ pub trait Canvas {
 
 **范围（v1）**：仅接管**不透明大窗**（`CreateSwapChainForHwnd` flip-model，**不引入 DirectComposition**）；透明小窗留软渲染。
 
-**后端选择（窗口级显式 opt-in）**：`WindowConfig.accelerated`（默认 `false`）/ `App::accelerated(true)` / 示例 `--accelerated`。即使开启，以下情形**强制软渲染**：RDP 远程会话（`SM_REMOTESESSION`，flip-model 在远程桌面不可用）、离屏截图（`run_offscreen` 走 `Pixmap`）、设备创建失败（`try_create` 返 `None` → 回退，**绝不 panic**）。
+**后端选择**：`WindowConfig.renderer`（默认 `Renderer::Software`）/ `App::renderer(..)` / 命令行 `--renderer auto|software|gpu`（`--accelerated` 为等价旧写法）。`Renderer::Auto` 在以下情形**回退软渲染**：RDP 远程会话（`SM_REMOTESESSION`，flip-model 在远程桌面不可用）、设备创建失败（`try_create` 返 `None`，**绝不 panic**）。`Renderer::Gpu` 在同样情形下**报错终止**而非回退——它的用途是让"拿不到 GPU"这件事可见，静默换路会让基于它的验证失去意义。离屏截图（`run_offscreen`）不再恒软，同样按 `renderer` 选后端。
 
 **DPI**：D2D 在逻辑坐标绘制，`make_canvas` 时 `SetTransform(scale)` 统一放大到物理像素（不同于软路径直画物理 `Pixmap` 的 ×scale）。
 

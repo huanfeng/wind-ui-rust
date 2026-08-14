@@ -608,14 +608,24 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
 
-### GPU 加速渲染（Windows，可选）
+### 渲染后端选择（Windows）
 ```rust
-App::new("…", w, h).accelerated(true).content(ui).run();
+App::new("…", w, h).renderer(Renderer::Auto).content(ui).run();
 ```
-- `App::accelerated(true)` 在 Windows 上 opt-in **Direct2D GPU 后端**：几何/渐变/阴影/文字光栅走 GPU，适合大窗口/多控件下降低软件光栅的逐像素填色开销。**默认关闭**（软渲染）。
-- 文字仍走 **DirectWrite**（系统字体缓存、ClearType 字形），与软路径字体/字重一致。
-- 自动回退软渲染（绝不 panic）：RDP 远程会话、无可用 GPU、设备创建失败、离屏截图（`--screenshot`）。
-- v1 仅适用**不透明窗口**；透明/分层窗口仍走软渲染。示例对比：`cargo run --release --example ime -- --accelerated`。
+
+| 变体 | 行为 | 用途 |
+|---|---|---|
+| `Renderer::Auto` | GPU 优先，设备建不起来自动回退软光栅 | 发布给最终用户 |
+| `Renderer::Software`（**默认**） | 强制软光栅 | 内存敏感场景 |
+| `Renderer::Gpu` | 强制 GPU，拿不到就**报错终止** | 测试与排障 |
+
+- GPU 走 **Direct2D**：几何/渐变/阴影/文字光栅交给 GPU，大窗口多控件时省下软光栅的逐像素填色开销。
+- 文字两条路都是 **DirectWrite**，字体与字重一致。区别在于 GPU 路径由 D2D 直接完成 ClearType 的子像素混合，而软后端得自己把三通道覆盖率压进单通道 alpha——GPU 是 Windows 上更正统的那条路。
+- `Gpu` 之所以报错而非回退：它的用途就是"拿不到 GPU 要告诉我"。静默换一条路会让基于它的验证失去意义——两张软渲染的截图看起来当然一致。要自动回退请用 `Auto`。
+- `Auto` 的回退条件：RDP 远程会话（flip-model swapchain 在远程桌面不可用）、无可用 GPU、设备创建失败。回退只在 stderr 留一行说明。
+- 仅适用**不透明窗口**；透明/分层窗口仍走软渲染。
+- 截图也能选后端：`--renderer gpu|software|auto`，于是同一个 example 可出软/硬两份图做比对。`--accelerated` 是等价于 `--renderer auto` 的旧写法，保留可用。
+  对比示例：`cargo run --release --example settings -- --screenshot a.png --renderer software` 与 `--renderer gpu`。
 
 ---
 
@@ -1378,7 +1388,7 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 | 全局热键（`App::hotkey`） | ✓ | ✗ debug 期 panic、release 静默忽略 |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
-| Direct2D GPU 后端（`App::accelerated`） | ✓ | — 不适用（macOS 恒软渲染） |
+| Direct2D GPU 后端（`App::renderer`） | ✓ | — 不适用（macOS 恒软渲染，`Renderer::Gpu` 会报错） |
 
 **命名一致性**
 

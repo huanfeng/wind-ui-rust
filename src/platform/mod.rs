@@ -90,12 +90,15 @@ enum Offscreen {
 }
 
 impl Offscreen {
-    /// `gpu=true` 时尝试 GPU 后端，建不起来则回退软光栅并告警——截图路径宁可出图
-    /// 也不该失败，但必须让人知道出的不是 GPU 的图，否则「GPU 与软渲染一致」这个
-    /// 结论会建立在两张软渲染图上。
-    fn new(w: u32, h: u32, gpu: bool) -> Self {
+    /// 按 `renderer` 选后端。
+    ///
+    /// [`Renderer::Auto`] 下设备建不起来就回退软光栅并告警——截图路径宁可出图也不该
+    /// 失败，但必须让人知道出的不是 GPU 的图，否则「GPU 与软渲染一致」这个结论会
+    /// 建立在两张软渲染图上。[`Renderer::Gpu`] 则直接终止：它的用途就是"拿不到 GPU
+    /// 要告诉我"，静默回退会让这次验证白做。
+    fn new(w: u32, h: u32, renderer: Renderer) -> Self {
         #[cfg(all(windows, feature = "d2d"))]
-        if gpu {
+        if renderer.wants_gpu() {
             if let Some(backend) =
                 crate::platform::win32::d2d::offscreen::OffscreenBackend::new(w, h)
             {
@@ -104,9 +107,19 @@ impl Offscreen {
                     last: Pixmap::new(w, h).expect("分配 pixmap 失败"),
                 };
             }
+            assert!(
+                !renderer.requires_gpu(),
+                "Renderer::Gpu 要求 GPU 截图，但 D2D 离屏设备建不起来（硬件与 WARP 都失败）。\
+                 需要自动回退请改用 Renderer::Auto"
+            );
             eprintln!("[windui] D2D 离屏设备创建失败，截图回退软渲染");
         }
-        let _ = gpu;
+        // 非 Windows 或未开 d2d feature：`Renderer::Gpu` 无从满足，同样应当报错而非
+        // 让调用方以为拿到了 GPU 图。
+        assert!(
+            !renderer.requires_gpu() || cfg!(all(windows, feature = "d2d")),
+            "Renderer::Gpu 在当前平台/编译配置下不可用（需要 Windows 且启用 d2d feature）"
+        );
         Offscreen::Soft(Pixmap::new(w, h).expect("分配 pixmap 失败"))
     }
 
@@ -149,9 +162,9 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     let ph = (cfg.height as f32 * s).round().max(1.0) as i32;
     let size = Size::new(pw, ph);
     handler.set_scale(s);
-    // 截图后端随 `accelerated` 走：`--screenshot --accelerated` 出 GPU 图，
-    // 使 29 个 example 都能做软硬整页比对，而不必为每条差异手写单元测试。
-    let mut off = Offscreen::new(pw as u32, ph as u32, cfg.accelerated);
+    // 截图后端随 `renderer` 走：`--screenshot --renderer gpu` 出 GPU 图，使 29 个
+    // example 都能做软硬整页比对，而不必为每条差异手写单元测试。
+    let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
     off.frame(handler, size, cfg.bg);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
@@ -278,9 +291,8 @@ pub struct WindowConfig {
     pub frameless: bool,
     /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
     pub animations: Option<bool>,
-    /// GPU 加速渲染（Direct2D 后端）opt-in，默认 false（软渲染）。仅不透明大窗有效；
-    /// RDP 远程会话与离屏截图恒走软渲染（见 win32 后端选择）。
-    pub accelerated: bool,
+    /// 渲染后端选择。默认 [`Renderer::Software`]。
+    pub renderer: Renderer,
     /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
     pub min_width: i32,
     pub min_height: i32,
@@ -305,10 +317,60 @@ impl Default for WindowConfig {
             start_hidden: false,
             frameless: false,
             animations: None,
-            accelerated: false,
+            renderer: Renderer::default(),
             min_width: 0,
             min_height: 0,
         }
+    }
+}
+
+/// 渲染后端的选择方式。
+///
+/// 两条后端并非替代关系：GPU（Direct2D）走系统的几何与文字光栅，是 Windows 上更
+/// 正统的路径——ClearType 子像素混合由 D2D 直接完成，而软后端得自己把三通道覆盖率
+/// 压进单通道 alpha。软光栅则在没有可用 GPU、或内存紧张时兜底。
+///
+/// ```no_run
+/// # use windui::prelude::*;
+/// App::new("demo", 800, 600)
+///     .renderer(Renderer::Auto)      // GPU 优先，建不起来自动回退
+///     .content(Element::label("hi"))
+///     .run();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Renderer {
+    /// GPU 优先，设备建不起来时**自动回退**软件光栅。
+    ///
+    /// 回退是静默的（只在 stderr 留一行说明），适合发布给最终用户——机器上有没有
+    /// 可用 GPU 不该由使用方操心。
+    Auto,
+    /// 强制软件光栅（tiny-skia）。
+    ///
+    /// 内存敏感场景用这个：GPU 路径要额外持有 swapchain、设备上下文与若干缓存位图。
+    /// 当前的默认值——GPU 路径的验证还在补齐中，默认切换会在后续版本进行。
+    #[default]
+    Software,
+    /// 强制 GPU，设备建不起来时**报错终止**而非回退。
+    ///
+    /// 用于测试与排障：静默回退会让"我在验证 GPU 行为"这件事失去意义——两张软渲染
+    /// 的截图看起来当然一致。要的是"拿不到 GPU 就告诉我"，而不是悄悄换一条路。
+    Gpu,
+}
+
+impl Renderer {
+    /// 是否应当尝试 GPU 后端。
+    ///
+    /// 仅 Windows + d2d feature 下有调用者：其余平台没有可尝试的 GPU 后端，
+    /// 只有 `requires_gpu` 仍需判断（`Renderer::Gpu` 在那里无从满足，须报错）。
+    #[cfg_attr(not(all(windows, feature = "d2d")), allow(dead_code))]
+    pub(crate) fn wants_gpu(self) -> bool {
+        matches!(self, Renderer::Auto | Renderer::Gpu)
+    }
+
+    /// GPU 建不起来时是否必须报错（而非回退软件）。
+    pub(crate) fn requires_gpu(self) -> bool {
+        matches!(self, Renderer::Gpu)
     }
 }
 
@@ -614,6 +676,37 @@ impl DialogRequest {
             DialogRequest::SaveFile(d, cb) => cb(d.save_file()),
             DialogRequest::Custom(f) => f(),
         }
+    }
+}
+
+#[cfg(test)]
+mod renderer_tests {
+    use super::*;
+
+    /// 默认必须是软光栅。
+    ///
+    /// 单独钉住是因为改默认值是一次**行为变更**，会把所有未显式选择的应用一起切到
+    /// GPU 上。它该由一次明确的版本决策来做，而不是谁顺手改了 `#[default]` 就生效。
+    #[test]
+    fn default_is_software() {
+        assert_eq!(Renderer::default(), Renderer::Software);
+        assert_eq!(WindowConfig::default().renderer, Renderer::Software);
+    }
+
+    /// 三个变体在"要不要试 GPU"和"失败能不能回退"两个维度上的取值。
+    #[test]
+    fn wants_and_requires_gpu_truth_table() {
+        assert!(Renderer::Auto.wants_gpu(), "Auto 应尝试 GPU");
+        assert!(!Renderer::Auto.requires_gpu(), "Auto 失败应可回退");
+
+        assert!(!Renderer::Software.wants_gpu(), "Software 不应尝试 GPU");
+        assert!(!Renderer::Software.requires_gpu());
+
+        assert!(Renderer::Gpu.wants_gpu());
+        assert!(
+            Renderer::Gpu.requires_gpu(),
+            "Gpu 失败必须报错——静默回退会让基于它的验证拿两张软渲染图得出'软硬一致'"
+        );
     }
 }
 

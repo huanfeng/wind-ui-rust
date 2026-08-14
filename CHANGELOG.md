@@ -161,6 +161,20 @@
   `examples/multiline_demo.rs` 已迁到 `.accent_role(Role::Accent)`，常量删除。
 
 ### Changed
+- **`App::accelerated(bool)` 换成 `App::renderer(Renderer)`（破坏性）**。布尔开关只能表达
+  "要不要试 GPU"，答不了"拿不到 GPU 该怎么办"——而这两件事需要分开：
+
+  | 变体 | 行为 | 用途 |
+  |---|---|---|
+  | `Renderer::Auto` | GPU 优先，建不起来自动回退软光栅 | 发布给最终用户 |
+  | `Renderer::Software`（默认） | 强制软光栅 | 内存敏感场景 |
+  | `Renderer::Gpu` | 强制 GPU，拿不到就**报错终止** | 测试与排障 |
+
+  `Gpu` 之所以报错而非回退，是因为它的用途就是"拿不到 GPU 要告诉我"。静默换一条路会让
+  基于它的验证失去意义——两张软渲染的截图看起来当然一致。这也是它与 `Auto` 唯一的区别。
+  迁移：`accelerated(true)` → `renderer(Renderer::Auto)`；`accelerated(false)` 即默认，可直接删去。
+  命令行新增 `--renderer auto|software|gpu`，`--accelerated` 作为等价旧写法保留。
+  **默认仍是软光栅**：GPU 路径的验证还在补齐（本版从零测试补到 13 条），默认切换留待后续版本。
 - **`EventCtx::request_close` 改为走关闭决策链，新增 `force_close` 跳过它（破坏性）**。
   此前 `request_close()` 的语义是"应用已决定关闭"——直接落地，不问 `on_close_request`、
   也不先关最顶层对话框。问题在于**无边框窗口的 × 是自绘控件**
