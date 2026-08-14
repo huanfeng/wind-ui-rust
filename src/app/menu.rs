@@ -105,9 +105,21 @@ impl MenuLevel {
     fn max_scroll(&self) -> i32 {
         (self.content_h - self.rect.h).max(0)
     }
+    /// 条目的**可视带**：面板矩形上下各内缩 `MENU_VPAD`，使条目在触达圆角边框前
+    /// 自然裁切。绘制的 `clip_rect` 与所有条目命中判据都取自这里——两边各写一份
+    /// 就会分叉：滚动后挪进边带的行被裁掉看不见，却仍然可点，用户点到的是一个
+    /// 不存在于屏幕上的项。
+    pub(super) fn item_clip(&self) -> Rect {
+        Rect::new(
+            self.rect.x,
+            self.rect.y + MENU_VPAD,
+            self.rect.w,
+            (self.rect.h - 2 * MENU_VPAD).max(0),
+        )
+    }
     /// 命中点 → 项下标（分隔线不可命中）。
     fn item_at(&self, p: Point) -> Option<usize> {
-        if !self.rect.contains(p) {
+        if !self.item_clip().contains(p) {
             return None;
         }
         for (i, (top, h)) in self.item_rows().into_iter().enumerate() {
@@ -124,7 +136,7 @@ impl MenuLevel {
     /// 命中尾随可点击图标 → 项下标。图标固定贴右绘制（`r.right()-MENU_PAD_X-MENU_ICON_W`
     /// 起始），与 badge 是否存在无关，故命中矩形无需重算 badge 宽度即可复刻绘制位置。
     pub(super) fn trailing_icon_at(&self, p: Point) -> Option<usize> {
-        if !self.rect.contains(p) {
+        if !self.item_clip().contains(p) {
             return None;
         }
         let icon_left = self.rect.right() - MENU_PAD_X - MENU_ICON_W;
@@ -882,15 +894,11 @@ impl MenuHost {
                 } else {
                     0
                 };
-            // 裁剪到内缩矩形：上下各留 MENU_VPAD 像素，使条目在触达圆角边框前
-            // 自然裁切（scroll=0 时第一项恰在裁剪边界，滚动时产生平滑"滚出"效果）。
+            // 裁剪到内缩矩形（`item_clip` 同时是命中判据，见其文档）：上下各留
+            // MENU_VPAD 像素，使条目在触达圆角边框前自然裁切（scroll=0 时第一项
+            // 恰在裁剪边界，滚动时产生平滑"滚出"效果）。
             canvas.save();
-            canvas.clip_rect(Rect::new(
-                r.x,
-                r.y + MENU_VPAD,
-                r.w,
-                (r.h - 2 * MENU_VPAD).max(0),
-            ));
+            canvas.clip_rect(level.item_clip());
             for (i, (top, h)) in level.item_rows().into_iter().enumerate() {
                 let it = &level.items[i];
                 if it.separator {
@@ -1054,6 +1062,64 @@ mod tests {
     use crate::app::test_support::{dropdown_handler, key_ev};
     use crate::app::App;
     use crate::ui::Element;
+
+    /// 回归：命中判据必须与绘制裁剪同源。面板上下各 `MENU_VPAD` 的边带被 clip 掉，
+    /// 而 `scroll == 0` 时首项恰好从裁剪线起画，边带里没有行——问题只在滚动之后
+    /// 暴露：挪进边带的行看不见却仍落在 `rect` 内，按 `rect.contains` 判定就是
+    /// 命中，用户点到的是一个屏幕上不存在的项。
+    #[test]
+    fn scrolled_menu_ignores_clicks_in_clipped_bands() {
+        use crate::event::MenuItem;
+        use crate::geometry::Point;
+
+        let items: Vec<MenuItem> = (0..10)
+            .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+            .collect();
+        let level = MenuLevel {
+            items,
+            // 面板只装得下 5 行，内容有 10 行 → 可滚动。
+            rect: Rect::new(40, 100, 160, 5 * MENU_ITEM_H + 2 * MENU_VPAD),
+            hover: None,
+            has_icons: false,
+            spawn: None,
+            content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
+            // 滚半行：行边界落在边带内部，两条边带底下都确实压着行。
+            scroll: MENU_ITEM_H / 2,
+        };
+        let (r, x) = (level.rect, level.rect.x + 20);
+        let rows = level.item_rows();
+        let covered = |y: i32| rows.iter().any(|(top, h)| y >= *top && y < top + h);
+
+        for y in [r.y + MENU_VPAD - 1, r.bottom() - MENU_VPAD] {
+            let p = Point::new(x, y);
+            // 前置条件：该点在面板内（不是"点到菜单外"那条已有的关闭路径），
+            // 且确实被某一行覆盖——否则这个断言不修也会通过。
+            assert!(r.contains(p), "y={y} 应落在面板矩形内");
+            assert!(covered(y), "y={y} 应被某一行覆盖（否则测不到本缺陷）");
+            assert_eq!(
+                level.item_at(p),
+                None,
+                "y={y} 在被裁掉的边带里，不得命中任何项"
+            );
+            assert_eq!(
+                level.trailing_icon_at(p),
+                None,
+                "y={y} 尾随图标同样不得命中"
+            );
+        }
+
+        // 可视带内照常命中，修复没有把正常路径一起关掉。
+        assert!(
+            level.item_at(Point::new(x, r.y + MENU_VPAD)).is_some(),
+            "裁剪线上第一行像素应可点"
+        );
+        assert!(
+            level
+                .item_at(Point::new(x, r.bottom() - MENU_VPAD - 1))
+                .is_some(),
+            "裁剪线下最后一行像素应可点"
+        );
+    }
 
     #[test]
     fn trailing_icon_click_fires_independently_of_item_selection() {

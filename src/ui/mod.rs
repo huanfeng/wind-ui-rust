@@ -672,6 +672,10 @@ pub struct Element {
     layout: Layout,
     style: Style,
     widget: Box<dyn Widget>,
+    /// 是否已挂过真正的 widget（`base` 里那个 `EmptyWidget` 占位不算）。
+    /// 用独立标志而非"探测 widget 是不是空"，是因为后者只能靠 `as_any_mut()`
+    /// 这类可选实现来猜——自定义 widget 不实现它就漏判。
+    has_widget: bool,
     children: Vec<Element>,
     visible: bool,
     vis_signal: Option<Signal<bool>>,
@@ -706,6 +710,7 @@ impl Element {
             layout,
             style: Style::default(),
             widget: Box::new(EmptyWidget),
+            has_widget: false,
             children: Vec::new(),
             visible: true,
             vis_signal: None,
@@ -898,7 +903,7 @@ impl Element {
             self.widget.as_any_mut().is_none(),
             "clickable() 仅用于容器（col/row/stack），不能叠加在叶子控件上"
         );
-        self.widget = Box::new(containers::Clickable::new());
+        self.set_widget(Box::new(containers::Clickable::new()));
         self
     }
 
@@ -1624,7 +1629,7 @@ impl Element {
         let row_fn_clone = row_fn.clone();
         let widget = dyn_list::DynList::with_scope(data, move |item: T| row_fn_clone(item), rows);
         let mut container = Self::scroll().fill();
-        container.widget = Box::new(widget);
+        container.set_widget(Box::new(widget));
         container.reactive = true;
         for el in initial {
             container.children.push(el);
@@ -1648,7 +1653,7 @@ impl Element {
         let build_fn_clone = build_fn.clone();
         let widget = dyn_list::DynList::with_scope(data, move |item: T| build_fn_clone(item), rows);
         let mut container = Self::col().fill();
-        container.widget = Box::new(widget);
+        container.set_widget(Box::new(widget));
         container.reactive = true;
         for el in initial {
             container.children.push(el);
@@ -1694,10 +1699,10 @@ impl Element {
                     .child(row.weight(1.0)),
             );
         }
-        container.widget = Box::new(reorder::ReorderList::new(
+        container.set_widget(Box::new(reorder::ReorderList::new(
             ctl,
             reorder::CommitMode::Children,
-        ));
+        )));
         container.reactive = true;
         container
     }
@@ -1749,7 +1754,7 @@ impl Element {
         let source = reorder::signal_rows(data, row_fn, ctl.clone());
         let mut list = reorder::ReorderList::new(ctl, reorder::CommitMode::Callback);
         list.set_source(source);
-        container.widget = Box::new(list);
+        container.set_widget(Box::new(list));
         container.reactive = true;
         container
     }
@@ -2400,7 +2405,7 @@ impl Element {
                 tr = tr.child(cell.weight(w));
             }
             // 整行悬停轻微高亮（叠层在斑马纹之上、单元格之下；可编辑单元格的 clickable 叠层叠加其上）。
-            tr.widget = Box::new(sortable_table::HoverRow::new());
+            tr.set_widget(Box::new(sortable_table::HoverRow::new()));
             scroll = scroll.child(
                 Element::col()
                     .width_match()
@@ -2489,7 +2494,9 @@ impl Element {
             .width_match()
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
-        header.widget = Box::new(sortable_table::SortableHeader::new(cols, sort, None));
+        header.set_widget(Box::new(sortable_table::SortableHeader::new(
+            cols, sort, None,
+        )));
         header.reactive = true;
 
         // 正文：滚动容器保留内置 ScrollWidget（滚轮 + 滚动条拖拽），行由 SortableBody 挂在
@@ -2501,7 +2508,9 @@ impl Element {
                 disp, ri, &data[ri], &weights, None, None, 1, None, None,
             ));
         }
-        body.widget = Box::new(sortable_table::SortableBody::new(data, weights, sort));
+        body.set_widget(Box::new(sortable_table::SortableBody::new(
+            data, weights, sort,
+        )));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
 
@@ -2546,11 +2555,11 @@ impl Element {
             .width_match()
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
-        header.widget = Box::new(sortable_table::SortableHeader::new(
+        header.set_widget(Box::new(sortable_table::SortableHeader::new(
             cols,
             sort,
             Some(on_sort),
-        ));
+        )));
         header.reactive = true;
 
         // 正文：滚动容器保留内置 ScrollWidget；PagedBody 挂在其内部 col 上，绑定当前页数据信号，
@@ -2562,7 +2571,7 @@ impl Element {
                 disp, disp, row, &weights, None, None, 1, None, None,
             ));
         }
-        body.widget = Box::new(sortable_table::PagedBody::new(rows, weights));
+        body.set_widget(Box::new(sortable_table::PagedBody::new(rows, weights)));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
 
@@ -2604,11 +2613,13 @@ impl Element {
 
         // 表头：[全选列] + [可排序数据列子行]，与正文的 [复选框列] + [数据列] 逐列对齐
         // （子行 weight=1 占 W-scw，其内数据列按 weights 分；正文数据列在固定 scw 后同样按 weights 分）。
-        let selectall = Element::label("")
+        let selectall = Element::leaf()
             .width(scw)
             .widget(sortable_table::SelectAllCheck::new(selected.clone()));
         let mut subrow = Element::row().weight(1.0).cross(Align::Stretch);
-        subrow.widget = Box::new(sortable_table::SortableHeader::new(cols, sort, None));
+        subrow.set_widget(Box::new(sortable_table::SortableHeader::new(
+            cols, sort, None,
+        )));
         subrow.reactive = true;
         let header = Element::row()
             .width_match()
@@ -2619,9 +2630,9 @@ impl Element {
 
         // 正文：滚动容器保留内置 ScrollWidget；SelectableBody 挂在其内部 col 上，首次布局构建行。
         let mut body = Element::col().width_match();
-        body.widget = Box::new(sortable_table::SelectableBody::new(
+        body.set_widget(Box::new(sortable_table::SelectableBody::new(
             data, weights, selected, sort,
-        ));
+        )));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
 
@@ -2868,10 +2879,31 @@ impl Element {
         self
     }
 
-    /// 设置自定义内容控件（叶子）。
+    /// 设置自定义内容控件：把实现了 [`Widget`] 的类型挂到**还没有控件的**节点上，
+    /// 即 `Element::leaf()` 或任意容器（`col`/`row`/`stack`）。
+    ///
+    /// 不能挂到已经是控件的节点上（`button`/`label`/`slider` … 以及 `table_*`、
+    /// `list_signal` 这类内部已挂了 widget 的组合构造器）——一个节点只有一个
+    /// widget 槽，那样做等于把原控件**静默丢掉**：按钮不再是按钮，却既不报错也
+    /// 没有任何迹象。要在控件旁边加东西，用容器把两者并排放（`Element::row()`
+    /// `.child(按钮).child(Element::leaf().widget(自定义))`）。
+    #[track_caller]
     pub fn widget(mut self, w: impl Widget + 'static) -> Self {
-        self.widget = Box::new(w);
+        debug_assert!(
+            !self.has_widget,
+            "widget() 只能挂到没有控件的节点（leaf / col / row / stack）上；\
+             该节点已有控件，再挂会把它静默替换掉"
+        );
+        self.set_widget(Box::new(w));
         self
+    }
+
+    /// 内部挂载入口：与 `has_widget` 标志同步，绕过 [`Element::widget`] 的守卫。
+    /// 组合构造器把 widget 挂到自己刚建的容器上时用它——那是构造器自己的节点，
+    /// 不是调用方误挂。
+    fn set_widget(&mut self, w: Box<dyn Widget>) {
+        self.widget = w;
+        self.has_widget = true;
     }
 
     // ---- 尺寸 ----
@@ -4560,6 +4592,48 @@ mod tests {
         // 命中某项 → 控件的动态文案胜出。
         hit.set(Some(3));
         assert_eq!(tree.node_tooltip(node).as_deref(), Some("第 3 项"));
+    }
+
+    /// 测试用最小自绘控件。
+    struct Probe;
+    impl crate::core::Widget for Probe {
+        fn measure(
+            &self,
+            _a: crate::geometry::Size,
+            _s: &crate::style::Style,
+            _t: &mut dyn crate::text::TextEngine,
+        ) -> crate::geometry::Size {
+            crate::geometry::Size::new(10, 10)
+        }
+    }
+
+    /// `widget()` 的正常用法：空槽位（leaf 与三种容器）都能挂。
+    #[test]
+    fn widget_mounts_on_empty_slots() {
+        for e in [
+            Element::leaf(),
+            Element::col(),
+            Element::row(),
+            Element::stack(),
+        ] {
+            let _ = e.widget(Probe);
+        }
+    }
+
+    /// 守卫回归：挂到已经是控件的节点上，等于把原控件静默丢掉——按钮不再是
+    /// 按钮，却既不报错也没有任何迹象。debug 下必须当场炸出来。
+    #[test]
+    #[should_panic(expected = "该节点已有控件")]
+    fn widget_rejects_replacing_a_control() {
+        let _ = Element::button("确定").widget(Probe);
+    }
+
+    /// 同一守卫覆盖组合构造器：`scroll()` 是容器，但它内部已挂了滚动控件，
+    /// 盖掉就没有滚动了。
+    #[test]
+    #[should_panic(expected = "该节点已有控件")]
+    fn widget_rejects_replacing_a_composed_container_widget() {
+        let _ = Element::scroll().widget(Probe);
     }
 
     /// 无静态 tooltip 的自绘控件，未命中时不应弹出空提示。

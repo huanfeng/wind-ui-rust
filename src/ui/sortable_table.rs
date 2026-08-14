@@ -464,7 +464,7 @@ pub(super) fn body_row(
     if let Some(a) = actions {
         tr = tr.child(action_cell((a.build)(orig), a.weight));
     }
-    tr.widget = Box::new(HoverRow::with_activate(orig, activate.cloned()));
+    tr.set_widget(Box::new(HoverRow::with_activate(orig, activate.cloned())));
     tr = with_row_menu(tr, orig, menu);
     Element::col()
         .width_match()
@@ -903,7 +903,7 @@ pub(super) fn select_body_row(
     if let Some(a) = actions {
         tr = tr.child(action_cell((a.build)(orig), a.weight));
     }
-    tr.widget = Box::new(SelectableRow::new(row_sel));
+    tr.set_widget(Box::new(SelectableRow::new(row_sel)));
     tr = with_row_menu(tr, orig, menu);
     Element::col()
         .width_match()

@@ -25,13 +25,16 @@ use crate::event::Event;
 use crate::geometry::{Color, Rect, Size};
 use crate::render::image::{Fit, Image, VisualState, PLACEHOLDER_SIZE};
 use crate::render::{Canvas, Paint};
-use crate::style::Style;
+use crate::style::{Role, Style};
 use crate::text::TextEngine;
 
-/// 占位框背景色（淡灰）。
-const PLACEHOLDER_BG: Color = Color::rgb(0xEE, 0xEE, 0xEE);
-/// 占位框边框色。
-const PLACEHOLDER_BORDER: Color = Color::rgb(0xCC, 0xCC, 0xCC);
+/// 占位框底色。语义是**中性的"此处没有可绘制内容"**，不是"出错了"：`paint_into`
+/// 走到占位分支的条件只有"没有可用的图层"，它既覆盖解码失败，也覆盖调用方本就
+/// 传了 `None`（图还没来）。用 `Danger` 会把后者误报成错误，故取次级表面 +
+/// 常规边框——与卡片、表头等"空态容器"同源，换主题自动跟随。
+const PLACEHOLDER_BG: Role = Role::SurfaceAlt;
+/// 占位框边框角色。
+const PLACEHOLDER_BORDER: Role = Role::Border;
 
 /// 一层图片：原图 + 着色结果缓存（避免每帧重着色）。
 struct Layer {
@@ -266,8 +269,24 @@ impl ImageContent {
             }
             None => {
                 let (x, y, w, h) = (dst.x as f32, dst.y as f32, dst.w as f32, dst.h as f32);
-                canvas.fill_round_rect(x, y, w, h, radius, &Paint::fill(PLACEHOLDER_BG));
-                canvas.stroke_round_rect(x, y, w, h, radius, 1.0, &Paint::fill(PLACEHOLDER_BORDER));
+                let th = crate::theme::current();
+                canvas.fill_round_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    &Paint::fill(PLACEHOLDER_BG.resolve(&th)),
+                );
+                canvas.stroke_round_rect(
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius,
+                    1.0,
+                    &Paint::fill(PLACEHOLDER_BORDER.resolve(&th)),
+                );
             }
         }
     }
@@ -436,28 +455,46 @@ mod tests {
         );
     }
 
+    /// 占位框须走主题角色，不得是模块级硬编码色——硬编码的淡灰在暗色主题下是块
+    /// 近白方块，与周围深色卡片格格不入。亮/暗两套主题各画一次，断言底色/边框
+    /// 恰为该主题的 `SurfaceAlt`/`Border`。
     #[test]
-    fn placeholder_paints_visible_box() {
-        let mut pm = Pixmap::new(60, 60).unwrap();
-        pm.fill(tiny_skia::Color::WHITE);
-        let c = ImageContent::new(None);
-        {
-            let mut canvas = SkiaCanvas::new(&mut pm);
-            c.paint_into(
-                Rect::new(10, 10, 40, 40),
-                &mut canvas,
-                &Style::default(),
-                VisualState::Normal,
+    fn placeholder_follows_theme() {
+        use crate::theme::Theme;
+        for (name, theme) in [("light", Theme::default()), ("dark", Theme::dark())] {
+            let (bg, border) = (theme.palette.surface_alt, theme.palette.border);
+            let surface = theme.palette.surface;
+            crate::theme::set_current(std::rc::Rc::new(theme));
+            let mut pm = Pixmap::new(60, 60).unwrap();
+            // 底铺该主题的卡片表面色，模拟占位框实际所处的环境。
+            pm.fill(tiny_skia::Color::from_rgba8(
+                surface.r, surface.g, surface.b, 255,
+            ));
+            let c = ImageContent::new(None);
+            {
+                let mut canvas = SkiaCanvas::new(&mut pm);
+                c.paint_into(
+                    Rect::new(10, 10, 40, 40),
+                    &mut canvas,
+                    &Style::default(),
+                    VisualState::Normal,
+                );
+            }
+            let fill = pm.pixel(30, 30).unwrap();
+            assert_eq!(
+                (fill.red(), fill.green(), fill.blue()),
+                (bg.r, bg.g, bg.b),
+                "{name} 主题：占位框底色应为 SurfaceAlt"
+            );
+            // 左边框（x=10 这一列）：描边居中于边界，取 x=10、y 居中处。
+            let stroke = pm.pixel(10, 30).unwrap();
+            assert_eq!(
+                (stroke.red(), stroke.green(), stroke.blue()),
+                (border.r, border.g, border.b),
+                "{name} 主题：占位框边框应为 Border"
             );
         }
-        let p = pm.pixel(30, 30).unwrap();
-        assert!(
-            p.red() < 250 && p.green() < 250 && p.blue() < 250,
-            "占位框应可见，实得 ({},{},{})",
-            p.red(),
-            p.green(),
-            p.blue()
-        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 
     #[test]

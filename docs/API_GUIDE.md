@@ -1114,7 +1114,13 @@ fn main() {
 
 ## 9. 扩展：自定义控件
 
-实现 `Widget` trait，挂到 `Element::leaf().widget(...)`（或任意容器的 `.widget()`）。
+实现 `Widget` trait，挂到 `Element::leaf().widget(...)`（或空容器 `col`/`row`/`stack` 的
+`.widget()`）。
+
+⚠️ 一个节点只有一个 widget 槽，故 `.widget()` **只能挂到还没有控件的节点上**。挂到
+`button`/`label`/`slider` 这类控件，或 `scroll`/`table_*`/`list_signal` 这类内部已挂了控件的
+组合构造器上，会把原控件替换掉——debug 下 `debug_assert` 会带调用点报错。要在控件旁边加
+自绘内容，用容器把两者并排：`Element::row().child(按钮).child(Element::leaf().widget(自定义))`。
 
 `Widget` 是**纯内容接口**——不持有、不访问树。所有方法都有默认实现，按需覆盖：
 
