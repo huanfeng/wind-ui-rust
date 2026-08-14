@@ -112,6 +112,11 @@ define_class!(
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             self.do_draw();
+            // 帧内产生的意图也要消费：App 级回调（channel 的 on_message、on_interval）
+            // 拿到 EventCtx 后可以请求关窗、弹原生对话框、改窗口显隐，而它们是在出帧
+            // 时跑的，不经过任何输入事件。不在这里排空，这些请求要拖到用户下一次点键
+            // 敲键才生效——win32 侧在 WM_PAINT 里出于同样理由排空。
+            self.after_event();
         }
 
         #[unsafe(method(mouseDown:))]
@@ -316,6 +321,15 @@ define_class!(
                 let op = self.ivars().borrow_mut().handler.take_window_op();
                 if let (Some(WindowOp::Hide), Some(win)) = (op, self.window()) {
                     win.orderOut(None);
+                }
+                // 对话框请求同理：拦截器现在收 EventCtx，"挡下这次关闭、同时
+                // ctx.defer_blocking 弹一个确认框"是文档推荐的确认退出流程
+                // （见 API_GUIDE §8.7）。不在这里排空，那个框要等用户下一次
+                // 输入才弹出来，看着就像点了关闭没反应。
+                let dialog = self.ivars().borrow_mut().handler.take_dialog_request();
+                if let Some(req) = dialog {
+                    req.run();
+                    self.setNeedsDisplay(true);
                 }
             }
             allow
