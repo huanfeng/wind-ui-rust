@@ -843,6 +843,8 @@ struct UiHost {
     close_handler: Option<CloseHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
+    /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
+    resolving_close: bool,
 }
 
 impl UiHost {
@@ -854,6 +856,19 @@ impl UiHost {
     /// 借用期间被调用（win32 `WM_CLOSE` / macOS `windowShouldClose:`），此处碰 OS 会
     /// 同步重入（见 AGENTS.md 铁律 6）。
     fn resolve_close(&mut self) -> bool {
+        // 防自我递归：`on_close_request` 的回调里再调 `ctx.request_close()` 会经
+        // `apply_app_effects` 回到这里。那种写法本就没有意义（正在回答"能不能关"），
+        // 直接放行不再重入。
+        if self.resolving_close {
+            return true;
+        }
+        self.resolving_close = true;
+        let out = self.resolve_close_inner();
+        self.resolving_close = false;
+        out
+    }
+
+    fn resolve_close_inner(&mut self) -> bool {
         // 优先关闭最顶层可见对话框（不退出窗口）。
         if close_topmost_modal() {
             // 对话框被关闭，需要重绘以隐藏遮罩。
@@ -911,18 +926,17 @@ impl UiHost {
         self.damage.needs_relayout = true;
     }
 
-    /// 落地控件发出的关闭请求（`EventCtx::request_close`）：`hide_on_close` 时转为隐藏。
+    /// 落地**已决定**的关闭（`EventCtx::force_close`）：`hide_on_close` 时转为隐藏，
+    /// 但不问 `close_handler`、也不先关对话框。
     ///
-    /// 关闭请求有**三个**入口，走两套管道，容易漏：
-    /// - ESC 与系统标题栏 × → `on_close_request` → [`Self::resolve_close`]
-    /// - 控件主动请求 → `res.close` → **本函数**
+    /// 关闭意图有两类，走两条路，别搞混：
+    /// - **用户请求关闭**（系统 × / Alt+F4 / ESC / 自绘 × 按钮 / `ctx.request_close()`）
+    ///   → [`Self::resolve_close`]：关顶层对话框 → 问 `on_close_request` → `hide_on_close`。
+    /// - **应用已决定关闭**（`ctx.force_close()`）→ **本函数**。
     ///
-    /// 第三个入口最易被忽略：有边框窗口的 × 由系统绘制、走 `WM_CLOSE`；而**无边框窗口
-    /// 的 × 是自绘控件**（`Element::window_button(WindowButtonKind::Close)`），走的是
-    /// `request_close()`。漏掉本函数，`.frameless().hide_on_close()` 会直接杀进程。
-    ///
-    /// 此处**不询问 `close_handler`**：`request_close()` 的语义是「应用已决定关闭」，
-    /// 而非「用户请求关闭」，沿用既有行为不变。
+    /// 自绘 × 按钮曾经走本函数（`request_close` 当时表示"应用已决定"），后果是
+    /// `on_close_request` 拦得住 Alt+F4 却拦不住 ×——而无边框窗口的 × 恰恰是主入口，
+    /// 守卫因此形同虚设。现在它与系统 × 同走决策链。
     fn apply_close_intent(&mut self) {
         if self.hide_on_close {
             self.pending_window_op = Some(WindowOp::Hide);
@@ -978,6 +992,7 @@ impl UiHost {
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
             close_handler,
             hide_on_close,
+            resolving_close: false,
         }
     }
 
@@ -1034,6 +1049,7 @@ impl UiHost {
             mut repaint,
             damage,
             close,
+            close_forced,
             focus,
             consumed,
             menu,
@@ -1083,8 +1099,10 @@ impl UiHost {
                 }
             }
         }
-        if close {
+        if close_forced {
             self.apply_close_intent();
+        } else if close && self.resolve_close() {
+            self.close = true;
         }
         // 浮层菜单。target 是 SendKey 动作的派发对象：优先当前焦点控件（如 TextInput
         // 的右键剪贴板项），否则回退根节点（on_context_menu 容器不可聚焦，其菜单项多为
@@ -1807,9 +1825,70 @@ mod tests {
         );
     }
 
-    /// 控件的 request_close（无边框窗口的自绘 × 走此路）也须受 hide_on_close 约束。
-    /// 它与 ESC/系统 × 走的是**另一条管道**（res.close 而非 on_close_request），
-    /// 漏接会让 .frameless().hide_on_close() 直接杀进程。
+    /// 无边框窗口的自绘 × 必须与系统 ×、Alt+F4 走**同一条**决策链。
+    ///
+    /// 回归的是一个真实故障：自绘 × 当初走 `res.close` 直落，于是 `on_close_request`
+    /// 拦得住 Alt+F4 却拦不住 ×——而无边框窗口的 × 恰恰是用户最常点的那个，守卫因此
+    /// 形同虚设（下游那个"改了内容点 × 直接丢失、按 Alt+F4 才提示"的报告即由此而来）。
+    #[test]
+    fn frameless_close_button_goes_through_the_close_guard() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::ui::WindowButtonKind;
+        use std::cell::Cell;
+        use tiny_skia::Pixmap;
+
+        let asked = std::rc::Rc::new(Cell::new(0u32));
+        let a = asked.clone();
+        let app = App::new("t", 200, 100)
+            // 一律拦下：模拟"有未保存的更改，先问一句"。
+            .on_close_request(move |_ctx| {
+                a.set(a.get() + 1);
+                false
+            })
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::window_button(WindowButtonKind::Close)),
+            );
+        let mut handler = app.into_handler_for_test();
+        let mut pm = Pixmap::new(200, 100).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 100));
+
+        let at = Point::new(20, 20);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            at,
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+
+        assert_eq!(asked.get(), 1, "自绘 × 必须问过 on_close_request");
+        assert!(!handler.wants_close(), "守卫拒绝时不该关窗");
+    }
+
+    /// `force_close` 是给"应用已决定"的场合（安装器要求退出、用户已在确认框里选过），
+    /// 它**跳过**守卫——否则会变成"安装器等窗口关、窗口等用户回答"。
+    #[test]
+    fn force_close_skips_the_guard() {
+        use std::cell::Cell;
+        let asked = std::rc::Rc::new(Cell::new(0u32));
+        let a = asked.clone();
+        let app = App::new("t", 100, 100)
+            .on_close_request(move |_ctx| {
+                a.set(a.get() + 1);
+                false
+            })
+            .content(Element::col());
+        let mut app = app.into_handler_for_test();
+        app.apply_close_intent(); // force_close 的落地路径
+        assert_eq!(asked.get(), 0, "force_close 不该问守卫");
+        assert!(app.wants_close());
+    }
+
+    /// 已决定的关闭（`force_close`）也须受 hide_on_close 约束。
     #[test]
     fn widget_request_close_respects_hide_on_close() {
         let app = App::new("t", 100, 100)
@@ -1824,7 +1903,7 @@ mod tests {
         assert_eq!(app.take_window_op(), Some(WindowOp::Hide));
     }
 
-    /// 未开 hide_on_close 时，控件的 request_close 仍须真关——不可回归。
+    /// 未开 hide_on_close 时，已决定的关闭仍须真关——不可回归。
     #[test]
     fn widget_request_close_still_closes_by_default() {
         let app = App::new("t", 100, 100).content(Element::col());

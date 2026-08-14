@@ -604,7 +604,7 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 ```
 - `App::frameless()` 去掉系统标题栏，客户区铺满整窗，**保留 Aero 吸附/缩放/投影**（WM_NCCALCSIZE + WS_THICKFRAME + DwmExtendFrameIntoClientArea）。
 - `Element::window_drag()` 标记拖动区（自定义标题栏）：命中非交互区拖窗、命中可聚焦控件（按钮/输入）则不拖、交控件处理。
-- `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`。
+- `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`——关闭键与系统 × 同走关闭决策链，`on_close_request` 一样拦得住（见 §8.7）。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
 
@@ -1000,7 +1000,7 @@ ctx.show_context_menu(pos, vec![
 字面量 `MenuItem { .. }` 不再可用。字段读取不受影响。菜单项的可选修饰只会越来越多，
 封住字面量这条路，日后加字段才不必每次都破坏下游。
 动作闭包收 `&mut EventCtx`（宿主在浮层里借给它），与 `on_click` 同形——`ctx.toast(..)`、
-`ctx.defer_blocking(..)`、`ctx.request_close()` 都能用。它是 `Fn` 不是 `FnMut`：项会被克隆进
+`ctx.defer_blocking(..)`、`ctx.request_close()`（走关闭决策链）都能用。它是 `Fn` 不是 `FnMut`：项会被克隆进
 浮层的每一级面板、粘滞项还要重建后再执行同一份动作，要改状态请用 `Signal`。
 
 任意元素/容器挂菜单用 `Element::on_context_menu(build)`（命中沿父链冒泡到首个设了回调的节点）；
@@ -1136,8 +1136,14 @@ fn main() {
 
 ### 8.7 关闭请求与「确认退出」
 
-`App::on_close_request(|ctx| -> bool)` 在 ESC（无对话框时）与点击标题栏 × 时被调用，
-返回 `true` 放行、`false` 取消。回调收 `EventCtx`，但**返回值是同步的**——平台在
+`App::on_close_request(|ctx| -> bool)` 在**所有用户发起的关闭**上被调用——ESC（无对话框时）、
+系统标题栏 ×、Alt+F4，以及无边框窗口的**自绘 ×**（`window_button(WindowButtonKind::Close)`，
+它内部调 `ctx.request_close()`）。返回 `true` 放行、`false` 取消。
+
+> 应用自己"已经决定"要关的地方用 `ctx.force_close()`，它**跳过**本拦截器：安装器要求本进程
+> 退出、用户已经在你的确认框里选过"直接退出"——这些地方再问一遍轻则多问，重则死锁
+> （安装器等窗口关、窗口等用户回答）。在拦截器回调内部调 `request_close()` 无效，宿主会忽略
+> 以免自我递归。回调收 `EventCtx`，但**返回值是同步的**——平台在
 `WM_CLOSE` / `windowShouldClose:` 里等这个 `bool`，而原生模态框自带消息泵，在这里同步弹
 必然与宿主的泵打架（§8.6）。所以「弹确认框」的正确形状永远是：
 **先返回 `false` 挡下这一次，再另起一条路把「确认」送回来**。

@@ -161,6 +161,21 @@
   `examples/multiline_demo.rs` 已迁到 `.accent_role(Role::Accent)`，常量删除。
 
 ### Changed
+- **`EventCtx::request_close` 改为走关闭决策链，新增 `force_close` 跳过它（破坏性）**。
+  此前 `request_close()` 的语义是"应用已决定关闭"——直接落地，不问 `on_close_request`、
+  也不先关最顶层对话框。问题在于**无边框窗口的 × 是自绘控件**
+  （`Element::window_button(WindowButtonKind::Close)`），它走的正是这条路：于是
+  `on_close_request` 拦得住 Alt+F4、ESC、系统 ×，唯独拦不住用户最常点的那个 ×。
+  下游的报告是"改了内容点 × 直接丢失、按 Alt+F4 才提示"——守卫在 frameless 应用里
+  基本等于没有。同一个"关闭窗口"的意图，来源不同却走两条路、守卫只覆盖一半，是设计漏洞。
+  现在 `request_close()` = **请求**关闭（关顶层对话框 → 问 `on_close_request` →
+  `hide_on_close`），与系统 × 完全同路；确实已经决定要关的场合改用 `force_close()`。
+  取"默认过守卫、绕过要显式"这个方向，是因为绝大多数调用点是按钮点击（用户意图），
+  而真正"应用已决定"的只有安装器要求退出、确认框里已选过"直接退出"这么几处——
+  后者若不绕过会死锁：安装器等窗口关、窗口等用户回答。
+  **迁移**：调用点若是"用户点了某个关闭按钮"，不动即可（自动获得守卫）；若是"程序已经
+  决定关闭"，改成 `force_close()`。未设 `on_close_request` 的应用不受影响。
+  `on_close_request` 回调内再调 `request_close()` 无效（宿主忽略以免自我递归）。
 - **`setting_row_desc` 的说明文字改用 `Role::TextSubtle`**（原 `TextMuted`，视觉变更）。
   行标题已是正文档，说明再压一档才拉得开层次；`TextMuted` 是**次级正文**的档位，用在这里
   两行字仍显得同重。本版新增 `TextSubtle` 时讲的正是"版权行、脚注这类比 muted 更淡但仍

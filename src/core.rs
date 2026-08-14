@@ -1203,7 +1203,11 @@ pub(crate) struct EventOutcome {
     damage: DamageReq,
     /// Some(Some(id))=设置捕获；Some(None)=释放捕获。
     capture: Option<Option<NodeId>>,
+    /// 用户请求关闭窗口：交由宿主的关闭决策链处理（关顶层对话框 → 问
+    /// `on_close_request` → `hide_on_close`）。
     close: bool,
+    /// 应用已决定关闭：跳过决策链直接落地。
+    close_forced: bool,
     focus: Option<NodeId>,
     /// 控件请求弹出的上下文菜单（宿主接管渲染与命中）。
     menu: Option<MenuRequest>,
@@ -1273,8 +1277,30 @@ impl EventCtx<'_> {
         self.out.capture = Some(None);
     }
     /// 请求关闭窗口。
+    /// **请求**关闭窗口：交给宿主的关闭决策链——先关最顶层对话框，没有则问
+    /// [`App::on_close_request`](crate::app::App::on_close_request)，最后按
+    /// `hide_on_close` 决定是关还是隐。
+    ///
+    /// 自绘标题栏的关闭按钮（`Element::window_button(WindowButtonKind::Close)`）走的正是
+    /// 这条路：无边框窗口的 × 与系统 × 在用户眼里是同一个按钮，没有理由一个过守卫、
+    /// 另一个不过——`on_close_request` 拦得住 Alt+F4 却拦不住 ×，等于形同虚设。
+    ///
+    /// 已经确定要关（安装器要求退出、用户在确认框里选了"直接退出"）用
+    /// [`force_close`](Self::force_close)。
+    ///
+    /// 在 `on_close_request` 的回调**内部**调用本方法无效（正在回答"能不能关"，
+    /// 再请求一次没有意义），宿主会忽略以免自我递归。
     pub fn request_close(&mut self) {
         self.out.close = true;
+    }
+    /// **直接**关闭窗口：跳过关闭决策链（不问 `on_close_request`、不先关对话框），
+    /// 但仍受 `hide_on_close` 约束。
+    ///
+    /// 用于"应用已经决定"的场合：安装器要求本进程退出、用户在未保存确认框里已经选过
+    /// "直接退出"。这类地方再走一遍守卫，轻则多问一次，重则死锁——安装器等窗口关、
+    /// 窗口等用户回答。
+    pub fn force_close(&mut self) {
+        self.out.close_forced = true;
     }
     /// 请求把焦点移到本节点。
     pub fn request_focus(&mut self) {
@@ -1505,7 +1531,10 @@ pub struct DispatchResult {
     pub repaint: bool,
     /// 本次分发累积的失效区域（宿主据此选择局部/整窗重绘）。
     pub damage: DamageReq,
+    /// 用户请求关闭窗口，须走关闭决策链（见 [`EventCtx::request_close`]）。
     pub close: bool,
+    /// 应用已决定关闭，跳过决策链（见 [`EventCtx::force_close`]）。
+    pub close_forced: bool,
     pub focus: Option<NodeId>,
     /// 事件是否被某个控件消费（供宿主决定是否回退到默认行为，如 Escape 关窗）。
     pub consumed: bool,
@@ -2158,6 +2187,7 @@ impl Tree {
                 res.repaint |= o.repaint;
                 res.damage = res.damage.merge(o.damage);
                 res.close |= o.close;
+                res.close_forced |= o.close_forced;
                 res.consumed |= consumed;
                 if o.focus.is_some() {
                     res.focus = o.focus;
@@ -2252,6 +2282,7 @@ impl Tree {
             repaint: o.repaint,
             damage: o.damage,
             close: o.close,
+            close_forced: o.close_forced,
             focus: o.focus,
             consumed: false,
             menu: o.menu,
@@ -2270,6 +2301,7 @@ impl Tree {
             res.repaint = o.repaint;
             res.damage = o.damage;
             res.close = o.close;
+            res.close_forced = o.close_forced;
             res.focus = o.focus;
             res.consumed = consumed;
             res.menu = o.menu;
@@ -2310,6 +2342,7 @@ impl Tree {
             res.repaint |= out.repaint;
             res.damage = res.damage.merge(out.damage);
             res.close |= out.close;
+            res.close_forced |= out.close_forced;
             res.consumed = true;
             if out.focus.is_some() {
                 res.focus = out.focus;
