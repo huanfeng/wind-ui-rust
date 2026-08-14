@@ -264,6 +264,17 @@ pub(super) struct MenuHost {
 }
 
 impl MenuHost {
+    /// 中止进行中的滚动条拖拽，返回此前是否正在拖。
+    ///
+    /// 供捕获丢失时收尾：这条拖拽不走 `UiHost::capture`（菜单打开时指针事件在进入
+    /// 控件树之前就被浮层截走，逻辑捕获从未建立），所以 `on_capture_lost` 里对
+    /// `capture` 的判空覆盖不到它——不单独收尾就会切走应用再回来时滑块还粘着指针。
+    pub(super) fn abort_scrollbar_drag(&mut self) -> bool {
+        self.scrollbar_drag.take().is_some()
+    }
+}
+
+impl MenuHost {
     /// 当前是否有浮层菜单展开。
     pub(super) fn is_open(&self) -> bool {
         self.active.is_some()
@@ -1739,5 +1750,37 @@ mod tests {
         handler.on_key(k(Key::Escape));
         assert!(handler.menu.active.is_none(), "Escape 应关闭菜单");
         assert_eq!(sel.get(), 1, "Escape 不应改变选中值");
+    }
+
+    /// 回归：捕获丢失（Alt+Tab / Cmd+Tab / 原生模态框接管）必须收掉菜单滚动条拖拽。
+    ///
+    /// 这条拖拽状态不走 `UiHost::capture`——菜单打开时指针事件在进入控件树之前就被
+    /// 浮层截走，逻辑捕获从未建立。`on_capture_lost` 里对 `capture` 的判空早退因此
+    /// 覆盖不到它：切走应用再回来，滑块还粘在指针上。两平台同病，不是某个后端的事。
+    #[test]
+    fn capture_loss_aborts_menu_scrollbar_drag() {
+        use crate::platform::AppHandler;
+        let (mut handler, _sel) = dropdown_handler();
+        // 直接置入拖拽态：真实路径要先弹出可滚动的长菜单再按住滑块，
+        // 而这里要验的是"捕获丢失时它会不会被收掉"，与怎么进入无关。
+        handler.menu.scrollbar_drag = Some(MenuScrollbarDrag {
+            level: 0,
+            start_y: 50,
+            start_scroll: 0,
+            track_h: 100.0,
+            thumb_h: 20.0,
+        });
+        assert!(
+            handler.capture.is_none(),
+            "前置：菜单拖拽期间逻辑捕获本就是空的——正是这一点让早退分支漏掉它"
+        );
+
+        let repaint = handler.on_capture_lost();
+
+        assert!(
+            handler.menu.scrollbar_drag.is_none(),
+            "捕获丢失后拖拽态必须清掉，否则滑块会一直粘着指针"
+        );
+        assert!(repaint, "收掉拖拽属于可见变化，应请求重绘");
     }
 }

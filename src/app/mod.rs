@@ -1332,10 +1332,13 @@ impl AppHandler for UiHost {
 
     fn on_capture_lost(&mut self) -> bool {
         self.damage.needs_full = true;
+        // 菜单滚动条拖拽不走 `self.capture`，得单独收尾（见 abort_scrollbar_drag）。
+        // 必须放在下面的 `capture.is_none()` 早退之前，否则菜单打开时这条永远收不掉。
+        let had_scrollbar_drag = self.menu.abort_scrollbar_drag();
         // 给捕获节点派发一个远处坐标的合成 Up，复用 Up 语义让其收尾
         // （Slider 复位拖动、Button 因 inside=false 不误触发），并清逻辑捕获。
         if self.capture.is_none() {
-            return false;
+            return had_scrollbar_drag;
         }
         let ev = PointerEvent::single(
             PointerKind::Up,
