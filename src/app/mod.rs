@@ -869,6 +869,12 @@ struct UiHost {
     hide_on_close: bool,
     /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
     resolving_close: bool,
+    /// 上一帧绘制中是否有控件请求了下一帧（帧末从 `anim` 全局态收割，见
+    /// [`Self::finish_frame_damage`]）。平台的 `wants_animation` 读这里而**不是**直接读
+    /// `anim::animation_requested()`：那是个线程全局位，同线程跑多个窗口时，后绘制的
+    /// 窗口在帧首 `anim::reset_request()` 会清掉前一个窗口刚提出的续帧请求，让它的动画
+    /// 掉帧甚至冻住。收进实例字段后，每个宿主只回答自己那一份。
+    wants_anim: bool,
 }
 
 impl UiHost {
@@ -1017,6 +1023,7 @@ impl UiHost {
             close_handler,
             hide_on_close,
             resolving_close: false,
+            wants_anim: false,
         }
     }
 
@@ -1479,7 +1486,12 @@ impl AppHandler for UiHost {
     }
 
     fn wants_animation(&self) -> bool {
-        crate::anim::animation_requested()
+        // 帧末收割的快照，不是当下的全局位——理由见 `UiHost::wants_anim`。
+        //
+        // 帧**之外**发生的重绘请求（后台线程写信号、热键/托盘回调、定时器）不经这里：
+        // 那些路径各自有 `InvalidateRect` 兜底把帧唤起来，本方法只回答"上一帧画完后
+        // 还要不要继续按帧驱动"这一件事。
+        self.wants_anim
     }
 
     fn intervals(&self) -> Vec<std::time::Duration> {
@@ -1935,6 +1947,43 @@ mod tests {
         app.apply_close_intent();
         assert!(app.wants_close());
         assert_eq!(app.take_window_op(), None);
+    }
+
+    /// 回归（多窗口地基）：续帧请求必须归各宿主自己所有。
+    ///
+    /// `anim` 的请求位是**线程全局**的，而每帧起始都会 `reset_request()` 清一次。同线程
+    /// 跑两个窗口时，后绘制的那个会把前一个刚提出的续帧请求一并抹掉；若 `wants_animation`
+    /// 直接读全局位，前者的动画就在对方出帧的瞬间冻住。故各宿主在帧末把它收进自己的字段。
+    #[test]
+    fn animation_request_does_not_leak_between_hosts() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        // A：不确定进度条，每帧都请求下一帧。
+        let mut a = App::new("a", 100, 40)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::progress_indeterminate().width_match()),
+            )
+            .into_handler_for_test();
+        // B：纯静态内容，永不请求动画。
+        let mut b = App::new("b", 100, 40)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::leaf().width(40).height(20)),
+            )
+            .into_handler_for_test();
+        a.set_scale(1.0);
+        b.set_scale(1.0);
+        let mut pm = Pixmap::new(100, 40).unwrap();
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 40));
+        assert!(a.wants_animation(), "不确定进度条应请求续帧");
+        // B 出一帧：其帧首的 reset_request 会清掉 A 留在全局位上的请求。
+        b.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 40));
+        assert!(!b.wants_animation(), "静态内容不应请求续帧");
+        assert!(a.wants_animation(), "A 的续帧请求不得被 B 的帧清掉");
     }
 
     #[test]

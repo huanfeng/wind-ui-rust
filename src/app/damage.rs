@@ -130,6 +130,10 @@ impl UiHost {
         if crate::anim::take_relayout() {
             self.damage.needs_relayout = true;
         }
+        // 续帧请求与脏区、重排请求同源同期：都是本帧绘制中控件写进 `anim` 线程全局态的
+        // 东西，都必须在下一帧 `reset_request` 抹掉它们之前收进本宿主。少收这一样，
+        // 多窗口下就是"另一个窗口的帧把我的动画请求清了"（见 `UiHost::wants_anim`）。
+        self.wants_anim = crate::anim::animation_requested();
     }
 
     /// 局部重绘：把脏区渲染进脏区大小的子 pixmap（tiny-skia 按 pixmap 边界自动剔除框外
