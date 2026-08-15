@@ -527,18 +527,23 @@ pub struct MenuRequest {
 /// 应用层在取走时还原成控件树——与 [`HotkeyCtx`] 只给意图不给窗口句柄是同一个手法。
 ///
 /// 只有 `Window::content` 一个构造入口，故应用层的还原必然成功。
-pub struct WindowContent(Box<dyn std::any::Any>);
+///
+/// 装的是**构建器**而非建好的树：控件树构建期用户创建的 `Signal` 要归到新窗口名下
+/// （窗口关闭时随之回收），而那只能在构建**发生时**收集。收一棵建好的树就太晚了——
+/// 那些信号在调用方写下 `Element::col()…` 的那一刻就已经进了全局 arena。
+pub struct WindowContent(Box<dyn FnOnce() -> Box<dyn std::any::Any>>);
 
 impl WindowContent {
-    /// 装入内容。**仅供应用层构造器调用**。
-    pub(crate) fn new<T: 'static>(value: T) -> Self {
-        Self(Box::new(value))
+    /// 装入内容构建器。**仅供应用层构造器调用**。
+    pub(crate) fn new<T: 'static>(build: impl FnOnce() -> T + 'static) -> Self {
+        Self(Box::new(move || Box::new(build())))
     }
 
-    /// 取回内容。类型必须与装入时一致，否则 panic。
+    /// 求值构建器并取回内容。类型必须与装入时一致，否则 panic。
+    ///
+    /// 调用方负责在合适的信号作用域内调用本方法（见 `UiHost::take_new_windows`）。
     pub(crate) fn take<T: 'static>(self) -> T {
-        *self
-            .0
+        *(self.0)()
             .downcast::<T>()
             .expect("WindowContent 只能由 Window::content 构造，类型必然匹配")
     }

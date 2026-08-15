@@ -48,11 +48,14 @@ fn main() {
                     Element::row()
                         .spacing(12)
                         .child(Element::button("打开设置…").on_click(move |ctx| {
+                            let th = th_child.clone();
                             ctx.open_window(
                                 Window::new("设置", 420, 320)
                                     .centered(true)
                                     .min_size(320, 260)
-                                    .content(settings_page(name, th_child.clone(), dark)),
+                                    // content 收闭包：内容在窗口真正创建时才构建，
+                                    // 其间创建的 Signal 归这个窗口，关窗即回收。
+                                    .content(move || settings_page(name, th, dark)),
                             );
                         }))
                         .child(Element::button("关于…").on_click(|ctx| {
@@ -60,7 +63,7 @@ fn main() {
                                 Window::new("关于", 360, 220)
                                     .resizable(false)
                                     .centered(true)
-                                    .content(about_page()),
+                                    .content(about_page),
                             );
                         })),
                 )

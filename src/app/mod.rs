@@ -102,7 +102,7 @@ pub fn take_deferred() -> Option<DialogRequest> {
 ///     ctx.open_window(
 ///         Window::new("设置", 560, 420)
 ///             .resizable(false)
-///             .content(Element::col().padding(16).child(Element::label("设置项…"))),
+///             .content(|| Element::col().padding(16).child(Element::label("设置项…"))),
 ///     );
 /// });
 /// ```
@@ -126,7 +126,7 @@ impl Window {
                 bg: None,
                 // 占位。取不走：`content` 是唯一产出 `WindowRequest` 的方法，
                 // 没调它就拿不到能交给 `open_window` 的值——类型上已经封死。
-                content: crate::event::WindowContent::new(NoContent),
+                content: crate::event::WindowContent::new(|| NoContent),
             },
         }
     }
@@ -162,9 +162,20 @@ impl Window {
         self
     }
 
-    /// 设置内容控件树，得到可交给 `ctx.open_window` 的请求。
-    pub fn content(mut self, root: Element) -> WindowRequest {
-        self.req.content = crate::event::WindowContent::new(root);
+    /// 设置内容构建器，得到可交给 `ctx.open_window` 的请求。
+    ///
+    /// 收闭包而非建好的树：闭包在**窗口真正创建时**才求值，其间创建的 `Signal` 归这个
+    /// 窗口所有，窗口关闭时一并回收。传一棵建好的树就晚了——那些信号在调用方写下
+    /// `Element::col()…` 的那一刻就已经进了全局 arena，窗口关掉也没人收，反复开关设置窗
+    /// 会让它们一直累积。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let ui = Element::col();
+    /// Window::new("设置", 560, 420).content(move || Element::col().child(ui));
+    /// ```
+    pub fn content(mut self, build: impl FnOnce() -> Element + 'static) -> WindowRequest {
+        self.req.content = crate::event::WindowContent::new(build);
         self.req
     }
 }
@@ -937,6 +948,15 @@ struct UiHost {
     resolving_close: bool,
     /// 待创建的子窗口（`ctx.open_window` 排入，平台在事件分发完全返回后取走）。
     pending_windows: Vec<crate::event::WindowRequest>,
+    /// 本窗口内容构建期创建的信号（仅子窗有）。宿主析构时整批回收，使反复开关设置窗
+    /// 不会让信号在全局 arena 里越积越多。
+    ///
+    /// 主窗为 `None`：它的内容在 `App` 上构建、活到进程结束，没有可回收的时机，
+    /// 硬套一个作用域只会让「谁拥有这些信号」多出一条无意义的规则。
+    ///
+    /// 只管**构建期**的信号。控件内部的那些由控件自己的 `SignalScope` 管
+    /// （`dyn_list`/`reorder`/`sortable_table` 都是如此），随 widget 析构一并回收。
+    scope: Option<crate::signal::SignalScope>,
     /// 上一帧绘制中是否有控件请求了下一帧（帧末从 `anim` 全局态收割，见
     /// [`Self::finish_frame_damage`]）。平台的 `wants_animation` 读这里而**不是**直接读
     /// `anim::animation_requested()`：那是个线程全局位，同线程跑多个窗口时，后绘制的
@@ -1092,6 +1112,7 @@ impl UiHost {
             hide_on_close,
             resolving_close: false,
             pending_windows: Vec::new(),
+            scope: None,
             wants_anim: false,
         }
     }
@@ -1582,8 +1603,11 @@ impl AppHandler for UiHost {
                     // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
                     ..WindowConfig::default()
                 };
-                let root: Element = req.content.take();
-                let host = UiHost::new(
+                // 内容构建期创建的信号归这个窗口所有：`scope` 随宿主析构，窗口关掉
+                // 就整批回收，反复开关子窗不会在全局 arena 里越积越多。
+                let mut scope = crate::signal::SignalScope::new();
+                let root: Element = scope.collect(|| req.content.take());
+                let mut host = UiHost::new(
                     root,
                     self.theme_src.clone(),
                     bg,
@@ -1597,6 +1621,9 @@ impl AppHandler for UiHost {
                     None,
                     false,
                 );
+                // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
+                // 节点而非信号，控件自带的信号由控件自己的 `SignalScope` 管。
+                host.scope = Some(scope);
                 (cfg, Box::new(host) as Box<dyn AppHandler>)
             })
             .collect()
@@ -2171,9 +2198,9 @@ mod tests {
                 Window::new("设置", 420, 300)
                     .resizable(false)
                     .min_size(320, 240)
-                    .content(Element::col().fill()),
+                    .content(|| Element::col().fill()),
             );
-            ctx.open_window(Window::new("关于", 360, 200).content(Element::col().fill()));
+            ctx.open_window(Window::new("关于", 360, 200).content(|| Element::col().fill()));
         });
         h.apply_app_effects(res);
 
@@ -2193,6 +2220,49 @@ mod tests {
         assert!(h.take_new_windows().is_empty(), "请求应在取走时清空");
     }
 
+    /// 子窗内容构建期创建的信号，随窗口关闭整批回收。
+    ///
+    /// 没有这条，反复开关设置窗会让那些信号在全局 arena 里一直累积——单窗口时代无所谓
+    /// （内容活到进程结束），多窗口下才成为真的泄漏。
+    #[test]
+    fn child_window_signals_are_reclaimed_on_close() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        let before = crate::signal::stats().live;
+
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(Window::new("子窗", 200, 150).content(|| {
+                // 典型写法：子窗自己的局部状态，在内容构建期创建。
+                let a = crate::signal::signal(0i32);
+                let b = crate::signal::signal(String::new());
+                Element::col()
+                    .fill()
+                    .child(Element::label_signal(b))
+                    .child(Element::label(format!("{}", a.get())))
+            }))
+        });
+        h.apply_app_effects(res);
+
+        let made = h.take_new_windows();
+        assert_eq!(made.len(), 1);
+        let during = crate::signal::stats().live;
+        assert!(
+            during >= before + 2,
+            "子窗内容里创建的信号应当存在（before={before} during={during}）"
+        );
+
+        // 关掉子窗 = 丢掉它的宿主。
+        drop(made);
+        let after = crate::signal::stats().live;
+        assert_eq!(
+            after, before,
+            "子窗关闭后其构建期信号应整批回收（before={before} after={after}）"
+        );
+    }
+
     /// 子窗与主窗共享同一个 `ThemeHandle`：换肤时所有窗口一起变，而不是各自定格。
     #[test]
     fn child_window_shares_theme_handle() {
@@ -2202,7 +2272,7 @@ mod tests {
         let mut h = app.content(Element::col().fill()).into_handler_for_test();
         let root = h.tree.root.unwrap();
         let res = h.tree.run_detached(root, |ctx| {
-            ctx.open_window(Window::new("子窗", 200, 150).content(Element::col().fill()))
+            ctx.open_window(Window::new("子窗", 200, 150).content(|| Element::col().fill()))
         });
         h.apply_app_effects(res);
         let made = h.take_new_windows();

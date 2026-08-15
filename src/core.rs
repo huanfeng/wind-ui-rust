@@ -1410,7 +1410,7 @@ impl EventCtx<'_> {
     /// ```no_run
     /// # use windui::prelude::*;
     /// Element::button("设置…").on_click(|ctx| {
-    ///     ctx.open_window(Window::new("设置", 560, 420).content(Element::label("设置项…")));
+    ///     ctx.open_window(Window::new("设置", 560, 420).content(|| Element::label("设置项…")));
     /// });
     /// ```
     ///
