@@ -115,7 +115,7 @@ fn main() {
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
 | 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
-| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键（Windows）、多窗口（Windows，`ctx.open_window`）、启动即隐藏、关闭转隐藏、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
+| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键（Windows）、多窗口（`ctx.open_window`）、启动即隐藏、关闭转隐藏、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
 
 控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
 `Signal<bool>`、`dropdown`/`list`/`tabs` 绑 `Signal<usize>`、`text_input` 绑 `Signal<String>`。

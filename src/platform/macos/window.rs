@@ -43,28 +43,111 @@ use crate::geometry::{Color, Point, Size};
 use crate::platform::to_skia_color;
 
 thread_local! {
-    /// 仍存活的 windui 窗口数——对照 win32 的 `LiveWindows`（那边要按句柄驱动帧，故存的是
-    /// 集合；这里每个视图用 `schedule_next_frame` 自调度，只需知道还剩几个）。
-    static LIVE_WINDOWS: Cell<usize> = const { Cell::new(0) };
+    /// 仍存活的 windui 窗口，**并且是它们的所有者**——对照 win32 的 `LiveWindows`。
+    ///
+    /// 那边存 `HWND`（窗口由 OS 拥有，登记表只是名册）；这边必须存 `Retained`：从代码
+    /// 创建的 `NSWindow` 默认 `releasedWhenClosed = true`，`alloc/init` 给出的 +1 会在
+    /// `close` 时被 AppKit 抵消掉，我们手上的 `Retained` 随即悬垂。故建窗时一律
+    /// `setReleasedWhenClosed(false)`，把生命周期完全交给这张表：表里在，窗口在；移出
+    /// 并释放，`NSWindow` → `ContentView` → `ViewState` → `handler` 顺次析构，子窗的
+    /// 信号也就此整批回收（`UiHost::scope`）。
+    ///
+    /// 单窗口时代看不到这个问题：`terminate` 直接结束进程，那份 `Retained` 从未 drop 过。
+    static WINDOWS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+    /// 已注销、等待延迟释放的窗口，见 [`unregister_window`]。
+    static CLOSED: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+    /// 应用已进入退出流程（`terminate` 已发出），见 [`ContentView::window_will_close`]。
+    static TERMINATING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// 窗口建成时登记。
-fn register_window() {
-    LIVE_WINDOWS.with(|n| n.set(n.get() + 1));
+/// 两个引用是否指向同一个 `NSWindow`（登记表按对象身份增删，不能用 `==`）。
+fn same_window(a: &NSWindow, b: &NSWindow) -> bool {
+    std::ptr::eq(a as *const NSWindow, b as *const NSWindow)
 }
 
-/// 窗口关闭时注销，返回**这是不是最后一个**（调用方据此 terminate）。
+/// 窗口建成时登记（连同所有权）。
+fn register_window(win: Retained<NSWindow>) {
+    WINDOWS.with(|v| {
+        let mut v = v.borrow_mut();
+        debug_assert!(!v.iter().any(|w| same_window(w, &win)), "窗口重复登记");
+        v.push(win);
+    });
+}
+
+/// 窗口即将关闭时注销，返回**这是不是最后一个**（调用方据此 terminate）。
 ///
-/// 计数已为零时返回 `false` 而不是让它回绕：那说明有条关闭路径没配对登记，此时按
-/// "最后一个"处理会在还有窗口活着时杀掉整个应用。
-fn unregister_window() -> bool {
-    LIVE_WINDOWS.with(|n| {
-        let left = n.get().saturating_sub(1);
-        debug_assert!(n.get() > 0, "关闭了未登记的窗口");
-        let was_counted = n.get() > 0;
-        n.set(left);
-        was_counted && left == 0
-    })
+/// 取出的 `Retained` **不在此处 drop**，而是移进 `CLOSED` 交主队列稍后清空：此刻调用栈
+/// 正在这个窗口的 `windowWillClose:` 里，就地放掉最后一个强引用会让 `NSWindow`（连同
+/// 兼任 contentView 与 delegate 的 `ContentView`，也就是 `self`）在回调返回前析构。
+/// 对照 win32：那边 `WM_DESTROY` 里 `Box::from_raw` 是安全的，因为 `WindowState` 不是
+/// 正在执行的那个对象本身。
+///
+/// 未登记的窗口返回 `false`：那说明有条关闭路径没配对登记，此时按"最后一个"处理会在
+/// 还有窗口活着时杀掉整个应用。
+fn unregister_window(win: &NSWindow) -> bool {
+    let (found, left) = WINDOWS.with(|v| {
+        let mut v = v.borrow_mut();
+        match v.iter().position(|w| same_window(w, win)) {
+            Some(i) => {
+                let owned = v.remove(i);
+                CLOSED.with(|c| c.borrow_mut().push(owned));
+                (true, v.len())
+            }
+            None => (false, v.len()),
+        }
+    });
+    debug_assert!(found, "注销未登记的窗口");
+    if found {
+        // 派回主队列（此刻即主线程）：调用栈退干净后再析构。
+        unsafe {
+            dispatch_async_f(
+                std::ptr::addr_of!(_dispatch_main_q),
+                std::ptr::null_mut(),
+                drain_closed_windows,
+            );
+        }
+    }
+    found && left == 0
+}
+
+/// 释放已注销的窗口（[`unregister_window`] 的延迟释放落点）。
+///
+/// 先整体取出再 drop：析构 `NSWindow` 会连锁析构 `ContentView` 与整个 `UiHost`，若那
+/// 期间有任何路径回头碰 `CLOSED`，持着借用就是运行期 panic。
+extern "C" fn drain_closed_windows(_ctx: *mut c_void) {
+    let pending: Vec<Retained<NSWindow>> = CLOSED.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    drop(pending);
+}
+
+/// 当前仍存活的窗口快照。
+///
+/// 返回**拷贝**而非借用：调用方拿着它去标脏、甚至建窗关窗，那些路径会回头改这张表；
+/// 持着 `RefCell` 的借用走进去就是 panic。同 win32 `live_windows` 的理由。
+fn live_windows() -> Vec<Retained<NSWindow>> {
+    WINDOWS.with(|v| v.borrow().clone())
+}
+
+/// 标脏一个窗口的内容视图（下一轮 run loop 出帧）。
+fn mark_dirty(win: &NSWindow) {
+    if let Some(view) = win.contentView() {
+        view.setNeedsDisplay(true);
+    }
+}
+
+/// 标脏所有窗口。跨线程唤醒走这里——唤的是"这个应用"，不是某一个窗口。
+fn mark_all_windows_dirty() {
+    for w in live_windows() {
+        mark_dirty(&w);
+    }
+}
+
+/// 已关闭窗口的占位 handler：全部走 `AppHandler` 的默认实现（不画、不响应任何输入）。
+///
+/// 见 [`ContentView::release_handler`]——窗口关掉后真正的 `UiHost` 就地析构，位置由它顶上。
+struct DeadHandler;
+
+impl AppHandler for DeadHandler {
+    fn render(&mut self, _target: &mut dyn crate::render::RenderTarget, _size: Size) {}
 }
 
 /// 视图运行期状态（对应 win32 的 `WindowState`）。
@@ -377,7 +460,30 @@ define_class!(
         // 注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
-            if unregister_window() {
+            // 已在退出流程中：`NSApplication::terminate` 会**同步挨个关掉所有窗口**，
+            // 包括正是在本回调里发起 terminate 的那一个——它早已从登记表除名，再走一遍
+            // 就会撞上"注销未登记的窗口"。win32 无此重入：`PostQuitMessage` 只是往队列
+            // 里放一条 WM_QUIT，不会回头再触发一遍 WM_DESTROY。
+            if TERMINATING.with(|t| t.get()) {
+                return;
+            }
+            // 先废止定时器：`NSTimer` 持 target 的**强**引用，不废止就与本视图构成循环，
+            // 窗口关掉后 `ContentView` 永不析构——`on_interval` 会继续对着已关闭的窗口
+            // 跑，子窗那批信号也回收不掉。win32 无此问题：`SetTimer(hwnd,…)` 的定时器
+            // 随窗口销毁由 OS 清理，不反过来持有任何东西。
+            self.invalidate_timers();
+            // `windowWillClose:` 是"将要关"，此刻 window 尚未析构、contentView 仍挂着，
+            // 故 `self.window()` 必然拿得到。拿不到说明本回调的触发时机与假设不符，
+            // 那样注销就会漏掉一个窗口（应用再也退不出去），debug 下拦下。
+            // 上层状态就地回收（子窗那批信号在此归还），不等 NSWindow 析构。
+            self.release_handler();
+            let Some(win) = self.window() else {
+                debug_assert!(false, "windowWillClose: 取不到 window，窗口无法注销");
+                return;
+            };
+            if unregister_window(&win) {
+                // 置位**先于** terminate：它会同步回到本回调（见开头那道闸）。
+                TERMINATING.with(|t| t.set(true));
                 let mtm = MainThreadMarker::from(self);
                 NSApplication::sharedApplication(mtm).terminate(None);
             }
@@ -601,6 +707,50 @@ impl ContentView {
             timers.push(timer);
         }
         self.ivars().borrow_mut().interval_timers = timers;
+    }
+
+    /// 窗口关闭时**就地**释放上层状态（`UiHost`），换 [`DeadHandler`] 占位。
+    ///
+    /// **不能等 `NSWindow` 析构**：`close` 之后 AppKit 内部仍持有窗口好几份引用（实测
+    /// `retainCount` 是我们那份的九倍），何时归零不由我们决定、也没有任何承诺。把
+    /// `UiHost` 的回收挂上去，子窗那批 `Signal` 就会一直滞留到进程退出——反复开关子窗
+    /// 让全局 arena 越积越多，恰恰是 `SignalScope` 要解决的问题。
+    ///
+    /// 对照 win32：那边 `WM_DESTROY` 里显式 `Box::from_raw` 收掉 `WindowState`，同样不
+    /// 依赖 `HWND` 的生命周期。**两个平台在这一点上是一致的：上层状态由框架自己回收。**
+    ///
+    /// 换占位而不是留空，是因为 AppKit 在 `windowWillClose:` 之后仍会给视图派几条消息
+    /// （光标、跟踪区收尾）；让它们打在一个全默认实现上，比在每个调用点判空要稳。
+    fn release_handler(&self) {
+        let old = {
+            let mut st = self.ivars().borrow_mut();
+            std::mem::replace(
+                &mut st.handler,
+                Box::new(DeadHandler) as Box<dyn AppHandler>,
+            )
+        };
+        // 借用之外析构：`UiHost` 的 drop 会连锁回收整棵树与那批信号，其间不该有人还借着
+        // `ViewState`（析构路径上的任何回调都会撞上 RefCell）。
+        drop(old);
+    }
+
+    /// 废止本视图的全部定时器（动画帧 + `on_interval`），打破 `NSTimer` → target 的强引用。
+    ///
+    /// 两段式：`invalidate` 会释放 target（可能就是最后一个引用），必须在借用之外调。
+    fn invalidate_timers(&self) {
+        let (frame, intervals) = {
+            let mut st = self.ivars().borrow_mut();
+            (
+                st.frame_timer.take(),
+                std::mem::take(&mut st.interval_timers),
+            )
+        };
+        if let Some(t) = frame {
+            t.invalidate();
+        }
+        for t in intervals {
+            t.invalidate();
+        }
     }
 
     /// 动画帧驱动：废止上一个待触发的帧定时器，若仍在动画则按刷新率调度下一次一次性重绘。
@@ -936,22 +1086,6 @@ impl ContentView {
                 st.handler.take_new_windows(),
             )
         };
-        // 多窗口（`ctx.open_window`）：macOS 尚未实现——**刻意不给一份没编译过的实现**，
-        // 理由与全局热键完全相同，见 `platform/macos/hotkey.rs` 头部那段说明：这套代码
-        // 在 Windows 环境下编写，AppKit 侧的 NSWindow 所有权与 delegate 时序无法验证，
-        // 交付"看着像对的代码"比明确的未实现更危险。请求在此丢弃并出声，不静默。
-        if !new_windows.is_empty() {
-            debug_assert!(
-                false,
-                "windui：macOS 尚未实现多窗口（EventCtx::open_window）。\n\
-                 该窗口不会打开。Windows 侧已实现；macOS 需在 run_windowed 里把建窗段落\n\
-                 抽出复用，并解决子窗 NSWindow 的持有与 windowWillClose 计数配对。"
-            );
-            eprintln!(
-                "[windui] macOS 尚未实现 ctx.open_window，丢弃 {} 个开窗请求",
-                new_windows.len()
-            );
-        }
         if let Some(op) = op {
             if let Some(win) = self.window() {
                 match op {
@@ -974,11 +1108,54 @@ impl ContentView {
             req.run();
             self.setNeedsDisplay(true);
         }
+        // 建出 `ctx.open_window` 排队的子窗。借用早已释放（`new_windows` 是拥有的值），
+        // 这一步会 `makeKeyAndOrderFront`，进而同步回调本窗的 `windowDidResignKey:`
+        // ——那里要借 `ViewState`，两个 `&mut` 并存就是 panic（铁律 6 的 AppKit 版）。
+        self.open_child_windows(new_windows);
         self.apply_cursor();
         if close {
             if let Some(win) = self.window() {
                 win.close();
             }
+        }
+        // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。放在关窗之后——本窗若
+        // 已关掉，它早从登记表里除名了，正好不必为一个要消失的窗口排帧。
+        self.broadcast_signal_dirty();
+    }
+
+    /// 建出应用层排队的子窗（`EventCtx::open_window`）并显示。
+    ///
+    /// **调用方须已释放 `ViewState` 借用**：建窗会同步走完 `setContentView` /
+    /// `makeKeyAndOrderFront`，其中激活新窗口会让当前窗口收到 `windowDidResignKey:`，
+    /// 那条回调要借本视图的 `ViewState`。对照 win32 的 `open_pending_windows`。
+    fn open_child_windows(&self, requests: Vec<(WindowConfig, Box<dyn AppHandler>)>) {
+        if requests.is_empty() {
+            return;
+        }
+        let mtm = MainThreadMarker::from(self);
+        for (cfg, handler) in requests {
+            let win = create_window(mtm, &cfg, handler);
+            win.makeKeyAndOrderFront(None);
+        }
+    }
+
+    /// 本次事件分发写过信号时，让**除本窗外**的窗口各失效一次。
+    ///
+    /// `Signal` 是跨窗口共享状态的唯一原语（`Copy` 句柄，传进子窗即可共享），但事件
+    /// 分发只会让发起方产生脏区——"在设置窗里改了名字，主窗显示的还是旧的"就是这么来的。
+    /// 发起方跳过：它自己已经有精确脏区，整窗失效反而把局部重绘的收益抹掉。
+    ///
+    /// 单窗口下恒为空操作。与 win32 的 `broadcast_signal_dirty` 同源，语义必须一致。
+    fn broadcast_signal_dirty(&self) {
+        if !crate::signal::take_cross_window_dirty() {
+            return;
+        }
+        let me = self.window();
+        for w in live_windows() {
+            if me.as_ref().is_some_and(|m| same_window(m, &w)) {
+                continue;
+            }
+            mark_dirty(&w);
         }
     }
 
@@ -1025,48 +1202,46 @@ extern "C" {
     );
 }
 
-/// 主线程蹦床：dispatch 回主线程后标脏一帧。此刻必在主线程，裸指针解引用安全；
-/// render 前会排空消息通道（UiHost::render 的 pump 排空），故唤醒即取到最新数据。
-extern "C" fn wake_on_main(ctx: *mut c_void) {
-    let view = ctx as *const ContentView;
-    // 视图随窗口存活至进程退出，指针在 run loop 期间始终有效（对照 win32 PostMessage 到 HWND）。
-    unsafe { (*view).setNeedsDisplay(true) };
+/// 主线程蹦床：dispatch 回主线程后标脏所有窗口。此刻必在主线程，thread_local 的登记表
+/// 与建表方同属主线程；render 前会排空消息通道（`UiHost::render` 的 pump），故唤醒即
+/// 取到最新数据。
+extern "C" fn wake_on_main(_ctx: *mut c_void) {
+    mark_all_windows_dirty();
 }
 
-/// 跨线程唤醒句柄：仅持视图裸指针（as usize 以满足 Send）。signal 经 dispatch 派回主线程，
-/// 线程安全。对照 win32 的 `Win32Wake`（持 HWND 数值 + PostMessage）。
+/// 跨线程唤醒句柄。`signal` 经 libdispatch 派回主线程标脏**所有**窗口。
 ///
-/// **多窗口缺口**：win32 侧的唤醒已改投 App 级消息宿主（message-only 窗口）再广播给各
-/// 窗口，这样绑定目标不随任何一个窗口消失；这边仍绑单个视图，那个窗口一关，后台线程的
-/// 唤醒就静默丢失。当前无影响——还只能建一个窗口——但多窗口 API 落地时必须一并改掉。
-/// 托盘无此问题：`NSStatusItem` 本就由 `run_windowed` 的栈持有，已是 App 级。
-struct MacWake {
-    view: usize,
-}
-unsafe impl Send for MacWake {}
+/// **不绑定任何一个视图**（早期版本持视图裸指针）：唤醒的目标是"这个应用"——后台线程
+/// 送来的消息由主窗的 `App::channel` pump 排空——绑在某个窗口上，那个窗口一关唤醒就
+/// 静默丢失。对照 win32：那边同样从"投给唯一那个窗口"改成了投给 App 级 message-only
+/// 宿主再广播。托盘无此问题：`NSStatusItem` 本就由 `run_windowed` 的栈持有，已是 App 级。
+///
+/// 无字段故自动 `Send`：不再需要为裸指针补 `unsafe impl`。
+struct MacWake;
 impl crate::sync::RawWakeSignal for MacWake {
     fn signal(&self) {
         unsafe {
             dispatch_async_f(
                 std::ptr::addr_of!(_dispatch_main_q),
-                self.view as *mut c_void,
+                std::ptr::null_mut(),
                 wake_on_main,
             );
         }
     }
 }
 
-/// 窗口端运行：创建 `NSApplication` + `NSWindow` + 自定义 `NSView`，进入事件循环（阻塞至退出）。
-pub(crate) fn run_windowed(
-    mut cfg: WindowConfig,
+/// 建一个窗口：`NSWindow` + 内容视图 + 委托 + `on_interval` 定时器，登记进 [`WINDOWS`]。
+///
+/// **不显示**——主窗要照顾 `start_hidden`、子窗建好即显，由调用方决定（对照 win32 把
+/// `create_window` 与 `show_window` 拆开的同一理由）。
+///
+/// 与 win32 的同名函数不同，这里不返回 `Option`：`NSWindow` 的初始化不像
+/// `CreateWindowExW` 那样会因为类没注册、句柄无效而失败，拿不到窗口只有内存耗尽一途。
+fn create_window(
+    mtm: MainThreadMarker,
+    cfg: &WindowConfig,
     handler: Box<dyn AppHandler>,
-    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
-    single: Option<crate::single_instance::SingleInstance>,
-) {
-    let mtm = MainThreadMarker::new().expect("macOS GUI 必须在主线程运行");
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-
+) -> Retained<NSWindow> {
     // 内容矩形为逻辑点尺寸（AppKit 在高 DPI 下自动按 backingScale 放大像素）。
     let content_rect = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
@@ -1092,6 +1267,14 @@ pub(crate) fn run_windowed(
         )
     };
     window.setTitle(&NSString::from_str(&cfg.title));
+    // 生命周期归 [`WINDOWS`] 表，不让 AppKit 在 `close` 时替我们 release——否则表里那份
+    // `Retained` 立刻悬垂。详见 `WINDOWS` 的说明。
+    //
+    // 安全：本方法之所以是 `unsafe`，正因为它改的就是窗口的所有权语义——置 `true` 会让
+    // AppKit 在关闭时替对象 release 一次，与 `Retained` 各自记账的引用计数对不上。我们
+    // 置的是 `false`，即"谁也别替我 release"，引用计数从此完全由 `WINDOWS`/`CLOSED` 两张
+    // 表决定，这正是 `Retained` 成立的前提。
+    unsafe { window.setReleasedWhenClosed(false) };
 
     // 最小客户区尺寸（逻辑点，0=不限制某轴）：对照 win32 的 WM_GETMINMAXINFO，防止用户把
     // 窗口缩到操作不到按钮。macOS 以点为单位、无需按 DPI 换算——AppKit 自动按 backingScale
@@ -1130,9 +1313,9 @@ pub(crate) fn run_windowed(
     }
     window.setContentView(Some(&view));
     window.setAcceptsMouseMovedEvents(true);
-    // 登记进活动窗口计数：`windowWillClose:` 据此判断自己是不是最后一个。设 delegate
-    // **之前**登记——设完就可能收到关闭回调，那时计数必须已经算上这一个。
-    register_window();
+    // 登记进活动窗口表（连同所有权）：`windowWillClose:` 据此判断自己是不是最后一个。
+    // 设 delegate **之前**登记——设完就可能收到关闭回调，那时窗口必须已经在表里。
+    register_window(window.clone());
     // 窗口关闭时退出应用（视图兼任窗口委托）。隐藏到托盘走 orderOut，不触发关闭，故不退出。
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     view.refresh_tracking_area();
@@ -1145,12 +1328,29 @@ pub(crate) fn run_windowed(
     // 动画帧驱动改为自调度的一次性定时器（见 ContentView::schedule_next_frame）：跟随显示器
     // 刷新率、空闲零唤醒。首帧 drawRect 由 makeKeyAndOrderFront 触发，其后按需自续约。
 
-    // 跨线程唤醒：把视图裸指针回填进 WakerShared；后台线程 send 经 dispatch 派回主线程标脏一帧。
-    // 窗口建好后再绑定，绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。
+    // on_interval：按 handler 注册的间隔安装周期 NSTimer。
+    view.install_interval_timers();
+
+    window
+}
+
+/// 窗口端运行：创建 `NSApplication` + 主窗，进入事件循环（阻塞至退出）。
+pub(crate) fn run_windowed(
+    mut cfg: WindowConfig,
+    handler: Box<dyn AppHandler>,
+    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
+) {
+    let mtm = MainThreadMarker::new().expect("macOS GUI 必须在主线程运行");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    let window = create_window(mtm, &cfg, handler);
+
+    // 跨线程唤醒：绑一个不指向任何窗口的句柄（见 MacWake）；后台线程 send 经 dispatch
+    // 派回主线程标脏。绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。
     if let Some(w) = &waker {
-        w.bind(Box::new(MacWake {
-            view: Retained::as_ptr(&view) as usize,
-        }));
+        w.bind(Box::new(MacWake));
     }
     // 单实例首实例：起 accept 线程接收二次实例 argv（收到后经 libdispatch 派回主线程
     // 切页 + 激活窗口）。窗口指针存活至进程退出，对照 MacWake 持视图指针的做法。
@@ -1165,9 +1365,6 @@ pub(crate) fn run_windowed(
         // 装晚了就直接丢掉（表现为「第一次点链接没反应，第二次才行」）。
         super::url_scheme::install();
     }
-
-    // on_interval：按 handler 注册的间隔安装周期 NSTimer。
-    view.install_interval_timers();
 
     // 全局热键（若配置）：macOS 尚未实现，此处仅触发 debug 期提示。
     // 详见 platform/macos/hotkey.rs——Windows 侧已实现，macOS 需 Carbon RegisterEventHotKey。

@@ -1299,8 +1299,8 @@ Window::new("设置", 420, 320).content(move || Element::text_input(name, "名�
 **退出语义**：关掉**最后一个**窗口才退出进程。主窗可以先关、留着子窗继续用；托盘菜单的
 「退出」会销毁全部窗口。
 
-**平台**：Windows 已实现。**macOS 尚未实现**——`open_window` 在 debug 期 panic 提示、
-release 期打印一行并忽略（同全局热键的处理）。
+**平台**：Windows 与 macOS 均已实现，语义一致（开窗、独立关闭、各窗自己的
+`on_close_request`/`on_interval`、跨窗共享 `Signal`、换肤联动、关掉最后一个才退出）。
 
 **截图验证**：`--screenshot` 走离屏路径、不开真窗口，但合成交互（`--click X Y`）开出的子窗
 **各自也会出一张**（`out.png` → `out-1.png`、`out-2.png`），故多窗口界面照样能做自动化视觉回归。

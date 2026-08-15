@@ -7,6 +7,8 @@
 //! - `window`：`NSApplication` + `NSWindow` + 自定义翻转 `NSView`。渲染走 CPU（tiny-skia
 //!   `Pixmap`），`drawRect:` 中经 `CGBitmapContext`→`CGImage`→`CGContextDrawImage` blit；
 //!   鼠标/键盘/滚轮/光标/HiDPI/无边框拖动/文件拖放/输入法（`NSTextInputClient`）均在此。
+//!   多窗口也在此：登记表 `WINDOWS` 兼任子窗 `NSWindow` 的所有者（对照 win32 那张只存
+//!   `HWND` 的名册——差别的来由见该常量的说明）。
 //! - `clipboard`：`NSPasteboard`。
 //! - `tray`：`NSStatusItem` 托盘（图标 + 左键/双击 + 原生右键菜单）。
 //! - 文字渲染见 `crate::text::coretext`（Core Text）。

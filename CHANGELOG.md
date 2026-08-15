@@ -16,7 +16,7 @@
   子窗**不设** `channel`（跨窗数据流走 `Signal`：主窗 `App::channel` 的回调写信号、子窗读同一
   句柄，复制一份 pump 只会让同一条消息处理两次）与 `hide_on_close`（隐藏后没有唤起途径，
   只会留下一个关不掉也看不见的窗口）。
-- **多窗口：`EventCtx::open_window` + `Window` 构建器**（Windows；macOS 未实现，见下）。
+- **多窗口：`EventCtx::open_window` + `Window` 构建器**（Windows + macOS）。
   在任意控件回调里 `ctx.open_window(Window::new("设置", 560, 420).content(ui))` 即可开出
   独立窗口——设置页、关于框这类子窗不必再挤进主窗做成对话框。
   请求经宿主排队、由平台在事件分发**完全返回**后才真正建窗：在回调里直接建窗会同步派发
@@ -28,10 +28,21 @@
   子窗与主窗**共享同一个 `ThemeHandle`**，运行期换肤所有窗口一起变；`Signal` 是 `Copy`
   句柄，直接传进子窗即可跨窗共享状态，不需要额外的窗口间通信机制。
   新增 `examples/multi_window.rs` 演示以上四点。
-  **macOS 尚未实现**：`open_window` 在 debug 期 panic 提示、release 期打印一行并忽略。
-  理由与全局热键相同（见 `platform/macos/hotkey.rs` 头部）——AppKit 侧的 NSWindow 所有权
-  与 delegate 时序在 Windows 开发环境下无法验证，交付一份没编译过的实现比明确的未实现更
-  危险。
+  **macOS 侧同语义实现**，经真机验证（开窗、独立关闭、子窗自己的拦截器与定时器、信号
+  整批回收、跨窗广播、跨线程唤醒）。主窗与子窗共用抽出来的 `create_window`；窗口登记表
+  `WINDOWS` 同时是子窗 `NSWindow` 的**所有者**——`NSWindow` 是引用计数对象，从代码创建的
+  默认 `releasedWhenClosed = true` 会在 `close` 时抵消掉我们手上那份 `Retained`，故一律
+  置 `false` 由框架记账（win32 那边 `HWND` 由 OS 拥有，登记表只是名册）。
+  三处**只有真机才暴露**的差异：`NSTimer` 持 target 的强引用，不在 `windowWillClose:` 里
+  废止就与视图构成循环，子窗关掉后 `on_interval` 仍继续跑；`NSApplication::terminate` 会
+  **同步重入**发起它的那个窗口的 `windowWillClose:`（win32 的 `PostQuitMessage` 只是入队
+  一条 WM_QUIT，不会回头再触发 WM_DESTROY），故需要一道退出中标志；窗口 `close` 之后
+  AppKit 内部仍持有多份引用（实测 `retainCount` 是我们那份的九倍、何时归零无承诺），故
+  上层 `UiHost` 由 `windowWillClose:` **就地**析构而不等 `NSWindow` 释放——与 win32 在
+  `WM_DESTROY` 里显式回收 `WindowState` 是同一个原则：上层状态由框架自己收。
+- **跨线程唤醒（macOS）改为 App 级**：`MacWake` 不再绑主窗那个 `NSView`，改为标脏所有
+  窗口。唤醒的目标是**应用**而不是某个窗口，绑在窗口上那个窗口一关唤醒就静默丢失
+  （win32 已先一步改投 App 级 message-only 宿主）。
 
 ### Fixed
 - **子窗内容构建期创建的 `Signal` 随窗口关闭整批回收**。此前反复开关设置窗会让它们在全局

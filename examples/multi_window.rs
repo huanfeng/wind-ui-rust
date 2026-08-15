@@ -16,8 +16,7 @@
 //! 子窗只有对自己有意义的配置（标题/尺寸/可缩放/居中/无边框/最小尺寸/背景）。托盘、
 //! 全局热键、单实例、渲染后端都是**应用级**的，由 `App` 那次配置决定，子窗自动跟随。
 //!
-//! 平台支持：Windows 已实现；macOS 尚未实现多窗口，`open_window` 会在 debug 期 panic
-//! 提示、release 期打印一行并忽略（同全局热键的处理，见 `platform/macos/hotkey.rs`）。
+//! 平台支持：Windows 与 macOS 均已实现，行为一致。
 
 use windui::prelude::*;
 use windui::style::Role;
