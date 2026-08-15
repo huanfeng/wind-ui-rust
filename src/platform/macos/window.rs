@@ -1017,6 +1017,11 @@ extern "C" fn wake_on_main(ctx: *mut c_void) {
 
 /// 跨线程唤醒句柄：仅持视图裸指针（as usize 以满足 Send）。signal 经 dispatch 派回主线程，
 /// 线程安全。对照 win32 的 `Win32Wake`（持 HWND 数值 + PostMessage）。
+///
+/// **多窗口缺口**：win32 侧的唤醒已改投 App 级消息宿主（message-only 窗口）再广播给各
+/// 窗口，这样绑定目标不随任何一个窗口消失；这边仍绑单个视图，那个窗口一关，后台线程的
+/// 唤醒就静默丢失。当前无影响——还只能建一个窗口——但多窗口 API 落地时必须一并改掉。
+/// 托盘无此问题：`NSStatusItem` 本就由 `run_windowed` 的栈持有，已是 App 级。
 struct MacWake {
     view: usize,
 }

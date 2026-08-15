@@ -60,7 +60,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM,
     HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE,
+    HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE,
     NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
     SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
@@ -152,6 +152,172 @@ unsafe fn live_windows() -> Vec<HWND> {
             .map(|v| HWND(v as *mut _))
             .collect()
     })
+}
+
+// ── App 级消息宿主 ──────────────────────────────────────────────────────────
+
+/// 托盘、全局热键、跨线程唤醒的宿主状态。指针挂在 message-only 窗口的
+/// `GWLP_USERDATA` 上（同 [`WindowState`] 的形状）。
+///
+/// 这三样都是**应用**的资源而非某个窗口的：托盘图标代表整个程序、全局热键在所有窗口
+/// 之外生效、后台线程唤醒的是"这个应用"。此前它们挂在唯一那个窗口上，于是"窗口"与
+/// "应用"两个生命周期被迫重合——多窗口下就变成了「关掉哪个窗口托盘图标才消失」这种
+/// 没有正确答案的问题。移到独立的 message-only 窗口后，它们活到消息循环结束为止。
+struct AppHost {
+    /// 系统托盘状态（None=无托盘）。drop 时自动清理图标。
+    tray: Option<tray::TrayState>,
+    /// 全局热键状态（None=无热键）。drop 时自动注销。
+    hotkeys: Option<hotkey::HotkeyState>,
+    /// 托盘点击、热键触发所指向的窗口——主窗口，即 `App::run` 建的那个。
+    ///
+    /// 「唤出窗口」「最小化到托盘」说的都是它；子窗（设置页之类）不是这些操作的对象。
+    main: HWND,
+}
+
+const APP_HOST_CLASS: PCWSTR = w!("WindUiAppHostClass");
+
+thread_local! {
+    /// App 级消息宿主窗口句柄（0=未创建）。
+    static APP_HOST_HWND: Cell<isize> = const { Cell::new(0) };
+}
+
+/// App 级消息宿主的窗口句柄。托盘/热键注册与跨线程唤醒都投向它。
+fn app_host_hwnd() -> HWND {
+    HWND(APP_HOST_HWND.with(|h| h.get()) as *mut _)
+}
+
+/// 取 App 级宿主状态的可变引用。
+///
+/// 与 [`state_from`] 同样的重入约束：返回的借用必须在任何可能重入 `wnd_proc` 的 OS
+/// 调用之前结束（铁律 6）。
+unsafe fn app_host() -> Option<&'static mut AppHost> {
+    let hwnd = app_host_hwnd();
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppHost;
+    if ptr.is_null() {
+        None
+    } else {
+        Some(&mut *ptr)
+    }
+}
+
+/// 建 App 级消息宿主：一个 message-only 窗口，承载托盘/热键/唤醒。
+///
+/// 它**不进** [`LiveWindows`]：那张表回答的是"还有没有可见窗口"，而本窗口从不显示，
+/// 把它算进去应用就永远退不掉了。
+unsafe fn create_app_host(hinst: HINSTANCE, main: HWND) {
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(app_host_proc),
+        hInstance: hinst,
+        lpszClassName: APP_HOST_CLASS,
+        ..Default::default()
+    };
+    RegisterClassExW(&wc);
+    let host = Box::new(AppHost {
+        tray: None,
+        hotkeys: None,
+        main,
+    });
+    let host_ptr = Box::into_raw(host);
+    match CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        APP_HOST_CLASS,
+        PCWSTR::null(),
+        WINDOW_STYLE::default(),
+        0,
+        0,
+        0,
+        0,
+        Some(HWND_MESSAGE),
+        None,
+        Some(hinst),
+        Some(host_ptr as *const c_void),
+    ) {
+        Ok(h) => APP_HOST_HWND.with(|c| c.set(h.0 as isize)),
+        Err(e) => {
+            // 建不起来就回收状态：没有宿主窗口，托盘与热键随后都不会安装（见
+            // `run_windowed`），应用退化成"只有窗口"仍可正常跑。
+            drop(Box::from_raw(host_ptr));
+            eprintln!("[windui] App 级消息宿主创建失败，托盘/全局热键将不可用: {e:?}");
+        }
+    }
+}
+
+/// 销毁 App 级消息宿主（消息循环退出后调用），触发托盘图标清理与热键注销。
+unsafe fn destroy_app_host() {
+    let hwnd = app_host_hwnd();
+    if !hwnd.0.is_null() {
+        let _ = DestroyWindow(hwnd);
+        APP_HOST_HWND.with(|c| c.set(0));
+    }
+}
+
+/// App 级消息宿主的窗口过程：托盘回调、全局热键、跨线程唤醒。
+///
+/// 都不碰 `handler`——托盘与热键的回调只需各自的 `TrayState`/`HotkeyState`，产出的是
+/// [`WindowOp`] 意图，由 `main` 窗口执行；唤醒则只是让各窗口出一帧。
+unsafe extern "system" fn app_host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_NCCREATE => {
+            let cs = lparam.0 as *const CREATESTRUCTW;
+            if !cs.is_null() {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // 跨线程唤醒：让**所有**窗口出一帧。
+        //
+        // 广播而非只叫主窗口：`App::channel` 的 pump 挂在各自宿主上，消息落到哪个窗口
+        // 的状态里，只有那个宿主自己知道。多叫醒几个窗口的代价是几次被脏区挡掉的重绘，
+        // 漏叫一个的代价是那条通道的数据永远不上屏。
+        WM_APP_WAKE => {
+            for h in live_windows() {
+                let _ = InvalidateRect(Some(h), None, false);
+            }
+            LRESULT(0)
+        }
+        // 全局热键：系统投递到本窗口队列（事件驱动，不轮询，故不破坏空闲零 CPU）。
+        //
+        // 严格两段式（铁律 6）：第一段借 host 跑回调、取出意图；借用在语句结束时释放。
+        // 第二段才碰 OS——`ShowWindow`/`SetForegroundWindow` 会同步派发 WM_SHOWWINDOW /
+        // WM_ACTIVATE 到主窗口的 wnd_proc，那里会再借一次它自己的 state。
+        WM_HOTKEY => {
+            let (op, main) = match app_host() {
+                Some(h) => (
+                    h.hotkeys.as_mut().and_then(|hs| hs.dispatch(wparam.0)),
+                    h.main,
+                ),
+                None => (None, HWND(std::ptr::null_mut())),
+            };
+            if !main.0.is_null() {
+                run_window_op(main, op);
+            }
+            LRESULT(0)
+        }
+        tray::WM_TRAYICON => {
+            on_tray_message(lparam);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppHost;
+            if !ptr.is_null() {
+                // 先清零再 drop，同 WindowState：托盘菜单的模态循环里本窗口若被销毁，
+                // 循环结束后仍会回到这里 `app_host()`，清零在前那次才拿到 None。
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                drop(Box::from_raw(ptr));
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 /// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
@@ -329,10 +495,6 @@ struct WindowState {
     last_click: ClickTracker,
     /// 触摸拖动滚动状态机（触摸提升为鼠标消息后据此区分点击/滑动）。
     touch: Touch,
-    /// 系统托盘状态（None=无托盘）。drop 时自动清理图标。
-    tray: Option<tray::TrayState>,
-    /// 全局热键状态（None=无热键）。drop 时自动注销。
-    hotkeys: Option<hotkey::HotkeyState>,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
     /// 是否已向系统申请鼠标离开通知（TrackMouseEvent）。离开后系统清此标志需重新申请。
@@ -421,8 +583,6 @@ impl WindowState {
             backend: Box::new(SkiaBackend::new()),
             last_click: ClickTracker::default(),
             touch: Touch::default(),
-            tray: None,
-            hotkeys: None,
             frameless: false,
             mouse_tracked: false,
             pending_surrogate: None,
@@ -648,28 +808,34 @@ unsafe fn run_windowed(
     // 接收文件拖放：拖入文件后以 WM_DROPFILES 递送路径 + 落点。
     DragAcceptFiles(hwnd, true);
 
-    // 全局热键（若配置）：窗口创建后注册，状态存入 WindowState（drop 时自动注销）。
+    // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
+    // 某个窗口，故都挂到这个 message-only 窗口上（见 `AppHost`）。
+    create_app_host(hinst, hwnd);
+    let host_hwnd = app_host_hwnd();
+
+    // 全局热键（若配置）：注册到 App 级宿主，状态存入 AppHost（drop 时自动注销）。
     // 注册失败不阻止启动——热键是全局独占资源，被占用是常态而非异常。
     if !cfg.hotkeys.is_empty() {
-        let hs = hotkey::HotkeyState::register(hwnd, std::mem::take(&mut cfg.hotkeys));
-        if let Some(s) = state_from(hwnd) {
-            s.hotkeys = Some(hs);
+        let hs = hotkey::HotkeyState::register(host_hwnd, std::mem::take(&mut cfg.hotkeys));
+        if let Some(h) = app_host() {
+            h.hotkeys = Some(hs);
         }
     }
 
-    // 系统托盘图标（若配置）：窗口创建后安装，状态存入 WindowState（drop 时清理）。
+    // 系统托盘图标（若配置）：回调消息发往 App 级宿主，状态存入 AppHost（drop 时清理）。
     if let Some(t) = cfg.tray.take() {
-        if let Some(ts) = tray::install(hwnd, t) {
-            if let Some(s) = state_from(hwnd) {
-                s.tray = Some(ts);
+        if let Some(ts) = tray::install(host_hwnd, t) {
+            if let Some(h) = app_host() {
+                h.tray = Some(ts);
             }
         }
     }
 
-    // 跨线程唤醒：绑定平台句柄（hwnd 数值 + PostMessage），此前积压的 wake 会立即补发。
+    // 跨线程唤醒：投向 App 级宿主而非某个窗口——绑在窗口上的话，那个窗口一关，后台
+    // 线程的唤醒就静默丢失，通道数据再也不上屏。此前积压的 wake 会在绑定时立即补发。
     if let Some(w) = &waker {
         w.bind(Box::new(Win32Wake {
-            hwnd: hwnd.0 as isize,
+            hwnd: host_hwnd.0 as isize,
         }));
     }
 
@@ -738,6 +904,10 @@ unsafe fn run_windowed(
     }
 
     run_message_loop();
+
+    // 销毁 App 级宿主：触发托盘图标 NIM_DELETE 与全局热键注销。放在消息循环之后——
+    // 托盘与热键要活过所有窗口（常驻托盘类应用正是"窗口都关了仍在跑"）。
+    destroy_app_host();
 
     // 消息循环结束后立即显式释放 GPU 共享设备链（D3D11/DXGI/D2D/DWrite COM 对象）。
     // 推迟到线程析构才 Release 会触发 GPU 命令队列排空 + DWrite 字体缓存全局清理，
@@ -1073,29 +1243,6 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        // 跨线程唤醒：触发一帧（render 前会排空消息通道）。
-        WM_APP_WAKE => {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            LRESULT(0)
-        }
-        // 托盘回调消息：左键/双击触发回调，右键弹原生菜单。
-        // 全局热键：系统投递到本窗口队列（事件驱动，不轮询，故不破坏空闲零 CPU）。
-        //
-        // 严格两段式（铁律 6）：第一段借 state 跑回调、取出意图；借用在语句结束时释放。
-        // 第二段才碰 OS——`ShowWindow`/`SetForegroundWindow` 会同步派发 WM_SHOWWINDOW /
-        // WM_ACTIVATE 回本函数，届时会再 `state_from` 一次。若此刻第一段的借用还活着，
-        // 就是两个 `&mut WindowState` 并存的 UB（无 RefCell，不会 panic，只会静默出错）。
-        WM_HOTKEY => {
-            let op = state_from(hwnd)
-                .and_then(|s| s.hotkeys.as_mut())
-                .and_then(|hs| hs.dispatch(wparam.0));
-            run_window_op(hwnd, op);
-            LRESULT(0)
-        }
-        tray::WM_TRAYICON => {
-            on_tray_message(hwnd, lparam);
-            LRESULT(0)
-        }
         // 输入法开始合成：通知焦点控件进入组合态（自绘光标隐藏，让系统组合浮层
         // 自带的、随组合进度前进的光标成为唯一可见光标），再定位候选窗。
         WM_IME_STARTCOMPOSITION => {
@@ -1336,17 +1483,20 @@ unsafe fn apply_window_op(hwnd: HWND) {
 }
 
 /// 消费运行期热键操作队列（改绑/启停），落地到 `HotkeyState`。
-/// 先经 handler 取队列（借 handler 字段），再对 hotkeys 字段执行——同一
-/// `WindowState` 的两个字段序贯借用，无别名。
+///
+/// 队列在窗口的 handler 上（`HotkeyHandle` 排进去的），而 `HotkeyState` 在 App 级宿主上，
+/// 故要跨两个 state。**先取完队列、释放窗口那份借用，再借宿主**：两份借用不重叠，
+/// 与铁律 6 同一个理由——中间隔着的 `Register/UnregisterHotKey` 虽不向本线程同步派发
+/// 消息，但让两个 `&mut` 同时活着本身就是别名。
 unsafe fn apply_hotkey_ops(hwnd: HWND) {
-    let Some(state) = state_from(hwnd) else {
-        return;
+    let ops = match state_from(hwnd) {
+        Some(state) => state.handler.take_hotkey_ops(),
+        None => return,
     };
-    let ops = state.handler.take_hotkey_ops();
     if ops.is_empty() {
         return;
     }
-    if let Some(hk) = state.hotkeys.as_mut() {
+    if let Some(hk) = app_host().and_then(|h| h.hotkeys.as_mut()) {
         for (id, op) in ops {
             hk.apply(id, op);
         }
@@ -1380,10 +1530,10 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
     }
 }
 
-/// 托盘消息处理。**严格分段，每段之间必须释放 `WindowState` 借用**（铁律 6）。
+/// 托盘消息处理。**严格分段，每段之间必须释放 `AppHost` 借用**（铁律 6）。
 ///
 /// 托盘是重入风险最高的路径：右键菜单的 `TrackPopupMenu` 自带模态消息循环，菜单
-/// 从弹出到用户点选之间的每一次鼠标移动都会重入 `wnd_proc`。
+/// 从弹出到用户点选之间的每一次鼠标移动都会重入窗口过程。
 ///
 /// 分段按「这个 OS 调用会不会重入」切，两条路径互斥（非先后关系）：
 /// - 点击路径：「取意图」（持借用）→「执行意图」（无借用）。
@@ -1392,41 +1542,46 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
 ///
 /// 动作分类由自由函数 `tray::classify` 完成，不碰 state——右键路径因此全程只在
 /// 「建菜单」「跑选中项」两处取借用。
-unsafe fn on_tray_message(hwnd: HWND, lparam: LPARAM) {
+unsafe fn on_tray_message(lparam: LPARAM) {
+    // 菜单要弹在主窗口名下：`TrackPopupMenu` 先 `SetForegroundWindow` 才能让菜单在
+    // 点击别处时正常消失，而 message-only 窗口不可见、前置它没有意义。
+    let Some(main) = app_host().map(|h| h.main) else {
+        return;
+    };
     match tray::classify(lparam) {
         tray::TrayEvent::Click(kind) => {
-            // 取意图：借 state 跑回调；借用随本语句结束而释放。
-            let actions = state_from(hwnd)
-                .and_then(|s| s.tray.as_mut())
+            // 取意图：借 host 跑回调；借用随本语句结束而释放。
+            let actions = app_host()
+                .and_then(|h| h.tray.as_mut())
                 .map(|ts| tray::run_click(ts, kind))
                 .unwrap_or_default();
             // 执行意图：已无借用。
-            run_tray_actions(hwnd, actions);
+            run_tray_actions(main, actions);
         }
         tray::TrayEvent::RightClick => {
             // 建菜单：借用内完成（CreatePopupMenu/AppendMenuW 均不重入）。
-            let Some(menu) = state_from(hwnd)
-                .and_then(|s| s.tray.as_ref())
+            let Some(menu) = app_host()
+                .and_then(|h| h.tray.as_ref())
                 .and_then(|ts| ts.build_menu())
             else {
                 return;
             };
-            // 弹菜单：**无借用**。菜单存续期间 wnd_proc 会被反复重入。
-            let id = tray::track_menu(hwnd, menu);
+            // 弹菜单：**无借用**。菜单存续期间窗口过程会被反复重入。
+            let id = tray::track_menu(main, menu);
             if id == 0 {
                 return; // 用户取消
             }
             // 跑选中项：重借取意图，借用随语句释放。
             //
-            // 若窗口在弹菜单的模态循环里被销毁，`WM_DESTROY` 已先清零 GWLP_USERDATA
-            // 才 drop `WindowState`（见该分支），故此处 `state_from` 返回 None 而非
-            // 解引用已释放内存——这个顺序是本分段设计的前提。
-            let actions = state_from(hwnd)
-                .and_then(|s| s.tray.as_mut())
+            // 若宿主窗口在弹菜单的模态循环里被销毁，其 `WM_DESTROY` 已先清零
+            // GWLP_USERDATA 才 drop `AppHost`（见 `app_host_proc`），故此处
+            // `app_host()` 返回 None 而非解引用已释放内存——这个顺序是本分段设计的前提。
+            let actions = app_host()
+                .and_then(|h| h.tray.as_mut())
                 .map(|ts| ts.run_item(id))
                 .unwrap_or_default();
             // 执行意图：已无借用。
-            run_tray_actions(hwnd, actions);
+            run_tray_actions(main, actions);
         }
         tray::TrayEvent::Other => {}
     }
@@ -1446,19 +1601,25 @@ unsafe fn run_tray_actions(hwnd: HWND, actions: Vec<tray::TrayAction>) {
             // 不走 WindowOp：托盘「退出」是应用的唯一真实出口，**刻意绕过
             // `hide_on_close`**（否则开了关闭转隐藏的应用将永远退不掉）。
             //
+            // 销毁**全部**窗口而不只是主窗口：退出说的是整个应用，留下一个设置子窗
+            // 会让消息循环继续跑（最后一个窗口关闭才退出，见 `LiveWindows`），
+            // 表现为「点了退出，托盘图标没了，程序还在」。
+            //
             // `break` 丢弃 quit 之后的意图，是刻意的三重收口：窗口已销毁，后续意图
             // 本就无从生效（HWND 失效、`state_from` 取不到 state）；显式截断让这个
             // 事实可读，而非依赖两个不相干的兜底；也堵住「HWND 被系统回收后
             // `state_from` 取到另一个窗口的 state」这一理论缺口。macOS 侧
             // `NSApp::terminate` 本就不返回，两平台由此在构造上一致。
             tray::TrayAction::Quit => {
-                let _ = DestroyWindow(hwnd);
+                for h in live_windows() {
+                    let _ = DestroyWindow(h);
+                }
                 break;
             }
             // 先取出投递目标释放借用，再调 Shell_NotifyIconW（它会跨线程发消息）。
             tray::TrayAction::Notify { title, body } => {
-                let target = state_from(hwnd)
-                    .and_then(|s| s.tray.as_ref())
+                let target = app_host()
+                    .and_then(|h| h.tray.as_ref())
                     .map(|ts| ts.notify_target());
                 if let Some((h, uid)) = target {
                     tray::notify(h, uid, &title, &body);
