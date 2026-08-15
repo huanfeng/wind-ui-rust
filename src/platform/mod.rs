@@ -124,7 +124,12 @@ impl Offscreen {
     }
 
     /// 渲染一帧（清底 + 整树绘制）。
-    fn frame(&mut self, handler: &mut Box<dyn AppHandler>, size: Size, bg: Color) {
+    ///
+    /// `fallback_bg` 只在宿主不报底色时兜底：本函数会连渲多帧，而中间合成的交互
+    /// （`--click` 回放到换肤按钮上）可能换掉主题——用创建时那份 `cfg.bg` 清屏，
+    /// 截出来就是"控件已转暗、底色还停在亮色"的半吊子图。
+    fn frame(&mut self, handler: &mut Box<dyn AppHandler>, size: Size, fallback_bg: Color) {
+        let bg = handler.bg().unwrap_or(fallback_bg);
         match self {
             Offscreen::Soft(pm) => {
                 pm.fill(to_skia_color(bg));
@@ -408,6 +413,18 @@ pub trait AppHandler {
     }
     /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
     fn set_scale(&mut self, _scale: f32) {}
+
+    /// 当前清屏色。`None` = 沿用 [`WindowConfig::bg`]（窗口创建时那份）。
+    ///
+    /// 平台**每帧查询**而不缓存：运行期换主题（[`ThemeHandle::set`](crate::app::ThemeHandle::set)）
+    /// 会改变底色，而创建时抄下的那份不会跟着变。此前正是如此——切暗色后控件前景转暗、
+    /// 窗口底色仍停在亮色，浅色文字画在浅色底上几乎看不见。
+    ///
+    /// 构建期的 `App::theme` 那条路不受影响（它当场同步了 `WindowConfig::bg`），本方法
+    /// 补的是运行期那条。
+    fn bg(&self) -> Option<Color> {
+        None
+    }
 
     /// 焦点文本控件的光标位置（**物理像素**，相对客户区左上角）+ 高度：`(x, y_top, height)`。
     /// 平台层据此定位输入法候选窗。无文本焦点时返回 None。

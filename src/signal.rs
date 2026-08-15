@@ -210,12 +210,22 @@ fn notify_changed() {
     // 句柄，传进子窗即可共享），而上面两条路都只能让**当前**窗口重绘——事件期那条
     // 走当前事件节点的局部脏区，事件期外那条走 anim 通道由本窗口的帧消费。
     // 于是"在设置窗里改了名字，主窗显示的还是旧的"。见 [`take_cross_window_dirty`]。
-    CROSS_DIRTY.with(|c| c.set(true));
+    mark_cross_window_dirty();
     if EVENT_ACTIVE.with(|c| c.get()) {
         TOUCHED.with(|c| c.set(true));
     } else {
         crate::anim::request_repaint();
     }
+}
+
+/// 标记「跨窗口可见状态已变」，让平台在分发收尾时刷新其余窗口。
+///
+/// 信号写入自动置位；此外还有一个非信号的来源——运行期换主题
+/// （[`ThemeHandle::set`](crate::app::ThemeHandle::set)），它改的是所有窗口共享的
+/// 主题源，却不经过任何信号。少了这一处，"换肤联动"就只在应用碰巧同时写了信号时
+/// 才成立（比如用一个 `Signal<bool>` 记当前明暗），换个写法就失效。
+pub(crate) fn mark_cross_window_dirty() {
+    CROSS_DIRTY.with(|c| c.set(true));
 }
 
 /// 取走并清除「写过信号」标志，供平台层决定要不要让**其他**窗口也失效。

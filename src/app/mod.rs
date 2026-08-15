@@ -197,10 +197,13 @@ impl ThemeHandle {
             inner: Rc::new(RefCell::new(t)),
         }
     }
-    /// 替换当前主题并请求重绘。
+    /// 替换当前主题并请求重绘（所有窗口）。
     pub fn set(&self, t: Theme) {
         *self.inner.borrow_mut() = Rc::new(t);
         crate::anim::request_repaint();
+        // 主题源为所有窗口共享，而 `request_repaint` 只唤起当前窗口。不标这一笔，
+        // 换肤就只在应用碰巧同时写了信号时才联动（比如用 `Signal<bool>` 记明暗）。
+        crate::signal::mark_cross_window_dirty();
     }
     /// 就地修改当前主题（快照 → 改 → 写回 → 请求重绘）。运行期局部调整的便捷入口：
     ///
@@ -1599,6 +1602,21 @@ impl AppHandler for UiHost {
             .collect()
     }
 
+    /// 当前清屏色。
+    ///
+    /// **当场从主题源取，不读 `self.bg`**：那个字段在 `begin_frame` 里刷新，而平台是在
+    /// `render` **之前**清屏的——读它就永远慢一帧，换主题后的那一帧仍按旧底色清屏，
+    /// 而控件已经用新主题画了。停在这一帧就是"浅色文字画在浅色底上"。
+    ///
+    /// 经 `App::bg` 显式固定过底色时不跟随主题（与 `bg_follows_theme` 的既定语义一致）。
+    fn bg(&self) -> Option<Color> {
+        if self.bg_follows_theme {
+            Some(self.theme_src.current().palette.bg)
+        } else {
+            Some(self.bg)
+        }
+    }
+
     fn wants_animation(&self) -> bool {
         // 帧末收割的快照，不是当下的全局位——理由见 `UiHost::wants_anim`。
         //
@@ -2068,6 +2086,66 @@ mod tests {
     /// `anim` 的请求位是**线程全局**的，而每帧起始都会 `reset_request()` 清一次。同线程
     /// 跑两个窗口时，后绘制的那个会把前一个刚提出的续帧请求一并抹掉；若 `wants_animation`
     /// 直接读全局位，前者的动画就在对方出帧的瞬间冻住。故各宿主在帧末把它收进自己的字段。
+    /// 运行期换主题后，平台**下一次清屏**就要拿到新底色——不能等一帧。
+    ///
+    /// 平台是在 `render` **之前**清屏的，而 `UiHost::bg` 字段要到 `render` 里的
+    /// `begin_frame` 才刷新。若 `AppHandler::bg` 读那个字段就永远慢一帧：换主题后的
+    /// 那一帧按旧底色清屏、控件却已用新主题画好，停在这里就是"浅色文字画在浅色底上"。
+    /// 故本测试**刻意不渲染**，直接查——那正是平台清屏时所处的时刻。
+    #[test]
+    fn bg_follows_theme_without_rendering_a_frame() {
+        use crate::platform::AppHandler;
+        let mut app = App::new("t", 100, 100);
+        let theme = app.theme_handle();
+        let h = app.content(Element::col().fill()).into_handler_for_test();
+
+        let light_bg = h.bg().expect("宿主应报告清屏色");
+        assert_eq!(light_bg, Theme::default().palette.bg);
+
+        theme.set(Theme::dark());
+        let dark_bg = h.bg().expect("宿主应报告清屏色");
+        assert_ne!(light_bg, dark_bg, "换主题后底色必须立刻变，不能等下一帧");
+        assert_eq!(dark_bg, Theme::dark().palette.bg);
+    }
+
+    /// 换主题要让**所有**窗口刷新，而不只是触发换肤的那个。
+    ///
+    /// 主题源为所有窗口共享，但 `anim::request_repaint` 只唤起当前窗口。此前换肤能联动
+    /// 纯属巧合——示例用一个 `Signal<bool>` 记明暗，是那次**信号写入**顺带触发了跨窗
+    /// 广播；只调 `theme.set()` 的写法则不会。
+    #[test]
+    fn theme_switch_requests_cross_window_refresh() {
+        let mut app = App::new("t", 100, 100);
+        let theme = app.theme_handle();
+        let _h = app.content(Element::col().fill()).into_handler_for_test();
+        // 清掉建树期间可能积累的标记，隔离本次断言。
+        let _ = crate::signal::take_cross_window_dirty();
+
+        theme.set(Theme::dark());
+        assert!(
+            crate::signal::take_cross_window_dirty(),
+            "换主题必须请求跨窗刷新，否则其他窗口停在旧配色"
+        );
+    }
+
+    /// 经 `App::bg` 显式固定的底色不跟随主题（既定语义，勿因上一条回归而改掉）。
+    ///
+    /// 与既有的 `explicit_bg_stays_fixed_across_theme_switch` 是两件事：那条查的是
+    /// `handler.bg` **字段**（局部重绘子缓冲的填底色）、且在渲染之后；这条查的是平台
+    /// 真正用来清屏的 `AppHandler::bg()` **方法**、且不渲染。
+    #[test]
+    fn explicit_bg_reported_to_platform_ignores_theme() {
+        use crate::platform::AppHandler;
+        let fixed = Color::hex(0x123456);
+        let mut app = App::new("t", 100, 100).bg(fixed);
+        let theme = app.theme_handle();
+        let h = app.content(Element::col().fill()).into_handler_for_test();
+
+        assert_eq!(h.bg(), Some(fixed));
+        theme.set(Theme::dark());
+        assert_eq!(h.bg(), Some(fixed), "显式指定的底色不该被换肤覆盖");
+    }
+
     /// `ctx.open_window` 的请求要一路走到平台能消费的形状：配置照搬、内容还原成宿主。
     ///
     /// 建窗本身要真窗口才测得了（见提交说明里的外部 WM_CLOSE 冒烟），但**意图有没有

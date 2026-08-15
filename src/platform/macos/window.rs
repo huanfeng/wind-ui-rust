@@ -512,7 +512,8 @@ impl ContentView {
                 st.handler.set_scale(scale);
             }
             st.ensure_pixmap(pw, ph);
-            let bg = st.bg;
+            // 每帧问宿主要底色：运行期换主题时 `st.bg`（创建时抄的那份）不会跟着变。
+            let bg = st.handler.bg().unwrap_or(st.bg);
             let pixmap = st.pixmap.as_mut().unwrap();
             pixmap.fill(to_skia_color(bg));
             // 借用拆分：handler 与 pixmap 是不同字段，但都在 st 里，需先取出 pixmap 的裸数据后渲染。
