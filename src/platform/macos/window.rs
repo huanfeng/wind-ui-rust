@@ -7,7 +7,7 @@
 //! 对照 `platform/win32/mod.rs`（消息循环 + GDI 呈现）。坐标统一：事件按
 //! **物理像素、相对客户区左上角**上交（视图设为 `isFlipped`，故点坐标即左上原点）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::PathBuf;
 
@@ -41,6 +41,31 @@ use super::{AppHandler, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 use crate::platform::to_skia_color;
+
+thread_local! {
+    /// 仍存活的 windui 窗口数——对照 win32 的 `LiveWindows`（那边要按句柄驱动帧，故存的是
+    /// 集合；这里每个视图用 `schedule_next_frame` 自调度，只需知道还剩几个）。
+    static LIVE_WINDOWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// 窗口建成时登记。
+fn register_window() {
+    LIVE_WINDOWS.with(|n| n.set(n.get() + 1));
+}
+
+/// 窗口关闭时注销，返回**这是不是最后一个**（调用方据此 terminate）。
+///
+/// 计数已为零时返回 `false` 而不是让它回绕：那说明有条关闭路径没配对登记，此时按
+/// "最后一个"处理会在还有窗口活着时杀掉整个应用。
+fn unregister_window() -> bool {
+    LIVE_WINDOWS.with(|n| {
+        let left = n.get().saturating_sub(1);
+        debug_assert!(n.get() > 0, "关闭了未登记的窗口");
+        let was_counted = n.get() > 0;
+        n.set(left);
+        was_counted && left == 0
+    })
+}
 
 /// 视图运行期状态（对应 win32 的 `WindowState`）。
 struct ViewState {
@@ -348,12 +373,14 @@ define_class!(
             self.abort_composition();
         }
 
-        // 窗口即将销毁时退出应用（对照 win32 WM_DESTROY→PostQuitMessage）。
+        // 窗口即将销毁：最后一个关掉才退出应用（对照 win32 WM_DESTROY→PostQuitMessage）。
         // 注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
-            let mtm = MainThreadMarker::from(self);
-            NSApplication::sharedApplication(mtm).terminate(None);
+            if unregister_window() {
+                let mtm = MainThreadMarker::from(self);
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
         }
     }
 );
@@ -1080,6 +1107,9 @@ pub(crate) fn run_windowed(
     }
     window.setContentView(Some(&view));
     window.setAcceptsMouseMovedEvents(true);
+    // 登记进活动窗口计数：`windowWillClose:` 据此判断自己是不是最后一个。设 delegate
+    // **之前**登记——设完就可能收到关闭回调，那时计数必须已经算上这一个。
+    register_window();
     // 窗口关闭时退出应用（视图兼任窗口委托）。隐藏到托盘走 orderOut，不触发关闭，故不退出。
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     view.refresh_tracking_area();

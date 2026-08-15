@@ -11,7 +11,7 @@ pub mod tray;
 
 pub use tray::{Tray, TrayCtx, TrayMenuItem};
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -55,22 +55,23 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsZoomed, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
-    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
-    HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-    SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
-    SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
-    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    GetWindowRect, IsIconic, IsWindow, IsZoomed, LoadCursorW, LoadIconW,
+    MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM,
+    HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+    HTTOPRIGHT, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE,
+    NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
+    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
+    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -83,11 +84,74 @@ use crate::geometry::{Color, Point, Size};
 thread_local! {
     /// wnd_proc 入口处写入当前 HWND；PickDialog::pick_* 读取以注入父窗口。
     static ACTIVE_HWND: Cell<isize> = const { Cell::new(0) };
+    /// 本线程上仍存活的 windui 窗口，见 [`LiveWindows`]。
+    static LIVE_WINDOWS: RefCell<LiveWindows> = const { RefCell::new(LiveWindows::new()) };
 }
 
 /// 供 platform::inject_parent 读取当前活跃窗口句柄（单线程，消息循环内保证有效）。
 pub(super) fn active_hwnd() -> isize {
     ACTIVE_HWND.with(|h| h.get())
+}
+
+/// 本线程上仍存活的 windui 窗口登记表：消息循环据此决定驱动谁的帧、以及何时该退出。
+///
+/// 存 `isize` 而非 `HWND` 有两个理由：`HWND` 不是 `Send` 也进不了 `const` 初始化，
+/// 更要紧的是登记表的增删与退出判定因此**不依赖真实窗口**，可以直接单测——这套逻辑
+/// 的错法（少注销一个就永不退出、多注销一个就提前杀掉整个应用）都不是编译期能拦下的。
+struct LiveWindows {
+    ids: Vec<isize>,
+}
+
+impl LiveWindows {
+    const fn new() -> Self {
+        Self { ids: Vec::new() }
+    }
+
+    /// 登记一个新窗口。重复登记同一句柄是调用方的错，debug 下拦下。
+    fn add(&mut self, id: isize) {
+        debug_assert!(!self.ids.contains(&id), "窗口重复登记: {id:#x}");
+        self.ids.push(id);
+    }
+
+    /// 注销一个窗口，返回**注销后登记表是否已空**（即这是不是最后一个窗口）。
+    ///
+    /// 注销一个从未登记过的句柄返回 `false`：那说明有条销毁路径没走过登记，此时若按
+    /// "空了"处理就会在还有窗口活着时退出整个应用。debug 下拦下以便定位。
+    fn remove(&mut self, id: isize) -> bool {
+        let before = self.ids.len();
+        self.ids.retain(|&x| x != id);
+        debug_assert!(before != self.ids.len(), "注销未登记的窗口: {id:#x}");
+        before != self.ids.len() && self.ids.is_empty()
+    }
+
+    fn ids(&self) -> Vec<isize> {
+        self.ids.clone()
+    }
+}
+
+/// 登记一个已创建的窗口。
+unsafe fn register_window(hwnd: HWND) {
+    LIVE_WINDOWS.with(|w| w.borrow_mut().add(hwnd.0 as isize));
+}
+
+/// 注销一个已销毁的窗口，返回它是否是最后一个（调用方据此 `PostQuitMessage`）。
+unsafe fn unregister_window(hwnd: HWND) -> bool {
+    LIVE_WINDOWS.with(|w| w.borrow_mut().remove(hwnd.0 as isize))
+}
+
+/// 当前仍存活的窗口句柄快照。
+///
+/// 返回**拷贝**而非借用：调用方拿着它去 `InvalidateRect`/`UpdateWindow`，那会同步派发
+/// `WM_PAINT` 回到 `wnd_proc`，窗口可能就此被销毁并回头注销自己。持着 `RefCell` 的借用
+/// 走进这一步就是运行期 panic。
+unsafe fn live_windows() -> Vec<HWND> {
+    LIVE_WINDOWS.with(|w| {
+        w.borrow()
+            .ids()
+            .into_iter()
+            .map(|v| HWND(v as *mut _))
+            .collect()
+    })
 }
 
 /// 查询系统"显示动画"设置（无障碍/省电）。查询失败默认开。
@@ -499,6 +563,11 @@ unsafe fn run_windowed(
         }
     };
 
+    // 登记进活动窗口表：消息循环据此驱动帧，`WM_DESTROY` 据此判断是不是最后一个窗口。
+    // 放在 CreateWindowExW **返回之后**而非 WM_NCCREATE 里：创建期间的消息还够不到消息
+    // 循环，而创建失败的那条路径上根本没有窗口需要注销。
+    register_window(hwnd);
+
     // 用实际窗口 DPI 设置内容缩放（可能与系统 DPI 不同，如多显示器）。
     let dpi = GetDpiForWindow(hwnd);
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
@@ -668,7 +737,7 @@ unsafe fn run_windowed(
         let _ = UpdateWindow(hwnd);
     }
 
-    run_message_loop(hwnd);
+    run_message_loop();
 
     // 消息循环结束后立即显式释放 GPU 共享设备链（D3D11/DXGI/D2D/DWrite COM 对象）。
     // 推迟到线程析构才 Release 会触发 GPU 命令队列排空 + DWrite 字体缓存全局清理，
@@ -702,19 +771,33 @@ impl Drop for TimerResolution {
     }
 }
 
-unsafe fn run_message_loop(hwnd: HWND) {
-    // 动画帧间隔按显示器刷新率取整（默认 60fps 上限，刷新率 <60 时回退到实际值）。
-    // 注：仅起始采样一次；跨刷新率不同的显示器移动后不更新（单窗口小工具可接受）。
-    let frame_ms = frame_interval_ms(hwnd);
+unsafe fn run_message_loop() {
     let mut msg = MSG::default();
     let mut last_frame = std::time::Instant::now();
     // 仅动画期间持有（提升定时器分辨率），空闲时 None 由 Drop 归还，省电。
     let mut hires: Option<TimerResolution> = None;
+    // 动画帧间隔（ms），按当前窗口集合里最快的那块屏采样。缓存到窗口集合变化为止：
+    // 每轮都采样要对每个窗口 GetDC + GetDeviceCaps，那是白付的开销。
+    let mut frame_ms = frame_interval_ms(&live_windows());
+    let mut live_count = LIVE_WINDOWS.with(|w| w.borrow().ids().len());
     loop {
-        let animating = !IsIconic(hwnd).as_bool()
-            && state_from(hwnd)
-                .map(|s| s.handler.wants_animation())
-                .unwrap_or(false);
+        // 每轮取一次快照：上一轮的 UpdateWindow 可能已经销毁了某个窗口。
+        let windows = live_windows();
+        if windows.len() != live_count {
+            live_count = windows.len();
+            frame_ms = frame_interval_ms(&windows);
+        }
+        // 需要按帧驱动的窗口：最小化的跳过（画了也看不见，只是空转）。
+        let pending: Vec<HWND> = windows
+            .into_iter()
+            .filter(|&h| {
+                !IsIconic(h).as_bool()
+                    && state_from(h)
+                        .map(|s| s.handler.wants_animation())
+                        .unwrap_or(false)
+            })
+            .collect();
+        let animating = !pending.is_empty();
         if animating {
             // 提升定时器分辨率到 1ms：否则 MsgWait 超时被默认 ~15.6ms tick 向上取整，
             // 16ms 等待常变成 ~31ms → 实测掉到 ~30fps。
@@ -735,8 +818,14 @@ unsafe fn run_message_loop(hwnd: HWND) {
             }
             // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤刷新率且不冻结）。
             if last_frame.elapsed().as_millis() >= frame_ms {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
+                for h in pending {
+                    // 上一轮 PeekMessage 排空期间该窗口可能已被销毁（点了自己的关闭
+                    // 按钮），`pending` 是那之前的快照，故逐个复核仍然有效。
+                    if IsWindow(Some(h)).as_bool() {
+                        let _ = InvalidateRect(Some(h), None, false);
+                        let _ = UpdateWindow(h);
+                    }
+                }
                 last_frame = std::time::Instant::now();
             }
         } else {
@@ -753,9 +842,22 @@ unsafe fn run_message_loop(hwnd: HWND) {
     }
 }
 
-/// 动画帧间隔（ms）= 1000 / 目标帧率。目标帧率取窗口所在显示器刷新率，
+/// 动画帧间隔（ms）：取各窗口所在显示器中**最短**的那个间隔（最高刷新率）。
+///
+/// 取最短而非平均或最长：这是一条共享的循环，间隔就是所有窗口的公共上限。按慢屏配速会
+/// 让快屏上的窗口掉帧，而按快屏配速只是让慢屏窗口多收几次 `InvalidateRect`——那些多余的
+/// 帧被脏区系统挡掉，代价远小于掉帧。窗口集合为空时返回默认 60fps 的间隔。
+unsafe fn frame_interval_ms(windows: &[HWND]) -> u128 {
+    windows
+        .iter()
+        .map(|&h| window_frame_interval_ms(h))
+        .min()
+        .unwrap_or(1000 / 60)
+}
+
+/// 单个窗口的动画帧间隔（ms）= 1000 / 目标帧率。目标帧率取窗口所在显示器刷新率，
 /// 上限 60（默认）；刷新率 <60（如 50Hz 面板）则回退到实际值；查询失败按 60 处理。
-unsafe fn frame_interval_ms(hwnd: HWND) -> u128 {
+unsafe fn window_frame_interval_ms(hwnd: HWND) -> u128 {
     let hdc = GetDC(Some(hwnd));
     let hz = if hdc.is_invalid() {
         0
@@ -1054,10 +1156,14 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 最后一个窗口关闭才结束消息循环：多窗口下关掉设置子窗不该把整个应用带走。
+            //
             // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。
             // TrayState::drop 会调 Shell_NotifyIconW(NIM_DELETE)，需在进程退出前执行，
             // 因此不能 leak，仍须显式 drop——但顺序调整后用户感知到的关闭延迟消失。
-            PostQuitMessage(0);
+            if unregister_window(hwnd) {
+                PostQuitMessage(0);
+            }
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
             if !ptr.is_null() {
                 // **先清零指针再 drop**，顺序是承重的：模态循环（`TrackPopupMenu`）
@@ -1957,6 +2063,72 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
         None
     } else {
         Some(&mut *ptr)
+    }
+}
+
+#[cfg(test)]
+mod live_windows_tests {
+    use super::LiveWindows;
+
+    /// 单窗口：关掉它就是关掉最后一个，消息循环该退出。
+    #[test]
+    fn single_window_close_is_last() {
+        let mut w = LiveWindows::new();
+        w.add(1);
+        assert!(w.remove(1), "唯一的窗口关掉后应报告「已空」");
+    }
+
+    /// 多窗口：只有最后一个才报告「已空」。
+    ///
+    /// 这是本次改动的全部意义——此前任何窗口的 `WM_DESTROY` 都直接 `PostQuitMessage`，
+    /// 关掉设置子窗会把整个应用一起带走。
+    #[test]
+    fn only_the_last_window_reports_empty() {
+        let mut w = LiveWindows::new();
+        w.add(1);
+        w.add(2);
+        w.add(3);
+        assert!(!w.remove(2), "还有两个窗口活着，不该退出");
+        assert!(!w.remove(1), "还有一个窗口活着，不该退出");
+        assert!(w.remove(3), "最后一个关掉才该退出");
+    }
+
+    /// 关闭顺序与登记顺序无关：先关最早建的那个同样不该退出。
+    #[test]
+    fn close_order_does_not_matter() {
+        let mut w = LiveWindows::new();
+        w.add(10);
+        w.add(20);
+        assert!(!w.remove(10));
+        assert!(w.remove(20));
+    }
+
+    /// 注销一个没登记过的句柄不得报告「已空」。
+    ///
+    /// release 构建里 `debug_assert` 不生效，这条路径必须自己站得住：若返回 true，
+    /// 一次意料之外的重复 `WM_DESTROY` 就会在其他窗口还开着时杀掉整个应用。
+    #[test]
+    fn removing_unknown_window_never_reports_empty() {
+        let mut w = LiveWindows::new();
+        w.add(1);
+        // debug 下 remove 会 debug_assert，故只在 release 语义下验证返回值。
+        if !cfg!(debug_assertions) {
+            assert!(!w.remove(999), "注销未知句柄不该被当成「最后一个」");
+            assert_eq!(w.ids(), vec![1], "登记表不应被未知句柄的注销改动");
+        }
+    }
+
+    /// 重复注销同一个窗口不得二次报告「已空」。
+    #[test]
+    fn double_remove_does_not_report_empty_twice() {
+        let mut w = LiveWindows::new();
+        w.add(1);
+        w.add(2);
+        assert!(!w.remove(1));
+        assert!(w.remove(2), "第二个关掉时应报告已空");
+        if !cfg!(debug_assertions) {
+            assert!(!w.remove(2), "已经空了，重复注销不该再报一次");
+        }
     }
 }
 
