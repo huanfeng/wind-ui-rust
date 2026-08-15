@@ -11,7 +11,8 @@
 //! - **ESC 或点标题栏 × 均隐藏而非退出**（`hide_on_close`）。
 //! - 退出只有一条路：托盘右键 → 退出。
 //!
-//! 热键消息由系统投递到本窗口队列，空闲时仍阻塞在 `GetMessageW`——**零 CPU 占用**。
+//! 热键由系统事件驱动投递（win32 `RegisterHotKey` / macOS Carbon `RegisterEventHotKey`，
+//! 两者都不需要用户授权），空闲时仍阻塞在事件循环里——**零 CPU 占用**。
 
 use windui::prelude::*;
 

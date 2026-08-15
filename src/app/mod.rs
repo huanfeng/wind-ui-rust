@@ -594,9 +594,9 @@ impl App {
     /// 此时该热键静默失效、其余热键与应用本身不受影响。这是刻意的——为一个热键冲突
     /// 让整个应用起不来是不可接受的。
     ///
-    /// **平台状态：全局热键当前仅 Windows 实现。** macOS 上本方法在 debug 期 panic
-    /// （提示未实现）、release 期静默忽略；托盘、[`Self::start_hidden`] 与窗口显隐在
-    /// 两平台均可用。详见 `src/platform/macos/hotkey.rs`。
+    /// **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`
+    /// （两者都不需要用户授权）。语义一致：全局生效、组合被占用则该热键静默失效、
+    /// 运行期可经 [`HotkeyHandle`] 改绑与启停。
     pub fn hotkey(
         mut self,
         hotkey: crate::event::Hotkey,

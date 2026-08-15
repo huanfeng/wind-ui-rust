@@ -13,9 +13,9 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 > **`AppHandler` 缝合面的对齐状况**（哪些回调 win32 调了而 macOS 没调）：
 > `set_ime_composing` / `capture_active` / `on_capture_lost` 已接齐（见 §4.1 与 §8）；
 > `on_pan` / `start_fling` / `cancel_fling` 在 macOS 上**刻意不接**（惯性由系统给，见 §4.1 末尾）；
-> 仅剩 `take_hotkey_ops` 未接——它依赖全局热键本身，而 macOS 的全局热键要从零实现 Carbon
-> `RegisterEventHotKey`（`platform/macos/hotkey.rs` 目前只是 debug 期提示的空壳）。
-> 运行期改绑/启停接口 `HotkeyHandle` 在 macOS 上因此无处落地，属独立一档的工作量。
+> `take_hotkey_ops` 已接（全局热键走 Carbon `RegisterEventHotKey`，见
+> `platform/macos/hotkey.rs`），`HotkeyHandle` 的运行期改绑/启停两平台同步落地。
+> 至此 `AppHandler` 的缝合面在两平台**已全部对齐**（除刻意不接的惯性三件套）。
 
 ---
 

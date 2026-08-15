@@ -112,9 +112,7 @@ impl HotkeyCtx {
     }
     /// 取出回调声明的意图（供平台层在**释放窗口状态借用之后**执行）。
     ///
-    /// 唯一调用点在 win32 的热键派发路径；macOS 尚未接入全局热键
-    /// （见 `platform/macos/hotkey.rs`），那侧编译时无调用点会被判为 dead code。
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// 两平台的热键派发路径各调一次（win32 的 `WM_HOTKEY`、macOS 的 Carbon 处理器）。
     pub(crate) fn take_op(&mut self) -> Option<WindowOp> {
         self.op.take()
     }

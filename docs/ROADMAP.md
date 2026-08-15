@@ -101,7 +101,7 @@
 | 拖拽文件输入（OLE Drag & Drop） | 🟢 | P1 | 桌面小工具高频交互 |
 | 虚拟化列表（仅渲染可见视口） | 🟢 | P1 | `list` 每行一个 Node，海量数据爆炸（已知限制） |
 | TextInput 水平滚动 | 🟢 | P1 | 已记录缺陷 |
-| 全局热键 | 🟡 | P2 | 仅"后台唤出"类需要 |
+| 全局热键 | ✅ 已交付（双平台） | — | win32 `RegisterHotKey` / macOS Carbon `RegisterEventHotKey`，均无需用户授权；`HotkeyHandle` 运行期改绑与启停 |
 | 无边框窗口 + 自定义标题栏 | 🟡 | P2 | 视觉现代化，按产品需要 |
 | 暗色模式自动感知 | 🟡 | P2 | 有价值；Mica/Acrylic 仅锦上添花 |
 | 多窗口（设置子窗 / Tooltip） | ✅ 已交付（双平台） | — | `ctx.open_window(Window::new(..).content(..))`；子窗共享主题句柄与 `Signal`，托盘/热键/渲染后端由应用级宿主决定。`.single(key)` 单例窗口（同键只开一个，已开的激活到前台）。macOS 侧经真机验证：开窗/独立关闭/子窗拦截器与定时器/信号回收/跨窗广播/跨线程唤醒/单例激活 |

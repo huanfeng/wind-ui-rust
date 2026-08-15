@@ -58,6 +58,42 @@ thread_local! {
     static CLOSED: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
     /// 应用已进入退出流程（`terminate` 已发出），见 [`ContentView::window_will_close`]。
     static TERMINATING: Cell<bool> = const { Cell::new(false) };
+    /// 主窗——`App::run` 建的那一个。
+    ///
+    /// 托盘点击与全局热键说的"唤出窗口"指的都是它；子窗（设置页之类）不是这些操作的
+    /// 对象。对照 win32 `AppHost::main`。不取 `WINDOWS[0]`：主窗关掉之后那个位置会变成
+    /// 别的窗口，而"热键唤出的是哪个窗口"不该随之改变。
+    static MAIN_WINDOW: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+/// 对主窗执行一个窗口操作。全局热键的回调声明意图后由此落地。
+///
+/// **调用方须已释放各类借用**：这里的 AppKit 调用会同步回调进视图（激活窗口触发
+/// `windowDidResignKey:` 之类），届时会再借 `ViewState`。对照 win32 的 `run_window_op`。
+pub(super) fn run_window_op_on_main(op: WindowOp) {
+    let Some(win) = MAIN_WINDOW.with(|w| w.borrow().clone()) else {
+        return;
+    };
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    match op {
+        WindowOp::Minimize => win.miniaturize(None),
+        WindowOp::ToggleMaximize => win.zoom(None),
+        // 与 `TrayCtx::show_window`、`after_event` 的 `WindowOp::Show` 同源：三者是同一
+        // 语义的三个入口（托盘点击 / 控件请求 / 全局热键），实现必须一致。
+        WindowOp::Show => {
+            // 最小化时仅 makeKeyAndOrderFront 不会还原窗口，先取消最小化。
+            if win.isMiniaturized() {
+                win.deminiaturize(None);
+            }
+            win.makeKeyAndOrderFront(None);
+            // 热键是在别的应用前台时按的，本应用多半不在激活态——不 activate 的话窗口
+            // 只是排到自己应用的最前，用户仍看不到它。
+            NSApplication::sharedApplication(mtm).activate();
+        }
+        WindowOp::Hide => win.orderOut(None),
+    }
 }
 
 /// 登记表里的一条。对照 win32 的同名结构，差别只在这边持的是所有权。
@@ -1096,18 +1132,24 @@ impl ContentView {
 
     /// 事件分发后：执行待处理窗口操作、原生对话框请求、应用光标、必要时关窗。
     fn after_event(&self) {
-        let (op, dialog, close, new_windows) = {
+        let (op, dialog, close, hotkey_ops, new_windows) = {
             let mut st = self.ivars().borrow_mut();
             (
                 st.handler.take_window_op(),
                 st.handler.take_dialog_request(),
                 st.handler.wants_close(),
+                st.handler.take_hotkey_ops(),
                 // `is_open` 查的是 `WINDOWS`，与这里借着的 `ViewState` 是两个独立
                 // RefCell，可同时活着。单例判定必须由宿主在**构建内容之前**做。
                 st.handler
                     .take_new_windows(&|key| find_single_window(key).is_some()),
             )
         };
+        // 运行期热键操作（`HotkeyHandle` 改绑/启停）。热键状态是应用级的（thread_local），
+        // 与本窗的 `ViewState` 是两份东西——借用已释放，这里不会与之相撞。
+        for (id, hop) in hotkey_ops {
+            super::hotkey::apply(id, hop);
+        }
         if let Some(op) = op {
             if let Some(win) = self.window() {
                 match op {
@@ -1212,7 +1254,11 @@ impl ContentView {
 }
 
 /// macOS keyCode → 框架特殊键。返回 None 表示走文本/快捷键路径。
-fn map_special(key_code: u16) -> Option<Key> {
+///
+/// `pub(super)` 是给 `hotkey.rs` 的单测用的：那边有一张反向的表（`Key` → keyCode，
+/// 注册全局热键用），两张表必须互逆，否则会出现"注册的是 Home、按下去却当 End 处理"
+/// 这种两处各自看着都对的错位。
+pub(super) fn map_special(key_code: u16) -> Option<Key> {
     Some(match key_code {
         0x30 => Key::Tab,       // 48
         0x24 => Key::Enter,     // 36 Return
@@ -1406,10 +1452,13 @@ pub(crate) fn run_windowed(
         super::url_scheme::install();
     }
 
-    // 全局热键（若配置）：macOS 尚未实现，此处仅触发 debug 期提示。
-    // 详见 platform/macos/hotkey.rs——Windows 侧已实现，macOS 需 Carbon RegisterEventHotKey。
+    // 主窗登记：托盘与全局热键的"唤出窗口"指的是它。装热键**之前**设好——热键一旦
+    // 注册就可能立刻被按下。
+    MAIN_WINDOW.with(|w| *w.borrow_mut() = Some(window.clone()));
+
+    // 全局热键（若配置）：Carbon RegisterEventHotKey，见 platform/macos/hotkey.rs。
     if !cfg.hotkeys.is_empty() {
-        super::hotkey::HotkeyState::register(std::mem::take(&mut cfg.hotkeys));
+        super::hotkey::install(std::mem::take(&mut cfg.hotkeys));
     }
 
     // 系统托盘（若配置）：窗口创建后安装；TrayState 须存活至退出（按钮 target 为弱引用）。

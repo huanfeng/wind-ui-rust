@@ -116,7 +116,7 @@ fn main() {
 | List | `list` / `list_pill` (sidebar style) / `list_icons` (single-select / scroll / highlight / icons / disabled state) / `list_signal` (data-driven dynamic list) / `reorder_list` (drag to reorder) |
 | Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select) |
 | Image | `image` / `image_svg` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
-| System | System tray (icon + left/double click + native context menu), global hotkeys (Windows), multi-window (`ctx.open_window`, incl. singleton windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
+| System | System tray (icon + left/double click + native context menu), global hotkeys, multi-window (`ctx.open_window`, incl. singleton windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
 
 Widget state binds uniformly to `Signal<T>` — a `Copy` handle created by `signal(initial)`:
 `checkbox` / `switch` take `Signal<bool>`, `dropdown` / `list` / `tabs` take `Signal<usize>`,

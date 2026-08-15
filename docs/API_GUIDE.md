@@ -587,7 +587,7 @@ App::new("查词", 480, 360)
 - `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
-> **平台状态**：全局热键当前**仅 Windows 实现**。macOS 上 `App::hotkey` 在 debug 期 panic、release 期静默忽略；托盘、`start_hidden`、窗口显隐在两平台均可用。macOS 热键需 Carbon `RegisterEventHotKey`，见 `src/platform/macos/hotkey.rs`。
+> **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`——两者都**不需要用户授权**，语义一致（全局生效、组合被占用则该热键静默失效、运行期可改绑与启停）。macOS 上另两条路（`CGEventTap`、`NSEvent` 全局监听）都要用户在「系统设置 → 隐私与安全性 → 辅助功能」手动授权，且后者只能监听不能拦截，故不采用。
 
 完整示例见 `examples/hotkey.rs`。
 
