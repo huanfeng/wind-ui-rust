@@ -27,7 +27,6 @@ use crate::event::{CursorShape, Key, MouseButton, PointerEvent, PointerKind, Win
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, DialogRequest, Renderer, WindowConfig};
 use crate::render::Paint;
-use crate::signal::Signal;
 use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
 use crate::ui::Element;
@@ -47,8 +46,6 @@ use toast::ToastHost;
 use tooltip::TooltipState;
 
 thread_local! {
-    /// 构建期收集所有 `Element::dialog` 注册的显示 Signal，供 ESC / WM_CLOSE 优先关闭对话框。
-    static MODAL_SIGNALS: RefCell<Vec<Signal<bool>>> = const { RefCell::new(Vec::new()) };
     /// 待执行的延迟闭包（[`defer_blocking`] 排入，平台在事件分发完全返回后取走执行）。
     static DEFERRED: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
 }
@@ -89,24 +86,6 @@ pub fn take_deferred() -> Option<DialogRequest> {
             f();
         }
     })))
-}
-
-/// 注册一个对话框显示信号（由 `Element::dialog` 在构建期调用）。
-pub(crate) fn register_modal(show: Signal<bool>) {
-    MODAL_SIGNALS.with(|s| s.borrow_mut().push(show));
-}
-
-/// 关闭当前最顶层（最后注册）的可见对话框。返回 true 表示确实关闭了一个。
-fn close_topmost_modal() -> bool {
-    MODAL_SIGNALS.with(|s| {
-        for sig in s.borrow().iter().rev() {
-            if sig.get() {
-                sig.set(false);
-                return true;
-            }
-        }
-        false
-    })
 }
 
 type RenderClosure = Box<dyn FnMut(&mut dyn crate::render::RenderTarget, Size)>;
@@ -899,8 +878,8 @@ impl UiHost {
     }
 
     fn resolve_close_inner(&mut self) -> bool {
-        // 优先关闭最顶层可见对话框（不退出窗口）。
-        if close_topmost_modal() {
+        // 优先关闭本窗口最顶层的可见对话框（不退出窗口）。
+        if self.tree.close_topmost_modal() {
             // 对话框被关闭，需要重绘以隐藏遮罩。
             self.damage.needs_full = true;
             return false;
@@ -1984,6 +1963,61 @@ mod tests {
         b.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 40));
         assert!(!b.wants_animation(), "静态内容不应请求续帧");
         assert!(a.wants_animation(), "A 的续帧请求不得被 B 的帧清掉");
+    }
+
+    /// 回归（多窗口地基）：对话框栈必须归各自的树所有。
+    ///
+    /// 曾是线程全局栈，按 `Element::dialog` 的构造顺序累积。两个窗口下后构建的那个占住
+    /// 栈顶，于是在 B 窗口按 ESC / 点关闭，关掉的是 A 窗口的对话框。
+    #[test]
+    fn close_request_only_touches_this_windows_dialog() {
+        use crate::platform::AppHandler;
+        let show_b = crate::signal::signal(true);
+        let show_a = crate::signal::signal(true);
+        // 刻意先建 B、后建 A：全局栈下栈顶将是 A 的对话框。
+        let mut b = App::new("b", 100, 100)
+            .content(Element::stack().fill().child(Element::dialog(
+                show_b,
+                Element::leaf().width(20).height(20),
+            )))
+            .into_handler_for_test();
+        let a = App::new("a", 100, 100)
+            .content(Element::stack().fill().child(Element::dialog(
+                show_a,
+                Element::leaf().width(20).height(20),
+            )))
+            .into_handler_for_test();
+        assert!(!b.on_close_request(), "有对话框时关闭请求应被拦下，不关窗");
+        assert!(!show_b.get(), "应关掉 B 自己的对话框");
+        assert!(show_a.get(), "A 窗口的对话框不得被 B 的关闭请求波及");
+        drop(a); // 持到断言之后：树活着，其上的信号才活着
+    }
+
+    /// 嵌套对话框：ESC 先关最内层的那个。
+    ///
+    /// 依赖 `build` 的先序遍历（父先 insert、再递归子），故栈顶恒为最内层。此前按
+    /// `Element::dialog` 的构造顺序登记，而内层作为外层的参数**先**求值，栈序正好是反的。
+    #[test]
+    fn close_request_closes_innermost_dialog_first() {
+        use crate::platform::AppHandler;
+        let outer = crate::signal::signal(true);
+        let inner = crate::signal::signal(true);
+        let mut h = App::new("t", 100, 100)
+            .content(
+                Element::stack().fill().child(Element::dialog(
+                    outer,
+                    Element::col()
+                        .width(60)
+                        .height(60)
+                        .child(Element::dialog(inner, Element::leaf().width(20).height(20))),
+                )),
+            )
+            .into_handler_for_test();
+        assert!(!h.on_close_request());
+        assert!(!inner.get(), "第一次关闭请求应关掉最内层对话框");
+        assert!(outer.get(), "外层对话框应还开着");
+        assert!(!h.on_close_request());
+        assert!(!outer.get(), "第二次才轮到外层");
     }
 
     #[test]

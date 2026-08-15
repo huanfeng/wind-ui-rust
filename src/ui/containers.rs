@@ -247,7 +247,17 @@ impl Widget for ScrollWidget {
 }
 
 /// 模态遮罩 widget：吞掉所有指针事件，阻止穿透到下层（命中链先于其下内容）。
-pub struct ModalScrim;
+pub struct ModalScrim {
+    /// 本遮罩的显示信号。持有它是为了让 `build` 能把遮罩登记进 `Tree::modals`，
+    /// 供 ESC / 窗口关闭优先关掉最顶层对话框。
+    show: Signal<bool>,
+}
+
+impl ModalScrim {
+    pub fn new(show: Signal<bool>) -> Self {
+        Self { show }
+    }
+}
 
 impl Widget for ModalScrim {
     fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
@@ -265,6 +275,10 @@ impl Widget for ModalScrim {
         // 仅对窗口拖动区判定透明：无边框窗口弹出对话框后，自绘标题栏仍可拖窗
         // （遮罩照常吞事件、照常屏蔽标题栏窗口按钮）。见 `Widget::scrim_passthrough`。
         true
+    }
+
+    fn modal_signal(&self) -> Option<Signal<bool>> {
+        Some(self.show)
     }
 }
 

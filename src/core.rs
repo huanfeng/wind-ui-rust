@@ -157,6 +157,14 @@ pub trait Widget {
     fn is_modal(&self) -> bool {
         false
     }
+    /// 本节点绑定的对话框显示信号（仅对话框遮罩）。`Element::build` 据此把节点登记进
+    /// [`Tree::modals`]，使 ESC / 窗口关闭能优先关掉最顶层可见对话框。
+    ///
+    /// 与 [`Widget::is_modal`] 同为遮罩的属性但用途不同：那个管键盘焦点圈定，这个管
+    /// "谁能被 ESC 关掉"。分开是因为前者只需知道"是不是模态"，后者需要拿到那个信号。
+    fn modal_signal(&self) -> Option<Signal<bool>> {
+        None
+    }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
     fn take_click(&mut self, _f: ClickFn) {}
     /// 显隐切换时重置交互态（hover/press → 静止，并令下次绘制的补间瞬时落定不动画）。
@@ -393,6 +401,12 @@ pub struct Tree {
     /// 当前无调用方使用水平 offset（拖拽重排只写 y），如需支持应改内缩判定本身，
     /// 而不是让 arrange 去读 offset。
     arrange_origin: Point,
+    /// 本树上所有对话框遮罩的显示信号，按 `build` 的先序遍历登记（父在前、子在后），
+    /// 故**栈顶即最内层**：嵌套对话框下 ESC 先关最里面那个。
+    ///
+    /// 挂在树上而非线程全局：同线程跑多个窗口时，全局栈会让在 A 窗口按下的 ESC 关掉
+    /// B 窗口的对话框。归属到树，每个宿主只看得见自己那棵树上的遮罩。
+    modals: Vec<Signal<bool>>,
 }
 
 impl Default for Tree {
@@ -412,12 +426,38 @@ impl Tree {
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
             arrange_origin: Point::new(0, 0),
+            modals: Vec::new(),
         }
     }
 
     /// 取走 on_update 相位累积的 toast 请求（宿主在 layout 后调用上屏），并清空暂存。
     pub fn take_pending_toasts(&mut self) -> Vec<ToastRequest> {
         std::mem::take(&mut self.pending_toasts)
+    }
+
+    /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
+    ///
+    /// 同一个信号重复登记会被忽略：子树重建会让同一个 `Element::dialog` 再走一次
+    /// `build`，不去重则栈随重建次数无界增长。
+    pub(crate) fn register_modal(&mut self, show: Signal<bool>) {
+        if !self.modals.contains(&show) {
+            self.modals.push(show);
+        }
+    }
+
+    /// 关闭本树上最顶层（最内层）的可见对话框。返回是否确实关掉了一个。
+    ///
+    /// 顺带清掉句柄已失效的登记（子树连同其信号一起被回收后留下的空壳），使反复重建
+    /// 带对话框的子树不会让本栈越积越长。
+    pub(crate) fn close_topmost_modal(&mut self) -> bool {
+        self.modals.retain(|s| s.is_alive());
+        for sig in self.modals.iter().rev() {
+            if sig.get() {
+                sig.set(false);
+                return true;
+            }
+        }
+        false
     }
 
     // ---- arena ----

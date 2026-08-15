@@ -2025,11 +2025,12 @@ impl Element {
     /// 面板须自带背景（`bg_role(Role::Surface)` 等），否则面板空白区会穿透遮罩、
     /// 让其下的标题栏被误判成拖动区。
     pub fn dialog(show: Signal<bool>, content: Element) -> Self {
-        // 注册到宿主的对话框信号栈，使 ESC / WM_CLOSE 能优先关闭此对话框。
-        crate::app::register_modal(show);
+        // 遮罩自己带着显示信号，`build` 时登记进所属 `Tree`，使 ESC / WM_CLOSE 能优先
+        // 关闭此对话框。登记推迟到 build 而非在此直接做，是为了让归属跟着树走——
+        // 否则同线程多窗口下，先构建的那棵树会把后构建的对话框一并收走。
         Element::stack()
             .fill()
-            .widget(containers::ModalScrim)
+            .widget(containers::ModalScrim::new(show))
             .bg(Color::rgba(0, 0, 0, 120))
             .visible_when(move || show.get())
             .child(content.align(Align::Center))
@@ -3208,6 +3209,8 @@ impl Element {
         if let Some(f) = self.click {
             widget.take_click(f);
         }
+        // 在 widget 被移进 Node 之前问一次：对话框遮罩要把显示信号登记到树上。
+        let modal = widget.modal_signal();
         let node = Node {
             parent: None,
             children: Vec::new(),
@@ -3247,6 +3250,10 @@ impl Element {
         let id = tree.insert(node);
         if is_reactive {
             tree.register_reactive(id);
+        }
+        // 对话框遮罩登记到树上（先序：父在前、子在后，故嵌套对话框中最内层落在栈顶）。
+        if let Some(show) = modal {
+            tree.register_modal(show);
         }
         for mut ce in children {
             // 父为线性容器时，把请求的 weight 落到主轴维度
