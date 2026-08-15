@@ -116,7 +116,7 @@ fn main() {
 | List | `list` / `list_pill` (sidebar style) / `list_icons` (single-select / scroll / highlight / icons / disabled state) / `list_signal` (data-driven dynamic list) / `reorder_list` (drag to reorder) |
 | Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select) |
 | Image | `image` / `image_svg` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
-| System | System tray (icon + left/double click + native context menu), global hotkeys (Windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
+| System | System tray (icon + left/double click + native context menu), global hotkeys (Windows), multi-window (Windows, `ctx.open_window`), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
 
 Widget state binds uniformly to `Signal<T>` — a `Copy` handle created by `signal(initial)`:
 `checkbox` / `switch` take `Signal<bool>`, `dropdown` / `list` / `tabs` take `Signal<usize>`,
@@ -133,7 +133,7 @@ cargo test                                                  # run unit tests
 cargo clippy --all-targets                                  # lint
 ```
 
-Examples: `fullshowcase` (comprehensive), `settings` (settings window: sidebar + tables + dialogs), `dyn_list` (data-driven dynamic list), `about` (cards + toasts), `background_task` (cross-thread updates), `animation`, `theming` (TOML themes + runtime switching), `image`, `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `hotkey` (global hotkeys + start hidden), `file_drop`, `ime`, `ime_settings`, plus `phase0`–`phase5` staged demos.
+Examples: `fullshowcase` (comprehensive), `settings` (settings window: sidebar + tables + dialogs), `dyn_list` (data-driven dynamic list), `about` (cards + toasts), `background_task` (cross-thread updates), `animation`, `theming` (TOML themes + runtime switching), `image`, `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `hotkey` (global hotkeys + start hidden), `multi_window` (child windows + cross-window shared state), `file_drop`, `ime`, `ime_settings`, plus `phase0`–`phase5` staged demos.
 
 ## Architecture
 

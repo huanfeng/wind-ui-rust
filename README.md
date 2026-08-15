@@ -115,7 +115,7 @@ fn main() {
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
 | 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
-| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键（Windows）、启动即隐藏、关闭转隐藏、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
+| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键（Windows）、多窗口（Windows，`ctx.open_window`）、启动即隐藏、关闭转隐藏、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
 
 控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
 `Signal<bool>`、`dropdown`/`list`/`tabs` 绑 `Signal<usize>`、`text_input` 绑 `Signal<String>`。
@@ -131,7 +131,7 @@ cargo test                                                  # 运行单元测试
 cargo clippy --all-targets                                  # 静态检查
 ```
 
-示例一览：`fullshowcase`（综合）、`settings`（设置窗：侧栏 + 表格 + 对话框）、`dyn_list`（数据驱动动态列表）、`about`（卡片 + Toast）、`background_task`（跨线程更新）、`animation`、`theming`（TOML 主题 + 运行期切换）、`image`、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`hotkey`（全局热键 + 启动即隐藏）、`file_drop`、`ime`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
+示例一览：`fullshowcase`（综合）、`settings`（设置窗：侧栏 + 表格 + 对话框）、`dyn_list`（数据驱动动态列表）、`about`（卡片 + Toast）、`background_task`（跨线程更新）、`animation`、`theming`（TOML 主题 + 运行期切换）、`image`、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`hotkey`（全局热键 + 启动即隐藏）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`ime`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
 
 ## 架构
 

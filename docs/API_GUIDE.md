@@ -1231,6 +1231,62 @@ message-only 窗口的 `wndproc` 里，macOS/Linux 上跑在派回主线程的�
 `tx.send(argv)`。代价是延后到下一帧执行，而窗口隐藏时不出帧、消息会积压到窗口再显示为止
 （托盘常驻应用尤其要注意），库不替你做这层转发正是为此。
 
+### 8.8 多窗口
+
+设置页、关于框这类独立子窗，在**任意控件回调**里开：
+
+```rust
+Element::button("设置…").on_click(move |ctx| {
+    ctx.open_window(
+        Window::new("设置", 560, 420)
+            .centered(true)
+            .min_size(360, 280)
+            .content(move || settings_page()),   // 注意是闭包
+    );
+});
+```
+
+`Window` 的构建器与 `App` 同形（`new(title, w, h)` 起手、链式配置、`content` 收尾），
+只有对子窗有意义的那几项：`resizable` / `centered` / `frameless` / `min_size` / `bg`。
+
+**`content` 收闭包而非建好的树**，两个理由：闭包在窗口**真正创建时**才求值，与
+`open_window` 的排队语义一致（下方"时机"）；更要紧的是其间创建的 `Signal` 归这个窗口所有，
+**窗口关闭时整批回收**。传一棵建好的树就晚了——那些信号在你写下 `Element::col()…` 的
+那一刻就已经进了全局 arena，窗口关掉也没人收，反复开关设置窗会一轮轮累积。
+
+**时机**：请求排队，平台在事件分发**完全返回**后才真正建窗。在回调里直接建窗会同步派发
+`WM_NCCREATE`/`WM_SIZE` 重入窗口过程，那里再取一次窗口状态就是 `&mut` 别名——与 `WindowOp`、
+原生对话框（§8.6）是同一条延后通道、同一个理由。同一个回调里连开多个窗合法，按调用顺序创建。
+
+**继承与不继承**：
+
+| 跟随应用 | 不随子窗复制 |
+|---|---|
+| 主题句柄（换肤时**所有窗口一起变**） | `App::channel` 的通道、`on_interval` 定时器 |
+| 托盘、全局热键、单实例 | `on_close_request` 拦截器、`hide_on_close` |
+| 渲染后端（主窗选 GPU，子窗也 GPU） | — |
+
+右列不复制是刻意的：那些回调绑在主窗那次 `App` 上，复制一份会让同一条消息被处理两次。
+代价是子窗**目前拿不到**这些能力（`Window` 上没有对应入口）。
+
+**跨窗共享状态**不需要任何额外机制——`Signal` 是 `Copy` 句柄，传进子窗即可，两边读写同一份：
+
+```rust
+let name = signal(String::from("世界"));
+// 主窗显示
+Element::label(name)
+// 子窗编辑：改它，主窗同步刷新
+Window::new("设置", 420, 320).content(move || Element::text_input(name, "名字"))
+```
+
+**退出语义**：关掉**最后一个**窗口才退出进程。主窗可以先关、留着子窗继续用；托盘菜单的
+「退出」会销毁全部窗口。
+
+**平台**：Windows 已实现。**macOS 尚未实现**——`open_window` 在 debug 期 panic 提示、
+release 期打印一行并忽略（同全局热键的处理）。
+
+可运行示例：`examples/multi_window.rs`。
+
 ---
 
 ## 9. 扩展：自定义控件
@@ -1364,8 +1420,9 @@ let res = windui::testing::run_with_ctx_in(&mut tree, node_id, |ctx| ...);
   而次像素抗锯齿要求每个通道各有一个 alpha、RGBA 只有一个，层内因此退化为灰度抗锯齿
   （浏览器给 `opacity` 子树的也是这个取舍）。小字号下会觉得比不透明路径略"细"。
   两个后端都如此，与 GPU 与否无关。全不透明的常规路径不受影响。
-- **信号槽位回收只覆盖库内三处重建宿主**：`list_signal` / `host_signal` 的 `DynList`、
-  `reorder_list_signal` 的行源、可排序表格的表头与正文。作用域外的 `signal()` **永不回收**，
+- **信号槽位回收只覆盖库内四处**：`list_signal` / `host_signal` 的 `DynList`、
+  `reorder_list_signal` 的行源、可排序表格的表头与正文，以及**子窗内容构建期**
+  （`Window::content` 的闭包内，随窗口关闭整批回收，见 §8.8）。作用域外的 `signal()` **永不回收**，
   这是刻意的——应用状态没有所有者，也不该有。但若应用自己写了"按数据整批重建子树"的
   控件，其构建期信号仍会一轮轮累积，须自持一个 `SignalScope` 管起来
   （`WINDUI_SIGNALS=1` 可在活跃槽位创新高时打印，健康应用启动后应永久安静）。
@@ -1386,6 +1443,7 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 |---|---|---|
 | 窗口 / 事件循环 / 文字 / 触摸 / 剪贴板 / 托盘 / 文件拖放 / 无边框窗口 | ✓ | ✓ |
 | 全局热键（`App::hotkey`） | ✓ | ✗ debug 期 panic、release 静默忽略 |
+| 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✗ debug 期 panic、release 打印一行并忽略 |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
 | Direct2D GPU 后端（`App::renderer`） | ✓ | — 不适用（macOS 恒软渲染，`Renderer::Gpu` 会报错） |
@@ -1416,6 +1474,7 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 |------|------|
 | `windui::prelude` | 常用类型一站式导入 |
 | `windui::app::App` | 窗口配置与启动 |
+| `windui::app::Window` | 子窗配置，交给 `ctx.open_window`（见 §8.8） |
 | `windui::ui::Element` | 控件构建器（第三方主入口） |
 | `windui::geometry` | `Color / Point / Size / Rect / Insets` |
 | `windui::spec` | `Align / Axis / Dimension` |
@@ -1427,4 +1486,4 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::anim` | `request_repaint()`（驱动动画） |
 | `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.1） |
 
-更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表等）。
+更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口等）。
