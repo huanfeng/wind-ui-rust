@@ -104,7 +104,7 @@
 | 全局热键 | 🟡 | P2 | 仅"后台唤出"类需要 |
 | 无边框窗口 + 自定义标题栏 | 🟡 | P2 | 视觉现代化，按产品需要 |
 | 暗色模式自动感知 | 🟡 | P2 | 有价值；Mica/Acrylic 仅锦上添花 |
-| 多窗口（设置子窗 / Tooltip） | 🟡 | P2 | 多数小工具单窗够用，改动大 |
+| 多窗口（设置子窗 / Tooltip） | ✅ 已交付（Windows） | — | `ctx.open_window(Window::new(..).content(..))`；子窗共享主题句柄与 `Signal`，托盘/热键/渲染后端由应用级 `AppHost` 决定。macOS 未实现（同全局热键，不交付未验证的 AppKit 代码） |
 | 轻量补间动画（Tween / Easing） | 🟡 | P2 | 补 fling 之外的通用插值；保持轻量 |
 | TextInput 撤销/重做 | 🟡 | P2 | 常用但非紧急 |
 | 富文本 / 行内混排 | 🔴 | — | 小工具少需、成本高 |
@@ -115,7 +115,7 @@
 | 系统服务层 SPI（`SystemService` trait 群） | 🟢 | P0 | **地基**：统一剪贴板/IME/对话框/托盘，承载多项功能并为 macOS 铺路；呼应既有"平台收口" |
 | 虚拟列表 Adapter 模式 | 🟢 | P1 | 同上痛点 |
 | 脏矩形局部重绘 + 增量布局 | ✅ 已交付（v0.4.0） | — | 交互失效系统：结构签名判定局部 vs 整窗，hover/拖动/点击/打字走 ~1ms 局部重绘 |
-| 多 UiHost + 单消息循环（多窗口） | 🟡 | P2 | 价值明确但改动大，与多窗口功能绑定 |
+| 多 UiHost + 单消息循环（多窗口） | ✅ 已交付（Windows） | — | 每窗一个 `UiHost`，win32 消息循环按活动窗口表驱动、最后一个窗口关闭才退出；托盘/热键/跨线程唤醒移到 message-only 的 `AppHost` |
 | Signals 响应式数据流 | ✅ 已交付（v0.4.0） | — | 落地为 `Signal<T>` 状态原语（取代 `Rc<Cell>`/`Rc<RefCell>`，`set` 自动局部脏区）；非替换控件模型，恰为"可选层"形态 |
 | GPU / 软硬混合光栅 | ✅ 已交付（v0.4.0，opt-in） | — | Direct2D 后端，`App::renderer` 三档选择（Auto/Software/Gpu）、默认仍软；文字坚持 DirectWrite，不引 WGPU 字形图集 |
 
