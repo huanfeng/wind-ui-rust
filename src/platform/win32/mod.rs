@@ -77,7 +77,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(feature = "d2d")]
 use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 
-use super::{AppHandler, Renderer, WindowConfig};
+use super::{AppHandler, NewWindow, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 
@@ -99,18 +99,28 @@ pub(super) fn active_hwnd() -> isize {
 /// 更要紧的是登记表的增删与退出判定因此**不依赖真实窗口**，可以直接单测——这套逻辑
 /// 的错法（少注销一个就永不退出、多注销一个就提前杀掉整个应用）都不是编译期能拦下的。
 struct LiveWindows {
-    ids: Vec<isize>,
+    wins: Vec<LiveWindow>,
+}
+
+/// 登记表里的一条。
+struct LiveWindow {
+    id: isize,
+    /// 单例键（`Window::single`）。`None` = 普通窗口，永不参与去重。
+    single: Option<String>,
 }
 
 impl LiveWindows {
     const fn new() -> Self {
-        Self { ids: Vec::new() }
+        Self { wins: Vec::new() }
     }
 
     /// 登记一个新窗口。重复登记同一句柄是调用方的错，debug 下拦下。
-    fn add(&mut self, id: isize) {
-        debug_assert!(!self.ids.contains(&id), "窗口重复登记: {id:#x}");
-        self.ids.push(id);
+    fn add(&mut self, id: isize, single: Option<String>) {
+        debug_assert!(
+            !self.wins.iter().any(|w| w.id == id),
+            "窗口重复登记: {id:#x}"
+        );
+        self.wins.push(LiveWindow { id, single });
     }
 
     /// 注销一个窗口，返回**注销后登记表是否已空**（即这是不是最后一个窗口）。
@@ -118,20 +128,38 @@ impl LiveWindows {
     /// 注销一个从未登记过的句柄返回 `false`：那说明有条销毁路径没走过登记，此时若按
     /// "空了"处理就会在还有窗口活着时退出整个应用。debug 下拦下以便定位。
     fn remove(&mut self, id: isize) -> bool {
-        let before = self.ids.len();
-        self.ids.retain(|&x| x != id);
-        debug_assert!(before != self.ids.len(), "注销未登记的窗口: {id:#x}");
-        before != self.ids.len() && self.ids.is_empty()
+        let before = self.wins.len();
+        self.wins.retain(|w| w.id != id);
+        debug_assert!(before != self.wins.len(), "注销未登记的窗口: {id:#x}");
+        before != self.wins.len() && self.wins.is_empty()
     }
 
     fn ids(&self) -> Vec<isize> {
-        self.ids.clone()
+        self.wins.iter().map(|w| w.id).collect()
+    }
+
+    /// 找出带指定单例键的窗口（`Window::single`）。
+    ///
+    /// 键随窗口注销一并消失，故找到的那个必然还活着——单例判定不需要额外的存活校验，
+    /// 也不会因为某条关闭路径绕过了应用层而留下一个"占着键的鬼窗口"。
+    fn find_single(&self, key: &str) -> Option<isize> {
+        self.wins
+            .iter()
+            .find(|w| w.single.as_deref() == Some(key))
+            .map(|w| w.id)
     }
 }
 
 /// 登记一个已创建的窗口。
-unsafe fn register_window(hwnd: HWND) {
-    LIVE_WINDOWS.with(|w| w.borrow_mut().add(hwnd.0 as isize));
+unsafe fn register_window(hwnd: HWND, single: Option<String>) {
+    LIVE_WINDOWS.with(|w| w.borrow_mut().add(hwnd.0 as isize, single));
+}
+
+/// 查找带指定单例键的既有窗口。
+unsafe fn find_single_window(key: &str) -> Option<HWND> {
+    LIVE_WINDOWS
+        .with(|w| w.borrow().find_single(key))
+        .map(|v| HWND(v as *mut _))
 }
 
 /// 注销一个已销毁的窗口，返回它是否是最后一个（调用方据此 `PostQuitMessage`）。
@@ -740,7 +768,7 @@ unsafe fn create_window(
     // 登记进活动窗口表：消息循环据此驱动帧，`WM_DESTROY` 据此判断是不是最后一个窗口。
     // 放在 CreateWindowExW **返回之后**而非 WM_NCCREATE 里：创建期间的消息还够不到消息
     // 循环，而创建失败的那条路径上根本没有窗口需要注销。
-    register_window(hwnd);
+    register_window(hwnd, cfg.single.clone());
 
     // 用实际窗口 DPI 设置内容缩放（可能与系统 DPI 不同，如多显示器）。
     let dpi = GetDpiForWindow(hwnd);
@@ -1546,8 +1574,12 @@ unsafe fn broadcast_signal_dirty(origin: HWND) {
 /// ——建窗会同步派发 WM_NCCREATE/WM_SIZE/WM_PAINT，其中 WM_PAINT 会走到新窗口自己的
 /// `state_from`；若此刻发起方的借用还活着，两个 `&mut WindowState` 就并存了。
 unsafe fn open_pending_windows(hwnd: HWND) {
+    // `is_open` 查的是 `LIVE_WINDOWS`——与 `state_from` 拿的裸指针不是同一份状态，
+    // 两者可同时活着。单例判定必须由宿主在**构建内容之前**做，故只能这样传进去。
     let requests = match state_from(hwnd) {
-        Some(s) => s.handler.take_new_windows(),
+        Some(s) => s
+            .handler
+            .take_new_windows(&|key| find_single_window(key).is_some()),
         None => return,
     };
     if requests.is_empty() {
@@ -1560,10 +1592,21 @@ unsafe fn open_pending_windows(hwnd: HWND) {
     };
     let hinst = HINSTANCE(hmodule.0);
     let renderer = app_host().map(|h| h.renderer).unwrap_or_default();
-    for (cfg, handler) in requests {
-        // 子窗建不起来只是少一个窗口，不该带走整个应用——`create_window` 已打印原因。
-        if let Some(child) = create_window(hinst, &cfg, handler, renderer) {
-            show_window(child);
+    for item in requests {
+        match item {
+            // 单例（`Window::single`）：把已有的那个激活到前台。找不到说明它在判定与
+            // 执行之间被关掉了——正常竞态，什么都不做即可。
+            NewWindow::Focus(key) => {
+                if let Some(existing) = find_single_window(&key) {
+                    show_and_activate(existing);
+                }
+            }
+            // 子窗建不起来只是少一个窗口，不该带走整个应用——`create_window` 已打印原因。
+            NewWindow::Create(cfg, handler) => {
+                if let Some(child) = create_window(hinst, &cfg, handler, renderer) {
+                    show_window(child);
+                }
+            }
         }
     }
 }
@@ -2321,7 +2364,7 @@ mod live_windows_tests {
     #[test]
     fn single_window_close_is_last() {
         let mut w = LiveWindows::new();
-        w.add(1);
+        w.add(1, None);
         assert!(w.remove(1), "唯一的窗口关掉后应报告「已空」");
     }
 
@@ -2332,9 +2375,9 @@ mod live_windows_tests {
     #[test]
     fn only_the_last_window_reports_empty() {
         let mut w = LiveWindows::new();
-        w.add(1);
-        w.add(2);
-        w.add(3);
+        w.add(1, None);
+        w.add(2, None);
+        w.add(3, None);
         assert!(!w.remove(2), "还有两个窗口活着，不该退出");
         assert!(!w.remove(1), "还有一个窗口活着，不该退出");
         assert!(w.remove(3), "最后一个关掉才该退出");
@@ -2344,8 +2387,8 @@ mod live_windows_tests {
     #[test]
     fn close_order_does_not_matter() {
         let mut w = LiveWindows::new();
-        w.add(10);
-        w.add(20);
+        w.add(10, None);
+        w.add(20, None);
         assert!(!w.remove(10));
         assert!(w.remove(20));
     }
@@ -2357,7 +2400,7 @@ mod live_windows_tests {
     #[test]
     fn removing_unknown_window_never_reports_empty() {
         let mut w = LiveWindows::new();
-        w.add(1);
+        w.add(1, None);
         // debug 下 remove 会 debug_assert，故只在 release 语义下验证返回值。
         if !cfg!(debug_assertions) {
             assert!(!w.remove(999), "注销未知句柄不该被当成「最后一个」");
@@ -2369,13 +2412,73 @@ mod live_windows_tests {
     #[test]
     fn double_remove_does_not_report_empty_twice() {
         let mut w = LiveWindows::new();
-        w.add(1);
-        w.add(2);
+        w.add(1, None);
+        w.add(2, None);
         assert!(!w.remove(1));
         assert!(w.remove(2), "第二个关掉时应报告已空");
         if !cfg!(debug_assertions) {
             assert!(!w.remove(2), "已经空了，重复注销不该再报一次");
         }
+    }
+
+    /// 单例键（`Window::single`）：同键的第二次请求找得到第一个窗口。
+    #[test]
+    fn single_key_finds_existing_window() {
+        let mut w = LiveWindows::new();
+        w.add(1, Some("settings".into()));
+        assert_eq!(w.find_single("settings"), Some(1));
+    }
+
+    /// 不同键之间互不干扰——「设置」开着不该让「关于」也被挡下。
+    #[test]
+    fn different_single_keys_do_not_collide() {
+        let mut w = LiveWindows::new();
+        w.add(1, Some("settings".into()));
+        w.add(2, Some("about".into()));
+        assert_eq!(w.find_single("settings"), Some(1));
+        assert_eq!(w.find_single("about"), Some(2));
+        assert_eq!(
+            w.find_single("help"),
+            None,
+            "没登记过的键不该匹配到任何窗口"
+        );
+    }
+
+    /// 无键的普通窗口**永不**参与去重：它们本就该点几次开几个。
+    #[test]
+    fn keyless_windows_never_match() {
+        let mut w = LiveWindows::new();
+        w.add(1, None);
+        w.add(2, None);
+        assert_eq!(w.find_single("settings"), None);
+    }
+
+    /// 键随窗口注销一并释放：关掉设置窗之后必须能再开出来。
+    ///
+    /// 这正是把单例判定放在登记表、而不是让应用层自己拿 `Signal` 记标记的理由——
+    /// 标记会因为绕过 `on_close_request` 的关闭路径（如 `ctx.request_close()`）而漏
+    /// 复位，那之后那个窗口就再也开不出来了。
+    #[test]
+    fn single_key_is_released_when_window_closes() {
+        let mut w = LiveWindows::new();
+        w.add(1, Some("settings".into()));
+        w.add(2, None);
+        assert!(!w.remove(1), "还有一个窗口活着");
+        assert_eq!(
+            w.find_single("settings"),
+            None,
+            "窗口关掉后键必须释放，否则设置窗再也开不出来"
+        );
+    }
+
+    /// 同一个键先后用于两个窗口（关掉再开）：找到的是新的那个。
+    #[test]
+    fn single_key_rebinds_after_reopen() {
+        let mut w = LiveWindows::new();
+        w.add(1, Some("settings".into()));
+        assert!(w.remove(1));
+        w.add(7, Some("settings".into()));
+        assert_eq!(w.find_single("settings"), Some(7));
     }
 }
 

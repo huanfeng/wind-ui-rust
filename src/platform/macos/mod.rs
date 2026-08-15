@@ -23,7 +23,7 @@ pub mod window;
 
 pub use tray::{Tray, TrayCtx, TrayMenuItem};
 
-use super::{AppHandler, WindowConfig};
+use super::{AppHandler, NewWindow, WindowConfig};
 
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入事件循环。
 pub(crate) fn run(

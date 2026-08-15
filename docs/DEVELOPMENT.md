@@ -76,6 +76,7 @@ cargo run --example <name> -- --screenshot out.png --scale 1.5   # 验证高 DPI
 合成交互期间经 `ctx.open_window` 开出的**子窗各自再出一张**，文件名在主图基础上加序号
 （`out.png` → `out-1.png`、`out-2.png`，窗口标题打印在日志里）。只跟一层：子窗再开的窗口
 不再跟进——一层已覆盖"点开设置页看看长什么样"这个实际需求，递归下去产物难以和调用点对应。
+设了 `Window::single` 的窗口同键只出一张，与真跑开几个窗口一致。
 
 > 格式：不强制 `cargo fmt`——图形 API 刻意用宽行。保持与周边一致即可。
 

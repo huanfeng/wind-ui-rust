@@ -576,6 +576,11 @@ pub struct WindowRequest {
     pub close_handler: Option<WindowCloseHandler>,
     /// 本窗口的周期回调（`Window::on_interval`）。随窗口关闭一并停止。
     pub intervals: Vec<(std::time::Duration, WindowIntervalFn)>,
+    /// 单例键（`Window::single`）。`None` = 每次请求都开一个新窗口。
+    ///
+    /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并把那个窗口激活到前台。
+    /// 判定放在平台层而非应用层，是因为"把已有窗口拉到前台"只有平台做得到。
+    pub single: Option<String>,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

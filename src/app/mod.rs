@@ -27,7 +27,7 @@ use crate::event::{
     CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp, WindowRequest,
 };
 use crate::geometry::{Color, Point, Rect, Size};
-use crate::platform::{self, AppHandler, DialogRequest, Renderer, WindowConfig};
+use crate::platform::{self, AppHandler, DialogRequest, NewWindow, Renderer, WindowConfig};
 use crate::render::Paint;
 use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
@@ -129,8 +129,37 @@ impl Window {
                 content: crate::event::WindowContent::new(|| NoContent),
                 close_handler: None,
                 intervals: Vec::new(),
+                single: None,
             },
         }
+    }
+
+    /// 把本窗口设为**单例**：同一个 `key` 同时只存在一个窗口。
+    ///
+    /// 已经开着同键窗口时，本次请求被丢弃，那个窗口被激活到前台（最小化的会还原）。
+    /// 设置页、关于框这类"再点一次应该跳到已开的那个"的窗口用它。
+    ///
+    /// 判定在平台层做，不是应用层自己拿 `Signal` 记一个"开着没有"：
+    /// - 只有平台能把已有窗口拉到前台。应用层挡住重复开窗后什么都不发生，看着像按钮坏了；
+    /// - 键随窗口登记表自动清除，`ctx.request_close()`（绕过 `on_close_request`）关掉的
+    ///   窗口也不会漏复位——自己记标记就会漏，然后那个窗口再也开不出来。
+    ///
+    /// 已有窗口的配置**不会**被后续请求更新（标题、尺寸、内容都保持第一次那份）：
+    /// 单例的语义是"就是那一个窗口"，把它按新配置重建反而丢掉用户在里面的状态。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Element::button("打开设置…").on_click(|ctx| {
+    ///     ctx.open_window(
+    ///         Window::new("设置", 420, 320)
+    ///             .single("settings")
+    ///             .content(|| Element::col().padding(16).child(Element::label("设置项…"))),
+    ///     );
+    /// });
+    /// ```
+    pub fn single(mut self, key: impl Into<String>) -> Self {
+        self.req.single = Some(key.into());
+        self
     }
 
     /// 本窗口的关闭请求拦截器：返回 `true` 放行、`false` 取消。语义与
@@ -357,6 +386,8 @@ impl App {
                 renderer: Renderer::default(),
                 min_width: 0,
                 min_height: 0,
+                // 主窗本就唯一，不参与单例去重（`Window::single` 只给子窗）。
+                single: None,
             },
             render: None,
             content: None,
@@ -1620,10 +1651,21 @@ impl AppHandler for UiHost {
     /// 子窗共享**同一个** `ThemeHandle`：运行期换主题时所有窗口一起变，而不是各拿一份
     /// 快照各自定格。其余应用级设施（托盘/热键/单实例/跨线程通道）都不复制——它们属于
     /// 应用，已经在主窗那次 `run` 里装好了。
-    fn take_new_windows(&mut self) -> Vec<(WindowConfig, Box<dyn AppHandler>)> {
+    /// 单例（`Window::single`）在这里判定，**早于内容构建**：已有同键窗口就只回报一个
+    /// `Focus`，那棵控件树根本不建（`req.content` 的闭包不跑，它的副作用也不发生）。
+    ///
+    /// `batch` 记本批已决定新建的键：`is_open` 查的是平台登记表，而同一次分发里连着两个
+    /// 同键请求时，第一个还没建出来——只信 `is_open` 会一次开出两个"单例"窗口。
+    fn take_new_windows(&mut self, is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
+        let mut batch: std::collections::HashSet<String> = std::collections::HashSet::new();
         std::mem::take(&mut self.pending_windows)
             .into_iter()
             .map(|req| {
+                if let Some(key) = req.single.clone() {
+                    if is_open(&key) || !batch.insert(key.clone()) {
+                        return NewWindow::Focus(key);
+                    }
+                }
                 let bg_explicit = req.bg.is_some();
                 let bg = req.bg.unwrap_or(self.theme.palette.bg);
                 let cfg = WindowConfig {
@@ -1636,6 +1678,7 @@ impl AppHandler for UiHost {
                     frameless: req.frameless,
                     min_width: req.min_width,
                     min_height: req.min_height,
+                    single: req.single,
                     // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
                     // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
                     ..WindowConfig::default()
@@ -1665,7 +1708,7 @@ impl AppHandler for UiHost {
                 // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
                 // 节点而非信号，控件自带的信号由控件自己的 `SignalScope` 管。
                 host.scope = Some(scope);
-                (cfg, Box::new(host) as Box<dyn AppHandler>)
+                NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
             })
             .collect()
     }
@@ -2214,6 +2257,17 @@ mod tests {
         assert_eq!(h.bg(), Some(fixed), "显式指定的底色不该被换肤覆盖");
     }
 
+    /// 测试辅助：把 `NewWindow` 解成 `(配置, 宿主)`。
+    ///
+    /// 遇到 `Focus` 直接 panic——用它的测试都断言"这批请求都该建窗"，静默跳过会让
+    /// "单例误判把窗口吃掉了"表现成 `len` 对不上，而不是指着问题说话。
+    fn expect_create(w: NewWindow) -> (WindowConfig, Box<dyn AppHandler>) {
+        match w {
+            NewWindow::Create(cfg, host) => (*cfg, host),
+            NewWindow::Focus(key) => panic!("期望建窗，实际被判为激活已有单例窗口: {key}"),
+        }
+    }
+
     /// `ctx.open_window` 的请求要一路走到平台能消费的形状：配置照搬、内容还原成宿主。
     ///
     /// 建窗本身要真窗口才测得了（见提交说明里的外部 WM_CLOSE 冒烟），但**意图有没有
@@ -2230,7 +2284,10 @@ mod tests {
             )
             .into_handler_for_test();
         // 没人开窗时不该凭空冒出窗口。
-        assert!(h.take_new_windows().is_empty(), "未请求时不应有待建窗口");
+        assert!(
+            h.take_new_windows(&|_| false).is_empty(),
+            "未请求时不应有待建窗口"
+        );
 
         // 模拟控件回调里调 ctx.open_window。
         let root = h.tree.root.unwrap();
@@ -2245,7 +2302,11 @@ mod tests {
         });
         h.apply_app_effects(res);
 
-        let made = h.take_new_windows();
+        let made: Vec<_> = h
+            .take_new_windows(&|_| false)
+            .into_iter()
+            .map(expect_create)
+            .collect();
         assert_eq!(made.len(), 2, "一次回调里连开两个窗都要送到");
         let (cfg_a, _) = &made[0];
         assert_eq!(cfg_a.title, "设置", "顺序须与调用顺序一致");
@@ -2258,7 +2319,129 @@ mod tests {
         assert_eq!(made[1].0.title, "关于");
 
         // 取走即清空，下一轮不会重复建窗。
-        assert!(h.take_new_windows().is_empty(), "请求应在取走时清空");
+        assert!(
+            h.take_new_windows(&|_| false).is_empty(),
+            "请求应在取走时清空"
+        );
+    }
+
+    /// 单例窗口（`Window::single`）：平台报"已开着"时，请求变成 `Focus` 且**内容不构建**。
+    ///
+    /// 内容不构建是这条路径的关键——判定若晚于构建，每点一次都要白搭一整棵控件树，
+    /// 闭包里的副作用（这里用计数器代表）也会跟着重复执行。
+    #[test]
+    fn single_window_already_open_becomes_focus_without_building_content() {
+        use crate::platform::AppHandler;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let builds = Rc::new(Cell::new(0u32));
+        let b = builds.clone();
+        let root = h.tree.root.unwrap();
+        let res =
+            h.tree.run_detached(root, move |ctx| {
+                ctx.open_window(Window::new("设置", 200, 150).single("settings").content(
+                    move || {
+                        b.set(b.get() + 1);
+                        Element::col().fill()
+                    },
+                ))
+            });
+        h.apply_app_effects(res);
+
+        // 平台报"settings 已经开着"。
+        let made = h.take_new_windows(&|key| key == "settings");
+        assert_eq!(made.len(), 1, "请求仍要送到平台——它得知道去激活哪个窗口");
+        match &made[0] {
+            NewWindow::Focus(key) => assert_eq!(key, "settings"),
+            NewWindow::Create(..) => panic!("已有同键窗口时不该再建一个"),
+        }
+        assert_eq!(builds.get(), 0, "内容闭包不该被运行——单例判定必须早于构建");
+    }
+
+    /// 同一次分发里连开两个同键窗口：第一个建、第二个只激活。
+    ///
+    /// 只信平台的 `is_open` 会在这里失手——第一个窗口尚未建出来，登记表里还没有它，
+    /// 于是一次回调开出两个"单例"窗口。
+    #[test]
+    fn two_same_key_requests_in_one_batch_create_only_one() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            for _ in 0..3 {
+                ctx.open_window(
+                    Window::new("设置", 200, 150)
+                        .single("settings")
+                        .content(|| Element::col().fill()),
+                );
+            }
+        });
+        h.apply_app_effects(res);
+
+        let made = h.take_new_windows(&|_| false);
+        assert_eq!(made.len(), 3, "三个请求都要送到，只是意图不同");
+        assert!(matches!(made[0], NewWindow::Create(..)), "第一个该建窗");
+        assert!(
+            matches!(made[1], NewWindow::Focus(_)) && matches!(made[2], NewWindow::Focus(_)),
+            "同批后续同键请求只该激活，不该再建"
+        );
+    }
+
+    /// 无键窗口永不去重：点几次开几个，同批也是。
+    #[test]
+    fn keyless_windows_are_never_deduped() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            for _ in 0..3 {
+                ctx.open_window(Window::new("便签", 200, 150).content(|| Element::col().fill()));
+            }
+        });
+        h.apply_app_effects(res);
+
+        let made = h.take_new_windows(&|_| true); // 即便平台对任何键都说"开着"
+        assert_eq!(made.len(), 3);
+        assert!(
+            made.iter().all(|w| matches!(w, NewWindow::Create(..))),
+            "没设 single 的窗口不参与去重"
+        );
+    }
+
+    /// 不同单例键互不干扰：「设置」开着不该把「关于」也挡下。
+    #[test]
+    fn different_single_keys_do_not_block_each_other() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("关于", 200, 150)
+                    .single("about")
+                    .content(|| Element::col().fill()),
+            )
+        });
+        h.apply_app_effects(res);
+
+        let made = h.take_new_windows(&|key| key == "settings");
+        assert_eq!(made.len(), 1);
+        assert!(
+            matches!(made[0], NewWindow::Create(..)),
+            "只有 settings 开着，about 该照常建出来"
+        );
     }
 
     /// 子窗自己的关闭拦截器与定时器要真的挂到子窗宿主上。
@@ -2288,7 +2471,11 @@ mod tests {
         });
         h.apply_app_effects(res);
 
-        let mut made = h.take_new_windows();
+        let mut made: Vec<_> = h
+            .take_new_windows(&|_| false)
+            .into_iter()
+            .map(expect_create)
+            .collect();
         assert_eq!(made.len(), 1);
         let (_, child) = &mut made[0];
 
@@ -2338,7 +2525,7 @@ mod tests {
         });
         h.apply_app_effects(res);
 
-        let made = h.take_new_windows();
+        let made = h.take_new_windows(&|_| false);
         assert_eq!(made.len(), 1);
         let during = crate::signal::stats().live;
         assert!(
@@ -2367,7 +2554,7 @@ mod tests {
             ctx.open_window(Window::new("子窗", 200, 150).content(|| Element::col().fill()))
         });
         h.apply_app_effects(res);
-        let made = h.take_new_windows();
+        let made = h.take_new_windows(&|_| false);
         assert_eq!(made.len(), 1);
 
         // 换肤后，子窗宿主下一帧读到的必须是新主题。用底色区分两套主题

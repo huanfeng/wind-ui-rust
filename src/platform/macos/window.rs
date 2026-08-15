@@ -37,7 +37,7 @@ use objc2_foundation::{
 
 use tiny_skia::Pixmap;
 
-use super::{AppHandler, WindowConfig};
+use super::{AppHandler, NewWindow, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 use crate::platform::to_skia_color;
@@ -53,11 +53,18 @@ thread_local! {
     /// 信号也就此整批回收（`UiHost::scope`）。
     ///
     /// 单窗口时代看不到这个问题：`terminate` 直接结束进程，那份 `Retained` 从未 drop 过。
-    static WINDOWS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+    static WINDOWS: RefCell<Vec<LiveWindow>> = const { RefCell::new(Vec::new()) };
     /// 已注销、等待延迟释放的窗口，见 [`unregister_window`]。
     static CLOSED: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
     /// 应用已进入退出流程（`terminate` 已发出），见 [`ContentView::window_will_close`]。
     static TERMINATING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 登记表里的一条。对照 win32 的同名结构，差别只在这边持的是所有权。
+struct LiveWindow {
+    win: Retained<NSWindow>,
+    /// 单例键（`Window::single`）。`None` = 普通窗口，永不参与去重。
+    single: Option<String>,
 }
 
 /// 两个引用是否指向同一个 `NSWindow`（登记表按对象身份增删，不能用 `==`）。
@@ -66,12 +73,24 @@ fn same_window(a: &NSWindow, b: &NSWindow) -> bool {
 }
 
 /// 窗口建成时登记（连同所有权）。
-fn register_window(win: Retained<NSWindow>) {
+fn register_window(win: Retained<NSWindow>, single: Option<String>) {
     WINDOWS.with(|v| {
         let mut v = v.borrow_mut();
-        debug_assert!(!v.iter().any(|w| same_window(w, &win)), "窗口重复登记");
-        v.push(win);
+        debug_assert!(!v.iter().any(|w| same_window(&w.win, &win)), "窗口重复登记");
+        v.push(LiveWindow { win, single });
     });
+}
+
+/// 查找带指定单例键的既有窗口。
+///
+/// 键随窗口注销一并消失，故找到的那个必然还活着——单例判定不需要额外的存活校验。
+fn find_single_window(key: &str) -> Option<Retained<NSWindow>> {
+    WINDOWS.with(|v| {
+        v.borrow()
+            .iter()
+            .find(|w| w.single.as_deref() == Some(key))
+            .map(|w| w.win.clone())
+    })
 }
 
 /// 窗口即将关闭时注销，返回**这是不是最后一个**（调用方据此 terminate）。
@@ -87,10 +106,10 @@ fn register_window(win: Retained<NSWindow>) {
 fn unregister_window(win: &NSWindow) -> bool {
     let (found, left) = WINDOWS.with(|v| {
         let mut v = v.borrow_mut();
-        match v.iter().position(|w| same_window(w, win)) {
+        match v.iter().position(|w| same_window(&w.win, win)) {
             Some(i) => {
                 let owned = v.remove(i);
-                CLOSED.with(|c| c.borrow_mut().push(owned));
+                CLOSED.with(|c| c.borrow_mut().push(owned.win));
                 (true, v.len())
             }
             None => (false, v.len()),
@@ -124,7 +143,7 @@ extern "C" fn drain_closed_windows(_ctx: *mut c_void) {
 /// 返回**拷贝**而非借用：调用方拿着它去标脏、甚至建窗关窗，那些路径会回头改这张表；
 /// 持着 `RefCell` 的借用走进去就是 panic。同 win32 `live_windows` 的理由。
 fn live_windows() -> Vec<Retained<NSWindow>> {
-    WINDOWS.with(|v| v.borrow().clone())
+    WINDOWS.with(|v| v.borrow().iter().map(|w| w.win.clone()).collect())
 }
 
 /// 标脏一个窗口的内容视图（下一轮 run loop 出帧）。
@@ -1083,7 +1102,10 @@ impl ContentView {
                 st.handler.take_window_op(),
                 st.handler.take_dialog_request(),
                 st.handler.wants_close(),
-                st.handler.take_new_windows(),
+                // `is_open` 查的是 `WINDOWS`，与这里借着的 `ViewState` 是两个独立
+                // RefCell，可同时活着。单例判定必须由宿主在**构建内容之前**做。
+                st.handler
+                    .take_new_windows(&|key| find_single_window(key).is_some()),
             )
         };
         if let Some(op) = op {
@@ -1128,14 +1150,32 @@ impl ContentView {
     /// **调用方须已释放 `ViewState` 借用**：建窗会同步走完 `setContentView` /
     /// `makeKeyAndOrderFront`，其中激活新窗口会让当前窗口收到 `windowDidResignKey:`，
     /// 那条回调要借本视图的 `ViewState`。对照 win32 的 `open_pending_windows`。
-    fn open_child_windows(&self, requests: Vec<(WindowConfig, Box<dyn AppHandler>)>) {
+    fn open_child_windows(&self, requests: Vec<NewWindow>) {
         if requests.is_empty() {
             return;
         }
         let mtm = MainThreadMarker::from(self);
-        for (cfg, handler) in requests {
-            let win = create_window(mtm, &cfg, handler);
-            win.makeKeyAndOrderFront(None);
+        for item in requests {
+            match item {
+                // 单例（`Window::single`）：把已有的那个激活到前台。找不到说明它在判定与
+                // 执行之间被关掉了——正常竞态，什么都不做即可。
+                NewWindow::Focus(key) => {
+                    let Some(existing) = find_single_window(&key) else {
+                        continue;
+                    };
+                    // 与 win32 的 `show_and_activate` 同语义：最小化的先还原，再置前。
+                    // 期间应用可能已不在前台，仅 orderFront 不足以把窗口带上来。
+                    if existing.isMiniaturized() {
+                        existing.deminiaturize(None);
+                    }
+                    existing.makeKeyAndOrderFront(None);
+                    NSApplication::sharedApplication(mtm).activate();
+                }
+                NewWindow::Create(cfg, handler) => {
+                    let win = create_window(mtm, &cfg, handler);
+                    win.makeKeyAndOrderFront(None);
+                }
+            }
         }
     }
 
@@ -1315,7 +1355,7 @@ fn create_window(
     window.setAcceptsMouseMovedEvents(true);
     // 登记进活动窗口表（连同所有权）：`windowWillClose:` 据此判断自己是不是最后一个。
     // 设 delegate **之前**登记——设完就可能收到关闭回调，那时窗口必须已经在表里。
-    register_window(window.clone());
+    register_window(window.clone(), cfg.single.clone());
     // 窗口关闭时退出应用（视图兼任窗口委托）。隐藏到托盘走 orderOut，不触发关闭，故不退出。
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     view.refresh_tracking_area();

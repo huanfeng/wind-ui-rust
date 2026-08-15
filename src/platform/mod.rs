@@ -261,7 +261,17 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
 /// 只走一层：子窗**再**开的窗口不再跟进。截图是给视觉回归用的，一层已经覆盖
 /// "点开设置页看看长什么样"这个实际需求，递归下去只会让产物文件难以对应。
 fn shoot_child_windows(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, base: &Path) {
-    let children = handler.take_new_windows();
+    // 离屏路径没有"已有窗口"，故 `is_open` 恒假；同一串 `--click` 里重复请求的同键窗口
+    // 由宿主的批内去重挡下，回报成 `Focus` 后在这里丢弃。**出几张图因此与真跑开几个
+    // 窗口一致**——否则截图里出两张、实际只开一个，视觉回归比对的就不是实际界面了。
+    let children: Vec<_> = handler
+        .take_new_windows(&|_| false)
+        .into_iter()
+        .filter_map(|w| match w {
+            NewWindow::Create(cfg, h) => Some((cfg, h)),
+            NewWindow::Focus(_) => None,
+        })
+        .collect();
     if children.is_empty() {
         return;
     }
@@ -357,6 +367,10 @@ pub struct WindowConfig {
     /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
     pub min_width: i32,
     pub min_height: i32,
+    /// 单例键（见 `crate::event::WindowRequest::single`）。`None` = 不去重。
+    ///
+    /// 只对 `ctx.open_window` 开出的子窗有意义：主窗本就唯一，`App` 不提供这个设置。
+    pub single: Option<String>,
 }
 
 impl Default for WindowConfig {
@@ -381,6 +395,7 @@ impl Default for WindowConfig {
             renderer: Renderer::default(),
             min_width: 0,
             min_height: 0,
+            single: None,
         }
     }
 }
@@ -588,9 +603,28 @@ pub trait AppHandler {
     ///
     /// 返回的 `WindowConfig` 只描述**这一个窗口**：托盘、全局热键、单实例这些应用级配置
     /// 一律为空，平台不得据此重复安装（它们在 `run` 那次已经装好，见 win32 的 `AppHost`）。
-    fn take_new_windows(&mut self) -> Vec<(WindowConfig, Box<dyn AppHandler>)> {
+    ///
+    /// `is_open` 由平台提供，回答"这个单例键（`Window::single`）当前是否已有窗口"。
+    /// 判定必须发生在**构建内容之前**，故只能由宿主在这里问平台，而不是平台拿到结果再
+    /// 过滤：`WindowRequest::content` 是个闭包，宿主一旦把它跑起来就已经白搭了一整棵
+    /// 控件树，闭包里的副作用也跟着执行了一遍。
+    fn take_new_windows(&mut self, _is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
         Vec::new()
     }
+}
+
+/// [`AppHandler::take_new_windows`] 的一项：建一个新窗口，或激活已有的同键单例窗口。
+pub enum NewWindow {
+    /// 建一个新窗口，并把这个 handler 挂上去。
+    ///
+    /// 配置装箱：`WindowConfig` 三百多字节，而 `Focus` 只有一个 `String`——不装箱的话
+    /// 每个 `Focus` 也要按最大变体占位。
+    Create(Box<WindowConfig>, Box<dyn AppHandler>),
+    /// 已有同键窗口（`Window::single`）：把它激活到前台，本次不建窗。
+    ///
+    /// 内容闭包**没有被运行**。平台按键去登记表里找那个窗口；找不到就什么都不做
+    /// （窗口在判定与执行之间关掉了，属于正常竞态，不是错误）。
+    Focus(String),
 }
 
 // ── 文件 / 目录选择对话框 ────────────────────────────────────────────────────
