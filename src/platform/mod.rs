@@ -250,6 +250,62 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     }
     off.pixmap().save_png(path).expect("保存 PNG 失败");
     eprintln!("[windui] 截屏已保存: {}", path.display());
+    // 合成交互期间开出的子窗（`--click` 点到"打开设置…"之类）各自再出一张。
+    // 不做这一步，多窗口界面的视觉回归就只能看到主窗，子窗永远没人验。
+    shoot_child_windows(cfg, handler, path);
+}
+
+/// 给 `ctx.open_window` 开出的子窗各截一张，文件名在主图基础上加序号
+/// （`out.png` → `out-1.png`、`out-2.png`…）。
+///
+/// 只走一层：子窗**再**开的窗口不再跟进。截图是给视觉回归用的，一层已经覆盖
+/// "点开设置页看看长什么样"这个实际需求，递归下去只会让产物文件难以对应。
+fn shoot_child_windows(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, base: &Path) {
+    let children = handler.take_new_windows();
+    if children.is_empty() {
+        return;
+    }
+    let s = cfg.screenshot_scale.max(0.1);
+    for (i, (wcfg, mut whandler)) in children.into_iter().enumerate() {
+        let pw = (wcfg.width as f32 * s).round().max(1.0) as i32;
+        let ph = (wcfg.height as f32 * s).round().max(1.0) as i32;
+        let size = Size::new(pw, ph);
+        whandler.set_scale(s);
+        // 渲染后端跟主窗一致，与窗口路径下由 `AppHost.renderer` 决定子窗后端同理。
+        let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
+        off.frame(&mut whandler, size, wcfg.bg);
+        // 同主窗：收敛型动画多推几帧以捕获稳定终态。
+        for _ in 0..4 {
+            if !whandler.wants_animation() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            off.frame(&mut whandler, size, wcfg.bg);
+        }
+        let out = child_screenshot_path(base, i + 1);
+        off.pixmap().save_png(&out).expect("保存子窗 PNG 失败");
+        eprintln!(
+            "[windui] 子窗截屏已保存: {}（标题：{}）",
+            out.display(),
+            wcfg.title
+        );
+    }
+}
+
+/// `out.png` + 序号 1 → `out-1.png`。无扩展名时补 `png`。
+///
+/// 用序号而非窗口标题：标题可以带路径分隔符、冒号、换行，做文件名要先净化一遍，
+/// 而净化后的名字反而不好和源码里的调用点对上。标题另行打印在日志里。
+fn child_screenshot_path(base: &Path, idx: usize) -> PathBuf {
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("screenshot"));
+    let ext = base
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("png"));
+    base.with_file_name(format!("{stem}-{idx}.{ext}"))
 }
 
 /// 一条全局热键绑定：组合 + 回调。
@@ -736,6 +792,49 @@ mod renderer_tests {
         assert!(
             Renderer::Gpu.requires_gpu(),
             "Gpu 失败必须报错——静默回退会让基于它的验证拿两张软渲染图得出'软硬一致'"
+        );
+    }
+}
+
+#[cfg(test)]
+mod child_screenshot_path_tests {
+    use super::child_screenshot_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn appends_index_before_extension() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("out.png"), 1),
+            PathBuf::from("out-1.png")
+        );
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("out.png"), 2),
+            PathBuf::from("out-2.png")
+        );
+    }
+
+    /// 目录必须保留：主图与子窗图要落在同一处，视觉回归才好一起比对。
+    #[test]
+    fn keeps_parent_directory() {
+        let got = child_screenshot_path(&PathBuf::from("artifacts/multi.png"), 1);
+        assert_eq!(got, PathBuf::from("artifacts/multi-1.png"));
+    }
+
+    /// 无扩展名时补 png，而不是产出一个没有后缀的文件。
+    #[test]
+    fn defaults_extension_to_png() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("shot"), 3),
+            PathBuf::from("shot-3.png")
+        );
+    }
+
+    /// 文件名里本就带点号时，只在**最后**一个扩展名前插序号。
+    #[test]
+    fn splits_at_last_extension() {
+        assert_eq!(
+            child_screenshot_path(&PathBuf::from("v1.2.png"), 1),
+            PathBuf::from("v1.2-1.png")
         );
     }
 }

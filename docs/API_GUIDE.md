@@ -1302,6 +1302,9 @@ Window::new("设置", 420, 320).content(move || Element::text_input(name, "名�
 **平台**：Windows 已实现。**macOS 尚未实现**——`open_window` 在 debug 期 panic 提示、
 release 期打印一行并忽略（同全局热键的处理）。
 
+**截图验证**：`--screenshot` 走离屏路径、不开真窗口，但合成交互（`--click X Y`）开出的子窗
+**各自也会出一张**（`out.png` → `out-1.png`、`out-2.png`），故多窗口界面照样能做自动化视觉回归。
+
 可运行示例：`examples/multi_window.rs`。
 
 ---

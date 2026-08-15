@@ -6,6 +6,9 @@
 ## [Unreleased]
 
 ### Added
+- **截图管线覆盖子窗**：合成交互（`--click X Y`）期间经 `ctx.open_window` 开出的子窗各自再出
+  一张，文件名在主图基础上加序号（`out.png` → `out-1.png`、`out-2.png`，标题打印在日志里）。
+  此前 `run_offscreen` 是单 handler 单 pixmap，多窗口界面的视觉回归只看得到主窗。只跟一层。
 - **子窗可设自己的 `on_close_request` 与 `on_interval`**。关闭拦截器必须是每个窗口自己的——
   平台在 `WM_CLOSE` / `windowShouldClose:` 里同步等这个 `bool`，问的是"**这个**窗口能不能关"，
   主窗那份不会代管子窗，跨窗共享的 `Signal` 也表达不了它。定时器则是随窗口生灭更干净：
