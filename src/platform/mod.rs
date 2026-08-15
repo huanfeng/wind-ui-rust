@@ -505,6 +505,19 @@ pub trait AppHandler {
     fn take_dialog_request(&mut self) -> Option<DialogRequest> {
         crate::app::take_deferred()
     }
+
+    /// 取出并清除待创建的子窗口（`EventCtx::open_window` 排入）。平台在事件分发
+    /// **完全返回**后调用，与 [`take_window_op`](Self::take_window_op) 同点。
+    ///
+    /// 交出的是**配置 + 已经建好的宿主**，而不是控件树：宿主的构造需要主题句柄等应用层
+    /// 上下文，平台层既拿不到也不该认识它。平台只需按 `WindowConfig` 建窗、把 handler
+    /// 挂上去——与 `run` 收到的那一份是同一种东西。
+    ///
+    /// 返回的 `WindowConfig` 只描述**这一个窗口**：托盘、全局热键、单实例这些应用级配置
+    /// 一律为空，平台不得据此重复安装（它们在 `run` 那次已经装好，见 win32 的 `AppHost`）。
+    fn take_new_windows(&mut self) -> Vec<(WindowConfig, Box<dyn AppHandler>)> {
+        Vec::new()
+    }
 }
 
 // ── 文件 / 目录选择对话框 ────────────────────────────────────────────────────

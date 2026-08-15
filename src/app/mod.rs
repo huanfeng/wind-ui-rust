@@ -23,7 +23,9 @@ use std::time::Duration;
 use crate::sync::{new_channel, ChannelPump, Sender, WakerShared};
 
 use crate::core::{DamageReq, DispatchResult, EventCtx, NodeId, Tree};
-use crate::event::{CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp};
+use crate::event::{
+    CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp, WindowRequest,
+};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{self, AppHandler, DialogRequest, Renderer, WindowConfig};
 use crate::render::Paint;
@@ -87,6 +89,88 @@ pub fn take_deferred() -> Option<DialogRequest> {
         }
     })))
 }
+
+/// 子窗口构建器：交给 [`EventCtx::open_window`](crate::core::EventCtx::open_window)。
+///
+/// 与 [`App`] 的构建器同形（`new(title, w, h)` 起手、链式配置、`content` 收尾），但只有
+/// 对子窗有意义的那几项——托盘、全局热键、单实例、渲染后端都是**应用级**的，由主窗口
+/// 那次 `App` 配置决定，子窗跟随（见 `AppHost`）。
+///
+/// ```no_run
+/// # use windui::prelude::*;
+/// Element::button("设置…").on_click(|ctx| {
+///     ctx.open_window(
+///         Window::new("设置", 560, 420)
+///             .resizable(false)
+///             .content(Element::col().padding(16).child(Element::label("设置项…"))),
+///     );
+/// });
+/// ```
+pub struct Window {
+    req: WindowRequest,
+}
+
+impl Window {
+    /// 新建子窗口配置。`width`/`height` 是**客户区**逻辑尺寸（同 [`App::new`]）。
+    pub fn new(title: impl Into<String>, width: i32, height: i32) -> Self {
+        Self {
+            req: WindowRequest {
+                title: title.into(),
+                width,
+                height,
+                resizable: true,
+                centered: false,
+                frameless: false,
+                min_width: 0,
+                min_height: 0,
+                bg: None,
+                // 占位。取不走：`content` 是唯一产出 `WindowRequest` 的方法，
+                // 没调它就拿不到能交给 `open_window` 的值——类型上已经封死。
+                content: crate::event::WindowContent::new(NoContent),
+            },
+        }
+    }
+
+    /// 允许用户调整窗口大小（默认 true）。
+    pub fn resizable(mut self, on: bool) -> Self {
+        self.req.resizable = on;
+        self
+    }
+
+    /// 窗口居中显示。
+    pub fn centered(mut self, on: bool) -> Self {
+        self.req.centered = on;
+        self
+    }
+
+    /// 无标题栏窗口（自定义标题栏），同 [`App::frameless`]。
+    pub fn frameless(mut self, on: bool) -> Self {
+        self.req.frameless = on;
+        self
+    }
+
+    /// 最小客户区尺寸（逻辑 dp）。
+    pub fn min_size(mut self, w: i32, h: i32) -> Self {
+        self.req.min_width = w;
+        self.req.min_height = h;
+        self
+    }
+
+    /// 固定窗口背景色。不设则随主题 `palette.bg`（换暗色主题时子窗底色同步转暗）。
+    pub fn bg(mut self, c: Color) -> Self {
+        self.req.bg = Some(c);
+        self
+    }
+
+    /// 设置内容控件树，得到可交给 `ctx.open_window` 的请求。
+    pub fn content(mut self, root: Element) -> WindowRequest {
+        self.req.content = crate::event::WindowContent::new(root);
+        self.req
+    }
+}
+
+/// `Window::new` 的内容占位类型：用户没调 `content` 就 `open_window` 时，宿主据此拦下。
+struct NoContent;
 
 type RenderClosure = Box<dyn FnMut(&mut dyn crate::render::RenderTarget, Size)>;
 
@@ -848,6 +932,8 @@ struct UiHost {
     hide_on_close: bool,
     /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
     resolving_close: bool,
+    /// 待创建的子窗口（`ctx.open_window` 排入，平台在事件分发完全返回后取走）。
+    pending_windows: Vec<crate::event::WindowRequest>,
     /// 上一帧绘制中是否有控件请求了下一帧（帧末从 `anim` 全局态收割，见
     /// [`Self::finish_frame_damage`]）。平台的 `wants_animation` 读这里而**不是**直接读
     /// `anim::animation_requested()`：那是个线程全局位，同线程跑多个窗口时，后绘制的
@@ -1002,6 +1088,7 @@ impl UiHost {
             close_handler,
             hide_on_close,
             resolving_close: false,
+            pending_windows: Vec::new(),
             wants_anim: false,
         }
     }
@@ -1067,7 +1154,10 @@ impl UiHost {
             window_op,
             toast,
             dialog,
+            open_windows,
         } = res;
+        // 开窗请求排队：平台在事件分发完全返回后 `take_new_windows` 取走并建窗。
+        self.pending_windows.extend(open_windows);
         if let Some(f) = focus {
             let old = self.focus.current;
             self.tree.set_focused(Some(f), old);
@@ -1462,6 +1552,51 @@ impl AppHandler for UiHost {
         self.scale = scale;
         // 文字引擎同步 scale，保证文字测量/绘制与图形缩放一致。
         self.engine.set_scale(scale);
+    }
+
+    /// 把排队的开窗请求变成「配置 + 宿主」交给平台。
+    ///
+    /// 子窗共享**同一个** `ThemeHandle`：运行期换主题时所有窗口一起变，而不是各拿一份
+    /// 快照各自定格。其余应用级设施（托盘/热键/单实例/跨线程通道）都不复制——它们属于
+    /// 应用，已经在主窗那次 `run` 里装好了。
+    fn take_new_windows(&mut self) -> Vec<(WindowConfig, Box<dyn AppHandler>)> {
+        std::mem::take(&mut self.pending_windows)
+            .into_iter()
+            .map(|req| {
+                let bg_explicit = req.bg.is_some();
+                let bg = req.bg.unwrap_or(self.theme.palette.bg);
+                let cfg = WindowConfig {
+                    title: req.title,
+                    width: req.width,
+                    height: req.height,
+                    bg,
+                    centered: req.centered,
+                    resizable: req.resizable,
+                    frameless: req.frameless,
+                    min_width: req.min_width,
+                    min_height: req.min_height,
+                    // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
+                    // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
+                    ..WindowConfig::default()
+                };
+                let root: Element = req.content.take();
+                let host = UiHost::new(
+                    root,
+                    self.theme_src.clone(),
+                    bg,
+                    !bg_explicit,
+                    // 热键队列共享：子窗里的控件也能改绑全局热键（句柄本就可克隆传入）。
+                    self.hotkey_ops.clone(),
+                    // 通道与定时器不继承：它们绑的是主窗那次 `App` 上注册的回调，
+                    // 复制一份会让同一条消息被处理两次。
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    false,
+                );
+                (cfg, Box::new(host) as Box<dyn AppHandler>)
+            })
+            .collect()
     }
 
     fn wants_animation(&self) -> bool {
@@ -1933,6 +2068,82 @@ mod tests {
     /// `anim` 的请求位是**线程全局**的，而每帧起始都会 `reset_request()` 清一次。同线程
     /// 跑两个窗口时，后绘制的那个会把前一个刚提出的续帧请求一并抹掉；若 `wants_animation`
     /// 直接读全局位，前者的动画就在对方出帧的瞬间冻住。故各宿主在帧末把它收进自己的字段。
+    /// `ctx.open_window` 的请求要一路走到平台能消费的形状：配置照搬、内容还原成宿主。
+    ///
+    /// 建窗本身要真窗口才测得了（见提交说明里的外部 WM_CLOSE 冒烟），但**意图有没有
+    /// 正确传出去**是纯逻辑，可以在这里钉住——这段链路跨了 core/app/platform 三层，
+    /// 中间任何一环漏接，症状都是"点了没反应"。
+    #[test]
+    fn open_window_request_reaches_platform_as_config_and_host() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::leaf().width(50).height(50)),
+            )
+            .into_handler_for_test();
+        // 没人开窗时不该凭空冒出窗口。
+        assert!(h.take_new_windows().is_empty(), "未请求时不应有待建窗口");
+
+        // 模拟控件回调里调 ctx.open_window。
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("设置", 420, 300)
+                    .resizable(false)
+                    .min_size(320, 240)
+                    .content(Element::col().fill()),
+            );
+            ctx.open_window(Window::new("关于", 360, 200).content(Element::col().fill()));
+        });
+        h.apply_app_effects(res);
+
+        let made = h.take_new_windows();
+        assert_eq!(made.len(), 2, "一次回调里连开两个窗都要送到");
+        let (cfg_a, _) = &made[0];
+        assert_eq!(cfg_a.title, "设置", "顺序须与调用顺序一致");
+        assert_eq!((cfg_a.width, cfg_a.height), (420, 300));
+        assert!(!cfg_a.resizable);
+        assert_eq!((cfg_a.min_width, cfg_a.min_height), (320, 240));
+        // 应用级设施不得随子窗复制：托盘会变成两个图标、热键会重复注册。
+        assert!(cfg_a.tray.is_none(), "子窗不得带托盘");
+        assert!(cfg_a.hotkeys.is_empty(), "子窗不得带全局热键");
+        assert_eq!(made[1].0.title, "关于");
+
+        // 取走即清空，下一轮不会重复建窗。
+        assert!(h.take_new_windows().is_empty(), "请求应在取走时清空");
+    }
+
+    /// 子窗与主窗共享同一个 `ThemeHandle`：换肤时所有窗口一起变，而不是各自定格。
+    #[test]
+    fn child_window_shares_theme_handle() {
+        use crate::platform::AppHandler;
+        let mut app = App::new("main", 200, 200);
+        let theme = app.theme_handle();
+        let mut h = app.content(Element::col().fill()).into_handler_for_test();
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(Window::new("子窗", 200, 150).content(Element::col().fill()))
+        });
+        h.apply_app_effects(res);
+        let made = h.take_new_windows();
+        assert_eq!(made.len(), 1);
+
+        // 换肤后，子窗宿主下一帧读到的必须是新主题。用底色区分两套主题
+        // （强调色在明暗两套里是同一个值，区分不出来）。
+        let before = theme.current().palette.bg;
+        theme.set(Theme::dark());
+        let after = theme.current().palette.bg;
+        assert_ne!(before, after, "前置条件：两套主题的底色不同");
+        // 子窗宿主持的是句柄而非快照，故 current() 与主窗一致。
+        assert_eq!(
+            h.theme_src.current().palette.bg,
+            after,
+            "子窗与主窗必须看到同一个主题源"
+        );
+    }
+
     #[test]
     fn animation_request_does_not_leak_between_hosts() {
         use crate::platform::AppHandler;

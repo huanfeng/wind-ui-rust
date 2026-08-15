@@ -196,6 +196,9 @@ thread_local! {
     static EVENT_ACTIVE: Cell<bool> = const { Cell::new(false) };
     /// 本次事件处理期内是否写过信号（供核心据当前事件节点局部失效）。
     static TOUCHED: Cell<bool> = const { Cell::new(false) };
+    /// 自上次广播以来是否写过信号——供平台层判断要不要让**其他**窗口也重绘。
+    /// 见 [`take_cross_window_dirty`]。
+    static CROSS_DIRTY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 写信号后触发重绘的钩子。
@@ -203,11 +206,28 @@ thread_local! {
 ///   （结构签名层会在显隐/布局变化时升级整窗），不强制整窗。
 /// - 事件期外（后台 pump / 定时器 / 直接调用）：经 anim 通道请求重绘（整窗兜底）。
 fn notify_changed() {
+    // 无论在不在事件期都记一笔：信号是跨窗口共享状态的唯一原语（`Signal` 是 `Copy`
+    // 句柄，传进子窗即可共享），而上面两条路都只能让**当前**窗口重绘——事件期那条
+    // 走当前事件节点的局部脏区，事件期外那条走 anim 通道由本窗口的帧消费。
+    // 于是"在设置窗里改了名字，主窗显示的还是旧的"。见 [`take_cross_window_dirty`]。
+    CROSS_DIRTY.with(|c| c.set(true));
     if EVENT_ACTIVE.with(|c| c.get()) {
         TOUCHED.with(|c| c.set(true));
     } else {
         crate::anim::request_repaint();
     }
+}
+
+/// 取走并清除「写过信号」标志，供平台层决定要不要让**其他**窗口也失效。
+///
+/// 只在多窗口下有实际作用：信号可以被任意窗口的控件写入，而读它的控件可能在别的窗口
+/// 里。发起写入的那个窗口自有精确脏区，其余窗口无从知道自己该重绘，故由平台在事件分发
+/// 收尾时统一广播一次。
+///
+/// 按"写过信号"而不是"需要重绘"来广播：后者每次 hover 都成立，会让所有窗口跟着刷；
+/// 而信号写入是人手速度的低频事件，且正是跨窗共享状态唯一可能变化的途径。
+pub(crate) fn take_cross_window_dirty() -> bool {
+    CROSS_DIRTY.with(|c| c.replace(false))
 }
 
 /// 核心：进入某节点事件处理前调用——标记事件期开始、清"写过信号"标志。

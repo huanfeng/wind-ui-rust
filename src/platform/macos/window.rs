@@ -926,14 +926,31 @@ impl ContentView {
 
     /// 事件分发后：执行待处理窗口操作、原生对话框请求、应用光标、必要时关窗。
     fn after_event(&self) {
-        let (op, dialog, close) = {
+        let (op, dialog, close, new_windows) = {
             let mut st = self.ivars().borrow_mut();
             (
                 st.handler.take_window_op(),
                 st.handler.take_dialog_request(),
                 st.handler.wants_close(),
+                st.handler.take_new_windows(),
             )
         };
+        // 多窗口（`ctx.open_window`）：macOS 尚未实现——**刻意不给一份没编译过的实现**，
+        // 理由与全局热键完全相同，见 `platform/macos/hotkey.rs` 头部那段说明：这套代码
+        // 在 Windows 环境下编写，AppKit 侧的 NSWindow 所有权与 delegate 时序无法验证，
+        // 交付"看着像对的代码"比明确的未实现更危险。请求在此丢弃并出声，不静默。
+        if !new_windows.is_empty() {
+            debug_assert!(
+                false,
+                "windui：macOS 尚未实现多窗口（EventCtx::open_window）。\n\
+                 该窗口不会打开。Windows 侧已实现；macOS 需在 run_windowed 里把建窗段落\n\
+                 抽出复用，并解决子窗 NSWindow 的持有与 windowWillClose 计数配对。"
+            );
+            eprintln!(
+                "[windui] macOS 尚未实现 ctx.open_window，丢弃 {} 个开窗请求",
+                new_windows.len()
+            );
+        }
         if let Some(op) = op {
             if let Some(win) = self.window() {
                 match op {

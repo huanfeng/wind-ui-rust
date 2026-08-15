@@ -520,6 +520,52 @@ pub struct MenuRequest {
     pub rebuild: Option<std::rc::Rc<dyn Fn() -> Vec<MenuItem>>>,
 }
 
+/// 子窗口内容的不透明载体。
+///
+/// 核心层不认识控件树类型（分层上 `ui` 在 `core` 之上，见 `docs/DESIGN.md` §4），而
+/// 打开子窗这件事的**意图**产生在控件回调里。于是内容在这里只作为不透明值传递，由
+/// 应用层在取走时还原成控件树——与 [`HotkeyCtx`] 只给意图不给窗口句柄是同一个手法。
+///
+/// 只有 `Window::content` 一个构造入口，故应用层的还原必然成功。
+pub struct WindowContent(Box<dyn std::any::Any>);
+
+impl WindowContent {
+    /// 装入内容。**仅供应用层构造器调用**。
+    pub(crate) fn new<T: 'static>(value: T) -> Self {
+        Self(Box::new(value))
+    }
+
+    /// 取回内容。类型必须与装入时一致，否则 panic。
+    pub(crate) fn take<T: 'static>(self) -> T {
+        *self
+            .0
+            .downcast::<T>()
+            .expect("WindowContent 只能由 Window::content 构造，类型必然匹配")
+    }
+}
+
+/// 控件经 [`EventCtx::open_window`](crate::core::EventCtx::open_window) 发起的开窗请求。
+///
+/// **不在回调里直接建窗**，与 [`WindowOp`] / `DialogRequest` 同一个理由：回调运行在平台
+/// 层持有窗口状态借用期间，此时创建窗口会同步派发 `WM_NCCREATE`/`WM_SIZE` 等消息重入
+/// 窗口过程，那里再取一次状态就是 `&mut` 别名（AGENTS.md 铁律 6）。请求经宿主排队，
+/// 平台在事件分发**完全返回**后才真正建窗。
+pub struct WindowRequest {
+    pub title: String,
+    pub width: i32,
+    pub height: i32,
+    pub resizable: bool,
+    pub centered: bool,
+    pub frameless: bool,
+    /// 最小客户区尺寸（逻辑 dp，0=不限制）。
+    pub min_width: i32,
+    pub min_height: i32,
+    /// 窗口背景色。`None` 则随主题 `palette.bg`（同 `App` 未显式 `bg` 时的行为）。
+    pub bg: Option<crate::geometry::Color>,
+    /// 内容控件树（不透明，见 [`WindowContent`]）。
+    pub content: WindowContent,
+}
+
 /// 轻提示语义类型：决定提示图标（及默认强调色）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ToastKind {

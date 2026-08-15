@@ -11,7 +11,7 @@ use crate::signal::Signal;
 
 use crate::event::{
     CursorShape, Event, KeyEvent, MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind,
-    ToastKind, ToastRequest, WindowOp,
+    ToastKind, ToastRequest, WindowOp, WindowRequest,
 };
 use crate::geometry::{Color, Insets, Point, Rect, Size};
 use crate::platform::{DialogRequest, PickDialog};
@@ -1259,6 +1259,9 @@ pub(crate) struct EventOutcome {
     toast: Option<ToastRequest>,
     /// 控件请求弹出的原生文件对话框（宿主待事件分发完全返回后再执行，见 `DialogRequest`）。
     dialog: Option<DialogRequest>,
+    /// 控件请求打开的子窗口（同上，宿主待分发完全返回后才真正建窗）。
+    /// 用 `Vec` 而非 `Option`：一次回调里连开两个窗是合法的，后者不该顶掉前者。
+    open_windows: Vec<WindowRequest>,
 }
 
 /// 传给 `Widget::on_event` 的受控句柄：在不暴露裸 arena 的前提下操作本节点与请求副作用。
@@ -1395,6 +1398,25 @@ impl EventCtx<'_> {
     /// 直接同步调用 `PickDialog::pick_file()` 等方法或系统 `MessageBox`。
     pub fn defer_blocking(&mut self, f: impl FnOnce() + 'static) {
         self.out.dialog = Some(DialogRequest::Custom(Box::new(f)));
+    }
+    /// 打开一个新窗口（设置页、关于框这类独立子窗）。
+    ///
+    /// 请求排队，平台在事件分发**完全返回**后才真正建窗——在回调里直接建窗会同步派发
+    /// `WM_NCCREATE`/`WM_SIZE` 等消息重入窗口过程，那里再取一次窗口状态就是 `&mut`
+    /// 别名（AGENTS.md 铁律 6），与 `WindowOp`、`DialogRequest` 走同一条延后通道。
+    ///
+    /// 新窗口与打开它的窗口**共享主题句柄**：运行期换主题时所有窗口一起变。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Element::button("设置…").on_click(|ctx| {
+    ///     ctx.open_window(Window::new("设置", 560, 420).content(Element::label("设置项…")));
+    /// });
+    /// ```
+    ///
+    /// 同一个回调里连开多个窗是合法的，按调用顺序创建。
+    pub fn open_window(&mut self, req: WindowRequest) {
+        self.out.open_windows.push(req);
     }
     /// 本节点绝对矩形（判断指针是否仍在控件内）。
     pub fn bounds(&self) -> Rect {
@@ -1588,6 +1610,8 @@ pub struct DispatchResult {
     pub toast: Option<ToastRequest>,
     /// 控件请求弹出的原生文件对话框（宿主待事件分发完全返回后再执行）。
     pub dialog: Option<DialogRequest>,
+    /// 控件请求打开的子窗口（宿主待事件分发完全返回后才真正建窗）。
+    pub open_windows: Vec<WindowRequest>,
 }
 
 impl Tree {
@@ -2250,6 +2274,7 @@ impl Tree {
                 if o.dialog.is_some() {
                     res.dialog = o.dialog;
                 }
+                res.open_windows.extend(o.open_windows);
                 // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
                 // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
                 if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
@@ -2330,6 +2355,7 @@ impl Tree {
             window_op: o.window_op,
             toast: o.toast,
             dialog: o.dialog,
+            open_windows: o.open_windows,
         }
     }
 
@@ -2349,6 +2375,7 @@ impl Tree {
             res.window_op = o.window_op;
             res.toast = o.toast;
             res.dialog = o.dialog;
+            res.open_windows = o.open_windows;
         }
         res
     }
@@ -2396,6 +2423,7 @@ impl Tree {
             if out.dialog.is_some() {
                 res.dialog = out.dialog;
             }
+            res.open_windows.extend(out.open_windows);
             break; // 命中一个拖放处理者即止
         }
         res

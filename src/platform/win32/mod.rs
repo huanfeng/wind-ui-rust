@@ -77,7 +77,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(feature = "d2d")]
 use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 
-use super::{AppHandler, WindowConfig};
+use super::{AppHandler, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 
@@ -172,6 +172,9 @@ struct AppHost {
     ///
     /// 「唤出窗口」「最小化到托盘」说的都是它；子窗（设置页之类）不是这些操作的对象。
     main: HWND,
+    /// 主窗当初选定的渲染后端。子窗沿用它——应用层构造子窗配置时不知道这件事，
+    /// 而"主窗跑 GPU、子窗悄悄退回软件"是没人想要的结果。
+    renderer: Renderer,
 }
 
 const APP_HOST_CLASS: PCWSTR = w!("WindUiAppHostClass");
@@ -207,7 +210,7 @@ unsafe fn app_host() -> Option<&'static mut AppHost> {
 ///
 /// 它**不进** [`LiveWindows`]：那张表回答的是"还有没有可见窗口"，而本窗口从不显示，
 /// 把它算进去应用就永远退不掉了。
-unsafe fn create_app_host(hinst: HINSTANCE, main: HWND) {
+unsafe fn create_app_host(hinst: HINSTANCE, main: HWND, renderer: Renderer) {
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(app_host_proc),
@@ -220,6 +223,7 @@ unsafe fn create_app_host(hinst: HINSTANCE, main: HWND) {
         tray: None,
         hotkeys: None,
         main,
+        renderer,
     });
     let host_ptr = Box::into_raw(host);
     match CreateWindowExW(
@@ -643,16 +647,8 @@ impl crate::sync::RawWakeSignal for Win32Wake {
     }
 }
 
-unsafe fn run_windowed(
-    mut cfg: WindowConfig,
-    handler: Box<dyn AppHandler>,
-    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
-    single: Option<crate::single_instance::SingleInstance>,
-) {
-    let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-
-    let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
-    let hinst = HINSTANCE(hmodule.0);
+/// 注册窗口类。重复调用无害（同名类第二次返回 0），主窗与子窗共用同一个类。
+unsafe fn register_window_class(hinst: HINSTANCE) {
     let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
     // MAKEINTRESOURCE(1)=IDI_APPLICATION：整数 1 当资源序号传入（低 64K 表示序号而非字符串指针）。
@@ -669,9 +665,25 @@ unsafe fn run_windowed(
         hIconSm: hicon,
         ..Default::default()
     };
-    let atom = RegisterClassExW(&wc);
-    debug_assert!(atom != 0, "RegisterClassExW 失败");
+    RegisterClassExW(&wc);
+}
 
+/// 建一个窗口并挂上宿主：主窗（`run_windowed`）与子窗（`ctx.open_window`）共用。
+///
+/// **不含任何应用级设施**（托盘/热键/唤醒/单实例）——那些在 `run_windowed` 里一次性
+/// 装到 `AppHost` 上，见该结构的文档。也**不调 `ShowWindow`**：主窗要照顾
+/// `start_hidden`、子窗建好即显，由调用方决定。
+///
+/// `renderer` 单独传而不读 `cfg.renderer`：子窗的配置由应用层构造，那里不知道主窗当初
+/// 选了哪个后端，而"主窗跑 GPU、子窗悄悄退回软件"是没人想要的结果。
+///
+/// 失败返回 `None`（已回收 `WindowState`）。主窗失败是致命的，子窗失败只是少一个窗口。
+unsafe fn create_window(
+    hinst: HINSTANCE,
+    cfg: &WindowConfig,
+    handler: Box<dyn AppHandler>,
+    renderer: Renderer,
+) -> Option<HWND> {
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
     state.min_w = cfg.min_width;
@@ -719,7 +731,8 @@ unsafe fn run_windowed(
             // 创建失败不会触发 WM_DESTROY，需手动回收已装箱的 WindowState，
             // 避免泄漏（含其 GDI 资源）。成功路径下所有权已转移给 HWND。
             drop(Box::from_raw(state_ptr));
-            panic!("CreateWindowExW 失败: {e:?}");
+            eprintln!("[windui] CreateWindowExW 失败: {e:?}");
+            return None;
         }
     };
 
@@ -761,9 +774,9 @@ unsafe fn run_windowed(
     {
         let env_force = std::env::var("WINDUI_D2D").is_ok_and(|v| v != "0" && !v.is_empty());
         let is_remote = GetSystemMetrics(SM_REMOTESESSION) != 0;
-        let want = cfg.renderer.wants_gpu() || env_force;
+        let want = renderer.wants_gpu() || env_force;
         assert!(
-            !(cfg.renderer.requires_gpu() && is_remote),
+            !(renderer.requires_gpu() && is_remote),
             "Renderer::Gpu 要求 GPU 渲染，但当前是 RDP 远程会话——flip-model swapchain \
              在远程桌面不可用。需要自动回退请改用 Renderer::Auto"
         );
@@ -779,7 +792,7 @@ unsafe fn run_windowed(
                 }
                 None => {
                     assert!(
-                        !cfg.renderer.requires_gpu(),
+                        !renderer.requires_gpu(),
                         "Renderer::Gpu 要求 GPU 渲染，但 D2D 设备创建失败。\
                          需要自动回退请改用 Renderer::Auto"
                     );
@@ -807,42 +820,6 @@ unsafe fn run_windowed(
 
     // 接收文件拖放：拖入文件后以 WM_DROPFILES 递送路径 + 落点。
     DragAcceptFiles(hwnd, true);
-
-    // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
-    // 某个窗口，故都挂到这个 message-only 窗口上（见 `AppHost`）。
-    create_app_host(hinst, hwnd);
-    let host_hwnd = app_host_hwnd();
-
-    // 全局热键（若配置）：注册到 App 级宿主，状态存入 AppHost（drop 时自动注销）。
-    // 注册失败不阻止启动——热键是全局独占资源，被占用是常态而非异常。
-    if !cfg.hotkeys.is_empty() {
-        let hs = hotkey::HotkeyState::register(host_hwnd, std::mem::take(&mut cfg.hotkeys));
-        if let Some(h) = app_host() {
-            h.hotkeys = Some(hs);
-        }
-    }
-
-    // 系统托盘图标（若配置）：回调消息发往 App 级宿主，状态存入 AppHost（drop 时清理）。
-    if let Some(t) = cfg.tray.take() {
-        if let Some(ts) = tray::install(host_hwnd, t) {
-            if let Some(h) = app_host() {
-                h.tray = Some(ts);
-            }
-        }
-    }
-
-    // 跨线程唤醒：投向 App 级宿主而非某个窗口——绑在窗口上的话，那个窗口一关，后台
-    // 线程的唤醒就静默丢失，通道数据再也不上屏。此前积压的 wake 会在绑定时立即补发。
-    if let Some(w) = &waker {
-        w.bind(Box::new(Win32Wake {
-            hwnd: host_hwnd.0 as isize,
-        }));
-    }
-
-    // 单实例首实例：建 message-only 窗口接收二次实例 argv（UI 线程切页 + 激活主窗口）。
-    if let Some(si) = single {
-        crate::single_instance::install_listener(&si.app_id, hwnd.0 as isize, si.on_second);
-    }
 
     // 注册周期定时器（on_interval）：timer id 从 1 起，靠 WM_TIMER 派发。
     if let Some(s) = state_from(hwnd) {
@@ -896,11 +873,69 @@ unsafe fn run_windowed(
         );
     }
 
+    Some(hwnd)
+}
+
+/// 显示窗口。与创建分开：主窗要照顾 `start_hidden`，子窗建好即显。
+unsafe fn show_window(hwnd: HWND) {
+    let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = UpdateWindow(hwnd);
+}
+
+unsafe fn run_windowed(
+    mut cfg: WindowConfig,
+    handler: Box<dyn AppHandler>,
+    waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
+    single: Option<crate::single_instance::SingleInstance>,
+) {
+    let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
+    let hinst = HINSTANCE(hmodule.0);
+    register_window_class(hinst);
+
+    let hwnd = create_window(hinst, &cfg, handler, cfg.renderer).expect("主窗口创建失败");
+
+    // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
+    // 某个窗口，故都挂到这个 message-only 窗口上（见 `AppHost`）。
+    create_app_host(hinst, hwnd, cfg.renderer);
+    let host_hwnd = app_host_hwnd();
+
+    // 全局热键（若配置）：注册到 App 级宿主，状态存入 AppHost（drop 时自动注销）。
+    // 注册失败不阻止启动——热键是全局独占资源，被占用是常态而非异常。
+    if !cfg.hotkeys.is_empty() {
+        let hs = hotkey::HotkeyState::register(host_hwnd, std::mem::take(&mut cfg.hotkeys));
+        if let Some(h) = app_host() {
+            h.hotkeys = Some(hs);
+        }
+    }
+
+    // 系统托盘图标（若配置）：回调消息发往 App 级宿主，状态存入 AppHost（drop 时清理）。
+    if let Some(t) = cfg.tray.take() {
+        if let Some(ts) = tray::install(host_hwnd, t) {
+            if let Some(h) = app_host() {
+                h.tray = Some(ts);
+            }
+        }
+    }
+
+    // 跨线程唤醒：投向 App 级宿主而非某个窗口——绑在窗口上的话，那个窗口一关，后台
+    // 线程的唤醒就静默丢失，通道数据再也不上屏。此前积压的 wake 会在绑定时立即补发。
+    if let Some(w) = &waker {
+        w.bind(Box::new(Win32Wake {
+            hwnd: host_hwnd.0 as isize,
+        }));
+    }
+
+    // 单实例首实例：建 message-only 窗口接收二次实例 argv（UI 线程切页 + 激活主窗口）。
+    if let Some(si) = single {
+        crate::single_instance::install_listener(&si.app_id, hwnd.0 as isize, si.on_second);
+    }
+
     // 启动即隐藏：常驻托盘类应用不该在启动时闪一下窗口。此处**不调用 ShowWindow**，
     // 窗口保持初始的不可见态，等托盘点击或全局热键送来 WindowOp::Show。
     if !cfg.start_hidden {
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = UpdateWindow(hwnd);
+        show_window(hwnd);
     }
 
     run_message_loop();
@@ -1480,6 +1515,56 @@ unsafe fn apply_window_op(hwnd: HWND) {
     // 运行期热键操作与窗口操作同点消费（HotkeyHandle 排队 → 此处落地）。
     // Register/UnregisterHotKey 不向本窗口同步派发消息，可在借用内直接执行。
     apply_hotkey_ops(hwnd);
+    // 开窗请求同点消费（`ctx.open_window` 排队 → 此处落地）。
+    open_pending_windows(hwnd);
+    // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。
+    broadcast_signal_dirty(hwnd);
+}
+
+/// 本次事件分发写过信号时，让**除发起方外**的窗口各失效一次。
+///
+/// `Signal` 是跨窗口共享状态的唯一原语（`Copy` 句柄，传进子窗即可共享），但事件分发
+/// 只会让发起方产生脏区——"在设置窗里改了名字，主窗显示的还是旧的"就是这么来的。
+/// 发起方跳过：它自己已经有精确脏区，整窗失效反而把局部重绘的收益抹掉。
+///
+/// 单窗口下恒为空操作（除自己外没有别的窗口），故这条广播不会影响既有性能画像。
+unsafe fn broadcast_signal_dirty(origin: HWND) {
+    if !crate::signal::take_cross_window_dirty() {
+        return;
+    }
+    for h in live_windows() {
+        if h != origin {
+            let _ = InvalidateRect(Some(h), None, false);
+        }
+    }
+}
+
+/// 建出 `ctx.open_window` 排队的子窗口。
+///
+/// **两段式**（铁律 6）：先取完请求、释放发起方的 `WindowState` 借用，再 `CreateWindowExW`
+/// ——建窗会同步派发 WM_NCCREATE/WM_SIZE/WM_PAINT，其中 WM_PAINT 会走到新窗口自己的
+/// `state_from`；若此刻发起方的借用还活着，两个 `&mut WindowState` 就并存了。
+unsafe fn open_pending_windows(hwnd: HWND) {
+    let requests = match state_from(hwnd) {
+        Some(s) => s.handler.take_new_windows(),
+        None => return,
+    };
+    if requests.is_empty() {
+        return;
+    }
+    // 借用已释放（`requests` 是拥有的值）。以下可以安全地重入窗口过程。
+    let hmodule = match GetModuleHandleW(None) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let hinst = HINSTANCE(hmodule.0);
+    let renderer = app_host().map(|h| h.renderer).unwrap_or_default();
+    for (cfg, handler) in requests {
+        // 子窗建不起来只是少一个窗口，不该带走整个应用——`create_window` 已打印原因。
+        if let Some(child) = create_window(hinst, &cfg, handler, renderer) {
+            show_window(child);
+        }
+    }
 }
 
 /// 消费运行期热键操作队列（改绑/启停），落地到 `HotkeyState`。
