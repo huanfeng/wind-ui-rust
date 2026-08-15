@@ -127,8 +127,45 @@ impl Window {
                 // 占位。取不走：`content` 是唯一产出 `WindowRequest` 的方法，
                 // 没调它就拿不到能交给 `open_window` 的值——类型上已经封死。
                 content: crate::event::WindowContent::new(|| NoContent),
+                close_handler: None,
+                intervals: Vec::new(),
             },
         }
+    }
+
+    /// 本窗口的关闭请求拦截器：返回 `true` 放行、`false` 取消。语义与
+    /// [`App::on_close_request`] 完全一致（含"先返回 false 挡下、再另起一条路把确认送
+    /// 回来"那套，见 API_GUIDE §8.7），只是作用在这个子窗上。
+    ///
+    /// 拦截器是**每个窗口自己的**：平台同步等这个 `bool`，问的是"这个窗口能不能关"。
+    /// 主窗那个不会代管子窗，跨窗共享的 `Signal` 也表达不了它。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let dirty = signal(true);
+    /// # let asking = signal(false);
+    /// Window::new("设置", 420, 320)
+    ///     .on_close_request(move |_ctx| {
+    ///         if dirty.get() {
+    ///             asking.set(true);   // 弹自绘确认框
+    ///             return false;       // 挡下这一次
+    ///         }
+    ///         true
+    ///     })
+    ///     .content(|| Element::col().fill());
+    /// ```
+    pub fn on_close_request(mut self, f: impl FnMut(&mut EventCtx) -> bool + 'static) -> Self {
+        self.req.close_handler = Some(Box::new(f));
+        self
+    }
+
+    /// 本窗口的周期回调，语义同 [`App::on_interval`]，但**随本窗口关闭一并停止**。
+    ///
+    /// 子窗里的实时刷新用它，而不是在主窗挂一个定时器写 `Signal`——后者在子窗关掉之后
+    /// 仍会一直跑。可多次调用。
+    pub fn on_interval(mut self, every: Duration, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        self.req.intervals.push((every, Box::new(f)));
+        self
     }
 
     /// 允许用户调整窗口大小（默认 true）。
@@ -1614,11 +1651,15 @@ impl AppHandler for UiHost {
                     !bg_explicit,
                     // 热键队列共享：子窗里的控件也能改绑全局热键（句柄本就可克隆传入）。
                     self.hotkey_ops.clone(),
-                    // 通道与定时器不继承：它们绑的是主窗那次 `App` 上注册的回调，
-                    // 复制一份会让同一条消息被处理两次。
+                    // 通道不继承也不另设：跨窗数据流走 `Signal`（主窗 `App::channel` 的
+                    // 回调写信号，子窗读同一个句柄，变更经跨窗广播上屏）。给子窗复制一份
+                    // 主窗的 pump 会让同一条消息被处理两次。
                     Vec::new(),
-                    Vec::new(),
-                    None,
+                    // 定时器与关闭拦截器则是**这个窗口自己的**，随它一起生灭。
+                    req.intervals,
+                    req.close_handler,
+                    // `hide_on_close` 不给子窗：隐藏后没有唤起途径（托盘唤的是主窗），
+                    // 只会留下一个关不掉也看不见的窗口。
                     false,
                 );
                 // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
@@ -2218,6 +2259,57 @@ mod tests {
 
         // 取走即清空，下一轮不会重复建窗。
         assert!(h.take_new_windows().is_empty(), "请求应在取走时清空");
+    }
+
+    /// 子窗自己的关闭拦截器与定时器要真的挂到子窗宿主上。
+    ///
+    /// 这两样刻意**不**从主窗继承（主窗那份绑的是主窗的回调），所以只能由 `Window` 带过来；
+    /// 中间漏接的症状是"设了回调没反应"，编译期抓不到。
+    #[test]
+    fn child_window_carries_its_own_close_handler_and_intervals() {
+        use crate::platform::AppHandler;
+        use std::time::Duration;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let allow = crate::signal::signal(false);
+        let ticks = crate::signal::signal(0i32);
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("子窗", 200, 150)
+                    .on_close_request(move |_| allow.get())
+                    .on_interval(Duration::from_millis(250), move |_| {
+                        ticks.set(ticks.get() + 1)
+                    })
+                    .content(|| Element::col().fill()),
+            )
+        });
+        h.apply_app_effects(res);
+
+        let mut made = h.take_new_windows();
+        assert_eq!(made.len(), 1);
+        let (_, child) = &mut made[0];
+
+        // 定时器：平台按这个列表 SetTimer，故必须原样送到。
+        assert_eq!(
+            child.intervals(),
+            vec![Duration::from_millis(250)],
+            "子窗的 on_interval 应挂到子窗宿主上"
+        );
+        // 触发第 0 个定时器，回调应真的跑。
+        assert!(child.on_interval_fired(0), "定时器回调应执行并请求重绘");
+        assert_eq!(ticks.get(), 1);
+
+        // 关闭拦截器：拦下时不放行。
+        assert!(!child.on_close_request(), "拦截器返回 false 时不该放行关闭");
+        allow.set(true);
+        assert!(child.on_close_request(), "拦截器返回 true 时应放行");
+
+        // 主窗不受子窗那份影响（各是各的）。
+        assert!(h.on_close_request(), "主窗未设拦截器，应默认放行");
+        assert!(h.intervals().is_empty(), "主窗没注册定时器");
     }
 
     /// 子窗内容构建期创建的信号，随窗口关闭整批回收。

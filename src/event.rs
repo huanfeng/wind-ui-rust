@@ -569,7 +569,23 @@ pub struct WindowRequest {
     pub bg: Option<crate::geometry::Color>,
     /// 内容控件树（不透明，见 [`WindowContent`]）。
     pub content: WindowContent,
+    /// 关闭请求拦截器（`Window::on_close_request`）。返回 true 放行、false 取消。
+    ///
+    /// 必须是**每个窗口自己的**：平台在 `WM_CLOSE` / `windowShouldClose:` 里同步等这个
+    /// `bool`，问的是"这个窗口能不能关"。跨窗共享的 `Signal` 表达不了它。
+    pub close_handler: Option<WindowCloseHandler>,
+    /// 本窗口的周期回调（`Window::on_interval`）。随窗口关闭一并停止。
+    pub intervals: Vec<(std::time::Duration, WindowIntervalFn)>,
 }
+
+/// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。
+///
+/// 与 `App::on_close_request` 收的是同一种闭包——那个作用在主窗，这个作用在
+/// [`WindowRequest`] 对应的子窗上。
+pub type WindowCloseHandler = Box<dyn FnMut(&mut crate::core::EventCtx) -> bool>;
+
+/// 窗口周期回调，与 `App::on_interval` 同形。
+pub type WindowIntervalFn = Box<dyn FnMut(&mut crate::core::EventCtx)>;
 
 /// 轻提示语义类型：决定提示图标（及默认强调色）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

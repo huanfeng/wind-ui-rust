@@ -6,6 +6,13 @@
 ## [Unreleased]
 
 ### Added
+- **子窗可设自己的 `on_close_request` 与 `on_interval`**。关闭拦截器必须是每个窗口自己的——
+  平台在 `WM_CLOSE` / `windowShouldClose:` 里同步等这个 `bool`，问的是"**这个**窗口能不能关"，
+  主窗那份不会代管子窗，跨窗共享的 `Signal` 也表达不了它。定时器则是随窗口生灭更干净：
+  在主窗挂一个定时器刷新子窗内容，子窗关掉之后它还会一直跑。
+  子窗**不设** `channel`（跨窗数据流走 `Signal`：主窗 `App::channel` 的回调写信号、子窗读同一
+  句柄，复制一份 pump 只会让同一条消息处理两次）与 `hide_on_close`（隐藏后没有唤起途径，
+  只会留下一个关不掉也看不见的窗口）。
 - **多窗口：`EventCtx::open_window` + `Window` 构建器**（Windows；macOS 未实现，见下）。
   在任意控件回调里 `ctx.open_window(Window::new("设置", 560, 420).content(ui))` 即可开出
   独立窗口——设置页、关于框这类子窗不必再挤进主窗做成对话框。
