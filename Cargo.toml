@@ -77,7 +77,27 @@ windows = { version = "0.62", features = [
 # objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
 # 缺哪个类型就在对应 features 里补哪个。
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+# `catch-all`：每次 msg_send 都包一层 @try/@catch，把 Objective-C 异常转成 Rust panic。
+#
+# 为什么必须开：ObjC 异常穿不过 Rust 栈。不接住的话，它一路 unwind 到 main 的
+# catch_unwind 被判成 foreign exception，随即 abort() —— 崩溃日志里只剩
+# `__rust_foreign_exception` 和一句 "abort() called"，异常名与 reason 全丢。
+# WindInput #67 就是这么查了半天，真正的信息（`-[NSApplication activate]:
+# unrecognized selector`）压根没进日志。开了以后同一场景 panic 出的是：
+#   uncaught exception 'NSInvalidArgumentException' reason: -[NSApplication xxx]:
+#   unrecognized selector sent to instance  + 完整 ObjC 栈
+#
+# 为什么不是在外层手工 `exception::catch` 兜一次：兜不住。异常在 `objc_msgSend` 这道
+# extern "C"（nounwind）边界上就已 terminate，根本 unwind 不到外层的 @try。只有逐次
+# 包裹（即本 feature）才能在抛出点接住。
+#
+# ⚠ 收益依赖 `panic = "unwind"`：panic=abort 下转出来的 panic 落在 nounwind 上下文里，
+# 只会得到一句 "panic in a function that cannot unwind"，信息照样丢。宿主 profile 若
+# 设了 panic="abort"，这层保护等于没有。
+#
+# 代价：每个 msg_send 多一组 landing pad，二进制变大、内联受阻；不抛异常时运行时开销为零。
+# 实测 wind_setting release（aarch64）9,477,856 → 9,773,616 字节，+289 KB / +3.1%。
+objc2 = { version = "0.6", features = ["catch-all"] }
 objc2-foundation = { version = "0.3", features = [
     "NSString",
     "NSURL",
@@ -168,10 +188,14 @@ required-features = ["svg"]
 name = "image"
 required-features = ["svg"]
 
+# 仅作用于本 crate 的独立构建（examples）；作为依赖时 profile 由宿主决定。
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
+# ⚠ 这行让 objc2 的 catch-all 在 examples 上失效：转出来的 panic 落在 nounwind 上下文，
+# 只剩一句 "panic in a function that cannot unwind"。示例以体积为先，接受这个取舍；
+# 但**下游应用不要跟着抄** —— 详见上面 objc2 依赖处的说明。
 panic = "abort"
 strip = true
 
