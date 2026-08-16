@@ -59,6 +59,29 @@ pub(crate) fn run(
     window::run_windowed(cfg, handler, waker, single);
 }
 
+/// 把应用带到前台。**所有激活都必须走这里，不要直接 `app.activate()`。**
+///
+/// 无参的 `-[NSApplication activate]` 是 macOS 14 才有的 selector，而 objc2 的绑定不做
+/// 运行时版本检查、直接 `msg_send`：13 及以下会 `doesNotRecognizeSelector:` 抛
+/// `NSInvalidArgumentException`。Objective-C 异常穿不过 Rust 栈——它一路 unwind 到
+/// `main` 的 `catch_unwind`，被判成 foreign exception 后直接 `abort()`，崩溃日志里
+/// 只剩一句 "abort() called"，连异常名都没有（WindInput #67 就是这么崩的，且因为
+/// `run_windowed` 在 `app.run()` 前无条件激活，13 及以下是**启动必崩**）。
+///
+/// 故先问过 `respondsToSelector:`，老系统回落到 10.0 就有的
+/// `activateIgnoringOtherApps:`（14 起才标 deprecated，至今仍可用）。
+pub(crate) fn activate_app(app: &objc2_app_kit::NSApplication) {
+    use objc2::sel;
+    use objc2_foundation::NSObjectProtocol;
+
+    if app.respondsToSelector(sel!(activate)) {
+        app.activate();
+    } else {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
+}
+
 /// 查询系统“显示动画”偏好（减弱动态效果）。占位：默认开。
 fn os_animations_enabled() -> bool {
     // TODO(macos): 读取 NSWorkspace.accessibilityDisplayShouldReduceMotion，取反。

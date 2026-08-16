@@ -203,7 +203,7 @@ fn activate(main_window: usize) {
             v.setNeedsDisplay(true);
         }
     }
-    NSApplication::sharedApplication(mtm).activate();
+    crate::platform::macos::activate_app(&NSApplication::sharedApplication(mtm));
 }
 
 #[cfg(test)]

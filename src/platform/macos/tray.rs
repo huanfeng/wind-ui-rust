@@ -41,7 +41,7 @@ impl TrayCtx {
     pub fn show_window(&mut self) {
         if let Some(mtm) = MainThreadMarker::new() {
             self.window.makeKeyAndOrderFront(None);
-            NSApplication::sharedApplication(mtm).activate();
+            super::activate_app(&NSApplication::sharedApplication(mtm));
         }
     }
     /// 隐藏窗口（最小化到托盘）。

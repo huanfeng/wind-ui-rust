@@ -90,7 +90,7 @@ pub(super) fn run_window_op_on_main(op: WindowOp) {
             win.makeKeyAndOrderFront(None);
             // 热键是在别的应用前台时按的，本应用多半不在激活态——不 activate 的话窗口
             // 只是排到自己应用的最前，用户仍看不到它。
-            NSApplication::sharedApplication(mtm).activate();
+            super::activate_app(&NSApplication::sharedApplication(mtm));
         }
         WindowOp::Hide => win.orderOut(None),
     }
@@ -1160,7 +1160,9 @@ impl ContentView {
                     WindowOp::Show => {
                         win.makeKeyAndOrderFront(None);
                         // 隐藏期间应用可能已失去激活态，仅 orderFront 不足以到前台。
-                        NSApplication::sharedApplication(MainThreadMarker::from(self)).activate();
+                        super::activate_app(&NSApplication::sharedApplication(
+                            MainThreadMarker::from(self),
+                        ));
                     }
                     WindowOp::Hide => win.orderOut(None),
                 }
@@ -1211,7 +1213,7 @@ impl ContentView {
                         existing.deminiaturize(None);
                     }
                     existing.makeKeyAndOrderFront(None);
-                    NSApplication::sharedApplication(mtm).activate();
+                    super::activate_app(&NSApplication::sharedApplication(mtm));
                 }
                 NewWindow::Create(cfg, handler) => {
                     let win = create_window(mtm, &cfg, handler);
@@ -1472,7 +1474,7 @@ pub(crate) fn run_windowed(
     if !cfg.start_hidden {
         window.makeKeyAndOrderFront(None);
     }
-    app.activate();
+    super::activate_app(&app);
     app.run();
     drop(_tray);
 }
