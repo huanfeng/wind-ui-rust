@@ -2,6 +2,8 @@
 //!
 //! 坐标用 f32（绝对窗口坐标）。布局层的 i32 `Rect` 在 paint 时转 f32。
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod image;
 pub mod prof;
 pub mod skia;

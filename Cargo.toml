@@ -19,6 +19,10 @@ exclude = [".github/", ".remember/", "/scripts", "/temp", "/artifacts"]
 default = ["svg", "d2d"]
 svg = ["dep:resvg"]
 d2d = []
+# 跨平台 GPU 渲染后端（wgpu）。默认关：依赖树大、编译时间与体积代价明显，且当前仅到
+# P0 骨架（共享设备 + 离屏清屏/readback），尚未接入 Canvas/RenderTarget。
+# 详见 docs/gpu-cross-platform-design.md。
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
@@ -35,6 +39,15 @@ resvg = { version = "0.48", optional = true, default-features = false }
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+# ---- GPU 后端（feature = "gpu"，默认关）----
+# wgpu：跨平台 GPU 抽象（macOS→Metal / Linux→Vulkan,GL / Windows→DX12）。版本锁在单一大版本，
+# 其 API 迭代快，升级时只需改 src/render/gpu/（面积受控）。
+wgpu = { version = "30", optional = true }
+# 实例缓冲的 Rust 结构体 ↔ 字节切片转换。P0 骨架尚未用到（离屏 readback 是纯字节拷贝），
+# 与 wgpu 一并锁在这里是因为 P1 图元批处理必用，且它已在依赖树里（tiny-skia 间接依赖）。
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+# wgpu 的 adapter/device 请求与 buffer map 是 async，本项目无运行时，用它就地阻塞。
+pollster = { version = "1", optional = true }
 
 # ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
 [target.'cfg(windows)'.dependencies]
