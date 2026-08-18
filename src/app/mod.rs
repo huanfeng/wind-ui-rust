@@ -378,6 +378,7 @@ impl App {
                 screenshot_rclick: None,
                 screenshot_clicks: Vec::new(),
                 screenshot_hover: None,
+                screenshot_drag: None,
                 tray: None,
                 hotkeys: Vec::new(),
                 start_hidden: false,
@@ -526,6 +527,13 @@ impl App {
                 args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
             ) {
                 self.cfg.screenshot_clicks.push((x, y));
+            }
+        }
+        // --drag X0 Y0 X1 Y1：截屏前合成一次左键拖拽，验证划选高亮这类拖出才成立的视觉。
+        if let Some(i) = args.iter().position(|a| a == "--drag") {
+            let n = |k: usize| args.get(i + k).and_then(|s| s.parse::<i32>().ok());
+            if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (n(1), n(2), n(3), n(4)) {
+                self.cfg.screenshot_drag = Some((x0, y0, x1, y1));
             }
         }
         // --hover X Y：截屏前在 (X,Y) 合成悬停并等待超过提示延时，验证 tooltip 等悬停视觉。

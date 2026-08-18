@@ -69,6 +69,7 @@ cargo run --example <name> -- --screenshot out.png         # 离屏渲染存 PNG
 cargo run --example <name> -- --screenshot out.png --scale 1.5   # 验证高 DPI
 # 截屏前合成交互（验证菜单/下拉/悬停视觉）：
 #   --click X Y / --rclick X Y / --hover X Y（逻辑坐标，X 与 Y 是两个参数，不是 "X,Y"）
+#   --drag X0 Y0 X1 Y1（合成 Down→Move→Up，验证划选高亮这类拖出才成立的视觉）
 ```
 
 `--screenshot` 走平台无关的 `platform::run_offscreen`，无需开窗，适合自动化视觉回归。

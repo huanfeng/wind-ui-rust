@@ -203,6 +203,32 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         ));
         off.frame(handler, size, cfg.bg);
     }
+    // 可选：合成一次左键拖拽（Down→Move→Up），捕获划选高亮等拖出才成立的状态。
+    // Up 之后再出一帧：宿主对 Up 置 needs_relayout，选区须活过这次重排才算真成立。
+    if let Some((x0, y0, x1, y1)) = cfg.screenshot_drag {
+        let pt = |lx: i32, ly: i32| {
+            Point::new(
+                (lx as f32 * s).round() as i32,
+                (ly as f32 * s).round() as i32,
+            )
+        };
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            pt(x0, y0),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            pt(x1, y1),
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            pt(x1, y1),
+            MouseButton::Left,
+        ));
+        off.frame(handler, size, cfg.bg);
+    }
     // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
     if let Some((lx, ly)) = cfg.screenshot_hover {
         let pos = Point::new(
@@ -349,6 +375,10 @@ pub struct WindowConfig {
     pub screenshot_clicks: Vec<(i32, i32)>,
     /// 截屏前合成一次悬停（逻辑坐标 Move）并等待超过提示延时，用于验证 tooltip 等悬停视觉。
     pub screenshot_hover: Option<(i32, i32)>,
+    /// 截屏前合成一次左键拖拽 `(x0, y0, x1, y1)`（逻辑坐标 Down→Move→Up），用于验证
+    /// 划选高亮、拖动排序这类"只有拖出去才成立"的视觉——单击（`screenshot_clicks`）
+    /// 到不了这些状态。
+    pub screenshot_drag: Option<(i32, i32, i32, i32)>,
     /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
     pub tray: Option<Tray>,
     /// 全局热键绑定（空=不注册）。窗口创建后注册，窗口销毁时自动注销。
@@ -387,6 +417,7 @@ impl Default for WindowConfig {
             screenshot_rclick: None,
             screenshot_clicks: Vec::new(),
             screenshot_hover: None,
+            screenshot_drag: None,
             tray: None,
             hotkeys: Vec::new(),
             start_hidden: false,
