@@ -19,10 +19,12 @@ exclude = [".github/", ".remember/", "/scripts", "/temp", "/artifacts"]
 default = ["svg", "d2d"]
 svg = ["dep:resvg"]
 d2d = []
-# 跨平台 GPU 渲染后端（wgpu）。默认关：依赖树大、编译时间与体积代价明显，且当前仅到
-# P0 骨架（共享设备 + 离屏清屏/readback），尚未接入 Canvas/RenderTarget。
+# 跨平台 GPU 渲染后端（wgpu）。默认关：依赖树大、编译时间与体积代价明显。
 # 详见 docs/gpu-cross-platform-design.md。
-gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
+#
+# `dep:objc2-quartz-core` 声明在 macOS 的 target 段里：target 段的可选依赖照样能挂 feature，
+# 只是在别的目标上开了也不会引入任何东西——于是 Windows 侧开 `gpu` 不会多编一行 ObjC 绑定。
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:objc2-quartz-core"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
@@ -178,6 +180,16 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGAffineTransform",
     "CGDataProvider",
     "CGPath",
+] }
+# QuartzCore/CoreAnimation：GPU 后端把 `CAMetalLayer` 挂到内容视图上，wgpu 从该 layer 建
+# surface（见 platform/macos/window.rs）。只随 `gpu` feature 引入，且只要 CALayer/CAMetalLayer
+# 两个类型——不开 `objc2-metal`，Metal 设备与像素格式全由 wgpu 在 layer 上设置，本项目不碰。
+objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "CALayer",
+    "CAMetalLayer",
+    "CATransaction",
+    "objc2-core-foundation",
 ] }
 objc2-core-text = { version = "0.3", features = [
     "CTLine",

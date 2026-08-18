@@ -1,8 +1,13 @@
 //! macOS 窗口、事件循环与呈现（Cocoa/AppKit + Core Graphics）。
 //!
-//! 渲染全在 CPU：单份 tiny-skia `Pixmap`（RGBA 预乘）作后备缓冲；呈现时用
+//! 默认渲染全在 CPU：单份 tiny-skia `Pixmap`（RGBA 预乘）作后备缓冲；呈现时用
 //! `CGBitmapContext` 把缓冲转成 `CGImage`，在自定义 `NSView::drawRect:` 里
 //! `CGContextDrawImage` 拷屏。空闲时阻塞在 `NSApplication` 的 run loop，零阻塞渲染。
+//!
+//! 开 `gpu` feature 且 [`Renderer`] 选了 GPU 档时另有一条路：内容视图挂 `CAMetalLayer`，
+//! wgpu 从该 layer 建 surface，出帧点从 `drawRect:` 换成 `updateLayer`（见 [`attach_gpu`] 与
+//! `ContentView::draw_gpu`）。两条路径在**窗口创建时二选一**，运行期不切换；GPU 建不起来时
+//! `Renderer::Auto` 静默回退本文件的软路径。软路径的代码一行未动。
 //!
 //! 对照 `platform/win32/mod.rs`（消息循环 + GDI 呈现）。坐标统一：事件按
 //! **物理像素、相对客户区左上角**上交（视图设为 `isFlipped`，故点坐标即左上原点）。
@@ -35,12 +40,17 @@ use objc2_foundation::{
     NSTimer, NSUInteger,
 };
 
+#[cfg(feature = "gpu")]
+use objc2_quartz_core::{CAMetalLayer, CATransaction};
+
 use tiny_skia::Pixmap;
 
 use super::{AppHandler, NewWindow, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
-use crate::platform::to_skia_color;
+use crate::platform::{to_skia_color, Renderer};
+#[cfg(feature = "gpu")]
+use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
 
 thread_local! {
     /// 仍存活的 windui 窗口，**并且是它们的所有者**——对照 win32 的 `LiveWindows`。
@@ -64,6 +74,12 @@ thread_local! {
     /// 对象。对照 win32 `AppHost::main`。不取 `WINDOWS[0]`：主窗关掉之后那个位置会变成
     /// 别的窗口，而"热键唤出的是哪个窗口"不该随之改变。
     static MAIN_WINDOW: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    /// 应用选定的渲染后端档位（`App::renderer`）。
+    ///
+    /// 子窗（`ctx.open_window`）的 `WindowConfig` 由应用层现构造，那里不知道主窗当初选了
+    /// 哪个后端，而"主窗跑 GPU、子窗悄悄退回软件"是没人想要的结果。对照 win32：那边存在
+    /// `AppHost` 上，这边没有 App 级宿主对象，就近放进这张线程局部表。
+    static APP_RENDERER: Cell<Renderer> = const { Cell::new(Renderer::Software) };
 }
 
 /// 对主窗执行一个窗口操作。全局热键的回调声明意图后由此落地。
@@ -236,6 +252,19 @@ struct ViewState {
     interval_timers: Vec<Retained<NSTimer>>,
     /// 复用的 DeviceRGB 色彩空间。
     color_space: CFRetained<CGColorSpace>,
+    /// GPU 呈现目标。`Some` = 本窗走 GPU 路径（`pixmap` 与 CGImage 拷屏那一整套全不走）。
+    ///
+    /// **声明顺序即析构顺序，这两个字段的先后是必须的**：`WindowGpu` 里的 `wgpu::Surface`
+    /// 存着下面那张 layer 的裸指针，layer 先释放就是悬垂。
+    #[cfg(feature = "gpu")]
+    gpu: Option<WindowGpu>,
+    /// 挂在视图 backing layer 下的那张 `CAMetalLayer` 子层（见 [`attach_gpu`]）。
+    ///
+    /// 这份 `Retained` 是 surface 那个裸指针的**存活担保**：视图的 layer 树里也有它一份，
+    /// 但那份由 AppKit 管、我们说了不算，而本字段的生命周期是明确的——它随 `ViewState`
+    /// 一起死，且死在 `gpu` 之后。
+    #[cfg(feature = "gpu")]
+    metal_layer: Option<Retained<CAMetalLayer>>,
 }
 
 impl ViewState {
@@ -270,6 +299,26 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        /// GPU 路径下让 AppKit 走 `updateLayer` 而不是 `drawRect:`。
+        ///
+        /// 不这么做的话，AppKit 会为视图额外分配一整张窗口大小的 CPU backing store 供
+        /// `drawRect:` 用——而我们的像素全在 Metal 子层里，那张缓冲一个字节都不会被写。
+        #[cfg(feature = "gpu")]
+        #[unsafe(method(wantsUpdateLayer))]
+        fn wants_update_layer(&self) -> bool {
+            self.ivars().borrow().metal_layer.is_some()
+        }
+
+        /// GPU 路径的出帧点，与下面的 `drawRect:` 等价（含帧内意图的排空，理由见那边）。
+        /// `setNeedsDisplay(true)` 在两条路径下分别落到这里和 `drawRect:`，故上层的所有
+        /// 标脏调用不必区分后端。
+        #[cfg(feature = "gpu")]
+        #[unsafe(method(updateLayer))]
+        fn update_layer(&self) {
+            self.do_draw();
+            self.after_event();
         }
 
         #[unsafe(method(drawRect:))]
@@ -511,6 +560,19 @@ define_class!(
             self.abort_composition();
         }
 
+        // 窗口可见性变化（被别的窗口盖住、最小化、切 Space、以及**刚 orderFront 之后**）：
+        // 重绘一帧。
+        //
+        // 这条是 GPU 路径的必需品，不是优化：窗口不可见时 Metal 的 `nextDrawable` 会一直
+        // 等 vsync（wgpu 因此先查 `occlusionState`，不可见就直接判 `Occluded`），而窗口
+        // 刚 `makeKeyAndOrderFront` 时系统还没把它标成 visible——首帧正好撞上这一档被丢掉。
+        // 丢了就再也没人标脏，窗口永远空白（真机上就是这么表现的）。变可见时补一次即可。
+        #[cfg(feature = "gpu")]
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion_state(&self, _notification: &NSNotification) {
+            self.setNeedsDisplay(true);
+        }
+
         // 窗口即将销毁：最后一个关掉才退出应用（对照 win32 WM_DESTROY→PostQuitMessage）。
         // 注意 `orderOut`（隐藏到托盘）不触发此回调，故隐藏不会退出。
         #[unsafe(method(windowWillClose:))]
@@ -582,6 +644,10 @@ impl ContentView {
             frame_timer: None,
             interval_timers: Vec::new(),
             color_space,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+            #[cfg(feature = "gpu")]
+            metal_layer: None,
         };
         let this = Self::alloc(mtm).set_ivars(RefCell::new(state));
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -665,6 +731,15 @@ impl ContentView {
         let pw = (bounds.size.width as f32 * scale).round().max(1.0) as i32;
         let ph = (bounds.size.height as f32 * scale).round().max(1.0) as i32;
 
+        // GPU 路径：像素直接进 `CAMetalLayer` 的 surface，下面 pixmap→CGImage→拷屏那一整套
+        // 全不走（连后备缓冲都不分配）。两条路径在窗口创建时二选一，运行期不切换。
+        #[cfg(feature = "gpu")]
+        if self.ivars().borrow().gpu.is_some() {
+            self.draw_gpu(bounds.size, pw, ph, scale);
+            self.schedule_next_frame();
+            return;
+        }
+
         // 渲染进 pixmap（借用期间不触发可重入的 OS 调用）。
         let image = {
             let mut st = self.ivars().borrow_mut();
@@ -740,6 +815,77 @@ impl ContentView {
 
         // 本帧画完后，若仍有控件请求持续动画，按显示器刷新率自调度下一帧。
         self.schedule_next_frame();
+    }
+
+    /// GPU 路径出一帧：按需重配 surface → 取帧铺底 → 交宿主绘制 → present。
+    ///
+    /// 与软路径的 `do_draw` 一一对应：`ensure_pixmap` 对应 `resize`、`pixmap.fill(bg)` 对应
+    /// 取帧时的清屏、`CGContextDrawImage` 拷屏对应 `present`。DPI 变化的处理也照抄那边
+    /// （比较 `st.scale` 后通知宿主），只多一件事：同步 layer 的 `contentsScale`。
+    ///
+    /// 取不到帧不是错误（窗口被遮挡、drawable 一时用尽都会撞上），三档各有各的反应，
+    /// 见 [`FrameError`]。只有"重配过还是不行"才提示一次。
+    #[cfg(feature = "gpu")]
+    fn draw_gpu(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) {
+        // 两段式（同本文件其余各处）：借用内只跟宿主与 GPU 打交道，可能重入本视图回调的
+        // AppKit 调用（这里是补排一次重绘）留到借用释放之后。
+        let retry = self.draw_gpu_frame(size_pt, pw, ph, scale);
+        if retry {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// [`Self::draw_gpu`] 的借用段。返回 `true` 表示这一帧没画成、需要再排一次重绘。
+    #[cfg(feature = "gpu")]
+    fn draw_gpu_frame(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) -> bool {
+        let mut borrow = self.ivars().borrow_mut();
+        let st = &mut *borrow;
+        if let Some(layer) = &st.metal_layer {
+            // Metal 层是子层，不随视图自动改尺寸——每帧对一次账（尺寸没变则不动）。
+            let f = layer.frame().size;
+            if (f.width - size_pt.width).abs() > 0.5 || (f.height - size_pt.height).abs() > 0.5 {
+                set_layer_frame(layer, size_pt);
+            }
+            if (st.scale - scale).abs() > 0.001 {
+                // AppKit 只替它自己那张 backing layer 维护 contentsScale，子层得自己设。
+                layer.setContentsScale(scale as f64);
+            }
+        }
+        if (st.scale - scale).abs() > 0.001 {
+            st.scale = scale;
+            st.handler.set_scale(scale);
+        }
+        // 每帧问宿主要底色（运行期换主题时创建时抄的那份不会变），与软路径同源。
+        let bg = st.handler.bg().unwrap_or(st.bg);
+        // 分字段借用：`gpu` 与 `handler` 是 `ViewState` 的两个字段，可同时可变借出。
+        let Some(gpu) = st.gpu.as_mut() else {
+            return false;
+        };
+        gpu.resize((pw.max(1) as u32, ph.max(1) as u32));
+        match gpu.begin_frame(bg) {
+            Ok(mut frame) => {
+                {
+                    let mut target = frame.target();
+                    st.handler.render(&mut target, Size::new(pw, ph));
+                    // target（连同它开出的 canvas）必须先析构：GPU canvas 是攒够一帧在
+                    // 析构时才提交的，present 早于它就会 present 一张空底。
+                }
+                frame.present();
+                false
+            }
+            // 一时取不到 drawable：补排一次。不补的话这次标脏就白丢了——事件驱动的宿主
+            // 没有"下一帧"兜底，界面会停在旧内容上直到用户再动一下。
+            Err(FrameError::Skipped) => true,
+            // 窗口不可见：重排只会空转，等 `windowDidChangeOcclusionState:` 唤回。
+            Err(FrameError::Occluded) => false,
+            Err(FrameError::Lost) => {
+                notice_once(
+                    &GPU_LOST_NOTICE,
+                    "windui: GPU surface 已丢失且重配无效，窗口内容不再更新（请以软渲染重启）",
+                );
+                false
+            }
+        }
     }
 
     /// 安装 `on_interval` 周期定时器：按 handler 注册的间隔各建一个重复 NSTimer，存入
@@ -1216,7 +1362,9 @@ impl ContentView {
                     super::activate_app(&NSApplication::sharedApplication(mtm));
                 }
                 NewWindow::Create(cfg, handler) => {
-                    let win = create_window(mtm, &cfg, handler);
+                    // 后端档位取应用级的那份而不是 `cfg.renderer`：子窗配置由应用层现构造，
+                    // 不知道主窗当初选了什么（见 `APP_RENDERER`）。
+                    let win = create_window(mtm, &cfg, handler, APP_RENDERER.with(|r| r.get()));
                     win.makeKeyAndOrderFront(None);
                 }
             }
@@ -1318,6 +1466,141 @@ impl crate::sync::RawWakeSignal for MacWake {
     }
 }
 
+#[cfg(feature = "gpu")]
+static GPU_LOST_NOTICE: std::sync::Once = std::sync::Once::new();
+
+/// 进程内只提示一次。每帧刷屏没人会看，一次刚好够把判断送到眼前（同 `render/gpu/canvas.rs`）。
+#[cfg(feature = "gpu")]
+fn notice_once(once: &std::sync::Once, msg: &str) {
+    once.call_once(|| eprintln!("{msg}"));
+}
+
+/// `WINDUI_GPU` 的三档语义。对标 win32 的 `WINDUI_D2D`，多一档"显式关"：
+/// 没有它就没法在有 GPU 的机器上验证回退路径（而回退路径本身就是被测对象）。
+///
+/// | 取值 | 含义 |
+/// | --- | --- |
+/// | 未设置 | 听 [`Renderer`]：`Auto`/`Gpu` 尝试，`Software` 不试 |
+/// | `0` 或空 | 一律不试。此时 `Renderer::Gpu` **报错终止**——它的用途就是"拿不到 GPU 要告诉我" |
+/// | 其他值 | 一律尝试（`Software` 也当 `Auto`），排障用 |
+#[cfg(feature = "gpu")]
+fn wants_gpu(renderer: Renderer) -> bool {
+    match std::env::var("WINDUI_GPU") {
+        Err(_) => renderer.wants_gpu(),
+        Ok(v) if v.is_empty() || v == "0" => false,
+        Ok(_) => true,
+    }
+}
+
+/// 给窗口接上 GPU 后端：建 `CAMetalLayer` → 由它建 wgpu surface → 挂进视图的图层树。
+///
+/// 顺序是刻意的：**先把 surface 建成再碰视图**。反过来（先 `setWantsLayer` 再建 surface）
+/// 一旦 surface 失败，就得把已经装上去的 Metal 层再摘掉，而"摘一半"的视图状态没人验证过。
+///
+/// 失败处理与 win32 的 D2D 接线同语义：`Renderer::Auto` 静默回退软路径（stderr 一行），
+/// `Renderer::Gpu` 报错终止（静默换一条路会让基于它做的验证失去意义）。
+#[cfg(feature = "gpu")]
+fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
+    if !wants_gpu(renderer) {
+        assert!(
+            !renderer.requires_gpu(),
+            "Renderer::Gpu 要求 GPU 渲染，但 WINDUI_GPU=0 已显式禁用 GPU 后端。\
+             需要自动回退请改用 Renderer::Auto"
+        );
+        return;
+    }
+    let Some(gpu) = SharedGpu::get() else {
+        assert!(
+            !renderer.requires_gpu(),
+            "Renderer::Gpu 要求 GPU 渲染，但 wgpu 设备创建失败（硬件与软件适配器都拿不到）。\
+             需要自动回退请改用 Renderer::Auto"
+        );
+        eprintln!("[windui] wgpu 设备不可用，回退软渲染（Skia）");
+        return;
+    };
+
+    let scale = window.backingScaleFactor().max(0.1);
+    let bounds = view.bounds();
+    let size = (
+        (bounds.size.width * scale).round().max(1.0) as u32,
+        (bounds.size.height * scale).round().max(1.0) as u32,
+    );
+
+    let layer = CAMetalLayer::new();
+    // 内容按物理像素呈现：contentsScale 决定 layer 的点→像素换算，不设的话 Retina 屏上
+    // 会拿 1x 的像素去铺 2x 的区域（画面糊一半）。
+    layer.setContentsScale(scale);
+    // 窗口底色恒不透明（每帧先铺 bg），告诉合成器不必在它背后再混一层。
+    layer.setOpaque(true);
+    set_layer_frame(&layer, bounds.size);
+
+    // 安全：`SurfaceTargetUnsafe::CoreAnimationLayer` 只存裸指针，要求 layer 活得比 surface 久。
+    // 这一条由 `ViewState` 的字段顺序保证：`gpu`（持 surface）声明在 `metal_layer`（持这份
+    // `Retained`）之前，故析构时 surface 先没、layer 后没；两者又同属一个 `ViewState`，
+    // 中途不可能只掉一个。视图的图层树里也持着这张 layer（下面 `addSublayer` 之后），是第二道保险。
+    let surface = unsafe {
+        gpu.instance()
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                Retained::as_ptr(&layer) as *mut c_void,
+            ))
+    };
+    let win_gpu = match surface {
+        Ok(s) => WindowGpu::new(gpu, s, size),
+        Err(e) => {
+            eprintln!("[windui] wgpu surface 创建失败: {e}");
+            None
+        }
+    };
+    let Some(win_gpu) = win_gpu else {
+        assert!(
+            !renderer.requires_gpu(),
+            "Renderer::Gpu 要求 GPU 渲染，但 CAMetalLayer surface 建不起来。\
+             需要自动回退请改用 Renderer::Auto"
+        );
+        eprintln!("[windui] GPU surface 不可用，回退软渲染（Skia）");
+        return;
+    };
+    if crate::render::prof::enabled() {
+        eprintln!("[windui] {}", win_gpu.info());
+    }
+
+    {
+        let mut st = view.ivars().borrow_mut();
+        st.gpu = Some(win_gpu);
+        st.metal_layer = Some(layer.clone());
+    }
+    // Metal 层挂成 **AppKit 那张 backing layer 的子层**，而不是用 `makeBackingLayer` 直接
+    // 顶替 backing layer 本身（`MTKView` 那种写法）。
+    //
+    // 理由是实测出来的：视图自带的 layer 一旦不是 AppKit 建的，AppKit 就把 `layerContents-
+    // RedrawPolicy` 置成 `Never` 并**再也不发 `drawRect:`/`updateLayer`**——`wantsUpdateLayer`
+    // 照问不误（真机上问了两次），但出帧回调一次都不来，窗口停在空白。手动把 policy 改回
+    // `DuringViewResize` 也救不回来。而挂成子层时 backing layer 仍是 AppKit 自己的那张，
+    // `setNeedsDisplay(true)` → `updateLayer` 这条链路完全照旧——于是本文件里十几处标脏调用
+    // 一处都不用改，两条渲染路径共用同一套失效机制。
+    //
+    // 借用须先释放：这些 AppKit 调用可能同步回调进本视图（那里要借 `ViewState`）。
+    view.setWantsLayer(true);
+    if let Some(root) = view.layer() {
+        root.addSublayer(&layer);
+    }
+}
+
+/// 让 Metal 子层铺满视图（原点恒为 0），并**关掉隐式动画**。
+///
+/// CALayer 的几何属性默认带 0.25s 隐式动画：不关的话拖动窗口边框时 Metal 层会一路"追"着
+/// 视图慢半拍，看起来像整个界面在弹。
+#[cfg(feature = "gpu")]
+fn set_layer_frame(layer: &CAMetalLayer, size: NSSize) {
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setFrame(NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size,
+    });
+    CATransaction::commit();
+}
+
 /// 建一个窗口：`NSWindow` + 内容视图 + 委托 + `on_interval` 定时器，登记进 [`WINDOWS`]。
 ///
 /// **不显示**——主窗要照顾 `start_hidden`、子窗建好即显，由调用方决定（对照 win32 把
@@ -1329,6 +1612,9 @@ fn create_window(
     mtm: MainThreadMarker,
     cfg: &WindowConfig,
     handler: Box<dyn AppHandler>,
+    // 只在 `gpu` feature 下用于选后端。签名对两档保持一致（调用方不必分 feature 分支），
+    // 故仅在关掉那一档时抑制未使用告警——同 win32 `create_window` 的 `renderer` 参数。
+    #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] renderer: Renderer,
 ) -> Retained<NSWindow> {
     // 内容矩形为逻辑点尺寸（AppKit 在高 DPI 下自动按 backingScale 放大像素）。
     let content_rect = NSRect {
@@ -1400,6 +1686,11 @@ fn create_window(
         st.handler.set_scale(scale);
     }
     window.setContentView(Some(&view));
+    // GPU 后端选择：`renderer` 想要 GPU（或 `WINDUI_GPU` 强制）时，把内容视图的呈现换成
+    // CAMetalLayer。放在 `setContentView` 之后——layer 要挂进窗口的图层树，且此刻
+    // `backingScaleFactor` 才是这个窗口真实的那个。离屏截图走 `run_offscreen`，不到此处。
+    #[cfg(feature = "gpu")]
+    attach_gpu(&view, &window, renderer);
     window.setAcceptsMouseMovedEvents(true);
     // 登记进活动窗口表（连同所有权）：`windowWillClose:` 据此判断自己是不是最后一个。
     // 设 delegate **之前**登记——设完就可能收到关闭回调，那时窗口必须已经在表里。
@@ -1433,7 +1724,9 @@ pub(crate) fn run_windowed(
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-    let window = create_window(mtm, &cfg, handler);
+    // 后端档位登记为应用级：子窗建出来时要跟主窗走同一条渲染路径（见 `APP_RENDERER`）。
+    APP_RENDERER.with(|r| r.set(cfg.renderer));
+    let window = create_window(mtm, &cfg, handler, cfg.renderer);
 
     // 跨线程唤醒：绑一个不指向任何窗口的句柄（见 MacWake）；后台线程 send 经 dispatch
     // 派回主线程标脏。绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。
@@ -1477,4 +1770,12 @@ pub(crate) fn run_windowed(
     super::activate_app(&app);
     app.run();
     drop(_tray);
+
+    // 事件循环结束后释放 GPU 共享设备链，对照 win32 消息循环之后的 `release_shared_device`。
+    //
+    // 实话：`NSApplication::terminate:` 正常情况下直接结束进程，这一行执行不到（`drop(_tray)`
+    // 同理，它一直就在这儿）。保留它是因为"事件循环结束就释放设备"这条契约得有个落点——
+    // 将来若改用可被 `stop:` 打断的 run loop，缺了它就是设备泄漏，而那种泄漏很难被注意到。
+    #[cfg(feature = "gpu")]
+    crate::render::gpu::release_shared_gpu();
 }

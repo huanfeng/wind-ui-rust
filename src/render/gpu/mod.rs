@@ -31,14 +31,19 @@
 //! # 平台无关性
 //!
 //! 本模块内**不出现任何 `#[cfg(target_os)]`**。平台差异只从两个注入点进来：surface 创建
-//! （P1，窗口层给句柄）与 `GlyphSource`（P2，平台文字引擎）。这是 Linux 将来只写平台层、
-//! 渲染器零改动的前提。
+//! （窗口层建好 `wgpu::Surface` 交进 `surface.rs` 的 `WindowGpu`）与 `GlyphSource`
+//! （P2，平台文字引擎）。这是 Linux 将来只写平台层、渲染器零改动的前提。
+//!
+//! 窗口呈现（`surface.rs`）目前只有 macOS 平台层接了线（`platform/macos/window.rs` 挂
+//! CAMetalLayer）；Windows 走的是既有的 D2D 后端，不经过本模块。
 
 pub mod canvas;
 pub mod device;
 pub mod offscreen;
 mod prim;
+pub mod surface;
 
 pub use canvas::{WgpuCanvas, WgpuTarget};
 pub use device::{release_shared_gpu, SharedGpu};
 pub use offscreen::OffscreenGpu;
+pub use surface::{Frame, FrameError, WindowGpu};
