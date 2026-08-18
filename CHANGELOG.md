@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.13.0] - 2026-08-18
 
 ### Added
 - **全局热键（macOS）**：Carbon `RegisterEventHotKey` + 应用级事件处理器，与 Windows 侧
@@ -1033,7 +1033,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.10.0...v0.11.0
