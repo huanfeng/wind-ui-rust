@@ -197,10 +197,15 @@ opacity 进实例颜色调制。SVG 已在 CPU 侧按目标尺寸光栅（`from_
 
 现状：`window.rs` 走 `drawRect:` + CGImage 拷屏。GPU 路径改为 layer 呈现：
 
-1. 窗口创建时若选中 GPU 后端：`view.setWantsLayer(true)`，挂 `CAMetalLayer`
-   （objc2-quartz-core），`presentsWithTransaction` 按需、`contentsScale`
+1. 窗口创建时若选中 GPU 后端：`view.setWantsLayer(true)`，`CAMetalLayer`
+   （objc2-quartz-core）**挂成 AppKit backing layer 的子层**、`contentsScale`
    跟 `backingScaleFactor`。wgpu 从该 layer 建 surface
    （`SurfaceTargetUnsafe::CoreAnimationLayer`，不必引入 raw-window-handle 窗口抽象）。
+   ⚠ 真机结论（2026-08 接线时实测）：不能用 `makeBackingLayer` 让 CAMetalLayer
+   顶替 backing layer——视图 layer 一旦不是 AppKit 自建的，AppKit 会把
+   `layerContentsRedrawPolicy` 置 `Never` 且再不回调 `drawRect:`/`updateLayer`，
+   窗口永远空白；子层方案让两条渲染路径共用同一套 `setNeedsDisplay→updateLayer`
+   失效链路，代价只是子层 frame 需每帧对账（`CATransaction` 关隐式动画）。
 2. 帧循环不变：仍是现有的"事件 → repaint 标记 → 渲染"路径，只是渲染分支从
    "画 pixmap + setNeedsDisplay" 换成 "WgpuTarget 渲染 + surface present"。
    `drawRect:` 在 GPU 模式下不再承担内容绘制。
@@ -211,7 +216,14 @@ opacity 进实例颜色调制。SVG 已在 CPU 侧按目标尺寸光栅（`from_
    NSTimer 成环/窗口所有权三坑——GPU 改造不触碰那些机制。
 5. 回退：`CAMetalLayer` 或 wgpu adapter 创建失败 → `Renderer::Auto` 静默
    回退现有 CGImage 软路径（stderr 一行），`Renderer::Gpu` 报错终止。
-   环境变量 `WINDUI_GPU=1/0` 强制/禁用（对标 `WINDUI_D2D`）。
+   环境变量 `WINDUI_GPU=1/0` 强制/禁用（对标 `WINDUI_D2D`，多一档显式关，
+   用于在有 GPU 的机器上验证回退路径）。
+6. 可见性：wgpu 依 `NSWindow.occlusionState` 判窗口可见，不可见直接报
+   `Occluded`（绕开 Metal `nextDrawable` 的整秒卡顿）；而窗口刚
+   `makeKeyAndOrderFront` 时 visible 位尚未置起，**首帧必然落空**——必须接
+   `windowDidChangeOcclusionState:` 在置位时补一次重绘，否则窗口永远空白。
+   验证机远程冒烟前要 `caffeinate -u -t N` 唤醒显示器，屏幕休眠时
+   occlusionState 恒不可见，GPU 路径一帧不出，极易误判成代码 bug。
 
 ### 4.7 Linux 展望
 
