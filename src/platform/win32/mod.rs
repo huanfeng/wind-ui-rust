@@ -717,7 +717,9 @@ unsafe fn create_window(
     hinst: HINSTANCE,
     cfg: &WindowConfig,
     handler: Box<dyn AppHandler>,
-    renderer: Renderer,
+    // 只在 `d2d` feature 下用于选后端。签名对两档保持一致（调用方不必分 feature 分支），
+    // 故仅在关掉那一档时抑制未使用告警——CI 的「Clippy（关闭默认 feature）」正查这个。
+    #[cfg_attr(not(feature = "d2d"), allow(unused_variables))] renderer: Renderer,
 ) -> Option<HWND> {
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
