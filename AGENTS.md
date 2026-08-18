@@ -86,7 +86,8 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 2. [ ] `Theme` 加对应覆盖层 struct（`Option<Color>` 字段 + 回退方法），并接入 `Theme` 聚合 + TOML（`#[serde(default)]`）。
 3. [ ] `Element::<name>()` 构造器（`src/ui/mod.rs`）+ 模块注册 + 必要的 `pub use` 导出。
 4. [ ] **在 `examples/fullshowcase.rs` 的"控件"标签页加展示卡片**（硬性要求，集中展示避免单页过长）。
-5. [ ] 契约单测：经真实 `dispatch_pointer`/`dispatch_key` + `abs_bounds` 验证交互，**不写 mock**。
+5. [ ] 契约单测：经真实 `dispatch_pointer`/`dispatch_key` + `abs_bounds` 验证交互，**不写 mock**；
+   涉及选区/命中/布局缓存的，须**同时覆盖 Wrap 宽与显式宽**（见 §5「宽度不能只测一种」）。
 6. [ ] 独立 `code-reviewer` 审查 → 修复 → 截图验证 → 单独 commit。
 
 状态绑定沿用统一模型：开关 `Rc<Cell<bool>>`、索引 `Rc<Cell<usize>>`、数值 `Rc<Cell<f32/f64>>`、文本 `Rc<RefCell<String>>`。
@@ -109,6 +110,14 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
     `out-2.png`（标题打印在日志里）。只跟一层。设了 `Window::single` 的窗口同键只出一张，
     与真跑开几个窗口一致。
   - 有动画时离屏路径自动前进一帧。
+- **宽度不能只测一种**：`measure` 拿的是父给的 `avail.w`、`paint` 拿的是分配到的 `content.w`，
+  二者只在控件**显式设宽**（`width`/`width_match`/`weight`）时相等；不设宽（Wrap 宽）时天然不等。
+  凡涉及**选区、命中测试、布局缓存**的控件，至少留一个**不设宽**的用例。
+  > 实例：RichText 划选曾在不设宽时全线失效（布局缓存按"宽度相等"判命中 → 每帧 miss → 重排
+  > 顺手清空选区；而宿主对 Down/Up 与按键都置 `needs_relayout`，高亮永远等不到下一帧）。
+  > 当时 22 个 RichText 测试有 21 个写着 `.width(200)`，showcase 那处写着 `.width_match()`——
+  > 全部落在相等的那一侧，无一暴露。写测试时为让折行可预测而钉死宽度、写示例时为排版好看而
+  > `width_match`，是会让整个测试集体系统性偏向同一侧的写法惯性，需要刻意对抗。
 - 改公共 API 后跑 `cargo build --examples` 确认全部示例适配。
 - 触摸惯性等**只能真机验证**的特性，代码自洽 + 单测覆盖可测部分后，明确请用户在触摸屏实测，别声称"已验证"。
 
@@ -155,6 +164,7 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 | OS 重入借用冲突 | 见铁律 §6 两段式借用。 |
 | 改了视觉硬编码颜色 | 走 `theme::current()`，破坏主题一致性会被审查打回。 |
 | 改公共 API 漏改示例 | `cargo build --examples` 兜底。 |
+| 选区/命中类测试全绿但真机失效 | 测试若清一色钉死宽度，会漏掉 Wrap 宽下 `avail.w != content.w` 的路径。至少留一个不设宽用例，见 §5。 |
 | `LF will be replaced by CRLF` 警告 | Windows 换行符提示，无害，忽略。 |
 
 ---
