@@ -6,21 +6,20 @@
 //! 而文字仍由平台引擎（Core Text / FreeType）光栅、GPU 只负责合成，保住「文字与系统
 //! 一致」这个核心卖点。完整取舍见 `docs/gpu-cross-platform-design.md`。
 //!
-//! # 分期（当前进度：P2）
+//! # 分期（当前进度：P3）
 //!
 //! | 阶段 | 内容 | 落点 |
 //! | --- | --- | --- |
 //! | ✅ P0 | 共享设备 + 离屏目标（清屏 / readback 成 `Pixmap`） | `device.rs`、`offscreen.rs` |
 //! | ✅ P1 | 几何图元：SDF shader + 实例批处理、裁剪与 `save/restore`，接上 `Canvas`/`RenderTarget` | `prim.rs`、`shader.wgsl`、`canvas.rs` |
-//! | **✅ P2（当前）** | 文字：平台光栅（`GlyphSource`）→ R8 run-cache → 纹理四边形；measure/line_metrics 仍委托引擎 | `text.rs`、`text.wgsl` |
-//! | P3 | 图片/SVG 纹理缓存与离屏层栈（`push_layer` 的 opacity 合成） | `tex.rs`、`layer.rs` |
+//! | ✅ P2 | 文字：平台光栅（`GlyphSource`）→ R8 run-cache → 纹理四边形；measure/line_metrics 仍委托引擎 | `text.rs`、`text.wgsl` |
+//! | **✅ P3（当前）** | 图片/SVG 纹理缓存（fit/圆角/opacity）与离屏层栈（`push_layer` 的 opacity 合成） | `tex.rs`、`layer.rs`、`image.wgsl` |
 //! | P5 | 文字 glyph atlas：粒度降到单字形、跨文本共享、合批成一次 draw | `text.rs` |
 //!
-//! 到 P2 为止，`Canvas` 只剩 `draw_image`（P3）与 `push_layer` 的 opacity（P3）是空缺，
-//! 两处都在 `canvas.rs` 里显式留了空实现 + 进程内一次性 stderr 提示。这与「P0 刻意不实现
-//! 两个 trait」并不矛盾：P0 时连一个图元都画不出来，接上去就是个纯粹会静默漏画的后端；
-//! 从 P1 起缺的那几项有明确落点、有提示、有断言（层栈仍保持平衡），拿它渲真实界面已经是
-//! 可验证的行为。
+//! 到 P3 为止 `Canvas` 的图元集**已全部落地**，没有空实现了。仍与软后端有意不同的只剩
+//! 「像素读不回来」（`as_pixmap` 恒 `None`，调用方据此走全窗重绘，与 d2d 同一档待遇）
+//! 与 `draw_text` 在引擎不提供 `GlyphSource` 时的空操作（Windows 的 DirectWrite 走 D2D
+//! 后端，不实现它）。
 //!
 //! # 图元渲染的一句话总结
 //!
@@ -29,9 +28,12 @@
 //! 色标放 uniform 数组。于是帧内零状态切换。详见 `prim.rs` 与 `shader.wgsl` 的模块头。
 //!
 //! 文字：另一条管线（要纹理绑定，几何那条没有），一条 run 一张 R8 覆盖度纹理、一个
-//! draw call。两条管线**按 `Canvas` 调用顺序交替 flush**（几何攒批 → 遇到文字先把几何
-//! 画掉 → 文字攒批 → 遇到几何先把文字画掉），叠放次序于是恒等于提交次序。详见
-//! `text.rs` 与 `canvas.rs::before_prim`。
+//! draw call。图片是第三条（采完整的预乘 RGBA、外加一个圆角 SDF 遮罩）。三条管线
+//! **按 `Canvas` 调用顺序交替 flush**（谁要入批就先把另两批画掉），叠放次序于是恒等于
+//! 提交次序。详见 `text.rs`、`tex.rs` 与 `canvas.rs::before_prim`。
+//!
+//! 层：`push_layer` 从纹理池取一张与目标同尺寸的透明纹理并把后续绘制重定向进去，
+//! `pop_layer` 把它整张按 opacity 合成回父目标（走图片管线）。嵌套即栈。详见 `layer.rs`。
 //!
 //! # 平台无关性
 //!
@@ -45,9 +47,11 @@
 
 pub mod canvas;
 pub mod device;
+mod layer;
 pub mod offscreen;
 mod prim;
 pub mod surface;
+mod tex;
 mod text;
 
 pub use canvas::{WgpuCanvas, WgpuTarget};

@@ -184,12 +184,12 @@ pub(super) struct CacheStats {
     pub(super) evictions: u64,
 }
 
-struct Cached<V> {
+struct Cached<K, V> {
     value: Arc<V>,
     /// 与 `map` 里的键同一份。`HashMap` 不给「按引用取回键的所有权句柄」的接口，
     /// 而 `get` 命中后要拿它去更新时序表，故在值里也存一份 `Arc`（一次引用计数，
     /// 不是一份拷贝）。
-    key: Arc<RunKey>,
+    key: Arc<K>,
     /// 最近一次命中的时刻，与 `order` 里的键一一对应。
     stamp: u64,
     bytes: usize,
@@ -201,12 +201,18 @@ struct Cached<V> {
 /// 线性扫最小值」：逐出在缓存打满后是**每次 miss 都要做**的事，线性扫 512 条会把
 /// 光栅省下来的时间又搭进去。`BTreeMap` 的首元素即最久未用。
 ///
-/// 键存 `Arc<RunKey>`（两张表共享同一份）而不是各存一份：`get` 在命中时要往时序表里
+/// 键存 `Arc<K>`（两张表共享同一份）而不是各存一份：`get` 在命中时要往时序表里
 /// 重新登记一次键，直接 clone 会连 `String` 一起复制——那是**每帧、每条文字**一次
 /// 堆分配，而缓存命中本该是这条路径上最便宜的一步。
-pub(super) struct RunCache<V> {
-    map: HashMap<Arc<RunKey>, Cached<V>>,
-    order: BTreeMap<u64, Arc<RunKey>>,
+///
+/// 对键泛型（P3 起图片纹理缓存 `tex.rs` 复用同一份）：两处要的是同一套「条数 + 字节
+/// 双预算 + LRU 逐出 + 命中统计」，各写一份的代价不是重复代码，而是**两份各自会漂的
+/// 逐出语义**——「单条超预算不能把自己逐掉」这种坑修一次就够了。`label` 只进
+/// `WINDUI_PROF` 的报告行，用来区分是哪一份缓存在涨。
+pub(super) struct LruCache<K, V> {
+    map: HashMap<Arc<K>, Cached<K, V>>,
+    order: BTreeMap<u64, Arc<K>>,
+    label: &'static str,
     tick: u64,
     bytes: usize,
     max_entries: usize,
@@ -219,11 +225,12 @@ pub(super) struct RunCache<V> {
     reported: (usize, usize),
 }
 
-impl<V> RunCache<V> {
-    pub(super) fn new(max_entries: usize, max_bytes: usize) -> Self {
+impl<K: std::hash::Hash + Eq, V> LruCache<K, V> {
+    pub(super) fn new(label: &'static str, max_entries: usize, max_bytes: usize) -> Self {
         Self {
             map: HashMap::new(),
             order: BTreeMap::new(),
+            label,
             tick: 0,
             bytes: 0,
             max_entries: max_entries.max(1),
@@ -246,7 +253,7 @@ impl<V> RunCache<V> {
     }
 
     /// 取并「touch」（刷新 LRU 时序）。未命中记 miss。
-    pub(super) fn get(&mut self, key: &RunKey) -> Option<Arc<V>> {
+    pub(super) fn get(&mut self, key: &K) -> Option<Arc<V>> {
         let tick = self.tick;
         let Some(e) = self.map.get_mut(key) else {
             self.misses += 1;
@@ -263,7 +270,7 @@ impl<V> RunCache<V> {
     }
 
     /// 放入并按预算逐出。返回放入的值（调用方紧接着就要用它）。
-    pub(super) fn insert(&mut self, key: RunKey, value: Arc<V>, bytes: usize) -> Arc<V> {
+    pub(super) fn insert(&mut self, key: K, value: Arc<V>, bytes: usize) -> Arc<V> {
         let key = Arc::new(key);
         // 同键重入（并发/重算）时先把旧条目的账平掉，否则 bytes 会只增不减。
         if let Some(old) = self.map.remove(&key) {
@@ -327,7 +334,8 @@ impl<V> RunCache<V> {
         }
         self.reported = (s.entries, s.bytes);
         eprintln!(
-            "windui: gpu 文字 run-cache {} 条 / {:.1} MiB（命中 {} 未命中 {} 逐出 {}）",
+            "windui: gpu {} {} 条 / {:.1} MiB（命中 {} 未命中 {} 逐出 {}）",
+            self.label,
             s.entries,
             s.bytes as f64 / (1024.0 * 1024.0),
             s.hits,
@@ -349,7 +357,7 @@ pub(super) struct TextRenderer {
     globals_bg: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
-    cache: RunCache<RunTexture>,
+    cache: LruCache<RunKey, RunTexture>,
 }
 
 impl TextRenderer {
@@ -473,7 +481,7 @@ impl TextRenderer {
             globals_bg,
             instances,
             capacity: INIT_CAPACITY,
-            cache: RunCache::new(MAX_ENTRIES, MAX_BYTES),
+            cache: LruCache::new("文字 run-cache", MAX_ENTRIES, MAX_BYTES),
         }
     }
 
@@ -829,7 +837,7 @@ mod tests {
     /// scale 变化天然换键（不需要"整体失效"那种粗暴做法），旧键仍可被 LRU 逐出。
     #[test]
     fn scale_change_produces_a_new_key() {
-        let mut c: RunCache<u32> = RunCache::new(8, 1 << 20);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 8, 1 << 20);
         c.insert(key("hi", 14.0, 1.0), Arc::new(1), 16);
         assert!(c.get(&key("hi", 14.0, 2.0)).is_none(), "换 scale 应未命中");
         c.insert(key("hi", 14.0, 2.0), Arc::new(2), 64);
@@ -840,7 +848,7 @@ mod tests {
     /// 条数预算：超限逐出**最久未用**的那条（而不是最早插入的）。
     #[test]
     fn evicts_least_recently_used_by_entry_budget() {
-        let mut c: RunCache<u32> = RunCache::new(3, 1 << 20);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 3, 1 << 20);
         for (i, t) in ["a", "b", "c"].iter().enumerate() {
             c.insert(key(t, 14.0, 1.0), Arc::new(i as u32), 8);
         }
@@ -862,7 +870,7 @@ mod tests {
     /// 字节预算：条数没超也要按体量逐出，且 `bytes` 统计要跟着掉下来。
     #[test]
     fn evicts_by_byte_budget() {
-        let mut c: RunCache<u32> = RunCache::new(100, 1000);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 100, 1000);
         c.insert(key("a", 14.0, 1.0), Arc::new(0), 600);
         c.insert(key("b", 14.0, 1.0), Arc::new(1), 300);
         assert_eq!(c.stats().bytes, 900);
@@ -878,7 +886,7 @@ mod tests {
     /// 单条就超预算时**不能把自己逐掉**：调用方拿到的 Arc 马上就要用。
     #[test]
     fn oversized_single_entry_survives() {
-        let mut c: RunCache<u32> = RunCache::new(4, 100);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 4, 100);
         let v = c.insert(key("huge", 14.0, 1.0), Arc::new(7), 10_000);
         assert_eq!(*v, 7);
         assert_eq!(c.stats().entries, 1, "唯一一条即便超预算也要留着");
@@ -888,7 +896,7 @@ mod tests {
     /// 同键重入不能把 `bytes` 记两遍（否则跑一会儿预算就被虚高的账逼着狂逐出）。
     #[test]
     fn reinsert_same_key_replaces_accounting() {
-        let mut c: RunCache<u32> = RunCache::new(8, 1 << 20);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 8, 1 << 20);
         c.insert(key("a", 14.0, 1.0), Arc::new(1), 100);
         c.insert(key("a", 14.0, 1.0), Arc::new(2), 250);
         assert_eq!(c.stats().entries, 1);
@@ -899,7 +907,7 @@ mod tests {
     /// 命中/未命中计数——「第二次绘制不再光栅」那条端到端判据靠它兜底。
     #[test]
     fn stats_track_hits_and_misses() {
-        let mut c: RunCache<u32> = RunCache::new(8, 1 << 20);
+        let mut c: LruCache<RunKey, u32> = LruCache::new("测试缓存", 8, 1 << 20);
         assert!(c.get(&key("a", 14.0, 1.0)).is_none());
         c.insert(key("a", 14.0, 1.0), Arc::new(1), 8);
         assert!(c.get(&key("a", 14.0, 1.0)).is_some());

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 
 use super::device::SharedGpu;
+use super::tex::ImageRenderer;
 use super::text::TextRenderer;
 use crate::geometry::Color;
 use crate::render::{Gradient, Paint};
@@ -399,10 +400,12 @@ pub(super) struct PrimRenderer {
     instances: wgpu::Buffer,
     /// 实例缓冲当前能放几个实例。
     capacity: usize,
-    /// 附着格式。文字管线懒建时要用。
+    /// 附着格式。文字/图片管线懒建时要用。
     format: wgpu::TextureFormat,
     /// 文字管线 + run-cache（懒建）。
     text: Option<TextRenderer>,
+    /// 图片管线 + 纹理缓存 + 层纹理池（懒建，同上）。
+    image: Option<ImageRenderer>,
 }
 
 impl PrimRenderer {
@@ -521,6 +524,7 @@ impl PrimRenderer {
             capacity: INIT_CAPACITY,
             format,
             text: None,
+            image: None,
         }
     }
 
@@ -529,6 +533,20 @@ impl PrimRenderer {
         let format = self.format;
         self.text
             .get_or_insert_with(|| TextRenderer::new(gpu, format))
+    }
+
+    /// 图片渲染器（首次用到时建）。层纹理池也在它里面，理由见 `tex.rs`。
+    pub(super) fn image(&mut self, gpu: &Arc<SharedGpu>) -> &mut ImageRenderer {
+        let format = self.format;
+        self.image
+            .get_or_insert_with(|| ImageRenderer::new(gpu, format))
+    }
+
+    /// 帧末回收：目前只有层纹理池要收缩（没建过图片渲染器就没有池，直接跳过）。
+    pub(super) fn end_frame(&mut self) {
+        if let Some(img) = self.image.as_mut() {
+            img.end_frame();
+        }
     }
 
     /// 把 `batch` 里攒的图元编码成一个 render pass 并提交，随后清空 batch。

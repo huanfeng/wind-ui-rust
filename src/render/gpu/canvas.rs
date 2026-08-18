@@ -10,12 +10,15 @@
 //! 而这里**只攒实例不画**，直到 `Canvas` 析构才编一个 pass 一次画完。于是「帧末裁剪栈
 //! 必须归零」这条（d2d 的 `pushed_clips` 教训）在这里落在 `Drop` 上。
 //!
+//! # 三条管线与叠放次序
+//!
+//! 几何（`prim.rs`）、文字（`text.rs`）、图片（`tex.rs`）各有一条管线，各攒各的批。
+//! 任一批入批前先把另两批画掉（[`WgpuCanvas::before_prim`] 及 `draw_text`/`draw_image`
+//! 开头那两行），于是**屏幕上的叠放次序恒等于 `Canvas` 的调用次序**。
+//! `push_layer`/`pop_layer` 则在切换绘制目标前后各 flush 一次（[`WgpuCanvas::flush_all`]）。
+//!
 //! # 分期空缺
 //!
-//! - `draw_image`（P3）：显式空实现，且进程内提示一次。静默漏画会被当成布局 bug 排查
-//!   半天，这一行 stderr 是给未来的自己省时间。
-//! - `push_layer` / `pop_layer`（P3）：只维护嵌套计数保证平衡，`opacity` **暂不生效**
-//!   （子树会按不透明绘制）。
 //! - `measure_text` / `measure_text_wrapped` / `text_line_metrics`：**委托 `make_canvas`
 //!   传入的 `engine`**。这不是桩——软后端同样是委托它，排版与度量本就属于平台文字栈，
 //!   GPU 后端（P2）只接管「光栅出来的像素怎么上屏」那一段。
@@ -25,7 +28,9 @@
 use std::sync::Arc;
 
 use super::device::SharedGpu;
+use super::layer::LayerTexture;
 use super::prim::{PrimBatch, PrimRenderer, MAX_BATCH};
+use super::tex::{image_item, place_image, ImageItem, MAX_IMAGE_BATCH};
 use super::text::{text_item, RunKey, TextItem, MAX_TEXT_BATCH};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::image::{Fit, Image};
@@ -71,11 +76,12 @@ impl RenderTarget for WgpuTarget<'_> {
             engine,
             batch: PrimBatch::default(),
             text_batch: Vec::new(),
+            image_batch: Vec::new(),
             size: self.size,
             scale: scale.max(0.01),
             clips: Vec::new(),
             saves: Vec::new(),
-            layers: 0,
+            layers: Vec::new(),
         })
     }
     // `as_pixmap` 用 trait 默认的 None：GPU 侧像素读不回来，调用方据此走全窗重绘
@@ -85,20 +91,46 @@ impl RenderTarget for WgpuTarget<'_> {
 /// 攒图元的 `Canvas`。析构时把本帧攒下的实例一次画完。
 pub struct WgpuCanvas<'a> {
     gpu: Arc<SharedGpu>,
+    /// **基础**渲染目标（窗口后备缓冲或离屏纹理）。层栈非空时当前目标是栈顶那张层纹理，
+    /// 取法统一走 [`current_view`]。
     view: &'a wgpu::TextureView,
     renderer: &'a mut PrimRenderer,
     engine: &'a mut dyn TextEngine,
     batch: PrimBatch,
-    /// 待画的文字。与 `batch` **互斥非空**：入批前互相 flush，见 [`WgpuCanvas::flush_prims`]。
+    /// 待画的文字。与另两批 **互斥非空**：入批前互相 flush，见 [`WgpuCanvas::flush_all`]。
     text_batch: Vec<TextItem>,
+    /// 待画的图片（含 `pop_layer` 的合成 quad）。同上，与另两批互斥非空。
+    image_batch: Vec<ImageItem>,
     size: (u32, u32),
     scale: f32,
     /// 裁剪栈：存**逻辑**矩形，每一层已是各级交集（只会收窄）。
     clips: Vec<Rect>,
     /// `save()` 记下的栈深，`restore()` 据此回弹。
     saves: Vec<usize>,
-    /// `push_layer` 的嵌套计数（P3 前只用来保证平衡）。
-    layers: u32,
+    /// 离屏层栈（P3）。栈顶即当前绘制目标。
+    ///
+    /// 元素是 `Option`：层纹理分配失败时压一个 `None` 占位——**栈必须保持平衡**，
+    /// 否则后续 `pop_layer` 会把外层的层提前合成掉，画面错得离成因很远。占位期间子树
+    /// 直接画到最近的外层目标上（opacity 失效，内容仍在），对标软后端「分配失败退化成
+    /// 1×1/0 透明度」那条守卫的同一个意图：宁可少一层效果，不可乱栈。
+    layers: Vec<Option<LayerTexture>>,
+}
+
+/// 当前绘制目标：最近一个成功分配的层纹理，没有则是基础目标。
+///
+/// 写成自由函数而不是 `&self` 方法：调用点要同时可变借用 `self.renderer`/`self.batch`，
+/// 而 `&self` 方法会把整个 `self` 借出去。分字段借用只在函数体内成立。
+fn current_view<'v>(
+    layers: &'v [Option<LayerTexture>],
+    base: &'v wgpu::TextureView,
+) -> &'v wgpu::TextureView {
+    layers
+        .iter()
+        .rev()
+        .flatten()
+        .next()
+        .map(|l| l.view())
+        .unwrap_or(base)
 }
 
 impl WgpuCanvas<'_> {
@@ -135,10 +167,11 @@ impl WgpuCanvas<'_> {
         }
     }
 
-    /// 编码并提交本批几何实例。
+    /// 编码并提交本批几何实例（画到**当前**目标：层栈顶或基础目标）。
     fn flush_prims(&mut self) {
+        let view = current_view(&self.layers, self.view);
         self.renderer
-            .flush(&self.gpu, self.view, self.size, self.scale, &mut self.batch);
+            .flush(&self.gpu, view, self.size, self.scale, &mut self.batch);
     }
 
     /// 编码并提交本批文字。
@@ -147,23 +180,47 @@ impl WgpuCanvas<'_> {
             return;
         }
         let gpu = self.gpu.clone();
+        let view = current_view(&self.layers, self.view);
         self.renderer
             .text(&gpu)
-            .flush(&gpu, self.view, self.size, &mut self.text_batch);
+            .flush(&gpu, view, self.size, &mut self.text_batch);
     }
 
-    /// **几何图元入批前**必须调：把已攒的文字先画掉。
+    /// 编码并提交本批图片（含层合成 quad）。
+    fn flush_images(&mut self) {
+        if self.image_batch.is_empty() {
+            return;
+        }
+        let gpu = self.gpu.clone();
+        let view = current_view(&self.layers, self.view);
+        self.renderer
+            .image(&gpu)
+            .flush(&gpu, view, self.size, &mut self.image_batch);
+    }
+
+    /// 把三批全部画到当前目标。切换绘制目标（push/pop 层）前必须调——攒着的实例属于
+    /// **切换前**那个目标，跟着切过去就是画到了错误的层里。
     ///
-    /// 这就是 painter's algorithm 在「两条管线」下的全部实现。几何攒批、文字攒批，
-    /// 谁要入批就先把对面画掉——于是屏幕上的叠放次序恒等于 `Canvas` 调用次序。
-    /// 反过来（两边各攒到帧末再画）会让所有文字压在所有几何之上：文字被输入框背景
-    /// 盖住、或者反过来浮在滚动区之外，都是这一条错了的症状。
+    /// 三批互斥非空（入批前互相 flush），故先后顺序不影响结果。
+    fn flush_all(&mut self) {
+        self.flush_prims();
+        self.flush_text();
+        self.flush_images();
+    }
+
+    /// **几何图元入批前**必须调：把已攒的文字与图片先画掉。
+    ///
+    /// 这就是 painter's algorithm 在「三条管线」下的全部实现。几何攒批、文字攒批、
+    /// 图片攒批，谁要入批就先把另外两边画掉——于是屏幕上的叠放次序恒等于 `Canvas`
+    /// 调用次序。反过来（各攒到帧末再画）会让所有文字压在所有几何之上：文字被输入框
+    /// 背景盖住、或者反过来浮在滚动区之外，都是这一条错了的症状。
     ///
     /// 代价是每次交错各一次 command buffer 提交（实测约 90 µs/次，见 `text.rs` 模块头
     /// 的实测表）。合并成一次提交要先给每批实例/渐变表分配独立缓冲区段，属于 P1 批处理
-    /// 的重新设计——**不要**为了省这几次提交而把两边都攒到帧末，那是在拿正确性换性能。
+    /// 的重新设计——**不要**为了省这几次提交而把三边都攒到帧末，那是在拿正确性换性能。
     fn before_prim(&mut self) {
         self.flush_text();
+        self.flush_images();
     }
 }
 
@@ -178,18 +235,35 @@ impl Drop for WgpuCanvas<'_> {
             self.clips.len(),
             self.saves.len()
         );
-        debug_assert_eq!(
-            self.layers, 0,
-            "帧末合成层未归零（push_layer/pop_layer 未配对）"
-        );
-        // 两批互斥非空（入批前互相 flush），故先后顺序不影响结果；两个都调是为了
-        // 「最后一笔是文字」和「最后一笔是图元」两种收尾都能画干净。
         debug_assert!(
-            self.batch.is_empty() || self.text_batch.is_empty(),
-            "几何与文字不应同时有待画内容——交错 flush 漏了一处"
+            self.layers.is_empty(),
+            "帧末合成层未归零：还剩 {} 层（push_layer/pop_layer 未配对）",
+            self.layers.len()
         );
+        // 三批互斥非空（入批前互相 flush），故先后顺序不影响结果；三个都调是为了
+        // 「最后一笔是文字/图元/图片」三种收尾都能画干净。
+        debug_assert!(
+            [
+                self.batch.is_empty(),
+                self.text_batch.is_empty(),
+                self.image_batch.is_empty()
+            ]
+            .iter()
+            .filter(|e| !**e)
+            .count()
+                <= 1,
+            "几何/文字/图片不应同时有待画内容——交错 flush 漏了一处"
+        );
+        // 未配对的层在 release 档下不会触发上面的断言，此时把剩下的层依次合成回去：
+        // 少一层 opacity 也比整片内容凭空消失强（内容都画在层纹理里，不合成就全丢了）。
+        while !self.layers.is_empty() {
+            self.pop_layer();
+        }
         self.flush_prims();
         self.flush_text();
+        self.flush_images();
+        // 帧末回收层纹理池里的超额纹理（见 `layer.rs`）。
+        self.renderer.end_frame();
     }
 }
 
@@ -327,13 +401,73 @@ impl Canvas for WgpuCanvas<'_> {
         self.maybe_flush();
     }
 
-    /// P3 落点：图片纹理缓存（`tex.rs`）。当前为空实现。
+    /// 图片纹理缓存（`tex.rs`）→ 一条带纹理的四边形。
+    ///
+    /// **fit 缩放、1:1 吸附、落点取整全部逐行照抄 `SkiaCanvas::draw_image`**
+    /// （src/render/skia.rs:364-458），连注释里的理由一起搬——同一张图标在两个后端下
+    /// 必须落在同一个像素上、糊或不糊也必须一致。差别只有两处，都是路径差异不是语义差异：
+    ///
+    /// 1. 软后端要给 `draw_pixmap` 建一张圆角 mask 位图，这里把同一个圆角矩形交给
+    ///    片元的 SDF（`image.wgsl`），Cover/None 的溢出同样由它裁掉。
+    /// 2. 软后端恒用 `FilterQuality::Bilinear`（1:1 时双线性自然退化为纯 blit），
+    ///    这里必须**显式**在 1:1 时切 nearest：GPU 的线性采样即便在 1:1 上也会因浮点
+    ///    误差沾到邻纹素，细描边照样被摊糊，前面那次精确光栅就白做了。
     fn draw_image(&mut self, img: &Image, dst: Rect, fit: Fit, radius: f32, opacity: f32) {
-        let _ = (img, dst, fit, radius, opacity);
-        notice_once(
-            &IMAGE_NOTICE,
-            "windui: gpu 后端 draw_image 尚未实现（P3），本帧的图片不会被绘制",
+        let _g = crate::render::prof::scope(crate::render::prof::IMAGE);
+        let opacity = opacity.clamp(0.0, 1.0);
+        if opacity <= 0.0 {
+            return;
+        }
+        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。GPU 后端没有软后端那个
+        // 局部重绘的 offset（`as_pixmap` 恒为 None，调用方走全窗重绘）。
+        let s = self.scale;
+        let pdst = dst.scaled(s);
+        if pdst.is_empty() {
+            return;
+        }
+        let (iw, ih) = (img.width() as f32, img.height() as f32);
+        if iw <= 0.0 || ih <= 0.0 {
+            return;
+        }
+        let clip = self.clip_phys();
+        // 剔除：dst 与裁剪矩形无交集就别上传纹理了（对标 `draw_text` 开头那次剔除）。
+        let clip_rect = Rect::new(
+            clip[0] as i32,
+            clip[1] as i32,
+            (clip[2] - clip[0]) as i32,
+            (clip[3] - clip[1]) as i32,
         );
+        if pdst.intersect(&clip_rect).is_empty() {
+            return;
+        }
+
+        let (pw, ph) = (pdst.w as f32, pdst.h as f32);
+        let (px, py) = (pdst.x as f32, pdst.y as f32);
+        // fit 缩放 / 近 1:1 吸附 / 居中取整（纯几何，逐行照抄软后端，见 `tex.rs`）。
+        let (quad, nearest) = place_image(fit, iw, ih, [px, py, pw, ph], s);
+        // 圆角 clamp 与 `rounded_rect_path` 同源（软后端建 mask 路径时 clamp）。
+        let pr = (radius * s).min(pw / 2.0).min(ph / 2.0).max(0.0);
+
+        // 图片入批前把几何与文字画掉，保持提交顺序即叠放顺序。
+        self.flush_prims();
+        self.flush_text();
+
+        let gpu = self.gpu.clone();
+        let Some(bound) = self.renderer.image(&gpu).get_or_upload(&gpu, img) else {
+            return;
+        };
+        self.image_batch.push(image_item(
+            bound,
+            quad,
+            [px, py, pw, ph],
+            clip,
+            pr,
+            opacity,
+            nearest,
+        ));
+        if self.image_batch.len() >= MAX_IMAGE_BATCH {
+            self.flush_images();
+        }
     }
 
     /// 平台光栅 → run-cache → 一条带纹理的四边形（见 `text.rs`）。
@@ -377,8 +511,9 @@ impl Canvas for WgpuCanvas<'_> {
             return;
         }
 
-        // 文字入批前把已攒的几何画掉，保持提交顺序即叠放顺序。
+        // 文字入批前把已攒的几何与图片画掉，保持提交顺序即叠放顺序。
         self.flush_prims();
+        self.flush_images();
 
         let max_width = rect.w as f32;
         let key = RunKey::new(text, ts, align, max_width, s);
@@ -452,21 +587,61 @@ impl Canvas for WgpuCanvas<'_> {
         self.engine.line_metrics(text, ts)
     }
 
-    /// P3 落点：离屏层栈（`layer.rs`）。当前只记嵌套深度，`opacity` **不生效**——
-    /// 子树会按不透明绘制。记数是为了 `pop_layer` 的守卫与帧末平衡断言仍然有效。
+    /// 离屏层：后续绘制重定向到一张与目标同尺寸的透明纹理（见 `layer.rs`）。
     fn push_layer(&mut self, opacity: f32) {
-        let _ = opacity;
-        self.layers += 1;
-        notice_once(
-            &LAYER_NOTICE,
-            "windui: gpu 后端 push_layer 的 opacity 尚未生效（P3），子树按不透明绘制",
-        );
+        // 切目标前把攒着的三批画到**当前**目标——它们属于层外，跟着切进层里就等于
+        // 被层的 opacity 又调制了一遍。
+        self.flush_all();
+        let gpu = self.gpu.clone();
+        let size = self.size;
+        let layer = self.renderer.image(&gpu).acquire_layer(&gpu, size);
+        match layer {
+            Some(mut l) => {
+                l.opacity = opacity.clamp(0.0, 1.0);
+                self.layers.push(Some(l));
+            }
+            None => {
+                // 分配失败（显存/尺寸上限）：压占位保持栈平衡，子树直接画到外层。
+                notice_once(
+                    &LAYER_NOTICE,
+                    "windui: gpu 后端离屏层纹理分配失败，本次 push_layer 的 opacity 不生效（子树按不透明绘制）",
+                );
+                self.layers.push(None);
+            }
+        }
     }
 
     fn pop_layer(&mut self) {
         // 守卫防下溢（仿软后端 `pop_layer` 的 `if let Some`）。
-        debug_assert!(self.layers > 0, "pop_layer 多于 push_layer");
-        self.layers = self.layers.saturating_sub(1);
+        debug_assert!(!self.layers.is_empty(), "pop_layer 多于 push_layer");
+        if self.layers.is_empty() {
+            return;
+        }
+        // ★ 顺序：先把层内攒着的批次画进**层自己**（此刻栈顶仍是它），再出栈。
+        //   反过来的话这些图元会画到父目标上，且完全绕过 opacity 调制。
+        self.flush_all();
+        let Some(top) = self.layers.pop().expect("上面已判过非空") else {
+            return; // 占位层：内容本就直接画在外层，无需合成。
+        };
+        // 合成回父目标：整目标大小的 quad × opacity，圆角 0、裁剪取全目标
+        // （层内容自身已被各自的 clip 裁过，这里再裁一次只会重复剪切）。
+        let (w, h) = self.size;
+        let full = [0.0, 0.0, w as f32, h as f32];
+        self.image_batch.push(image_item(
+            top.bound(),
+            full,
+            full,
+            [0.0, 0.0, w as f32, h as f32],
+            0.0,
+            top.opacity,
+            // 层与目标 1:1，nearest 免掉一次无谓的重采样。
+            true,
+        ));
+        // 此刻 `current_view` 已回到父目标，合成 quad 正好画在那里。
+        self.flush_images();
+        // 合成已提交，纹理可以还回池子（wgpu 会保证已提交的命令用完再释放）。
+        let gpu = self.gpu.clone();
+        self.renderer.image(&gpu).release_layer(top);
     }
 
     fn save(&mut self) {
@@ -496,10 +671,9 @@ impl Canvas for WgpuCanvas<'_> {
 }
 
 static TEXT_NOTICE: std::sync::Once = std::sync::Once::new();
-static IMAGE_NOTICE: std::sync::Once = std::sync::Once::new();
 static LAYER_NOTICE: std::sync::Once = std::sync::Once::new();
 
-/// 进程内只提示一次分期空缺。每帧刷屏没人会看，一次则刚好够把「不是我布局写错了」
+/// 进程内只提示一次降级。每帧刷屏没人会看，一次则刚好够把「不是我布局写错了」
 /// 这个判断送到眼前。
 fn notice_once(once: &std::sync::Once, msg: &str) {
     once.call_once(|| eprintln!("{msg}"));
@@ -1628,6 +1802,437 @@ mod tests {
             return;
         };
         assert_eq!(eng.calls, 0, "裁剪外的文字应在光栅前就被剔除");
+    }
+
+    // ---- 图片（P3）----
+    //
+    // 测试图全部**程序生成**（`Image::from_rgba`），不依赖任何文件：解码是
+    // `render/image.rs` 的事，本文件要测的是「解码好的像素怎么落到目标上」。
+
+    use super::super::layer::alloc_count;
+    use super::super::tex::upload_count;
+
+    /// 纯色测试图（非预乘 RGBA）。
+    fn solid_image(w: u32, h: u32, c: Color) -> Image {
+        Image::from_rgba(w, h, &[c.r, c.g, c.b, c.a].repeat((w * h) as usize))
+            .expect("测试图尺寸合法")
+    }
+
+    /// 逐像素红/蓝棋盘（非预乘 RGBA）。用来看重采样有没有把纹素网格糊掉。
+    fn checker_image(w: u32, h: u32) -> Image {
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let c: [u8; 4] = if (x + y) % 2 == 0 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                v.extend_from_slice(&c);
+            }
+        }
+        Image::from_rgba(w, h, &v).expect("测试图尺寸合法")
+    }
+
+    const IMG_RED: Color = Color::rgb(255, 0, 0);
+
+    /// Fill：铺满 dst，框内是图片色、框外原样。对标软后端
+    /// `draw_image_fills_dst_and_respects_bounds`。
+    #[test]
+    fn draw_image_fill_matches_soft_backend() {
+        let img = solid_image(4, 4, IMG_RED);
+        assert_matches_soft("image_fill", 100, 100, 1.0, WHITE, &[(22, 22, 36, 36)], {
+            let img = img.clone();
+            move |c: &mut dyn Canvas| {
+                c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0, 1.0);
+            }
+        });
+        let Some(pm) = render_gpu(100, 100, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(20, 20, 40, 40), Fit::Fill, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        assert_eq!(px(&pm, 40, 40), [255, 0, 0, 255], "dst 内应被图片填满");
+        assert_eq!(px(&pm, 5, 5), WHITE_PX, "dst 外一个像素都不该动");
+        // 边界严丝合缝：dst 是 (20,20,40,40)，墨迹范围必须恰好是它。
+        assert_eq!(ink_bounds(&pm, WHITE_PX), Some((20, 20, 60, 60)));
+    }
+
+    /// 物理尺寸与源图一致时必须逐像素精确——对标软后端
+    /// `draw_image_unit_scale_is_pixel_exact`（那条判据的存在理由是 DPI 感知图标）。
+    #[test]
+    fn draw_image_unit_scale_is_pixel_exact() {
+        let img = solid_image(4, 4, IMG_RED);
+        let Some(pm) = render_gpu(20, 20, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(5, 5, 4, 4), Fit::Contain, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        for y in 5..9 {
+            for x in 5..9 {
+                assert_eq!(
+                    px(&pm, x, y),
+                    [255, 0, 0, 255],
+                    "({x},{y}) 应为纯红（1:1 无插值）"
+                );
+            }
+        }
+        assert_eq!(px(&pm, 9, 9), WHITE_PX, "框外不得被插值溢出污染");
+    }
+
+    /// 1:1 时纹素网格必须原样保留：逐像素棋盘画出来仍是棋盘。
+    ///
+    /// 严格说，四边形已经贴在整数物理像素上、纹素与像素 1:1 时，linear 采样落在纹素
+    /// 中心，理论上也能得到同样的结果——所以这条真正钉住的是**对齐**（落点取整 +
+    /// 尺寸吸附）。「1:1 走 nearest」那一半由 `tex.rs::exact_unit_scale_uses_nearest`
+    /// 在 CPU 侧钉死，两条各管一段。
+    #[test]
+    fn draw_image_at_unit_scale_keeps_the_texel_grid() {
+        let img = checker_image(9, 9);
+        let Some(pm) = render_gpu(20, 20, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(2, 3, 9, 9), Fit::Contain, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        for y in 0..9u32 {
+            for x in 0..9u32 {
+                let want = if (x + y) % 2 == 0 {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                assert_eq!(
+                    px(&pm, 2 + x, 3 + y),
+                    want,
+                    "棋盘格 ({x},{y}) 被重采样糊掉了"
+                );
+            }
+        }
+    }
+
+    /// 近 1:1 的落点：源 8×8 进 9×9 的框，两个后端必须画在同一处（对标软后端
+    /// `draw_image_snaps_near_unit_scale`）。
+    #[test]
+    fn draw_image_near_unit_scale_matches_soft_backend() {
+        let img = solid_image(8, 8, IMG_RED);
+        assert_matches_soft("image_near_unit", 30, 30, 1.0, WHITE, &[(6, 6, 7, 7)], {
+            let img = img.clone();
+            move |c: &mut dyn Canvas| {
+                c.draw_image(&img, Rect::new(5, 5, 9, 9), Fit::Contain, 0.0, 1.0);
+            }
+        });
+        let Some(pm) = render_gpu(30, 30, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(5, 5, 9, 9), Fit::Contain, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        assert_eq!(px(&pm, 9, 9), [255, 0, 0, 255], "近 1:1 处应是纯图片色");
+    }
+
+    /// 大圆角把四角裁掉（角落保持背景色），对标软后端 `draw_image_rounded_clips_corners`。
+    #[test]
+    fn draw_image_rounded_clips_corners() {
+        let img = solid_image(4, 4, IMG_RED);
+        assert_matches_soft("image_rounded", 60, 60, 1.0, WHITE, &[(25, 25, 10, 10)], {
+            let img = img.clone();
+            move |c: &mut dyn Canvas| {
+                // dst 40×40、圆角 20（=半边长，近圆）。
+                c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0, 1.0);
+            }
+        });
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(10, 10, 40, 40), Fit::Fill, 20.0, 1.0);
+        }) else {
+            return;
+        };
+        assert_eq!(px(&pm, 11, 11), WHITE_PX, "圆角应把角落裁成背景");
+        assert_eq!(px(&pm, 30, 30), [255, 0, 0, 255], "中心仍是图片色");
+    }
+
+    /// 低不透明度：红图叠白底混出更浅的色（状态调制），对标软后端
+    /// `draw_image_opacity_blends_lighter`。
+    #[test]
+    fn draw_image_opacity_blends_lighter() {
+        let img = solid_image(4, 4, IMG_RED);
+        assert_matches_soft("image_opacity", 40, 40, 1.0, WHITE, &[(7, 7, 26, 26)], {
+            let img = img.clone();
+            move |c: &mut dyn Canvas| {
+                c.draw_image(&img, Rect::new(5, 5, 30, 30), Fit::Fill, 0.0, 0.4);
+            }
+        });
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(5, 5, 30, 30), Fit::Fill, 0.0, 0.3);
+        }) else {
+            return;
+        };
+        let p = px(&pm, 20, 20);
+        assert!(p[0] > 240, "红通道应仍高，实得 {p:?}");
+        assert!(p[1] > 150 && p[2] > 150, "低不透明应混入白底（实得 {p:?}）");
+    }
+
+    /// Cover：等比铺满并把溢出裁到 dst——墨迹范围必须**恰好**是 dst。
+    #[test]
+    fn draw_image_cover_is_clipped_to_dst() {
+        // 源 4×2（宽高比 2:1）进 20×20 的框：k=max(5,10)=10 → 40×20，横向溢出 ±10。
+        let img = solid_image(4, 2, IMG_RED);
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(10, 10, 20, 20), Fit::Cover, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        assert_eq!(
+            ink_bounds(&pm, WHITE_PX),
+            Some((10, 10, 30, 30)),
+            "Cover 的溢出必须被 dst 裁掉，一个像素都不能漏到框外"
+        );
+    }
+
+    /// Contain：等比完整显示、短边留白（letterbox）。
+    #[test]
+    fn draw_image_contain_leaves_letterbox() {
+        // 源 4×2 进 20×20：k=min(5,10)=5 → 20×10，竖直居中 → 上下各留 5。
+        let img = solid_image(4, 2, IMG_RED);
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.draw_image(&img, Rect::new(10, 10, 20, 20), Fit::Contain, 0.0, 1.0);
+        }) else {
+            return;
+        };
+        assert_eq!(
+            ink_bounds(&pm, WHITE_PX),
+            Some((10, 15, 30, 25)),
+            "Contain 应等比缩放并在框内居中留白"
+        );
+    }
+
+    /// 缓存：同一张图第二次绘制不再上传；换一张图才会再传一次。
+    #[test]
+    fn same_image_is_uploaded_once() {
+        let Some(mut off) = offscreen(40, 40) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        let img = solid_image(4, 4, IMG_RED);
+        let before = upload_count();
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_image(&img, Rect::new(0, 0, 40, 40), Fit::Fill, 0.0, 1.0);
+        };
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("首帧");
+        assert_eq!(upload_count() - before, 1, "首次绘制应上传一次");
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("次帧");
+        assert_eq!(upload_count() - before, 1, "同一张图第二次应命中缓存");
+        // 同一帧内画两次也只有一次上传。
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &|c| {
+            draw(c);
+            draw(c);
+        })
+        .expect("同帧两次");
+        assert_eq!(upload_count() - before, 1, "同帧重复绘制同样命中缓存");
+        // 换一张图（新的 `Rc`）→ 新键 → 再传一次。
+        let other = solid_image(4, 4, Color::rgb(0, 0, 255));
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_image(&other, Rect::new(0, 0, 40, 40), Fit::Fill, 0.0, 1.0);
+        })
+        .expect("换图");
+        assert_eq!(upload_count() - before, 2, "换一张图应重新上传");
+    }
+
+    /// 交错顺序（painter's algorithm）：几何 → 图片 → 几何，后画的压在先画的之上。
+    #[test]
+    fn image_and_geometry_interleave_in_submission_order() {
+        let img = solid_image(2, 2, IMG_RED);
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::rgb(0, 0, 255)));
+            c.draw_image(&img, Rect::new(0, 0, 40, 40), Fit::Fill, 0.0, 1.0);
+            c.fill_rect(0.0, 0.0, 20.0, 20.0, &Paint::fill(Color::rgb(0, 255, 0)));
+        }) else {
+            return;
+        };
+        assert_eq!(px(&pm, 30, 30), [255, 0, 0, 255], "图片应压在先画的几何上");
+        assert_eq!(px(&pm, 10, 10), [0, 255, 0, 255], "后画的几何应压在图片上");
+    }
+
+    // ---- 离屏层（P3）----
+
+    /// 50% 红块合成到白底 → 粉色。对标软后端 `push_pop_layer_composites_with_opacity`。
+    #[test]
+    fn push_pop_layer_composites_with_opacity() {
+        assert_matches_soft("layer_50", 40, 40, 1.0, WHITE, &[(2, 2, 36, 36)], |c| {
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+        });
+        // 两后端一致还不够，绝对值也要对：是粉，不是红也不是白。
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+        }) else {
+            return;
+        };
+        let p = px(&pm, 20, 20);
+        assert!(p[0] > 240, "红通道应高，实得 {p:?}");
+        assert!(
+            (100..200).contains(&(p[1] as i32)) && (100..200).contains(&(p[2] as i32)),
+            "绿/蓝应被白底抬到中段（50% 合成），实得 {p:?}"
+        );
+        assert_eq!(p[3], 255, "不透明背景上合成后 alpha 应仍为满");
+    }
+
+    /// 层的意义在于「**整体**一次 opacity」：层内两块不透明色重叠，重叠处与非重叠处
+    /// 必须一模一样。
+    ///
+    /// 这是层与「把 opacity 摊到每个图元上」的唯一区别，也是唯一会被偷偷做错的地方——
+    /// 后者在重叠处会叠成 1-(1-a)² 的更深色，而 UI 里的浮层/卡片子树几乎处处重叠
+    /// （背景 + 描边 + 内容），一旦做错整块浮层的观感就厚一层。
+    #[test]
+    fn layer_composites_its_subtree_as_a_group() {
+        let Some(pm) = render_gpu(60, 40, 1.0, WHITE, &|c| {
+            c.push_layer(0.5);
+            // 两块同色不透明矩形，左块 0..40、右块 20..60 → 中间 20..40 重叠。
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.fill_rect(20.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+        }) else {
+            return;
+        };
+        let single = px(&pm, 8, 20);
+        let overlap = px(&pm, 30, 20);
+        assert_eq!(
+            single, overlap,
+            "重叠处与非重叠处必须同色（层是整体调制，不是逐图元调制）"
+        );
+    }
+
+    /// 嵌套层：两层 0.5 叠起来等效 0.25（层是栈，内层先合成进外层）。
+    #[test]
+    fn nested_layers_multiply_opacity() {
+        let draw = |c: &mut dyn Canvas| {
+            c.push_layer(0.5);
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+            c.pop_layer();
+            c.pop_layer();
+        };
+        assert_matches_soft("layer_nested", 40, 40, 1.0, WHITE, &[(2, 2, 36, 36)], draw);
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &draw) else {
+            return;
+        };
+        // 25% 红 over 白：r=255，g/b≈191。
+        let p = px(&pm, 20, 20);
+        assert!(p[0] > 240, "红通道应仍满，实得 {p:?}");
+        let want = 255 - 64; // (1-0.25)*255
+        for ch in [p[1], p[2]] {
+            assert!(
+                (ch as i32 - want).abs() <= 3,
+                "嵌套 0.5×0.5 应等效 0.25（期望 g/b≈{want}），实得 {p:?}"
+            );
+        }
+    }
+
+    /// 层内的几何与文字仍按调用顺序叠放，合成回父目标时作为整体调制。
+    #[test]
+    fn layer_preserves_interleaving_of_text_and_geometry() {
+        let mut eng = MockGlyphEngine::new((40, 40));
+        let Some(pm) = render_gpu_text(40, 40, 1.0, WHITE, &mut eng, &|c| {
+            c.push_layer(0.5);
+            // 层内：蓝底 → 红字铺满（压住蓝底）→ 绿块盖左上角（压住红字）。
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::rgb(0, 0, 255)));
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 40, 40),
+                Color::rgb(255, 0, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            c.fill_rect(0.0, 0.0, 20.0, 20.0, &Paint::fill(Color::rgb(0, 255, 0)));
+            c.pop_layer();
+        }) else {
+            return;
+        };
+        // 50% 红 over 白 → (255,128,128)；50% 绿 over 白 → (128,255,128)。
+        let text = px(&pm, 30, 30);
+        assert!(
+            text[0] > 240 && (100..200).contains(&(text[1] as i32)),
+            "层内文字应压在层内几何之上并被整体调制，实得 {text:?}"
+        );
+        let geo = px(&pm, 10, 10);
+        assert!(
+            geo[1] > 240 && (100..200).contains(&(geo[0] as i32)),
+            "层内后画的几何应压在文字之上，实得 {geo:?}"
+        );
+    }
+
+    /// 层内画图片：图片同样只被层调制一次，且不会被层的清屏抹掉。
+    #[test]
+    fn layer_composites_images_too() {
+        let img = solid_image(2, 2, IMG_RED);
+        let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
+            c.push_layer(0.5);
+            c.draw_image(&img, Rect::new(0, 0, 40, 40), Fit::Fill, 0.0, 1.0);
+            c.pop_layer();
+        }) else {
+            return;
+        };
+        let p = px(&pm, 20, 20);
+        assert!(
+            p[0] > 240 && (100..200).contains(&(p[1] as i32)),
+            "层内图片应按 50% 合成到白底（→ 粉），实得 {p:?}"
+        );
+    }
+
+    /// 层纹理池：连续两帧各 push/pop 一次，第二帧必须复用第一帧那张纹理。
+    ///
+    /// 窗口尺寸的层纹理动辄几 MiB，每帧现建现丢在淡入淡出动画里就是每帧几 MiB 的
+    /// 分配——这条判据是池存在与否的唯一可观察证据。
+    #[test]
+    fn layer_texture_is_reused_across_frames() {
+        let Some(mut off) = offscreen(40, 40) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        let draw = |c: &mut dyn Canvas| {
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(RED));
+            c.pop_layer();
+        };
+        let before = alloc_count();
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("首帧");
+        assert_eq!(alloc_count() - before, 1, "首帧应新建一张层纹理");
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("次帧");
+        assert_eq!(alloc_count() - before, 1, "次帧应从池里复用，不再新建");
+        // 复用的纹理必须被清干净。判据取「50% RED over 白」的解析值：层若残留上一帧
+        // 的同色内容，合成两遍会明显更深（每个通道各往 RED 那边多走一半）。
+        let pm = draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("第三帧");
+        let p = px(&pm, 20, 20);
+        let want = |c: u8| (c as f32 * 0.5 + 255.0 * 0.5).round() as i32;
+        for (i, ch) in [RED.r, RED.g, RED.b].iter().enumerate() {
+            assert!(
+                (p[i] as i32 - want(*ch)).abs() <= 2,
+                "复用的层纹理未清干净（残留上一帧）：通道 {i} 期望 {}，实得 {p:?}",
+                want(*ch)
+            );
+        }
+    }
+
+    /// `push_layer` 后不 `pop_layer`：帧末断言必须炸。
+    ///
+    /// 不平衡的层栈会把「本该合成回去的一整棵子树」留在层纹理里，画面上表现为一大块
+    /// 内容凭空消失，而成因离现场很远。断言只在 debug 档生效，故本测试也只在 debug 编。
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "帧末合成层未归零")]
+    fn unbalanced_push_layer_trips_the_frame_end_assert() {
+        let Some(mut off) = offscreen(20, 20) else {
+            // 没有适配器时这条判据无从验证。`should_panic` 分不清「跳过」和「没炸」，
+            // 故补一个同文案的 panic，并照例打印一行跳过说明。
+            println!("跳过：GPU 不可用，帧末层平衡断言未实际验证");
+            panic!("帧末合成层未归零（跳过占位）");
+        };
+        let mut eng = crate::text::NullTextEngine;
+        let _ = draw_on(&mut off, 1.0, WHITE, &mut eng, &|c| {
+            c.push_layer(0.5);
+            c.fill_rect(0.0, 0.0, 20.0, 20.0, &Paint::fill(RED));
+        });
     }
 
     /// 真 Core Text 的**墨量比对**：软后端（直接合成进 pixmap）与 GPU 后端
