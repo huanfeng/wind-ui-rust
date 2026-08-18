@@ -15,6 +15,7 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 
 use super::device::SharedGpu;
+use super::text::TextRenderer;
 use crate::geometry::Color;
 use crate::render::{Gradient, Paint};
 
@@ -98,7 +99,7 @@ struct Globals {
 
 /// 非预乘 sRGB 字节 → 0..1。**不做 gamma 转换**：附着是 `Rgba8Unorm`，字节即最终像素值，
 /// 与 `tiny_skia::Pixmap` 同一空间——这是两条路径能逐像素比对的前提。
-fn color_f32(c: Color) -> [f32; 4] {
+pub(super) fn color_f32(c: Color) -> [f32; 4] {
     [
         c.r as f32 / 255.0,
         c.g as f32 / 255.0,
@@ -387,6 +388,9 @@ fn warn_once(once: &std::sync::Once, msg: &str) {
 
 /// 管线与跨帧复用的 GPU 资源。挂在渲染目标上（而不是进程级单例）：它绑死了附着格式，
 /// 而目标才知道自己的格式；跟着目标一起析构也省掉一份「设备释放后管线还活着」的悬空态。
+///
+/// 文字管线与 run-cache（P2）同样绑死格式、同样要跨帧复用，故一并挂在这里——懒建，
+/// 一帧文字都没有的目标（几何测试、纯图形界面）不付那次管线编译。
 pub(super) struct PrimRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -395,6 +399,10 @@ pub(super) struct PrimRenderer {
     instances: wgpu::Buffer,
     /// 实例缓冲当前能放几个实例。
     capacity: usize,
+    /// 附着格式。文字管线懒建时要用。
+    format: wgpu::TextureFormat,
+    /// 文字管线 + run-cache（懒建）。
+    text: Option<TextRenderer>,
 }
 
 impl PrimRenderer {
@@ -511,7 +519,16 @@ impl PrimRenderer {
             grads,
             instances,
             capacity: INIT_CAPACITY,
+            format,
+            text: None,
         }
+    }
+
+    /// 文字渲染器（首次用到时建）。
+    pub(super) fn text(&mut self, gpu: &Arc<SharedGpu>) -> &mut TextRenderer {
+        let format = self.format;
+        self.text
+            .get_or_insert_with(|| TextRenderer::new(gpu, format))
     }
 
     /// 把 `batch` 里攒的图元编码成一个 render pass 并提交，随后清空 batch。

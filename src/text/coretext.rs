@@ -32,7 +32,7 @@ use objc2_core_text::{
     CTTextAlignment,
 };
 
-use super::{TextEngine, TextStyle};
+use super::{AlphaMask, GlyphSource, RunRequest, TextEngine, TextStyle};
 use crate::geometry::{Color, Rect, Size};
 use crate::spec::Align;
 
@@ -158,6 +158,28 @@ impl Default for CoreTextEngine {
     }
 }
 
+/// 单行/折行判据：无显式换行符、且整行排版宽装得进排版宽度。
+///
+/// 抽成函数是因为它有**两个**调用点（直接合成的 `draw` 与光栅到位图的 `raster_run`），
+/// 而两者判得不一样的话，同一段文字在软后端是一行、在 GPU 后端却折成两行——这种差异
+/// 不会报错，只会让两条路径的截图对不上，且要到很后面才归因到这一行判据上。
+fn is_single_line(text: &str, line_w: f64, layout_w: f64) -> bool {
+    !text.contains('\n') && line_w <= layout_w
+}
+
+/// 字形出挑余量（物理像素）：位图四周各留这么多，防止音调符、斜体右出挑、
+/// 某些字体越出 ascent/descent 的部件被位图边界裁掉（见 [`AlphaMask::pad`]）。
+///
+/// 取物理字号的 10%、下限 2 上限 16：常见 UI 字号（12~24dp）下是 2~4px，够覆盖
+/// PingFang/Helvetica 的出挑，又不至于把每张位图都撑大一圈。
+fn overhang_pad(psize: f32) -> u32 {
+    (psize * 0.1).ceil().clamp(2.0, 16.0) as u32
+}
+
+/// 单张 mask 的物理尺寸上限。超限直接不画而不是分块：这个量级的**单段**文字在 UI 里
+/// 不存在，出现即调用方传了个荒谬的 rect，画出来也没人看得到。
+const MAX_MASK_DIM: u32 = 8192;
+
 /// 取 CTLine 的排版尺寸：返回 (宽, 上行高 ascent, 下行高 descent, 行距 leading)，单位物理像素。
 fn line_metrics(line: &CTLine) -> (f64, f64, f64, f64) {
     let mut ascent = 0.0f64;
@@ -170,6 +192,10 @@ fn line_metrics(line: &CTLine) -> (f64, f64, f64, f64) {
 impl TextEngine for CoreTextEngine {
     fn set_scale(&mut self, scale: f32) {
         self.scale = scale.max(0.1);
+    }
+
+    fn glyph_source(&mut self) -> Option<&mut dyn GlyphSource> {
+        Some(self)
     }
 
     fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {
@@ -282,7 +308,7 @@ impl TextEngine for CoreTextEngine {
         // 同源；prect.w 由四边各自 round 得来，可能略窄于 rect.w * s，使 measure 判定放得下的
         // 文本在这里被提前折行（非整数 DPI 下末字掉到下一行）。定位仍用 prect。
         let playout_w = rect.scaled_out(s).w as f64;
-        let single = !text.contains('\n') && line_w <= playout_w;
+        let single = is_single_line(text, line_w, playout_w);
 
         CGContext::save_g_state(Some(&ctx));
         CGContext::set_allows_antialiasing(Some(&ctx), true);
@@ -368,5 +394,162 @@ impl TextEngine for CoreTextEngine {
 
         CGContext::restore_g_state(Some(&ctx));
         // ctx（仅包裹 pixmap 缓冲、未持有像素所有权）在此析构，pixmap 内容已就绪。
+    }
+}
+
+/// GPU 后端的整段光栅：同一套排版代码，只是把字画到**透明背景的独立位图**上，
+/// 取其覆盖度交给 GPU 调色合成（见 `render/gpu/text.rs`）。
+///
+/// # 为什么是「白底黑字取反」而不是「透明底白字取 alpha」
+///
+/// 覆盖度位图的自然做法是画到透明背景上直接取 alpha 通道。**实测那样出来的字明显偏细**：
+/// 同一段 14dp 英文，软后端的墨量比它高 13.5%、纯黑像素多 20%（48dp 下同样是 15%，
+/// 说明差在字形本体而不是抗锯齿边缘）。
+///
+/// 成因是 Core Graphics 的字形加重（stem darkening / font smoothing）**按前景与背景的
+/// 明暗关系取量**：深字浅底加重少，浅字深底加重多。透明背景在 CG 眼里接近黑，于是
+/// 「白字画在透明底」被当成浅字深底——把 smoothing 显式关掉字就细了 13%，显式打开
+/// 又粗了 22%，两头都不对，因为那是个连续量而不是开关。
+///
+/// 于是改成让 mask 上下文与真实绘制路径**处在同一种明暗关系**里：铺不透明白底、画
+/// 黑字、取 `255 - R` 作覆盖度，smoothing 一概不碰（与 [`TextEngine::draw`] 一样用
+/// 上下文默认值）。代价是缓存的这份加重量固定按「深字浅底」来——颜色进不了缓存键
+/// （进了缓存就没意义了），只能选一种。浅色主题（UI 的主流）下两条路径同源；深色主题
+/// 下软后端会比它再重一点点，属于已知偏差。
+///
+/// # 与 [`TextEngine::draw`] 的另一处差异：不带位置
+///
+/// `draw` 知道 rect 的 x/y，能用 `Rect::scaled_out` 把排版宽度与 `measure` 对齐到同一个
+/// 物理值；这里只有逻辑宽度（位置进不了缓存键——同一个标签出现在两个 x 就会各占一条
+/// 缓存），排版宽取 `ceil(max_width × scale)`。两者最多差一个物理像素列，只在非整数
+/// DPI 且文本恰好卡在折行边界时显形。
+impl GlyphSource for CoreTextEngine {
+    fn raster_run(&mut self, req: &RunRequest) -> Option<AlphaMask> {
+        let ts = &req.style;
+        if req.text.is_empty() || ts.size <= 0.0 {
+            return None;
+        }
+        let s = req.scale.max(0.1);
+        let psize = ts.size * s;
+        let font = self.font(ts.family, psize);
+        // 黑字画在不透明白底上（理由见 impl 头注释）：覆盖度 = 255 − 任一颜色通道。
+        let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        let plh = ts.line_height_px().map(|h| h * s);
+        let attr = self.attributed(req.text, &font, &black, req.align, plh);
+
+        let playout_w = (req.max_width.max(0.0) * s).ceil() as f64;
+        let probe = unsafe { CTLine::with_attributed_string(&attr) };
+        let (line_w, ascent, descent, leading) = line_metrics(&probe);
+        let single = is_single_line(req.text, line_w, playout_w);
+
+        // 文本块的物理排版尺寸。单行取自然行高（ascent+descent+leading）而非显式行高
+        // ——与 `draw` 的单行分支同源：那里的垂直定位也用自然行高，基线落在块顶 + ascent。
+        let (block_w, block_h, framesetter) = if single {
+            (line_w, ascent + descent + leading, None)
+        } else {
+            let fs = unsafe { CTFramesetter::with_attributed_string(&attr) };
+            let fit = unsafe {
+                fs.suggest_frame_size_with_constraints(
+                    CFRange {
+                        location: 0,
+                        length: 0,
+                    },
+                    None,
+                    CGSize {
+                        width: playout_w,
+                        height: f64::MAX,
+                    },
+                    ptr::null_mut(),
+                )
+            };
+            // 块宽取排版容器宽而非 fit.width：折行时各行的水平对齐是段落样式在
+            // **容器**内做的，块宽若收窄到最长行，右/居中对齐的行就会整体偏移。
+            (playout_w, fit.height, Some(fs))
+        };
+        let bw = (block_w.ceil().max(1.0)) as u32;
+        let bh = (block_h.ceil().max(1.0)) as u32;
+        let pad = overhang_pad(psize);
+        let (w, h) = (bw + 2 * pad, bh + 2 * pad);
+        if w > MAX_MASK_DIM || h > MAX_MASK_DIM {
+            return None;
+        }
+
+        // RGBA8 预乘、**不透明白底**的位图：与 `draw` 走同一类上下文（DeviceRGB +
+        // PremultipliedLast）、同一种明暗关系。不用 `kCGImageAlphaOnly`——那是另一类
+        // 上下文，既没有背景色可言（于是回到上面那个加重量不对的问题），Core Text 在
+        // 其上的行为也要单独验证。多出的三个通道在取完覆盖度后立刻丢掉，只是一次临时分配。
+        let mut rgba = vec![255u8; (w as usize) * (h as usize) * 4];
+        let ptr = rgba.as_mut_ptr() as *mut c_void;
+        let ctx = unsafe {
+            CGBitmapContextCreate(
+                ptr,
+                w as usize,
+                h as usize,
+                8,
+                w as usize * 4,
+                Some(&self.color_space),
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }?;
+
+        // smoothing 的两个开关一概不碰——`draw` 那条路径也不碰，用同一份上下文默认值
+        // 才可能得到同一份字形加重。
+        CGContext::set_allows_antialiasing(Some(&ctx), true);
+        CGContext::set_text_matrix(Some(&ctx), IDENTITY);
+
+        // 坐标系同 `draw`：不翻转上下文，只把「距顶」换算成「距底」。
+        let hf = h as f64;
+        let padf = pad as f64;
+        if single {
+            // 文本块顶边在 y=pad，基线再往下 ascent。
+            CGContext::set_text_position(Some(&ctx), padf, hf - (padf + ascent));
+            unsafe { probe.draw(&ctx) };
+        } else {
+            let fs = framesetter.expect("折行分支必有 framesetter");
+            let path_rect = CGRect {
+                origin: CGPoint {
+                    x: padf,
+                    y: hf - (padf + block_h),
+                },
+                // 高度多留 1px 避免末行被边界裁掉、宽度与 constraints 同源——两条都与
+                // `draw` 的折行分支逐字一致。
+                size: CGSize {
+                    width: playout_w,
+                    height: block_h.ceil() + 1.0,
+                },
+            };
+            let path = unsafe { CGPath::with_rect(path_rect, ptr::null()) };
+            let frame = unsafe {
+                fs.frame(
+                    CFRange {
+                        location: 0,
+                        length: 0,
+                    },
+                    &path,
+                    None,
+                )
+            };
+            unsafe { frame.draw(&ctx) };
+        }
+        // 上下文先析构，之后 rgba 里的字节才保证写完。
+        drop(ctx);
+
+        // 白底黑字 → 覆盖度是通道的补。三个颜色通道等值（黑字灰度 AA），取红即可。
+        let data = rgba.chunks_exact(4).map(|p| 255 - p[0]).collect();
+        // 首行基线距块顶：单行分支就是上面手动定位用的 ascent；折行分支交给 CTFrame
+        // 排版，显式行高时首行基线在「行高 − descent」处，否则同样是 ascent。
+        let baseline = if single {
+            ascent
+        } else {
+            plh.map(|h| h as f64 - descent).unwrap_or(ascent)
+        };
+        Some(AlphaMask {
+            data,
+            width: w,
+            height: h,
+            pad,
+            block: (block_w as f32, block_h as f32),
+            ascent: baseline as f32,
+        })
     }
 }

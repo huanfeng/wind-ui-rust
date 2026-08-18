@@ -12,23 +12,26 @@
 //!
 //! # 分期空缺
 //!
-//! - `draw_text`（P2）/ `draw_image`（P3）：显式空实现，且进程内提示一次。静默漏画会被
-//!   当成布局 bug 排查半天，这一行 stderr 是给未来的自己省时间。
+//! - `draw_image`（P3）：显式空实现，且进程内提示一次。静默漏画会被当成布局 bug 排查
+//!   半天，这一行 stderr 是给未来的自己省时间。
 //! - `push_layer` / `pop_layer`（P3）：只维护嵌套计数保证平衡，`opacity` **暂不生效**
 //!   （子树会按不透明绘制）。
 //! - `measure_text` / `measure_text_wrapped` / `text_line_metrics`：**委托 `make_canvas`
 //!   传入的 `engine`**。这不是桩——软后端同样是委托它，排版与度量本就属于平台文字栈，
-//!   GPU 后端到 P2 也只接管「光栅」那一段。
+//!   GPU 后端（P2）只接管「光栅出来的像素怎么上屏」那一段。
+//! - `draw_text`：已实现（P2），但引擎不提供 `GlyphSource` 时仍是空操作 + 一次提示
+//!   （Windows 的 DirectWrite 引擎走 D2D 后端，不实现它）。
 
 use std::sync::Arc;
 
 use super::device::SharedGpu;
 use super::prim::{PrimBatch, PrimRenderer, MAX_BATCH};
+use super::text::{text_item, RunKey, TextItem, MAX_TEXT_BATCH};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::image::{Fit, Image};
 use crate::render::{Canvas, Paint, RenderTarget};
 use crate::spec::Align;
-use crate::text::{LineMetrics, TextEngine, TextStyle};
+use crate::text::{block_offset_y, LineMetrics, RunRequest, TextEngine, TextStyle};
 
 /// 一帧的 GPU 渲染目标：一张颜色纹理视图 + 跨帧复用的管线与缓冲。
 pub struct WgpuTarget<'t> {
@@ -67,6 +70,7 @@ impl RenderTarget for WgpuTarget<'_> {
             renderer: &mut *self.renderer,
             engine,
             batch: PrimBatch::default(),
+            text_batch: Vec::new(),
             size: self.size,
             scale: scale.max(0.01),
             clips: Vec::new(),
@@ -85,6 +89,8 @@ pub struct WgpuCanvas<'a> {
     renderer: &'a mut PrimRenderer,
     engine: &'a mut dyn TextEngine,
     batch: PrimBatch,
+    /// 待画的文字。与 `batch` **互斥非空**：入批前互相 flush，见 [`WgpuCanvas::flush_prims`]。
+    text_batch: Vec<TextItem>,
     size: (u32, u32),
     scale: f32,
     /// 裁剪栈：存**逻辑**矩形，每一层已是各级交集（只会收窄）。
@@ -125,14 +131,39 @@ impl WgpuCanvas<'_> {
     /// 攒够一批就先画掉，避免长帧把实例数组撑到无界。
     fn maybe_flush(&mut self) {
         if self.batch.len() >= MAX_BATCH {
-            self.flush();
+            self.flush_prims();
         }
     }
 
-    /// 编码并提交本批实例。
-    fn flush(&mut self) {
+    /// 编码并提交本批几何实例。
+    fn flush_prims(&mut self) {
         self.renderer
             .flush(&self.gpu, self.view, self.size, self.scale, &mut self.batch);
+    }
+
+    /// 编码并提交本批文字。
+    fn flush_text(&mut self) {
+        if self.text_batch.is_empty() {
+            return;
+        }
+        let gpu = self.gpu.clone();
+        self.renderer
+            .text(&gpu)
+            .flush(&gpu, self.view, self.size, &mut self.text_batch);
+    }
+
+    /// **几何图元入批前**必须调：把已攒的文字先画掉。
+    ///
+    /// 这就是 painter's algorithm 在「两条管线」下的全部实现。几何攒批、文字攒批，
+    /// 谁要入批就先把对面画掉——于是屏幕上的叠放次序恒等于 `Canvas` 调用次序。
+    /// 反过来（两边各攒到帧末再画）会让所有文字压在所有几何之上：文字被输入框背景
+    /// 盖住、或者反过来浮在滚动区之外，都是这一条错了的症状。
+    ///
+    /// 代价是每次交错各一次 command buffer 提交（实测约 90 µs/次，见 `text.rs` 模块头
+    /// 的实测表）。合并成一次提交要先给每批实例/渐变表分配独立缓冲区段，属于 P1 批处理
+    /// 的重新设计——**不要**为了省这几次提交而把两边都攒到帧末，那是在拿正确性换性能。
+    fn before_prim(&mut self) {
+        self.flush_text();
     }
 }
 
@@ -151,7 +182,14 @@ impl Drop for WgpuCanvas<'_> {
             self.layers, 0,
             "帧末合成层未归零（push_layer/pop_layer 未配对）"
         );
-        self.flush();
+        // 两批互斥非空（入批前互相 flush），故先后顺序不影响结果；两个都调是为了
+        // 「最后一笔是文字」和「最后一笔是图元」两种收尾都能画干净。
+        debug_assert!(
+            self.batch.is_empty() || self.text_batch.is_empty(),
+            "几何与文字不应同时有待画内容——交错 flush 漏了一处"
+        );
+        self.flush_prims();
+        self.flush_text();
     }
 }
 
@@ -165,6 +203,7 @@ impl Canvas for WgpuCanvas<'_> {
     }
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
+        self.before_prim();
         let (clip, m) = (self.clip_phys(), self.aa_margin());
         self.batch
             .push_round_rect(x, y, w, h, radius, paint, clip, m);
@@ -181,6 +220,7 @@ impl Canvas for WgpuCanvas<'_> {
         width: f32,
         paint: &Paint,
     ) {
+        self.before_prim();
         // 以下四步逐行照抄 `SkiaCanvas::stroke_round_rect`（src/render/skia.rs:221-241），
         // 连注释里的理由一起搬——两个后端在同一 DPI 下必须给出同一条描边。
         //
@@ -210,6 +250,7 @@ impl Canvas for WgpuCanvas<'_> {
     }
 
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
+        self.before_prim();
         // 端帽是 Butt（skia.rs:262 的 `LineCap::Butt`）：线段两端不外延，
         // 几何上就是一个以线段为中轴的旋转矩形——`sd_segment_box` 直接给这个形状。
         let (clip, m) = (self.clip_phys(), self.aa_margin());
@@ -219,6 +260,7 @@ impl Canvas for WgpuCanvas<'_> {
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint) {
+        self.before_prim();
         let (clip, m) = (self.clip_phys(), self.aa_margin());
         self.batch.push_circle(cx, cy, r, paint, clip, m);
         self.maybe_flush();
@@ -239,6 +281,7 @@ impl Canvas for WgpuCanvas<'_> {
         if color.a == 0 || w <= 0.0 || h <= 0.0 || crate::render::skia::shadows_disabled() {
             return;
         }
+        self.before_prim();
         let s = self.scale;
         let pblur = (blur * s).max(0.0);
         // 软后端的模糊半径是 `pblur.round()`（3 趟 box-blur 的整数半径），这里以它为准换算，
@@ -293,13 +336,108 @@ impl Canvas for WgpuCanvas<'_> {
         );
     }
 
-    /// P2 落点：平台光栅进纹理缓存（`text.rs`）。当前为空实现。
+    /// 平台光栅 → run-cache → 一条带纹理的四边形（见 `text.rs`）。
+    ///
+    /// 放置逻辑**在这里**而不是在 `GlyphSource` 里：水平按 `align`、垂直按
+    /// [`block_offset_y`] 的契约（装得下居中、装不下顶对齐），与软后端同一份语义。
+    /// 平台侧只负责「把这段字排版光栅成一块覆盖度位图」，位图往哪儿贴与平台无关——
+    /// 这条分界也是这些判据能在 Windows 上用 mock 测到的原因。
+    ///
+    /// # 与软后端的两处已知差异
+    ///
+    /// 1. **贴整数物理像素**。位图与目标 1:1 nearest 采样，四边形落在半像素上会整体
+    ///    错半格；软后端是把字直接合成进 pixmap，水平位置可以是小数。于是 `Center`/
+    ///    `End` 对齐时两条路径最多差 0.5 物理像素。
+    /// 2. **排版宽度不含 rect 的小数位置**（见 `coretext.rs` 的 `raster_run` 注释）。
     fn draw_text(&mut self, text: &str, rect: Rect, color: Color, align: Align, ts: &TextStyle) {
-        let _ = (text, rect, color, align, ts);
-        notice_once(
-            &TEXT_NOTICE,
-            "windui: gpu 后端 draw_text 尚未实现（P2），本帧的文字不会被绘制",
+        let _g = crate::render::prof::scope(crate::render::prof::TEXT);
+        if text.is_empty() || rect.is_empty() || color.a == 0 {
+            return;
+        }
+        if self.engine.glyph_source().is_none() {
+            notice_once(
+                &TEXT_NOTICE,
+                "windui: 当前文字引擎不支持 GPU 文字光栅（未实现 GlyphSource），本帧的文字不会被绘制",
+            );
+            return;
+        }
+        let s = self.scale;
+        let prect = rect.scaled(s);
+        let clip = self.clip_phys();
+        // 剔除：整块文字都落在裁剪矩形外就别光栅了（对标软后端 `draw_text` 开头那次
+        // 与 pixmap 边界的相交判断——滚动列表里绝大多数行都走这条路）。留 4px 余量
+        // 兜住字形出挑与整数取整。
+        let clip_rect = Rect::new(
+            clip[0] as i32,
+            clip[1] as i32,
+            (clip[2] - clip[0]) as i32,
+            (clip[3] - clip[1]) as i32,
         );
+        if prect.inflate(4).intersect(&clip_rect).is_empty() {
+            return;
+        }
+
+        // 文字入批前把已攒的几何画掉，保持提交顺序即叠放顺序。
+        self.flush_prims();
+
+        let max_width = rect.w as f32;
+        let key = RunKey::new(text, ts, align, max_width, s);
+        let gpu = self.gpu.clone();
+        let tex = match self.renderer.text(&gpu).get(&key) {
+            Some(t) => t,
+            None => {
+                let src = self
+                    .engine
+                    .glyph_source()
+                    .expect("上面已判定本引擎支持 GlyphSource");
+                let req = RunRequest {
+                    text,
+                    style: *ts,
+                    align,
+                    max_width,
+                    scale: s,
+                };
+                let Some(mask) = src.raster_run(&req) else {
+                    return;
+                };
+                match self.renderer.text(&gpu).upload(&gpu, key, &mask) {
+                    Some(t) => t,
+                    None => return,
+                }
+            }
+        };
+
+        // ---- 放置（全在物理像素空间）----
+        // 用**未取整**的块尺寸：`ceil` 过的整数块高会给垂直居中引入恒为负的半像素
+        // 偏置，实测表现为整段文字比软后端稳定高 1px（见 `AlphaMask::block`）。
+        let (bwf, bhf) = tex.block;
+        let block_x = match align {
+            Align::Start | Align::Stretch => prect.x as f32,
+            Align::Center => prect.x as f32 + (prect.w as f32 - bwf) / 2.0,
+            Align::End => prect.x as f32 + prect.w as f32 - bwf,
+        };
+        let block_y = prect.y as f32 + block_offset_y(prect.h as f32, bhf);
+        let pad = tex.pad as f32;
+        // 纵向不能直接 `round(块顶 − pad)`：平台光栅器把基线**向下取整**吸附到整数行
+        // （Core Text 真机实测：mask 内基线 16.84 → 第 16 行，软后端 24.04/24.54 都 → 第
+        // 24 行；四个容器高全部对上），于是位图里的基线在 `floor(pad + ascent)` 行、软
+        // 后端的在 `floor(块顶 + ascent)` 行。直接取整块顶会让两次取整各自进位，差出来的
+        // 1px 随容器高的奇偶翻转——症状是 GPU 模式下整段文字比软后端高一行，而墨量逐
+        // 字节相同（正是这个「墨量对得上、位置差一行」的组合把成因指了出来）。
+        //
+        // 横向不做同样的事：CG 的字形水平定位是**亚像素**的（不吸附），mask 只能按
+        // 相位 0 光栅一份。故取最近整数，居中/右对齐时最多与软后端差半个像素。
+        let asc = tex.ascent;
+        let quad = [
+            (block_x - pad).round(),
+            (block_y + asc).floor() - (pad + asc).floor(),
+            tex.width as f32,
+            tex.height as f32,
+        ];
+        self.text_batch.push(text_item(tex, quad, clip, color));
+        if self.text_batch.len() >= MAX_TEXT_BATCH {
+            self.flush_text();
+        }
     }
 
     fn measure_text(&mut self, text: &str, ts: &TextStyle) -> Size {
@@ -412,6 +550,33 @@ mod tests {
         pm
     }
 
+    /// 离屏目标，无适配器时打印跳过。跳过必须打印——否则报告里「跳过」和「通过」
+    /// 长得一模一样。
+    fn offscreen(w: u32, h: u32) -> Option<OffscreenGpu> {
+        let off = OffscreenGpu::new(w, h);
+        if off.is_none() {
+            println!("跳过：本机没有可用的 wgpu 适配器（含软件回退），GPU 图元测试未执行");
+        }
+        off
+    }
+
+    /// 在既有离屏目标上渲一帧（缓存跨帧复用的测试要连渲两帧，故不能每次重建目标）。
+    fn draw_on(
+        off: &mut OffscreenGpu,
+        scale: f32,
+        bg: Color,
+        eng: &mut dyn TextEngine,
+        draw: &dyn Fn(&mut dyn Canvas),
+    ) -> Option<Pixmap> {
+        off.clear(bg);
+        {
+            let mut target = off.target();
+            let mut canvas = target.make_canvas(eng, scale);
+            draw(&mut *canvas);
+        }
+        off.readback()
+    }
+
     /// GPU 路径：同一串调用打到离屏目标再 readback。无适配器时 `None`（打印跳过）。
     fn render_gpu(
         w: u32,
@@ -420,21 +585,41 @@ mod tests {
         bg: Color,
         draw: &dyn Fn(&mut dyn Canvas),
     ) -> Option<Pixmap> {
-        let mut off = match OffscreenGpu::new(w, h) {
-            Some(o) => o,
-            None => {
-                println!("跳过：本机没有可用的 wgpu 适配器（含软件回退），GPU 图元测试未执行");
-                return None;
-            }
-        };
-        off.clear(bg);
+        let mut off = offscreen(w, h)?;
         let mut eng = crate::text::NullTextEngine;
-        {
-            let mut target = off.target();
-            let mut canvas = target.make_canvas(&mut eng, scale);
-            draw(&mut *canvas);
+        draw_on(&mut off, scale, bg, &mut eng, draw)
+    }
+
+    /// 同上，但指定文字引擎（mock `GlyphSource`）。
+    fn render_gpu_text(
+        w: u32,
+        h: u32,
+        scale: f32,
+        bg: Color,
+        eng: &mut dyn TextEngine,
+        draw: &dyn Fn(&mut dyn Canvas),
+    ) -> Option<Pixmap> {
+        let mut off = offscreen(w, h)?;
+        draw_on(&mut off, scale, bg, eng, draw)
+    }
+
+    /// 有墨像素（相对背景有偏离）的外接矩形 `(x0, y0, x1, y1)`，半开区间。全空时 `None`。
+    ///
+    /// 判据用墨迹范围而不是「某个像素等于某色」：文字是抗锯齿的，边缘像素的具体取值
+    /// 随光栅器浮动，而「这段字占了哪几列哪几行」是稳定的（也正是放置逻辑要钉住的）。
+    fn ink_bounds(pm: &Pixmap, bg: [u8; 4]) -> Option<(u32, u32, u32, u32)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for y in 0..pm.height() {
+            for x in 0..pm.width() {
+                if px(pm, x, y) != bg {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
         }
-        off.readback()
+        (x0 != u32::MAX).then_some((x0, y0, x1, y1))
     }
 
     /// 「墨量」：全图相对背景的通道偏离总量。比单纯的通道和敏感得多——白底上画白色
@@ -1032,7 +1217,8 @@ mod tests {
 
     // ---- 分期空缺的行为 ----
 
-    /// 未实现的图元不得把已画的东西弄坏，也不得 panic。
+    /// 未实现的图元、以及不支持 `GlyphSource` 的引擎（此处是 `NullTextEngine`）
+    /// 不得把已画的东西弄坏，也不得 panic。
     #[test]
     fn unimplemented_primitives_are_no_ops() {
         let Some(pm) = render_gpu(40, 40, 1.0, WHITE, &|c| {
@@ -1097,5 +1283,518 @@ mod tests {
             return;
         };
         assert_eq!(px(&pm, 20, 20), [255, 0, 0, 255], "最后一笔应压在最上面");
+    }
+
+    // ---- 文字（P2）：放置 / 调色 / 缓存 / 交错顺序 ----
+    //
+    // 全部用 mock `GlyphSource`（`text.rs` 的 `mock` 模块）。放置、裁剪、缓存、批次
+    // 顺序都是平台无关逻辑，本来就该在任何一台机器上测得到；真引擎的那一半（光栅得
+    // 像不像）由 macOS 上的墨量比对负责，两层各管一段。
+
+    use super::super::text::mock::{MockGlyphEngine, Pattern};
+
+    const BLACK: Color = Color::rgb(0, 0, 0);
+    /// 白底的字节（mock 画的是不透明黑块，判据只看「和白底不一样」）。
+    const WHITE_PX: [u8; 4] = [255, 255, 255, 255];
+
+    /// 水平对齐：文本块按 `align` 在 rect 内定位。三种对齐的墨迹左边界应分别落在
+    /// rect 左端、正中、右端——这是 `draw_text` 里那段放置逻辑唯一的可观察产物。
+    #[test]
+    fn text_horizontal_alignment_places_block_in_rect() {
+        for (align, want_x0) in [(Align::Start, 0u32), (Align::Center, 45), (Align::End, 90)] {
+            // 文本块 10×4（逻辑=物理，scale=1），rect 宽 100。
+            let mut eng = MockGlyphEngine::new((10, 4));
+            let Some(pm) = render_gpu_text(100, 20, 1.0, WHITE, &mut eng, &|c| {
+                c.draw_text(
+                    "x",
+                    Rect::new(0, 0, 100, 20),
+                    BLACK,
+                    align,
+                    &TextStyle::new(12.0),
+                );
+            }) else {
+                return;
+            };
+            let b = ink_bounds(&pm, WHITE_PX).expect("应画出文字");
+            assert_eq!(
+                (b.0, b.2),
+                (want_x0, want_x0 + 10),
+                "{align:?} 的墨迹横向范围不对，实得 {b:?}"
+            );
+        }
+    }
+
+    /// 垂直定位：装得下时居中（`block_offset_y` 的第一条分支）。
+    #[test]
+    fn text_is_vertically_centered_when_it_fits() {
+        let mut eng = MockGlyphEngine::new((10, 4));
+        let Some(pm) = render_gpu_text(60, 60, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 10, 60, 20),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        let b = ink_bounds(&pm, WHITE_PX).expect("应画出文字");
+        // rect y=10 高 20，块高 4 → 顶偏移 (20-4)/2 = 8 → y0 = 18。
+        assert_eq!((b.1, b.3), (18, 22), "垂直居中位置不对，实得 {b:?}");
+    }
+
+    /// 垂直定位：装不下时**顶对齐**而非居中溢出——`block_offset_y` 里那个
+    /// `.max(0)` 的 GPU 版（同 `text::text_block_contract::overflowing_text_is_top_aligned`）。
+    #[test]
+    fn overflowing_text_is_top_aligned() {
+        let mut eng = MockGlyphEngine::new((10, 40));
+        let Some(pm) = render_gpu_text(60, 120, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 20, 60, 16),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        let b = ink_bounds(&pm, WHITE_PX).expect("应画出文字");
+        assert_eq!(b.1, 20, "装不下时应顶对齐到 rect 顶边，实得 y0={}", b.1);
+        assert_eq!(b.3, 60, "块高 40 应完整画出（越出 rect 由裁剪收口）");
+    }
+
+    /// `pad`（字形出挑余量）不参与定位：位图带 pad 时墨迹落点必须与不带 pad 时一致。
+    /// 漏减 pad 的症状是整段文字整体偏移几个像素，且随字号变化——极难认出成因。
+    #[test]
+    fn overhang_pad_does_not_shift_the_block() {
+        let mut plain = MockGlyphEngine::new((10, 4));
+        let mut padded = MockGlyphEngine::new((10, 4)).with_pad(3);
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 100, 20),
+                BLACK,
+                Align::Center,
+                &TextStyle::new(12.0),
+            );
+        };
+        let Some(a) = render_gpu_text(100, 20, 1.0, WHITE, &mut plain, &draw) else {
+            return;
+        };
+        let Some(b) = render_gpu_text(100, 20, 1.0, WHITE, &mut padded, &draw) else {
+            return;
+        };
+        assert_eq!(
+            ink_bounds(&a, WHITE_PX),
+            ink_bounds(&b, WHITE_PX),
+            "带 pad 的位图应贴到同一处（定位按文本块算，不是按位图算）"
+        );
+    }
+
+    /// 裁剪矩形对文字与几何图元同样生效（同一份 clip 字段、同一条片元判据）。
+    #[test]
+    fn text_respects_clip_rect() {
+        // 块 40×20 在 60 高的 rect 内居中 → 占 y∈[20,40)；裁剪带取它中间的一条。
+        let mut eng = MockGlyphEngine::new((40, 20));
+        let Some(pm) = render_gpu_text(60, 60, 1.0, WHITE, &mut eng, &|c| {
+            c.save();
+            c.clip_rect(Rect::new(10, 25, 20, 8));
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 60, 60),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            c.restore();
+        }) else {
+            return;
+        };
+        let b = ink_bounds(&pm, WHITE_PX).expect("裁剪带内应有字");
+        assert_eq!(
+            b,
+            (10, 25, 30, 33),
+            "墨迹应恰好被裁成 (10,25,20,8)，实得 {b:?}"
+        );
+    }
+
+    /// 调色：R8 覆盖度 × 文字颜色，输出预乘。50% 红字盖白底应得粉——判据与 P1 的
+    /// `translucent_overlay_matches_soft_backend` 同一条（预乘约定错了会整体发白/发黑）。
+    #[test]
+    fn text_is_tinted_by_color_with_premultiplied_output() {
+        let mut eng = MockGlyphEngine::new((20, 20));
+        let Some(pm) = render_gpu_text(20, 20, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 20, 20),
+                Color::rgba(255, 0, 0, 128),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        let p = px(&pm, 10, 10);
+        assert!(p[0] > 240, "红通道应仍高，实得 {p:?}");
+        assert!(
+            (100..200).contains(&(p[1] as i32)) && (100..200).contains(&(p[2] as i32)),
+            "绿/蓝应被白底抬到中段（50% 合成 → 粉），实得 {p:?}"
+        );
+        assert_eq!(p[3], 255, "不透明背景上合成后 alpha 应仍为满");
+    }
+
+    /// 覆盖度是逐纹素采样的（nearest + 1:1）：棋盘图案画出来仍是棋盘，不会被过滤糊平。
+    #[test]
+    fn coverage_is_sampled_one_to_one() {
+        let mut eng = MockGlyphEngine::new((16, 16)).with_pattern(Pattern::Checker);
+        let Some(pm) = render_gpu_text(16, 16, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 16, 16),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        // 2×2 棋盘：(0,0) 格是墨、(2,0) 格是空。
+        assert_eq!(px(&pm, 0, 0), [0, 0, 0, 255], "棋盘的墨格应是纯黑");
+        assert_eq!(px(&pm, 2, 0), WHITE_PX, "棋盘的空格应保持白底");
+        assert_eq!(px(&pm, 1, 1), [0, 0, 0, 255], "同一格内应一致（无过渡）");
+    }
+
+    /// 缓存：同键第二次绘制不再调用光栅器；换 scale 则是新键，必须重新光栅。
+    #[test]
+    fn same_run_is_rastered_once_and_scale_makes_a_new_key() {
+        let Some(mut off) = offscreen(60, 40) else {
+            return;
+        };
+        let mut eng = MockGlyphEngine::new((10, 4));
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "hello",
+                Rect::new(0, 0, 60, 20),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        };
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("首帧");
+        assert_eq!(eng.calls, 1, "首次绘制应光栅一次");
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("次帧");
+        assert_eq!(eng.calls, 1, "同键第二次应命中缓存，不再光栅");
+        draw_on(&mut off, 2.0, WHITE, &mut eng, &draw).expect("换 scale");
+        assert_eq!(eng.calls, 2, "scale 变化天然换键，应重新光栅");
+        assert_eq!(eng.last.map(|l| l.0), Some(2.0), "光栅请求应带上新的 scale");
+        // 换回旧 scale 仍命中（换键不等于整体失效——旧键还在，只是排在 LRU 里）。
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("换回");
+        assert_eq!(eng.calls, 2, "换回旧 scale 应仍命中");
+    }
+
+    /// 同一段文字换颜色**不**产生新键：颜色在片元里调制，不进纹理也不进键。
+    #[test]
+    fn color_is_not_part_of_the_cache_key() {
+        let Some(mut off) = offscreen(40, 20) else {
+            return;
+        };
+        let mut eng = MockGlyphEngine::new((10, 4));
+        for color in [BLACK, Color::rgb(255, 0, 0), Color::rgb(0, 0, 255)] {
+            draw_on(&mut off, 1.0, WHITE, &mut eng, &|c| {
+                c.draw_text(
+                    "hi",
+                    Rect::new(0, 0, 40, 20),
+                    color,
+                    Align::Start,
+                    &TextStyle::new(12.0),
+                );
+            })
+            .expect("渲染");
+        }
+        assert_eq!(eng.calls, 1, "三种颜色应共用同一张覆盖度纹理");
+    }
+
+    /// 交错顺序（painter's algorithm）：几何 → 文字 → 几何，后画的压在先画的之上。
+    ///
+    /// 这是「两条管线」下最容易错的一条：两边各攒到帧末再画，所有文字就会一起浮到
+    /// 所有几何之上——输入框的字盖住选中高亮、滚动区的字飘在容器外，都是这个症状。
+    #[test]
+    fn text_and_geometry_interleave_in_submission_order() {
+        let mut eng = MockGlyphEngine::new((40, 40));
+        let Some(pm) = render_gpu_text(40, 40, 1.0, WHITE, &mut eng, &|c| {
+            // ① 蓝底铺满
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(Color::rgb(0, 0, 255)));
+            // ② 红字铺满（应盖住蓝底）
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 40, 40),
+                Color::rgb(255, 0, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            // ③ 绿块只盖左上角（应盖住红字）
+            c.fill_rect(0.0, 0.0, 20.0, 20.0, &Paint::fill(Color::rgb(0, 255, 0)));
+        }) else {
+            return;
+        };
+        assert_eq!(
+            px(&pm, 30, 30),
+            [255, 0, 0, 255],
+            "文字应压在先画的几何之上"
+        );
+        assert_eq!(
+            px(&pm, 10, 10),
+            [0, 255, 0, 255],
+            "后画的几何应压在文字之上"
+        );
+    }
+
+    /// 反向：文字 → 几何 → 文字。第二段文字必须压在中间那块几何之上。
+    #[test]
+    fn geometry_between_two_runs_does_not_reorder_them() {
+        // 两段文字的块都是 40×40（mock 尺寸与 rect 无关），故用 rect 的位置把它们错开：
+        // "a" 落在左上 40×40，"b" 落在右下 40×40，中间那块几何铺满全图。
+        let mut eng = MockGlyphEngine::new((40, 40));
+        let Some(pm) = render_gpu_text(80, 80, 1.0, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "a",
+                Rect::new(0, 0, 40, 40),
+                Color::rgb(255, 0, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            c.fill_rect(0.0, 0.0, 80.0, 80.0, &Paint::fill(Color::rgb(0, 0, 255)));
+            c.draw_text(
+                "b",
+                Rect::new(40, 40, 40, 40),
+                Color::rgb(0, 255, 0),
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        assert_eq!(px(&pm, 20, 20), [0, 0, 255, 255], "几何应盖住第一段文字");
+        assert_eq!(
+            px(&pm, 60, 60),
+            [0, 255, 0, 255],
+            "第二段文字应压在几何之上"
+        );
+    }
+
+    /// scale=1.5：逻辑坐标不变，文本块与落点都按物理放大。
+    #[test]
+    fn text_placement_scales_with_dpi() {
+        let mut eng = MockGlyphEngine::new((10, 4));
+        let Some(pm) = render_gpu_text(150, 60, 1.5, WHITE, &mut eng, &|c| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 100, 20),
+                BLACK,
+                Align::Center,
+                &TextStyle::new(12.0),
+            );
+        }) else {
+            return;
+        };
+        let b = ink_bounds(&pm, WHITE_PX).expect("应画出文字");
+        // 物理 rect 150 宽、块 15 宽 → x0 = (150-15)/2 = 67.5 → 取整 67 或 68。
+        assert!(
+            (67..=68).contains(&b.0) && b.2 - b.0 == 15,
+            "1.5x 下应居中且块宽 15px，实得 {b:?}"
+        );
+        // 物理 rect 高 30、块高 6 → y0 = (30-6)/2 = 12。
+        assert_eq!((b.1, b.3), (12, 18), "1.5x 下的垂直居中不对，实得 {b:?}");
+    }
+
+    /// 完全落在裁剪之外的文字不该走光栅（滚动列表里这是绝大多数行的路径）。
+    #[test]
+    fn text_outside_the_clip_is_not_rastered() {
+        let mut eng = MockGlyphEngine::new((10, 4));
+        let Some(_) = render_gpu_text(60, 60, 1.0, WHITE, &mut eng, &|c| {
+            c.save();
+            c.clip_rect(Rect::new(0, 0, 10, 10));
+            c.draw_text(
+                "x",
+                Rect::new(0, 40, 60, 12),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            c.restore();
+        }) else {
+            return;
+        };
+        assert_eq!(eng.calls, 0, "裁剪外的文字应在光栅前就被剔除");
+    }
+
+    /// 真 Core Text 的**墨量比对**：软后端（直接合成进 pixmap）与 GPU 后端
+    /// （光栅成 alpha mask → 纹理 → 调色合成）画同一段字，比墨迹范围与总墨量。
+    ///
+    /// 只在 macOS 上跑——上面那些 mock 判据管的是「位图往哪儿贴」，这一组管的是
+    /// 「贴上去的像不像」，而后者只有真引擎能回答。判据用墨量而不是逐像素：两条
+    /// 光栅路径（真背景上直接抗锯齿混合 vs 透明底光栅再合成）的边缘取值必然有差异，
+    /// 逐像素比会把两个都对的实现判成不一致；墨量则能抓住「整体偏胖/偏瘦」「位置偏了」
+    /// 「漏画了一块」这三类真问题（memory「视觉效果要量化验证」的同一条教训）。
+    #[cfg(target_os = "macos")]
+    mod coretext_ink {
+        use super::*;
+        use crate::text::CoreTextEngine;
+
+        /// 墨迹范围各边允许的偏差（物理像素）。
+        ///
+        /// 实测六个场景**全部为 0**——两条路径的字形位置逐像素重合。留 1px 是给不同
+        /// 系统版本/字体版本的度量微调留的余量，不是给实现留的。
+        const BOUND_TOL: i64 = 1;
+        /// 总墨量的相对差上限。
+        ///
+        /// 实测：单行英文/中文、折行长文、半透明、2x 缩放五个场景 **0.00%**（逐字节
+        /// 相同——mask 与直接合成走的是同一份 Core Text 光栅），只有居中对齐是 0.14%，
+        /// 差在水平亚像素相位（CG 的字形水平定位不吸附像素，而 mask 只能按相位 0 光栅
+        /// 一份，见 `draw_text` 的注释）。取 2% ≈ 实测最差值的 14 倍余量：够容忍字体
+        /// 版本差异，又能在「换了条光栅路径导致字重变了」时立刻报警——最初把 mask 画在
+        /// 透明底上时，这个数是 13~17%。
+        const INK_TOL: f64 = 0.02;
+
+        /// 白底上的总墨量（各通道相对 255 的偏离之和）。
+        fn ink_amount(pm: &Pixmap) -> f64 {
+            pm.data()
+                .chunks_exact(4)
+                .map(|p| (0..3).map(|i| (255 - p[i]) as f64).sum::<f64>())
+                .sum()
+        }
+
+        /// 同场景两条路径各画一遍并比对。
+        fn compare(name: &str, w: u32, h: u32, scale: f32, draw: &dyn Fn(&mut dyn Canvas)) {
+            let mut soft = Pixmap::new(w, h).expect("软后端 pixmap");
+            soft.fill(sk_color(WHITE));
+            {
+                let mut eng = CoreTextEngine::new();
+                eng.set_scale(scale);
+                let mut c = SkiaCanvas::with_text(&mut soft, &mut eng, scale);
+                draw(&mut c);
+            }
+            let Some(mut off) = offscreen(w, h) else {
+                return;
+            };
+            let mut eng = CoreTextEngine::new();
+            eng.set_scale(scale);
+            let gpu = draw_on(&mut off, scale, WHITE, &mut eng, draw).expect("GPU 帧读回");
+
+            let (bs, bg) = (
+                ink_bounds(&soft, WHITE_PX).expect("软后端应画出字"),
+                ink_bounds(&gpu, WHITE_PX).expect("GPU 应画出字"),
+            );
+            let (is, ig) = (ink_amount(&soft), ink_amount(&gpu));
+            let rel = if is > 0.0 { (ig - is).abs() / is } else { 1.0 };
+            println!(
+                "[{name}] 墨迹 软={bs:?} GPU={bg:?}  墨量 软={is:.0} GPU={ig:.0} 相对差={:.2}%",
+                rel * 100.0
+            );
+
+            let edges = [
+                ("左", bs.0, bg.0),
+                ("上（首行基线位置）", bs.1, bg.1),
+                ("右", bs.2, bg.2),
+                ("下", bs.3, bg.3),
+            ];
+            for (which, a, b) in edges {
+                let d = (a as i64 - b as i64).abs();
+                assert!(
+                    d <= BOUND_TOL,
+                    "[{name}] 墨迹{which}边差 {d}px（软={a} GPU={b}），超过 {BOUND_TOL}px"
+                );
+            }
+            assert!(
+                rel <= INK_TOL,
+                "[{name}] 墨量相对差 {:.2}% 超过 {:.0}%（软={is:.0} GPU={ig:.0}）",
+                rel * 100.0,
+                INK_TOL * 100.0
+            );
+        }
+
+        #[test]
+        fn single_line_latin() {
+            compare("单行英文", 240, 40, 1.0, &|c| {
+                c.draw_text(
+                    "Hello windui",
+                    Rect::new(10, 8, 220, 24),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(14.0),
+                );
+            });
+        }
+
+        #[test]
+        fn single_line_cjk() {
+            compare("单行中文", 240, 40, 1.0, &|c| {
+                c.draw_text(
+                    "中文排版测试",
+                    Rect::new(10, 8, 220, 24),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(14.0),
+                );
+            });
+        }
+
+        /// 折行：rect 宽小于整段宽，两条路径必须折在同一处、行数一致。
+        #[test]
+        fn wrapped_paragraph() {
+            compare("折行长文", 200, 140, 1.0, &|c| {
+                c.draw_text(
+                    "The quick brown fox jumps over the lazy dog near the river bank.",
+                    Rect::new(10, 10, 160, 120),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(13.0),
+                );
+            });
+        }
+
+        /// 居中对齐：块的水平落点是 GPU 侧自己算的，这条钉住它与引擎内部定位一致。
+        #[test]
+        fn centered_line() {
+            compare("居中对齐", 240, 40, 1.0, &|c| {
+                c.draw_text(
+                    "Centered",
+                    Rect::new(10, 8, 220, 24),
+                    BLACK,
+                    Align::Center,
+                    &TextStyle::new(14.0),
+                );
+            });
+        }
+
+        /// 半透明文字色：覆盖度 × alpha 的调制是否与直接合成同量级。
+        #[test]
+        fn translucent_color() {
+            compare("半透明字", 240, 40, 1.0, &|c| {
+                c.draw_text(
+                    "Translucent",
+                    Rect::new(10, 8, 220, 24),
+                    Color::rgba(0, 0, 0, 128),
+                    Align::Start,
+                    &TextStyle::new(14.0),
+                );
+            });
+        }
+
+        /// 2x 屏：字号物理化后重新排版（不是把 1x 的位图放大），两条路径同源。
+        #[test]
+        fn hidpi_scale_2() {
+            compare("2x 缩放", 480, 80, 2.0, &|c| {
+                c.draw_text(
+                    "Retina 文字",
+                    Rect::new(10, 8, 220, 24),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(14.0),
+                );
+            });
+        }
     }
 }
