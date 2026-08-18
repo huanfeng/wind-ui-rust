@@ -9,7 +9,9 @@
 //! 去 padding、以及**字节语义（预乘 RGBA 直通）**这几件事。P1 的图元会在同一个纹理上加
 //! 自己的 pass，再走同一个 `readback` 做逐像素比对。
 
+use super::canvas::WgpuTarget;
 use super::device::SharedGpu;
+use super::prim::PrimRenderer;
 use crate::geometry::Color;
 use std::sync::Arc;
 use tiny_skia::Pixmap;
@@ -38,6 +40,9 @@ pub struct OffscreenGpu {
     h: u32,
     /// 对齐后的每行字节数（≥ `w * 4`）。
     row_bytes: u32,
+    /// 图元管线与实例缓冲。懒建（清屏/readback 那条闭环用不到它，没必要为纯 P0 的
+    /// 调用付一次管线编译），此后跨帧复用——每帧重建管线会把帧时间全吃掉。
+    prim: Option<PrimRenderer>,
 }
 
 impl OffscreenGpu {
@@ -86,7 +91,23 @@ impl OffscreenGpu {
             w,
             h,
             row_bytes,
+            prim: None,
         })
+    }
+
+    /// 取本纹理的 [`RenderTarget`](crate::render::RenderTarget)：图元 pass 渲到同一张
+    /// 颜色纹理上，画完仍走 [`Self::readback`] 取回，于是 P0 钉下的字节语义（预乘直通、
+    /// 行对齐去 padding）原样适用于 P1 的图元。
+    ///
+    /// 目标是 `LoadOp::Load`——先 [`Self::clear`] 铺背景再 `make_canvas` 画内容，
+    /// 与「窗口每帧先清屏后绘制」是同一条路径。
+    pub fn target(&mut self) -> WgpuTarget<'_> {
+        if self.prim.is_none() {
+            self.prim = Some(PrimRenderer::new(&self.gpu, TEXTURE_FORMAT));
+        }
+        // 分字段借用：gpu/view 只读、prim 可变，互不冲突。
+        let prim = self.prim.as_mut().expect("prim renderer 刚建好");
+        WgpuTarget::new(self.gpu.clone(), &self.view, prim, (self.w, self.h))
     }
 
     /// 物理像素尺寸 (w, h)。
