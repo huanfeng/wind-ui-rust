@@ -680,10 +680,16 @@ impl crate::sync::RawWakeSignal for Win32Wake {
 unsafe fn register_window_class(hinst: HINSTANCE) {
     let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
-    // MAKEINTRESOURCE(1)=IDI_APPLICATION：整数 1 当资源序号传入（低 64K 表示序号而非字符串指针）。
+    // 打包工具（wind-packer/editpe）注入正式图标时按惯例名 "MAINICON" 写组图标，不会覆盖
+    // 数字序号 1（那是 .rc 里 `1 ICON "..."` 编译期烙入的占位图）。优先按名字取，命中的才是
+    // 打包后的真实图标；开发态直接 `cargo run`（未过打包工具）时按名字取不到，
+    // 回退到数字序号 1 取编译期占位图，行为不变。
+    // MAKEINTRESOURCE(1)：整数 1 当资源序号传入（低 64K 表示序号而非字符串指针）。
     // 这不是“悬垂指针”，故抑制 clippy；其自动建议 ptr::dangling() 会把序号改成 u16 对齐值(2)，是语义错误。
     #[allow(clippy::manual_dangling_ptr)]
-    let hicon = LoadIconW(Some(hinst), PCWSTR(1usize as *const u16)).unwrap_or_default();
+    let hicon = LoadIconW(Some(hinst), w!("MAINICON"))
+        .or_else(|_| LoadIconW(Some(hinst), PCWSTR(1usize as *const u16)))
+        .unwrap_or_default();
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(wnd_proc),
