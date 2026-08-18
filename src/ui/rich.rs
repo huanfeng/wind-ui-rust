@@ -32,7 +32,9 @@
 //!   标点/空白止，Latin 单词）、**三击选段落**（跨软换行，同浏览器）、Ctrl+A 全选；Ctrl+C 复制选区
 //!   （无选区复制全文，Ctrl+Shift+C 强制全文）；右键菜单随选区态提供「复制/复制全部/全选」
 //!   （`Element::copy_menu(false)` 关闭）。拼装经 Frag 的 line/block 源锚点：跨块补
-//!   换行、块内软换行按 CJK/Latin 边界补空格。选区随重排失效（碎片下标不稳定）。
+//!   换行、块内软换行按 CJK/Latin 边界补空格。选区随**真**重排失效（碎片下标不稳定）——
+//!   宽度落在布局的等价区间内不算重排（见 `RichLayout::wrap_hi`）：Wrap 宽下 measure
+//!   拿 avail.w、paint 拿 content.w，两者天然不等，按相等判缓存会让选区活不过一帧。
 //! - **行数截断**：[`Para::clamp`]（长释义预览）——未展开时最多排 N 行，截断处
 //!   缀「… 展开」可点击标记；展开态是 `Signal<bool>`，同折叠的状态分离纪律。
 //! - **动态文档**：[`super::Element::rich_signal`] 绑定 `Signal<RichDoc>`（词典切
@@ -556,6 +558,16 @@ struct RichLayout {
     dividers: Vec<(i32, i32)>,
     /// 自然尺寸（最宽行 × 总高）。
     size: Size,
+    /// 本布局有效的约束宽上界（无约束排出时为 `i32::MAX`）。任何落在
+    /// `[size.w, wrap_hi]` 内的约束宽都产出**同一份**布局：贪心逐 token 装行下，
+    /// 每行宽 ≤ `size.w` ≤ 新约束宽，而每处换行都因"再加一个 token 会超 `wrap_hi`
+    /// （≥ 新约束宽）"发生——换行点不变，碎片与坐标全等。
+    ///
+    /// 这条区间是选区能活过一帧的前提：`measure` 拿父给的 `avail.w`、`paint` 拿
+    /// 分配到的 `content.w`，Wrap 宽控件下两者天然不等（如 500 vs 自然宽 93）。
+    /// 若按"宽度必须相等"判缓存，则 measure/paint 每帧交替重排、`sel` 随之清空，
+    /// 而宿主对 Down/Up/按键都置 `needs_relayout`——全选与拖选的高亮永远等不到下一帧。
+    wrap_hi: i32,
     key: LayoutKey,
 }
 
@@ -1171,6 +1183,7 @@ fn layout_doc(
         headers,
         dividers: w.dividers,
         size: Size::new(natural_w, w.y),
+        wrap_hi: key.wrap_w.unwrap_or(i32::MAX),
         key,
     }
 }
@@ -1365,12 +1378,18 @@ impl RichText {
         let th = crate::theme::current();
         let scale = m.scale();
         let mut cache = self.cache.borrow_mut();
+        // 无约束（Wrap 宽）视作上界无穷大，与有约束宽走同一条区间判定。
+        let want_w = wrap_w.unwrap_or(i32::MAX);
         let hit = cache.as_ref().is_some_and(|l| {
             let k = &l.key;
             // 动画期产物恒 miss：高度补间每帧变化，且落定后还需一次重排
             // 得到无裁剪的稳定布局（否则冻结在最后一个动画帧）。
             !l.animated
-                && k.wrap_w == wrap_w
+                // 宽度按等价区间判定而非相等（见 `RichLayout::wrap_hi`）：measure 的
+                // avail.w 与 paint 的 content.w 在 Wrap 宽下天然不等，按相等判会
+                // 每帧交替重排、把选区一并清掉。
+                && l.size.w <= want_w
+                && want_w <= l.wrap_hi
                 && k.family.as_deref() == style.font_family.as_deref()
                 && k.size_bits == style.font_size.to_bits()
                 && k.weight == style.font_weight
@@ -2469,9 +2488,37 @@ mod tests {
         let style = Style::default();
         rt.measure(Size::new(200, 0), &style, &mut crate::text::NullTextEngine);
         rt.sel.set(Some((0, 3)));
-        // 宽度变化 → 布局键 miss → 重排 → 选区失效。
-        rt.measure(Size::new(100, 0), &style, &mut crate::text::NullTextEngine);
+        // 收窄到自然宽（4×9=36）以下 → 折行点变 → 真重排 → 选区失效。
+        rt.measure(Size::new(20, 0), &style, &mut crate::text::NullTextEngine);
         assert!(rt.sel.get().is_none(), "重排后选区应清空");
+    }
+
+    #[test]
+    fn measure_paint_width_gap_keeps_selection() {
+        // 回归：Wrap 宽控件下 measure 收到父给的 avail.w、paint 收到分配到的
+        // content.w（= 自然宽），二者天然不等。曾按"宽度必须相等"判缓存，于是
+        // 每帧交替重排、顺手清空选区——而宿主对 Down/Up/按键都置 needs_relayout，
+        // 结果 Ctrl+A 全选与拖选松手后的高亮永远等不到下一帧（对话框内必现）。
+        let doc = RichDoc::new().para("汉汉汉汉");
+        let rt = RichText::new(doc);
+        let style = Style::default();
+        // measure：父给 500 可用宽。
+        let sz = rt.measure(Size::new(500, 0), &style, &mut crate::text::NullTextEngine);
+        assert!(sz.w < 500, "自然宽应小于可用宽，否则测不到本回归");
+        rt.sel.set(Some((0, 3)));
+        // paint：以自然宽（节点实际分配宽）再确保一次布局。
+        {
+            let mut m = EngineMeasurer(&mut crate::text::NullTextEngine);
+            rt.ensure_layout(Some(sz.w), &style, &mut m);
+        }
+        assert_eq!(
+            rt.sel.get(),
+            Some((0, 3)),
+            "paint 的 content.w 不应清掉选区"
+        );
+        // 下一帧 measure 又回到 avail.w：同样不得重排。
+        rt.measure(Size::new(500, 0), &style, &mut crate::text::NullTextEngine);
+        assert_eq!(rt.sel.get(), Some((0, 3)), "回到 avail.w 也不应清掉选区");
     }
 
     #[test]
@@ -2506,6 +2553,38 @@ mod tests {
             labels,
             vec!["复制", "复制全部", "全选"],
             "有选区时应提供三项且右键不清选区"
+        );
+    }
+
+    #[test]
+    fn selection_survives_host_relayout_on_wrap_width() {
+        // 端到端回归（对话框内 Wrap 宽 RichText 的必现场景）：宿主对按键与
+        // Down/Up 都置 `needs_relayout`（src/app/mod.rs），下一帧 layout_root
+        // 以 avail.w 再 measure 一次。曾因 measure/paint 宽度不等而每帧重排，
+        // Ctrl+A 全选的选区在同一帧就被清掉——高亮永远不出现。
+        // 注意本例刻意不设 width：显式宽下 avail.w == content.w，测不到本回归。
+        let doc = RichDoc::new().para("汉字词典");
+        let (mut tree, node) = build(Element::rich(doc), 300, 300);
+        tree.dispatch_key(ctrl_key(0x41, false), Some(node));
+        // 宿主本帧重排。
+        tree.layout_root(Size::new(300, 300), &mut crate::text::NullTextEngine);
+        // 菜单项数随选区态变化，借它观测选区是否还在。
+        let (mut hover, mut cap) = (None, None);
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Down,
+                crate::geometry::Point::new(10, 7),
+                MouseButton::Right,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        let menu = res.menu.expect("右键应请求菜单");
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["复制", "复制全部", "全选"],
+            "全选后经宿主重排，选区应存活"
         );
     }
 
