@@ -1,7 +1,9 @@
 # 跨平台 GPU 渲染后端设计（macOS / Linux）
 
-> 状态：设计稿（未实施）。对照文档：`docs/DESIGN.md`（总体架构）、
-> `docs/MACOS_PORTING.md`（macOS 平台层）、`src/platform/win32/d2d.rs`（Windows GPU 后端先例）。
+> 状态：**P0~P3 已落地**（2026-08-18，`src/render/gpu/`，feature `gpu`），macOS 窗口
+> 可用 GPU 呈现，Canvas 图元集全部实现；P4 收尾同日完成（CI/文档/基准）；P5 按需。
+> 对照文档：`docs/DESIGN.md`（总体架构）、`docs/MACOS_PORTING.md`（macOS 平台层）、
+> `src/platform/win32/d2d.rs`（Windows GPU 后端先例）。
 
 ## 1. 背景与目标
 
@@ -278,6 +280,19 @@ Windows 上 `gpu` feature 与 `d2d` 共存时 D2D 优先（成熟度）。运行
 
 依赖关系：P0→P1→P2→P3→P4 串行；P5 各项独立。每阶段独立可合并、
 可发布（feature 默认关，主线不受影响）。
+
+### 实测基准（P4 验收，2026-08-18，验证机 Apple M4 @2x，settings 例子，release）
+
+| 路径 | 首帧（全窗/冷缓存） | 稳态 |
+| --- | --- | --- |
+| 软光栅 | 30.7ms | **局部重绘** 0.7~1.0ms/帧 |
+| GPU（Metal） | 55.9ms（文字缓存全冷） | **全窗重绘** 2.6~2.8ms/帧 |
+
+结论：全窗工作负载（动画、滚动、大面积失效、4K/HiDPI）GPU 约 12×；但静态 UI 的
+小面积更新上，软后端的 damage 快路（0.8ms）仍胜过 GPU 全窗（2.6ms）——GPU 后端
+`as_pixmap()=None` 恒全窗是当前设计的既定取舍。GPU 稳态的大头是文字：48 条 run
+各一次 command buffer 提交（约 90µs/次），P5 的 glyph atlas 把它压回整帧一次提交
+后预计 <1.5ms。首帧偏高来自文字 run-cache 冷启动（48 次 Core Text 光栅 + 上传）。
 
 ## 8. 风险与对策
 

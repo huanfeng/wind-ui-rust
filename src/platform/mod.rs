@@ -433,9 +433,10 @@ impl Default for WindowConfig {
 
 /// 渲染后端的选择方式。
 ///
-/// 两条后端并非替代关系：GPU（Direct2D）走系统的几何与文字光栅，是 Windows 上更
-/// 正统的路径——ClearType 子像素混合由 D2D 直接完成，而软后端得自己把三通道覆盖率
-/// 压进单通道 alpha。软光栅则在没有可用 GPU、或内存紧张时兜底。
+/// 两条后端并非替代关系。GPU 路径各平台不同但语义一致：Windows 走 Direct2D
+/// （ClearType 子像素混合由 D2D 直接完成，是更正统的一条）；macOS 走 wgpu/Metal
+/// （`gpu` feature，几何用 SDF shader、文字仍由 Core Text 光栅、GPU 只合成，
+/// 见 `render/gpu`）。软光栅则在没有可用 GPU、或内存紧张时兜底。
 ///
 /// ```no_run
 /// # use windui::prelude::*;
@@ -468,9 +469,16 @@ pub enum Renderer {
 impl Renderer {
     /// 是否应当尝试 GPU 后端。
     ///
-    /// 仅 Windows + d2d feature 下有调用者：其余平台没有可尝试的 GPU 后端，
-    /// 只有 `requires_gpu` 仍需判断（`Renderer::Gpu` 在那里无从满足，须报错）。
-    #[cfg_attr(not(all(windows, feature = "d2d")), allow(dead_code))]
+    /// 调用者：Windows + d2d feature（D2D 后端）与 macOS + gpu feature（wgpu 后端）。
+    /// 两者都关掉的平台没有可尝试的 GPU 后端，只有 `requires_gpu` 仍需判断
+    /// （`Renderer::Gpu` 在那里无从满足，须报错）。
+    #[cfg_attr(
+        not(any(
+            all(windows, feature = "d2d"),
+            all(target_os = "macos", feature = "gpu")
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn wants_gpu(self) -> bool {
         matches!(self, Renderer::Auto | Renderer::Gpu)
     }

@@ -445,9 +445,11 @@ impl App {
     /// - [`Renderer::Software`]：强制软光栅，内存敏感场景用。
     /// - [`Renderer::Gpu`]：强制 GPU，拿不到就报错终止（测试与排障用）。
     ///
-    /// GPU 路径在 Windows 上是更正统的一条：ClearType 的子像素混合由 Direct2D 直接
-    /// 完成，而软后端得自己把三通道覆盖率压进单通道 alpha。macOS 目前恒软光栅，
-    /// 本设置在那里只有 `Gpu` 会因无法满足而报错。
+    /// GPU 路径按平台取最合适的实现：Windows 走 Direct2D（ClearType 子像素混合由
+    /// D2D 直接完成，是更正统的一条）；macOS 走 wgpu/Metal（需开 `gpu` feature，
+    /// 文字仍由 Core Text 光栅、GPU 只合成，观感与软路径一致）。环境变量
+    /// `WINDUI_D2D`（Windows）/`WINDUI_GPU`（macOS）可在运行时强制或禁用，
+    /// 便于排障与验证回退路径。
     pub fn renderer(mut self, r: Renderer) -> Self {
         self.cfg.renderer = r;
         self

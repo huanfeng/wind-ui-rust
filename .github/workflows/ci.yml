@@ -50,6 +50,13 @@ jobs:
       # 关闭时的门控疏漏一路溜到发布版才被发现（0.11.0 即如此）。
       - name: Clippy（关闭默认 feature）
         run: cargo clippy --no-default-features --all-targets -- -D warnings
+      # 跨平台 GPU 后端（wgpu）。测试依赖真实适配器：Windows runner 走 WARP 软件
+      # 回退、macOS runner 走 Metal；两者都拿不到时 GPU 用例会打印「跳过」后返回
+      # ——绿灯不等于跑了，怀疑时进日志搜「跳过：本机没有可用的 wgpu 适配器」。
+      - name: Clippy（gpu feature）
+        run: cargo clippy --all-targets --features gpu -- -D warnings
+      - name: Test（gpu feature）
+        run: cargo test --features gpu
 
   dco:
     name: DCO sign-off
