@@ -163,6 +163,43 @@ impl Offscreen {
     }
 }
 
+/// 报告一次合成点击的命中结果。
+///
+/// **落空时总是打印**，即使没开 `WINDUI_HITS`：合成点击不命中任何节点是完全无声的
+/// ——不报错、不 panic，截出来的图和没点一样。于是"坐标写错了"与"框架丢了这次点击"
+/// 在现象上无法区分，只能靠反复猜坐标。一行输出就能终结这类误判。
+///
+/// 命中但未被消费同样值得报：那说明点在了非交互区域（标签、留白、被遮住的节点）上。
+///
+/// 命中且被消费是常态，只在 `WINDUI_HITS=1` 时打印——想确认"到底点到了哪个节点"时用，
+/// 例如内容重建改变了布局、旧坐标已经指向别的控件。
+fn report_hit(handler: &dyn AppHandler, logical: (i32, i32), trace: bool) {
+    let Some(hit) = handler.last_pointer_hit() else {
+        return;
+    };
+    let (x, y) = logical;
+    match hit.node {
+        None => {
+            eprintln!("[windui] --click {x} {y} 未命中任何节点（该坐标处是空白）——截图将与没点一样")
+        }
+        Some(id) if !hit.consumed => {
+            let b = hit.bounds;
+            eprintln!(
+                "[windui] --click {x} {y} 命中 {id:?} bounds=({},{} {}×{})，但无人消费——点在了非交互区域上",
+                b.x, b.y, b.w, b.h
+            );
+        }
+        Some(id) if trace => {
+            let b = hit.bounds;
+            eprintln!(
+                "[windui] --click {x} {y} → {id:?} bounds=({},{} {}×{}) consumed",
+                b.x, b.y, b.w, b.h
+            );
+        }
+        Some(_) => {}
+    }
+}
+
 /// 离屏渲染一帧并保存 PNG——**平台无关**逻辑，Windows 与 macOS 的 `run` 在
 /// `cfg.screenshot.is_some()` 时共用。无需窗口，适合自动化视觉回归。
 ///
@@ -194,6 +231,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     }
     // 可选：依次合成左键单击（Down+Up），捕获下拉展开等。多个 `--click` 按序回放，
     // 用于验证需要连续点击才能到达的状态（如复选菜单连点多个开关而菜单不关）。
+    let trace_hits = std::env::var("WINDUI_HITS").is_ok_and(|v| v != "0");
     for &(lx, ly) in &cfg.screenshot_clicks {
         let pos = Point::new(
             (lx as f32 * s).round() as i32,
@@ -204,6 +242,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             pos,
             MouseButton::Left,
         ));
+        report_hit(handler.as_ref(), (lx, ly), trace_hits);
         handler.on_pointer(PointerEvent::single(
             PointerKind::Up,
             pos,
@@ -384,6 +423,21 @@ pub struct HotkeyBinding {
 }
 
 /// 窗口配置（平台无关）。由 `App` 构建器组装，交各平台后端的 `run` 消费。
+/// 一次指针事件的命中结果，供离屏截图路径诊断"这一下点到哪儿了"。
+///
+/// 存在的理由：合成点击**不命中任何可交互节点时是完全无声的**——不报错、不 panic，
+/// 截出来的图和没点一样。于是"坐标写错了"与"框架丢了这次点击"在现象上无法区分，
+/// 只能靠反复猜坐标。见 [`run_offscreen`]。
+#[derive(Debug, Clone, Copy)]
+pub struct PointerHit {
+    /// 命中的节点（`None` = 落在空白处，没有任何节点接住）。
+    pub node: Option<crate::core::NodeId>,
+    /// 命中节点的绝对矩形（逻辑坐标）。`node` 为 `None` 时是零矩形。
+    pub bounds: crate::geometry::Rect,
+    /// 事件是否被某个控件**消费**。命中了节点但未消费，说明点在了非交互区域上。
+    pub consumed: bool,
+}
+
 /// 截屏前合成的一次键盘输入。
 ///
 /// `Text` 逐字符合成 [`Key::Char`]——**不经平台键码映射**，因为 `Key::Char` 本就是逻辑
@@ -571,6 +625,14 @@ pub trait AppHandler {
     }
     /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
     fn set_scale(&mut self, _scale: f32) {}
+
+    /// **诊断用**：最近一次指针事件的命中结果（`None` = 尚无事件或实现未提供）。
+    ///
+    /// 只服务离屏截图路径的合成点击——见 [`run_offscreen`] 里对它的用法。默认实现回
+    /// `None`，故非 `UiHost` 的 handler（如 `RenderOnly`）无需关心。
+    fn last_pointer_hit(&self) -> Option<PointerHit> {
+        None
+    }
 
     /// 当前清屏色。`None` = 沿用 [`WindowConfig::bg`]（窗口创建时那份）。
     ///

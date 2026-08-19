@@ -77,6 +77,8 @@ cargo run --example <name> -- --screenshot out.png --scale 1.5   # 验证高 DPI
 #   两者可重复，并按写的顺序混合回放；走 handler.on_key，与真实按键同一条通路
 # 覆盖窗口尺寸（同时放开 min_size 下限，因为要验的正是下限处的布局）：
 #   --size W H
+# 命中诊断：点击落空时总会打印一行（落空是无声的，截图和没点一样）；
+#   WINDUI_HITS=1 额外打印成功命中的节点与矩形
 ```
 
 ```bash

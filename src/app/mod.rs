@@ -1106,6 +1106,9 @@ struct UiHost {
     tooltip: TooltipState,
     /// 触摸滚动手势（惯性 + 平移残差），见 [`fling`]。
     scroll: ScrollState,
+    /// 最近一次指针事件的命中结果，供离屏截图路径诊断（见 `AppHandler::last_pointer_hit`）。
+    /// 只在指针路径写，不参与任何绘制决策。
+    last_hit: Option<crate::platform::PointerHit>,
     /// 局部重绘仲裁与后备缓冲，见 [`damage`]。
     damage: DamageState,
     /// 最近一帧的逻辑窗口尺寸（菜单弹出位置钳制用）。
@@ -1290,6 +1293,7 @@ impl UiHost {
             toast: ToastHost::default(),
             tooltip: TooltipState::default(),
             scroll: ScrollState::default(),
+            last_hit: None,
             damage: DamageState::default(),
             logical_size: Size::new(0, 0),
             theme,
@@ -1731,6 +1735,14 @@ impl AppHandler for UiHost {
         let mut hover = self.hover;
         let mut capture = self.capture;
         let mut res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
+        // 诊断快照：命中的是哪个节点、有没有被消费。用 `hit_test` 而不是 `hover`——
+        // 后者在 Up/Leave 上会被清掉，而我们要记的是「这一下点到哪儿了」。
+        let hit = self.tree.hit_test(ev.pos);
+        self.last_hit = Some(crate::platform::PointerHit {
+            node: hit,
+            bounds: hit.map(|id| self.tree.abs_bounds(id)).unwrap_or_default(),
+            consumed: res.consumed,
+        });
         self.hover = hover;
         self.capture = capture;
         // 悬停提示：记录指针位置；悬停节点变化时重新计时（隐藏旧提示、对新节点计时）。
@@ -1769,6 +1781,10 @@ impl AppHandler for UiHost {
             self.damage.needs_relayout = true;
         }
         repaint
+    }
+
+    fn last_pointer_hit(&self) -> Option<crate::platform::PointerHit> {
+        self.last_hit
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
@@ -3380,6 +3396,90 @@ mod tests {
             text.get(),
             "新词",
             "合成打字应落进 autofocus 的输入框，并覆盖被全选的旧内容"
+        );
+    }
+
+    /// 合成点击的命中结果应当可读——落空与"命中但无人消费"必须分得开。
+    ///
+    /// 没有它时错在哪：合成点击不命中任何节点是**完全无声**的，不报错不 panic，截出来
+    /// 的图和没点一样。于是"坐标写错了"与"框架丢了这次点击"在现象上无法区分，只能靠
+    /// 反复猜坐标——wind-dict 就是这么把一次坐标失误误判成上游丢帧的。
+    #[test]
+    fn pointer_hit_distinguishes_miss_from_unconsumed() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 200, 200).content(
+            Element::col()
+                .padding(10)
+                .child(Element::button("可点").height(30))
+                .child(Element::label("纯文本").width(120).height(30))
+                .child(Element::flex_spacer()),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 200).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 200));
+        // 必须 Down+Up 成对：只发 Down 的话按钮的指针捕获不释放，后续 Down 全被它接走，
+        // 测出来的"命中"其实是捕获转发的结果，不是命中测试的结果。
+        let click = |h: &mut UiHost, p: Point| {
+            h.on_pointer(PointerEvent::single(
+                PointerKind::Down,
+                p,
+                MouseButton::Left,
+            ));
+            h.on_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        };
+
+        assert!(
+            handler.last_pointer_hit().is_none(),
+            "尚无指针事件时不该编造命中结果"
+        );
+
+        // 按钮：命中且被消费。
+        let btn = handler.focus.order[0];
+        let b = handler.tree.abs_bounds(btn);
+        click(&mut handler, Point::new(b.x + b.w / 2, b.y + b.h / 2));
+        let hit = handler.last_pointer_hit().expect("应有命中记录");
+        assert_eq!(hit.node, Some(btn));
+        assert!(hit.consumed, "点按钮应被消费");
+
+        // 纯文本：命中了节点，但没人消费——点在非交互区域上。
+        // 定宽是为了让坐标确定：不设宽时标签按内容自适应，点在文字右侧的空处就落到
+        // 容器上了，而无 widget 的容器本身不是命中目标。
+        click(&mut handler, Point::new(60, 55));
+        let hit = handler.last_pointer_hit().expect("应有命中记录");
+        assert!(hit.node.is_some(), "标签本身是个节点，应当命中");
+        assert!(
+            !hit.consumed,
+            "标签不消费点击——这一档必须与「完全没命中」分得开，两者的排查方向不同"
+        );
+
+        // 窗口内的空白：什么都没命中。
+        click(&mut handler, Point::new(195, 195));
+        let hit = handler.last_pointer_hit().expect("应有命中记录");
+        assert_eq!(hit.node, None, "空白处应报未命中");
+        assert!(!hit.consumed);
+    }
+
+    /// `NodeId` 的 Debug 是紧凑格式——诊断输出里最常出现的就是它。
+    ///
+    /// 没有它时错在哪：派生格式 `NodeId { index: 12, generation: 0 }` 一行里塞三五个就没法
+    /// 读了。代际非 0 必须显示，否则"旧 id 指向新节点"这类问题在输出里看不出来。
+    #[test]
+    fn node_id_debug_is_compact_and_keeps_generation() {
+        use crate::core::Tree;
+        let mut tree = Tree::new();
+        let a = Element::leaf().build(&mut tree);
+        assert_eq!(format!("{a:?}"), "#0", "首个节点应是 #0，不带代际");
+        tree.remove(a);
+        let b = Element::leaf().build(&mut tree);
+        assert_eq!(
+            format!("{b:?}"),
+            "#0g1",
+            "复用槽位必须带出代际，否则与被回收的旧 id 在输出里长得一样"
         );
     }
 }

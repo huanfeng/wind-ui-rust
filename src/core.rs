@@ -115,10 +115,25 @@ pub trait ClipboardProvider {
 }
 
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct NodeId {
     index: u32,
     generation: u32,
+}
+
+/// 紧凑格式 `#12`（复用过的槽位带代际：`#12g2`）。
+///
+/// 手写而非 `derive`：派生格式是 `NodeId { index: 12, generation: 0 }`，一行诊断里塞三五个
+/// 就没法读了，而 id 恰恰是诊断输出里最常出现的东西。代际为 0 时省略——绝大多数节点从未
+/// 被回收复用，带上只是噪声；非 0 时必须显示，否则"旧 id 指向新节点"这类问题看不出来。
+impl std::fmt::Debug for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.generation == 0 {
+            write!(f, "#{}", self.index)
+        } else {
+            write!(f, "#{}g{}", self.index, self.generation)
+        }
+    }
 }
 
 /// 纯内容控件接口。不持有也不访问树。
