@@ -237,6 +237,27 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         ));
         off.frame(handler, size, cfg.bg);
     }
+    // 可选：按序合成键盘输入（--type / --key）。走 `handler.on_key`——与真实按键**同一条
+    // 通路**（焦点裁决、Tab 兜底、控件回调都照常），不是旁路。每条之后出一帧，让重排与
+    // 响应式重建落地，下一次按键才作用在新树上。
+    for k in &cfg.screenshot_keys {
+        match k {
+            ScreenshotKey::Text(t) => {
+                for ch in t.chars() {
+                    handler.on_key(KeyEvent {
+                        key: crate::event::Key::Char(ch),
+                        pressed: true,
+                        shift: false,
+                        ctrl: false,
+                    });
+                }
+            }
+            ScreenshotKey::Key(ev) => {
+                handler.on_key(*ev);
+            }
+        }
+        off.frame(handler, size, cfg.bg);
+    }
     // 可选：合成一次悬停（Move）并等待超过提示延时，捕获 tooltip 等悬停浮层。
     if let Some((lx, ly)) = cfg.screenshot_hover {
         let pos = Point::new(
@@ -363,6 +384,18 @@ pub struct HotkeyBinding {
 }
 
 /// 窗口配置（平台无关）。由 `App` 构建器组装，交各平台后端的 `run` 消费。
+/// 截屏前合成的一次键盘输入。
+///
+/// `Text` 逐字符合成 [`Key::Char`]——**不经平台键码映射**，因为 `Key::Char` 本就是逻辑
+/// 字符（`TextInput` 直接吃它）。故 `--type 中文` 也能工作，无需 IME。
+#[derive(Debug, Clone)]
+pub enum ScreenshotKey {
+    /// 一段文本，逐字符输入。
+    Text(String),
+    /// 一个具名键（Enter / Escape / Tab / Up / Down / ...），可带修饰键。
+    Key(KeyEvent),
+}
+
 pub struct WindowConfig {
     pub title: String,
     pub width: i32,
@@ -387,6 +420,12 @@ pub struct WindowConfig {
     /// 划选高亮、拖动排序这类"只有拖出去才成立"的视觉——单击（`screenshot_clicks`）
     /// 到不了这些状态。
     pub screenshot_drag: Option<(i32, i32, i32, i32)>,
+    /// 截屏前合成的键盘输入，按序回放。
+    ///
+    /// 与 `screenshot_clicks` 同为可重复参数，但两者**各自成序**——键盘与指针的相对
+    /// 先后无法表达（`--click A --type x --click B` 里两次点击都发生在打字之前）。
+    /// 够用于「点进某页 → 在输入框打字」这类场景；需要严格交错时拆成多次截图。
+    pub screenshot_keys: Vec<ScreenshotKey>,
     /// 系统托盘图标（None=不创建）。窗口创建后安装，窗口销毁时自动清理。
     pub tray: Option<Tray>,
     /// 全局热键绑定（空=不注册）。窗口创建后注册，窗口销毁时自动注销。
@@ -426,6 +465,7 @@ impl Default for WindowConfig {
             screenshot_clicks: Vec::new(),
             screenshot_hover: None,
             screenshot_drag: None,
+            screenshot_keys: Vec::new(),
             tray: None,
             hotkeys: Vec::new(),
             start_hidden: false,

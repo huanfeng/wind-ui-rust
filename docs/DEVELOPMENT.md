@@ -70,6 +70,18 @@ cargo run --example <name> -- --screenshot out.png --scale 1.5   # 验证高 DPI
 # 截屏前合成交互（验证菜单/下拉/悬停视觉）：
 #   --click X Y / --rclick X Y / --hover X Y（逻辑坐标，X 与 Y 是两个参数，不是 "X,Y"）
 #   --drag X0 Y0 X1 Y1（合成 Down→Move→Up，验证划选高亮这类拖出才成立的视觉）
+# 截屏前合成键盘（验证输入中/候选高亮/焦点归属这类只有打字才到得了的状态）：
+#   --type <text>   逐字符输入（不经平台键码映射，中文可直接打）
+#   --key <name>    具名键 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/Backspace/Delete/Space
+#                   或单个字符，可加 ctrl+ / shift+ 前缀（--key ctrl+a 全选）
+#   两者可重复，并按写的顺序混合回放；走 handler.on_key，与真实按键同一条通路
+# 覆盖窗口尺寸（同时放开 min_size 下限，因为要验的正是下限处的布局）：
+#   --size W H
+```
+
+```bash
+# 例：把「打字过筛 → ↑↓ 选候选 → Tab 接受补全」整条键盘通路截下来
+cargo run --release --example palette -- --screenshot out.png --type para --key Down --key Tab
 ```
 
 `--screenshot` 走平台无关的 `platform::run_offscreen`，无需开窗，适合自动化视觉回归。

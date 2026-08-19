@@ -27,12 +27,21 @@
 //! （这里是 `cursor: Signal<usize>`）。高亮条是一个 `bg_role_alpha` 的兄弟节点，
 //! 靠 `visible_when` 跟随游标——用角色色而非写死颜色，故运行期换主题自动跟随。
 //!
-//! ## 已知盲区
+//! ## 视觉回归
 //!
-//! 本例的键盘交互目前**截不到图**：截图路径（`--screenshot`）支持 `--click` /
-//! `--drag` / `--hover`，但还没有合成键盘输入的 `--type` / `--key`。所以「焦点落在
-//! 哪」「游标停在第几项」这两件事只能靠人眼在真机上看，进不了视觉回归。首帧的
-//! autofocus + 全选状态是唯一截得到的部分。
+//! 整条通路可以截图验证（`--type` / `--key` 与 `--click` 同为可重复参数，按写的顺序
+//! 混合回放，走的是与真实按键同一条 `handler.on_key`）：
+//!
+//! ```bash
+//! # 首帧：autofocus 已聚焦、上次的词处于全选态
+//! cargo run --release --example palette -- --screenshot a.png
+//! # 打字过筛 + ↑↓ 移动游标（覆盖旧内容 → 4 条候选 → 高亮第 3 项）
+//! cargo run --release --example palette -- --screenshot b.png --type para --key Down --key Down
+//! # Tab 接受补全（查询框变成 parallel，候选重筛为 1 条）
+//! cargo run --release --example palette -- --screenshot c.png --type para --key Down --key Down --key Tab
+//! # 最小尺寸下布局是否还成立
+//! cargo run --release --example palette -- --screenshot d.png --size 300 240 --type pal
+//! ```
 
 use windui::core::EventCtx;
 use windui::event::Key;

@@ -1071,6 +1071,13 @@ Element::text_input(query, "输入以过筛…")
 // ④ 「哪一项高亮」是应用状态（`Signal<usize>` 存游标），框架只负责把键送到
 ```
 
+整条通路可以截图验证：`--type <text>` / `--key <name>` 与 `--click` 同为可重复参数、按写的
+顺序混合回放，走的是与真实按键同一条 `handler.on_key`。例：
+
+```bash
+cargo run --release --example palette -- --screenshot out.png --type para --key Down --key Tab
+```
+
 `on_nav_key` 送到的键是 `Key::Up` / `Key::Down`（仅单行）与 `Key::Tab`（两种模式都送）。
 PageUp/PageDown 尚不在 `Key` 枚举里（要加得动两个平台的键码映射）。
 

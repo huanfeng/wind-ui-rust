@@ -438,6 +438,7 @@ impl App {
                 screenshot_clicks: Vec::new(),
                 screenshot_hover: None,
                 screenshot_drag: None,
+                screenshot_keys: Vec::new(),
                 tray: None,
                 hotkeys: Vec::new(),
                 start_hidden: false,
@@ -555,9 +556,23 @@ impl App {
         self
     }
 
-    /// 从命令行解析 `--screenshot <path>` 与可选 `--scale <f>`（高 DPI 截屏验证）。
-    pub fn screenshot_from_args(mut self) -> Self {
+    /// 从命令行解析截屏相关参数。
+    ///
+    /// 支持：`--screenshot <path>`、`--scale <f>`（高 DPI）、`--size W H`、
+    /// `--renderer <auto|software|gpu>`，以及截屏前合成的交互
+    /// `--click X Y` / `--rclick X Y` / `--drag X0 Y0 X1 Y1` / `--hover X Y` /
+    /// `--type <text>` / `--key <name>`。
+    pub fn screenshot_from_args(self) -> Self {
         let args: Vec<String> = std::env::args().collect();
+        self.screenshot_args(&args)
+    }
+
+    /// 从任意参数序列解析（[`screenshot_from_args`](Self::screenshot_from_args) 用进程
+    /// 参数调用它）。
+    ///
+    /// 独立成方法是为了**可测**：直接读 `std::env::args()` 的话，"`--size` 有没有把
+    /// `min_size` 的下限一并放开"这类断言只能靠真起一个进程传参才验得了，进不了单测。
+    fn screenshot_args(mut self, args: &[String]) -> Self {
         if let Some(i) = args.iter().position(|a| a == "--screenshot") {
             if let Some(p) = args.get(i + 1) {
                 self.cfg.screenshot = Some(PathBuf::from(p));
@@ -604,6 +619,51 @@ impl App {
                 args.get(i + 2).and_then(|s| s.parse::<i32>().ok()),
             ) {
                 self.cfg.screenshot_hover = Some((x, y));
+            }
+        }
+        // --size W H：覆盖 App::new 的窗口尺寸，**并把 min_size 的下限一并放开**——
+        // 要测的正是下限处的表现，若还受 min_size 钳制就永远截不到"最小尺寸下布局
+        // 是否还成立"这张图。此前尺寸写死在代码里，这类验证只能改代码重编译。
+        if let Some(i) = args.iter().position(|a| a == "--size") {
+            let n = |k: usize| args.get(i + k).and_then(|v| v.parse::<i32>().ok());
+            if let (Some(w), Some(h)) = (n(1), n(2)) {
+                if w > 0 && h > 0 {
+                    self.cfg.width = w;
+                    self.cfg.height = h;
+                    self.cfg.min_width = 0;
+                    self.cfg.min_height = 0;
+                }
+            }
+        }
+        // --type <text> / --key <name>：截屏前合成键盘输入，按序回放。
+        //
+        // 没有它时缺什么：截图路径此前只有指针（--click/--rclick/--drag/--hover），于是
+        // 任何"输入中"的界面状态都截不到图——补全浮层、候选高亮、焦点落在哪，全都只能
+        // 靠人眼在真机上看。键盘通路本身（autofocus/on_submit/on_nav_key）尤其需要它，
+        // 否则那条路是唯一没有视觉回归覆盖的核心交互。
+        //
+        // 两者与 --click 一样可重复、按出现顺序回放，且**混合排序**：
+        // `--type ab --key Enter --type c` 严格按写的顺序来。
+        for (i, a) in args.iter().enumerate() {
+            match a.as_str() {
+                "--type" => {
+                    if let Some(t) = args.get(i + 1) {
+                        self.cfg
+                            .screenshot_keys
+                            .push(platform::ScreenshotKey::Text(t.clone()));
+                    }
+                }
+                "--key" => {
+                    if let Some(spec) = args.get(i + 1) {
+                        match parse_key_spec(spec) {
+                            Some(ev) => self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(ev)),
+                            None => eprintln!(
+                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/Backspace/Delete/Space，可加 ctrl+ / shift+ 前缀），已跳过"
+                            ),
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         // --renderer <auto|software|gpu>：选渲染后端，便于同一个 example 出软/硬两份
@@ -1478,6 +1538,58 @@ impl UiHost {
         // 过期 toast 先清除（需要 &mut self，必须在借用 self.engine 生成 canvas 之前完成）。
         self.retain_live_toasts(now_ms);
     }
+}
+
+/// 解析 `--key` 的键名，支持 `ctrl+` / `shift+` 前缀（可叠加，大小写不敏感）。
+///
+/// 只认**具名键**：字符输入走 `--type`，那条路不必逐个列举字符，也天然支持中文。
+fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
+    use crate::event::{Key, KeyEvent};
+    let (mut ctrl, mut shift) = (false, false);
+    let mut rest = spec;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if let Some(r) = lower.strip_prefix("ctrl+") {
+            ctrl = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("shift+") {
+            shift = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else {
+            break;
+        }
+    }
+    let key = match rest.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Key::Enter,
+        "escape" | "esc" => Key::Escape,
+        "tab" => Key::Tab,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        "space" => Key::Space,
+        // 单个字符也放行（`--key ctrl+a` 全选）：Ctrl 组合在本库走 `Key::Other(vk)`，
+        // 与 TextInput 对 Ctrl+A/C/V/X 的处理对齐。
+        s if s.chars().count() == 1 => {
+            let c = s.chars().next()?;
+            if ctrl && c.is_ascii_alphabetic() {
+                Key::Other(c.to_ascii_uppercase() as u32)
+            } else {
+                Key::Char(rest.chars().next()?)
+            }
+        }
+        _ => return None,
+    };
+    Some(KeyEvent {
+        key,
+        pressed: true,
+        shift,
+        ctrl,
+    })
 }
 
 /// 帧耗时浮层（WINDUI_FPS=1）：左上角显示本帧渲染耗时与估算 fps，用于排查卡顿。
@@ -3134,6 +3246,140 @@ mod tests {
                 (1, HotkeyOp::SetEnabled(false)),
             ],
             "pending_ops 读过之后宿主仍应消费到全部意图"
+        );
+    }
+
+    /// `--size W H` 覆盖窗口尺寸，并把 `min_size` 的下限**一并放开**。
+    ///
+    /// 没有放开下限时错在哪：要测的正是「最小尺寸下布局还成不成立」，而 `min_size`
+    /// 会把窗口钳回下限——于是 `--size` 看起来生效了，截出来的却还是下限那张图，
+    /// 比对不出任何问题。没有 `--size` 时尺寸写死在 `App::new` 里，这类验证只能改
+    /// 代码重编译，进不了 CI。
+    #[test]
+    fn size_arg_overrides_window_and_releases_min_size() {
+        let args: Vec<String> = ["app", "--size", "720", "480"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let app = App::new("t", 920, 620)
+            .min_size(800, 600)
+            .screenshot_args(&args);
+        assert_eq!((app.cfg.width, app.cfg.height), (720, 480));
+        assert_eq!(
+            (app.cfg.min_width, app.cfg.min_height),
+            (0, 0),
+            "下限须放开，否则窗口被钳回 800x600，截出来的不是要验的那张图"
+        );
+    }
+
+    /// 非法 `--size` 不该把窗口改成 0 或负数（那会让后续 `Pixmap::new` 直接失败）。
+    #[test]
+    fn size_arg_rejects_nonpositive_and_keeps_min_size() {
+        let mk = |a: &[&str]| -> Vec<String> { a.iter().map(|s| s.to_string()).collect() };
+        for bad in [
+            mk(&["app", "--size", "0", "480"]),
+            mk(&["app", "--size", "-5", "480"]),
+            mk(&["app", "--size", "abc", "480"]),
+            mk(&["app", "--size"]),
+        ] {
+            let app = App::new("t", 920, 620)
+                .min_size(800, 600)
+                .screenshot_args(&bad);
+            assert_eq!(
+                (app.cfg.width, app.cfg.height, app.cfg.min_width),
+                (920, 620, 800),
+                "非法 --size 应整条忽略，含不动 min_size：{bad:?}"
+            );
+        }
+    }
+
+    /// `--type` / `--key` 按**出现顺序**混合入列。
+    ///
+    /// 没有它时错在哪：若两者各扫一遍参数分别入列，`--type ab --key Enter --type c`
+    /// 会变成「ab、c、Enter」——回车跑在最后一段文本之后，截到的是另一个状态。
+    #[test]
+    fn type_and_key_args_interleave_in_source_order() {
+        use crate::platform::ScreenshotKey;
+        let args: Vec<String> = ["app", "--type", "ab", "--key", "Enter", "--type", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let app = App::new("t", 60, 60).screenshot_args(&args);
+        let got: Vec<String> = app
+            .cfg
+            .screenshot_keys
+            .iter()
+            .map(|k| match k {
+                ScreenshotKey::Text(t) => format!("T:{t}"),
+                ScreenshotKey::Key(e) => format!("K:{:?}", e.key),
+            })
+            .collect();
+        assert_eq!(got, vec!["T:ab", "K:Enter", "T:c"]);
+    }
+
+    /// 键名解析：具名键、修饰前缀、Ctrl+字母，以及无法识别时不入列。
+    ///
+    /// 没有它时错在哪：认错键名的症状是「截图跟没按一样」——不会报错、不会 panic，
+    /// 只是那一步静默没发生，比对时只看到一张"怎么没反应"的图。
+    #[test]
+    fn key_spec_parses_names_modifiers_and_rejects_unknown() {
+        use crate::event::Key;
+        let p = |s: &str| super::parse_key_spec(s);
+
+        assert_eq!(p("Enter").map(|e| e.key), Some(Key::Enter));
+        assert_eq!(p("esc").map(|e| e.key), Some(Key::Escape), "别名 esc");
+        assert_eq!(p("DOWN").map(|e| e.key), Some(Key::Down), "大小写不敏感");
+
+        let st = p("shift+Tab").expect("shift+Tab 应可解析");
+        assert_eq!(st.key, Key::Tab);
+        assert!(st.shift && !st.ctrl);
+
+        // Ctrl+字母走 Key::Other(vk)，与 TextInput 对 Ctrl+A/C/V/X 的处理对齐；
+        // 若这里发成 Key::Char('a')，全选就会变成"输入一个字母 a"。
+        let ca = p("ctrl+a").expect("ctrl+a 应可解析");
+        assert_eq!(ca.key, Key::Other(u32::from(b'A')));
+        assert!(ca.ctrl);
+
+        assert!(p("F13").is_none(), "未支持的键应回 None 而不是猜一个");
+        assert!(p("").is_none());
+    }
+
+    /// 合成按键走的是 `handler.on_key` —— 与真实按键**同一条通路**，
+    /// 焦点裁决与控件回调都照常。
+    ///
+    /// 没有它时错在哪：这条是整个键盘通路唯一能进视觉回归的途径。若回放绕过宿主
+    /// （比如直接调 `tree.dispatch_key`），截到的就不是真实交互的结果——Tab 兜底、
+    /// 失焦裁决、needs_relayout 全都不会发生。
+    #[test]
+    fn synthesized_typing_reaches_the_autofocused_control() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let text = crate::signal::signal(String::from("旧"));
+        let app = App::new("t", 200, 120).content(
+            Element::col().padding(8).child(
+                Element::text_input(text, "")
+                    .height(30)
+                    .autofocus_select_all(),
+            ),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 120).unwrap();
+        // 首帧兑现 autofocus（与 run_offscreen 的首个 render 对应）。
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 120));
+        for ch in "新词".chars() {
+            handler.on_key(crate::event::KeyEvent {
+                key: crate::event::Key::Char(ch),
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            });
+        }
+        assert_eq!(
+            text.get(),
+            "新词",
+            "合成打字应落进 autofocus 的输入框，并覆盖被全选的旧内容"
         );
     }
 }
