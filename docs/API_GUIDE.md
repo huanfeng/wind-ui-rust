@@ -450,7 +450,12 @@ Element::text_input(text, "占位符")               // text: Signal<String>
     .multiline()       // 多行
     .wrap(true)        // 多行时是否自动折行（默认 true）
     .leading_icon('\u{1F50D}')  // 前置图标字形（搜索框等）：左侧留图标区，文字/光标/命中相应右移
+    .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行 Enter 插入换行，不触发）
+    .on_nav_key(|ctx, key| ..)  // 本控件未处理的 上/下 键（候选列表游标用）
 ```
+> `on_submit` / `on_nav_key` 不是便捷糖而是**唯一出口**：按键分发不冒泡，没有它们
+> 这两类键就地消失，详见 [8.3 焦点与键盘](#83-焦点与键盘)。
+
 > 文本框支持输入 emoji 等补充平面字符（自动拼接 UTF-16 代理对），并以整个 emoji 为单位编辑（光标移动、删除按字符走）；emoji 彩色显示。
 > ⚠️ `.password()` / `.multiline()` / `.wrap()` 是 **text_input 专属**。本库用单一 `Element` 类型承载所有控件（统一链式是核心一致性），故这几个修饰符链到别的控件**不会编译报错**；但 **debug 构建下会 `panic` 报错提示**误用，release 下静默忽略（无类型分裂代价）。
 
@@ -1037,6 +1042,54 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
 ### 8.3 焦点与键盘
 - Tab / Shift+Tab 在 `focusable()` 控件间导航（框架自动维护焦点环）。
 - 自定义控件实现 `Widget::focusable() -> true` 即加入导航链。
+- `.autofocus()` / `.autofocus_select_all()`：**声明式初始焦点**。布局稳定后宿主把焦点
+  交给该节点，一次性（语义同 HTML `autofocus`）。`_select_all` 额外全选已有内容——
+  查询框/地址栏语义，唤起后直接覆盖打字。
+  必需的原因：`ctx.request_focus()` 只能把焦点给**自己**，且只在该控件自己的事件回调里
+  可用，故「进程起来时焦点该在谁身上」在应用层无从表达。而 `focus == None` 时
+  `Tree::dispatch_key` 会**丢弃整个按键事件**（它的目标是 `Option<NodeId>`，没有派给
+  根节点的兜底）——`start_hidden()` 的常驻工具因此「热键唤起后第一次按键完全无响应」。
+  兑现时机是节点**首次进入焦点环**那一帧，且不抢已有焦点；此后焦点归用户，不会每帧粘回来。
+  程序性移交**不点亮焦点环**（判据是用户最近一次交互用的什么设备），输入框照常显示光标条。
+
+> ⚠️ **按键分发不冒泡。** `Tree::dispatch_key` 只对焦点节点做一次 `call_on_event`，
+> 没有沿父链的循环（对比 `dispatch_files`，那个是真冒泡）。所以控件「不消费」某个键的
+> 后果不是「传给外层容器」而是**事件就地消失**——想在外层容器挂 `Widget` 接 Enter 的
+> 写法编译通过、逻辑正确、永远不触发。唯一的例外是 Escape，宿主对它有关窗兜底。
+> 单行输入的 Enter 与 ↑↓ 请走下面两个专属出口。
+
+**键盘通路四件套**（命令面板 / 查词 / 快速打开 / 地址栏共用同一条路，完整例子见
+`examples/palette.rs`）：
+
+```rust
+Element::text_input(query, "输入以过筛…")
+    .autofocus_select_all()               // ① 焦点有归属，且全选旧内容供覆盖打字
+    .on_submit(move |ctx| confirm(ctx))   // ② Enter 的出口（单行专属；多行 Enter 换行）
+    .on_nav_key(move |_ctx, key| { .. })  // ③ ↑↓ 的出口（多行 ↑↓ 用于移行，不触发）
+// ④ 「哪一项高亮」是应用状态（`Signal<usize>` 存游标），框架只负责把键送到
+```
+
+`on_nav_key` 送到的键是 `Key::Up` / `Key::Down`（仅单行）与 `Key::Tab`（两种模式都送）。
+PageUp/PageDown 尚不在 `Key` 枚举里（要加得动两个平台的键码映射）。
+
+**Tab 是兜底而非抢先。** 键先到焦点控件，只有回调返回 `false` 时宿主才拿它做焦点导航
+——同网页里 input `preventDefault()` 掉 Tab 的机制，也与本库 Escape 关窗兜底同形。
+所以查询框可以把 Tab 用作「接受补全 / 切换候选」：
+
+```rust
+.on_nav_key(move |_ctx, ev| match ev.key {
+    Key::Down => { cursor.set(cursor.get() + 1); true }
+    Key::Up   => { cursor.set(cursor.get().saturating_sub(1)); true }
+    // Tab 接受当前候选；Shift+Tab 刻意放过，留给焦点导航当退路。
+    Key::Tab if !ev.shift => { accept(); true }
+    _ => false,
+})
+```
+
+> ⚠️ **务必给用户留一条键盘退路。** 无脑返回 `true` 会把 Shift+Tab 一起吃掉，那时除了
+> 鼠标没有任何办法把焦点移出这个输入框。惯例是只吞 Tab、放过 Shift+Tab。
+>
+> 未声明 `on_nav_key` 的控件行为完全不变——当前没有任何内置控件消费 Tab。
 
 ### 8.4 右键约定
 **右键默认不触发控件**（桌面习惯）。框架在分发层拦截非左键的 Down/Up；仅需右键的控件 override `Widget::wants_right_click() -> true`。新控件**默认即正确**。

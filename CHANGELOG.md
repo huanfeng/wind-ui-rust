@@ -6,6 +6,27 @@
 ## [Unreleased]
 
 ### Added
+- **声明式初始焦点：`Element::autofocus()` / `autofocus_select_all()`**。布局稳定后宿主把
+  键盘焦点交给该节点，一次性（语义同 HTML `autofocus`）；`_select_all` 额外全选已有内容。
+  必需的原因是应用层此前**无从表达**这件事：`EventCtx::request_focus` 写的是
+  `self.out.focus = Some(self.self_id)`——只能把焦点给**自己**，且只在该控件自己的事件回调
+  里可用，没有「让某个别的节点获得焦点」的说法。而 `focus == None` 时 `Tree::dispatch_key`
+  会**丢弃整个按键事件**（它的目标是 `Option<NodeId>`，没有派给根节点的兜底）。于是
+  `start_hidden()` 的常驻工具在热键唤起后第一次按键完全无响应——不是打错了地方，是消失了。
+  兑现时机与 `focusable_order` 取交集，故对话框弹着的那一帧不会把焦点送到遮罩后面去；
+  「出现即算兑现」而不是「每帧见到 `focus == None` 就补」，否则点空白清焦点会在下一帧被
+  撤销，焦点粘死在输入框上。焦点环**不点亮**：程序性移交沿用 `:focus-visible` 的判据
+  （看用户最近一次交互用的什么设备），理由同对话框的模态移交。
+  全选走**合成 Ctrl+A 回送控件**，与右键菜单的复制/粘贴同一条既有通路，故不必为此新增
+  `Widget` trait 方法，且对不处理 Ctrl+A 的控件天然退化为纯聚焦。
+- **单行输入的键盘出口：`Element::on_submit()` / `on_nav_key()`**。前者接 Enter（提交查询、
+  确认命令面板选中项），后者接本控件未处理的方向键（候选列表游标）。多行输入不触发——
+  那里 Enter 是换行、上下是移行，编辑器的固有语义不该被应用截走。
+  这不是便捷糖而是**唯一出口**：`Tree::dispatch_key` 的全部实现是一次
+  `call_on_event(focus, ..)`，**没有** `ancestor_chain` 循环（对比同文件的 `dispatch_files`，
+  那个是真冒泡）。所以控件「不消费」某个键的后果不是「传给外层容器」而是**事件就地消失**。
+  `on_nav_key` 送 `Key::Up` / `Key::Down`（仅单行）与 `Key::Tab`（两种模式都送，见下方
+  「Changed」）。PageUp/PageDown 尚不在 `Key` 枚举里（要加得动两个平台的键码映射）。
 - **运行期句柄的测试构造口：`ThemeHandle::detached(theme)` / `HotkeyHandle::detached()`**，
   配 `HotkeyHandle::pending_ops()` 供断言。真句柄只能从 `App` 取，而 `App` 在测试里建不起来
   （要开窗口）。后果不是「换肤那部分测不了」，而是**整个持有句柄的应用状态结构测不了**——
@@ -16,6 +37,34 @@
   线程局部的，无宿主时没人消费，是无害空转。`pending_ops()` **只读不取走**，故对真句柄调用
   也安全——若像 `take_hotkey_ops` 那样清空队列，下游在真句柄上断言一次就把宿主本该执行的
   改绑偷走了：测试通过，真机上热键静默不改。
+- **示例 `examples/palette.rs`**：唤起 → 打字 → 上下选候选 → Enter 确认的完整键盘通路
+  （命令面板 / 查词 / 快速打开 / 地址栏共用同一条路）。上面三条合起来才成立，分开看每条都
+  像已经能用了，故留一个整体的例子。选中态由应用自己画（`Signal<usize>` 存游标 + 一个
+  `bg_role_alpha` 的高亮兄弟节点靠 `visible_when` 跟随），框架只负责把键送到。
+
+### Changed
+- **Tab 键从「宿主抢先」改为「宿主兜底」**。此前 `UiHost::on_key` 里 Tab 是唯一在
+  `dispatch_key` **之前**处理的键，控件根本收不到——于是「输入框想自己用 Tab」在应用层
+  无从表达，而 Tab 在查询框里是常规语义（接受补全、切换候选：词典、命令面板、地址栏
+  都要它）。现在键一律先给焦点控件，只有它不消费时才轮到焦点导航，与同一函数里 Escape
+  关窗兜底同形，也与网页里 input `preventDefault()` 掉 Tab 的机制一致。
+  **对现有行为零影响**：当前没有任何内置控件消费 Tab，故未声明 `on_nav_key` 的界面上
+  Tab 照旧走焦点导航（`tab_navigation_is_a_fallback_after_the_focused_control` 钉住这一条
+  ——少了它，这个改动会静默废掉整个焦点导航而不产生任何编译错误）。
+- **`Element::on_nav_key` 的回调签名**改为 `FnMut(&mut EventCtx, KeyEvent) -> bool`
+  （原 `FnMut(&mut EventCtx, Key)`）。两处都是 Tab 逼出来的：返回值表示「我消费了吗」，
+  宿主的焦点导航只在返回 `false` 时才发生；收整个 `KeyEvent` 是为了能读 `shift`——应用把
+  Tab 用作接受补全时若连 Shift+Tab 一起吞掉，用户就没有任何键盘途径离开该输入框了。
+  本 API 尚未随版本发布，故直接改签名而非留弃用别名。
+
+### Fixed
+- **`src/ui/inputs.rs` 两处失实注释**。原文写的是「多行：Enter 插入换行。单行不处理
+  （冒泡，留给默认行为）」与「单行不消费（冒泡）」——**冒泡这件事不存在**，按键分发没有
+  沿父链的循环。这比缺口本身更危险：它描述的是作者以为的架构，下游照它去写「外层容器挂
+  `Widget` 接 Enter」会得到一份编译通过、逻辑正确、永远不触发的实现。现在两处都改成说明
+  「未消费 = 就地消失」并指向 `on_submit` / `on_nav_key`，另加一条测试
+  （`unconsumed_key_does_not_bubble_to_outer_container`）把真实行为钉住：注释若再退回去，
+  那条测试会当场变红。
 
 ## [0.13.0] - 2026-08-18
 

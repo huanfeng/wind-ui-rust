@@ -700,6 +700,8 @@ pub struct Element {
     on_drop: Option<DropFn>,
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
+    /// 声明式初始焦点（见 [`Element::autofocus`]）。
+    autofocus: Option<crate::core::Autofocus>,
     focusable: Option<bool>,
     enabled_static: bool,
     enabled: Option<Signal<bool>>,
@@ -735,6 +737,7 @@ impl Element {
             on_drop: None,
             context_menu: None,
             window_drag: false,
+            autofocus: None,
             focusable: None,
             enabled_static: true,
             enabled: None,
@@ -972,6 +975,45 @@ impl Element {
     /// 测试、鼠标交互与 `request_focus`。
     pub fn focusable(mut self, on: bool) -> Self {
         self.focusable = Some(on);
+        self
+    }
+
+    /// **声明式初始焦点**：布局稳定后宿主把键盘焦点交给本节点（一次性，语义同 HTML
+    /// 的 `autofocus`）。
+    ///
+    /// 没有它时错在哪：[`EventCtx::request_focus`](crate::core::EventCtx::request_focus)
+    /// 只能把焦点给**自己**，且只在该控件自己的事件回调里可用——「进程起来时焦点该在
+    /// 谁身上」在应用层无从表达。于是 `focus == None`，而
+    /// [`Tree::dispatch_key`](crate::core::Tree::dispatch_key) 的目标是 `Option<NodeId>`，
+    /// 为 `None` 时**整个按键事件被丢弃**。对 `start_hidden()` 起步的常驻托盘工具就是
+    /// 「热键唤起后第一次按键无处可去」。
+    ///
+    /// 兑现时机是节点**首次进入焦点环**那一帧（不可见/被禁用/被模态遮住时不算），
+    /// 且仅当此刻还没有焦点——不会抢走用户已经选中的控件。**只兑现一次**：此后
+    /// 焦点归用户，不会每帧把它粘回来。
+    ///
+    /// 不点亮焦点环：程序性移交沿用 `:focus-visible` 的判据——环显不显示取决于用户
+    /// 最近一次交互用的什么设备，而不是这次聚焦是不是框架挪的。输入框照常显示光标条。
+    ///
+    /// 需要「聚焦并全选」（查询框语义）用 [`autofocus_select_all`](Self::autofocus_select_all)。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let q = signal(String::new());
+    /// let ui = Element::col().child(Element::text_input(q, "查词…").autofocus());
+    /// ```
+    pub fn autofocus(mut self) -> Self {
+        self.autofocus = Some(crate::core::Autofocus::Focus);
+        self
+    }
+
+    /// 聚焦并**全选已有内容**：查询框/地址栏语义——上次查的词还在框里，唤起后直接
+    /// 覆盖打字，不用先删。时机与限制同 [`autofocus`](Self::autofocus)。
+    ///
+    /// 走合成 Ctrl+A 回送控件（与右键菜单的复制/粘贴同一条通路），故对不处理 Ctrl+A
+    /// 的控件退化为纯聚焦，不会出错。
+    pub fn autofocus_select_all(mut self) -> Self {
+        self.autofocus = Some(crate::core::Autofocus::FocusSelectAll);
         self
     }
 
@@ -1424,6 +1466,102 @@ impl Element {
     #[track_caller]
     pub fn leading_icon(self, glyph: char) -> Self {
         self.config_text_input(|c| c.leading = Some(glyph))
+    }
+
+    /// **单行输入的 Enter 出口**：Enter 按下时触发（提交查询、执行命令面板选中项）。
+    ///
+    /// 没有它时错在哪：单行 `TextInput` 此前对 Enter 不做处理，而
+    /// [`Tree::dispatch_key`](crate::core::Tree::dispatch_key) **不冒泡**——它只对焦点
+    /// 节点做一次 `call_on_event`，没有 `ancestor_chain` 循环（对比 `dispatch_files`，
+    /// 那个是真冒泡）。于是「不消费」的后果不是「传给外层」而是**事件消失**：想在外层
+    /// 容器挂 Widget 接 Enter 的写法编译通过、逻辑正确、永远不触发。
+    ///
+    /// **多行输入不触发**：那里 Enter 是插入换行，编辑器的固有语义不该被应用截走。
+    ///
+    /// 仅 `Element::text_input(..)` 可用（链到别处 debug 下 panic、release 下静默忽略）。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let q = signal(String::new());
+    /// let ui = Element::text_input(q, "查词…")
+    ///     .autofocus_select_all()
+    ///     .on_submit(move |ctx| ctx.toast_ok(format!("查 {}", q.get())));
+    /// ```
+    #[track_caller]
+    pub fn on_submit(self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+        self.config_text_input_widget(|ti| ti.set_on_submit(f), "on_submit()")
+    }
+
+    /// **本控件未处理的导航键的出口**：候选列表游标用（↑↓ 在候选间移动，配合
+    /// [`on_submit`](Self::on_submit) 的 Enter 确认当前项）。
+    ///
+    /// 没有它时错在哪：单行输入对 ↑↓ 不做处理，而按键分发不冒泡（详见
+    /// [`on_submit`](Self::on_submit)），于是 ↑↓ 就地消失——「输入框聚焦时用 ↑↓ 选
+    /// 候选」这条通路在应用层无从实现。选中态本身下游能自己画（`Signal<usize>` 存
+    /// 游标即可），缺的只是按键能到达某处。
+    ///
+    /// **送到的键**：[`Key::Up`](crate::event::Key::Up) /
+    /// [`Key::Down`](crate::event::Key::Down)（仅单行；多行那里是移动到相邻视觉行）与
+    /// [`Key::Tab`](crate::event::Key::Tab)（两种模式都送）。PageUp/PageDown 尚不在
+    /// [`Key`](crate::event::Key) 枚举里（要加得动两个平台的键码映射）。
+    ///
+    /// # 返回值是「我消费了吗」，Tab 上尤其重要
+    ///
+    /// 宿主的 Tab 焦点导航是**兜底**——只在本回调返回 `false` 时才轮到。所以：
+    ///
+    /// - 想让 Tab 接受补全 / 切换候选：处理它并返回 `true`。
+    /// - **务必给用户留一条键盘退路**：无脑 `true` 会连 Shift+Tab 一起吃掉，那时除了鼠标
+    ///   没有任何办法把焦点移出这个输入框。惯例是只吞 Tab、放过 Shift+Tab（见下例）。
+    /// - 上下键返回 `false` 是无害的（单行输入本来就不用它们）。
+    ///
+    /// 回调收整个 [`KeyEvent`](crate::event::KeyEvent) 而不只是 `Key`，正是为了能读到
+    /// `shift` / `ctrl` 做上面这个判断。
+    ///
+    /// 仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// # use windui::event::Key;
+    /// let q = signal(String::new());
+    /// let cursor = signal(0usize);
+    /// let ui = Element::text_input(q, "查词…").on_nav_key(move |_ctx, ev| match ev.key {
+    ///     Key::Down => {
+    ///         cursor.set(cursor.get() + 1);
+    ///         true
+    ///     }
+    ///     Key::Up => {
+    ///         cursor.set(cursor.get().saturating_sub(1));
+    ///         true
+    ///     }
+    ///     // Tab 接受当前候选；Shift+Tab 放过，留给焦点导航当退路。
+    ///     Key::Tab if !ev.shift => {
+    ///         q.set(String::from("已补全"));
+    ///         true
+    ///     }
+    ///     _ => false,
+    /// });
+    /// ```
+    #[track_caller]
+    pub fn on_nav_key(
+        self,
+        f: impl FnMut(&mut crate::core::EventCtx, crate::event::KeyEvent) -> bool + 'static,
+    ) -> Self {
+        self.config_text_input_widget(|ti| ti.set_on_nav_key(f), "on_nav_key()")
+    }
+
+    /// 直接配置内含的 `TextInput`（回调类修饰符用；`TextConfig` 是 `Copy` 的纯数据，
+    /// 装不了闭包）。误用的处理同 [`config_text_input`](Self::config_text_input)。
+    #[track_caller]
+    fn config_text_input_widget(mut self, f: impl FnOnce(&mut TextInput), what: &str) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<TextInput>())
+        {
+            Some(ti) => f(ti),
+            None => debug_assert!(false, "{what} 只能用于 Element::text_input(..)"),
+        }
+        self
     }
 
     /// 静态可见标志。不可见的节点本帧不显示、不命中，且**不占布局**
@@ -3236,6 +3374,7 @@ impl Element {
             on_drop: self.on_drop,
             context_menu: self.context_menu,
             window_drag: self.window_drag,
+            autofocus: self.autofocus,
             focusable: self.focusable,
             tooltip: self.tooltip,
             focused: false,
@@ -5069,5 +5208,229 @@ mod tests {
             "点击回调里写信号应升级为 Layout 级失效（仅 Rect 会导致文案变了却不重排）"
         );
         assert_eq!(caption.get(), "暂停");
+    }
+
+    /// P0-2 回归：单行输入的 Enter 应到达 `on_submit`。
+    ///
+    /// 没有它时错在哪：单行 Enter 此前落进 `if self.is_multiline()` 守卫的否定分支，
+    /// 而 `Tree::dispatch_key` 不冒泡——事件就地消失。「唤起 → 打字 → 回车确认」这条
+    /// 通路在应用层无从实现。
+    #[test]
+    fn single_line_enter_reaches_on_submit() {
+        use crate::event::{Key, KeyEvent};
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        let fired = Rc::new(StdCell::new(0u32));
+        let f = fired.clone();
+        let text = crate::signal::signal(String::from("词"));
+        let ui = Element::col().child(
+            Element::text_input(text, "查词…")
+                .height(30)
+                .on_submit(move |_| f.set(f.get() + 1)),
+        );
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 60), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+
+        let res = tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
+            Some(input),
+        );
+        assert_eq!(fired.get(), 1, "单行 Enter 应触发 on_submit");
+        assert!(res.consumed, "触发了回调就该报已消费");
+        assert_eq!(text.get(), "词", "Enter 不应把换行写进单行文本");
+    }
+
+    /// **按键分发不冒泡**——钉住这个事实本身。
+    ///
+    /// 曾有注释声称单行 Enter「冒泡，留给默认行为」。它描述的是作者以为的架构：
+    /// `Tree::dispatch_key` 的全部实现是一次 `call_on_event(focus, ..)`，没有
+    /// `ancestor_chain` 循环（对比 `dispatch_files`，那个是真冒泡）。危害不在缺口本身，
+    /// 而在下游照那句注释去写「外层容器挂 Widget 接 Enter」——编译通过、逻辑正确、
+    /// 永远不触发。本测试锁住真实行为，注释若再退回去会当场变红。
+    #[test]
+    fn unconsumed_key_does_not_bubble_to_outer_container() {
+        use crate::core::{EventCtx, Widget};
+        use crate::event::{Event, Key, KeyEvent};
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        struct KeyProbe(Rc<StdCell<u32>>);
+        impl Widget for KeyProbe {
+            fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
+                if let Event::Key(k) = ev {
+                    if k.key == Key::Enter {
+                        self.0.set(self.0.get() + 1);
+                    }
+                }
+                false
+            }
+        }
+        let seen = Rc::new(StdCell::new(0u32));
+        let text = crate::signal::signal(String::new());
+        // 外层容器挂探针，内层是**没有** on_submit 的单行输入。
+        let ui = Element::stack()
+            .fill()
+            .widget(KeyProbe(seen.clone()))
+            .child(Element::text_input(text, "").height(30));
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 60), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+
+        let res = tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+            },
+            Some(input),
+        );
+        assert!(!res.consumed, "无 on_submit 时单行 Enter 不该报已消费");
+        assert_eq!(
+            seen.get(),
+            0,
+            "未消费的按键**不会**传到外层容器——它就地消失。这正是 on_submit 必须存在的理由"
+        );
+    }
+
+    /// P0-3 回归：单行输入未处理的 ↑↓ 应到达 `on_nav_key`（候选列表游标）。
+    ///
+    /// 没有它时错在哪：↑↓ 与 Enter 同一个守卫、同一个后果——就地消失。选中态下游能
+    /// 自己画，缺的只是按键能到达某处。
+    #[test]
+    fn nav_keys_reach_on_nav_key_in_single_line() {
+        use crate::event::{Key, KeyEvent};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let got: Rc<RefCell<Vec<Key>>> = Rc::new(RefCell::new(Vec::new()));
+        let g = got.clone();
+        let text = crate::signal::signal(String::from("ab"));
+        let ui = Element::col().child(Element::text_input(text, "").height(30).on_nav_key(
+            move |_, ev| {
+                g.borrow_mut().push(ev.key);
+                true
+            },
+        ));
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 60), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
+
+        assert!(tree.dispatch_key(k(Key::Down), Some(input)).consumed);
+        assert!(tree.dispatch_key(k(Key::Up), Some(input)).consumed);
+        assert_eq!(
+            *got.borrow(),
+            vec![Key::Down, Key::Up],
+            "单行的 ↑↓ 应按序送到 on_nav_key"
+        );
+    }
+
+    /// Tab 应先送到焦点控件；控件消费掉它，宿主的焦点导航就不该再发生。
+    ///
+    /// 没有它时错在哪：Tab 此前是唯一**抢在** `dispatch_key` 之前处理的键，控件根本
+    /// 收不到。而「Tab 接受补全 / 切换候选」在查询框里是常规语义——词典、命令面板、
+    /// 地址栏都要它。
+    #[test]
+    fn tab_reaches_control_before_focus_navigation() {
+        use crate::event::{Key, KeyEvent};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let got: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(Vec::new()));
+        let g = got.clone();
+        let text = crate::signal::signal(String::new());
+        let ui = Element::col().child(
+            Element::text_input(text, "")
+                .height(30)
+                // 只吞 Tab，放过 Shift+Tab —— 给用户留键盘退路。
+                .on_nav_key(move |_, ev| {
+                    if ev.key == Key::Tab && !ev.shift {
+                        g.borrow_mut().push(true);
+                        return true;
+                    }
+                    false
+                }),
+        );
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 60), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+        let tab = |shift| KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            shift,
+            ctrl: false,
+        };
+
+        assert!(
+            tree.dispatch_key(tab(false), Some(input)).consumed,
+            "控件应能消费 Tab"
+        );
+        assert_eq!(got.borrow().len(), 1, "Tab 应送到 on_nav_key");
+        assert!(
+            !tree.dispatch_key(tab(true), Some(input)).consumed,
+            "回调放过 Shift+Tab 时不该报已消费——否则用户失去离开该控件的唯一键盘途径"
+        );
+    }
+
+    /// 多行输入保留 Enter 换行与 ↑↓ 移行——应用回调不该截走编辑器的固有语义。
+    ///
+    /// 没有这条约束时错在哪：若新分支放在多行守卫之前（或忘了守卫），多行编辑框一按
+    /// 回车就跑应用的提交逻辑而不换行，一按上下就不移动光标。两者都是静默的行为倒退。
+    #[test]
+    fn multiline_keeps_enter_and_arrows_for_editing() {
+        use crate::event::{Key, KeyEvent};
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        let fired = Rc::new(StdCell::new(0u32));
+        let (f1, f2) = (fired.clone(), fired.clone());
+        let text = crate::signal::signal(String::from("ab"));
+        let ui = Element::col().child(
+            Element::text_input(text, "")
+                .multiline()
+                .height(80)
+                .on_submit(move |_| f1.set(f1.get() + 1))
+                .on_nav_key(move |_, _| {
+                    f2.set(f2.get() + 1);
+                    true
+                }),
+        );
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 120), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
+
+        tree.dispatch_key(k(Key::Enter), Some(input));
+        assert_eq!(text.get(), "ab\n", "多行 Enter 应插入换行");
+        tree.dispatch_key(k(Key::Up), Some(input));
+        tree.dispatch_key(k(Key::Down), Some(input));
+        assert_eq!(
+            fired.get(),
+            0,
+            "多行模式下 Enter/↑↓ 归编辑器，不该触发应用回调"
+        );
     }
 }

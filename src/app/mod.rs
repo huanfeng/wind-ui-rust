@@ -1666,28 +1666,39 @@ impl AppHandler for UiHost {
         if self.menu.is_open() {
             return self.handle_menu_key(ev);
         }
-        // Tab 由宿主独占用于焦点导航，并启用焦点环显示。焦点环跨节点变化（低频）→ 整窗。
-        if ev.key == Key::Tab {
-            self.focus.visible = true;
-            let moved = self.move_focus(!ev.shift);
-            if moved {
-                self.damage.needs_full = true;
-            }
-            return moved;
-        }
-        // 其余键先交给焦点控件；未被消费的 Escape 回退为关闭窗口。
+        // 一律先交给焦点控件；宿主的 Tab 焦点导航与 Escape 关窗都是**兜底**，只在焦点
+        // 控件没要这个键时才轮到。
+        //
+        // Tab 此前是唯一抢在分发之前的键——那让「输入框想自己用 Tab」在应用层无从表达
+        // （补全接受、候选切换：Tab 在查询框里是常规语义）。兜底而非抢先也正是网页的做法：
+        // 键先到焦点元素，它 `preventDefault()` 掉就轮不到浏览器导航。同文件的 Escape
+        // 本就是这个形状，Tab 是那个不一致的例外。
+        //
+        // 对现有行为零影响：当前没有任何控件消费 Tab，故未声明 `on_nav_key` 的控件上
+        // Tab 照旧走焦点导航（`tab_still_navigates_when_control_declines_it` 钉住）。
         let res = self.tree.dispatch_key(ev, self.focus.current);
         // 键盘路径不参与失焦裁决（没有"点在别处"这回事），故 blur_at 恒为 None。
-        let (repaint, damage, consumed) =
+        let (mut repaint, damage, consumed) =
             self.apply_dispatch_effects(res, FocusSource::Keyboard, None);
-        if !consumed && ev.key == Key::Escape && self.resolve_close() {
-            self.close = true;
-        }
         // 键盘改动可能影响布局（文本增减）或他处（切页/对话框）→ 置 needs_relayout：
         // render 重排后用结构签名判定，签名不变（定宽输入打字）走局部，变了升级整窗。
         if repaint {
             self.apply_damage(damage);
             self.damage.needs_relayout = true;
+        }
+        if !consumed {
+            match ev.key {
+                // 焦点导航。焦点环跨节点变化（低频）→ 整窗。
+                Key::Tab => {
+                    self.focus.visible = true;
+                    if self.move_focus(!ev.shift) {
+                        self.damage.needs_full = true;
+                        repaint = true;
+                    }
+                }
+                Key::Escape if self.resolve_close() => self.close = true,
+                _ => {}
+            }
         }
         repaint
     }

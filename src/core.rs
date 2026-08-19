@@ -274,6 +274,26 @@ pub enum Layout {
     Scroll,
 }
 
+/// 声明式初始焦点（[`crate::ui::Element::autofocus`]）。
+///
+/// 存在的理由：[`EventCtx::request_focus`] 只能把焦点给**自己**，且只在该控件自己的
+/// 事件回调里可用——于是「进程起来时焦点该在谁身上」这件事在应用层无从表达。对常驻
+/// 托盘、`start_hidden()` 起步的工具尤其致命：热键唤起后 `focus == None`，第一次按键
+/// 无处可去（[`Tree::dispatch_key`] 的目标是 `Option<NodeId>`，为 `None` 时整个事件
+/// 直接丢弃）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Autofocus {
+    /// 只聚焦，光标落在文本末尾。
+    Focus,
+    /// 聚焦并全选已有内容——查询框/地址栏语义：上次查的词还在框里，下次唤起直接
+    /// 覆盖打字，不用先删。
+    ///
+    /// 实现走**合成 Ctrl+A 回送控件**，与右键菜单的复制/粘贴同一条既有通路
+    /// （见 `TextInput::context_menu_items`）。故对不处理 Ctrl+A 的控件是无害空操作，
+    /// 与 [`Focus`](Self::Focus) 等价。
+    FocusSelectAll,
+}
+
 /// 树节点。几何为物理像素，`bounds` 相对父节点。
 pub struct Node {
     pub parent: Option<NodeId>,
@@ -365,6 +385,9 @@ pub struct Node {
     /// **同级绘制顺序提升**：为 true 的子节点在其余兄弟之后绘制、命中时优先测试。
     /// 拖拽浮起的行用，否则会被排在它后面的兄弟行盖住。
     pub raised: bool,
+    /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
+    /// [`Autofocus`] 与 `UiHost::refresh_focus`。
+    pub autofocus: Option<Autofocus>,
 }
 
 struct Slot {
@@ -2430,6 +2453,17 @@ impl Tree {
     }
 
     /// 设置焦点节点（清旧设新，返回是否变化）。
+    /// 在给定的焦点顺序里找第一个声明了 [`Autofocus`] 的节点。
+    ///
+    /// 取交集而不是全树扫描：`order` 已经过滤掉了不可见、被禁用、被模态遮住的节点
+    /// （见 [`Tree::focusable_order`]）。少了这一层，对话框弹着的那一帧就会把焦点
+    /// 兑现给遮罩后面的输入框——键盘从此能打到用户看不见的地方。
+    pub fn first_autofocus(&self, order: &[NodeId]) -> Option<(NodeId, Autofocus)> {
+        order
+            .iter()
+            .find_map(|&id| self.get(id).and_then(|n| n.autofocus).map(|a| (id, a)))
+    }
+
     pub fn set_focused(&mut self, id: Option<NodeId>, old: Option<NodeId>) {
         if let Some(o) = old {
             if let Some(n) = self.get_mut(o) {

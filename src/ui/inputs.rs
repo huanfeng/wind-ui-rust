@@ -765,7 +765,19 @@ pub struct TextInput {
     /// 输入法组合态（拼音等未上屏）：为 true 时暂不绘制自绘光标条，避免与系统
     /// 组合浮层里跟随组合进度的光标重叠、显得"卡在组合开始前"。
     composing: Cell<bool>,
+    /// 单行模式下 Enter 的出口（见 [`crate::ui::Element::on_submit`]）。
+    on_submit: Option<SubmitFn>,
+    /// 本控件**未处理**的导航键的出口（见 [`crate::ui::Element::on_nav_key`]）。
+    on_nav_key: Option<NavKeyFn>,
 }
+
+/// 单行 Enter 回调。与 `on_click` 同形（`ctx` 在首位）。
+type SubmitFn = Box<dyn FnMut(&mut EventCtx)>;
+/// 导航键回调：收本控件未消费的导航键，返回是否消费。
+///
+/// 收整个 `KeyEvent` 而不只是 `Key`：Tab 必须能区分 Shift——应用把 Tab 用作「接受补全」
+/// 时若连 Shift+Tab 一起吞掉，用户就没有任何键盘途径离开这个输入框了。
+type NavKeyFn = Box<dyn FnMut(&mut EventCtx, KeyEvent) -> bool>;
 
 impl TextInput {
     pub fn new(text: Signal<String>, placeholder: String) -> Self {
@@ -787,12 +799,51 @@ impl TextInput {
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
             composing: Cell::new(false),
+            on_submit: None,
+            on_nav_key: None,
         }
     }
 
     /// 可变访问配置（供 Builder 配置）。
     pub fn config_mut(&mut self) -> &mut TextConfig {
         &mut self.config
+    }
+
+    /// 设置单行 Enter 回调（供 Builder；下游用 [`crate::ui::Element::on_submit`]）。
+    pub fn set_on_submit(&mut self, f: impl FnMut(&mut EventCtx) + 'static) {
+        self.on_submit = Some(Box::new(f));
+    }
+
+    /// 设置导航键回调（供 Builder；下游用 [`crate::ui::Element::on_nav_key`]）。
+    pub fn set_on_nav_key(&mut self, f: impl FnMut(&mut EventCtx, KeyEvent) -> bool + 'static) {
+        self.on_nav_key = Some(Box::new(f));
+    }
+
+    /// 触发 `on_submit`；返回是否消费了这次 Enter。
+    ///
+    /// 未设回调时返回 `false`——如实说明"本控件没处理"。它**不会**因此冒泡（见按键
+    /// 分支处的注释），但把消费与否报准仍有意义：宿主据 `consumed` 决定 Escape 的
+    /// 关窗兜底走不走，报错会连带影响它。
+    fn fire_submit(&mut self, ctx: &mut EventCtx) -> bool {
+        match &mut self.on_submit {
+            Some(f) => {
+                f(ctx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 触发 `on_nav_key`；返回是否消费——**由回调自己说**。
+    ///
+    /// 与 [`Self::fire_submit`] 的区别正在这里：Tab 未被消费时宿主会拿它做焦点导航，
+    /// 所以「消费与否」必须能逐次表态。回调无脑返回 `true` 会吃掉 Shift+Tab，
+    /// 让用户失去离开该控件的唯一键盘途径。
+    fn fire_nav_key(&mut self, ctx: &mut EventCtx, ev: KeyEvent) -> bool {
+        match &mut self.on_nav_key {
+            Some(f) => f(ctx, ev),
+            None => false,
+        }
     }
 
     /// 运行期是否多行：密码模式恒为单行（与 Builder 链式顺序无关，杜绝换行进入密码底层文本）。
@@ -1726,12 +1777,19 @@ impl Widget for TextInput {
                         }
                         true
                     }
-                    // 多行：Enter 插入换行。单行不处理（冒泡，留给默认行为）。
+                    // 多行：Enter 插入换行。单行：交给 `on_submit`，未设则不消费。
+                    //
+                    // **「不消费」不等于「冒泡」**：`Tree::dispatch_key` 只对焦点节点做
+                    // 一次 `call_on_event`，没有 `ancestor_chain` 循环（对比同文件的
+                    // `dispatch_files`，那个是真冒泡）。所以未消费的按键是**就地消失**，
+                    // 不会传给外层容器——想在外层挂 Widget 接 Enter 的写法编译通过、
+                    // 逻辑正确、永远不触发。单行 Enter 的唯一出口是 `on_submit`。
                     Key::Enter if self.is_multiline() => {
                         self.insert_newline(ctx);
                         true
                     }
-                    // 多行：上下移动到相邻视觉行。单行不消费（冒泡）。
+                    // 多行：上下移动到相邻视觉行。单行：交给 `on_nav_key`（候选列表游标
+                    // 等）。同样地，未设回调时事件就地消失而非冒泡，理由见上。
                     Key::Up if self.is_multiline() => {
                         self.move_vertical(ctx, false, k.shift);
                         true
@@ -1740,6 +1798,17 @@ impl Widget for TextInput {
                         self.move_vertical(ctx, true, k.shift);
                         true
                     }
+                    // 单行的 Enter / 上下键：本控件不处理，交给应用声明的出口。
+                    // 放在多行守卫之后，故多行模式永远走不到这里（Enter 换行、上下移行
+                    // 是编辑器的固有语义，不该被应用截走）。
+                    Key::Enter => self.fire_submit(ctx),
+                    // 上下键：单行本控件不用，交给应用。
+                    //
+                    // Tab：**两种模式都转发**，且默认不消费——宿主的焦点导航是兜底，
+                    // 只在这里返回 `false` 时才轮到。查询框把 Tab 用作「接受补全」需要
+                    // 它，而没声明 `on_nav_key` 的输入框行为完全不变。
+                    Key::Up | Key::Down if !self.is_multiline() => self.fire_nav_key(ctx, *k),
+                    Key::Tab => self.fire_nav_key(ctx, *k),
                     Key::Left => {
                         if !k.shift {
                             if let Some((s, _)) = self.selection() {
