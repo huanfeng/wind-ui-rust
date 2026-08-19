@@ -9,8 +9,6 @@ pub(super) mod d2d;
 pub mod hotkey;
 pub mod tray;
 
-pub use tray::{Tray, TrayCtx, TrayMenuItem};
-
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;

@@ -1,8 +1,9 @@
 //! macOS 系统托盘（`NSStatusItem`）：图标 + 提示 + 左键/双击回调 + 原生右键菜单。
 //!
-//! 公共构建器 API（`Tray` / `TrayMenuItem` / `TrayCtx`）与 win32 同形——含 `TrayCtx`
-//! 方法的 `&mut self` 签名：本平台可以立即执行、无需 win32 那套意图队列，但签名保持
-//! 一致，才不会出现「在 macOS 上写得通、到 Windows 上语义变了」的跨平台陷阱。
+//! 构建器 API（`Tray` / `TrayMenuItem` / `TrayCtx`）不在本模块——它们是**平台无关的
+//! 声明层**，收在 [`crate::platform::tray`]，本模块只负责执行 `TrayAction`。此前这里有
+//! 一份完整副本且**立即调 OS**，与 win32 的意图队列语义不同：同一段回调在两个平台上
+//! 行为不一致，而 macOS 那份因为要持有真 `NSWindow`，托盘回调在下游根本没法测。
 //! 左键单击/双击触发回调，
 //! 右键弹原生 `NSMenu`（勾选项按 `Signal<bool>` 当前值显示对勾、分隔线）。气泡走
 //! `NSUserNotification`（已弃用；未打包为 .app 时系统可能不展示，属系统限制）。
@@ -13,7 +14,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 
-use crate::signal::Signal;
+pub(crate) use crate::platform::tray::{invoke, ItemKind, Tray, TrayAction};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -27,39 +28,6 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImageAlphaInfo,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSSize, NSString};
-
-type TrayFn = Box<dyn FnMut(&mut TrayCtx)>;
-
-/// 托盘回调上下文：操作窗口与弹通知（不暴露原生句柄）。
-pub struct TrayCtx {
-    window: Retained<NSWindow>,
-    status_item: Retained<NSStatusItem>,
-}
-
-impl TrayCtx {
-    /// 显示并前置窗口（托盘最常见动作）。
-    pub fn show_window(&mut self) {
-        if let Some(mtm) = MainThreadMarker::new() {
-            self.window.makeKeyAndOrderFront(None);
-            super::activate_app(&NSApplication::sharedApplication(mtm));
-        }
-    }
-    /// 隐藏窗口（最小化到托盘）。
-    pub fn hide_window(&mut self) {
-        self.window.orderOut(None);
-    }
-    /// 退出应用。
-    pub fn quit(&mut self) {
-        if let Some(mtm) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(mtm).terminate(None);
-        }
-    }
-    /// 弹出系统通知（标题 + 正文）。未打包为 .app 时可能不展示。
-    pub fn notify(&mut self, title: &str, body: &str) {
-        deliver_notification(title, body);
-        let _ = &self.status_item; // 保留字段（未来可用 status item 锚定通知）。
-    }
-}
 
 #[allow(deprecated)]
 fn deliver_notification(title: &str, body: &str) {
@@ -78,112 +46,6 @@ fn deliver_notification(title: &str, body: &str) {
     note.setTitle(Some(&NSString::from_str(title)));
     note.setInformativeText(Some(&NSString::from_str(body)));
     center.deliverNotification(&note);
-}
-
-enum ItemKind {
-    Action {
-        label: String,
-        /// 勾选态绑定（None=从不打勾）；菜单弹出时读当前值。
-        checked: Option<Signal<bool>>,
-        /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
-        enabled: Option<Signal<bool>>,
-        cb: TrayFn,
-    },
-    Separator,
-}
-
-/// 托盘右键菜单项：普通项 / 勾选项 / 分隔线。
-pub struct TrayMenuItem {
-    kind: ItemKind,
-}
-
-impl TrayMenuItem {
-    /// 普通项：点击触发回调。
-    pub fn item(label: impl Into<String>, cb: impl FnMut(&mut TrayCtx) + 'static) -> Self {
-        Self {
-            kind: ItemKind::Action {
-                label: label.into(),
-                checked: None,
-                enabled: None,
-                cb: Box::new(cb),
-            },
-        }
-    }
-    /// 勾选项：`checked` 绑定状态，菜单弹出时按当前值显示对勾；点击触发回调
-    /// （回调内自行翻转 `checked`，框架不自动改）。
-    ///
-    /// `Signal<bool>` 是 `!Send` 的（存储线程局部），故整个 `Tray` 也是 `!Send`——
-    /// 托盘菜单在主线程构建、勾选态也在主线程的菜单弹出路径上读取，
-    /// 把构建好的 `Tray` 搬到别的线程会在编译期就被拦下。
-    pub fn check(
-        label: impl Into<String>,
-        checked: Signal<bool>,
-        cb: impl FnMut(&mut TrayCtx) + 'static,
-    ) -> Self {
-        Self {
-            kind: ItemKind::Action {
-                label: label.into(),
-                checked: Some(checked),
-                enabled: None,
-                cb: Box::new(cb),
-            },
-        }
-    }
-    /// 绑定禁用态：`flag` 为 false 时该项灰显且不可点（菜单弹出时读当前值）。
-    /// 对分隔线无效。永久禁用可传 `signal(false)`。
-    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
-        if let ItemKind::Action { enabled, .. } = &mut self.kind {
-            *enabled = Some(flag);
-        }
-        self
-    }
-    /// 分隔线。
-    pub fn separator() -> Self {
-        Self {
-            kind: ItemKind::Separator,
-        }
-    }
-}
-
-/// 托盘图标构建器。交给 `App::tray(...)`。
-#[derive(Default)]
-pub struct Tray {
-    tooltip: String,
-    icon: Option<(u32, u32, Vec<u8>)>,
-    on_left_click: Option<TrayFn>,
-    on_double_click: Option<TrayFn>,
-    items: Vec<TrayMenuItem>,
-}
-
-impl Tray {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    /// 鼠标悬停提示。
-    pub fn tooltip(mut self, s: impl Into<String>) -> Self {
-        self.tooltip = s.into();
-        self
-    }
-    /// 自定义图标：原始非预乘 RGBA8（`rgba.len()==w*h*4`）。未设则用系统默认图标。
-    pub fn icon_rgba(mut self, w: u32, h: u32, rgba: &[u8]) -> Self {
-        self.icon = Some((w, h, rgba.to_vec()));
-        self
-    }
-    /// 左键单击回调（常见用于显隐窗口）。
-    pub fn on_left_click(mut self, f: impl FnMut(&mut TrayCtx) + 'static) -> Self {
-        self.on_left_click = Some(Box::new(f));
-        self
-    }
-    /// 左键双击回调。
-    pub fn on_double_click(mut self, f: impl FnMut(&mut TrayCtx) + 'static) -> Self {
-        self.on_double_click = Some(Box::new(f));
-        self
-    }
-    /// 右键菜单项（普通/勾选/分隔线）。
-    pub fn menu(mut self, items: Vec<TrayMenuItem>) -> Self {
-        self.items = items;
-        self
-    }
 }
 
 /// `TrayTarget` 的内部状态。
@@ -247,26 +109,50 @@ impl TrayTarget {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// 构造一次性回调上下文（克隆 window + status item 的强引用）。
-    fn ctx(&self) -> TrayCtx {
-        let status_item = self.ivars().status_item.borrow().as_ref().unwrap().clone();
-        TrayCtx {
-            window: self.ivars().window.clone(),
-            status_item,
-        }
+    /// 触发左键单/双击回调，随即执行它请求的意图。
+    ///
+    /// **借用必须在执行之前释放**：`tray` 是 `RefCell`，而 `TrayAction::Show` 会
+    /// `makeKeyAndOrderFront` + 激活应用，这条路径可能同步回调进来（激活会派发事件）；
+    /// 那时若还持着 `borrow_mut`，就是 `already borrowed` panic。故先收意图、丢借用、
+    /// 再执行——与 win32 「释放 `&mut WindowState` 之后再跑意图」是同一条铁律的两个面。
+    fn invoke_click(&self, double: bool) {
+        let actions = {
+            let mut tray = self.ivars().tray.borrow_mut();
+            let cb = if double {
+                tray.on_double_click.as_mut()
+            } else {
+                tray.on_left_click.as_mut()
+            };
+            invoke(cb)
+        };
+        self.run_actions(actions);
     }
 
-    /// 触发左键单/双击回调。
-    fn invoke_click(&self, double: bool) {
-        let mut ctx = self.ctx();
-        let mut tray = self.ivars().tray.borrow_mut();
-        let cb = if double {
-            tray.on_double_click.as_mut()
-        } else {
-            tray.on_left_click.as_mut()
-        };
-        if let Some(cb) = cb {
-            cb(&mut ctx);
+    /// 执行托盘意图。窗口显隐与退出的语义须与热键/事件路径一致，故显隐复用同一组
+    /// NSWindow 调用。
+    ///
+    /// `Quit` 处**截断**其后的意图：`NSApp::terminate` 本就不返回，显式 break 让这个
+    /// 事实可读，也与 win32 的 `run_tray_actions` 在构造上一致（那边窗口已销毁，
+    /// 后续意图同样无从生效）。
+    fn run_actions(&self, actions: Vec<TrayAction>) {
+        let window = self.ivars().window.clone();
+        for action in actions {
+            match action {
+                TrayAction::Show => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        window.makeKeyAndOrderFront(None);
+                        super::activate_app(&NSApplication::sharedApplication(mtm));
+                    }
+                }
+                TrayAction::Hide => window.orderOut(None),
+                TrayAction::Quit => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        NSApplication::sharedApplication(mtm).terminate(None);
+                    }
+                    break;
+                }
+                TrayAction::Notify { title, body } => deliver_notification(&title, &body),
+            }
         }
     }
 
@@ -328,13 +214,9 @@ impl TrayTarget {
 
     /// 在模态菜单关闭后执行选中项回调（不在嵌套模态中，重入安全）。
     fn invoke_menu(&self, idx: usize) {
-        let mut ctx = self.ctx();
-        let mut tray = self.ivars().tray.borrow_mut();
-        if let Some(it) = tray.items.get_mut(idx) {
-            if let ItemKind::Action { cb, .. } = &mut it.kind {
-                cb(&mut ctx);
-            }
-        }
+        // 借用范围止于收完意图，理由同 `invoke_click`。
+        let actions = invoke(self.ivars().tray.borrow_mut().item_callback(idx));
+        self.run_actions(actions);
     }
 }
 
@@ -427,57 +309,4 @@ fn nsimage_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<Retained<NSImage>> {
     // 彩色图标（非模板），避免被渲染成单色。
     nsimage.setTemplate(false);
     Some(nsimage)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::signal::signal;
-
-    /// 编译期护栏：`Tray` 必须保持 `!Send`。
-    ///
-    /// 勾选态与禁用态都绑 `Signal<bool>`，而信号的存储是**线程局部**的——句柄搬到别的
-    /// 线程再读，读到的是那个线程的槽位表。`!Send` 让「构建 Tray 的线程」与「弹菜单读
-    /// 勾选态的线程」必然是同一个：`Tray` 只能原地交给 `App::tray`，`App` 因此也 `!Send`，
-    /// `App::run` 在同一线程消费它并在那里建窗口，本平台另有 `MainThreadMarker` 把 `pop_menu`
-    /// 钉在主线程上。
-    ///
-    /// 一旦 `Tray` 变成 `Send`，下面两条 impl 同时适用，方法解析出歧义，编译失败。
-    const _: fn() = || {
-        trait AmbiguousIfSend<A> {
-            fn tag() {}
-        }
-        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
-        struct Invalid;
-        impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
-        let _ = <Tray as AmbiguousIfSend<_>>::tag;
-    };
-
-    /// 勾选态是**弹出时现读**而非构建时快照：构建完菜单项后翻转信号，
-    /// 下一次弹出就该显示新状态（这正是 `check` 收信号而非 `bool` 的全部理由）。
-    #[test]
-    fn check_binds_the_signal_instead_of_snapshotting_its_value() {
-        let on = signal(false);
-        let it = TrayMenuItem::check("启用通知", on, |_| {});
-        let ItemKind::Action { checked, .. } = &it.kind else {
-            unreachable!("check() 建的就是 Action 项");
-        };
-        assert_eq!(checked.map(|c| c.get()), Some(false));
-        on.set(true);
-        assert_eq!(checked.map(|c| c.get()), Some(true));
-    }
-
-    /// 普通项不带勾选绑定（`None` = 从不打勾）；分隔线根本没有这组字段。
-    #[test]
-    fn item_and_separator_carry_no_check_binding() {
-        let it = TrayMenuItem::item("显示窗口", |_| {});
-        let ItemKind::Action { checked, .. } = &it.kind else {
-            unreachable!()
-        };
-        assert!(checked.is_none());
-        assert!(matches!(
-            TrayMenuItem::separator().kind,
-            ItemKind::Separator
-        ));
-    }
 }

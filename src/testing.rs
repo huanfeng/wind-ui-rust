@@ -25,6 +25,8 @@
 //! 意味着那些副作用没有宿主去消费——toast 不会显示，关窗请求不会生效。
 
 use crate::core::{DispatchResult, EventCtx, NodeId, Tree};
+use crate::event::{HotkeyCtx, WindowOp};
+use crate::platform::{TrayAction, TrayCtx, TrayMenuItem};
 use crate::ui::Element;
 
 /// 借一个 `EventCtx` 跑 `f`，返回它请求的副作用。
@@ -52,6 +54,74 @@ pub fn run_with_ctx_in(
     f: impl FnOnce(&mut EventCtx),
 ) -> DispatchResult {
     tree.run_detached(id, f)
+}
+
+/// 借一个 [`TrayCtx`] 跑 `f`，返回它请求的托盘意图（按调用顺序）。
+///
+/// 托盘是常驻工具**唯一的退出途径**，而 `TrayMenuItem::item("退出", |ctx| ctx.quit())`
+/// 这类回调此前一行测试都写不了：`TrayCtx` 字段私有、无公开构造，且两个平台各有一份，
+/// macOS 那份还持有真 `NSWindow`——测试里造不出来。
+///
+/// 现在 `TrayCtx` 是平台无关的意图容器，本函数与平台层走**同一条** `invoke` 路径，
+/// 测的就是生产路径而非一份形似的复制品。
+///
+/// ```
+/// use windui::prelude::*;
+/// use windui::platform::TrayAction;
+///
+/// // 待测的托盘菜单项（真实应用里来自自己的构建函数）。
+/// let item = TrayMenuItem::item("退出", |ctx| ctx.quit());
+/// assert_eq!(
+///     windui::testing::run_with_tray_ctx(item),
+///     vec![TrayAction::Quit],
+/// );
+/// ```
+///
+/// 只用于测试：意图没有宿主去执行，窗口不会真的显隐、应用不会真的退出。
+pub fn run_with_tray_ctx(item: TrayMenuItem) -> Vec<TrayAction> {
+    let mut item = item;
+    crate::platform::tray::invoke(item.callback())
+}
+
+/// 借一个 [`TrayCtx`] 跑任意闭包（不经菜单项），用于测 `Tray::on_left_click` 这类
+/// 直接持有闭包的回调。
+///
+/// ```
+/// use windui::prelude::*;
+/// use windui::platform::TrayAction;
+///
+/// let res = windui::testing::run_with_tray_ctx_fn(|ctx| {
+///     ctx.notify("已同步", "3 个词条");
+///     ctx.show_window();
+/// });
+/// assert_eq!(res.len(), 2, "意图应按调用顺序累积，不是只留最后一个");
+/// assert_eq!(res[1], TrayAction::Show);
+/// ```
+pub fn run_with_tray_ctx_fn(f: impl FnMut(&mut TrayCtx) + 'static) -> Vec<TrayAction> {
+    let mut boxed: Box<dyn FnMut(&mut TrayCtx)> = Box::new(f);
+    crate::platform::tray::invoke(Some(&mut boxed))
+}
+
+/// 借一个 [`HotkeyCtx`] 跑 `f`，返回它请求的窗口操作（未请求为 `None`）。
+///
+/// 与 [`run_with_tray_ctx`] 同一个理由：全局热键回调收 `HotkeyCtx`，其字段与
+/// `take_op` 都是 `pub(crate)`，下游造不出参数也读不出结果——"按下热键确实把窗口
+/// 调出来了"这件事测不了。
+///
+/// 返回 `Option` 而非 `Vec` 忠实反映了 `HotkeyCtx` 的形状：它只存**最后一个**意图
+/// （字段是 `Option<WindowOp>`），与累积成队列的 `TrayCtx` 不同。
+///
+/// ```
+/// use windui::prelude::*;
+/// use windui::event::WindowOp;
+///
+/// let op = windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window());
+/// assert_eq!(op, Some(WindowOp::Show));
+/// ```
+pub fn run_with_hotkey_ctx(f: impl FnOnce(&mut HotkeyCtx)) -> Option<WindowOp> {
+    let mut ctx = HotkeyCtx::default();
+    f(&mut ctx);
+    ctx.take_op()
 }
 
 #[cfg(test)]
@@ -103,6 +173,74 @@ mod tests {
         assert!(
             tree.get(root).unwrap().style.bg.is_some(),
             "改动应留在调用方的树上"
+        );
+    }
+
+    /// P2-1 回归：托盘菜单项的回调应当可测。
+    ///
+    /// 没有它时错在哪：`TrayCtx` 字段私有、无公开构造，且此前**两个平台各有一份**，
+    /// macOS 那份持有真 `NSWindow`——测试里造不出参数。于是
+    /// `TrayMenuItem::item("退出", |ctx| ctx.quit())` 这类回调一行测试都写不了，
+    /// 而托盘往往是常驻工具**唯一的退出途径**。
+    #[test]
+    fn tray_menu_item_callbacks_are_testable() {
+        use crate::platform::{TrayAction, TrayMenuItem};
+
+        assert_eq!(
+            super::run_with_tray_ctx(TrayMenuItem::item("退出", |ctx| ctx.quit())),
+            vec![TrayAction::Quit]
+        );
+        assert_eq!(
+            super::run_with_tray_ctx(TrayMenuItem::item("显示窗口", |ctx| ctx.show_window())),
+            vec![TrayAction::Show]
+        );
+        // 分隔线没有回调，不该凭空产生意图。
+        assert!(super::run_with_tray_ctx(TrayMenuItem::separator()).is_empty());
+    }
+
+    /// 勾选项的回调既能翻转自己的信号、又能请求窗口操作——两件事都要能断言。
+    ///
+    /// 这正是「把回调体抽成不收 ctx 的具名函数再测那个函数」测不到的部分：
+    /// 抽出去之后，"它到底有没有请求隐藏窗口"没人管。
+    #[test]
+    fn tray_check_item_callback_reports_both_signal_and_intent() {
+        use crate::platform::{TrayAction, TrayMenuItem};
+        use crate::signal::signal;
+
+        let pinned = signal(true);
+        let item = TrayMenuItem::check("常驻前台", pinned, move |ctx| {
+            pinned.set(!pinned.get());
+            ctx.hide_window();
+        });
+        assert_eq!(super::run_with_tray_ctx(item), vec![TrayAction::Hide]);
+        assert!(!pinned.get(), "回调应翻转勾选信号");
+    }
+
+    /// 热键回调的意图应当可读。`HotkeyCtx` 只存**最后一个**意图，与累积成队列的
+    /// `TrayCtx` 不同——这个差别由返回类型（`Option` vs `Vec`）如实反映。
+    ///
+    /// 没有它时错在哪：`HotkeyCtx::take_op` 是 `pub(crate)`，下游读不出回调请求了什么，
+    /// 「按下热键确实把窗口调出来了」测不了。
+    #[test]
+    fn hotkey_callback_intent_is_readable() {
+        use crate::event::WindowOp;
+
+        assert_eq!(
+            super::run_with_hotkey_ctx(|ctx| ctx.show_window()),
+            Some(WindowOp::Show)
+        );
+        assert_eq!(
+            super::run_with_hotkey_ctx(|_| {}),
+            None,
+            "没请求就该是 None"
+        );
+        // 只保留最后一个：忠实于 HotkeyCtx 的字段形状，不是队列。
+        assert_eq!(
+            super::run_with_hotkey_ctx(|ctx| {
+                ctx.show_window();
+                ctx.hide_window();
+            }),
+            Some(WindowOp::Hide)
         );
     }
 }

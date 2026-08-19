@@ -41,6 +41,23 @@
   （命令面板 / 查词 / 快速打开 / 地址栏共用同一条路）。上面三条合起来才成立，分开看每条都
   像已经能用了，故留一个整体的例子。选中态由应用自己画（`Signal<usize>` 存游标 + 一个
   `bg_role_alpha` 的高亮兄弟节点靠 `visible_when` 跟随），框架只负责把键送到。
+- **托盘收口为平台无关的声明层**：`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction` 移到
+  `windui::platform::tray`，两个后端只保留执行半边（消费 `TrayAction`）。
+  此前它在 win32 与 macOS 各有一份**完整副本**（各约 150 行雷同构建器），`platform/mod.rs`
+  按 `cfg` 分别 re-export。于是下游的跨平台性只是「两边方法名恰好一样」的巧合：类型其实
+  是两个，语义还不同——win32 的 `TrayCtx` 累积意图（`wnd_proc` 持有 `&mut WindowState`
+  期间碰 OS 就是别名 UB），macOS 的持有 `NSWindow` 并**立即**调 OS。同一段回调在两个平台
+  上行为不一致，而 macOS 那份因为要真 `NSWindow`，托盘回调在下游根本没法测。
+  macOS 侧因此改为「跑回调收意图 → 释放 `RefCell` 借用 → 执行」，与 win32 的
+  「释放 `&mut WindowState` 之后再跑意图」成为同一条铁律的两个面：`TrayAction::Show` 会
+  激活应用、可能同步回调进来，此时若还持着 `borrow_mut` 就是 `already borrowed` panic。
+  `Quit` 之后截断其余意图的语义也随之两平台一致。
+  连带收益：`Tray` 必须 `!Send` 那条编译期护栏此前两份、各只在自己平台编译，现在一份、
+  两平台都跑。win32 的 `tray.rs` 从 545 行降到 327 行。
+- **`testing::run_with_tray_ctx` / `run_with_tray_ctx_fn` / `run_with_hotkey_ctx`**：借一个
+  受控的 ctx 跑托盘菜单项 / 托盘闭包 / 热键回调，把它请求的意图交回来。这是上一条抽象的
+  正收益——托盘是常驻工具**唯一的退出途径**，`|ctx| ctx.quit()` 此前一行测试都写不了。
+  三者与平台层走**同一条** `invoke` 路径，测的是生产路径而非形似的复制品。
 
 ### Changed
 - **Tab 键从「宿主抢先」改为「宿主兜底」**。此前 `UiHost::on_key` 里 Tab 是唯一在

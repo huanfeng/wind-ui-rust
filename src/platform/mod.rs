@@ -1,10 +1,14 @@
 //! 平台抽象层。按目标平台分发到具体后端：Windows→`win32`，macOS→`macos`。
 //!
-//! 各后端对外暴露同形的 API（`run` / `open_url` / `Tray` 三件套 / `Clipboard`），
-//! 由本模块按 `cfg` 统一 re-export；上层（`app`/`lib::prelude`）只依赖 `crate::platform::*`，
-//! 不直接触碰任何具体后端，从而保持平台无关。
+//! 各后端对外暴露同形的 API（`run` / `open_url` / `Clipboard`），由本模块按 `cfg` 统一
+//! re-export；上层（`app`/`lib::prelude`）只依赖 `crate::platform::*`，不直接触碰任何具体
+//! 后端，从而保持平台无关。
 //!
-//! 平台无关的窗口配置 `WindowConfig` 定义在本层（其 `tray` 字段类型按 `cfg` 解析到各后端的 `Tray`）。
+//! 托盘的 `Tray` 三件套**不按 cfg 分发**：声明层收在平台无关的 [`tray`] 模块里，两个后端
+//! 只保留执行半边（消费 `TrayAction`）。此前它是两份完整副本，下游的跨平台性只是「两边
+//! 方法名恰好一样」的巧合，且 macOS 那份直接调 OS 因而回调不可测——理由详见 [`tray`]。
+//!
+//! 平台无关的窗口配置 `WindowConfig` 也定义在本层。
 //! win32 模块名（而非 `windows`）以免与外部 `windows` crate 冲突。
 
 // 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
@@ -13,21 +17,25 @@ pub mod win32;
 #[cfg(windows)]
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
-pub(crate) use win32::run;
+pub use win32::open_url;
 #[cfg(windows)]
-pub use win32::{open_url, Tray, TrayCtx, TrayMenuItem};
+pub(crate) use win32::run;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::clipboard::MacClipboard as Clipboard;
 #[cfg(target_os = "macos")]
-pub(crate) use macos::run;
+pub use macos::open_url;
 #[cfg(target_os = "macos")]
-pub use macos::{open_url, Tray, TrayCtx, TrayMenuItem};
+pub(crate) use macos::run;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
+
+/// 托盘的平台无关声明层（`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction`）。
+pub mod tray;
+pub use tray::{Tray, TrayAction, TrayCtx, TrayMenuItem};
 
 use std::cell::Cell;
 use std::path::Path;
