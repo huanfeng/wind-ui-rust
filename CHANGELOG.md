@@ -3,6 +3,20 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+- **运行期句柄的测试构造口：`ThemeHandle::detached(theme)` / `HotkeyHandle::detached()`**，
+  配 `HotkeyHandle::pending_ops()` 供断言。真句柄只能从 `App` 取，而 `App` 在测试里建不起来
+  （要开窗口）。后果不是「换肤那部分测不了」，而是**整个持有句柄的应用状态结构测不了**——
+  造不出实例，它所有的方法都跟着一起测不了，使用方只能把逻辑一个个抽成不依赖状态结构的
+  自由函数、测抽出来的那一半。这正是 `src/testing.rs` 想消灭的那类盲区，只是它当时只看到了
+  `EventCtx`。
+  `detached` 与真句柄**共用同一份实现**，不分叉行为：`ThemeHandle::set` 的两个重绘标记都是
+  线程局部的，无宿主时没人消费，是无害空转。`pending_ops()` **只读不取走**，故对真句柄调用
+  也安全——若像 `take_hotkey_ops` 那样清空队列，下游在真句柄上断言一次就把宿主本该执行的
+  改绑偷走了：测试通过，真机上热键静默不改。
+
 ## [0.13.0] - 2026-08-18
 
 ### Added

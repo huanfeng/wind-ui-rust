@@ -274,6 +274,25 @@ impl ThemeHandle {
             inner: Rc::new(RefCell::new(t)),
         }
     }
+    /// 造一个**不连宿主**的句柄，供下游给自己的应用状态写测试。
+    ///
+    /// 真句柄只能从 [`App::theme_handle`] 取，而 `App` 在测试里建不起来（要开窗口）。
+    /// 后果不是"换肤那部分测不了"，而是**整个持有句柄的状态结构测不了**——造不出实例，
+    /// 它所有的方法都跟着一起测不了。这个构造口把可测性还原到"与换肤无关的逻辑照常能测"。
+    ///
+    /// 行为与真句柄**完全一致**（`set`/`update`/`current` 走同一份实现）：写入只改自己
+    /// 那份 `Rc<Theme>`，另外置两个线程局部的重绘标记——无宿主时那两个标记没人消费，
+    /// 是无害的空转，故无需为测试分叉出第二套行为。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let th = ThemeHandle::detached(Theme::default());
+    /// th.update(|t| t.palette.accent = Color::hex(0x123456));
+    /// assert_eq!(th.current().palette.accent, Color::hex(0x123456));
+    /// ```
+    pub fn detached(t: Theme) -> Self {
+        Self::new(Rc::new(t))
+    }
     /// 替换当前主题并请求重绘（所有窗口）。
     pub fn set(&self, t: Theme) {
         *self.inner.borrow_mut() = Rc::new(t);
@@ -317,6 +336,46 @@ pub struct HotkeyHandle {
 }
 
 impl HotkeyHandle {
+    /// 造一个**不连宿主**的句柄，供下游给自己的应用状态写测试。理由同
+    /// [`ThemeHandle::detached`]：真句柄只能从 [`App::hotkey_handle`] 取，而 `App`
+    /// 在测试里建不起来，于是持有它的整个状态结构都造不出实例。
+    ///
+    /// `set` / `set_enabled` 照常把意图排进队列，用 [`Self::pending_ops`] 断言。
+    /// 队列无人消费——这正是"不连宿主"的意思：改绑不会真的向系统注册。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// use windui::event::HotkeyOp;
+    /// let hk = HotkeyHandle::detached();
+    /// hk.set(Hotkey::new(Key::Char('J')).ctrl());
+    /// hk.set_enabled(false);
+    /// assert_eq!(
+    ///     hk.pending_ops(),
+    ///     vec![
+    ///         HotkeyOp::Rebind(Hotkey::new(Key::Char('J')).ctrl()),
+    ///         HotkeyOp::SetEnabled(false),
+    ///     ],
+    /// );
+    /// ```
+    pub fn detached() -> Self {
+        Self {
+            id: 0,
+            queue: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+    /// 本句柄已排队、尚未被平台层消费的意图（按调用顺序）。
+    ///
+    /// **只读不取走**——故对真句柄调用也是安全的，不会把宿主该执行的改绑偷掉。
+    /// 队列由所有句柄共享，这里只返回 `id` 属于本句柄的那些：多热键应用中
+    /// 断言"改的是这一个"才有意义。
+    pub fn pending_ops(&self) -> Vec<crate::event::HotkeyOp> {
+        self.queue
+            .borrow()
+            .iter()
+            .filter(|(id, _)| *id == self.id)
+            .map(|(_, op)| *op)
+            .collect()
+    }
     /// 换成这个热键（下一次消息循环生效；失败回滚保留旧绑定）。
     pub fn set(&self, hotkey: crate::event::Hotkey) {
         self.queue
@@ -2966,5 +3025,104 @@ mod tests {
         ));
         handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
         assert_eq!(sel.get(), 0, "离屏合成点击首个标签应把选中索引切到 0");
+    }
+
+    /// P2-2 回归：持有运行期句柄的应用状态结构应当能在测试里造出来。
+    ///
+    /// 没有 `detached()` 时错在哪：这个 `Settings` 只能从 `App::theme_handle()` /
+    /// `App::hotkey_handle()` 取句柄，而 `App` 建不起来（要开窗口），于是
+    /// **整个结构造不出实例**——不是"换肤那部分测不了"，是 `label()` 这种跟句柄
+    /// 毫无关系的方法也一并测不了。下游只能把逻辑一个个抽成不依赖状态结构的自由
+    /// 函数，测的是抽出来的那一半。
+    #[test]
+    fn detached_handles_make_handle_holding_state_constructible() {
+        use crate::event::{Hotkey, HotkeyOp};
+
+        struct Settings {
+            theme: ThemeHandle,
+            hotkey: HotkeyHandle,
+            dark: bool,
+        }
+        impl Settings {
+            /// 与句柄无关的方法——正是它此前被连带牵累而测不了。
+            fn label(&self) -> &'static str {
+                if self.dark {
+                    "深色"
+                } else {
+                    "浅色"
+                }
+            }
+            fn apply_dark(&mut self) {
+                self.dark = true;
+                self.theme.set(Theme::dark());
+            }
+            fn rebind(&self, hk: Hotkey) {
+                self.hotkey.set(hk);
+            }
+        }
+
+        let mut s = Settings {
+            theme: ThemeHandle::detached(Theme::default()),
+            hotkey: HotkeyHandle::detached(),
+            dark: false,
+        };
+        assert_eq!(s.label(), "浅色", "不依赖句柄的方法应照常可测");
+
+        s.apply_dark();
+        assert_eq!(s.label(), "深色");
+        assert_eq!(
+            s.theme.current().palette.bg,
+            Theme::dark().palette.bg,
+            "detached 句柄的 set 应真的换掉自己那份主题"
+        );
+
+        let want = Hotkey::new(Key::Char('J')).ctrl();
+        s.rebind(want);
+        assert_eq!(
+            s.hotkey.pending_ops(),
+            vec![HotkeyOp::Rebind(want)],
+            "改绑意图应记在队列里供断言"
+        );
+    }
+
+    /// `pending_ops` 只读不取走，且只报本句柄的那些。
+    ///
+    /// 没有这两条性质时错在哪：若它像 `take_hotkey_ops` 一样清空队列，下游在真句柄上
+    /// 调一次断言，就把宿主本该执行的改绑偷走了——测试通过，真机上热键静默不改。
+    /// 若不按 id 过滤，多热键应用里断言"改的是这一个"永远成立，等于没断言。
+    #[test]
+    fn pending_ops_is_non_draining_and_scoped_to_own_id() {
+        use crate::event::{Hotkey, HotkeyOp};
+        use crate::platform::AppHandler;
+        let mut app = App::new("t", 60, 60);
+        let a = app.hotkey_handle(Hotkey::new(Key::Char('D')).ctrl(), |_| {});
+        let b = app.hotkey_handle(Hotkey::new(Key::Char('E')).ctrl(), |_| {});
+        let a_want = Hotkey::new(Key::Char('J')).ctrl();
+        a.set(a_want);
+        b.set_enabled(false);
+
+        assert_eq!(
+            a.pending_ops(),
+            vec![HotkeyOp::Rebind(a_want)],
+            "只应报本句柄（槽位 0）的意图"
+        );
+        assert_eq!(b.pending_ops(), vec![HotkeyOp::SetEnabled(false)]);
+        // 读两次结果相同 —— 没取走。
+        assert_eq!(
+            a.pending_ops(),
+            vec![HotkeyOp::Rebind(a_want)],
+            "读取不应清空"
+        );
+
+        // 宿主仍能拿到全部两条：断言没有偷走该执行的意图。
+        let mut handler = app.content(Element::col()).into_handler_for_test();
+        assert_eq!(
+            handler.take_hotkey_ops(),
+            vec![
+                (0, HotkeyOp::Rebind(a_want)),
+                (1, HotkeyOp::SetEnabled(false)),
+            ],
+            "pending_ops 读过之后宿主仍应消费到全部意图"
+        );
     }
 }

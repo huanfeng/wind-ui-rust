@@ -1431,6 +1431,24 @@ let res = windui::testing::run_with_ctx_in(&mut tree, node_id, |ctx| ...);
 
 没有它的话，"这一项点下去确实弹了 toast"只能退化成"把回调体抽成不收 ctx 的具名函数、再断言那个函数"——测的是抽出来的那一半，回调有没有接对反而没人管。**仅用于测试**：自己造的树没有宿主去消费这些副作用，toast 不会显示、关窗请求不会生效。
 
+**运行期句柄的测试构造口**：`ThemeHandle` / `HotkeyHandle` 真实只能从 `App` 取，而 `App`
+在测试里建不起来（要开窗口）。后果不是「换肤那部分测不了」，而是**整个持有句柄的状态
+结构测不了**——造不出实例，它所有的方法都跟着一起测不了。用 `detached()`：
+
+```rust
+struct Settings { theme: ThemeHandle, hotkey: HotkeyHandle, /* .. */ }
+
+let s = Settings {
+    theme: ThemeHandle::detached(Theme::default()),   // 不连宿主；set/update/current 行为一致
+    hotkey: HotkeyHandle::detached(),                 // set/set_enabled 照常排队，无人消费
+};
+assert_eq!(s.theme.current().palette.accent, ..);
+assert_eq!(s.hotkey.pending_ops(), vec![HotkeyOp::Rebind(want)]);
+```
+
+`pending_ops()` **只读不取走**，故对真句柄调用也安全（不会把宿主该执行的改绑偷掉），
+且只报本句柄 id 的那些。
+
 ---
 
 ## 10. 第三方开发规范（Do / Don't）
