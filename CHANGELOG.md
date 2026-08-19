@@ -6,6 +6,48 @@
 ## [Unreleased]
 
 ### Added
+- **跨平台 GPU 渲染后端（wgpu，feature `gpu`，默认关）**。macOS 窗口可用 GPU 呈现，
+  `Canvas` 图元集在该后端**全部落地、无空实现**；Windows 的 Direct2D 后端不动，两者共用
+  同一个 `Renderer` 三档开关（`Auto` / `Software`（默认）/ `Gpu`）。默认关的理由是依赖树、
+  编译时间与体积代价，不是能力未完成。
+  `SharedGpu` 是进程级单例（对标 `d2d::SharedDevice`：`Arc` 句柄分发、显式释放钩子、
+  失败记忆免刷屏）。像素格式钉死 `Rgba8Unorm` 直通字节语义与预乘 RGBA——sRGB 格式会把
+  128 编成 188，与软后端逐像素比对全盘对不上。模块内**禁 `#[cfg(target_os)]`**：平台差异
+  只从 surface 创建与 `GlyphSource` 两个注入点进入，为 Linux 复用铺路。
+  图元走**单管线 + 单 instanced draw**：圆角矩形/圆/描边/线段用解析 SDF，阴影用 Evan
+  Wallace 高斯近似（σ=√(b²+b) 对齐软后端三趟 box-blur 的方差，免烘焙免缓存），渐变走
+  uniform 数组插值（downlevel 档无 storage buffer 保证），裁剪矩形做成实例字段逐像素裁
+  （免 scissor 分批，且对齐软后端的整数 mask 语义）。双后端量化比对 15 场景（含 1.5×
+  缩放）：内部区域逐像素通道差全 0，差异只在 AA 边缘带（墨量相对差最大 0.745%，阈值 3%）。
+- **macOS GPU 窗口呈现接线（`CAMetalLayer` + wgpu surface）**。平台无关的 `WindowGpu`
+  收口非 sRGB 格式选择（Metal 上 `Bgra8Unorm`）、`begin_frame`/`present` 的借用时序、
+  `FrameError` 三档（`Occluded` 等唤回 / `Skipped` 须补重绘 / `Lost` 交调用方降级），
+  `Suboptimal` 延迟到下帧再重配以避开活 `SurfaceTexture` 的 panic。
+  两处结论是真机撞出来的，都会导致"窗口永远空白"这类无声故障：其一，视图 backing layer
+  一旦被顶替，AppKit 会把重绘策略置 `Never` 且再不回调——`CAMetalLayer` 只能挂成 backing
+  layer 的**子层**，与软路径共用 `setNeedsDisplay`→`updateLayer` 失效链路；其二，wgpu 依
+  `NSWindow.occlusionState` 判可见，首帧常落在 visible 置位**之前**，必须接
+  `windowDidChangeOcclusionState:` 唤回。
+  `WINDUI_GPU` 三档（未设 / `0` 显式关 / 其他强制试）；`Renderer::Auto` 失败静默回退软路径，
+  `Renderer::Gpu` 报错终止（静默换一条路会让基于它的验证失去意义）。
+- **GPU 后端的文字与图片**。文字经 `GlyphSource` 窄接口：整段由**平台引擎**光栅成 A8
+  覆盖度位图，GPU 只做上传与颜色调制合成——观感仍由系统文字栈决定。Core Text 侧铺白底画
+  黑字取 `255-R` 作覆盖度：透明底会让 CG 的字形加重量取到错误档位（实测墨量差 13~17%），
+  白底方案 5/6 场景墨量逐字节相同。`AlphaMask` 携带未取整排版尺寸与 ascent，因为 CG 把
+  基线 floor 吸附到整数行，定位须按基线行反解，否则整段文字会随容器高的奇偶上移 1px。
+  文字 run-cache 的键含文本/样式/宽/缩放/对齐（**颜色不进键**，换色复用位图），512 条 +
+  16MiB 双限 LRU，统计接 `WINDUI_PROF`；文字与几何按提交顺序交错分批，叠放次序恒等于
+  `Canvas` 调用次序。
+  图片侧 `place_image` 抽成纯函数逐行对齐软后端，1:1 走 nearest 精确 blit、其余 linear +
+  `ClampToEdge`，圆角遮罩复用 `sd_round_box`；纹理缓存与文字 run-cache 共用泛型 LRU
+  （64 条 + 64MiB 双预算，替代 d2d 的超水位全清）。`push/pop_layer` 用层栈重定向绘制目标、
+  池化纹理按尺寸复用，`pop` 先把三批 flush 进层再合成回父目标，`opacity` 同乘 rgb 与 a
+  以保持预乘；分配失败压 `None` 占位保栈平衡——宁可 opacity 失效，也不让子树整个消失。
+- **GPU 后端进 CI，并留下量化基准**。CI 增加 `gpu` feature 的 clippy + test（Windows WARP /
+  macOS Metal）；无适配器时用例打印跳过，**绿灯不等于跑了**。release 基准：全窗重绘 GPU
+  约 12×（2.6ms vs 30.7ms @ M4 2x），但**小面积更新软后端的 damage 快路仍占优**；GPU 稳态
+  的大头是每条文字一次提交，P5 的 glyph atlas 可收口。设计与分期见
+  `docs/gpu-cross-platform-design.md`。
 - **声明式初始焦点：`Element::autofocus()` / `autofocus_select_all()`**。布局稳定后宿主把
   键盘焦点交给该节点，一次性（语义同 HTML `autofocus`）；`_select_all` 额外全选已有内容。
   必需的原因是应用层此前**无从表达**这件事：`EventCtx::request_focus` 写的是
