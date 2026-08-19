@@ -615,10 +615,15 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
 
-### 渲染后端选择（Windows）
+### 渲染后端选择
 ```rust
 App::new("…", w, h).renderer(Renderer::Auto).content(ui).run();
 ```
+
+两平台各有一条可 opt-in 的 GPU 路径，`Renderer` 的三档语义相同（下表），差别只在后端实现：
+Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/Metal**（feature `gpu`，
+默认**关**——依赖树大、编译时间与体积代价明显，故按需开启；不开时 `Renderer::Gpu` 报错终止）。
+默认渲染器是 `Renderer::Software`，即不显式调 `.renderer(..)` 时两平台都走软光栅。
 
 | 变体 | 行为 | 用途 |
 |---|---|---|
@@ -633,6 +638,12 @@ App::new("…", w, h).renderer(Renderer::Auto).content(ui).run();
 - 仅适用**不透明窗口**；透明/分层窗口仍走软渲染。
 - 截图也能选后端：`--renderer gpu|software|auto`，于是同一个 example 可出软/硬两份图做比对。`--accelerated` 是等价于 `--renderer auto` 的旧写法，保留可用。
   对比示例：`cargo run --release --example settings -- --screenshot a.png --renderer software` 与 `--renderer gpu`。
+
+上面 Direct2D 那几条（ClearType、RDP 回退、仅不透明窗口）是 **Windows 专属**的实现细节。
+**macOS 侧**：内容视图挂一张 `CAMetalLayer`，wgpu 从该 layer 建 surface，图元走 SDF 渲染器、
+文字仍由 Core Text 光栅后交 GPU 合成（与软后端同一套字体与度量）。开启方式
+`cargo run --features gpu -- --renderer gpu`。实现细节与分阶段状态见
+[`docs/gpu-cross-platform-design.md`](gpu-cross-platform-design.md)。
 
 ---
 
@@ -1573,7 +1584,8 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 ## 11. 已知约束
 
 **功能约束**
-- CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。Windows 上可 opt-in Direct2D GPU 后端（见 §5）。
+- 默认 CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。两平台各有可 opt-in 的 GPU 后端：
+  Windows 走 Direct2D（feature `d2d`，默认开），macOS 走 wgpu/Metal（feature `gpu`，默认关）。见 §5。
 - `list` 当前每行是独立 Tab 停靠点，超长列表会拉长焦点链（计划：单 Tab 停靠 + 方向键导航）。
 - `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
 - 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
@@ -1599,16 +1611,16 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 **平台状态**
 
 Windows 与 macOS 均已支持——控件树、布局、事件、动画、主题是同一份平台无关代码，
-两平台间无需改动。以下几项尚未拉齐：
+两平台间无需改动。缝合面已基本对齐，下表列出各平台的实现方式与**两处尚未拉齐**的能力：
 
 | 能力 | Windows | macOS |
 |---|---|---|
 | 窗口 / 事件循环 / 文字 / 触摸 / 剪贴板 / 托盘 / 文件拖放 / 无边框窗口 | ✓ | ✓ |
-| 全局热键（`App::hotkey`） | ✓ | ✗ debug 期 panic、release 静默忽略 |
-| 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✗ debug 期 panic、release 打印一行并忽略 |
+| 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） |
+| 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
-| Direct2D GPU 后端（`App::renderer`） | ✓ | — 不适用（macOS 恒软渲染，`Renderer::Gpu` 会报错） |
+| GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（feature `gpu`，默认**关**；不开该 feature 时 `Renderer::Gpu` 报错终止） |
 
 **命名一致性**
 
