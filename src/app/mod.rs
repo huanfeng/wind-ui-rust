@@ -658,7 +658,7 @@ impl App {
                         match parse_key_spec(spec) {
                             Some(ev) => self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(ev)),
                             None => eprintln!(
-                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/Backspace/Delete/Space，可加 ctrl+ / shift+ 前缀），已跳过"
+                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/PageUp/PageDown/Backspace/Delete/Space，可加 ctrl+ / shift+ 前缀），已跳过"
                             ),
                         }
                     }
@@ -1575,6 +1575,8 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
         "end" => Key::End,
         "backspace" => Key::Backspace,
         "delete" | "del" => Key::Delete,
+        "pageup" | "pgup" => Key::PageUp,
+        "pagedown" | "pgdn" => Key::PageDown,
         "space" => Key::Space,
         // 单个字符也放行（`--key ctrl+a` 全选）：Ctrl 组合在本库走 `Key::Other(vk)`，
         // 与 TextInput 对 Ctrl+A/C/V/X 的处理对齐。
@@ -3355,6 +3357,9 @@ mod tests {
         let ca = p("ctrl+a").expect("ctrl+a 应可解析");
         assert_eq!(ca.key, Key::Other(u32::from(b'A')));
         assert!(ca.ctrl);
+
+        assert_eq!(p("PageUp").map(|e| e.key), Some(Key::PageUp));
+        assert_eq!(p("pgdn").map(|e| e.key), Some(Key::PageDown), "别名 pgdn");
 
         assert!(p("F13").is_none(), "未支持的键应回 None 而不是猜一个");
         assert!(p("").is_none());

@@ -1423,6 +1423,8 @@ pub(super) fn map_special(key_code: u16) -> Option<Key> {
         0x7E => Key::Up,        // 126
         0x73 => Key::Home,      // 115
         0x77 => Key::End,       // 119
+        0x74 => Key::PageUp,    // 116
+        0x79 => Key::PageDown,  // 121
         _ => return None,
     })
 }

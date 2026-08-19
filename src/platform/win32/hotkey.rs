@@ -16,8 +16,8 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, MOD_WIN, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    MOD_SHIFT, MOD_WIN, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
 };
 
 use crate::event::{Hotkey, HotkeyCtx, HotkeyOp, Key, WindowOp};
@@ -185,6 +185,8 @@ fn vk_of(key: Key) -> Option<u32> {
         Key::Down => VK_DOWN.0 as u32,
         Key::Home => VK_HOME.0 as u32,
         Key::End => VK_END.0 as u32,
+        Key::PageUp => VK_PRIOR.0 as u32,
+        Key::PageDown => VK_NEXT.0 as u32,
         Key::Delete => VK_DELETE.0 as u32,
         // 虚拟键码是 8 位的；越界值必是调用方搞错了，与其注册出个诡异热键不如拒绝。
         Key::Other(vk) if vk <= 0xFF => vk,
@@ -253,5 +255,39 @@ mod tests {
     #[test]
     fn 无修饰键时标志为零() {
         assert_eq!(mods_of(Hotkey::new(Key::Escape)), HOT_KEY_MODIFIERS(0));
+    }
+
+    /// 具名键的两张表必须互逆：`vk_of`（Key→VK，热键注册用）与 `mod.rs` 的 `map_vk`
+    /// （VK→Key，输入路径用）。
+    ///
+    /// 没有它时错在哪：两张表走偏的症状是"注册的是 Home，按下去却当 End 处理"——两处
+    /// 各自看都自洽，只有对着看才发现。macOS 侧本就有这条护栏（`具名键与输入路径的键码表一致`），
+    /// Windows 侧此前缺；而加 PageUp/PageDown 正是同时动这两张表。
+    #[test]
+    fn 具名键与输入路径的键码表一致() {
+        for key in [
+            Key::Tab,
+            Key::Enter,
+            Key::Escape,
+            Key::Space,
+            Key::Left,
+            Key::Right,
+            Key::Up,
+            Key::Down,
+            Key::Home,
+            Key::End,
+            Key::PageUp,
+            Key::PageDown,
+            Key::Delete,
+            // 刻意不含 Backspace：`vk_of` 对它返回 None（作全局热键无实际用途），
+            // 而输入路径照常识别 VK_BACK。两张表在这一项上有意不对称。
+        ] {
+            let vk = vk_of(key).expect("具名键都该有虚拟键码");
+            assert_eq!(
+                super::super::map_vk(vk as u16),
+                key,
+                "VK {vk:#04X} 在两张表里对应不同的键"
+            );
+        }
     }
 }

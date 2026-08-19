@@ -182,6 +182,11 @@ pub enum Key {
     Down,
     Home,
     End,
+    /// 上翻页。与 `Home`/`End` 同属"文档级导航"，控件未处理时可经
+    /// [`Element::on_nav_key`](crate::ui::Element::on_nav_key) 交给应用（翻候选页等）。
+    PageUp,
+    /// 下翻页。见 [`Key::PageUp`]。
+    PageDown,
     Char(char),
     Other(u32),
 }

@@ -1501,9 +1501,11 @@ impl Element {
     /// 游标即可），缺的只是按键能到达某处。
     ///
     /// **送到的键**：[`Key::Up`](crate::event::Key::Up) /
-    /// [`Key::Down`](crate::event::Key::Down)（仅单行；多行那里是移动到相邻视觉行）与
-    /// [`Key::Tab`](crate::event::Key::Tab)（两种模式都送）。PageUp/PageDown 尚不在
-    /// [`Key`](crate::event::Key) 枚举里（要加得动两个平台的键码映射）。
+    /// [`Key::Down`](crate::event::Key::Down)（仅单行；多行那里是移动到相邻视觉行），
+    /// 以及 [`Key::Tab`](crate::event::Key::Tab) /
+    /// [`Key::PageUp`](crate::event::Key::PageUp) /
+    /// [`Key::PageDown`](crate::event::Key::PageDown)（两种模式都送——本控件不做翻页，
+    /// 多行的上下移行只按视觉行走）。
     ///
     /// # 返回值是「我消费了吗」，Tab 上尤其重要
     ///
@@ -5375,10 +5377,56 @@ mod tests {
 
         assert!(tree.dispatch_key(k(Key::Down), Some(input)).consumed);
         assert!(tree.dispatch_key(k(Key::Up), Some(input)).consumed);
+        assert!(tree.dispatch_key(k(Key::PageDown), Some(input)).consumed);
+        assert!(tree.dispatch_key(k(Key::PageUp), Some(input)).consumed);
         assert_eq!(
             *got.borrow(),
-            vec![Key::Down, Key::Up],
-            "单行的 ↑↓ 应按序送到 on_nav_key"
+            vec![Key::Down, Key::Up, Key::PageDown, Key::PageUp],
+            "单行的 ↑↓ 与翻页键都应按序送到 on_nav_key"
+        );
+    }
+
+    /// 多行输入也转发翻页键——本控件不做翻页（上下移行只按视觉行走）。
+    ///
+    /// 没有它时错在哪：翻页键若和 ↑↓ 一样被多行守卫挡掉，多行场景下就地消失；而多行
+    /// 编辑器里"翻一页"恰恰是最需要交给应用（或将来交给控件自身）的动作。
+    #[test]
+    fn multiline_still_forwards_page_keys() {
+        use crate::event::{Key, KeyEvent};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let got: Rc<RefCell<Vec<Key>>> = Rc::new(RefCell::new(Vec::new()));
+        let g = got.clone();
+        let text = crate::signal::signal(String::from(
+            "a
+b",
+        ));
+        let ui = Element::col().child(
+            Element::text_input(text, "")
+                .multiline()
+                .height(80)
+                .on_nav_key(move |_, ev| {
+                    g.borrow_mut().push(ev.key);
+                    true
+                }),
+        );
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 120), &mut crate::text::NullTextEngine);
+        let input = tree.focusable_order()[0];
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
+        tree.dispatch_key(k(Key::PageDown), Some(input));
+        tree.dispatch_key(k(Key::Up), Some(input));
+        assert_eq!(
+            *got.borrow(),
+            vec![Key::PageDown],
+            "多行应转发翻页键，但不转发 ↑↓（那是移动到相邻视觉行）"
         );
     }
 

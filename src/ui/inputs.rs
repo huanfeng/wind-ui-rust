@@ -1808,7 +1808,9 @@ impl Widget for TextInput {
                     // 只在这里返回 `false` 时才轮到。查询框把 Tab 用作「接受补全」需要
                     // 它，而没声明 `on_nav_key` 的输入框行为完全不变。
                     Key::Up | Key::Down if !self.is_multiline() => self.fire_nav_key(ctx, *k),
-                    Key::Tab => self.fire_nav_key(ctx, *k),
+                    // 翻页键两种模式都转发：本控件不做翻页（多行的上下移行只按视觉行走），
+                    // 交给应用翻候选页 / 翻文档。
+                    Key::Tab | Key::PageUp | Key::PageDown => self.fire_nav_key(ctx, *k),
                     Key::Left => {
                         if !k.shift {
                             if let Some((s, _)) = self.selection() {

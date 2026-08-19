@@ -199,6 +199,8 @@ fn mac_keycode_of(key: Key) -> Option<u32> {
         Key::Down => 0x7D,
         Key::Home => 0x73,
         Key::End => 0x77,
+        Key::PageUp => 0x74,
+        Key::PageDown => 0x79,
         Key::Delete => 0x75, // ForwardDelete（0x33 是退格）
         Key::Other(vk) => return mac_keycode_from_vk(vk),
         // Backspace 作全局热键无实际用途（与 win32 侧一致）。
@@ -517,6 +519,8 @@ mod tests {
             Key::Home,
             Key::End,
             Key::Delete,
+            Key::PageUp,
+            Key::PageDown,
         ] {
             let code = mac_keycode_of(key).expect("具名键都该有键码");
             assert_eq!(

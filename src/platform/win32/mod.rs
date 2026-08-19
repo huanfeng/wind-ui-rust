@@ -41,7 +41,7 @@ use windows::Win32::UI::Input::Ime::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
     TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, HTOUCHINPUT,
@@ -2243,12 +2243,13 @@ unsafe fn handle_capture_changed(hwnd: HWND) {
     }
 }
 
-/// 把 VK 码翻译为框架键并分发。
-unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
-    let vk = wparam.0 as u16;
-    let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-    let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-    let key = if vk == VK_TAB.0 {
+/// VK 码 → 框架键。具名键逐个翻译，其余原样落进 `Key::Other`（Ctrl+A/C/V/X 等靠它）。
+///
+/// 独立成函数是为了可测：`hotkey.rs` 的 `vk_of` 是同一套键码的**反向**映射，两张表若走偏，
+/// 症状是"注册的是 Home、按下去却当 End 处理"——两处各自看都对，只有对着看才发现。
+/// 见 `hotkey.rs` 里钉住互逆关系的那条测试（macOS 侧本就有，Windows 侧此前缺）。
+pub(crate) fn map_vk(vk: u16) -> Key {
+    if vk == VK_TAB.0 {
         Key::Tab
     } else if vk == VK_RETURN.0 {
         Key::Enter
@@ -2272,11 +2273,22 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
         Key::Home
     } else if vk == VK_END.0 {
         Key::End
+    } else if vk == VK_PRIOR.0 {
+        Key::PageUp
+    } else if vk == VK_NEXT.0 {
+        Key::PageDown
     } else {
         Key::Other(vk as u32)
-    };
+    }
+}
+
+/// 把 VK 码翻译为框架键并分发。
+unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
+    let vk = wparam.0 as u16;
+    let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+    let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
     let ev = KeyEvent {
-        key,
+        key: map_vk(vk),
         pressed: true,
         shift,
         ctrl,
