@@ -307,6 +307,14 @@ impl<T> PartialEq for Signal<T> {
 }
 impl<T> Eq for Signal<T> {}
 
+/// 打印**句柄标识**（slot + 代际）而非值——`T` 未必 `Debug`，且绝大多数调试场景
+/// 想知道的是"这两处引用的是不是同一个信号"。值请自行 `sig.get()`。
+impl<T> std::fmt::Debug for Signal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Signal({:?})", self.key)
+    }
+}
+
 impl<T> Clone for Signal<T> {
     fn clone(&self) -> Self {
         *self

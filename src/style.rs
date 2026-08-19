@@ -2,6 +2,7 @@
 
 use crate::geometry::Color;
 use crate::render::{Gradient, Paint};
+use crate::signal::Signal;
 use crate::spec::Align;
 use crate::theme::Theme;
 
@@ -13,7 +14,7 @@ use crate::theme::Theme;
 /// 每补一个角色都是下游的破坏性变更；标上之后下游的 `match` 必须留 `_` 兜底分支，
 /// 新角色便只是新增。本 crate 内部的 `match` 不受影响，仍须穷尽——
 /// 忘记给新角色接上 `resolve` 会当场编译失败，正是想要的。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Role {
     Bg,
@@ -219,6 +220,13 @@ pub struct Style {
     pub fg: Color,
     /// 前景主题角色（Some 时优先于 `fg`，运行期换主题跟随）。
     pub fg_role: Option<Role>,
+    /// 前景角色的**信号版**（Some 时优先于 `fg_role` 与 `fg`）。
+    ///
+    /// 为什么需要它：`fg_role` 是构建期定死的值，而"同一份文案按状态换色"（成功回执绿、
+    /// 失败红）在运行期才知道该用哪个角色。没有它只能建两个绑同一份文本的节点、各自
+    /// `visible_when`，外加包住它们的容器也要带同样的判定（否则父容器仍为那个高度为 0 的
+    /// 容器计入 spacing）——三个节点、两处判定，表达的是"这行字有两种颜色"。
+    pub fg_role_signal: Option<Signal<Role>>,
     /// 字号 px。
     pub font_size: f32,
     /// 字重（DirectWrite 数值：400=Normal、500=Medium、600=SemiBold、700=Bold）。
@@ -247,6 +255,7 @@ impl Default for Style {
             corner_radius: 0.0,
             fg: Color::hex(0x1A1A1A),
             fg_role: Some(Role::Text),
+            fg_role_signal: None,
             font_size: 14.0,
             font_weight: crate::text::WEIGHT_NORMAL,
             font_family: None,
@@ -259,12 +268,28 @@ impl Default for Style {
 }
 
 impl Style {
-    /// 解析最终文字色：有 `fg_role` 时按主题解析，否则用 `fg`。
+    /// 解析最终文字色：`fg_role_signal` > `fg_role` > `fg`。
+    ///
+    /// 信号已失效（所在子树被重建）时**回落**而不是 panic：绘制期读到一个刚被回收的
+    /// 句柄是可能的（响应式重建与本帧绘制的竞态），此时画上一档颜色远好过崩掉。
     pub fn resolved_fg(&self, t: &Theme) -> Color {
+        if let Some(sig) = self.fg_role_signal {
+            if let Some(r) = sig.try_get() {
+                return r.resolve(t);
+            }
+        }
         match self.fg_role {
             Some(r) => r.resolve(t),
             None => self.fg,
         }
+    }
+
+    /// 当前生效的前景角色（`None` 表示用的是固定色 `fg`）。供布局签名折算，见
+    /// [`crate::core::Tree::layout_signature`]。
+    pub(crate) fn effective_fg_role(&self) -> Option<Role> {
+        self.fg_role_signal
+            .and_then(|s| s.try_get())
+            .or(self.fg_role)
     }
 }
 
@@ -326,5 +351,37 @@ mod tests {
             ..Style::default()
         };
         assert_eq!(s2.resolved_fg(&t), Color::hex(0x010203));
+    }
+
+    /// `fg_role_signal` 的优先级与失效回落。
+    ///
+    /// 没有它时各错在哪：
+    /// - 优先级搞反 → 设了信号却仍显示构建期那个角色，即"按状态换色"静默不生效。
+    /// - 失效不回落而是 `get()` → 响应式子树刚被重建、本帧还在绘制旧节点时当场 panic。
+    #[test]
+    fn fg_role_signal_wins_and_falls_back_when_disposed() {
+        use crate::signal::signal;
+        let t = Theme::default();
+        let tone = signal(Role::Success);
+        let mut st = Style {
+            fg: Color::hex(0x123456),
+            fg_role: Some(Role::Danger),
+            ..Default::default()
+        };
+
+        assert_eq!(st.resolved_fg(&t), t.palette.danger, "无信号时用 fg_role");
+        st.fg_role_signal = Some(tone);
+        assert_eq!(st.resolved_fg(&t), t.palette.success, "有信号时信号赢");
+        tone.set(Role::Warning);
+        assert_eq!(st.resolved_fg(&t), t.palette.warning, "改信号即换色");
+
+        tone.dispose();
+        assert_eq!(
+            st.resolved_fg(&t),
+            t.palette.danger,
+            "信号失效应回落到 fg_role，而不是 panic"
+        );
+        st.fg_role = None;
+        assert_eq!(st.resolved_fg(&t), Color::hex(0x123456), "再回落到固定 fg");
     }
 }

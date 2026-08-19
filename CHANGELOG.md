@@ -74,6 +74,24 @@
   进不了 CI。
   顺带把 `screenshot_from_args` 的解析抽成收 `&[String]` 的私有方法：直接读
   `std::env::args()` 时，上面这些断言只能靠真起进程传参才验得了。
+- **按状态换色：`Element::fg_role_signal(Signal<Role>)`**。`fg_role` 收的是 `Role` 值、
+  构建期就定死了，而「同一份文案，成功回执绿、失败红」要到运行期才知道用哪个角色。
+  此前只能建两个绑同一份文本的 label 各自 `visible_when`，外加包住它们的容器也要带同样
+  的判定（否则父容器仍为那个高度为 0 的容器计入 spacing）——三个节点、两处判定，表达的
+  是「这行字有两种颜色」。
+  优先级 `fg_role_signal` > `fg_role` > `fg`（`.fg(c)` 会清掉信号版，否则它继续赢，表现
+  为 `.fg(c)` 静默不生效）；信号失效时回落而不是 panic——绘制期读到刚被回收的句柄是可能
+  的（响应式重建与本帧绘制的竞态），画上一档颜色远好过崩掉。色板本就齐备：`Role::Success`
+  / `Warning` / `Danger` 同源于 `palette`，故换主题依然跟随。
+  换色的重绘沿用 `own_enabled`（置灰同属「布局不变但像素变了」）的既有范式：把生效角色
+  折进布局签名，重排后签名不等即自动升整窗。这一步是必需的且只在键盘路径上体现——
+  `call_on_event` 对事件期内的信号写入按类型分级，指针 Down/Up 升 `DamageReq::Layout`
+  （直接置 needs_full），但 Key 刻意只给 `Rect` 以「避免打字时整窗卡顿」。于是
+  `on_submit` 里改回执颜色那一帧只重画输入框，回执那行字保持旧色不动。
+  残留约束：指针 `Move` 不置 `needs_relayout`（hover 高频），故自定义 `Widget` 的 Move
+  分支里改别的节点的颜色信号需自行 `ctx.mark_dirty()`。已写进 rustdoc 与开发指南。
+- **`Signal<T>` 实现 `Debug`**，打印句柄标识（slot + 代际）而非值——`T` 未必 `Debug`，
+  且调试时想知道的通常是「这两处引用的是不是同一个信号」。
 
 ### Changed
 - **Tab 键从「宿主抢先」改为「宿主兜底」**。此前 `UiHost::on_key` 里 Tab 是唯一在

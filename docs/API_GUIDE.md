@@ -794,6 +794,19 @@ Element::label("标题")
 >
 > **平台状态**：`font_family` 两平台均生效。`font_weight` **当前仅 Windows 生效**——macOS 的 CoreText 路径尚未接入字重（`src/text/coretext.rs` 构造 `CTFont` 时不传 traits），传入非 400 的值不报错，但没有视觉变化。
 
+**按状态换色**：`fg_role` 收的是 `Role` 值、构建期定死。要「同一份文案，成功回执绿、失败红」用信号版：
+
+```rust
+let tone = signal(Role::TextMuted);
+Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Success) 即换色
+```
+
+优先级 `fg_role_signal` > `fg_role` > `fg`（`.fg(c)` 会清掉信号版）；信号失效时回落而不是 panic。色板本就齐备——`Role::Success` / `Warning` / `Danger` 同源于 `palette`，故换主题依然跟随。
+
+没有它只能建两个绑同一份文本的 label 各自 `visible_when`，外加包住它们的容器也要带同样的判定（否则父容器仍为那个高度为 0 的容器计入 spacing）——三个节点、两处判定，表达的是「这行字有两种颜色」。
+
+> 换色靠「生效角色进布局签名 → 重排后签名不等 → 升整窗」生效（同 `enabled_signal` 的置灰）。重排只在宿主置了 `needs_relayout` 的帧发生，而指针 `Move` 刻意不置（hover 高频）。故在自定义 `Widget` 的 Move 分支里改**别的**节点的颜色信号需自行 `ctx.mark_dirty()`；按键/点击/菜单/`App::channel` 都无需额外处理。
+
 ### 7.2 `Theme`（全局 + 每控件覆盖层）
 控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层：
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。

@@ -426,4 +426,66 @@ mod tests {
             "焦点在两个文本框之间转移应整窗刷新，否则旧框光标残留"
         );
     }
+
+    /// P2-3 回归：`fg_role_signal` 换色必须**升整窗**，走**键盘**路径。
+    ///
+    /// 为什么必须是键盘：`call_on_event` 对事件期内的信号写入按事件类型分级——指针
+    /// Down/Up 升 `DamageReq::Layout`（`apply_damage` 直接置 needs_full，覆盖所有读者），
+    /// 但 Key 只给 `DamageReq::Rect`，刻意保留局部重绘"避免打字时整窗卡顿"。于是键盘
+    /// 路径上的换色是唯一漏得掉的：`on_submit` 里把回执改成绿色，那一帧只重画输入框，
+    /// 回执那行字保持旧色不动——无 panic 无告警，要等下次凑巧整窗才变过来。
+    ///
+    /// 解法沿用 `own_enabled`（置灰同属"布局不变但像素变了"）的既有范式：把生效的前景
+    /// 角色折进布局签名，重排后签名不等即自动升整窗，无需为它单开特例分支。
+    #[test]
+    fn fg_role_signal_change_upgrades_to_full_repaint_on_key_path() {
+        use crate::app::test_support::key_ev;
+        use crate::event::Key;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::style::Role;
+        let tone = crate::signal::signal(Role::TextMuted);
+        let text = crate::signal::signal(String::new());
+        let app = App::new("t", 160, 100).content(
+            Element::col()
+                .width(160)
+                .height(100)
+                .child(
+                    Element::text_input(text, "查词…")
+                        .height(30)
+                        .autofocus()
+                        // Enter 提交 → 把回执改成成功色。这是 wind-dict 那个场景的最小复刻。
+                        .on_submit(move |_| tone.set(Role::Success)),
+                )
+                // 改色的是**另一个**节点：Key 事件的局部脏区只覆盖输入框，正是漏画的来源。
+                .child(Element::label("回执").fg_role_signal(tone)),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(160, 100).unwrap();
+        macro_rules! frame {
+            () => {
+                handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(160, 100))
+            };
+        }
+        frame!(); // 首帧兑现 autofocus 并种入后备缓冲
+
+        // 前提一：普通打字（不改颜色信号）确实走局部——否则本测试等于什么都没验。
+        let k = key_ev();
+        handler.on_key(k(Key::Char('a')));
+        frame!();
+        assert!(
+            !handler.damage.last_frame_full,
+            "前提：不改颜色的按键应走局部重绘（这条不成立则下面的断言没有意义）"
+        );
+
+        // Enter → on_submit 改颜色信号。
+        handler.on_key(k(Key::Enter));
+        assert_eq!(tone.get(), Role::Success, "前提：Enter 应触发 on_submit");
+        frame!();
+        assert!(
+            handler.damage.last_frame_full,
+            "换色帧必须整窗——键盘路径的信号写入只给局部脏区，会把改了色的那行字漏掉"
+        );
+    }
 }

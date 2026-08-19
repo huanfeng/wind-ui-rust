@@ -3268,11 +3268,52 @@ impl Element {
     pub fn fg(mut self, c: Color) -> Self {
         self.style.fg = c;
         self.style.fg_role = None;
+        // 信号版一并清掉：`fg` 的语义是"就用这个固定色"，留着信号会让它继续赢，
+        // 表现为 `.fg(c)` 静默不生效。
+        self.style.fg_role_signal = None;
         self
     }
     /// 主题角色前景/文字色（运行期换主题跟随）。
     pub fn fg_role(mut self, role: crate::style::Role) -> Self {
         self.style.fg_role = Some(role);
+        self
+    }
+    /// **按状态换色**：前景角色绑 `Signal<Role>`，运行期改信号即换色（同时照常跟随主题）。
+    ///
+    /// 没有它时错在哪：[`fg_role`](Self::fg_role) 收的是 `Role` 值、构建期就定死了，而
+    /// 「同一份文案，成功回执绿、失败红」要到运行期才知道用哪个角色。只能建两个绑同一份
+    /// 文本的节点、各自 `visible_when`，外加包住它们的容器也要带同样的判定——否则父容器
+    /// 仍为那个高度为 0 的容器计入 spacing。三个节点、两处判定，表达的是「这行字有两种
+    /// 颜色」。
+    ///
+    /// 优先级 `fg_role_signal` > [`fg_role`](Self::fg_role) > [`fg`](Self::fg)；调
+    /// `.fg(c)` 会清掉本设置。信号失效时回落到后两者而不是 panic。
+    ///
+    /// 色板本就齐备：[`Role::Success`](crate::style::Role::Success) /
+    /// [`Warning`](crate::style::Role::Warning) / [`Danger`](crate::style::Role::Danger)
+    /// 都同源于 `palette`，故换主题依然跟随。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let tone = signal(Role::TextMuted);
+    /// let msg = signal(String::from("尚未保存"));
+    /// let bar = Element::label_signal(msg).fg_role_signal(tone);
+    /// // 保存成功的回调里：
+    /// tone.set(Role::Success);
+    /// ```
+    ///
+    /// **填充按钮**上它会盖掉自动对比前景（`Intent` 保证的蓝底白字）——那是显式选择，
+    /// 请自行确认对比度。
+    ///
+    /// # 一处残留约束
+    ///
+    /// 换色靠"生效角色进布局签名、重排后签名不等即升整窗"生效（同 `enabled_signal` 的
+    /// 置灰）。而重排只在宿主置了 `needs_relayout` 的帧发生——指针 `Move` **刻意不置**
+    /// （hover 高频）。所以在自定义 `Widget` 的 Move 分支里改别的节点的颜色信号不会自动
+    /// 升整窗，那一帧只重画悬停节点；这种写法请自行 `ctx.mark_dirty()`。
+    /// 按键、点击、菜单、`App::channel` 这些路径都置了 `needs_relayout`，无需额外处理。
+    pub fn fg_role_signal(mut self, role: Signal<crate::style::Role>) -> Self {
+        self.style.fg_role_signal = Some(role);
         self
     }
     /// 浮层投影（drop shadow）。

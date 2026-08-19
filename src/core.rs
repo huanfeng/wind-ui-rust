@@ -1791,6 +1791,11 @@ impl Tree {
                 slot.generation.hash(&mut h);
                 n.effective_visible().hash(&mut h);
                 n.own_enabled().hash(&mut h);
+                // 前景角色进签名：`fg_role_signal` 是"布局不变但像素变了"的一类，与上面
+                // `own_enabled`（置灰）同理——纯颜色变化不改任何 bounds，只靠几何签名会被
+                // 判成"结构没变"而走局部重绘，那一帧只重画事件所在的节点，改了色的那行字
+                // 保持旧色不动。折进来即自动升整窗，无需为它单开特例分支。
+                n.style.effective_fg_role().hash(&mut h);
                 let b = n.bounds;
                 (b.x, b.y, b.w, b.h).hash(&mut h);
                 // 绘制偏移/层级提升进签名：拖拽让位这类"布局不变但像素位移"的变化据此
