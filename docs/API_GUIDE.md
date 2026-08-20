@@ -805,6 +805,22 @@ Element::label("标题")
 >
 > **平台状态**：`font_family` 两平台均生效。`font_weight` **当前仅 Windows 生效**——macOS 的 CoreText 路径尚未接入字重（`src/text/coretext.rs` 构造 `CTFont` 时不传 traits），传入非 400 的值不报错，但没有视觉变化。
 
+**派生信号 `Signal::map`**：同一份状态要以另一种形态喂给控件时用它——应用只维护一个语气信号，颜色与文案都从它派生，改一处两处同时跟上：
+
+```rust
+let tone = signal(Tone::Idle);
+let role = tone.map(|t| match t { Tone::Ok => Role::Success, Tone::Bad => Role::Danger, _ => Role::TextMuted });
+let text = tone.map(|t| match t { Tone::Ok => "已保存", Tone::Bad => "保存失败", _ => "尚未保存" }.to_string());
+Element::label_signal(text).fg_role_signal(role)
+```
+
+- **读时现算、不缓存**，请保持映射闭包廉价。不缓存是为了让读路径维持共享借用——`a.with(|_| b.get())` 这类嵌套读因此仍然合法，而缓存必须在读路径写回、写回要可变借用，嵌套读会当场 panic。
+- **只读**：`set`/`update` 在派生信号上是空操作（debug 下 panic 提示），要改值请改源。
+- `version()` **转问源**：源变而映射结果不变时仍报"变过"（保守方向，变更检测宁可多重建一次也不能漏）。
+- **链式 `map` 扁平化**：`a.map(f).map(g)` 组合成单层，不是两层嵌套。
+- 映射闭包**只能读不能写**信号（读期间持共享借用，写会撞借用冲突）。映射本就该是纯函数。
+- 派生槽位随 `SignalScope` 一并回收，与普通信号同一条路径。
+
 **按状态换色**：`fg_role` 收的是 `Role` 值、构建期定死。要「同一份文案，成功回执绿、失败红」用信号版：
 
 ```rust

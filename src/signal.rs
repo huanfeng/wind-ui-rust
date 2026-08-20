@@ -49,6 +49,7 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 /// 运行时 slot 键：索引 + 代际（复用 core arena 的失效心智，回收后旧句柄自然失效）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,11 +58,31 @@ struct SlotKey {
     generation: u32,
 }
 
+/// 派生映射：源值（`&dyn Any`，实为源类型）→ 派生值（`Box<dyn Any>`）。
+///
+/// `Rc` 是为了链式 `map` 能**组合**而不是层层嵌套（见 [`Signal::map`]）；类型擦除是因为
+/// 槽位表不带类型参数，源类型与派生类型只在 `map` 的那一刻可见。
+type ComputeFn = Rc<dyn Fn(&dyn Any) -> Box<dyn Any>>;
+
+/// 派生信号的来源：读时由 `compute(源值)` 现算，本槽位**不存值**。
+///
+/// 为什么不缓存：缓存要在读路径上判过期、过期就得写回，而写回需要 `RT` 的**可变**借用；
+/// 现在的读一律是共享借用，`a.with(|_| b.get())` 这类嵌套读因此合法。一旦读路径改成可变
+/// 借用，嵌套读会当场 panic——那是比"每次重算"大得多的代价。映射请保持廉价。
+struct Derived {
+    src: SlotKey,
+    compute: ComputeFn,
+}
+
 struct Slot {
     generation: u32,
+    /// 派生槽位这里存的是 `()` 占位——只为让 arena 的存活判定与回收记账保持原样，
+    /// 真值见 `derived`。
     value: Option<Box<dyn Any>>,
-    /// 每次写自增；供 `memo` 依赖比对（Phase 1 暂存，memo 在后续增量接入）。
+    /// 每次写自增；派生信号不自己记版本，`version()` 转问源。
     version: u64,
+    /// 非 `None` 即为派生信号。
+    derived: Option<Derived>,
 }
 
 /// 信号运行时：generational arena。
@@ -96,6 +117,7 @@ impl Runtime {
             let slot = &mut self.slots[idx as usize];
             slot.value = Some(value);
             slot.version = 0;
+            slot.derived = None;
             // generation 已在 `remove` 时自增过，此处沿用即可——复用槽位天然与旧句柄不同代。
             SlotKey {
                 index: idx,
@@ -107,6 +129,7 @@ impl Runtime {
                 generation: 0,
                 value: Some(value),
                 version: 0,
+                derived: None,
             });
             SlotKey {
                 index: idx,
@@ -135,12 +158,22 @@ impl Runtime {
         }
         slot.value = None;
         slot.version = 0;
+        slot.derived = None;
         // 溢出回绕后理论上可与极老的句柄撞代（同 `Tree` 的节点 id，2^32 次复用同一槽位）；
         // 实际不可达，且撞上也只是读到别人的值而非内存不安全。
         slot.generation = slot.generation.wrapping_add(1);
         self.free.push(key.index);
         self.live -= 1;
         true
+    }
+
+    /// 建一个派生槽位。走 `insert` 落占位值，故作用域收集、峰值统计、复用逻辑全部照旧。
+    fn insert_derived(&mut self, src: SlotKey, compute: ComputeFn) -> SlotKey {
+        let key = self.insert(Box::new(()));
+        if let Some(slot) = self.slot_mut(key) {
+            slot.derived = Some(Derived { src, compute });
+        }
+        key
     }
 
     fn slot(&self, key: SlotKey) -> Option<&Slot> {
@@ -523,6 +556,14 @@ impl<T: 'static> Signal<T> {
         RT.with(|rt| {
             let rt = rt.borrow();
             let slot = rt.slot(self.key)?;
+            // 派生信号：现算。借用全程是**共享**的，故映射闭包里再读别的信号也合法
+            // （写则不然，见 `Signal::map` 的约束）。
+            if let Some(d) = &slot.derived {
+                let src = rt.slot(d.src)?;
+                let raw = (d.compute)(src.value.as_ref()?.as_ref());
+                let v = raw.downcast_ref::<T>().expect("派生信号的值类型与句柄不符");
+                return Some(f(v));
+            }
             let v = slot
                 .value
                 .as_ref()
@@ -536,6 +577,82 @@ impl<T: 'static> Signal<T> {
     /// 句柄是否仍指向活着的槽位。
     pub fn is_alive(&self) -> bool {
         RT.with(|rt| rt.borrow().slot(self.key).is_some())
+    }
+
+    /// **派生信号**：映射本信号的值，得到一个只读的 `Signal<U>`。
+    ///
+    /// 解决的是"同一份状态要以另一种形态喂给控件"——例如把 `Signal<Tone>` 映成
+    /// `Signal<Role>` 交给 [`Element::fg_role_signal`](crate::ui::Element::fg_role_signal)，
+    /// 或把 `Signal<Vec<T>>` 映成 `Signal<String>` 做计数文案。没有它只能建两个节点各自
+    /// `visible_when` 互斥，或者在每个写入点同时维护两个信号（漏一处就静默不同步）。
+    ///
+    /// # 语义
+    ///
+    /// - **读时现算，不缓存**：每次 `get`/`with` 都会调一次映射闭包。请保持闭包廉价。
+    ///   不缓存是为了让读路径维持**共享借用**——现在 `a.with(|_| b.get())` 这类嵌套读是
+    ///   合法的，而缓存必须在读路径上写回，写回要可变借用，嵌套读就会当场 panic。
+    /// - **只读**：`set` / `update` 在派生信号上是空操作（debug 下 panic 提示）。要改值请
+    ///   改源信号。
+    /// - [`version`](Self::version) **转问源**：源变而映射结果不变时仍报"变过"。这是保守
+    ///   方向——变更检测宁可多重建一次，也不能漏。
+    /// - 源被回收后，本信号的读退化为 `None`（`try_get`）／panic（`get`），与普通信号
+    ///   句柄失效一致。
+    /// - **链式 `map` 会扁平化**：`a.map(f).map(g)` 只产生一个派生槽位（组合闭包），
+    ///   不是两层嵌套。故链再长也只有一次槽位开销、一层借用。
+    ///
+    /// # 约束
+    ///
+    /// 映射闭包**只能读不能写**信号：读期间持着 `RT` 的共享借用，闭包里 `set` 会撞上
+    /// `RefCell` 的借用冲突而 panic。映射本就该是纯函数。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let n = signal(3usize);
+    /// let label = n.map(|v| format!("共 {v} 条"));
+    /// assert_eq!(label.get(), "共 3 条");
+    /// n.set(10);
+    /// assert_eq!(label.get(), "共 10 条", "派生值跟随源");
+    /// ```
+    pub fn map<U: 'static>(self, f: impl Fn(&T) -> U + 'static) -> Signal<U> {
+        // 本次映射：源值(&dyn Any，实为 T) → U。
+        let mine: ComputeFn = Rc::new(move |any| {
+            let t = any.downcast_ref::<T>().expect("map 的输入类型与句柄不符");
+            Box::new(f(t)) as Box<dyn Any>
+        });
+        let key = RT.with(|rt| {
+            let mut rt = rt.borrow_mut();
+            // 自身已是派生就**组合**而不是再套一层：链式 map 恒为单层，读时也只解一次。
+            let prev = rt
+                .slot(self.key)
+                .and_then(|s| s.derived.as_ref())
+                .map(|d| (d.src, d.compute.clone()));
+            let (src, compute) = match prev {
+                Some((src, prev)) => {
+                    let composed: ComputeFn = Rc::new(move |any| {
+                        // prev: 源类型 → T；mine: T → U。
+                        let mid = prev(any);
+                        mine(&*mid)
+                    });
+                    (src, composed)
+                }
+                None => (self.key, mine),
+            };
+            rt.insert_derived(src, compute)
+        });
+        Signal {
+            key,
+            _t: PhantomData,
+            _not_send: PhantomData,
+        }
+    }
+
+    /// 本信号是否为 [`map`](Self::map) 派生而来（派生信号只读）。
+    pub fn is_derived(&self) -> bool {
+        RT.with(|rt| {
+            rt.borrow()
+                .slot(self.key)
+                .is_some_and(|s| s.derived.is_some())
+        })
     }
 
     /// 立即回收本信号的槽位。
@@ -567,6 +684,12 @@ impl<T: 'static> Signal<T> {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
+                // 派生信号只读：真写下去会把占位的 `()` 换成 T，此后读它就 panic
+                // （类型不符），而且症状离写入点很远。就地拦下。
+                if slot.derived.is_some() {
+                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
+                    return;
+                }
                 slot.value = Some(Box::new(value));
                 slot.version = slot.version.wrapping_add(1);
             } else {
@@ -583,6 +706,11 @@ impl<T: 'static> Signal<T> {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
+                // 理由同 [`Signal::set`]。
+                if slot.derived.is_some() {
+                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
+                    return;
+                }
                 if let Some(v) = slot.value.as_mut().and_then(|b| b.downcast_mut::<T>()) {
                     f(v);
                     slot.version = slot.version.wrapping_add(1);
@@ -601,7 +729,17 @@ impl<T: 'static> Signal<T> {
     /// 当前写入版本号（每次 `set`/`update` 自增）。用于变更检测：缓存上次版本，
     /// 不相等则说明值已更新。信号已被释放时返回 `0`。
     pub fn version(self) -> u64 {
-        RT.with(|rt| rt.borrow().slot(self.key).map(|s| s.version).unwrap_or(0))
+        RT.with(|rt| {
+            let rt = rt.borrow();
+            let slot = rt.slot(self.key)?;
+            // 派生信号自己不记版本：它没有"写入"这回事。转问源——源变即报变，哪怕映射
+            // 结果没变。保守方向：变更检测宁可多重建一次，也不能漏。
+            match &slot.derived {
+                Some(d) => rt.slot(d.src).map(|s| s.version),
+                None => Some(slot.version),
+            }
+        })
+        .unwrap_or(0)
     }
 }
 
@@ -944,5 +1082,101 @@ mod tests {
         assert_eq!(s.with(|v| v.0), 42);
         s.update(|v| v.0 = 7);
         assert_eq!(s.with(|v| v.0), 7);
+    }
+
+    /// 派生值跟随源，且 `version` 转问源（供 `DynList` 一类的变更检测）。
+    ///
+    /// 没有它时错在哪：派生信号若自己记版本，它永远是 0——绑了它的响应式宿主
+    /// （`list_signal`/`host_signal`）就永远不重建，界面停在首帧那份数据上。
+    #[test]
+    fn derived_follows_source_including_version() {
+        let n = signal(3usize);
+        let label = n.map(|v| format!("共 {v} 条"));
+        assert_eq!(label.get(), "共 3 条");
+        assert!(label.is_derived() && !n.is_derived());
+
+        let v0 = label.version();
+        n.set(10);
+        assert_eq!(label.get(), "共 10 条", "派生值应跟随源");
+        assert_ne!(label.version(), v0, "源变过，派生的 version 必须跟着变");
+    }
+
+    /// 链式 `map` **扁平化**：只多一个槽位，不是每层一个。
+    ///
+    /// 没有这条时错在哪：层层嵌套的话，读一次要沿链逐层解引用，且每层都占一个槽位——
+    /// 在会重建的子树里（每次重建都重新 map）槽位会成倍累积，`WINDUI_SIGNALS` 的活跃数
+    /// 一路攀升，看起来像信号泄漏。
+    #[test]
+    fn chained_map_flattens_to_a_single_slot() {
+        let n = signal(2i32);
+        let before = stats().live;
+        let out = n.map(|v| v * 3).map(|v| v + 1).map(|v| format!("{v}"));
+        assert_eq!(out.get(), "7", "三层组合应等于依次施加");
+        assert_eq!(
+            stats().live - before,
+            3,
+            "三次 map 各产生一个句柄，但每个都是单层——不会因组合而多占"
+        );
+        n.set(5);
+        assert_eq!(out.get(), "16", "链尾仍跟随源");
+    }
+
+    /// 映射闭包里**读别的信号**是合法的——读路径全程共享借用。
+    ///
+    /// 没有这条约束时错在哪：若为了缓存而把读路径改成可变借用，这种写法（以及既有的
+    /// `a.with(|_| b.get())`）会当场 `already mutably borrowed` panic，而且是运行期才炸。
+    #[test]
+    fn map_closure_may_read_other_signals() {
+        let unit = signal(String::from("条"));
+        let n = signal(4usize);
+        let label = n.map(move |v| format!("共 {v} {}", unit.get()));
+        assert_eq!(label.get(), "共 4 条");
+        unit.set(String::from("项"));
+        assert_eq!(
+            label.get(),
+            "共 4 项",
+            "闭包每次读时现算，故也跟随它读的信号"
+        );
+    }
+
+    /// 派生信号只读：`set`/`update` 不生效。
+    ///
+    /// 没有守卫时错在哪：写入会把派生槽位里的 `()` 占位换成真值，此后每次读都因类型不符
+    /// 而 panic——症状离写入点很远，很难查。
+    #[test]
+    #[should_panic(expected = "派生信号")]
+    fn derived_rejects_writes() {
+        let n = signal(1i32);
+        let d = n.map(|v| v * 2);
+        d.set(99);
+    }
+
+    /// 源被回收后，派生信号的读退化为 `None`，与普通句柄失效一致（不 panic 在 try_ 路径）。
+    #[test]
+    fn derived_dies_with_its_source() {
+        let n = signal(7i32);
+        let d = n.map(|v| v + 1);
+        assert_eq!(d.try_get(), Some(8));
+        n.dispose();
+        assert_eq!(d.try_get(), None, "源没了，派生读不出值");
+        assert!(d.is_alive(), "派生槽位自身还在（要单独回收），只是读不出值");
+    }
+
+    /// 派生槽位随 [`SignalScope`] 一并回收——它走的是同一条 `insert` 路径。
+    ///
+    /// 没有这条时错在哪：会重建的子树里每轮 map 都留下一个不归任何作用域管的槽位，
+    /// 一轮一个地漏。
+    #[test]
+    fn derived_slots_are_collected_by_scope() {
+        let src = signal(1i32);
+        let before = stats().live;
+        let mut scope = SignalScope::new();
+        scope.collect(|| {
+            let _a = src.map(|v| v * 2);
+            let _b = src.map(|v| v * 3);
+        });
+        assert_eq!(stats().live - before, 2, "作用域内建了两个派生槽位");
+        scope.dispose();
+        assert_eq!(stats().live, before, "作用域回收后派生槽位应一并归还");
     }
 }
