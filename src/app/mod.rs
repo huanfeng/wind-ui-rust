@@ -1197,6 +1197,9 @@ struct UiHost {
     /// 窗口在帧首 `anim::reset_request()` 会清掉前一个窗口刚提出的续帧请求，让它的动画
     /// 掉帧甚至冻住。收进实例字段后，每个宿主只回答自己那一份。
     wants_anim: bool,
+    /// 本帧实际更新的物理区域；`None` = 整帧。供平台收窄呈现范围（见
+    /// [`crate::platform::AppHandler::last_frame_damage`]）。
+    last_present: Option<Rect>,
 }
 
 impl Drop for UiHost {
@@ -1376,6 +1379,7 @@ impl UiHost {
             pending_windows: Vec::new(),
             scope: None,
             wants_anim: false,
+            last_present: None,
         }
     }
 
@@ -1746,6 +1750,14 @@ impl AppHandler for UiHost {
         }
 
         // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果种入后备缓冲供后续局部帧复用。----
+        // 清底由这里做，不再由平台每帧无条件 fill：局部帧根本不需要清（内容随后被脏区
+        // 覆盖），而那一次 fill 是整窗的，与脏区多小无关。
+        if let Some(pixmap) = target.as_pixmap() {
+            pixmap.fill(tiny_skia::Color::from_rgba8(
+                self.bg.r, self.bg.g, self.bg.b, self.bg.a,
+            ));
+        }
+        self.last_present = None;
         self.prepare_full_frame(logical, laid_out, now_ms);
         // canvas 借的是 self.engine，与下面各浮层状态是不相交字段，借用安全。
         let mut canvas = target.make_canvas(&mut self.engine, s);
@@ -1860,6 +1872,20 @@ impl AppHandler for UiHost {
             self.damage.needs_relayout = true;
         }
         repaint
+    }
+
+    fn request_full_frame(&mut self) {
+        self.damage.needs_full = true;
+    }
+
+    fn pending_damage(&self) -> Option<crate::geometry::Rect> {
+        // 逻辑 → 物理，并外扩一像素吸收取整误差。
+        self.next_frame_damage()
+            .map(|r| r.scaled(self.scale).inflate(1))
+    }
+
+    fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
+        self.last_present
     }
 
     fn on_window_shown(&mut self) -> bool {
@@ -2934,6 +2960,45 @@ mod tests {
         b.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 40));
         assert!(!b.wants_animation(), "静态内容不应请求续帧");
         assert!(a.wants_animation(), "A 的续帧请求不得被 B 的帧清掉");
+    }
+
+    /// 局部帧只更新脏区那几行，**绝不碰框外像素**——平台正是靠这一点把 R/B 交换与
+    /// 上传收窄到那几行（`AppHandler::last_frame_damage`）。若这里整窗拷贝回来，
+    /// 平台的窄上传就会把没交换过的行当成交换过的送上屏，颜色红蓝颠倒。
+    #[test]
+    fn partial_frame_leaves_pixels_outside_damage_untouched() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let (w, h) = (120, 200);
+        let mut a = App::new("a", w, h)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::progress_indeterminate().width_match().height(8)),
+            )
+            .into_handler_for_test();
+        a.set_scale(1.0);
+        let mut pm = Pixmap::new(w as u32, h as u32).unwrap();
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+
+        // 在远离进度条的底部埋一个标记色。
+        let mark = [0xFFu8, 0x00, 0xFF, 0xFF];
+        let off = ((h - 4) * w + 8) as usize * 4;
+        pm.data_mut()[off..off + 4].copy_from_slice(&mark);
+
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+        assert!(!a.damage.last_frame_full, "第二帧应走局部路径");
+        assert_eq!(
+            &pm.data()[off..off + 4],
+            &mark,
+            "脏区之外的像素不该被局部帧覆盖"
+        );
+        let dmg = a.last_frame_damage().expect("局部帧应报告更新范围");
+        assert!(
+            dmg.bottom() < h - 4,
+            "进度条的脏区不应延伸到底部标记处：{dmg:?}"
+        );
     }
 
     /// 回归（多窗口地基）：对话框栈必须归各自的树所有。

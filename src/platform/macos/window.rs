@@ -311,15 +311,17 @@ struct ViewState {
 
 impl ViewState {
     /// 确保后备缓冲匹配物理尺寸；变化时重建。
-    fn ensure_pixmap(&mut self, w: i32, h: i32) {
+    /// 确保后备 pixmap 为 w×h；返回是否**新建**了缓冲（新建的内容是透明黑，调用方需清底）。
+    fn ensure_pixmap(&mut self, w: i32, h: i32) -> bool {
         let w = w.max(1);
         let h = h.max(1);
         if self.buf_w == w && self.buf_h == h && self.pixmap.is_some() {
-            return;
+            return false;
         }
         self.pixmap = Some(Pixmap::new(w as u32, h as u32).expect("分配 pixmap 失败"));
         self.buf_w = w;
         self.buf_h = h;
+        true
     }
 }
 
@@ -789,11 +791,16 @@ impl ContentView {
                 st.scale = scale;
                 st.handler.set_scale(scale);
             }
-            st.ensure_pixmap(pw, ph);
-            // 每帧问宿主要底色：运行期换主题时 `st.bg`（创建时抄的那份）不会跟着变。
+            // 清底交给宿主的全窗路径（对照 win32 的 `SkiaBackend::paint`）：局部帧只更新
+            // 脏区，其余行仍是上一帧的内容——每帧 fill 会把它们抹成纯底色，画面就只剩
+            // 脏区那一块。只有**新建**的缓冲要在这里清一次：它的内容是透明黑，而宿主
+            // 未必立刻走全窗帧。
+            let fresh = st.ensure_pixmap(pw, ph);
             let bg = st.handler.bg().unwrap_or(st.bg);
             let pixmap = st.pixmap.as_mut().unwrap();
-            pixmap.fill(to_skia_color(bg));
+            if fresh {
+                pixmap.fill(to_skia_color(bg));
+            }
             // 借用拆分：handler 与 pixmap 是不同字段，但都在 st 里，需先取出 pixmap 的裸数据后渲染。
             let size = Size::new(pw, ph);
             // 安全：render 只写 pixmap，不访问 st 其他字段。

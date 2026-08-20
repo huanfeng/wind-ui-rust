@@ -136,8 +136,13 @@ impl Offscreen {
     /// `fallback_bg` 只在宿主不报底色时兜底：本函数会连渲多帧，而中间合成的交互
     /// （`--click` 回放到换肤按钮上）可能换掉主题——用创建时那份 `cfg.bg` 清屏，
     /// 截出来就是"控件已转暗、底色还停在亮色"的半吊子图。
+    ///
+    /// 先要求整帧再清底：清底与局部重绘是对立的（局部帧只更新脏区，清底会把其余部分
+    /// 抹成纯色——settings 曾因此截成一张几乎全空的图）。截图要的是完整画面，
+    /// 那就明确地每帧都整帧重绘，而不是指望"这一帧恰好是全窗"。
     fn frame(&mut self, handler: &mut Box<dyn AppHandler>, size: Size, fallback_bg: Color) {
         let bg = handler.bg().unwrap_or(fallback_bg);
+        handler.request_full_frame();
         match self {
             Offscreen::Soft(pm) => {
                 pm.fill(to_skia_color(bg));
@@ -639,6 +644,29 @@ pub trait AppHandler {
     /// 直接执行的。所以这条通知必须由平台发起，宿主自己推不出来。
     fn on_window_shown(&mut self) -> bool {
         false
+    }
+
+    /// 要求下一帧走整帧重绘（跳过局部重绘）。
+    ///
+    /// 截图路径每帧都调：出来的图必须是完整画面，不该取决于"这一帧恰好只有光标脏"。
+    fn request_full_frame(&mut self) {}
+
+    /// 下一帧**预计**只更新这块（**物理像素**）。`None` = 预计整帧。
+    ///
+    /// 平台据此把窗口失效区收窄（win32 `InvalidateRect`），系统随后给出的
+    /// `WM_PAINT` 就只覆盖这块。仅是预测：宿主渲染时仍可能升级为整帧，届时由
+    /// [`Self::last_frame_damage`] 报告实情。
+    fn pending_damage(&self) -> Option<crate::geometry::Rect> {
+        None
+    }
+
+    /// 上一帧实际更新的区域（**物理像素**）。`None` = 整帧都更新了。
+    ///
+    /// 平台据此把「R/B 交换 + 上传到设备」收窄到这块：两者都是与脏区大小无关的整窗
+    /// 遍历，520×700 的窗口每帧就是 36 万像素读改写 + 36 万像素上传。光标闪烁只脏
+    /// 4×32，却要为此付整窗的账。`render` 之后调用才有意义。
+    fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
+        None
     }
 
     /// **诊断用**：最近一次指针事件的命中结果（`None` = 尚无事件或实现未提供）。

@@ -121,6 +121,21 @@ impl UiHost {
         (do_full, damage)
     }
 
+    /// 下一帧**预计**的脏区（逻辑坐标）；`None` = 预计整窗。
+    ///
+    /// 供平台收窄窗口失效区（见 `AppHandler::pending_damage`）。只是预测：真正的
+    /// 局部/整窗判定在 `decide_repaint`，它还会看后备缓冲、浮层、DPI 等条件。
+    pub(super) fn next_frame_damage(&self) -> Option<Rect> {
+        if self.damage.needs_full || self.damage.needs_relayout {
+            return None;
+        }
+        match (self.damage.pending, self.damage.event) {
+            (Some(a), Some(b)) => Some(a.union(&b)),
+            (Some(r), None) | (None, Some(r)) => Some(r),
+            (None, None) => None,
+        }
+    }
+
     /// 帧末收尾（两条路径共用）：把本帧累积的动画脏区映射为下一帧的局部脏区，
     /// 并把布局动画的重排请求送进 `needs_relayout` 正规门。
     pub(super) fn finish_frame_damage(&mut self) {
@@ -157,12 +172,15 @@ impl UiHost {
         // 物理化并钳到 pixmap 边界。
         let pdmg = dmg.scaled(s).intersect(&Rect::new(0, 0, size.w, size.h));
         if pdmg.is_empty() {
-            self.blit_back_to(pixmap);
+            // 本帧没有实际可绘区域：pixmap 保持上一帧内容，平台无需重新上传任何一行。
+            self.last_present = Some(pdmg);
             return;
         }
         // 子 pixmap：脏区大小，按窗口背景填底（与全窗帧平台 fill 同色，重建一致）。
         let Some(mut sub) = Pixmap::new(pdmg.w as u32, pdmg.h as u32) else {
+            // 分配失败：退回整窗拷贝（正确优先），并让平台整窗上传。
             self.blit_back_to(pixmap);
+            self.last_present = None;
             return;
         };
         sub.fill(tiny_skia::Color::from_rgba8(
@@ -178,11 +196,12 @@ impl UiHost {
             );
             self.tree.paint(&mut canvas);
         }
-        // 合成进后备缓冲（脏区物理原点），再整窗拷给平台 pixmap。
+        // 合成进后备缓冲（脏区物理原点），再把这一块拷给平台 pixmap。
         if let Some(back) = self.damage.back.as_mut() {
             blit(&sub, back, pdmg.x, pdmg.y);
         }
-        self.blit_back_to(pixmap);
+        self.blit_back_rect_to(pixmap, pdmg);
+        self.last_present = Some(pdmg);
     }
 
     /// 把后备缓冲整窗拷入 pixmap（两者同尺寸时）。
@@ -191,6 +210,31 @@ impl UiHost {
             if back.width() == pixmap.width() && back.height() == pixmap.height() {
                 pixmap.data_mut().copy_from_slice(back.data());
             }
+        }
+    }
+
+    /// 只把后备缓冲的 `r`（物理像素）拷入 pixmap。
+    ///
+    /// 局部帧此前整窗拷贝：520×700 的窗口每帧 1.4MB 内存搬运，而实际变的可能只有
+    /// 光标那 4×32。pixmap 在帧间由平台复用，框外保持上一帧内容——正因如此，平台侧
+    /// 的 R/B 交换与上传也必须同样只做这一块（见 `AppHandler::last_frame_damage`）。
+    fn blit_back_rect_to(&self, pixmap: &mut Pixmap, r: Rect) {
+        let Some(back) = self.damage.back.as_ref() else {
+            return;
+        };
+        let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+        if back.width() as i32 != w || back.height() as i32 != h {
+            return;
+        }
+        let r = r.intersect(&Rect::new(0, 0, w, h));
+        if r.is_empty() {
+            return;
+        }
+        let (src, dst) = (back.data(), pixmap.data_mut());
+        let row_bytes = (r.w * 4) as usize;
+        for y in r.y..r.bottom() {
+            let off = ((y * w + r.x) * 4) as usize;
+            dst[off..off + row_bytes].copy_from_slice(&src[off..off + row_bytes]);
         }
     }
 

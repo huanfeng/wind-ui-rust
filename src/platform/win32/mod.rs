@@ -75,7 +75,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(feature = "d2d")]
 use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 
-use super::{AppHandler, NewWindow, Renderer, WindowConfig};
+use super::{to_skia_color, AppHandler, NewWindow, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Size};
 
@@ -440,12 +440,15 @@ struct SkiaBackend {
     pixmap: Option<Pixmap>,
     buf_w: i32,
     buf_h: i32,
+    /// 缓冲刚（重）建，内容尚未画满：这一帧必须整窗上传，不能只送脏区。
+    fresh: bool,
 }
 
 impl SkiaBackend {
     fn new() -> Self {
         Self {
             pixmap: None,
+            fresh: true,
             buf_w: 0,
             buf_h: 0,
         }
@@ -461,6 +464,8 @@ impl SkiaBackend {
         self.pixmap = Some(Pixmap::new(w as u32, h as u32).expect("分配 pixmap 失败"));
         self.buf_w = w;
         self.buf_h = h;
+        // 新缓冲全 0：在宿主重新画满之前，任何"只上传脏区"都会把没画过的黑底送上屏。
+        self.fresh = true;
     }
 }
 
@@ -485,23 +490,62 @@ impl WinRenderBackend for SkiaBackend {
 
         let size = Size::new(self.buf_w, self.buf_h);
         let pixmap = self.pixmap.as_mut().unwrap();
-        pixmap.fill(to_skia_color(bg));
+        // 清底交给宿主的全窗路径：局部帧不需要清，而那次 fill 是整窗的。只有**新建**的
+        // 缓冲要在这里清一次——它的内容是透明黑，而宿主未必立刻走全窗帧（对照 macOS）。
+        if self.fresh {
+            pixmap.fill(to_skia_color(bg));
+        }
         // target 借用 self.pixmap，限定在块内：块结束借用即释放，再重取引用做后续处理。
         {
             let mut tgt = crate::render::PixmapTarget { pixmap };
             handler.render(&mut tgt, size);
         }
+        // 本帧宿主实际重画了哪些行（None = 整窗）。缓冲刚重建时内容还不完整，按整窗处理。
+        let drawn = match (self.fresh, handler.last_frame_damage()) {
+            (false, Some(d)) => Some((d.y.clamp(0, self.buf_h), d.bottom().clamp(0, self.buf_h))),
+            _ => None,
+        };
+        self.fresh = false;
+        // 整窗帧时先把整个客户区标失效：`BeginPaint` 返回的 DC 带着 rcPaint 的裁剪，
+        // 若失效区只是上一帧那一小块，整窗内容会被裁掉、只更新一条。
+        if drawn.is_none() {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        // 上传范围 = 本帧重画的行 ∪ **系统的失效区**。后者不能少：窗口被别的窗口盖住
+        // 再暴露时，系统只发一条 WM_PAINT 就认为我们会重传那块；只上传自己的脏区，
+        // 暴露出来的部分就永远停在垃圾内容上。pixmap 是持久缓冲，那些行的内容是对的，
+        // 直接传即可。
+        let (py0, py1) = (
+            ps.rcPaint.top.clamp(0, self.buf_h),
+            ps.rcPaint.bottom.clamp(0, self.buf_h),
+        );
+        let (dy0, dy1) = drawn.unwrap_or((0, self.buf_h));
+        let (y0, y1) = if py1 > py0 {
+            (dy0.min(py0), dy1.max(py1))
+        } else {
+            (dy0, dy1)
+        };
+        if y0 >= y1 {
+            let _ = EndPaint(hwnd, &ps);
+            return false;
+        }
         let pixmap = self.pixmap.as_mut().unwrap();
-        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。
-        swap_rb_inplace(pixmap.data_mut());
-        let bits = pixmap.data().as_ptr() as *const c_void;
+        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。**只翻本帧重画过的行**：
+        // 其余行早已是上一帧交换过的 BGRA，再翻一次就成了红蓝颠倒。
+        let stride = (self.buf_w * 4) as usize;
+        swap_rb_inplace(&mut pixmap.data_mut()[dy0 as usize * stride..dy1 as usize * stride]);
+        let bits = pixmap.data()[y0 as usize * stride..].as_ptr() as *const c_void;
 
         // top-down DIB 描述：直接从缓冲拷到设备，无需独立 DIB section。
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: self.buf_w,
-                biHeight: -self.buf_h, // 负数 = top-down，与 pixmap 行序一致
+                // 负数 = top-down，与 pixmap 行序一致。高度按**本次上传的行数**：
+                // bits 已指向首行，DIB 只描述这一段。
+                biHeight: -(y1 - y0),
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -509,18 +553,17 @@ impl WinRenderBackend for SkiaBackend {
             },
             ..Default::default()
         };
-        let mut ps = PAINTSTRUCT::default();
-        let hdc = BeginPaint(hwnd, &mut ps);
+        // 只上传这些行：`bits` 已指向首行，DIB 只描述这一段（行连续）。
         let scanlines = SetDIBitsToDevice(
             hdc,
             0,
-            0,
+            y0,
             self.buf_w as u32,
-            self.buf_h as u32,
+            (y1 - y0) as u32,
             0,
             0,
             0,
-            self.buf_h as u32,
+            (y1 - y0) as u32,
             bits,
             &bmi,
             DIB_RGB_COLORS,
@@ -669,8 +712,6 @@ fn swap_rb_inplace(data: &mut [u8]) {
         }
     }
 }
-
-use super::to_skia_color;
 
 const CLASS_NAME: PCWSTR = w!("WindUiWindowClass");
 
@@ -1087,10 +1128,28 @@ unsafe fn run_message_loop() {
                 for h in pending {
                     // 上一轮 PeekMessage 排空期间该窗口可能已被销毁（点了自己的关闭
                     // 按钮），`pending` 是那之前的快照，故逐个复核仍然有效。
-                    if IsWindow(Some(h)).as_bool() {
-                        let _ = InvalidateRect(Some(h), None, false);
-                        let _ = UpdateWindow(h);
+                    if !IsWindow(Some(h)).as_bool() {
+                        continue;
                     }
+                    // 只失效宿主预计要重画的那块：`BeginPaint` 的 rcPaint 随之收窄，
+                    // 上传也就只需那几行（见 `SkiaBackend::paint`）。宿主临时升级整窗时
+                    // 由它自己在 paint 里补一次整窗失效，不会漏画。
+                    let dmg = state_from(h).and_then(|s| s.handler.pending_damage());
+                    match dmg {
+                        Some(r) => {
+                            let rc = RECT {
+                                left: r.x,
+                                top: r.y,
+                                right: r.right(),
+                                bottom: r.bottom(),
+                            };
+                            let _ = InvalidateRect(Some(h), Some(&rc), false);
+                        }
+                        None => {
+                            let _ = InvalidateRect(Some(h), None, false);
+                        }
+                    }
+                    let _ = UpdateWindow(h);
                 }
                 last_frame = std::time::Instant::now();
             }

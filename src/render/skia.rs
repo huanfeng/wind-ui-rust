@@ -194,6 +194,16 @@ impl Canvas for SkiaCanvas<'_> {
         self.scale
     }
 
+    /// 子 pixmap 覆盖的世界范围。全窗帧即整窗（等于不剔除），局部帧就是那块脏区。
+    ///
+    /// 向外各放一像素：物理→逻辑的除法有取整误差，压边的图元不能因为算窄了被丢掉。
+    fn cull_rect(&self) -> Option<Rect> {
+        let s = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let w = (self.pixmap.width() as f32 / s).ceil() as i32;
+        let h = (self.pixmap.height() as f32 / s).ceil() as i32;
+        Some(Rect::new(self.offset.x, self.offset.y, w, h).inflate(1))
+    }
+
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
         self.fill_round_rect(x, y, w, h, 0.0, paint);
     }

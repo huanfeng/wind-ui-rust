@@ -1090,77 +1090,100 @@ impl Tree {
         let (fx, fy, fw, fh) = (abs.x as f32, abs.y as f32, abs.w as f32, abs.h as f32);
         let radius = n.style.corner_radius;
 
+        // 本节点的自绘是否可能落进画布范围。局部重绘（光标闪烁这类只脏几十像素的动画）
+        // 里绝大多数节点都落在外面：它们的图元照样会被光栅器逐像素丢弃，但构造与文字
+        // 排版的开销**已经付掉了**——实测 120 个控件的界面每帧仍提交 61 次描边、
+        // 122 次文字，0.83ms/帧 ≈ 5% 单核，而真正要重画的只有光标那一条。
+        //
+        // 只跳过**自绘**，子树照常递归：`offset`（拖拽浮起等）能把子节点搬到父矩形之外，
+        // 按父矩形剪整棵子树会真的丢内容。遍历本身几乎不要钱，图元与排版才是成本。
+        let self_visible = canvas.cull_rect().is_none_or(|cull| {
+            // 与 `visual_bounds` 同一套余量：焦点环在框外、投影更远，报窄了会被切掉。
+            let mut pad = if n.focused { 3 } else { DAMAGE_MARGIN };
+            if let Some(sh) = &n.style.shadow {
+                if sh.color.a > 0 {
+                    let ext = (sh.spread + sh.blur).ceil() as i32
+                        + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32;
+                    pad = pad.max(ext);
+                }
+            }
+            !abs.inflate(pad).intersect(&cull).is_empty()
+        });
+
         // 子树整体不透明度：<1 时入离屏层，绘完整棵子树后按 opacity 合成回父层。
+        // 与自绘剪枝无关——层的 push/pop 必须成对，且子树可能有内容要画。
         let use_layer = n.style.opacity < 1.0;
         if use_layer {
             canvas.push_layer(n.style.opacity);
         }
 
         let theme = crate::theme::current();
-        // 投影：在背景之下、按 spread 外扩并按 dx/dy 偏移后柔化绘制。
-        if let Some(sh) = &n.style.shadow {
-            if sh.color.a > 0 {
-                let sp = sh.spread;
-                canvas.draw_shadow(
-                    fx - sp + sh.dx,
-                    fy - sp + sh.dy,
-                    fw + 2.0 * sp,
-                    fh + 2.0 * sp,
-                    (radius + sp).max(0.0),
-                    sh.blur,
-                    sh.color,
-                );
+        let content = abs.inset(n.padding);
+        if self_visible {
+            // 投影：在背景之下、按 spread 外扩并按 dx/dy 偏移后柔化绘制。
+            if let Some(sh) = &n.style.shadow {
+                if sh.color.a > 0 {
+                    let sp = sh.spread;
+                    canvas.draw_shadow(
+                        fx - sp + sh.dx,
+                        fy - sp + sh.dy,
+                        fw + 2.0 * sp,
+                        fh + 2.0 * sp,
+                        (radius + sp).max(0.0),
+                        sh.blur,
+                        sh.color,
+                    );
+                }
             }
-        }
-        if let Some(bg) = &n.style.bg {
-            canvas.fill_round_rect(fx, fy, fw, fh, radius, &bg.resolve_paint(&theme));
-        }
-        if let Some((bc, bw)) = &n.style.border {
-            if *bw > 0 {
-                let bp = Paint::fill(bc.solid_color(&theme));
-                let e = n.style.border_edges;
-                if e.is_all() {
-                    // 四边齐全走圆角描边，保住 corner_radius。
-                    canvas.stroke_round_rect(fx, fy, fw, fh, radius, *bw as f32, &bp);
-                } else {
-                    // 缺边时逐边画矩形段：圆角在此无意义——一条底边不存在「圆角」，
-                    // 硬套圆角描边会在缺口处留下两截弧线。
-                    let w = *bw as f32;
-                    if e.top {
-                        canvas.fill_round_rect(fx, fy, fw, w, 0.0, &bp);
-                    }
-                    if e.bottom {
-                        canvas.fill_round_rect(fx, fy + fh - w, fw, w, 0.0, &bp);
-                    }
-                    if e.left {
-                        canvas.fill_round_rect(fx, fy, w, fh, 0.0, &bp);
-                    }
-                    if e.right {
-                        canvas.fill_round_rect(fx + fw - w, fy, w, fh, 0.0, &bp);
+            if let Some(bg) = &n.style.bg {
+                canvas.fill_round_rect(fx, fy, fw, fh, radius, &bg.resolve_paint(&theme));
+            }
+            if let Some((bc, bw)) = &n.style.border {
+                if *bw > 0 {
+                    let bp = Paint::fill(bc.solid_color(&theme));
+                    let e = n.style.border_edges;
+                    if e.is_all() {
+                        // 四边齐全走圆角描边，保住 corner_radius。
+                        canvas.stroke_round_rect(fx, fy, fw, fh, radius, *bw as f32, &bp);
+                    } else {
+                        // 缺边时逐边画矩形段：圆角在此无意义——一条底边不存在「圆角」，
+                        // 硬套圆角描边会在缺口处留下两截弧线。
+                        let w = *bw as f32;
+                        if e.top {
+                            canvas.fill_round_rect(fx, fy, fw, w, 0.0, &bp);
+                        }
+                        if e.bottom {
+                            canvas.fill_round_rect(fx, fy + fh - w, fw, w, 0.0, &bp);
+                        }
+                        if e.left {
+                            canvas.fill_round_rect(fx, fy, w, fh, 0.0, &bp);
+                        }
+                        if e.right {
+                            canvas.fill_round_rect(fx + fw - w, fy, w, fh, 0.0, &bp);
+                        }
                     }
                 }
             }
-        }
 
-        let content = abs.inset(n.padding);
-        // 标记当前节点矩形：节点内的 anim::request_repaint 会把脏区归到此处（局部重绘用）。
-        crate::anim::set_paint_rect(Some(abs));
-        n.widget
-            .paint(abs, content, n.focused, enabled, canvas, &n.style);
-        crate::anim::set_paint_rect(None);
+            // 标记当前节点矩形：节点内的 anim::request_repaint 会把脏区归到此处（局部重绘用）。
+            crate::anim::set_paint_rect(Some(abs));
+            n.widget
+                .paint(abs, content, n.focused, enabled, canvas, &n.style);
+            crate::anim::set_paint_rect(None);
 
-        // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
-        if n.focused && self.focus_ring_visible {
-            let ring = crate::theme::current().palette.accent;
-            canvas.stroke_round_rect(
-                fx - 1.0,
-                fy - 1.0,
-                fw + 2.0,
-                fh + 2.0,
-                radius + 1.0,
-                2.0,
-                &Paint::fill(ring),
-            );
+            // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
+            if n.focused && self.focus_ring_visible {
+                let ring = crate::theme::current().palette.accent;
+                canvas.stroke_round_rect(
+                    fx - 1.0,
+                    fy - 1.0,
+                    fw + 2.0,
+                    fh + 2.0,
+                    radius + 1.0,
+                    2.0,
+                    &Paint::fill(ring),
+                );
+            }
         }
 
         let child_origin = Point::new(abs.x, abs.y);
@@ -3980,6 +4003,187 @@ mod tests {
         assert!(
             tree.caret_of(btn).is_none(),
             "非文本控件 caret_of 应为 None"
+        );
+    }
+
+    /// 转发到内层画布并计数的测试画布：`cull` 可控，用来对比"剪枝 / 不剪枝"两次绘制。
+    struct CountingCanvas<'a, 'b> {
+        inner: &'a mut crate::render::SkiaCanvas<'b>,
+        cull: Option<Rect>,
+        texts: usize,
+        strokes: usize,
+        fills: usize,
+    }
+
+    impl crate::render::Canvas for CountingCanvas<'_, '_> {
+        fn dpi_scale(&self) -> f32 {
+            self.inner.dpi_scale()
+        }
+        fn cull_rect(&self) -> Option<Rect> {
+            self.cull
+        }
+        fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, p: &crate::render::Paint) {
+            self.fills += 1;
+            self.inner.fill_rect(x, y, w, h, p);
+        }
+        fn fill_round_rect(
+            &mut self,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            r: f32,
+            p: &crate::render::Paint,
+        ) {
+            self.fills += 1;
+            self.inner.fill_round_rect(x, y, w, h, r, p);
+        }
+        fn stroke_round_rect(
+            &mut self,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            r: f32,
+            width: f32,
+            p: &crate::render::Paint,
+        ) {
+            self.strokes += 1;
+            self.inner.stroke_round_rect(x, y, w, h, r, width, p);
+        }
+        fn draw_line(
+            &mut self,
+            x0: f32,
+            y0: f32,
+            x1: f32,
+            y1: f32,
+            w: f32,
+            p: &crate::render::Paint,
+        ) {
+            self.strokes += 1;
+            self.inner.draw_line(x0, y0, x1, y1, w, p);
+        }
+        fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, p: &crate::render::Paint) {
+            self.fills += 1;
+            self.inner.fill_circle(cx, cy, r, p);
+        }
+        fn draw_shadow(
+            &mut self,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            r: f32,
+            blur: f32,
+            c: crate::geometry::Color,
+        ) {
+            self.inner.draw_shadow(x, y, w, h, r, blur, c);
+        }
+        fn draw_image(
+            &mut self,
+            img: &crate::render::image::Image,
+            dst: Rect,
+            fit: crate::render::image::Fit,
+            radius: f32,
+            opacity: f32,
+        ) {
+            self.inner.draw_image(img, dst, fit, radius, opacity);
+        }
+        fn draw_text(
+            &mut self,
+            text: &str,
+            rect: Rect,
+            color: crate::geometry::Color,
+            align: crate::spec::Align,
+            ts: &crate::text::TextStyle,
+        ) {
+            self.texts += 1;
+            self.inner.draw_text(text, rect, color, align, ts);
+        }
+        fn measure_text(
+            &mut self,
+            text: &str,
+            ts: &crate::text::TextStyle,
+        ) -> crate::geometry::Size {
+            self.inner.measure_text(text, ts)
+        }
+        fn push_layer(&mut self, opacity: f32) {
+            self.inner.push_layer(opacity);
+        }
+        fn pop_layer(&mut self) {
+            self.inner.pop_layer();
+        }
+        fn save(&mut self) {
+            self.inner.save();
+        }
+        fn restore(&mut self) {
+            self.inner.restore();
+        }
+        fn clip_rect(&mut self, r: Rect) {
+            self.inner.clip_rect(r);
+        }
+    }
+
+    /// 局部帧的节点剪枝：**画面必须逐像素等同于不剪枝**，同时确实省掉了图元提交。
+    ///
+    /// 剪枝掉的图元本来就会被光栅器按子 pixmap 边界丢弃，所以两次绘制的像素必然相同；
+    /// 这条测试锁住的是"相同"——一旦剪枝判据比实际绘制范围收得更紧（漏算焦点环、投影
+    /// 之类的框外余量），差异会立刻在这里暴露，而不是等到某个动画在真机上缺一块。
+    #[test]
+    fn partial_frame_culling_preserves_pixels_and_skips_primitives() {
+        let mut root = Element::col().width(240).height(400).padding(8).spacing(4);
+        for i in 0..20 {
+            root = root.child(
+                Element::row()
+                    .width_match()
+                    .height(16)
+                    .child(Element::label(format!("行 {i}")).weight(1.0))
+                    .child(Element::button("op").outline()),
+            );
+        }
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(240, 400), &mut te);
+
+        // 模拟局部帧：脏区大小的子 pixmap，原点对应世界 (8, 40)。
+        let dirty = Rect::new(8, 40, 40, 24);
+        let render = |cull: Option<Rect>| -> (Vec<u8>, usize, usize, usize) {
+            let mut pm = tiny_skia::Pixmap::new(dirty.w as u32, dirty.h as u32).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let (t, st, f);
+            {
+                let mut inner = crate::render::SkiaCanvas::with_text_offset(
+                    &mut pm,
+                    &mut eng,
+                    1.0,
+                    Point::new(dirty.x, dirty.y),
+                );
+                let mut c = CountingCanvas {
+                    inner: &mut inner,
+                    cull,
+                    texts: 0,
+                    strokes: 0,
+                    fills: 0,
+                };
+                tree.paint(&mut c);
+                (t, st, f) = (c.texts, c.strokes, c.fills);
+            }
+            (pm.data().to_vec(), t, st, f)
+        };
+
+        let (px_off, t_off, s_off, f_off) = render(None); // 不剪枝：老行为
+        let (px_on, t_on, s_on, f_on) = render(Some(dirty)); // 剪枝
+        assert_eq!(px_on, px_off, "剪枝不得改变任何一个像素");
+        assert!(
+            t_on < t_off && s_on < s_off && f_on < f_off,
+            "剪枝应真的省掉图元：text {t_on}/{t_off} stroke {s_on}/{s_off} fill {f_on}/{f_off}"
+        );
+        // 40x24 的脏区只压到两三行，绝大多数控件应被跳过。
+        assert!(
+            t_on * 4 < t_off,
+            "脏区只覆盖一小片，文字提交应大幅减少：{t_on}/{t_off}"
         );
     }
 
