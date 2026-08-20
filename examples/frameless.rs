@@ -4,6 +4,7 @@
 //! 截屏：cargo run --example frameless -- --screenshot artifacts/frameless.png
 //!
 //! - 拖动深色标题栏空白处移动窗口（按钮区自动排除，仍可点击）。
+//! - 标题栏上的「历史」是拖动区里的 `clickable()` 容器：**文字上**按下应弹提示，而不是拖窗。
 //! - 右上角三个按钮：最小化 / 最大化-还原 / 关闭。
 //! - 窗口四边/四角可缩放；保留 Aero 吸附与窗口投影。
 
@@ -27,6 +28,18 @@ fn main() {
                 .font_size(14.0)
                 .fg(Color::WHITE)
                 .weight(1.0),
+        )
+        // 拖动区里的文字入口：`clickable()` 容器 + 内层 `Label`。判定沿父链自内向外，
+        // 故整块（含文字本身）都算交互区。曾经只看命中落定的节点，`Label` 不可聚焦却把
+        // 命中吃掉，于是文字上判成拖窗——表现为「只有文字周围的空隙点得动」。
+        .child(
+            Element::row()
+                .cross(Align::Center)
+                .padding_xy(11, 0)
+                .height_match()
+                .clickable()
+                .on_click(|ctx| ctx.toast("点到了「历史」"))
+                .child(Element::label("历史").font_size(13.0).fg(Color::WHITE)),
         )
         .child(Element::window_button(WindowButtonKind::Minimize).fg(Color::WHITE))
         .child(Element::window_button(WindowButtonKind::Maximize).fg(Color::WHITE))

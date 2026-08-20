@@ -611,6 +611,7 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 ```
 - `App::frameless()` 去掉系统标题栏，客户区铺满整窗，**保留 Aero 吸附/缩放/投影**（WM_NCCALCSIZE + WS_THICKFRAME + DwmExtendFrameIntoClientArea）。
 - `Element::window_drag()` 标记拖动区（自定义标题栏）：命中非交互区拖窗、命中可聚焦控件（按钮/输入）则不拖、交控件处理。
+  判定**沿父链自内向外，先遇到谁听谁**：可聚焦节点算交互控件、`window_drag` 算拖动区。故拖动区里放 `.clickable()` 容器是安全的——容器内的文字、图标一并算交互区（这些子节点自己不可聚焦，只看落定节点的话会被判成拖窗，表现为"只有文字周围的空隙能点"）。反过来，可聚焦容器里再嵌一条 `window_drag` 也成立：内层更具体，拖动区赢。
 - `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`——关闭键与系统 × 同走关闭决策链，`on_close_request` 一样拦得住（见 §8.7）。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。

@@ -4743,6 +4743,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clickable_container_in_drag_region_is_not_caption() {
+        // 自绘标题栏的常见结构：拖动区里嵌一个 clickable 容器，容器内是文字。
+        // NullTextEngine 测不出文字尺寸，故给 label 显式尺寸模拟真实测量。
+        let tree = layout(
+            Element::col()
+                .fill()
+                .child(
+                    Element::row()
+                        .width_match()
+                        .height(38)
+                        .cross(Align::Stretch)
+                        .window_drag()
+                        .child(Element::label("wind-dict").width(120).height(38))
+                        .child(
+                            Element::row()
+                                .cross(Align::Center)
+                                .padding_xy(11, 0)
+                                .height_match()
+                                .clickable()
+                                .on_click(|_| {})
+                                .child(Element::label("历史").width(25).height(17)),
+                        ),
+                )
+                .child(Element::col().fill()),
+        );
+        // 入口的文字区（label 落在 y 10..27）：应交给 Clickable，而不是拖窗。
+        assert!(
+            !tree.drag_hit_at(Point::new(135, 19)),
+            "clickable 容器内的文字不该判为拖动区"
+        );
+        assert!(
+            tree.interactive_hit_at(Point::new(135, 19)),
+            "该判为交互控件（HTCLIENT）"
+        );
+        // 品牌文字区仍应可拖。
+        assert!(tree.drag_hit_at(Point::new(60, 19)));
+    }
+
+    #[test]
+    fn inner_window_drag_wins_over_outer_clickable() {
+        // 反向嵌套：整块可点的卡片里再留一条拖动条。判据取父链上**最近**的裁决者，
+        // 故内层的 window_drag 该赢——若改成「链上有没有可聚焦节点」就会判反。
+        let tree = layout(
+            Element::col()
+                .fill()
+                .clickable()
+                .on_click(|_| {})
+                .child(
+                    Element::row()
+                        .width_match()
+                        .height(38)
+                        .window_drag()
+                        .child(Element::label("标题").width(120).height(38)),
+                )
+                .child(Element::col().fill()),
+        );
+        assert!(
+            tree.drag_hit_at(Point::new(60, 19)),
+            "内层 window_drag 比外层 clickable 更具体，应判拖动区"
+        );
+        assert!(
+            !tree.interactive_hit_at(Point::new(60, 19)),
+            "同一次裁决只能有一个赢家，判了拖动区就不该再判交互控件"
+        );
+        // 拖动条之外仍归外层 clickable。
+        assert!(!tree.drag_hit_at(Point::new(60, 100)));
+        assert!(tree.interactive_hit_at(Point::new(60, 100)));
+    }
+
     /// 在 200×200 窗口里布局「顶部标题栏 + 模态对话框」，面板尺寸由参数给定。
     fn layout_titlebar_with_modal(panel_w: i32, panel_h: i32) -> Tree {
         let show = crate::signal::signal(true);

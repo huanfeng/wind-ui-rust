@@ -1652,6 +1652,18 @@ pub struct DispatchResult {
     pub open_windows: Vec<WindowRequest>,
 }
 
+/// 命中点的归属：无边框窗口的 `WM_NCHITTEST` 据此在客户区 / 拖动区之间分流。
+/// 判定见 [`Tree::hit_role`]。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HitRole {
+    /// 交互控件——平台判 HTCLIENT，优先于缩放边框与拖动区。
+    Interactive,
+    /// 窗口拖动区——平台判 HTCAPTION，由系统接管这次按下。
+    Drag,
+    /// 普通客户区。
+    Plain,
+}
+
 impl Tree {
     /// 节点有效启用态：自身与所有祖先均启用才为 true（父链继承）。
     pub fn node_enabled(&self, id: NodeId) -> bool {
@@ -1709,27 +1721,51 @@ impl Tree {
     /// `pos`（逻辑坐标）是否落在交互控件上（可聚焦节点，如自定义标题栏的窗口按钮）。
     /// 平台据此在 `WM_NCHITTEST` 把控件区强制判为 HTCLIENT——优先于缩放边框，
     /// 使整个按钮都是客户区、普通鼠标移动全程覆盖，避免顶部缩放条夺走 hover。
+    ///
+    /// 沿父链判定（见 [`Tree::hit_role`]），故可聚焦容器的**整个子树**都算交互控件。
+    /// 代价：无边框窗口里若有可聚焦容器（列表行、`clickable()` 卡片）贴着窗口边缘，
+    /// 那一段边缘让不出 8px 缩放带。此前只是"裸露部分让不出、文字上让得出"的斑马纹，
+    /// 一致化并未新增受影响区域；真要留出缩放带得让容器躲开边缘
+    /// （参照 `core::scrollbar::WINDOW_EDGE_INSET` 的做法）。
     pub fn interactive_hit_at(&self, pos: Point) -> bool {
         let Some(hit) = self.hit_test(pos) else {
             return false;
         };
-        self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false)
+        self.hit_role(hit) == HitRole::Interactive
     }
 
-    /// `pos`（逻辑坐标）是否落在窗口拖动区（自定义标题栏）。命中的是可聚焦控件
-    /// （按钮等）则不拖动——交控件处理；否则自身或任一祖先标了 `window_drag` 即可拖。
+    /// `pos`（逻辑坐标）是否落在窗口拖动区（自定义标题栏）。沿父链自内向外找最近的
+    /// 裁决者：先遇到可聚焦控件则不拖动——交控件处理；先遇到 `window_drag` 才判拖动区。
     /// 走穿透遮罩的命中（见 [`Tree::hit_test_for_drag`]）：模态对话框弹出时标题栏
     /// 仍可拖窗，但窗口按钮照旧被遮罩屏蔽（`interactive_hit_at` 用的是普通命中）。
     pub fn drag_hit_at(&self, pos: Point) -> bool {
         let Some(hit) = self.hit_test_for_drag(pos) else {
             return false;
         };
-        if self.get(hit).map(|n| n.widget.focusable()).unwrap_or(false) {
-            return false;
+        self.hit_role(hit) == HitRole::Drag
+    }
+
+    /// 命中落定后沿父链自内向外裁决归属，交互与拖动共用这一次遍历。
+    ///
+    /// 两侧必须同源：曾经"交互只看落定节点、拖动却沿父链"，于是
+    /// `clickable()` 容器里套一个 `Label`（`Label` 不可聚焦、却 `hit_opaque`，命中就在
+    /// 它那里落定）会被判成拖动区——事件分发认得这次点击，`WM_NCHITTEST` 却先答了
+    /// HTCAPTION，客户区连 `WM_LBUTTONDOWN` 都收不到，表现为"标题栏上的文字入口点不动，
+    /// 只有文字周围的空隙能点"。
+    ///
+    /// 取**最近**的裁决者而非"链上有没有"：可聚焦容器里再嵌拖动区（如整块可点的卡片
+    /// 顶部留一条拖动条）时，内层的声明更具体，该赢。
+    fn hit_role(&self, hit: NodeId) -> HitRole {
+        for id in self.ancestor_chain(hit) {
+            let Some(n) = self.get(id) else { continue };
+            if n.widget.focusable() {
+                return HitRole::Interactive;
+            }
+            if n.window_drag {
+                return HitRole::Drag;
+            }
         }
-        self.ancestor_chain(hit)
-            .iter()
-            .any(|&id| self.get(id).map(|n| n.window_drag).unwrap_or(false))
+        HitRole::Plain
     }
 
     /// `pos`（逻辑坐标）命中的节点是否落在 `id` 的子树内（含 `id` 自身）。
