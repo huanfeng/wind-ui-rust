@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::Color;
 use crate::style::Shadow;
+use crate::ui::caret::{self, CaretStyle};
 
 /// 全局基础调色板。
 #[derive(Clone, Serialize, Deserialize)]
@@ -344,6 +345,15 @@ pub struct InputTheme {
     /// 选区高亮（含 alpha）。
     pub selection: Option<Color>,
     pub cursor: Option<Color>,
+    /// 插入光标闪烁风格（默认 [`CaretStyle::Smooth`] 平滑呼吸）。
+    pub caret_style: Option<CaretStyle>,
+    /// 插入光标宽度（默认 `2.0` 逻辑 px）。可写 `{ px = 2 }` 固定物理像素；
+    /// 两种写法最终都会向下吸附到整数物理像素，非整数 DPI 下同样清晰。
+    pub caret_width: Option<Len>,
+    /// 插入光标两端是否半圆（默认 true）。
+    pub caret_rounded: Option<bool>,
+    /// 光标位置变化时是否在同一视觉行内滑行过去（默认 true）。
+    pub caret_smooth_move: Option<bool>,
     pub corner: Option<f32>,
 }
 
@@ -369,6 +379,18 @@ impl InputTheme {
     }
     pub fn cursor(&self, p: &Palette) -> Color {
         self.cursor.unwrap_or(p.text)
+    }
+    pub fn caret_style(&self) -> CaretStyle {
+        self.caret_style.unwrap_or_default()
+    }
+    pub fn caret_width(&self) -> Len {
+        self.caret_width.unwrap_or(Len::Dp(caret::DEFAULT_WIDTH))
+    }
+    pub fn caret_rounded(&self) -> bool {
+        self.caret_rounded.unwrap_or(true)
+    }
+    pub fn caret_smooth_move(&self) -> bool {
+        self.caret_smooth_move.unwrap_or(true)
     }
     pub fn corner(&self, m: &Metrics) -> f32 {
         self.corner.unwrap_or(m.corner_md)
@@ -1360,6 +1382,56 @@ mod tests {
             "未指定字段回退默认"
         );
         assert!(t.button.bg.is_none(), "控件覆盖默认 None");
+    }
+
+    /// 文档（API_GUIDE「文本输入」）里给出的光标 TOML 必须真能解析：
+    /// 风格名走 snake_case，改了枚举名而不改 `rename_all` 会让文档里的配置静默失效
+    /// （`from_toml` 报错、或回退默认），使用方只会看到"配了没反应"。
+    #[test]
+    fn caret_toml_parses_and_roundtrips() {
+        let t = Theme::from_toml(
+            "[input]
+caret_style = \"blink\"
+caret_width = 3.0
+             caret_rounded = false
+caret_smooth_move = false
+",
+        )
+        .expect("光标 TOML 应可解析");
+        assert_eq!(t.input.caret_style(), CaretStyle::Blink);
+        assert_eq!(t.input.caret_width(), Len::Dp(3.0));
+        assert!(!t.input.caret_rounded());
+        assert!(!t.input.caret_smooth_move());
+        // 四个风格名逐个验，且回环后不变。
+        for (name, want) in [
+            ("smooth", CaretStyle::Smooth),
+            ("blink", CaretStyle::Blink),
+            ("phase", CaretStyle::Phase),
+            ("solid", CaretStyle::Solid),
+        ] {
+            let t = Theme::from_toml(&format!(
+                "[input]
+caret_style = \"{name}\"
+"
+            ))
+            .unwrap_or_else(|e| panic!("{name} 应可解析：{e}"));
+            assert_eq!(t.input.caret_style(), want);
+            let back = Theme::from_toml(&t.to_toml().expect("序列化")).expect("回环解析");
+            assert_eq!(back.input.caret_style(), want, "{name} 回环后应不变");
+        }
+        // 未配置时回退默认：Smooth、2px、圆角、平滑移动。
+        let d = Theme::default();
+        assert_eq!(d.input.caret_style(), CaretStyle::Smooth);
+        assert_eq!(d.input.caret_width(), Len::Dp(caret::DEFAULT_WIDTH));
+        // 物理像素写法（非整数 DPI 下最清晰的选项）同样要能配。
+        let px = Theme::from_toml(
+            "[input]
+caret_width = { px = 2 }
+",
+        )
+        .expect("px 写法");
+        assert_eq!(px.input.caret_width(), Len::Physical { px: 2.0 });
+        assert!(d.input.caret_rounded() && d.input.caret_smooth_move());
     }
 
     #[test]

@@ -40,8 +40,8 @@ pub mod prelude {
     pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Len, TableTheme, Theme};
     pub use crate::ui::{
-        CheckMenuItem, CommitMode, DropdownItem, Element, ImageContent, ImageView, Link, Para,
-        RichColor, RichDoc, SortKey, SortOrder, SortStyle, SpanStyle, TextContent, Truncate,
-        WindowButton, WindowButtonKind,
+        CaretStyle, CheckMenuItem, CommitMode, DropdownItem, Element, ImageContent, ImageView,
+        Link, Para, RichColor, RichDoc, SortKey, SortOrder, SortStyle, SpanStyle, TextContent,
+        Truncate, WindowButton, WindowButtonKind,
     };
 }

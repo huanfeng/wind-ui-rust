@@ -3,6 +3,7 @@
 //! 容器（`col`/`row`/`stack`）与叶子（`leaf`、Phase 2 起的 `label` 等）都返回
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
+pub mod caret;
 pub mod containers;
 pub mod dyn_list;
 pub mod image;
@@ -36,6 +37,7 @@ use crate::style::{Role, Style};
 use crate::text::TextEngine;
 use crate::theme::{Intent, IntentColors};
 
+pub use caret::{CaretOpts, CaretState, CaretStyle};
 pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput};
 pub use link::Link;

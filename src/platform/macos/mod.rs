@@ -37,6 +37,12 @@ pub(crate) fn run(
         os_animations_enabled()
     };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
+    // 光标闪烁走**插入符**设置（`NSTextInsertionPointBlinkPeriod*`），不跟"减弱动态效果"
+    // 走：两者在系统里本就是分开的开关。应用显式 `animations(false)` 时连它一起关。
+    crate::ui::caret::set_blink_period_ms(match cfg.animations {
+        Some(false) => None,
+        _ => os_caret_blink_half_ms(),
+    });
 
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 win32 后端共用）。
@@ -84,6 +90,36 @@ pub(crate) fn activate_app(app: &objc2_app_kit::NSApplication) {
 fn os_animations_enabled() -> bool {
     // TODO(macos): 读取 NSWorkspace.accessibilityDisplayShouldReduceMotion，取反。
     true
+}
+
+/// 查询系统**插入符**闪烁半周期（ms）。`None` = 用户关掉了闪烁。
+///
+/// macOS 把它放在 `NSUserDefaults` 的 `NSTextInsertionPointBlinkPeriodOn/Off`（单位**秒**）：
+/// 两者都显式设为 0 才是"不闪"；键不存在（绝大多数机器）则用系统默认 500ms。
+/// 与"减弱动态效果"无关——那个管的是窗口/控件过渡。
+fn os_caret_blink_half_ms() -> Option<u32> {
+    use objc2_foundation::{NSString, NSUserDefaults};
+    let d = NSUserDefaults::standardUserDefaults();
+    let read = |k: &str| -> Option<f64> {
+        let key = NSString::from_str(k);
+        // objectForKey 为 None 即"用户没设过"，与"设成了 0"必须区分开。
+        d.objectForKey(&key)?;
+        Some(d.doubleForKey(&key))
+    };
+    let on = read("NSTextInsertionPointBlinkPeriodOn");
+    let off = read("NSTextInsertionPointBlinkPeriodOff");
+    match (on, off) {
+        (None, None) => Some(crate::ui::caret::BLINK_HALF_MS as u32),
+        (a, b) => {
+            let on = a.unwrap_or(0.5).max(0.0);
+            let off = b.unwrap_or(0.5).max(0.0);
+            if on <= 0.0 && off <= 0.0 {
+                return None; // 用户显式关掉闪烁
+            }
+            // 本库的相位模型是对称半周期，取亮/灭时长的平均。
+            Some((((on + off) / 2.0) * 1000.0).round().max(1.0) as u32)
+        }
+    }
 }
 
 /// 用系统默认程序打开 URL/路径（链接点击）。对照 win32 `ShellExecuteW`。

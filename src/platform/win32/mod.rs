@@ -51,16 +51,16 @@ use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, ShellExecuteW, HDROP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LoadCursorW, LoadIconW,
-    MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
-    SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM,
-    HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE,
-    NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
-    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCaretBlinkTime,
+    GetClientRect, GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LoadCursorW,
+    LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
+    GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
+    HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG,
+    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK,
+    SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
@@ -367,6 +367,21 @@ unsafe fn os_animations_enabled() -> bool {
     }
 }
 
+/// 查询系统**插入符**闪烁半周期（ms）。`None` = 用户关掉了闪烁。
+///
+/// 与 [`os_animations_enabled`] 是两码事：那个是客户区动画（窗口/控件过渡效果），
+/// 关掉它系统自带输入框的插入符照样闪。把光标闪烁挂到那个开关上，用户一开
+/// 「最佳性能」我们的光标就成了死杠。
+unsafe fn os_caret_blink_half_ms() -> Option<u32> {
+    match GetCaretBlinkTime() {
+        // INFINITE：用户在辅助功能里关掉了插入符闪烁。
+        u32::MAX => None,
+        // 0 表示查询失败（MSDN），回退默认值而不是当成"不闪"。
+        0 => Some(crate::ui::caret::BLINK_HALF_MS as u32),
+        ms => Some(ms),
+    }
+}
+
 /// 运行应用：截屏模式离屏渲染存盘；否则创建窗口进入消息循环（阻塞至退出）。
 pub(crate) fn run(
     cfg: WindowConfig,
@@ -381,6 +396,12 @@ pub(crate) fn run(
         unsafe { os_animations_enabled() }
     };
     crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
+    // 光标闪烁走**插入符**设置，不跟客户区动画走（见 `os_caret_blink_half_ms`）。
+    // 应用显式 `animations(false)` 时连它一起关：那是"我要一个完全静止的界面"。
+    crate::ui::caret::set_blink_period_ms(match cfg.animations {
+        Some(false) => None,
+        _ => unsafe { os_caret_blink_half_ms() },
+    });
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 macOS 后端共用）。
         super::run_offscreen(&cfg, &mut handler, &path);

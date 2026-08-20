@@ -15,6 +15,7 @@ use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::caret::{CaretOpts, CaretState};
 
 /// 左右按钮区宽度。
 const BTN_W: i32 = 30;
@@ -96,6 +97,8 @@ pub struct Stepper {
     edit_cursor: Cell<usize>,
     /// paint 中记录的光标局部坐标（相对控件左上角），供平台层定位 IME 候选窗。
     caret_local: Cell<Option<(i32, i32, i32)>>,
+    /// 编辑态插入光标的闪烁相位与平滑移动状态（与 TextInput 同一套实现、同一套主题）。
+    caret: CaretState,
     /// 输入法组合态：见 `TextInput::composing`，语义一致。
     composing: Cell<bool>,
     /// 长按方向：0=未按 / -1=减 / +1=加。
@@ -129,6 +132,7 @@ impl Stepper {
             edit_buf: RefCell::new(String::new()),
             edit_cursor: Cell::new(0),
             caret_local: Cell::new(None),
+            caret: CaretState::new(),
             composing: Cell::new(false),
             press_dir: Cell::new(0),
             press_start_ms: Cell::new(0),
@@ -325,20 +329,26 @@ impl Widget for Stepper {
             let text_start_x = mid.x + (mid.w - full_w) / 2;
             let cursor_x = text_start_x + before_w;
             if !self.composing.get() {
-                canvas.draw_line(
-                    cursor_x as f32,
-                    (mid.y + 2) as f32,
-                    cursor_x as f32,
-                    (mid.y + mid.h - 2) as f32,
-                    1.0,
-                    &Paint::fill(pal.accent),
+                // 与 TextInput 同一套光标：风格/宽度/圆角/平滑移动都读 `theme.input`。
+                // 颜色仍用 accent（编辑态的既有观感），只有动态部分接管。
+                let opts = CaretOpts::from_theme(&th.input);
+                self.caret.paint(
+                    canvas,
+                    cursor_x,
+                    mid.y + 2,
+                    (mid.h - 4).max(1),
+                    pal.accent,
+                    &opts,
                 );
+            } else {
+                self.caret.reset();
             }
             // 记录局部坐标供平台层定位 IME 候选窗。
             self.caret_local
                 .set(Some((cursor_x - bounds.x, mid.y - bounds.y, mid.h)));
         } else {
             self.caret_local.set(None);
+            self.caret.reset();
             canvas.draw_text(&self.display(), mid, value_color, Align::Center, ts);
         }
     }

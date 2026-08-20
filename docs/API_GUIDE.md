@@ -456,6 +456,33 @@ Element::text_input(text, "占位符")               // text: Signal<String>
 > `on_submit` / `on_nav_key` 不是便捷糖而是**唯一出口**：按键分发不冒泡，没有它们
 > 这两类键就地消失，详见 [8.3 焦点与键盘](#83-焦点与键盘)。
 
+**插入光标**：默认 `Smooth` 风格——缓入缓出地淡入淡出（周期 ~1.06s），2px 宽、两端圆角；
+打字/移动光标/点击定位后保持实心 0.5s，停手才开始闪。四种风格与外观都走主题，
+`TextInput` 与 `Stepper` 编辑态共用同一份配置：
+
+```toml
+[input]
+caret_style       = "blink"   # smooth（默认）| blink | phase | solid
+caret_width       = 2.0       # 逻辑 px（也可写 { px = 2 } 固定物理像素）
+caret_rounded     = true      # 两端半圆（窄到画不出圆弧时自动退回直角）
+caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行仍瞬移）
+```
+
+> **DPI**：光标绘制时**向下吸附到整数物理像素**，故 125%/150%/175% 下同样锐利。
+> 不吸附的话 2 逻辑 px 会落成 2.5 物理 px，抗锯齿铺成「中间 2 列实 + 两侧各半列淡」的
+> 3 列——又糊又比实际更肿。`caret_width` 与 `border_width` 同为 [`Len`]：`2.0` 随 DPI
+> 等比放大（125% → 2 物理 px、200% → 4），`{ px = 2 }` 则任意 DPI 恒为 2 物理像素。
+
+> **闪烁跟随系统的「插入符」设置**（Windows `GetCaretBlinkTime`、macOS
+> `NSTextInsertionPointBlinkPeriod*`）：周期随它走，用户在辅助功能里关掉闪烁则恒实心、
+> 不续帧。它**不受**「客户区动画 / 减弱动态效果」开关影响——那个管的是窗口与控件过渡，
+> 系统自带输入框在关掉它之后插入符照样闪。受它影响的是**平滑移动**（`anim::set_enabled(false)`
+> 即瞬移）。应用可用 `App::animations(false)` 一并关掉闪烁与滑行。
+
+> 闪烁只重绘光标那一条（自报脏区），不是整个输入框。窗口隐藏或最小化时两平台都不再驱动
+> 动画帧——托盘常驻应用「关窗即隐藏」后，留着焦点的输入框不会在后台空烧 CPU。
+> `--screenshot` 路径恒实心，保证视觉回归可比对。
+
 > 文本框支持输入 emoji 等补充平面字符（自动拼接 UTF-16 代理对），并以整个 emoji 为单位编辑（光标移动、删除按字符走）；emoji 彩色显示。
 > ⚠️ `.password()` / `.multiline()` / `.wrap()` 是 **text_input 专属**。本库用单一 `Element` 类型承载所有控件（统一链式是核心一致性），故这几个修饰符链到别的控件**不会编译报错**；但 **debug 构建下会 `panic` 报错提示**误用，release 下静默忽略（无类型分裂代价）。
 

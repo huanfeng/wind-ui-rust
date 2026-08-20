@@ -206,6 +206,9 @@ fn report_hit(handler: &dyn AppHandler, logical: (i32, i32), trace: bool) {
 /// 与窗口路径走同一渲染管线：按 `screenshot_scale` 物理化尺寸、可选合成
 /// 右键/单击/悬停交互、收敛动画推进若干帧以捕获稳定终态。
 pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, path: &Path) {
+    // 光标恒实心：闪烁相位跟真实时钟走，开着会让同一界面每次截出的光标忽有忽无，
+    // 视觉回归的整页比对就永远对不上。平滑移动同理（连点后可能停在滑行途中）。
+    crate::ui::caret::set_animated(false);
     // 物理像素 = 逻辑尺寸 × scale，供高 DPI 截屏验证。
     let s = cfg.screenshot_scale.max(0.1);
     let pw = (cfg.width as f32 * s).round().max(1.0) as i32;

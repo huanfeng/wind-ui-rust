@@ -15,6 +15,7 @@ use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
 use crate::theme::Intent;
+use crate::ui::caret::{CaretOpts, CaretState};
 use crate::ui::containers::VScrollbar;
 use crate::ui::TextContent;
 
@@ -684,9 +685,6 @@ const TEXT_PAD: i32 = 10;
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
 const SEL_EOL_EXTRA: i32 = 6;
-/// 插入光标宽度（逻辑 px）。反色渲染在此宽度内翻转字形笔画：过窄则压在笔画上时
-/// 断口不够醒目，过宽会啃掉字形。1px 与系统插入符一致。
-const CARET_W: i32 = 1;
 /// 密码掩码字符（U+2022 BULLET）。
 const PASSWORD_MASK: char = '\u{2022}';
 
@@ -753,6 +751,8 @@ pub struct TextInput {
     layout: RefCell<TextLayout>, // paint 重建的视觉行缓存
     /// 最近一帧绘制的光标局部位置 (x, y_top, height)（节点局部逻辑坐标），供输入法定位。
     caret_local: Cell<Option<(i32, i32, i32)>>,
+    /// 插入光标的闪烁相位与平滑移动状态（见 [`crate::ui::caret`]）。
+    caret: CaretState,
     dragging: bool,
     scrollbar: VScrollbar,
     /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
@@ -793,6 +793,7 @@ impl TextInput {
             goal_x: Cell::new(None),
             layout: RefCell::new(TextLayout::default()),
             caret_local: Cell::new(None),
+            caret: CaretState::new(),
             dragging: false,
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
@@ -1560,24 +1561,30 @@ impl Widget for TextInput {
             // 之所以用「重画一遍再裁剪」而不是 difference 混合：D2D 后端（本库默认）
             // 的 SetPrimitiveBlend 只有 SourceOver/Copy/Min/Add，真反相要么改走
             // ID2D1Effect 离屏合成、要么每帧 GPU 读回，代价都远超此处所值。
-            let caret = Rect::new(cxx, ly + 2, CARET_W, line_h - 4);
-            canvas.fill_rect(
-                caret.x as f32,
-                caret.y as f32,
-                caret.w as f32,
-                caret.h as f32,
-                &Paint::fill(inp.cursor(pal)),
-            );
-            if let Some(ln) = lay.lines.get(cl).filter(|ln| ln.end > ln.start) {
-                let s: String = chars[ln.start..ln.end].iter().collect();
-                canvas.save();
-                canvas.clip_rect(caret);
-                // 与常规绘制同一 rect/ts，只换颜色：同次排版故字形逐像素对齐。
-                // 取本次实际填的底色（非 inp.bg），背景逻辑再变反色也自动跟随。
-                let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
-                canvas.draw_text(&s, tr, bg, Align::Start, ts);
-                canvas.restore();
+            let opts = CaretOpts::from_theme(inp);
+            if let Some((caret, alpha)) =
+                // 竖直只内缩 1px：行盒本就含行距，再各缩 2px 会让光标明显短于字身，
+                // 视觉上"矮一截"。
+                self.caret
+                        .paint(canvas, cxx, ly + 1, line_h - 2, inp.cursor(pal), &opts)
+            {
+                if let Some(ln) = lay.lines.get(cl).filter(|ln| ln.end > ln.start) {
+                    let s: String = chars[ln.start..ln.end].iter().collect();
+                    canvas.save();
+                    canvas.clip_rect(caret);
+                    // 与常规绘制同一 rect/ts，只换颜色：同次排版故字形逐像素对齐。
+                    // 取本次实际填的底色（非 inp.bg），背景逻辑再变反色也自动跟随。
+                    // 按本帧光标 alpha 同步淡化：光标淡下去时反色也跟着退，否则半透明
+                    // 的光标底下会浮着一段永远刷白的字。
+                    let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
+                    canvas.draw_text(&s, tr, bg.scale_alpha(alpha), Align::Start, ts);
+                    canvas.restore();
+                }
             }
+        } else {
+            // 失焦/组合态：清掉滑行起点与脏区记录，下次出现按"首次"处理，
+            // 不会从上一次的旧位置滑过来。
+            self.caret.reset();
         }
         canvas.restore();
 
@@ -1994,27 +2001,78 @@ mod tests {
         TextInput::new(signal(String::new()), String::new())
     }
 
-    #[test]
-    fn layout_cache_hit_then_invalidates_on_change() {
+    /// 在给定帧时钟渲染一次聚焦态空输入框，返回像素缓冲。
+    fn caret_frame(ti: &TextInput, now_ms: u64) -> Vec<u8> {
+        use crate::core::Widget;
+        use crate::geometry::Rect;
         use crate::render::SkiaCanvas;
+        use crate::style::Style;
         use tiny_skia::Pixmap;
-        let ti = dummy_input(); // 单行
+        let b = Rect::new(0, 0, 200, 30);
+        crate::anim::set_clock_ms(now_ms);
         let mut pm = Pixmap::new(200, 30).unwrap();
-        let mut c = SkiaCanvas::new(&mut pm); // 无引擎：measure 走确定性近似
-        ti.rebuild_layout(&mut c, "abc", &crate::text::TextStyle::new(14.0), 200);
-        assert_eq!(ti.layout.borrow().lines.len(), 1);
-        assert_eq!(ti.layout.borrow().lines[0].end, 3);
-        // 同参再次：缓存命中，不破坏既有行集。
-        ti.rebuild_layout(&mut c, "abc", &crate::text::TextStyle::new(14.0), 200);
-        assert_eq!(ti.layout.borrow().lines[0].end, 3, "缓存命中应沿用旧行");
-        // 文本变化：键失配 → 重建为新长度。
-        ti.rebuild_layout(
-            &mut c,
-            "abcdefghij",
-            &crate::text::TextStyle::new(14.0),
-            200,
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            ti.paint(b, b, true, true, &mut c, &Style::default());
+        }
+        pm.data().to_vec()
+    }
+
+    /// 两帧间的墨量差（逐通道绝对差之和）。
+    ///
+    /// 全部取样都在**聚焦帧之间**做，不拿失焦帧当基线：失焦会 `CaretState::reset`，
+    /// 下一帧遂被判为"首次出现"而重置闪烁相位——那样量到的永远是实心光标。
+    fn frame_diff(a: &[u8], b: &[u8]) -> u32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs())
+            .sum()
+    }
+
+    /// 默认（Smooth）风格：闪烁必须真的改变画面，且淡变中段的墨量严格落在
+    /// 实心与全灭之间——只验"有没有画"区分不出渐变淡入淡出与硬切方波。
+    #[test]
+    fn caret_blink_modulates_actual_pixels() {
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(true);
+        let pause = crate::ui::caret::TYPING_PAUSE_MS;
+        let ti = dummy_input();
+        // 首帧确立光标位置（同时被记成一次交互，相位自此起算）。
+        let solid = caret_frame(&ti, 0);
+        // 全灭相位（暂停 + 亮 130 + 淡出 400 + 灭区中点）。
+        let dark = caret_frame(&ti, pause + 530 + 65);
+        // 淡变中段。
+        let mid = caret_frame(&ti, pause + 130 + 200);
+        let ink_solid = frame_diff(&solid, &dark);
+        let ink_mid = frame_diff(&mid, &dark);
+        assert!(ink_solid > 0, "实心与全灭必须画面不同（光标在闪）");
+        assert!(
+            ink_mid > 0 && ink_mid < ink_solid,
+            "淡变中段墨量应严格介于实心与全灭之间：mid={ink_mid} solid={ink_solid}"
         );
-        assert_eq!(ti.layout.borrow().lines[0].end, 10, "文本变化后应重建");
+    }
+
+    /// 光标动画关闭（截图路径、系统省电/无障碍设置）时：画面恒定，且**不请求续帧**。
+    /// 后者是省电语义——静止界面必须回到零 CPU 的阻塞空闲。
+    #[test]
+    fn caret_static_when_animation_off_and_asks_no_frames() {
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(false);
+        let ti = dummy_input();
+        let a = caret_frame(&ti, 0);
+        let b = caret_frame(&ti, 5_000);
+        assert_eq!(frame_diff(&a, &b), 0, "关闭动画后画面应逐像素恒定");
+        crate::anim::reset_request();
+        caret_frame(&ti, 9_000);
+        assert!(
+            !crate::anim::animation_requested(),
+            "不闪的光标不应请求续帧"
+        );
+        // 开着动画时则必须续帧，否则闪一半就冻住。
+        crate::ui::caret::set_animated(true);
+        crate::anim::reset_request();
+        caret_frame(&ti, 9_100);
+        assert!(crate::anim::animation_requested(), "闪烁光标应请求续帧");
     }
 
     #[test]

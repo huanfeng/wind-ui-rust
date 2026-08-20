@@ -51,6 +51,24 @@ pub fn request_repaint() {
     }
 }
 
+/// 控件请求持续动画，但**脏区自报**（paint 内调用）：用于视觉变化远小于节点的动画，
+/// 典型是文本光标闪烁——按节点算脏区会把整个输入框每帧重绘一遍，按光标条算只重绘
+/// 十几像素宽的一条。
+///
+/// `r` 是**逻辑绝对坐标**，且必须覆盖本帧与上一帧视觉的并集：局部帧以脏区为裁剪重绘
+/// 整棵树（见 `app::damage::render_partial`），报小了不会画错内容，只会把没进脏区的
+/// 那部分留成上一帧的残影。
+pub fn request_repaint_in(r: Rect) {
+    REQUEST.with(|c| c.set(true));
+    DAMAGE.with(|d| {
+        let merged = match d.get() {
+            Some(cur) => cur.union(&r),
+            None => r,
+        };
+        d.set(Some(merged));
+    });
+}
+
 /// 控件请求「下一帧重排 + 重绘」（paint 内调用）。供**布局动画**（高度补间等每帧
 /// 改变几何的动画）使用：与 `request_repaint` 不同，它让宿主下一帧走
 /// `needs_relayout` 正规门——重排后按结构签名升级整窗、并执行 hover 重同步/
