@@ -345,7 +345,7 @@ pub struct InputTheme {
     /// 选区高亮（含 alpha）。
     pub selection: Option<Color>,
     pub cursor: Option<Color>,
-    /// 插入光标闪烁风格（默认 [`CaretStyle::Smooth`] 平滑呼吸）。
+    /// 插入光标闪烁风格（默认 [`CaretStyle::Blink`] 经典方波）。
     pub caret_style: Option<CaretStyle>,
     /// 插入光标宽度（默认 `2.0` 逻辑 px）。可写 `{ px = 2 }` 固定物理像素；
     /// 两种写法最终都会向下吸附到整数物理像素，非整数 DPI 下同样清晰。
@@ -1419,9 +1419,9 @@ caret_style = \"{name}\"
             let back = Theme::from_toml(&t.to_toml().expect("序列化")).expect("回环解析");
             assert_eq!(back.input.caret_style(), want, "{name} 回环后应不变");
         }
-        // 未配置时回退默认：Smooth、2px、圆角、平滑移动。
+        // 未配置时回退默认：Blink、2px、圆角、平滑移动。
         let d = Theme::default();
-        assert_eq!(d.input.caret_style(), CaretStyle::Smooth);
+        assert_eq!(d.input.caret_style(), CaretStyle::Blink);
         assert_eq!(d.input.caret_width(), Len::Dp(caret::DEFAULT_WIDTH));
         // 物理像素写法（非整数 DPI 下最清晰的选项）同样要能配。
         let px = Theme::from_toml(

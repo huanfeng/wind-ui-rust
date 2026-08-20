@@ -2029,27 +2029,59 @@ mod tests {
             .sum()
     }
 
-    /// 默认（Smooth）风格：闪烁必须真的改变画面，且淡变中段的墨量严格落在
-    /// 实心与全灭之间——只验"有没有画"区分不出渐变淡入淡出与硬切方波。
+    /// 临时把当前主题换成指定光标风格（thread_local，用完须还原）。
+    fn with_caret_style(style: crate::ui::CaretStyle) {
+        let mut t = crate::theme::Theme::default();
+        t.input.caret_style = Some(style);
+        crate::theme::set_current(std::rc::Rc::new(t));
+    }
+
+    /// 闪烁必须真的改变画面，且两种风格的**曲线形状**在像素上可区分：
+    /// Smooth 的淡变中段严格落在实心与全灭之间，Blink 只有这两个值。
+    /// 只验"有没有画出来"是区分不出渐变与方波的。
     #[test]
     fn caret_blink_modulates_actual_pixels() {
         crate::anim::set_enabled(true);
         crate::ui::caret::set_animated(true);
+        crate::ui::caret::set_window_active(true);
+        crate::ui::caret::set_blink_period_ms(Some(crate::ui::caret::BLINK_HALF_MS as u32));
         let pause = crate::ui::caret::TYPING_PAUSE_MS;
+
+        with_caret_style(crate::ui::CaretStyle::Smooth);
         let ti = dummy_input();
         // 首帧确立光标位置（同时被记成一次交互，相位自此起算）。
         let solid = caret_frame(&ti, 0);
-        // 全灭相位（暂停 + 亮 130 + 淡出 400 + 灭区中点）。
-        let dark = caret_frame(&ti, pause + 530 + 65);
-        // 淡变中段。
-        let mid = caret_frame(&ti, pause + 130 + 200);
+        let dark = caret_frame(&ti, pause + 530 + 65); // 全灭相位
+        let mid = caret_frame(&ti, pause + 130 + 200); // 淡变中段
         let ink_solid = frame_diff(&solid, &dark);
         let ink_mid = frame_diff(&mid, &dark);
         assert!(ink_solid > 0, "实心与全灭必须画面不同（光标在闪）");
         assert!(
             ink_mid > 0 && ink_mid < ink_solid,
-            "淡变中段墨量应严格介于实心与全灭之间：mid={ink_mid} solid={ink_solid}"
+            "Smooth 的淡变中段应严格介于实心与全灭之间：mid={ink_mid} solid={ink_solid}"
         );
+
+        // 默认风格：方波，采样点只落在"全亮"或"全灭"两个值上。
+        with_caret_style(crate::ui::CaretStyle::Blink);
+        let ti = dummy_input();
+        let lit = caret_frame(&ti, 0);
+        let out = caret_frame(&ti, pause + 530 + 65);
+        assert!(frame_diff(&lit, &out) > 0, "方波也必须真的改变画面");
+        for t in [pause + 100, pause + 300, pause + 520] {
+            assert_eq!(
+                frame_diff(&caret_frame(&ti, t), &lit),
+                0,
+                "亮半周期内 {t} 应与全亮帧逐像素相同（方波无中间态）"
+            );
+        }
+        for t in [pause + 600, pause + 900, pause + 1050] {
+            assert_eq!(
+                frame_diff(&caret_frame(&ti, t), &out),
+                0,
+                "灭半周期内 {t} 应与全灭帧逐像素相同"
+            );
+        }
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 
     /// 光标动画关闭（截图路径、系统省电/无障碍设置）时：画面恒定，且**不请求续帧**。
@@ -2073,6 +2105,28 @@ mod tests {
         crate::anim::reset_request();
         caret_frame(&ti, 9_100);
         assert!(crate::anim::animation_requested(), "闪烁光标应请求续帧");
+    }
+
+    /// 窗口失活：画面恒定且**不请求续帧**——切到别的应用后，后台窗口不该继续按刷新率
+    /// 出帧。这条是省电的实处：光标是最常见的"永续动画"，不掐这一路，任何留着焦点的
+    /// 输入框都会让窗口在后台一直烧 CPU。
+    #[test]
+    fn inactive_window_asks_no_frames() {
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(true);
+        crate::ui::caret::set_window_active(false);
+        let ti = dummy_input();
+        let a = caret_frame(&ti, 0);
+        let b = caret_frame(&ti, 5_000);
+        assert_eq!(frame_diff(&a, &b), 0, "失活窗口画面应逐像素恒定");
+        crate::anim::reset_request();
+        caret_frame(&ti, 9_000);
+        assert!(!crate::anim::animation_requested(), "失活窗口不应请求续帧");
+        // 复位：thread_local 会带到同线程的后续测试。
+        crate::ui::caret::set_window_active(true);
+        crate::anim::reset_request();
+        caret_frame(&ti, 9_100);
+        assert!(crate::anim::animation_requested(), "重新激活应恢复续帧");
     }
 
     #[test]

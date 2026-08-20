@@ -14,14 +14,14 @@ use windui::prelude::*;
 
 const STYLES: [(CaretStyle, &str, &str); 4] = [
     (
-        CaretStyle::Smooth,
-        "Smooth",
-        "缓入缓出地淡入淡出，两端各驻留一小段（默认）",
-    ),
-    (
         CaretStyle::Blink,
         "Blink",
-        "亮 530ms / 灭 530ms 硬切换，与系统插入符一致",
+        "亮/灭各半周期硬切换，与系统插入符一致（默认，最省）",
+    ),
+    (
+        CaretStyle::Smooth,
+        "Smooth",
+        "缓入缓出地淡入淡出，两端各驻留一小段；每帧都在变，代价最高",
     ),
     (
         CaretStyle::Phase,
@@ -57,7 +57,7 @@ fn main() {
     let desc = signal(String::from(STYLES[0].2));
 
     let mut app = App::new("windui — 光标风格", 560, 470).theme(theme_for(
-        CaretStyle::Smooth,
+        CaretStyle::Blink,
         true,
         true,
         Len::Dp(2.0),

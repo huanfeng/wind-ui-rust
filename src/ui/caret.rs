@@ -21,6 +21,7 @@
 //!   周期也跟着它走，与 [`crate::anim::enabled`] 无关。
 //! - **平滑移动**是过渡动画，归 [`crate::anim::enabled`] 管，关掉即瞬移。
 //! - [`set_animated`] 是总闸（截图/视觉回归用）：关掉则恒实心、不滑行、不续帧。
+//! - **窗口失活**（[`set_window_active`]）同样转静态：后台窗口没有理由按刷新率出帧。
 
 use std::cell::Cell;
 
@@ -58,6 +59,22 @@ thread_local! {
     static ANIMATED: Cell<bool> = const { Cell::new(true) };
     /// 闪烁半周期（ms）；`None` = 系统/应用要求不闪。宿主启动时从平台注入。
     static BLINK_HALF: Cell<Option<u32>> = const { Cell::new(Some(BLINK_HALF_MS as u32)) };
+    /// 所属窗口是否处于激活（前台）态。宿主每帧绘制前注入。
+    static WINDOW_ACTIVE: Cell<bool> = const { Cell::new(true) };
+}
+
+/// 当前窗口是否激活（前台）。
+pub fn window_active() -> bool {
+    WINDOW_ACTIVE.with(|c| c.get())
+}
+
+/// 宿主每帧绘制前注入所属窗口的激活态。
+///
+/// 失活窗口的光标转为静态：既是系统观感（Windows 失活时插入符本就不显示，macOS 也不闪），
+/// 也是省电——后台窗口没有任何理由按刷新率出帧。多窗口下靠"每帧注入"取得正确值，
+/// 与帧时钟、主题快照同一套路数。
+pub fn set_window_active(active: bool) {
+    WINDOW_ACTIVE.with(|c| c.set(active));
 }
 
 /// 当前闪烁半周期（ms）。`None` 表示不闪（用户在系统里关了插入符闪烁，或应用显式关闭）。
@@ -92,10 +109,14 @@ pub fn set_animated(on: bool) {
 pub enum CaretStyle {
     /// 静态实心，不闪（零续帧开销）。
     Solid,
-    /// 经典方波：亮 [`BLINK_HALF_MS`] / 灭 [`BLINK_HALF_MS`]，硬切换，与系统插入符一致。
-    Blink,
-    /// 平滑呼吸（默认）：缓入缓出地淡入淡出，两端各驻留一小段。
+    /// 经典方波（默认）：亮/灭各半周期硬切换，与系统插入符一致。
+    ///
+    /// 之所以是默认而非 [`Smooth`](Self::Smooth)：它只有两个状态，绝大多数帧画面不变，
+    /// 实测同一界面比渐变省三分之一 CPU（2.34% → 1.56% 单核）；观感上也是各系统
+    /// 文本框几十年的样子。要更柔和的过渡就切 `Smooth`。
     #[default]
+    Blink,
+    /// 平滑呼吸：缓入缓出地淡入淡出，两端各驻留一小段。每帧 alpha 都在变，代价最高。
     Smooth,
     /// 半明半暗：alpha 在 1.0 与 [`PHASE_MIN_ALPHA`] 间正弦起伏，从不熄灭，识别度最高。
     Phase,
@@ -226,7 +247,7 @@ impl CaretState {
     /// 插入符闪烁在两个系统上都是独立设置。把两者绑在一起的后果是——用户在 Windows
     /// 性能选项里关掉动画后，系统自带输入框照闪，我们的却成了一根死杠。
     fn blink_half(&self, style: CaretStyle) -> Option<u64> {
-        if !style.animated() || !animated() {
+        if !style.animated() || !animated() || !window_active() {
             return None;
         }
         blink_period_ms().map(|v| v as u64)
@@ -546,6 +567,24 @@ mod tests {
         assert_eq!(c.alpha(CaretStyle::Blink, dark), 1.0, "总闸关闭应恒实心");
         set_animated(true);
         assert_eq!(c.alpha(CaretStyle::Blink, dark), 0.0, "恢复后应重新闪");
+    }
+
+    /// 窗口失活 → 光标静态。后台窗口的插入符在两个系统上本就不闪，更没理由按刷新率出帧。
+    #[test]
+    fn inactive_window_freezes_caret() {
+        set_animated(true);
+        set_blink_period_ms(Some(BLINK_HALF_MS as u32));
+        let c = CaretState::new();
+        c.bump(0);
+        let dark = TYPING_PAUSE_MS + BLINK_HALF_MS;
+        set_window_active(false);
+        assert_eq!(c.alpha(CaretStyle::Blink, dark), 1.0, "失活窗口光标应静态");
+        assert!(
+            c.blink_half(CaretStyle::Smooth).is_none(),
+            "失活不应视作在闪"
+        );
+        set_window_active(true);
+        assert_eq!(c.alpha(CaretStyle::Blink, dark), 0.0, "重新激活应恢复闪烁");
     }
 
     /// 半周期跟随系统设置：`GetCaretBlinkTime` 调快，应用里的光标同步变快。

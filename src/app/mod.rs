@@ -1197,6 +1197,9 @@ struct UiHost {
     /// 窗口在帧首 `anim::reset_request()` 会清掉前一个窗口刚提出的续帧请求，让它的动画
     /// 掉帧甚至冻住。收进实例字段后，每个宿主只回答自己那一份。
     wants_anim: bool,
+    /// 所属窗口是否激活（前台）。平台经 `on_window_activated` 通知，每帧注入给
+    /// `ui::caret`：失活窗口的光标转静态、不再续帧。
+    window_active: bool,
     /// 本帧实际更新的物理区域；`None` = 整帧。供平台收窄呈现范围（见
     /// [`crate::platform::AppHandler::last_frame_damage`]）。
     last_present: Option<Rect>,
@@ -1379,6 +1382,7 @@ impl UiHost {
             pending_windows: Vec::new(),
             scope: None,
             wants_anim: false,
+            window_active: true,
             last_present: None,
         }
     }
@@ -1527,6 +1531,9 @@ impl UiHost {
     /// 帧起始：排空跨线程通道、刷新主题快照与清屏色。
     fn begin_frame(&mut self) {
         self.drain_channels();
+        // 窗口激活态注入线程局部，供光标判定要不要闪（与帧时钟、主题快照同一套路数：
+        // 多窗口下每帧各注各的）。
+        crate::ui::caret::set_window_active(self.window_active);
         // 从运行期句柄刷新主题快照（热切换下一帧生效），注入线程局部供控件读取。
         self.theme = self.theme_src.current();
         crate::theme::set_current(self.theme.clone());
@@ -1886,6 +1893,20 @@ impl AppHandler for UiHost {
 
     fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
         self.last_present
+    }
+
+    fn on_window_activated(&mut self, active: bool) -> bool {
+        if self.window_active == active {
+            return false;
+        }
+        self.window_active = active;
+        // 重绘一帧把光标切到（或切回）该有的状态：失活时它停在最后一帧的相位上，
+        // 那可能正好是"淡到一半"，不重绘就定格成一根半透明的杠。
+        //
+        // 走整窗而非脏区：这一帧的目的就是让 caret 在新的激活态下重新决定自己，
+        // 而失活前的最后一帧脏区未必覆盖得到它（比如刚好停在全灭相位、什么都没画）。
+        self.damage.needs_full = true;
+        true
     }
 
     fn on_window_shown(&mut self) -> bool {
@@ -2999,6 +3020,41 @@ mod tests {
             dmg.bottom() < h - 4,
             "进度条的脏区不应延伸到底部标记处：{dmg:?}"
         );
+    }
+
+    /// 窗口激活态：失活后聚焦的输入框不再请求续帧（后台窗口不该按刷新率出帧），
+    /// 重新激活后恢复。多窗口下各宿主各记各的，不能靠线程全局位。
+    #[test]
+    fn inactive_window_stops_asking_for_frames() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let text = crate::signal::signal(String::from("abc"));
+        let mut a = App::new("a", 120, 60)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::text_input(text, "").width_match().autofocus()),
+            )
+            .into_handler_for_test();
+        a.set_scale(1.0);
+        let mut pm = Pixmap::new(120, 60).unwrap();
+        macro_rules! frame {
+            () => {
+                a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 60))
+            };
+        }
+        frame!();
+        assert!(a.wants_animation(), "激活窗口里的光标应请求续帧");
+
+        assert!(a.on_window_activated(false), "激活态变化应要求重绘");
+        assert!(!a.on_window_activated(false), "同值重复通知不应再要求重绘");
+        frame!();
+        assert!(!a.wants_animation(), "失活后不应再请求续帧");
+
+        assert!(a.on_window_activated(true));
+        frame!();
+        assert!(a.wants_animation(), "重新激活应恢复续帧");
     }
 
     /// 回归（多窗口地基）：对话框栈必须归各自的树所有。

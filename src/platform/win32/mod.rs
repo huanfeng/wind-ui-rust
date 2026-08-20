@@ -63,13 +63,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
+    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -1373,6 +1373,12 @@ unsafe extern "system" fn wnd_proc(
             handle_capture_changed(hwnd);
             LRESULT(0)
         }
+        // 窗口激活/失活：宿主据此把光标转静态（失活窗口的插入符本就不该闪，也没理由
+        // 按刷新率出帧）。仍交默认处理——激活的焦点归属由系统负责，我们只是搭个便车。
+        WM_ACTIVATE => {
+            handle_activate(hwnd, wparam);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DPICHANGED => {
             handle_dpi_changed(hwnd, wparam, lparam);
             LRESULT(0)
@@ -2329,6 +2335,24 @@ unsafe fn handle_ime_position(hwnd: HWND) {
 }
 
 /// OS 抢走指针捕获（如 Alt+Tab、WM_CAPTURECHANGED）：通知 handler 收尾。
+/// WM_ACTIVATE：把激活态转给宿主，需要时重绘一帧。
+///
+/// 严格两段式（铁律 6）：`InvalidateRect` 会同步派发 WM_PAINT，持着 `state` 借用调它
+/// 就是重入。
+unsafe fn handle_activate(hwnd: HWND, wparam: WPARAM) {
+    // 低 16 位：WA_INACTIVE(0) / WA_ACTIVE(1) / WA_CLICKACTIVE(2)。
+    let active = (wparam.0 & 0xFFFF) != WA_INACTIVE as usize;
+    let repaint = {
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
+        state.handler.on_window_activated(active)
+    };
+    if repaint {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
 unsafe fn handle_capture_changed(hwnd: HWND) {
     let repaint = {
         let Some(state) = state_from(hwnd) else {

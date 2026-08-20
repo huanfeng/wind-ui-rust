@@ -602,6 +602,15 @@ define_class!(
         fn window_did_resign_key(&self, _notification: &NSNotification) {
             self.notify_capture_lost();
             self.abort_composition();
+            self.notify_activated(false);
+        }
+
+        // 窗口成为 key：把激活态转给宿主，并把帧链重新起上——失活期间光标不再请求续帧，
+        // 链式定时器随之停摆，没人主动起就再也不闪了。
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _notification: &NSNotification) {
+            self.notify_activated(true);
+            self.schedule_next_frame();
         }
 
         // 窗口可见性变化（被别的窗口盖住、最小化、切 Space、以及**刚 orderFront 之后**）：
@@ -1000,6 +1009,21 @@ impl ContentView {
         }
         for t in intervals {
             t.invalidate();
+        }
+    }
+
+    /// 把窗口激活态转给宿主，需要时重绘一帧。
+    ///
+    /// 借用只活在取 repaint 的那条语句里：`setNeedsDisplay` 会同步走绘制路径，
+    /// 持着 `ViewState` 调它就是重入 panic（同 win32 的铁律 6）。
+    fn notify_activated(&self, active: bool) {
+        let repaint = self
+            .ivars()
+            .borrow_mut()
+            .handler
+            .on_window_activated(active);
+        if repaint {
+            self.setNeedsDisplay(true);
         }
     }
 
