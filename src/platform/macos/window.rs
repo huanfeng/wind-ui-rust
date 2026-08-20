@@ -125,6 +125,15 @@ pub(super) fn show_and_activate(win: &NSWindow, mtm: MainThreadMarker) {
     if was_hidden {
         notify_shown(win);
     }
+    // 帧驱动在隐藏期间是断链的（`schedule_next_frame` 见不可见即不续约，链式定时器
+    // 一旦停就没人再起）。这里补一次起链：否则窗口回来了，光标不闪、补间不动，
+    // 直到用户碰一下界面才恢复。放在最后，前面那些调用都不得持有 `ViewState` 借用。
+    if let Some(view) = win
+        .contentView()
+        .and_then(|v| v.downcast::<ContentView>().ok())
+    {
+        view.schedule_next_frame();
+    }
 }
 
 /// 通知宿主"窗口刚被唤起"。
@@ -995,6 +1004,14 @@ impl ContentView {
         }
         if !self.ivars().borrow().handler.wants_animation() {
             return;
+        }
+        // 不可见（`orderOut` 隐藏、或最小化）时不续约：托盘常驻应用「关窗即隐藏」后，
+        // 窗口里若留着聚焦的输入框，光标闪烁会一直请求续帧——不可见的窗口按刷新率
+        // 白烧 CPU。重新显示时 `show_and_activate` 会把帧链重新起上。
+        if let Some(win) = self.window() {
+            if !win.isVisible() || win.isMiniaturized() {
+                return;
+            }
         }
         let interval = self.display_frame_interval();
         // repeats=false：一次性；下一帧 do_draw 再续约，故动画停止即自然停。

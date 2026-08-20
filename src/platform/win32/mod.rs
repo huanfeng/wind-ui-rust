@@ -1048,11 +1048,16 @@ unsafe fn run_message_loop() {
             live_count = windows.len();
             frame_ms = frame_interval_ms(&windows);
         }
-        // 需要按帧驱动的窗口：最小化的跳过（画了也看不见，只是空转）。
+        // 需要按帧驱动的窗口：最小化**或隐藏**的跳过（画了也看不见，只是空转）。
+        //
+        // 隐藏这一条尤其要紧：托盘常驻应用「关窗即隐藏」后进程还活着，窗口里若留着一个
+        // 聚焦的输入框，光标闪烁会一直请求续帧——于是不可见的窗口按刷新率白烧 CPU，
+        // 用户只看得到风扇转。可见性必须在这里问，宿主自己不知道自己是不是被 order 走了。
         let pending: Vec<HWND> = windows
             .into_iter()
             .filter(|&h| {
-                !IsIconic(h).as_bool()
+                IsWindowVisible(h).as_bool()
+                    && !IsIconic(h).as_bool()
                     && state_from(h)
                         .map(|s| s.handler.wants_animation())
                         .unwrap_or(false)
