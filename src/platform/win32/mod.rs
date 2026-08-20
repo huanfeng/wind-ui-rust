@@ -53,7 +53,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageExtraInfo, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, IsIconic, IsWindow, IsZoomed, LoadCursorW, LoadIconW,
+    GetWindowRect, IsIconic, IsWindow, IsWindowVisible, IsZoomed, LoadCursorW, LoadIconW,
     MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, HTBOTTOM,
@@ -1772,12 +1772,29 @@ unsafe fn run_tray_actions(hwnd: HWND, actions: Vec<tray::TrayAction>) {
 /// 托盘点击同理（用户交互授予）。
 pub(crate) fn show_and_activate(hwnd: HWND) {
     unsafe {
+        // 先问再显示：`ShowWindow` 之后 `IsWindowVisible` 恒为真，跃迁就无从判断了。
+        let was_hidden = !IsWindowVisible(hwnd).as_bool();
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         } else {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
         let _ = SetForegroundWindow(hwnd);
+        if was_hidden {
+            notify_shown(hwnd);
+        }
+    }
+}
+
+/// 通知宿主"窗口刚被唤起"。
+///
+/// 放在 `ShowWindow`/`SetForegroundWindow` **之后**：那两个 API 会同步重入 `wnd_proc`
+/// （WM_SHOWWINDOW/WM_ACTIVATE），期间若持着 `&mut WindowState` 就是别名 UB（铁律 6）。
+/// 借用只活在取 repaint 那一条语句里。
+unsafe fn notify_shown(hwnd: HWND) {
+    let repaint = state_from(hwnd).is_some_and(|s| s.handler.on_window_shown());
+    if repaint {
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 

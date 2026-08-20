@@ -54,6 +54,18 @@ impl UiHost {
         self.tree.focus_ring_visible = self.focus.visible;
     }
 
+    /// 窗口从隐藏态被唤起：让 [`Autofocus`] **重新兑现一次**。
+    ///
+    /// 为什么这是对的：`autofocus` 平时是一次性的（兑现后焦点归用户），但"从托盘/热键
+    /// 唤起"是一段新的交互的开始，与页面重新载入同构——查询框该重新拿到焦点并全选上次
+    /// 的词，用户直接覆盖打字。没有这一步，第二次唤起时焦点还停在上次离开的地方，
+    /// `autofocus_select_all` 的"全选"也不会再发生。
+    ///
+    /// 只在**隐藏→可见的跃迁**上调用（平台层判定），故已经可见时再按热键不会重置界面。
+    pub(super) fn rearm_autofocus(&mut self) {
+        self.focus.autofocus_done = false;
+    }
+
     /// 兑现 [`Autofocus`]：节点首次进入焦点环那一帧把焦点交给它，只做一次。
     ///
     /// 没有它时错在哪：`focus == None` 时 `Tree::dispatch_key` 直接丢弃整个按键事件
@@ -656,5 +668,106 @@ mod tests {
             Some(handler.focus.order[0]),
             "放过的 Shift+Tab 应反向导航——这是吞 Tab 的控件留给用户的退路"
         );
+    }
+
+    /// 唤起后 `autofocus` 应**重新兑现一次**——这是常驻工具第二次唤起时的关键。
+    ///
+    /// 没有它时错在哪：`autofocus` 平时是一次性的（兑现后焦点归用户）。于是进程起来后的
+    /// 第一次唤起是好的，**第二次**唤起时焦点还停在上次离开的地方，`autofocus_select_all`
+    /// 的"全选"也不会再发生——上次查的词还在框里、光标在末尾，用户得先手动删。
+    /// 这条恰恰只在真机反复唤起时才暴露，单看第一次唤起一切正常。
+    #[test]
+    fn window_shown_rearms_autofocus_for_the_next_wake() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let text = crate::signal::signal(String::from("上次查的词"));
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .child(
+                    Element::text_input(text, "查词…")
+                        .height(30)
+                        .autofocus_select_all(),
+                )
+                .child(Element::flex_spacer()),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        macro_rules! frame {
+            () => {
+                handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200))
+            };
+        }
+        frame!();
+        assert!(handler.focus.current.is_some(), "首帧应兑现 autofocus");
+
+        // 模拟用户点走焦点后把窗口收起（常驻工具的常态）。
+        let blank = Point::new(150, 180);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            blank,
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            blank,
+            MouseButton::Left,
+        ));
+        frame!();
+        assert!(
+            handler.focus.current.is_none(),
+            "前提：点空白清焦点，且 autofocus 不该抢回来"
+        );
+
+        // 再次唤起：平台在隐藏→可见的跃迁上通知宿主。
+        assert!(handler.on_window_shown(), "唤起应请求重绘");
+        frame!();
+        assert_eq!(
+            handler.focus.current,
+            Some(handler.focus.order[0]),
+            "唤起后焦点应重新落回查询框"
+        );
+
+        // 全选也应重新生效：打字覆盖旧内容，而不是追加。
+        let k = crate::app::test_support::key_ev();
+        handler.on_key(k(Key::Char('新')));
+        assert_eq!(
+            text.get(),
+            "新",
+            "唤起后应重新全选，打字覆盖旧词——否则用户每次都得先手动删"
+        );
+    }
+
+    /// `App::on_show` 回调应在唤起时触发，且它请求的副作用要落地。
+    ///
+    /// 没有它时错在哪：常驻工具"每次唤起刷新一次数据 / 清掉上次结果"没有落点——三个
+    /// 唤起入口里只有控件请求经过宿主，托盘与热键都是平台层直接执行的，应用侧根本感知
+    /// 不到自己被唤起了。
+    #[test]
+    fn show_handler_runs_and_its_effects_land() {
+        use crate::platform::AppHandler;
+        let hits = crate::signal::signal(0u32);
+        let app = App::new("t", 120, 90)
+            .on_show(move |ctx| {
+                hits.update(|n| *n += 1);
+                ctx.toast_ok("已唤起");
+            })
+            .content(Element::col());
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+
+        handler.on_window_shown();
+        assert_eq!(hits.get(), 1, "唤起应触发 on_show");
+        assert!(
+            handler.toast.is_active(),
+            "回调请求的 toast 应被宿主收下，而不是随 ctx 一起丢掉"
+        );
+
+        handler.on_window_shown();
+        assert_eq!(hits.get(), 2, "每次唤起都触发；回调可重复调用（FnMut）");
     }
 }

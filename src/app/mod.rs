@@ -258,6 +258,8 @@ type AppCallback = Box<dyn FnMut(&mut EventCtx)>;
 /// 关闭请求拦截器（[`App::on_close_request`]）：返回 true 放行、false 取消。
 /// 与 [`AppCallback`] 分开是因为它多一个返回值——那个 `bool` 被平台同步等待。
 type CloseHandler = Box<dyn FnMut(&mut EventCtx) -> bool>;
+/// 窗口唤起回调。与 `on_click` 同形（ctx 在首位），无返回值——唤起不是一次可否决的请求。
+type ShowHandler = Box<dyn FnMut(&mut EventCtx)>;
 
 /// 应用构建器。命令式 API 的根入口。
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
@@ -411,6 +413,8 @@ pub struct App {
     waker_shared: Option<Arc<WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
     close_handler: Option<CloseHandler>,
+    /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
+    show_handler: Option<ShowHandler>,
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
@@ -457,6 +461,7 @@ impl App {
             waker_shared: None,
             single: None,
             close_handler: None,
+            show_handler: None,
             hide_on_close: false,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
@@ -946,6 +951,32 @@ impl App {
         self
     }
 
+    /// 窗口**从隐藏态**被唤起时调用（托盘点击 / 全局热键 / `WindowOp::Show`）。
+    ///
+    /// 常驻托盘工具的"每次唤起该做什么"落点：刷新一次数据、重置一段状态、清掉上次的
+    /// 查询结果。只在隐藏→可见的**跃迁**上触发——已经可见时再按热键不算，否则每按一次
+    /// 都会把界面重置一遍。
+    ///
+    /// 三个唤起入口里只有「控件请求」经过宿主，托盘与热键都由平台层直接执行，故这条
+    /// 通知由平台发起（见 `AppHandler::on_window_shown`）。
+    ///
+    /// **焦点不必在这里处理**：[`Element::autofocus`](crate::ui::Element::autofocus) /
+    /// [`autofocus_select_all`](crate::ui::Element::autofocus_select_all) 每次唤起都会
+    /// 自动重新兑现一次——查询框重新拿到焦点、上次的词重新被全选，无需应用介入。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::new("查词", 480, 360)
+    ///     .start_hidden()
+    ///     .on_show(|ctx| ctx.toast_ok("已唤起"))
+    ///     .content(Element::col())
+    ///     .run();
+    /// ```
+    pub fn on_show(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        self.show_handler = Some(Box::new(f));
+        self
+    }
+
     pub fn run(mut self) {
         // 窗口会被隐藏（启动即隐 / 关闭转隐）却无任何唤起途径 = 用户再也看不到窗口，
         // 只能去任务管理器结束进程。在 run() 而非各 setter 里查：tray/hotkey 可能在其后才链上。
@@ -973,6 +1004,7 @@ impl App {
                 self.hotkey_ops.clone(),
                 self.intervals,
                 self.close_handler,
+                self.show_handler,
                 self.hide_on_close,
             ))
         } else {
@@ -997,6 +1029,7 @@ impl App {
             self.hotkey_ops.clone(),
             self.intervals,
             self.close_handler,
+            self.show_handler,
             self.hide_on_close,
         )
     }
@@ -1141,6 +1174,8 @@ struct UiHost {
     show_fps: bool,
     /// 关闭请求拦截器：返回 true 允许关闭，false 取消。None 时默认允许。
     close_handler: Option<CloseHandler>,
+    /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
+    show_handler: Option<ShowHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
     /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
@@ -1251,6 +1286,24 @@ impl UiHost {
         self.damage.needs_relayout = true;
     }
 
+    /// 跑应用的唤起回调（`App::on_show`），并落地它请求的副作用。
+    ///
+    /// 借 ctx 走 `run_detached`，与菜单动作、`on_close_request` 同一条路——回调因此能
+    /// `ctx.toast_ok` / `ctx.request_close` / 改信号，与控件回调齐平。
+    /// 回调先取出再放回：它可能反过来再触发一次唤起（`ctx` 能请求窗口操作），
+    /// 独占借用会当场冲突。
+    fn run_show_handler(&mut self) {
+        let Some(mut f) = self.show_handler.take() else {
+            return;
+        };
+        let root = self.tree.root;
+        if let Some(root) = root {
+            let res = self.tree.run_detached(root, |ctx| f(ctx));
+            self.apply_app_effects(res);
+        }
+        self.show_handler = Some(f);
+    }
+
     /// 落地**已决定**的关闭（`EventCtx::force_close`）：`hide_on_close` 时转为隐藏，
     /// 但不问 `close_handler`、也不先关对话框。
     ///
@@ -1278,6 +1331,7 @@ impl UiHost {
         hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
         intervals: Vec<(std::time::Duration, AppCallback)>,
         close_handler: Option<CloseHandler>,
+        show_handler: Option<ShowHandler>,
         hide_on_close: bool,
     ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
@@ -1316,6 +1370,7 @@ impl UiHost {
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
             close_handler,
+            show_handler,
             hide_on_close,
             resolving_close: false,
             pending_windows: Vec::new(),
@@ -1807,6 +1862,19 @@ impl AppHandler for UiHost {
         repaint
     }
 
+    fn on_window_shown(&mut self) -> bool {
+        // 让 autofocus 重新兑现一次：从托盘/热键唤起是一段新交互的开始，与页面重新载入
+        // 同构——查询框该重新拿到焦点、上次的词该重新被全选。没有这一步，第二次唤起时
+        // 焦点还停在上次离开的地方，`autofocus_select_all` 的"全选"也不会再发生。
+        self.rearm_autofocus();
+        // 结构未变，故不能只靠脏区：焦点与选区都是纯视觉变化，必须整窗，理由同
+        // `refresh_focus` 之后的那次重绘。
+        self.damage.needs_relayout = true;
+        self.damage.needs_full = true;
+        self.run_show_handler();
+        true
+    }
+
     fn last_pointer_hit(&self) -> Option<crate::platform::PointerHit> {
         self.last_hit
     }
@@ -1933,6 +2001,9 @@ impl AppHandler for UiHost {
                     // 定时器与关闭拦截器则是**这个窗口自己的**，随它一起生灭。
                     req.intervals,
                     req.close_handler,
+                    // 唤起回调也不给子窗：子窗没有隐藏→唤起这条路（托盘与热键唤的是主窗），
+                    // 给了也永远不触发。
+                    None,
                     // `hide_on_close` 不给子窗：隐藏后没有唤起途径（托盘唤的是主窗），
                     // 只会留下一个关不掉也看不见的窗口。
                     false,

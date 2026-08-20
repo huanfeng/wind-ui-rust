@@ -96,19 +96,52 @@ pub(super) fn run_window_op_on_main(op: WindowOp) {
     match op {
         WindowOp::Minimize => win.miniaturize(None),
         WindowOp::ToggleMaximize => win.zoom(None),
-        // 与 `TrayCtx::show_window`、`after_event` 的 `WindowOp::Show` 同源：三者是同一
-        // 语义的三个入口（托盘点击 / 控件请求 / 全局热键），实现必须一致。
-        WindowOp::Show => {
-            // 最小化时仅 makeKeyAndOrderFront 不会还原窗口，先取消最小化。
-            if win.isMiniaturized() {
-                win.deminiaturize(None);
-            }
-            win.makeKeyAndOrderFront(None);
-            // 热键是在别的应用前台时按的，本应用多半不在激活态——不 activate 的话窗口
-            // 只是排到自己应用的最前，用户仍看不到它。
-            super::activate_app(&NSApplication::sharedApplication(mtm));
-        }
+        // 三个入口（托盘点击 / 控件请求 / 全局热键）共用 `show_and_activate`，不再各写一份。
+        WindowOp::Show => show_and_activate(&win, mtm),
         WindowOp::Hide => win.orderOut(None),
+    }
+}
+
+/// 显示并前置窗口——**唤起语义的唯一实现**。
+///
+/// 三个入口（托盘点击 / 控件请求 `WindowOp::Show` / 全局热键）此前各写一份，注释也写着
+/// "实现必须一致"，但实际已经走偏：`run_window_op_on_main` 会先 `deminiaturize`，
+/// `after_event` 那份不会——最小化状态下从控件请求唤起，窗口不会还原。收口到这里之后
+/// 那处缺陷一并消失，唤起通知也只需挂一个点。
+///
+/// 隐藏→可见的**跃迁**上通知宿主（见 [`notify_shown`]）。已经可见时再调不算唤起，
+/// 否则常驻工具每按一次热键都会重置一遍界面状态。
+pub(super) fn show_and_activate(win: &NSWindow, mtm: MainThreadMarker) {
+    // 先问再显示：`makeKeyAndOrderFront` 之后 `isVisible` 恒为真，跃迁就无从判断了。
+    let was_hidden = !win.isVisible();
+    // 最小化时仅 makeKeyAndOrderFront 不会还原窗口，先取消最小化。
+    if win.isMiniaturized() {
+        win.deminiaturize(None);
+    }
+    win.makeKeyAndOrderFront(None);
+    // 热键是在别的应用前台时按的，本应用多半不在激活态——不 activate 的话窗口只是排到
+    // 自己应用的最前，用户仍看不到它。
+    super::activate_app(&NSApplication::sharedApplication(mtm));
+    if was_hidden {
+        notify_shown(win);
+    }
+}
+
+/// 通知宿主"窗口刚被唤起"。
+///
+/// 放在 `makeKeyAndOrderFront` / `activate_app` **之后**：那两个调用会同步触发窗口与应用
+/// 的委托回调（`windowDidBecomeKey:` 等），期间若持着 `ViewState` 的借用就是重入 panic
+/// （同 win32 的铁律 6）。借用只活在取 repaint 那一条语句里。
+fn notify_shown(win: &NSWindow) {
+    let Some(view) = win.contentView() else {
+        return;
+    };
+    let Ok(view) = view.downcast::<ContentView>() else {
+        return;
+    };
+    let repaint = view.ivars().borrow_mut().handler.on_window_shown();
+    if repaint {
+        view.setNeedsDisplay(true);
     }
 }
 
@@ -1301,15 +1334,9 @@ impl ContentView {
                 match op {
                     WindowOp::Minimize => win.miniaturize(None),
                     WindowOp::ToggleMaximize => win.zoom(None),
-                    // 与 macos/tray.rs 的 TrayCtx::show_window / hide_window 同源：
-                    // 二者是同一语义的两个入口（托盘点击 / 控件请求），实现必须一致。
-                    WindowOp::Show => {
-                        win.makeKeyAndOrderFront(None);
-                        // 隐藏期间应用可能已失去激活态，仅 orderFront 不足以到前台。
-                        super::activate_app(&NSApplication::sharedApplication(
-                            MainThreadMarker::from(self),
-                        ));
-                    }
+                    // 与托盘、热键共用 `show_and_activate`（此前这份漏了 deminiaturize，
+                    // 最小化时从控件请求唤起不会还原窗口）。
+                    WindowOp::Show => show_and_activate(&win, MainThreadMarker::from(self)),
                     WindowOp::Hide => win.orderOut(None),
                 }
             }

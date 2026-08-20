@@ -138,10 +138,11 @@ impl TrayTarget {
         let window = self.ivars().window.clone();
         for action in actions {
             match action {
+                // 与控件请求、全局热键共用 `show_and_activate`：唤起是同一语义，
+                // 三处各写一份必然走偏（此前这份就漏了 deminiaturize）。
                 TrayAction::Show => {
                     if let Some(mtm) = MainThreadMarker::new() {
-                        window.makeKeyAndOrderFront(None);
-                        super::activate_app(&NSApplication::sharedApplication(mtm));
+                        super::window::show_and_activate(&window, mtm);
                     }
                 }
                 TrayAction::Hide => window.orderOut(None),
