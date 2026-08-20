@@ -44,6 +44,96 @@ impl<Msg> Sender<Msg> {
 pub(crate) type ChannelPump =
     Box<dyn FnMut(&mut crate::core::Tree, crate::core::NodeId) -> Vec<crate::core::DispatchResult>>;
 
+// ── App 级通道登记表 ────────────────────────────────────────────────────────
+//
+// pump 挂在**应用**而非某个窗口上，理由与托盘/全局热键/跨线程唤醒挪进 `AppHost` 时
+// 完全相同：后台线程发来的消息是给「这个应用」的，不是给某个窗口的。此前它们挂在
+// `UiHost` 上，于是「窗口」与「应用」两个生命周期被迫重合——主窗一关，`App::channel`
+// 注册的所有通道就随之失效，而应用可能还有别的窗口开着、还要继续收数据。
+//
+// 唤醒早已是 App 级（`RawWakeSignal` 投给 message-only 宿主，标脏所有窗口），消费却
+// 还留在窗口级，这本身就是条断裂：被唤醒之后要消费的东西随窗口死了。
+
+thread_local! {
+    /// 本线程（= 本应用）注册的全部通道排空器。
+    static APP_PUMPS: std::cell::RefCell<Vec<ChannelPump>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// 当前持有消费权的宿主序号。`None` = 无人持有，下一个出帧的窗口接管。
+    ///
+    /// 需要「代表窗口」而不是让每个窗口都排空：pump 借的是**调用方的树**，
+    /// `toast` / `focus` / `menu` 这些副作用会落到那棵树所属的窗口上。若谁先渲染谁消费，
+    /// 同一条消息的提示会随窗口的渲染次序在窗口之间跳。
+    static CHANNEL_OWNER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// 宿主序号发号器（主窗最小，故它天然先抢到消费权）。
+    static NEXT_HOST_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 注册一个通道排空器（`App::channel` 调用，建窗前）。
+pub(crate) fn register_pump(pump: ChannelPump) {
+    APP_PUMPS.with(|p| p.borrow_mut().push(pump));
+}
+
+/// 领一个宿主序号。
+pub(crate) fn next_host_id() -> u64 {
+    NEXT_HOST_ID.with(|n| {
+        let id = n.get();
+        n.set(id + 1);
+        id
+    })
+}
+
+/// 本宿主是否该在本帧排空通道：无人持有则就地接管，否则仅持有者为真。
+pub(crate) fn claim_channel_owner(host_id: u64) -> bool {
+    CHANNEL_OWNER.with(|o| match o.get() {
+        Some(cur) => cur == host_id,
+        None => {
+            o.set(Some(host_id));
+            true
+        }
+    })
+}
+
+/// 释放消费权（宿主析构时调用）。非持有者调用无副作用。
+///
+/// 释放而不是转交给某个具体窗口：核心层不知道还有谁活着。置空之后，下一个出帧的窗口
+/// 会经 [`claim_channel_owner`] 就地接管——而"还在出帧"恰好就是"还活着"的证据。
+pub(crate) fn release_channel_owner(host_id: u64) {
+    CHANNEL_OWNER.with(|o| {
+        if o.get() == Some(host_id) {
+            o.set(None);
+        }
+    });
+}
+
+/// 取走全部 pump（跑完须经 [`put_pumps`] 放回）。
+///
+/// 借出—放回而不是就地遍历：pump 要 `&mut Tree`，而它产出的副作用要整个 `&mut UiHost`
+/// 才能落地，同时持有两者过不了借用检查。
+pub(crate) fn take_pumps() -> Vec<ChannelPump> {
+    APP_PUMPS.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// 放回 pump。期间若有新注册（`App::channel` 只在建窗前可调，运行期不会发生），
+/// 拼接而不是覆盖，避免静默丢通道。
+pub(crate) fn put_pumps(mut pumps: Vec<ChannelPump>) {
+    APP_PUMPS.with(|p| {
+        let mut slot = p.borrow_mut();
+        pumps.append(&mut slot);
+        *slot = pumps;
+    });
+}
+
+/// 清空登记表与消费权（**仅测试**：用例之间彼此隔离）。
+///
+/// 刻意不在 `App::new` / `App::run` 里调：`App::channel` 是在 `run` **之前**注册的，
+/// 在 run 里清一次正好把刚注册的通道全丢掉；而 `App` 本就是一个进程一个、`run` 进消息
+/// 循环直到退出，运行期没有"换一个 App"这回事。
+#[cfg(test)]
+pub(crate) fn reset_pumps() {
+    APP_PUMPS.with(|p| p.borrow_mut().clear());
+    CHANNEL_OWNER.with(|o| o.set(None));
+}
+
 /// 建一个 typed channel：返回发送端 + 类型擦除的排空 pump（供 UiHost 每帧调用）。
 pub(crate) fn new_channel<Msg: Send + 'static>(
     waker: Waker,

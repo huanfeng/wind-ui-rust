@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::sync::{new_channel, ChannelPump, Sender, WakerShared};
+use crate::sync::{new_channel, Sender, WakerShared};
 
 use crate::core::{DamageReq, DispatchResult, EventCtx, NodeId, Tree};
 use crate::event::{
@@ -407,7 +407,6 @@ pub struct App {
     content: Option<Element>,
     theme: Option<Theme>,
     theme_src: Option<ThemeHandle>,
-    pumps: Vec<ChannelPump>,
     intervals: Vec<(Duration, AppCallback)>,
     waker_shared: Option<Arc<WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
@@ -454,7 +453,6 @@ impl App {
             content: None,
             theme: None,
             theme_src: None,
-            pumps: Vec::new(),
             intervals: Vec::new(),
             waker_shared: None,
             single: None,
@@ -973,7 +971,6 @@ impl App {
                 cfg.bg,
                 !self.bg_explicit,
                 self.hotkey_ops.clone(),
-                self.pumps,
                 self.intervals,
                 self.close_handler,
                 self.hide_on_close,
@@ -998,7 +995,6 @@ impl App {
             self.cfg.bg,
             !self.bg_explicit,
             self.hotkey_ops.clone(),
-            self.pumps,
             self.intervals,
             self.close_handler,
             self.hide_on_close,
@@ -1041,7 +1037,7 @@ impl App {
     ) -> Sender<Msg> {
         let waker = self.shared_waker();
         let (tx, pump) = new_channel(waker, on_message);
-        self.pumps.push(pump);
+        crate::sync::register_pump(pump);
         tx
     }
 
@@ -1132,8 +1128,11 @@ struct UiHost {
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
-    /// 跨线程通道的排空回调：渲染前在 UI 线程依次调用，把后台数据写入控件状态。
-    pumps: Vec<ChannelPump>,
+    /// 本宿主的序号，用于认领/释放通道消费权（见 `crate::sync` 的 App 级登记表）。
+    ///
+    /// 通道本身挂在应用上而非本宿主上：主窗关掉之后，别的窗口要能继续收后台数据。
+    /// 这里只留一个序号，回答"这一帧该不该由我来排空"。
+    host_id: u64,
     /// 定时器回调列表（与 interval_durs 下标对应）。
     interval_cbs: Vec<AppCallback>,
     /// 定时器间隔列表（平台据此注册 SetTimer/NSTimer）。
@@ -1163,6 +1162,14 @@ struct UiHost {
     /// 窗口在帧首 `anim::reset_request()` 会清掉前一个窗口刚提出的续帧请求，让它的动画
     /// 掉帧甚至冻住。收进实例字段后，每个宿主只回答自己那一份。
     wants_anim: bool,
+}
+
+impl Drop for UiHost {
+    /// 交还通道消费权。持有者是主窗时，这一步让主窗关闭后仍活着的窗口能接手排空——
+    /// 漏了它，通道就会连同那个已经不存在的窗口一起沉默（消息照常入队、永远没人消费）。
+    fn drop(&mut self) {
+        crate::sync::release_channel_owner(self.host_id);
+    }
 }
 
 impl UiHost {
@@ -1269,7 +1276,6 @@ impl UiHost {
         bg: Color,
         bg_follows_theme: bool,
         hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
-        pumps: Vec<ChannelPump>,
         intervals: Vec<(std::time::Duration, AppCallback)>,
         close_handler: Option<CloseHandler>,
         hide_on_close: bool,
@@ -1305,7 +1311,7 @@ impl UiHost {
             bg_follows_theme,
             hotkey_ops,
             swallow_up: false,
-            pumps,
+            host_id: crate::sync::next_host_id(),
             interval_cbs,
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
@@ -1485,16 +1491,32 @@ impl UiHost {
         let Some(root) = self.tree.root else {
             return;
         };
-        if self.pumps.is_empty() {
+        // 只有消费权的持有者排空：pump 借的是**本宿主的树**，产出的 toast/focus/menu
+        // 会落到本窗口上。若谁先出帧谁消费，同一条消息的提示会随渲染次序在窗口间跳。
+        if !crate::sync::claim_channel_owner(self.host_id) {
             return;
         }
-        let mut pumps = std::mem::take(&mut self.pumps);
+        let mut pumps = crate::sync::take_pumps();
+        if pumps.is_empty() {
+            return;
+        }
         let mut results = Vec::new();
         for pump in pumps.iter_mut() {
             results.append(&mut pump(&mut self.tree, root));
         }
-        self.pumps = pumps;
-        for res in results {
+        crate::sync::put_pumps(pumps);
+        for mut res in results {
+            // 关窗与窗口操作在这条路径上一律丢弃。通道消息是发给**应用**的，而这里
+            // 恰好借了哪个窗口的树是实现细节（主窗关掉后就换了一个）——让一条后台消息
+            // 去决定"关掉/最小化当前这个窗口"，目标是不确定的。窗口的开关本就该由那个
+            // 窗口自己的交互或 `on_interval` 触发。
+            //
+            // `open_windows` 反而保留：开窗是应用级动作，由宿主排队后统一建窗，不依赖
+            // 是哪棵树发起的——主窗关闭后仍能从通道里开出新窗口，正是本次把 pump 提到
+            // App 级要换来的能力。
+            res.close = false;
+            res.close_forced = false;
+            res.window_op = None;
             self.apply_app_effects(res);
         }
     }
@@ -1904,10 +1926,10 @@ impl AppHandler for UiHost {
                     !bg_explicit,
                     // 热键队列共享：子窗里的控件也能改绑全局热键（句柄本就可克隆传入）。
                     self.hotkey_ops.clone(),
-                    // 通道不继承也不另设：跨窗数据流走 `Signal`（主窗 `App::channel` 的
-                    // 回调写信号，子窗读同一个句柄，变更经跨窗广播上屏）。给子窗复制一份
-                    // 主窗的 pump 会让同一条消息被处理两次。
-                    Vec::new(),
+                    // 通道不在这里传：它登记在**应用**上（`crate::sync` 的 App 级表），
+                    // 全部窗口共用同一份 pump，由消费权持有者每帧排空一次。共用而非各持
+                    // 一份副本，故同一条消息不会被处理两次；而主窗关掉后消费权自动交还，
+                    // 由还活着的窗口接手——通道不再随某个窗口一起死。
                     // 定时器与关闭拦截器则是**这个窗口自己的**，随它一起生灭。
                     req.intervals,
                     req.close_handler,
@@ -2139,11 +2161,41 @@ mod tests {
 
     #[test]
     fn channel_returns_sendable_sender() {
+        crate::sync::reset_pumps();
         let mut app = App::new("t", 100, 100);
         let tx = app.channel::<u32>(|_ctx, _m| {});
         let h = std::thread::spawn(move || tx.send(5));
         assert!(h.join().unwrap().is_ok());
-        assert_eq!(app.pumps.len(), 1);
+        // pump 现在登记在 App 级（`crate::sync`）而不是 `App` 自己身上。
+        let pumps = crate::sync::take_pumps();
+        assert_eq!(pumps.len(), 1);
+        crate::sync::put_pumps(pumps);
+        crate::sync::reset_pumps();
+    }
+
+    /// 消费权：无人持有时先来先得，持有者之外一律为假；持有者析构后交还，
+    /// 下一个出帧的窗口就地接管——主窗关掉后子窗要能继续排空通道，靠的就是这条。
+    #[test]
+    fn channel_owner_is_claimed_once_and_released() {
+        crate::sync::reset_pumps();
+        let (a, b) = (crate::sync::next_host_id(), crate::sync::next_host_id());
+
+        assert!(crate::sync::claim_channel_owner(a), "无人持有时应就地接管");
+        assert!(crate::sync::claim_channel_owner(a), "持有者可反复认领");
+        assert!(!crate::sync::claim_channel_owner(b), "非持有者不得排空");
+
+        crate::sync::release_channel_owner(b);
+        assert!(
+            !crate::sync::claim_channel_owner(b),
+            "非持有者的释放应无副作用"
+        );
+
+        crate::sync::release_channel_owner(a);
+        assert!(
+            crate::sync::claim_channel_owner(b),
+            "持有者交还后由下一个接管"
+        );
+        crate::sync::reset_pumps();
     }
 
     #[test]
