@@ -14,12 +14,13 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetActiveWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, CreateWindowExW, DefWindowProcW, FindWindowW,
-    GetWindowThreadProcessId, IsIconic, RegisterClassExW, SendMessageTimeoutW, SetForegroundWindow,
-    ShowWindow, HWND_MESSAGE, SMTO_ABORTIFHUNG, SW_RESTORE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_COPYDATA, WNDCLASSEXW,
+    GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    RegisterClassExW, SendMessageTimeoutW, SetForegroundWindow, ShowWindow, HWND_MESSAGE,
+    SMTO_ABORTIFHUNG, SW_RESTORE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPYDATA, WNDCLASSEXW,
 };
 
 use super::{class_name, decode_argv, encode_argv, mutex_name};
@@ -184,18 +185,56 @@ unsafe extern "system" fn si_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
-/// 激活窗口:取消最小化 + 带到前台。SetForegroundWindow 需要前台激活权——本进程在后台
-/// 时默认没有;依赖二次实例在 forward 前 AllowSetForegroundWindow 授权(见 forward)。
+/// 激活窗口:取消最小化 + 带到前台。
+///
+/// 前台激活权有**两道**关卡，缺一窗口都只在任务栏闪烁：
+///
+/// 1. 二次实例在 forward 前 `AllowSetForegroundWindow` 把权限让给首实例（见 [`forward`]）；
+/// 2. 即便让了权，`SetForegroundWindow` 仍可能被前台锁定挡下——授权是**一次性**的，
+///    且在调用方失去前台、或期间发生用户输入时失效。实测「设置窗口开着时双击关联文件」
+///    正落在这一档：argv 送达、回调执行，窗口却不到前台，用户以为程序没反应。
+///
+/// 故此处再叠一道**输入队列附着**：把本线程临时挂到当前前台窗口的线程上，两者共享输入
+/// 状态，本线程于是被系统视作「前台线程」，`SetForegroundWindow` 得以通过。这是 Windows
+/// 上处理该锁定的既定手法（`AttachThreadInput`），代价是必须**成对解挂**——否则两个线程
+/// 的输入队列永久绑死，对方线程卡住会连累本线程。
+///
+/// 附着期间还补一次 `SetActiveWindow`：附着后两线程共享激活状态，这一步让窗口在
+/// 本线程的输入队列里也成为活动窗口，否则可能出现「到了前台但键盘焦点仍在别处」。
 pub(crate) fn activate(main_hwnd: isize) {
     if main_hwnd == 0 {
         return;
     }
     let hwnd = HWND(main_hwnd as *mut std::ffi::c_void);
     unsafe {
+        // 窗口可能已被销毁（主窗关掉、进程靠别的窗口活着）：对野句柄调用这串 API
+        // 只是静默失败，但更要紧的是别在后面做无谓的线程附着。
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return;
+        }
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
         }
+
+        let fg = GetForegroundWindow();
+        let cur_tid = GetCurrentThreadId();
+        // 前台窗口属于本线程时无需附着（附到自己上是错误用法）。
+        let fg_tid = if fg.is_invalid() {
+            0
+        } else {
+            GetWindowThreadProcessId(fg, None)
+        };
+        let attached =
+            fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, true).as_bool();
+
         let _ = SetForegroundWindow(hwnd);
         let _ = BringWindowToTop(hwnd);
+        if attached {
+            let _ = SetActiveWindow(hwnd);
+            // 解挂**必须**执行，且紧跟激活：附着期越短越好。
+            let _ = AttachThreadInput(cur_tid, fg_tid, false);
+        }
     }
 }
