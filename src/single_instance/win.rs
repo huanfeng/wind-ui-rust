@@ -194,13 +194,19 @@ unsafe extern "system" fn si_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 ///    且在调用方失去前台、或期间发生用户输入时失效。实测「设置窗口开着时双击关联文件」
 ///    正落在这一档：argv 送达、回调执行，窗口却不到前台，用户以为程序没反应。
 ///
-/// 故此处再叠一道**输入队列附着**：把本线程临时挂到当前前台窗口的线程上，两者共享输入
-/// 状态，本线程于是被系统视作「前台线程」，`SetForegroundWindow` 得以通过。这是 Windows
-/// 上处理该锁定的既定手法（`AttachThreadInput`），代价是必须**成对解挂**——否则两个线程
-/// 的输入队列永久绑死，对方线程卡住会连累本线程。
+/// 故本函数**分两档**，重手段只在轻手段失败时才用：
 ///
-/// 附着期间还补一次 `SetActiveWindow`：附着后两线程共享激活状态，这一步让窗口在
-/// 本线程的输入队列里也成为活动窗口，否则可能出现「到了前台但键盘焦点仍在别处」。
+/// - 常规：直接 `SetForegroundWindow`。授权尚在（从托盘点开、二次实例刚让权且期间无用户
+///   输入）时这一步就成了，绝大多数唤起走的是这条路。
+/// - 兜底：被锁定挡下才做**输入队列附着**——把本线程临时挂到当前前台窗口的线程上，两者
+///   共享输入状态，本线程于是被系统视作「前台线程」，`SetForegroundWindow` 得以通过。
+///
+/// 之所以不无条件附着：附着的对象是**任意第三方进程**的线程，附着期内两者输入队列相连，
+/// 对方卡死会连累本线程；且必须**成对解挂**，漏一次就是永久绑死。把它降为兜底后，
+/// 风险窗口从「每次唤起」缩到「常规路径确实失败时」，代价只是失败那次多一个 API 调用。
+///
+/// 附着期间补一次 `SetActiveWindow`：附着后两线程共享激活状态，这一步让窗口在本线程的
+/// 输入队列里也成为活动窗口，否则可能「到了前台但键盘焦点仍在别处」。
 pub(crate) fn activate(main_hwnd: isize) {
     if main_hwnd == 0 {
         return;
@@ -208,7 +214,7 @@ pub(crate) fn activate(main_hwnd: isize) {
     let hwnd = HWND(main_hwnd as *mut std::ffi::c_void);
     unsafe {
         // 窗口可能已被销毁（主窗关掉、进程靠别的窗口活着）：对野句柄调用这串 API
-        // 只是静默失败，但更要紧的是别在后面做无谓的线程附着。
+        // 只是静默失败，但更要紧的是别为它去动第三方线程。
         if !IsWindow(Some(hwnd)).as_bool() {
             return;
         }
@@ -218,6 +224,13 @@ pub(crate) fn activate(main_hwnd: isize) {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
 
+        // 第一档：够用就到此为止，不碰第三方线程。
+        if SetForegroundWindow(hwnd).as_bool() {
+            let _ = BringWindowToTop(hwnd);
+            return;
+        }
+
+        // 第二档：确认被锁定了才附着。
         let fg = GetForegroundWindow();
         let cur_tid = GetCurrentThreadId();
         // 前台窗口属于本线程时无需附着（附到自己上是错误用法）。
@@ -226,15 +239,18 @@ pub(crate) fn activate(main_hwnd: isize) {
         } else {
             GetWindowThreadProcessId(fg, None)
         };
-        let attached =
-            fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, true).as_bool();
-
+        if fg_tid == 0 || fg_tid == cur_tid {
+            return;
+        }
+        // 附着失败（前台属于高完整性进程时 UIPI 会拒）就此作罢：没附上就别解挂，
+        // 更不能接着调 SetActiveWindow——那会把焦点动到一个没有前台权的窗口上。
+        if !AttachThreadInput(cur_tid, fg_tid, true).as_bool() {
+            return;
+        }
         let _ = SetForegroundWindow(hwnd);
         let _ = BringWindowToTop(hwnd);
-        if attached {
-            let _ = SetActiveWindow(hwnd);
-            // 解挂**必须**执行，且紧跟激活：附着期越短越好。
-            let _ = AttachThreadInput(cur_tid, fg_tid, false);
-        }
+        let _ = SetActiveWindow(hwnd);
+        // 解挂**必须**执行，且紧跟激活：附着期越短越好。
+        let _ = AttachThreadInput(cur_tid, fg_tid, false);
     }
 }
