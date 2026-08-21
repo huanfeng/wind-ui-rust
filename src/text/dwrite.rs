@@ -1447,3 +1447,27 @@ mod layer_backdrop_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod scale_contract_tests {
+    use super::*;
+
+    /// 引擎必须**报回**它被设定的 scale。
+    ///
+    /// `TextEngine::scale` 有个默认实现恒返回 1.0，漏实现不会报错、只会静默说谎。
+    /// 代价是：富文本把 scale 计入布局缓存键，而测量路径读引擎、绘制路径读画布，
+    /// 两者一旦不一致就逐帧互相顶掉缓存——Retina 上每帧重排整篇文档，且重排会清空
+    /// 选区（表现为"划选后高亮立刻消失、Ctrl+C 复制到全文"）。这条正是那个 bug 的判据。
+    #[test]
+    fn engine_reports_the_scale_it_was_given() {
+        let mut eng = DWriteEngine::new();
+        assert_eq!(eng.scale(), 1.0, "初值应为 1.0");
+        for s in [2.0f32, 1.5, 1.25, 3.0] {
+            eng.set_scale(s);
+            assert_eq!(eng.scale(), s, "set_scale({s}) 之后 scale() 必须回同一个值");
+        }
+        // 下限钳制：0 会让物理字号退化，引擎按 0.1 兜底。
+        eng.set_scale(0.0);
+        assert!(eng.scale() > 0.0, "scale 不得为 0");
+    }
+}

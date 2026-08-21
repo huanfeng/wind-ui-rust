@@ -194,6 +194,16 @@ impl TextEngine for CoreTextEngine {
         self.scale = scale.max(0.1);
     }
 
+    /// 漏了这个 getter 的后果远超"少一个访问器"：`TextEngine::scale` 的默认实现恒返回
+    /// 1.0，于是**测量路径**（`EngineMeasurer`）看到 1.0、**绘制路径**（`CanvasMeasurer`
+    /// → `Canvas::dpi_scale`）看到真实的 2.0。富文本把 scale 计入布局缓存键，两条路径
+    /// 就此逐帧互相顶掉：Retina 上每帧重排整篇文档，而重排会清空选区——表现为"划选
+    /// 之后高亮立刻消失、Ctrl+C 复制到全文"。Windows 的 DirectWrite 引擎两个都实现了，
+    /// 故只有 macOS 中招。
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+
     fn glyph_source(&mut self) -> Option<&mut dyn GlyphSource> {
         Some(self)
     }
@@ -551,5 +561,29 @@ impl GlyphSource for CoreTextEngine {
             block: (block_w as f32, block_h as f32),
             ascent: baseline as f32,
         })
+    }
+}
+
+#[cfg(test)]
+mod scale_contract_tests {
+    use super::*;
+
+    /// 引擎必须**报回**它被设定的 scale。
+    ///
+    /// `TextEngine::scale` 有个默认实现恒返回 1.0，漏实现不会报错、只会静默说谎。
+    /// 代价是：富文本把 scale 计入布局缓存键，而测量路径读引擎、绘制路径读画布，
+    /// 两者一旦不一致就逐帧互相顶掉缓存——Retina 上每帧重排整篇文档，且重排会清空
+    /// 选区（表现为"划选后高亮立刻消失、Ctrl+C 复制到全文"）。这条正是那个 bug 的判据。
+    #[test]
+    fn engine_reports_the_scale_it_was_given() {
+        let mut eng = CoreTextEngine::new();
+        assert_eq!(eng.scale(), 1.0, "初值应为 1.0");
+        for s in [2.0f32, 1.5, 1.25, 3.0] {
+            eng.set_scale(s);
+            assert_eq!(eng.scale(), s, "set_scale({s}) 之后 scale() 必须回同一个值");
+        }
+        // 下限钳制：0 会让物理字号退化，引擎按 0.1 兜底。
+        eng.set_scale(0.0);
+        assert!(eng.scale() > 0.0, "scale 不得为 0");
     }
 }
