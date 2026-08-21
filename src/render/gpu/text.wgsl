@@ -11,6 +11,10 @@
 //
 // 采样是 **nearest + 1:1**：位图一个纹素对目标一个物理像素。线性过滤在这里只会把平台
 // 光栅好的字形边缘再糊一层，抗锯齿本就已经在覆盖度里了。
+//
+// 实例带 uv 子矩形，于是同一条管线同时服务两种粒度：整段 run（各自一张纹理、uv 取满）
+// 与 glyph atlas（共享一张纹理、uv 取自己那一格）。差别只在绑定的是哪张纹理与 uv 取多大,
+// 采样与合成逐字相同。
 
 struct Globals {
     /// 渲染目标物理尺寸（像素）。
@@ -19,17 +23,20 @@ struct Globals {
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;
-// 每条 run 一组：自己的覆盖度纹理 + 共享采样器（atlas 合并是 P5 的事，见 text.rs）。
+// 一组绑定 = 一张覆盖度纹理 + 共享采样器。整段 run 各绑各的，atlas 则整帧共用一组
+// ——后者于是能把上百条文字合成一次 instanced draw（见 text.rs）。
 @group(1) @binding(0) var mask: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 
 struct Inst {
     /// 位图四边形（**物理**像素 x,y,w,h）。已含 `AlphaMask::pad` 的外扩。
     @location(0) quad: vec4<f32>,
+    /// 纹理上的子矩形（归一化 u0,v0,u1,v1）。整段 run 取 (0,0,1,1)，atlas 取自己那一格。
+    @location(1) uv: vec4<f32>,
     /// 裁剪矩形（物理整数 x0,y0,x1,y1）。与几何管线同一份语义。
-    @location(1) clip: vec4<f32>,
+    @location(2) clip: vec4<f32>,
     /// 文字颜色，**非预乘** RGBA（0..1）。
-    @location(2) color: vec4<f32>,
+    @location(3) color: vec4<f32>,
 };
 
 struct VsOut {
@@ -56,8 +63,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         0.0,
         1.0,
     );
-    // quad 的四角即 uv 的四角：四边形与位图同尺寸，插值出来的 uv 恰好命中纹素中心。
-    out.uv = q;
+    // 四边形与它那块位图同尺寸（1:1），故 quad 的四角线性映到 uv 子矩形的四角，
+    // 插值出来的采样点恰好命中纹素中心。
+    out.uv = mix(inst.uv.xy, inst.uv.zw, q);
     out.clip = inst.clip;
     out.color = inst.color;
     return out;

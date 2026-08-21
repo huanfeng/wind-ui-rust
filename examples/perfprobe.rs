@@ -12,6 +12,11 @@
 //!   这一档量的是"连续动画的每帧成本"。
 //! - `PROBE_CARET=solid`：光标不闪，零续帧。用来确认"静止界面真的不出帧"。
 //!
+//! 另有 `PROBE_FULL=1`：加一个每 16ms 换一次文本的标签。文本换了排版就变，宿主据结构
+//! 签名把这一帧升成**整窗**——于是能量到「稳态整窗帧」，那正是 glyph atlas 的收益场景
+//! （160 条文字每帧全部重画，但字形早已在 atlas 里）。整段光栅粒度下这一档同样是每帧
+//! 全部重新光栅，两者的差就是 atlas 值多少。
+//!
 //! 跑法（macOS，必须 release）：
 //!
 //! ```sh
@@ -38,6 +43,9 @@ fn main() {
     theme.input.caret_style = Some(style);
 
     let text = signal(String::from("光标闪烁：每帧真正变的只有这一条竖线"));
+    // 整窗档：一个每帧换文本的标签。文本变 → 排版变 → 结构签名变 → 宿主升整窗帧。
+    let full_mode = std::env::var("PROBE_FULL").is_ok_and(|v| v != "0");
+    let tick = signal(0u64);
 
     let mut grid = Element::row().width_match().spacing(8);
     for c in 0..COLS {
@@ -52,16 +60,25 @@ fn main() {
         grid = grid.child(col);
     }
 
-    let ui = Element::col()
+    let mut ui = Element::col()
         .fill()
         .padding(10)
         .spacing(8)
-        .child(Element::text_input(text, "输入…").width_match().autofocus())
-        .child(grid);
+        .child(Element::text_input(text, "输入…").width_match().autofocus());
+    if full_mode {
+        ui = ui.child(
+            Element::label_signal(tick.map(|n| format!("整窗档 tick {n}")))
+                .font_size(12.0)
+                .fg(Color::hex(0x1A2035)),
+        );
+    }
+    let ui = ui.child(grid);
 
-    App::new("windui perf probe", 640, 760)
-        .theme(theme)
-        .content(ui)
-        .screenshot_from_args()
-        .run();
+    let mut app = App::new("windui perf probe", 640, 760).theme(theme);
+    if full_mode {
+        app = app.on_interval(std::time::Duration::from_millis(16), move |_| {
+            tick.set(tick.get() + 1);
+        });
+    }
+    app.content(ui).screenshot_from_args().run();
 }

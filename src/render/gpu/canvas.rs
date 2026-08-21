@@ -31,7 +31,7 @@ use super::device::SharedGpu;
 use super::layer::LayerTexture;
 use super::prim::{PrimBatch, PrimRenderer, MAX_BATCH};
 use super::tex::{image_item, place_image, ImageItem, MAX_IMAGE_BATCH};
-use super::text::{text_item, RunKey, TextItem, MAX_TEXT_BATCH};
+use super::text::{glyph_item, text_item, RunKey, TextItem, MAX_TEXT_BATCH};
 use crate::geometry::{Color, Rect, Size};
 use crate::render::image::{Fit, Image};
 use crate::render::{Canvas, Paint, RenderTarget};
@@ -391,6 +391,67 @@ impl WgpuCanvas<'_> {
         self.flush_images();
     }
 
+    /// 把一段排版结果按字形入批。返回 `false` 表示 atlas 装不下，调用方退回整段光栅。
+    ///
+    /// **全成功才入批**：中途失败就整段放弃，否则会画出「一半字形在 atlas 里、另一半
+    /// 是整段光栅」的重影。故先把槽位全取到，再一次性 extend。
+    fn push_glyphs(
+        &mut self,
+        gpu: &Arc<SharedGpu>,
+        sr: &crate::text::ShapedRun,
+        prect: Rect,
+        align: Align,
+        clip: [f32; 4],
+        color: Color,
+    ) -> bool {
+        if sr.glyphs.is_empty() {
+            return false;
+        }
+        // 块的落点与整段路径同一份算法（水平按 align、垂直按 `block_offset_y` 的契约）。
+        let (bwf, bhf) = sr.block;
+        let block_x = match align {
+            Align::Start | Align::Stretch => prect.x as f32,
+            Align::Center => prect.x as f32 + (prect.w as f32 - bwf) / 2.0,
+            Align::End => prect.x as f32 + prect.w as f32 - bwf,
+        };
+        let block_y = prect.y as f32 + block_offset_y(prect.h as f32, bhf);
+        // 基线吸附方向见 `draw_text` 里那段注释——两条路径必须用同一个，否则同一个
+        // 界面里走 atlas 的标签会比走整段光栅的段落高一像素。
+        let base = (block_y + sr.ascent).ceil();
+        let ox = block_x.round();
+
+        let bind = self.renderer.text(gpu).atlas(gpu).bind_group();
+        let mut items = Vec::with_capacity(sr.glyphs.len());
+        {
+            // 分字段借用：`engine` 出字形像素，`renderer` 持 atlas，两者是不同字段。
+            let src = self
+                .engine
+                .glyph_source()
+                .expect("上面已判定本引擎支持 GlyphSource");
+            let atlas = self.renderer.text(gpu).atlas(gpu);
+            for g in &sr.glyphs {
+                let Some(slot) = atlas.slot(gpu, src, &g.key) else {
+                    return false;
+                };
+                if slot.is_blank() {
+                    continue;
+                }
+                let quad = [
+                    ox + g.x as f32 + slot.left as f32,
+                    base + (g.dy + slot.top) as f32,
+                    slot.w as f32,
+                    slot.h as f32,
+                ];
+                items.push(glyph_item(bind.clone(), quad, slot.uv, clip, color));
+            }
+        }
+        self.text_batch.append(&mut items);
+        if self.text_batch.len() >= MAX_TEXT_BATCH {
+            self.flush_text();
+        }
+        true
+    }
+
     /// **几何图元入批前**必须调：把已攒的文字与图片先画掉。
     ///
     /// 这就是 painter's algorithm 在「三条管线」下的全部实现。几何攒批、文字攒批、
@@ -451,7 +512,8 @@ impl Drop for WgpuCanvas<'_> {
         // 归零意味着下一帧从缓冲头部重写，未提交的批次还指着那些字节。
         self.submit();
         // 帧末回收层纹理池里的超额纹理、归零帧内游标（见 `layer.rs` 与 `prim.rs`）。
-        self.renderer.end_frame();
+        let gpu = self.gpu.clone();
+        self.renderer.end_frame(&gpu);
     }
 }
 
@@ -723,6 +785,40 @@ impl Canvas for WgpuCanvas<'_> {
         let max_width = rect.w as f32;
         let key = RunKey::new(text, ts, align, max_width, s);
         let gpu = self.gpu.clone();
+        let req = RunRequest {
+            text,
+            style: *ts,
+            align,
+            max_width,
+            scale: s,
+        };
+
+        // ---- 先试 glyph atlas ----
+        // `WINDUI_GPU_NOATLAS=1` 关掉它退回整段光栅（对照测量用，同 `WINDUI_NOSHADOW`
+        // 的先例）。收益量化不该依赖"翻出旧版本再编一遍"——那样它就只会被量一次。
+        if atlas_enabled() {
+            // 单行文字走这条：字形跨文本共享（同一个界面里 `控件 0xx` 那 160 条标签只有
+            // 十几个不同字形），动态文本逐字变化也几乎全命中——而整段粒度下它每帧都 miss。
+            // 折行段落交不出字形序列（`coretext.rs::shape_run`），落到下面那条整段光栅。
+            let shaped = match self.renderer.text(&gpu).shaped(&key) {
+                Some(v) => v,
+                None => {
+                    let src = self
+                        .engine
+                        .glyph_source()
+                        .expect("上面已判定本引擎支持 GlyphSource");
+                    let r = src.shape_run(&req);
+                    self.renderer.text(&gpu).insert_shaped(key.clone(), r)
+                }
+            };
+            if let Some(sr) = shaped.as_ref() {
+                if self.push_glyphs(&gpu, sr, prect, align, clip, color) {
+                    return;
+                }
+            }
+        }
+
+        // ---- 退回整段光栅（run-cache）----
         let tex = match self.renderer.text(&gpu).get(&key) {
             Some(t) => t,
             None => {
@@ -730,13 +826,6 @@ impl Canvas for WgpuCanvas<'_> {
                     .engine
                     .glyph_source()
                     .expect("上面已判定本引擎支持 GlyphSource");
-                let req = RunRequest {
-                    text,
-                    style: *ts,
-                    align,
-                    max_width,
-                    scale: s,
-                };
                 let Some(mask) = src.raster_run(&req) else {
                     return;
                 };
@@ -758,19 +847,23 @@ impl Canvas for WgpuCanvas<'_> {
         };
         let block_y = prect.y as f32 + block_offset_y(prect.h as f32, bhf);
         let pad = tex.pad as f32;
-        // 纵向不能直接 `round(块顶 − pad)`：平台光栅器把基线**向下取整**吸附到整数行
-        // （Core Text 真机实测：mask 内基线 16.84 → 第 16 行，软后端 24.04/24.54 都 → 第
-        // 24 行；四个容器高全部对上），于是位图里的基线在 `floor(pad + ascent)` 行、软
-        // 后端的在 `floor(块顶 + ascent)` 行。直接取整块顶会让两次取整各自进位，差出来的
-        // 1px 随容器高的奇偶翻转——症状是 GPU 模式下整段文字比软后端高一行，而墨量逐
-        // 字节相同（正是这个「墨量对得上、位置差一行」的组合把成因指了出来）。
+        // 纵向不能直接 `round(块顶 − pad)`：平台光栅器把基线吸附到整数行，于是位图里的
+        // 基线与目标里的基线各自取整，差出来的 1px 随容器高的奇偶翻转——症状是 GPU 模式
+        // 下整段文字比软后端高一行，而墨量逐字节相同（正是这个「墨量对得上、位置差一行」
+        // 的组合把成因指了出来）。故按两边的基线行对齐来算落点。
         //
-        // 横向不做同样的事：CG 的字形水平定位是**亚像素**的（不吸附），mask 只能按
-        // 相位 0 光栅一份。故取最近整数，居中/右对齐时最多与软后端差半个像素。
+        // 吸附方向是 **ceil(块顶 + ascent)**：CG 的 `set_text_position` 收的是「距底」，
+        // 它把距底 floor 到整数设备行，而距顶 = 高 − 距底，那一侧于是恰好是 ceil。
+        // （此前这里写的是 floor；两边同为 floor 时差值在多数情况下与 ceil 一致，只在
+        // 某一侧的小数部分恰为 0 时差 1 像素。`coretext.rs` 的重组判据把真实规则量了
+        // 出来：逐行墨量逐值相同，只整体错开一行。）
+        //
+        // 横向不做同样的事：mask 是整段按相位 0 光栅的一份。故取最近整数，居中/右对齐
+        // 时最多与软后端差半个像素。走 atlas 那条路则按相位存多份，没有这个损失。
         let asc = tex.ascent;
         let quad = [
             (block_x - pad).round(),
-            (block_y + asc).floor() - (pad + asc).floor(),
+            (block_y + asc).ceil() - (pad + asc).ceil(),
             tex.width as f32,
             tex.height as f32,
         ];
@@ -882,6 +975,12 @@ static LAYER_NOTICE: std::sync::Once = std::sync::Once::new();
 
 /// 进程内只提示一次降级。每帧刷屏没人会看，一次则刚好够把「不是我布局写错了」
 /// 这个判断送到眼前。
+/// glyph atlas 是否启用（`WINDUI_GPU_NOATLAS=1` 关）。只读一次环境变量。
+fn atlas_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("WINDUI_GPU_NOATLAS").as_deref(), Ok("1")))
+}
+
 fn notice_once(once: &std::sync::Once, msg: &str) {
     once.call_once(|| eprintln!("{msg}"));
 }
@@ -1829,7 +1928,10 @@ mod tests {
     /// 覆盖度是逐纹素采样的（nearest + 1:1）：棋盘图案画出来仍是棋盘，不会被过滤糊平。
     #[test]
     fn coverage_is_sampled_one_to_one() {
-        let mut eng = MockGlyphEngine::new((16, 16)).with_pattern(Pattern::Checker);
+        // 棋盘是**整段光栅**那条路的判据（atlas 出的是逐字形位图），故显式关掉字形序列。
+        let mut eng = MockGlyphEngine::new((16, 16))
+            .with_pattern(Pattern::Checker)
+            .without_shaping();
         let Some(pm) = render_gpu_text(16, 16, 1.0, WHITE, &mut eng, &|c| {
             c.draw_text(
                 "x",
@@ -1853,7 +1955,9 @@ mod tests {
         let Some(mut off) = offscreen(60, 40) else {
             return;
         };
-        let mut eng = MockGlyphEngine::new((10, 4));
+        // 数的是 `raster_run` 的调用次数——只有整段光栅那条路会调它。
+        // atlas 那条的同款判据是 `glyph_calls`，见 `a_glyph_is_rastered_once_per_atlas`。
+        let mut eng = MockGlyphEngine::new((10, 4)).without_shaping();
         let draw = |c: &mut dyn Canvas| {
             c.draw_text(
                 "hello",
@@ -1881,7 +1985,8 @@ mod tests {
         let Some(mut off) = offscreen(40, 20) else {
             return;
         };
-        let mut eng = MockGlyphEngine::new((10, 4));
+        // 同上：数的是 `raster_run` 的调用次数。颜色不进键这一条两条路径都成立。
+        let mut eng = MockGlyphEngine::new((10, 4)).without_shaping();
         for color in [BLACK, Color::rgb(255, 0, 0), Color::rgb(0, 0, 255)] {
             draw_on(&mut off, 1.0, WHITE, &mut eng, &|c| {
                 c.draw_text(
@@ -2669,6 +2774,130 @@ mod tests {
             let c = t.make_canvas(&mut eng, 2.0);
             assert_eq!(c.cull_rect(), None, "整窗帧不得剔除任何节点");
         }
+    }
+
+    // ---- glyph atlas ----
+
+    /// 同一段文字，走 atlas 与走整段光栅**画出来必须逐像素相同**。
+    ///
+    /// 这是 atlas 的总判据。它的风险从来不在性能而在观感——「文字与系统一致」是这个
+    /// 项目的卖点，而拆成单字形最容易丢的是水平亚像素相位与基线取整。真引擎那一半由
+    /// `coretext.rs` 的重组判据用墨量钉住（实测差 0.00~0.01%），这一半钉的是**放置**：
+    /// mock 把文本块等分成无缝相接的字形，两条路径于是应当给出同一张图。
+    #[test]
+    fn atlas_and_whole_run_paths_paint_the_same_pixels() {
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "hello",
+                Rect::new(3, 2, 40, 16),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(10.0),
+            );
+        };
+        let mut atlas_eng = MockGlyphEngine::new((20, 8));
+        let mut whole_eng = MockGlyphEngine::new((20, 8)).without_shaping();
+        let Some(a) = render_gpu_text(48, 20, 1.0, WHITE, &mut atlas_eng, &draw) else {
+            return;
+        };
+        let b = render_gpu_text(48, 20, 1.0, WHITE, &mut whole_eng, &draw).expect("整段路径");
+        assert!(
+            atlas_eng.glyph_calls > 0,
+            "本判据要求 atlas 路径真的被走到（glyph_calls 应大于 0）"
+        );
+        assert_eq!(whole_eng.glyph_calls, 0, "对照组不该走 atlas");
+        assert_eq!(a.data(), b.data(), "两条路径画出来必须逐像素相同");
+    }
+
+    /// 一个字形在整个 atlas 里只光栅一次，跨文本共享。
+    ///
+    /// 这是 atlas 相对整段粒度的**根本**收益：整段粒度下「控件 000」和「控件 001」是
+    /// 两条独立的纹理，各光栅一遍；字形粒度下它们共用同一批格子。输入框逐字变化更极端
+    /// ——整段粒度每帧全 miss，字形粒度只多出新敲的那一个。
+    #[test]
+    fn a_glyph_is_rastered_once_and_shared_across_runs() {
+        let Some(mut off) = offscreen(40, 20) else {
+            return;
+        };
+        // block 宽 20、两个字符 → 每个字形宽 10，两段文字用的是同一个字形键。
+        let mut eng = MockGlyphEngine::new((20, 8));
+        for t in ["ab", "cd", "ab"] {
+            draw_on(&mut off, 1.0, WHITE, &mut eng, &|c: &mut dyn Canvas| {
+                c.draw_text(
+                    t,
+                    Rect::new(0, 0, 40, 20),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(8.0),
+                );
+            })
+            .expect("readback");
+        }
+        assert_eq!(
+            eng.glyph_calls, 1,
+            "三段文字共 6 个字符只该光栅出 1 个不同字形，实得 {} 次",
+            eng.glyph_calls
+        );
+        assert_eq!(eng.calls, 0, "走 atlas 就不该再整段光栅");
+    }
+
+    /// 一帧里的多条文字压成**一次** draw call。
+    ///
+    /// 整段粒度下每条 run 各自一张纹理，切绑定就得切 draw；atlas 下整帧共用一组绑定,
+    /// 连续的实例合成一次 instanced draw。这条钉的是收益本身——它不改变任何一个像素,
+    /// 回归了也只是变慢。
+    #[test]
+    fn a_frame_of_text_collapses_into_one_draw_call() {
+        let Some(mut off) = offscreen(80, 80) else {
+            return;
+        };
+        let mut eng = MockGlyphEngine::new((20, 8));
+        let before = super::super::text::draw_count();
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &|c: &mut dyn Canvas| {
+            for i in 0..8 {
+                c.draw_text(
+                    "ab",
+                    Rect::new(0, i * 10, 40, 10),
+                    BLACK,
+                    Align::Start,
+                    &TextStyle::new(8.0),
+                );
+            }
+        })
+        .expect("readback");
+        assert_eq!(
+            super::super::text::draw_count() - before,
+            1,
+            "8 条文字（16 个字形）应合成一次 draw call"
+        );
+    }
+
+    /// 字形塞不进 atlas 时，这一段整体退回整段光栅——**不能**画出一半一半的重影。
+    ///
+    /// 退回必须是"整段"的：中途失败就放弃已取到的槽位，否则同一段文字会有一部分来自
+    /// atlas、另一部分来自整段位图，叠在一起就是重影。
+    #[test]
+    fn a_glyph_too_big_for_the_atlas_falls_back_to_whole_run_raster() {
+        // 单个字形宽 2500 > ATLAS_SIZE(2048)，货架分配必然失败。
+        let mut eng = MockGlyphEngine::new((2500, 8));
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 200, 20),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(8.0),
+            );
+        };
+        let Some(pm) = render_gpu_text(200, 20, 1.0, WHITE, &mut eng, &draw) else {
+            return;
+        };
+        assert_eq!(eng.calls, 1, "应退回整段光栅（raster_run 恰好一次）");
+        let bg = bg_bytes(WHITE);
+        assert!(
+            ink_bounds(&pm, bg).is_some(),
+            "退回之后仍要把这段文字画出来，不能什么都不画"
+        );
     }
 
     /// 预乘清屏色：50% 红 → (0.5, 0, 0, 0.5)。窗口目标、离屏目标、层三处共用这一份，

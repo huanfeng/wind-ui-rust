@@ -560,10 +560,10 @@ impl PrimRenderer {
     ///
     /// **必须在本帧的提交之后调用**——游标归零意味着下一帧会从缓冲头部重新写，而
     /// 未提交的批次还指着那些字节。
-    pub(super) fn end_frame(&mut self) {
+    pub(super) fn end_frame(&mut self, gpu: &Arc<SharedGpu>) {
         self.used = 0;
         if let Some(t) = self.text.as_mut() {
-            t.end_frame();
+            t.end_frame(gpu);
         }
         if let Some(i) = self.image.as_mut() {
             i.end_frame();

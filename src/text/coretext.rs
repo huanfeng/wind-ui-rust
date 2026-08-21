@@ -761,8 +761,18 @@ fn run_font(run: &CTRun) -> Option<(String, CFRetained<CTFont>)> {
 
 /// 把浮点列拆成「整数列 + 亚像素相位」，相位在 `0..SUBPIXEL_PHASES`。
 ///
-/// 用 `round` 而不是 `floor(frac * PHASES)`：前者的量化误差 ≤ 半档（1/8 像素），
-/// 后者是整整一档（1/4 像素）。进位由 `q / PHASES` 的 floor 吸收，相位恒在范围内。
+/// `round` 与 `floor` 都试过，用重组判据的 10 个用例量了两遍（含 scale 1.0/2.0、
+/// kerning 对、窄字形、标点、中文回退）：
+///
+/// | | 最坏墨量差 | 逐字节相等的用例 |
+/// | --- | --- | --- |
+/// | `floor` | 0.66% | 7/10 |
+/// | `round` | **0.09%** | 1/10 |
+///
+/// `floor` 在多数用例上与 CG 完全吻合，但最坏情况差了七倍。取 `round` 是按**最坏值**
+/// 选的——观感问题是局部的，一段文字里有一个字画歪就够显眼，而"平均很准"救不了它。
+///
+/// 进位由 `q / PHASES` 的 floor 吸收，故相位恒在范围内。
 fn split_phase(x: f64) -> (i32, u8) {
     let p = SUBPIXEL_PHASES as f64;
     let q = (x * p).round();
@@ -878,11 +888,18 @@ mod atlas_shape_tests {
     #[test]
     fn shaped_glyphs_recompose_into_the_whole_run_raster() {
         let mut e = CoreTextEngine::new();
+        let mut worst = 0.0f64;
         let cases = [
             ("Hello, world", 13.0f32, 2.0f32),
+            ("Hello, world", 13.0, 1.0),
             ("控件 042", 12.0, 2.0),
+            ("控件 042", 12.0, 1.0),
             ("Wave AVA To. jgpq", 16.0, 1.0),
+            ("Wave AVA To. jgpq", 16.0, 2.0),
             ("中英混排 Mixed 123", 14.0, 2.0),
+            ("iiillljjj fi fl", 11.0, 1.0),
+            ("WWWMMM@@@", 20.0, 1.0),
+            ("1234567890", 11.0, 2.0),
         ];
         for (text, size, scale) in cases {
             let r = req(text, size, scale);
@@ -898,13 +915,7 @@ mod atlas_shape_tests {
                 "[{text}] 墨量 整段={ia:.0} 重组={ib:.0} 相对差={:.2}%  范围 {ba:?} vs {bb:?}",
                 rel * 100.0
             );
-            // 阈值按实测定：四个用例都在 0.01% 以内（AA 边缘的舍入），松到几个百分点
-            // 就等于放过「字重整体变了」这一类——而那正是拆开重拼最容易出的事。
-            assert!(
-                rel < 0.005,
-                "[{text}] 墨量相对差 {:.3}% 超阈——字重或相位对不上",
-                rel * 100.0
-            );
+            worst = worst.max(rel);
             let (ba, bb) = (ba.expect("整段有墨"), bb.expect("重组有墨"));
             for (i, (a, b)) in [(ba.0, bb.0), (ba.1, bb.1), (ba.2, bb.2), (ba.3, bb.3)]
                 .iter()
@@ -916,5 +927,12 @@ mod atlas_shape_tests {
                 );
             }
         }
+        // 阈值贴着实测定（最坏 0.09%，留一倍余量）：松到几个百分点就等于放过
+        // 「字重整体变了」这一类，而那正是拆开重拼最容易出的事。
+        assert!(
+            worst < 0.002,
+            "最差墨量相对差 {:.3}% 超阈——字重或相位对不上",
+            worst * 100.0
+        );
     }
 }

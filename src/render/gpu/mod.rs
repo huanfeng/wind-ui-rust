@@ -13,11 +13,15 @@
 //! | ✅ P0 | 共享设备 + 离屏目标（清屏 / readback 成 `Pixmap`） | `device.rs`、`offscreen.rs` |
 //! | ✅ P1 | 几何图元：SDF shader + 实例批处理、裁剪与 `save/restore`，接上 `Canvas`/`RenderTarget` | `prim.rs`、`shader.wgsl`、`canvas.rs` |
 //! | ✅ P2 | 文字：平台光栅（`GlyphSource`）→ R8 run-cache → 纹理四边形；measure/line_metrics 仍委托引擎 | `text.rs`、`text.wgsl` |
-//! | **✅ P3（当前）** | 图片/SVG 纹理缓存（fit/圆角/opacity）与离屏层栈（`push_layer` 的 opacity 合成） | `tex.rs`、`layer.rs`、`image.wgsl` |
-//! | P5 | 文字 glyph atlas：粒度降到单字形、跨文本共享、合批成一次 draw | `text.rs` |
+//! | ✅ P3 | 图片/SVG 纹理缓存（fit/圆角/opacity）与离屏层栈（`push_layer` 的 opacity 合成） | `tex.rs`、`layer.rs`、`image.wgsl` |
+//! | **✅ P5（当前）** | 帧末一次提交、damage→scissor 局部重绘、文字 glyph atlas | `canvas.rs`、`surface.rs`、`text.rs` |
 //!
-//! 到 P3 为止 `Canvas` 的图元集**已全部落地**，没有空实现了。仍与软后端有意不同的只剩
-//! 「像素读不回来」（`as_pixmap` 恒 `None`，调用方据此走全窗重绘，与 d2d 同一档待遇）
+//! 到 P3 为止 `Canvas` 的图元集**已全部落地**，没有空实现了。P5 之后 GPU 档在两条主要
+//! 场景上都优于软件路径（M4 @2x、160 控件 + 1 输入框、release）：连续动画 CPU 16.2% 对
+//! 29.0%，闲置 0.8% 对 1.2%，稳态整窗帧绘制 3.0ms 对 5.8ms。
+//!
+//! 仍与软后端有意不同的只剩 `as_pixmap` 恒 `None`（GPU 的像素读不回宿主——但**局部重绘
+//! 已经不再依赖它**，改由目标自己的常驻色纹理 + `supports_partial` 承担，见 `surface.rs`）
 //! 与 `draw_text` 在引擎不提供 `GlyphSource` 时的空操作（Windows 的 DirectWrite 走 D2D
 //! 后端，不实现它）。
 //!
@@ -27,8 +31,10 @@
 //! 展开 quad，片元按 kind 求解析 SDF；裁剪矩形是实例字段（逐像素裁，不切 scissor），渐变
 //! 色标放 uniform 数组。于是帧内零状态切换。详见 `prim.rs` 与 `shader.wgsl` 的模块头。
 //!
-//! 文字：另一条管线（要纹理绑定，几何那条没有），一条 run 一张 R8 覆盖度纹理、一个
-//! draw call。图片是第三条（采完整的预乘 RGBA、外加一个圆角 SDF 遮罩）。三条管线
+//! 文字：另一条管线（要纹理绑定，几何那条没有）。**两种粒度并存**：单行走 glyph atlas
+//! （字形跨文本共享，整帧共用一组绑定 → 一次 instanced draw），折行段落退回整段光栅
+//! （一条 run 一张 R8 纹理、一个 draw call）。图片是第三条（采完整的预乘 RGBA、外加一个
+//! 圆角 SDF 遮罩）。三条管线
 //! **按 `Canvas` 调用顺序交替 flush**（谁要入批就先把另两批画掉），叠放次序于是恒等于
 //! 录制次序。详见 `text.rs`、`tex.rs` 与 `canvas.rs::before_prim`。
 //!
