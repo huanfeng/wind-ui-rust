@@ -48,7 +48,7 @@ use tiny_skia::Pixmap;
 
 use super::{AppHandler, NewWindow, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
-use crate::geometry::{Color, Point, Size};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{to_skia_color, Renderer};
 #[cfg(feature = "gpu")]
 use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
@@ -75,6 +75,29 @@ const MAX_FRAME_DELAY_SECS: f64 = 5.0;
 /// 两帧之间的最小间隔（秒）。帧耗时超过目标间隔时的兜底：见
 /// [`ContentView::schedule_next_frame`] 里为什么不能取 0。
 const MIN_FRAME_DELAY_SECS: f64 = 0.001;
+/// 局部失效时向外扩的余量（视图点）。
+///
+/// 宿主预告的脏区（`pending_damage`）与它**实际**重绘的范围不完全相等：`render_partial`
+/// 会再外扩 2 逻辑像素的抗锯齿余量，并把矩形对齐到 4 逻辑像素网格。两项相加最多 6，
+/// 再留 2 给缩放取整。宁可多失效几像素（只是多搬一点），也不能少——报小了那圈边就会
+/// 留成上一帧的残影。
+const INVALIDATE_PAD_PT: f64 = 8.0;
+
+/// 宿主实际更新的范围是否**跑出**了本次失效区。
+///
+/// 跑出去的那部分会被 AppKit 的裁剪挡在屏幕之外，于是停留在上一帧——这是局部呈现
+/// 唯一会留下陈旧像素的口子，故判据取"宁可误报"：拿不准就当跑出去了，代价只是多一帧。
+///
+/// - `invalidated = None`（整窗失效）→ 无所谓超出。
+/// - `actual = None`（宿主升级成整帧）→ 只失效一小块时必然跑出。
+/// - 两者都有 → `actual ⊆ invalidated` 才算没跑出。
+fn damage_escapes(invalidated: Option<Rect>, actual: Option<Rect>) -> bool {
+    match (invalidated, actual) {
+        (None, _) => false,
+        (Some(_), None) => true,
+        (Some(inv), Some(a)) => a.union(&inv) != inv,
+    }
+}
 
 thread_local! {
     /// 仍存活的 windui 窗口，**并且是它们的所有者**——对照 win32 的 `LiveWindows`。
@@ -316,6 +339,10 @@ struct ViewState {
     /// 本帧**开始绘制**的时刻。帧截止从这里起算而不是从帧画完起算——理由见
     /// [`ContentView::schedule_next_frame`]。
     frame_start: std::time::Instant,
+    /// 本次待绘制由**局部**失效发起时，那块失效区（**物理像素**，已含外扩余量）。
+    /// `None` = 整窗失效或 AppKit 自己发起的重绘。`do_draw` 据此复核宿主实际更新的
+    /// 范围有没有超出它——见那里的说明。
+    partial_invalidate: Option<Rect>,
     /// `on_interval` 的周期定时器（按 handler.intervals() 顺序，下标即回调 idx）。
     /// 随窗口存活；进程退出时连同 run loop 一并销毁（对照 win32 的 SetTimer）。
     interval_timers: Vec<Retained<NSTimer>>,
@@ -468,7 +495,7 @@ define_class!(
         /// 动画帧定时器到点：请求重绘。下一帧 do_draw 若仍在动画则自行续约（见 schedule_next_frame）。
         #[unsafe(method(frameTick:))]
         fn frame_tick(&self, _timer: &NSTimer) {
-            self.setNeedsDisplay(true);
+            self.invalidate_pending();
         }
 
         /// `on_interval` 周期定时器到点：按定时器在 interval_timers 中的下标调对应回调，
@@ -734,6 +761,7 @@ impl ContentView {
             wheel_residual: 0.0,
             frame_timer: None,
             frame_start: std::time::Instant::now(),
+            partial_invalidate: None,
             interval_timers: Vec::new(),
             color_space,
             #[cfg(feature = "gpu")]
@@ -812,6 +840,44 @@ impl ContentView {
         self.addTrackingArea(&area);
     }
 
+    /// 帧驱动的标脏：**只失效宿主预计要更新的那块**，对照 win32 消息循环里的
+    /// `InvalidateRect(hwnd, rc)`。
+    ///
+    /// AppKit 会把 `drawRect:` 的上下文按失效区裁剪，于是下面那次 `CGContextDrawImage`
+    /// 只需把这一小块搬进后备缓冲——闪烁光标每帧只脏十几像素宽的一条，此前却按整窗
+    /// 付账（实测该项占每帧 3.1ms / 38%）。
+    ///
+    /// 外扩 [`INVALIDATE_PAD_PX`]：宿主的 `render_partial` 会把脏区再外扩 AA 余量并对齐到
+    /// 4 逻辑像素网格，实际重绘范围略大于这里的预测；报小了那圈边会留成上一帧的残影。
+    ///
+    /// 借用不跨 AppKit 调用（铁律 6）：`setNeedsDisplay*` 可能**同步**走到绘制路径，
+    /// 而那里要借 `ViewState`。故先读完、再置标志、最后才调。
+    fn invalidate_pending(&self) {
+        let (dmg, scale) = {
+            let st = self.ivars().borrow();
+            (st.handler.pending_damage(), st.scale.max(0.01) as f64)
+        };
+        let Some(r) = dmg else {
+            // 宿主预计整帧（重排、对话框、换主题…）：照旧整窗失效。
+            self.ivars().borrow_mut().partial_invalidate = None;
+            self.setNeedsDisplay(true);
+            return;
+        };
+        // 外扩余量后换算成视图点（视图是 isFlipped，故原点同为左上，无需翻转）。
+        // 记下的是**物理像素**那一份：`do_draw` 要拿它跟宿主报的实际更新范围比。
+        let padded = r.inflate((INVALIDATE_PAD_PT * scale).ceil() as i32);
+        let (x, y) = (padded.x as f64 / scale, padded.y as f64 / scale);
+        let (w, h) = (padded.w as f64 / scale, padded.h as f64 / scale);
+        self.ivars().borrow_mut().partial_invalidate = Some(padded);
+        self.setNeedsDisplayInRect(NSRect {
+            origin: NSPoint { x, y },
+            size: NSSize {
+                width: w,
+                height: h,
+            },
+        });
+    }
+
     /// 渲染一帧并 blit 到屏。
     fn do_draw(&self) {
         // 帧起点：`schedule_next_frame` 据此把下一帧排在「本帧开始 + 间隔」，而不是
@@ -835,6 +901,15 @@ impl ContentView {
             return;
         }
 
+        // 本次绘制是否由局部失效发起（取走后复位：AppKit 自己发起的重绘——暴露、缩放
+        // ——不该被上一次的标志带跑）。
+        let partial = {
+            let mut st = self.ivars().borrow_mut();
+            st.partial_invalidate.take()
+        };
+        // 宿主**实际**更新的范围有没有超出本次失效区。超出的那部分被 AppKit 的裁剪挡在
+        // 屏幕之外，会停留在上一帧——这是局部呈现唯一会留下陈旧像素的口子。
+        let escaped;
         // 渲染进 pixmap（借用期间不触发可重入的 OS 调用）。
         let image = {
             let mut st = self.ivars().borrow_mut();
@@ -860,6 +935,11 @@ impl ContentView {
                 pixmap: unsafe { &mut *ptr },
             };
             st.handler.render(&mut tgt, size);
+            // 与本次失效区对账。`last_frame_damage()` 为 `None` 表示宿主把这一帧升级成了
+            // 整帧（重排、浮层、后备缓冲失效…都会触发）；为 `Some(r)` 时 `r` 也可能比预测
+            // 略大——`render_partial` 会再外扩 AA 余量并对齐 4 像素网格。两种都算"跑出去了"，
+            // 出了借用补一次整窗失效（多一帧，换绝不留陈旧像素）。
+            escaped = damage_escapes(partial, st.handler.last_frame_damage());
 
             // 直接把 pixmap 缓冲包成 CGImage：经 CGDataProvider **引用**缓冲（不拷贝像素），
             // release 回调为 None（缓冲由 pixmap 拥有）。CGImage 在本帧 draw_image 后即析构，
@@ -912,6 +992,13 @@ impl ContentView {
             Some(&image),
         );
         CGContext::restore_g_state(Some(&cg));
+
+        // 宿主更新的范围跑出了本次失效区：补一次整窗失效，下一轮把完整画面送上去。
+        // 放在绘制**之后**：此刻各借用都已释放，且我们已在一次显示流程内，标脏只是排
+        // 下一轮，不会就地递归。
+        if escaped {
+            self.setNeedsDisplay(true);
+        }
 
         // 本帧画完后，若仍有控件请求持续动画，按显示器刷新率自调度下一帧。
         self.schedule_next_frame();
@@ -1941,4 +2028,39 @@ pub(crate) fn run_windowed(
     // 将来若改用可被 `stop:` 打断的 run loop，缺了它就是设备泄漏，而那种泄漏很难被注意到。
     #[cfg(feature = "gpu")]
     crate::render::gpu::release_shared_gpu();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 局部呈现唯一会留下陈旧像素的口子：宿主更新的范围跑出失效区、被 AppKit 裁掉。
+    /// 这条判据宁可误报（多出一帧）也不能漏报（残影留在屏上直到下次碰它）。
+    #[test]
+    fn damage_escaping_the_invalidated_rect_is_detected() {
+        let inv = Rect::new(100, 100, 50, 50);
+        // 整窗失效：怎么画都在范围内。
+        assert!(!damage_escapes(None, Some(Rect::new(0, 0, 4000, 4000))));
+        assert!(!damage_escapes(None, None));
+        // 宿主升级成整帧，而我们只失效了一小块 → 必须补。
+        assert!(damage_escapes(Some(inv), None));
+        // 完全落在里面 / 恰好等于 → 不用补。
+        assert!(!damage_escapes(
+            Some(inv),
+            Some(Rect::new(110, 110, 10, 10))
+        ));
+        assert!(!damage_escapes(Some(inv), Some(inv)));
+        // 四个方向各探出一像素 → 都要补。
+        for r in [
+            Rect::new(99, 100, 50, 50),  // 左
+            Rect::new(100, 99, 50, 50),  // 上
+            Rect::new(100, 100, 51, 50), // 右
+            Rect::new(100, 100, 50, 51), // 下
+        ] {
+            assert!(
+                damage_escapes(Some(inv), Some(r)),
+                "{r:?} 应判定为跑出失效区"
+            );
+        }
+    }
 }

@@ -104,6 +104,16 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
 | 窗口操作 | `take_window_op()` → `ShowWindow(SW_MINIMIZE/MAXIMIZE...)` | `NSWindow::miniaturize`/`zoom`/`close` |
 
+**帧驱动只失效脏区，但必须与宿主实际画的范围对账**：`frameTick:` 用
+`setNeedsDisplayInRect:`（对照 win32 的 `InvalidateRect(hwnd, rc)`）而不是整窗标脏，AppKit
+随之把 `drawRect:` 的上下文裁到那一块，`CGContextDrawImage` 只搬这几行——实测每帧
+4.75ms → 3.60ms。**要害在对账**：宿主可能把这一帧临时升级成整帧（重排、浮层、后备缓冲
+失效），或因 AA 余量与 4 像素网格对齐而画得比预告略大；跑出失效区的那部分会被裁掉、
+留成上一帧的残影。故 `do_draw` 拿 `last_frame_damage()` 与本次失效区比对
+（`damage_escapes`，有单测），一旦跑出就补一次整窗失效——多一帧，换绝不留陈旧像素。
+失效区另外外扩 `INVALIDATE_PAD_PT`(8pt) 吸收上述余量。事件路径仍整窗标脏，故"tick 与
+drawRect 之间来了输入"不会漏。
+
 **连续动画的配速器是 CoreAnimation 的 vsync，不是 NSTimer**：`schedule_next_frame` 的定时器
 只负责"再要一帧"——`setNeedsDisplay` 之后 CA 至多每个 vsync 出一帧，天然封顶在刷新率。故
 控件要的是满帧时，定时器应**尽早**响（实测延时 1ms → 正好 60.1fps，且一帧仍只有一次定时器
