@@ -253,6 +253,99 @@ pub trait GlyphSource {
     /// 按 `req` 排版并光栅。文本为空、尺寸退化或超出实现的体量上限时返回 `None`
     /// （调用方据此跳过本次绘制，不是错误）。
     fn raster_run(&mut self, req: &RunRequest) -> Option<AlphaMask>;
+
+    /// 按 `req` 排版成**字形序列**，不光栅。返回 `None` 表示这一段交不出字形序列
+    /// （实现不支持、或这一段的形状超出它能处理的范围），调用方退回 [`Self::raster_run`]。
+    ///
+    /// 分出这一步是 glyph atlas 的前提：整段光栅的粒度下，一个按钮标签、一行表格文本
+    /// 各占一张纹理，动态文本（输入框逐字变化）每帧都不命中；降到单字形之后，同一个
+    /// 字形在整个界面里只光栅一次、只占 atlas 里的一小格。
+    ///
+    /// **排版仍然整段做**（kerning、连字、字体回退都依赖上下文），这里交出来的是排版
+    /// 的结果而不是绕开排版。
+    fn shape_run(&mut self, req: &RunRequest) -> Option<ShapedRun> {
+        let _ = req;
+        None
+    }
+
+    /// 光栅单个字形。[`Self::shape_run`] 交出过的键都必须能光栅出来。
+    fn raster_glyph(&mut self, key: &GlyphKey) -> Option<GlyphBitmap> {
+        let _ = key;
+        None
+    }
+}
+
+/// 水平亚像素相位的档数。
+///
+/// 平台光栅器的字形水平定位是**亚像素**的（Core Text 实测不吸附整数列，只有基线吸附
+/// 整数行）。整段光栅时每个字形按 `frac(origin.x)` 落笔；拆成单字形后若一律贴整数列，
+/// 字间距会肉眼可见地变化——「文字与系统一致」这个卖点最容易在这里丢掉。故每个字形按
+/// 相位各存一份位图。
+///
+/// 4 档是常见取舍：量化误差 ≤ 1/8 像素，肉眼分不出，而再细一档 atlas 条目就翻倍。
+pub const SUBPIXEL_PHASES: u8 = 4;
+
+/// atlas 里一个字形的身份。
+///
+/// 不含颜色（颜色在片元里调制），不含位置（位置在 [`PlacedGlyph`] 上）——同一个字形
+/// 在一段文字里出现多次、在不同段文字里出现，共用同一张位图，这正是 atlas 的全部意义。
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct GlyphKey {
+    /// 字体身份：平台给的**稳定名字**（Core Text 取 PostScript 名）。
+    ///
+    /// 不用字体对象的指针值：指针会随对象释放被复用，键于是误命中到另一个字体，而
+    /// 现场看不出任何异常（图片纹理缓存用指针当键踩过同一个坑）。一段文字里出现多个
+    /// 字体是常态——字体回退对每个缺字的字符都会换一个物理字体。
+    pub font: std::sync::Arc<str>,
+    /// **物理**字号的位模式（`f32` 没有 `Eq`/`Hash`）。
+    pub size: u32,
+    /// 字体内的字形索引。
+    pub glyph: u16,
+    /// 水平亚像素相位，`0..`[`SUBPIXEL_PHASES`]。
+    pub phase: u8,
+}
+
+/// 一个已定位的字形。位置全是**整数**物理像素：亚像素的那一份已经烘进
+/// [`GlyphKey::phase`] 对应的那张位图里了。
+#[derive(Clone, Debug)]
+pub struct PlacedGlyph {
+    pub key: GlyphKey,
+    /// 字形原点（基线上的落笔点）相对文本块左边的物理列。
+    pub x: i32,
+    /// 该字形的基线相对**首行基线**的物理行偏移（单行且无上下标时恒 0）。
+    ///
+    /// 不直接给「相对块顶的行」：块顶在排版时还是浮点，而基线要吸附整数行——取整
+    /// 必须与整段光栅那条路径在**同一个地方**做（`floor(块顶 + ascent)`），否则两次
+    /// 取整各自进位，差出来的一个像素只随容器高的奇偶翻转。那正是 `AlphaMask::ascent`
+    /// 文档记下的那个坑。
+    pub dy: i32,
+}
+
+/// 一段文字排版后的字形序列。块度量的语义与 [`AlphaMask`] 逐字相同，好让两条路径
+/// （atlas 与整段光栅）的放置逻辑共用同一份代码。
+#[derive(Clone, Debug)]
+pub struct ShapedRun {
+    pub glyphs: Vec<PlacedGlyph>,
+    /// 同 [`AlphaMask::block`]。
+    pub block: (f32, f32),
+    /// 同 [`AlphaMask::ascent`]。
+    pub ascent: f32,
+}
+
+/// 单个字形的 A8 覆盖度位图 + 它相对**字形原点**的偏移。
+///
+/// 偏移必须由光栅方给出：字形的墨迹相对原点可上可下、可左可右（`j` 的下伸、`f` 的
+/// 左出挑），调用方无从推算。
+#[derive(Clone, Debug)]
+pub struct GlyphBitmap {
+    /// 覆盖度字节，行优先，`data.len() == width * height`。
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// 位图左边相对字形原点的物理列偏移（可负）。
+    pub left: i32,
+    /// 位图顶边相对基线的物理行偏移，**向下为正**（故通常为负——墨在基线之上）。
+    pub top: i32,
 }
 
 /// 占位引擎：不渲染，按等宽近似估算尺寸。供无 DirectWrite 的单元测试使用。

@@ -21,18 +21,22 @@ use tiny_skia::Pixmap;
 
 use objc2_core_foundation::{
     kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFAttributedString,
-    CFDictionary, CFRange, CFRetained, CFString, CGAffineTransform, CGPoint, CGRect, CGSize,
+    CFDictionary, CFIndex, CFRange, CFRetained, CFString, CGAffineTransform, CGPoint, CGRect,
+    CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColor, CGColorSpace, CGContext, CGImageAlphaInfo, CGPath,
 };
 use objc2_core_text::{
     kCTFontAttributeName, kCTForegroundColorAttributeName, kCTParagraphStyleAttributeName, CTFont,
-    CTFramesetter, CTLine, CTParagraphStyle, CTParagraphStyleSetting, CTParagraphStyleSpecifier,
-    CTTextAlignment,
+    CTFontOrientation, CTFramesetter, CTLine, CTParagraphStyle, CTParagraphStyleSetting,
+    CTParagraphStyleSpecifier, CTRun, CTTextAlignment,
 };
 
-use super::{AlphaMask, GlyphSource, RunRequest, TextEngine, TextStyle};
+use super::{
+    AlphaMask, GlyphBitmap, GlyphKey, GlyphSource, PlacedGlyph, RunRequest, ShapedRun, TextEngine,
+    TextStyle, SUBPIXEL_PHASES,
+};
 use crate::geometry::{Color, Rect, Size};
 use crate::spec::Align;
 
@@ -56,6 +60,16 @@ pub struct CoreTextEngine {
     scale: f32,
     /// 缓存 CTFont，按 (family, 物理字号 bits) 复用，避免每次绘字都创建字体对象。
     fonts: HashMap<(String, u32), CFRetained<CTFont>>,
+    /// `shape_run` 见过的**物理**字体，按 (PostScript 名, 物理字号 bits) 索引。
+    ///
+    /// `raster_glyph` 必须用这一张表里的对象，**不能**拿名字重新 `CTFontCreateWithName`：
+    /// 系统字体的 PostScript 名以点开头（`.SFNS-Regular` 之类），拿它去创建会得到另一个
+    /// 字体，而字形索引是**字体内部**的编号——索引没变、字体变了，画出来就是别的字。
+    /// 症状极隐蔽：字形的位置、步进宽度全对，只有字形长得不对（实测 `l` 画成了 15px
+    /// 宽的方块，逗号画成了 21px 高的字形，而墨迹外接框只差几个像素）。
+    ///
+    /// 字号进键是因为 `CTFont` 自带字号：同名不同号是两个对象，字形边界也不同。
+    run_fonts: HashMap<(String, u32), CFRetained<CTFont>>,
     /// 复用的 DeviceRGB 色彩空间。
     color_space: CFRetained<CGColorSpace>,
 }
@@ -66,6 +80,7 @@ impl CoreTextEngine {
         Self {
             scale: 1.0,
             fonts: HashMap::new(),
+            run_fonts: HashMap::new(),
             color_space,
         }
     }
@@ -562,6 +577,197 @@ impl GlyphSource for CoreTextEngine {
             ascent: baseline as f32,
         })
     }
+
+    /// 排版成字形序列。**排版仍然整段做**——kerning、连字、字体回退都依赖上下文，
+    /// 这里交出来的是 `CTLine` 排版的结果，不是绕开它。
+    ///
+    /// 折行的段落交回 [`Self::raster_run`]：`CTFrame` 的行原点与段落对齐是另一套定位，
+    /// 而折行的是段落文本，本来就不属于「每帧都在变」的那一类，先不摊这份复杂度。
+    fn shape_run(&mut self, req: &RunRequest) -> Option<ShapedRun> {
+        let ts = &req.style;
+        if req.text.is_empty() || ts.size <= 0.0 {
+            return None;
+        }
+        let s = req.scale.max(0.1);
+        let psize = ts.size * s;
+        let font = self.font(ts.family, psize);
+        let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        let plh = ts.line_height_px().map(|h| h * s);
+        let attr = self.attributed(req.text, &font, &black, req.align, plh);
+        let playout_w = (req.max_width.max(0.0) * s).ceil() as f64;
+        let line = unsafe { CTLine::with_attributed_string(&attr) };
+        let (line_w, ascent, descent, leading) = line_metrics(&line);
+        if !is_single_line(req.text, line_w, playout_w) {
+            return None;
+        }
+
+        let runs = unsafe { line.glyph_runs() };
+        let count = runs.count() as usize;
+        let mut glyphs = Vec::new();
+        for i in 0..count {
+            let ptr = unsafe { runs.value_at_index(i as CFIndex) };
+            if ptr.is_null() {
+                continue;
+            }
+            // CTLine 的 glyph runs 数组元素恒为 CTRun（Core Text 的契约）。
+            let run: &CTRun = unsafe { &*ptr.cast() };
+            let n = unsafe { run.glyph_count() } as usize;
+            if n == 0 {
+                continue;
+            }
+            // 每个 run 的字体可能不同：字体回退对每个缺字的字符都会换一个物理字体，
+            // 拿整段那个 `font` 当身份会把回退字形认成主字体的同号字形——那是另一个字。
+            let Some((name, rf)) = run_font(run) else {
+                continue;
+            };
+            // 登记这个物理字体，`raster_glyph` 稍后要用**它本人**去光栅。
+            self.run_fonts
+                .entry((name.clone(), psize.to_bits()))
+                .or_insert(rf);
+            let font_id: std::sync::Arc<str> = std::sync::Arc::from(name.as_str());
+            let mut gs = vec![0u16; n];
+            let mut ps = vec![CGPoint { x: 0.0, y: 0.0 }; n];
+            let range = CFRange {
+                location: 0,
+                length: n as CFIndex,
+            };
+            unsafe {
+                run.glyphs(range, NonNull::new(gs.as_mut_ptr())?);
+                run.positions(range, NonNull::new(ps.as_mut_ptr())?);
+            }
+            for k in 0..n {
+                let (x, phase) = split_phase(ps[k].x);
+                glyphs.push(PlacedGlyph {
+                    key: GlyphKey {
+                        font: font_id.clone(),
+                        size: psize.to_bits(),
+                        glyph: gs[k],
+                        phase,
+                    },
+                    x,
+                    // CG 的 y 向上，屏幕行向下。
+                    dy: (-ps[k].y).round() as i32,
+                });
+            }
+        }
+        if glyphs.is_empty() {
+            return None;
+        }
+        Some(ShapedRun {
+            glyphs,
+            block: (line_w as f32, (ascent + descent + leading) as f32),
+            ascent: ascent as f32,
+        })
+    }
+
+    /// 光栅单个字形。上下文与明暗关系**逐条照抄 [`Self::raster_run`]**：白底黑字、
+    /// 不碰 smoothing 开关、取 `255 − 红通道`。差一条都会让同一个字在两条路径下有
+    /// 不同的字重（透明底会让 CG 的字形加重量取错档，实测墨量差 13~17%）。
+    fn raster_glyph(&mut self, key: &GlyphKey) -> Option<GlyphBitmap> {
+        let psize = f32::from_bits(key.size);
+        if psize <= 0.0 || !psize.is_finite() {
+            return None;
+        }
+        // 先查 `shape_run` 登记过的物理字体；查不到才退回按名字创建（那条路只在
+        // 「atlas 里留着上一个引擎实例的键」这类边角情形下走到，见 `run_fonts`）。
+        let font = match self.run_fonts.get(&(key.font.to_string(), key.size)) {
+            Some(f) => f.clone(),
+            None => self.font(Some(&key.font), psize),
+        };
+        let glyph = key.glyph;
+        let mut rect = CGRect {
+            origin: CGPoint { x: 0.0, y: 0.0 },
+            size: CGSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        };
+        unsafe {
+            font.bounding_rects_for_glyphs(
+                CTFontOrientation::Default,
+                NonNull::from(&glyph),
+                &mut rect,
+                1,
+            )
+        };
+        // 亚像素相位：位图按「原点右移 frac」光栅，贴到整数列上仍保住原本的字间距。
+        let frac = key.phase as f64 / SUBPIXEL_PHASES as f64;
+        // 边界各留 1px：字形边界盒是排版意义上的，AA 的边缘可以越出它半个像素。
+        const PAD: i32 = 1;
+        let left = (rect.origin.x + frac).floor() as i32 - PAD;
+        let right = (rect.origin.x + rect.size.width + frac).ceil() as i32 + PAD;
+        // CG 的 y 向上：`up` 后缀的量都是「基线以上为正」。
+        let top_up = (rect.origin.y + rect.size.height).ceil() as i32 + PAD;
+        let bot_up = rect.origin.y.floor() as i32 - PAD;
+        let w = (right - left).max(1) as u32;
+        let h = (top_up - bot_up).max(1) as u32;
+        if w > MAX_MASK_DIM || h > MAX_MASK_DIM {
+            return None;
+        }
+
+        let mut rgba = vec![255u8; (w as usize) * (h as usize) * 4];
+        let ptr = rgba.as_mut_ptr() as *mut c_void;
+        let ctx = unsafe {
+            CGBitmapContextCreate(
+                ptr,
+                w as usize,
+                h as usize,
+                8,
+                w as usize * 4,
+                Some(&self.color_space),
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }?;
+        CGContext::set_allows_antialiasing(Some(&ctx), true);
+        CGContext::set_text_matrix(Some(&ctx), IDENTITY);
+        // 字形色显式设黑：这条路径没有属性串带来的前景色，靠上下文默认值就等于把
+        // 「黑字白底」这个前提交给了实现细节。
+        CGContext::set_rgb_fill_color(Some(&ctx), 0.0, 0.0, 0.0, 1.0);
+        // `CTFontDrawGlyphs` 的位置是用户空间的**绝对**坐标（不叠加 text position）。
+        let pos = CGPoint {
+            x: -left as f64 + frac,
+            y: -bot_up as f64,
+        };
+        unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&pos), 1, &ctx) };
+        drop(ctx);
+
+        let data = rgba.chunks_exact(4).map(|p| 255 - p[0]).collect();
+        Some(GlyphBitmap {
+            data,
+            width: w,
+            height: h,
+            left,
+            top: -top_up,
+        })
+    }
+}
+
+/// run 的**物理**字体：PostScript 名（当身份）+ 字体对象本身（当光栅器）。
+///
+/// 两样都要：名字用来做缓存键（指针值会随对象释放被复用，拿它当键会误命中到另一个
+/// 字体），对象用来光栅（名字重建不出同一个字体，见 `CoreTextEngine::run_fonts`）。
+///
+/// 取不到就跳过这一段——宁可少画一段，也不要拿整段那个字体顶上：字体回退产生的字形
+/// 索引在主字体里指向的是另一个字。
+fn run_font(run: &CTRun) -> Option<(String, CFRetained<CTFont>)> {
+    let attrs = unsafe { run.attributes() };
+    let v = unsafe { attrs.value((kCTFontAttributeName as *const CFString).cast::<c_void>()) };
+    let p = NonNull::new(v as *mut CTFont)?;
+    // 字典只借出引用，而这份字体要跨出 `attrs` 的生命周期活到光栅那一步。
+    let font = unsafe { CFRetained::retain(p) };
+    let name = unsafe { font.post_script_name() }.to_string();
+    Some((name, font))
+}
+
+/// 把浮点列拆成「整数列 + 亚像素相位」，相位在 `0..SUBPIXEL_PHASES`。
+///
+/// 用 `round` 而不是 `floor(frac * PHASES)`：前者的量化误差 ≤ 半档（1/8 像素），
+/// 后者是整整一档（1/4 像素）。进位由 `q / PHASES` 的 floor 吸收，相位恒在范围内。
+fn split_phase(x: f64) -> (i32, u8) {
+    let p = SUBPIXEL_PHASES as f64;
+    let q = (x * p).round();
+    let ix = (q / p).floor();
+    (ix as i32, (q - ix * p) as u8)
 }
 
 #[cfg(test)]
@@ -585,5 +791,130 @@ mod scale_contract_tests {
         // 下限钳制：0 会让物理字号退化，引擎按 0.1 兜底。
         eng.set_scale(0.0);
         assert!(eng.scale() > 0.0, "scale 不得为 0");
+    }
+}
+
+#[cfg(test)]
+mod atlas_shape_tests {
+    use super::*;
+
+    fn req<'a>(text: &'a str, size: f32, scale: f32) -> RunRequest<'a> {
+        RunRequest {
+            text,
+            style: TextStyle::new(size),
+            align: Align::Start,
+            max_width: 10_000.0,
+            scale,
+        }
+    }
+
+    /// 把 `shape_run` + `raster_glyph` 的结果重组成一张与 `raster_run` 同尺寸的 mask。
+    ///
+    /// 定位逐条照抄 `render/gpu/canvas.rs::draw_text`：基线吸附一次
+    /// （`floor(块顶 + ascent)`，这里块顶就是 `pad`），字形贴在整数列上，亚像素的
+    /// 那一份已经烘在位图里。
+    fn compose(e: &mut CoreTextEngine, r: &RunRequest, m: &AlphaMask) -> Vec<u8> {
+        let shaped = e.shape_run(r).expect("shape_run 应支持单行");
+        let (w, h) = (m.width, m.height);
+        let mut out = vec![0u8; (w * h) as usize];
+        // 基线吸附是 **ceil(块顶 + ascent)**，不是 floor：CG 的 `set_text_position`
+        // 收的是「距底」，它把距底 floor 到整数设备行，而距顶 = 位图高 − 距底，于是
+        // 距顶那一侧恰好是 ceil。用 floor 的话整段字会稳定高一行（本判据实测：逐行
+        // 墨量逐值相同，只整体错开一行）。
+        let base = (m.pad as f32 + m.ascent).ceil() as i32;
+        for g in &shaped.glyphs {
+            let bmp = e
+                .raster_glyph(&g.key)
+                .expect("shape_run 交出过的键必须能光栅");
+            let x0 = m.pad as i32 + g.x + bmp.left;
+            let y0 = base + g.dy + bmp.top;
+            for yy in 0..bmp.height as i32 {
+                let y = y0 + yy;
+                if y < 0 || y >= h as i32 {
+                    continue;
+                }
+                for xx in 0..bmp.width as i32 {
+                    let x = x0 + xx;
+                    if x < 0 || x >= w as i32 {
+                        continue;
+                    }
+                    let src = bmp.data[(yy as u32 * bmp.width + xx as u32) as usize] as u32;
+                    let d = &mut out[(y as u32 * w + x as u32) as usize];
+                    // 覆盖度并集（over）：相邻字形的 AA 边缘会重叠一两列。
+                    *d = (*d as u32 + src * (255 - *d as u32) / 255).min(255) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    fn ink(d: &[u8]) -> f64 {
+        d.iter().map(|&v| v as f64).sum()
+    }
+
+    fn bounds(d: &[u8], w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        for y in 0..h {
+            for x in 0..w {
+                if d[(y * w + x) as usize] > 8 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        (x0 != u32::MAX).then_some((x0, y0, x1, y1))
+    }
+
+    /// 拆成单字形再拼回去，必须复现整段光栅的那张图。
+    ///
+    /// 这是 glyph atlas 能不能做的**前提判据**：atlas 的全部风险不在性能而在观感——
+    /// 「文字与系统一致」是这个项目的卖点，而拆开重拼最容易丢的就是水平亚像素相位
+    /// （字间距会肉眼可见地变化）与字形加重量（上下文换了，CG 的取档也会变）。
+    ///
+    /// 判据取墨量与墨迹范围，不逐像素比：两条路径的相位量化差半档以内是设计允许的，
+    /// 逐像素比会永远红；而墨量能抓住「整体偏胖/偏瘦」，范围能抓住「整体位移」。
+    #[test]
+    fn shaped_glyphs_recompose_into_the_whole_run_raster() {
+        let mut e = CoreTextEngine::new();
+        let cases = [
+            ("Hello, world", 13.0f32, 2.0f32),
+            ("控件 042", 12.0, 2.0),
+            ("Wave AVA To. jgpq", 16.0, 1.0),
+            ("中英混排 Mixed 123", 14.0, 2.0),
+        ];
+        for (text, size, scale) in cases {
+            let r = req(text, size, scale);
+            let m = e.raster_run(&r).expect("raster_run");
+            let b = compose(&mut e, &r, &m);
+            let (ia, ib) = (ink(&m.data), ink(&b));
+            let rel = (ia - ib).abs() / ia.max(1.0);
+            let (ba, bb) = (
+                bounds(&m.data, m.width, m.height),
+                bounds(&b, m.width, m.height),
+            );
+            println!(
+                "[{text}] 墨量 整段={ia:.0} 重组={ib:.0} 相对差={:.2}%  范围 {ba:?} vs {bb:?}",
+                rel * 100.0
+            );
+            // 阈值按实测定：四个用例都在 0.01% 以内（AA 边缘的舍入），松到几个百分点
+            // 就等于放过「字重整体变了」这一类——而那正是拆开重拼最容易出的事。
+            assert!(
+                rel < 0.005,
+                "[{text}] 墨量相对差 {:.3}% 超阈——字重或相位对不上",
+                rel * 100.0
+            );
+            let (ba, bb) = (ba.expect("整段有墨"), bb.expect("重组有墨"));
+            for (i, (a, b)) in [(ba.0, bb.0), (ba.1, bb.1), (ba.2, bb.2), (ba.3, bb.3)]
+                .iter()
+                .enumerate()
+            {
+                assert!(
+                    (*a as i64 - *b as i64).abs() <= 1,
+                    "[{text}] 墨迹范围第 {i} 项差超 1 像素：{ba:?} vs {bb:?}"
+                );
+            }
+        }
     }
 }
