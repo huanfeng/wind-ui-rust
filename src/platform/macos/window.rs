@@ -892,6 +892,15 @@ impl ContentView {
         let pw = (bounds.size.width as f32 * scale).round().max(1.0) as i32;
         let ph = (bounds.size.height as f32 * scale).round().max(1.0) as i32;
 
+        // 本次绘制是否由局部失效发起。**取走即复位**，且必须在下面 GPU 路径的提前返回
+        // **之前**取：AppKit 自己发起的重绘（暴露、缩放）不该被上一次 tick 的标志带跑，
+        // 而 GPU 路径若把它留在原地，这个字段就会一直停在某次 tick 的旧值上。
+        // GPU 路径整个 surface 每帧重画，不需要这份对账，取走丢掉即可。
+        let partial = {
+            let mut st = self.ivars().borrow_mut();
+            st.partial_invalidate.take()
+        };
+
         // GPU 路径：像素直接进 `CAMetalLayer` 的 surface，下面 pixmap→CGImage→拷屏那一整套
         // 全不走（连后备缓冲都不分配）。两条路径在窗口创建时二选一，运行期不切换。
         #[cfg(feature = "gpu")]
@@ -900,13 +909,6 @@ impl ContentView {
             self.schedule_next_frame();
             return;
         }
-
-        // 本次绘制是否由局部失效发起（取走后复位：AppKit 自己发起的重绘——暴露、缩放
-        // ——不该被上一次的标志带跑）。
-        let partial = {
-            let mut st = self.ivars().borrow_mut();
-            st.partial_invalidate.take()
-        };
         // 宿主**实际**更新的范围有没有超出本次失效区。超出的那部分被 AppKit 的裁剪挡在
         // 屏幕之外，会停留在上一帧——这是局部呈现唯一会留下陈旧像素的口子。
         let escaped;
