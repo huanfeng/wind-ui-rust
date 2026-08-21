@@ -220,9 +220,31 @@ pub trait RenderTarget {
         engine: &'a mut dyn TextEngine,
         scale: f32,
     ) -> Box<dyn Canvas + 'a>;
-    /// 软渲染局部重绘快路取原始 Pixmap；GPU 后端默认 None → 调用方强制全窗。
+    /// 软渲染局部重绘快路取原始 Pixmap；GPU 后端默认 None → 调用方走自己的局部路径。
     fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
         None
+    }
+
+    /// 本目标能否只重画一块、其余区域保留上一帧的内容。
+    ///
+    /// 「保留上一帧」这件事在两条后端上落在不同的地方：软后端靠宿主维护的后备
+    /// `Pixmap`（`app/damage.rs`），GPU 后端靠目标自己的常驻色纹理——窗口 surface 的
+    /// 纹理是**轮转**的（Metal 的 drawable 通常两三张），只画脏区的话其余区域会是两三
+    /// 帧之前的画面。默认按「有没有 Pixmap」判，故 d2d 后端（两者都没有）恒 false。
+    fn supports_partial(&mut self) -> bool {
+        self.as_pixmap().is_some()
+    }
+
+    /// 宣告本帧的重绘范围（**物理**像素，`None` = 整窗），并按需铺底。
+    ///
+    /// 必须在 [`Self::make_canvas`] 之前调用一次。存在的理由是**时序**：平台层开帧时
+    /// 还不知道这一帧是局部还是整窗——那是宿主在 `render()` 里看脏区、浮层、结构签名
+    /// 之后才定的。清底若留在开帧那一步，就得靠平台层预测，而预测错一次的代价是整窗
+    /// 内容丢失（预测整窗→清了底，宿主却只画脏区）。改由宿主定完再宣告，两者恒等。
+    ///
+    /// 软后端默认空操作：它的铺底与合成走宿主的后备缓冲路径，不经过本方法。
+    fn begin_damage(&mut self, damage: Option<Rect>, bg: Color) {
+        let _ = (damage, bg);
     }
 }
 

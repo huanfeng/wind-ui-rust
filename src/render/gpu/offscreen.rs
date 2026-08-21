@@ -9,7 +9,7 @@
 //! 去 padding、以及**字节语义（预乘 RGBA 直通）**这几件事。P1 的图元会在同一个纹理上加
 //! 自己的 pass，再走同一个 `readback` 做逐像素比对。
 
-use super::canvas::WgpuTarget;
+use super::canvas::{clear_color, WgpuTarget};
 use super::device::SharedGpu;
 use super::prim::PrimRenderer;
 use crate::geometry::Color;
@@ -107,7 +107,19 @@ impl OffscreenGpu {
         }
         // 分字段借用：gpu/view 只读、prim 可变，互不冲突。
         let prim = self.prim.as_mut().expect("prim renderer 刚建好");
-        WgpuTarget::new(self.gpu.clone(), &self.view, prim, (self.w, self.h), None)
+        // 支持局部重绘：本目标的颜色纹理是**跨帧复用**的（见结构体文档），上一帧的
+        // 像素还在，这正是局部重绘的前提。窗口目标那边靠自建的常驻纹理达到同一效果。
+        //
+        // 铺底则由调用方的 `clear()` 显式做，不要兜底再清一次——那会把 `clear` 刚
+        // 铺好的底又盖掉一遍。
+        WgpuTarget::new(
+            self.gpu.clone(),
+            &self.view,
+            prim,
+            (self.w, self.h),
+            true,
+            None,
+        )
     }
 
     /// 物理像素尺寸 (w, h)。
@@ -212,19 +224,6 @@ impl OffscreenGpu {
 fn align_row_bytes(w: u32) -> u32 {
     let unpadded = w * 4;
     unpadded.div_ceil(ROW_ALIGN) * ROW_ALIGN
-}
-
-/// `Color`（非预乘 sRGB 字节）→ 清屏值。先做预乘再归一化：`Rgba8Unorm` 下
-/// `round(v * 255)` 精确还原字节，故清屏色能逐字节对上预期的预乘结果。
-fn clear_color(c: Color) -> wgpu::Color {
-    let a = c.a as u32;
-    let premul = |v: u8| ((v as u32 * a + 127) / 255) as f64 / 255.0;
-    wgpu::Color {
-        r: premul(c.r),
-        g: premul(c.g),
-        b: premul(c.b),
-        a: c.a as f64 / 255.0,
-    }
 }
 
 #[cfg(test)]

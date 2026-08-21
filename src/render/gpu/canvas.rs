@@ -47,6 +47,17 @@ pub struct WgpuTarget<'t> {
     size: (u32, u32),
     /// 本帧只允许落笔的物理矩形（`x, y, w, h`），`None` = 整窗。见 [`WgpuCanvas::scissor`]。
     scissor: Option<[u32; 4]>,
+    /// 本目标画的是**常驻**色纹理（窗口后备缓冲），故上一帧的内容还在，可以只重画一块。
+    /// 离屏目标恒 `false`：它每次都是新的一张。
+    partial: bool,
+    /// 宿主没宣告重绘范围时的兜底铺底色。`None` = 不兜底（离屏目标由调用方自己清）。
+    ///
+    /// 存在的理由是向后兼容：不经宿主重绘决策的调用方（离屏截图、测试）从来只调
+    /// `make_canvas`，而窗口目标必须保证「开画前底是干净的」——把兜底放在这里，
+    /// 老路径的行为与此前的「开帧即清屏」逐字相同。
+    fallback_bg: Option<Color>,
+    /// 是否已经宣告过本帧的重绘范围（[`RenderTarget::begin_damage`]）。
+    damage_set: bool,
 }
 
 impl<'t> WgpuTarget<'t> {
@@ -55,24 +66,103 @@ impl<'t> WgpuTarget<'t> {
         view: &'t wgpu::TextureView,
         renderer: &'t mut PrimRenderer,
         size: (u32, u32),
-        scissor: Option<[u32; 4]>,
+        partial: bool,
+        fallback_bg: Option<Color>,
     ) -> Self {
         Self {
             gpu,
             view,
             renderer,
             size,
-            scissor,
+            scissor: None,
+            partial,
+            fallback_bg,
+            damage_set: false,
         }
+    }
+
+    /// 把整张目标铺成 `color`（一个只做 `LoadOp::Clear` 的 pass）。
+    ///
+    /// 对应软后端全窗帧的 `pixmap.fill(bg)`：图元 pass 一律 `LoadOp::Load`
+    /// （painter's algorithm），底必须先铺好。
+    fn clear_all(&self, color: Color) {
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("windui target clear"),
+                });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("windui target clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: self.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color(color)),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        self.gpu.queue().submit([encoder.finish()]);
+    }
+}
+
+/// `Color`（非预乘 sRGB 字节）→ 清屏值：先预乘再归一化。
+///
+/// `*Unorm` 目标下 `round(v * 255)` 精确还原字节，故清屏色能逐字节对上预期的预乘结果
+/// ——这是双后端截图比对「内部通道差 = 0」的前提之一（`*Srgb` 格式会再编码一次）。
+///
+/// 三处清屏（窗口目标、离屏目标、层）**必须**是同一个算法：同一个 `bg` 在窗口里与在
+/// 截图里若不同色，最难被认成是清屏色算错了。曾经各留一份并靠注释约定「改动须同步」，
+/// 到第三处出现时收口成这一份。
+pub(super) fn clear_color(c: Color) -> wgpu::Color {
+    let a = c.a as u32;
+    let premul = |v: u8| ((v as u32 * a + 127) / 255) as f64 / 255.0;
+    wgpu::Color {
+        r: premul(c.r),
+        g: premul(c.g),
+        b: premul(c.b),
+        a: c.a as f64 / 255.0,
     }
 }
 
 impl RenderTarget for WgpuTarget<'_> {
+    fn supports_partial(&mut self) -> bool {
+        self.partial
+    }
+
+    /// 宣告本帧的重绘范围。整窗时顺带铺底；局部时**不铺**——脏区那一块的底由宿主
+    /// 自己画（对应软后端局部帧的 `sub.fill(bg)`），脏区之外则要原样保留上一帧。
+    fn begin_damage(&mut self, damage: Option<Rect>, bg: Color) {
+        self.damage_set = true;
+        match damage.filter(|_| self.partial) {
+            None => {
+                self.scissor = None;
+                self.clear_all(bg);
+            }
+            Some(r) => self.scissor = Some(clamp_scissor(r, self.size)),
+        }
+    }
+
     fn make_canvas<'a>(
         &'a mut self,
         engine: &'a mut dyn TextEngine,
         scale: f32,
     ) -> Box<dyn Canvas + 'a> {
+        // 兜底：没经过重绘决策的调用方（离屏截图、测试）此前靠的是「开帧即清屏」。
+        if !self.damage_set {
+            self.damage_set = true;
+            if let Some(bg) = self.fallback_bg {
+                self.clear_all(bg);
+            }
+        }
         Box::new(WgpuCanvas {
             gpu: self.gpu.clone(),
             view: self.view,
@@ -146,6 +236,18 @@ thread_local! {
 #[cfg(test)]
 pub(super) fn submit_count() -> u64 {
     SUBMITS.with(|c| c.get())
+}
+
+/// 逻辑上的脏区（**物理**像素 `Rect`）→ scissor 的 `[x, y, w, h]`，并收进目标边界。
+///
+/// 完全落在目标外时返回零宽高：那是「本帧什么都不该画」，比放行整窗安全——脏区算错
+/// 的症状是「界面某一块不刷新」，而放行整窗的症状是「局部帧把没重画的区域清成底色」。
+fn clamp_scissor(r: Rect, (w, h): (u32, u32)) -> [u32; 4] {
+    let x0 = r.x.max(0).min(w as i32) as u32;
+    let y0 = r.y.max(0).min(h as i32) as u32;
+    let x1 = r.right().max(0).min(w as i32) as u32;
+    let y1 = r.bottom().max(0).min(h as i32) as u32;
+    [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
 }
 
 /// 当前绘制目标：最近一个成功分配的层纹理，没有则是基础目标。
@@ -356,6 +458,23 @@ impl Drop for WgpuCanvas<'_> {
 impl Canvas for WgpuCanvas<'_> {
     fn dpi_scale(&self) -> f32 {
         self.scale
+    }
+
+    /// 本帧真正会落笔的世界范围（逻辑坐标）。全窗帧 `None`（不剔除），局部帧即脏区。
+    ///
+    /// scissor 省的是**片元**，这里省的是 CPU：绘制遍历据此跳过框外节点的自绘，那些
+    /// 图元虽然最终也会被 scissor 丢掉，但构造与排版的开销已经付掉了。光标闪烁这类
+    /// 只脏几十像素的动画里这是大头——120 个控件的界面每帧照样提交上百次描边与文字。
+    ///
+    /// 物理→逻辑向外取整：契约要求返回可见范围的**超集**，报小了会真的丢内容。
+    fn cull_rect(&self) -> Option<Rect> {
+        let [x, y, w, h] = self.scissor?;
+        let s = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let x0 = (x as f32 / s).floor() as i32;
+        let y0 = (y as f32 / s).floor() as i32;
+        let x1 = ((x + w) as f32 / s).ceil() as i32;
+        let y1 = ((y + h) as f32 / s).ceil() as i32;
+        Some(Rect::new(x0, y0, x1 - x0, y1 - y0).inflate(1))
     }
 
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
@@ -2439,6 +2558,130 @@ mod tests {
             1,
             "一帧应只提交一次 command buffer（回归成每批一提交了？）"
         );
+    }
+
+    // ---- 局部重绘（damage → scissor）----
+
+    /// 局部帧只重画脏区，框外**原样保留上一帧的像素**。
+    ///
+    /// 判据的锐利之处在于第二帧画的是**整窗**绿：只有 scissor 真的生效，右半才会留着
+    /// 第一帧的蓝。少了 scissor 的话整张都会变绿，而画面本身看不出任何"异常"——局部
+    /// 重绘错在这个方向上是最难发现的一类，它不报错、不闪、只是多画了。
+    #[test]
+    fn a_partial_frame_repaints_only_the_damaged_rect() {
+        const BLUE: Color = Color::rgb(40, 70, 210);
+        const GREEN: Color = Color::rgb(30, 160, 90);
+        let Some(mut off) = offscreen(60, 40) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        // 第一帧：整窗，左红右蓝。
+        off.clear(WHITE);
+        {
+            let mut t = off.target();
+            t.begin_damage(None, WHITE);
+            let mut c = t.make_canvas(&mut eng, 1.0);
+            c.fill_rect(0.0, 0.0, 30.0, 40.0, &Paint::fill(RED));
+            c.fill_rect(30.0, 0.0, 30.0, 40.0, &Paint::fill(BLUE));
+        }
+        // 第二帧：脏区只有左半，但**画满整窗**绿。
+        {
+            let mut t = off.target();
+            t.begin_damage(Some(Rect::new(0, 0, 30, 40)), WHITE);
+            let mut c = t.make_canvas(&mut eng, 1.0);
+            c.fill_rect(0.0, 0.0, 60.0, 40.0, &Paint::fill(GREEN));
+        }
+        let pm = off.readback().expect("readback");
+        let want_g = [GREEN.r, GREEN.g, GREEN.b, 255];
+        let want_b = [BLUE.r, BLUE.g, BLUE.b, 255];
+        assert_eq!(px(&pm, 15, 20), want_g, "脏区内应已重画成绿");
+        assert_eq!(
+            px(&pm, 45, 20),
+            want_b,
+            "脏区外应保留上一帧的蓝（scissor 没生效？）"
+        );
+        // 边界：脏区右缘的最后一列在内、下一列在外。
+        assert_eq!(px(&pm, 29, 20), want_g, "脏区右缘最后一列应在内");
+        assert_eq!(px(&pm, 30, 20), want_b, "脏区右缘之外的第一列应在外");
+    }
+
+    /// 整窗帧（`begin_damage(None)`）负责铺底；局部帧不铺——脏区那一块的底由宿主自己画。
+    ///
+    /// 这条钉的是「清屏从开帧挪到宿主宣告之后」这次改动：若整窗帧漏了铺底，上一帧的
+    /// 内容会在没有控件覆盖的区域渗出来。
+    #[test]
+    fn a_full_frame_clears_the_target_but_a_partial_one_does_not() {
+        const GREEN: Color = Color::rgb(30, 160, 90);
+        let Some(mut off) = offscreen(40, 40) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        off.clear(WHITE);
+        {
+            let mut t = off.target();
+            t.begin_damage(None, WHITE);
+            let mut c = t.make_canvas(&mut eng, 1.0);
+            c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(GREEN));
+        }
+        // 局部帧：宣告脏区后什么都不画 —— 目标必须原样不动。
+        {
+            let mut t = off.target();
+            t.begin_damage(Some(Rect::new(0, 0, 20, 20)), WHITE);
+            let _c = t.make_canvas(&mut eng, 1.0);
+        }
+        let pm = off.readback().expect("readback");
+        assert_eq!(
+            px(&pm, 10, 10),
+            [GREEN.r, GREEN.g, GREEN.b, 255],
+            "局部帧不该铺底（铺了就把上一帧盖掉了）"
+        );
+        // 整窗帧：宣告后什么都不画 —— 整张应回到底色。
+        {
+            let mut t = off.target();
+            t.begin_damage(None, WHITE);
+            let _c = t.make_canvas(&mut eng, 1.0);
+        }
+        let pm = off.readback().expect("readback");
+        assert_eq!(px(&pm, 10, 10), [255, 255, 255, 255], "整窗帧必须铺底");
+    }
+
+    /// `cull_rect` 把物理脏区报成**逻辑坐标的超集**——绘制遍历据此跳过框外节点的自绘。
+    ///
+    /// 这是局部重绘在 CPU 侧的全部收益来源：scissor 省的是片元，而框外图元的构造与
+    /// 排版开销在到达 scissor 之前就已经付掉了。报小了会真的丢内容，故一律向外取整。
+    #[test]
+    fn cull_rect_reports_a_logical_superset_of_the_damage() {
+        let Some(mut off) = offscreen(64, 64) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        // scale=2：物理 (20,30)+24x18 → 逻辑 (10,15)+12x9，再各放一像素余量。
+        {
+            let mut t = off.target();
+            t.begin_damage(Some(Rect::new(20, 30, 24, 18)), WHITE);
+            let c = t.make_canvas(&mut eng, 2.0);
+            assert_eq!(c.cull_rect(), Some(Rect::new(9, 14, 14, 11)));
+        }
+        // 整窗帧不剔除。
+        {
+            let mut t = off.target();
+            t.begin_damage(None, WHITE);
+            let c = t.make_canvas(&mut eng, 2.0);
+            assert_eq!(c.cull_rect(), None, "整窗帧不得剔除任何节点");
+        }
+    }
+
+    /// 预乘清屏色：50% 红 → (0.5, 0, 0, 0.5)。窗口目标、离屏目标、层三处共用这一份，
+    /// 算错的症状是「同一个 `bg` 在窗口里与在截图里是两个颜色」——最难被认成清屏色的锅。
+    #[test]
+    fn clear_color_is_premultiplied() {
+        let c = clear_color(Color::rgba(255, 0, 0, 128));
+        assert!((c.r - 128.0 / 255.0).abs() < 0.005, "实得 {}", c.r);
+        assert_eq!(c.g, 0.0);
+        assert_eq!(c.b, 0.0);
+        assert!((c.a - 128.0 / 255.0).abs() < 0.005, "实得 {}", c.a);
+        let o = clear_color(Color::rgb(255, 255, 255));
+        assert_eq!((o.r, o.g, o.b, o.a), (1.0, 1.0, 1.0, 1.0));
     }
 
     /// `push_layer` 后不 `pop_layer`：帧末断言必须炸。

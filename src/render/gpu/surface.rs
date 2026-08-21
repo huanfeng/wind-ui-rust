@@ -56,6 +56,25 @@ pub struct WindowGpu {
     /// 不当场重配：`configure` 在还有 `SurfaceTexture` 活着时会 panic，而那张纹理正要拿去
     /// 画这一帧。改为记下来，下一帧开画前补做。
     needs_reconfigure: bool,
+    /// 常驻后备色纹理：**所有绘制都打到它**，帧末整张拷进本帧的 drawable。
+    ///
+    /// 存在的唯一理由是让局部重绘成立。surface 自己的纹理是**轮转**的（Metal 通常两三
+    /// 张），这一帧拿到的那张上面留着的是两三帧之前的画面——只重画脏区的话，其余区域
+    /// 会跳回过去。软后端的对应物是宿主维护的后备 `Pixmap`（`app/damage.rs`）；这边把
+    /// 它放在目标侧，因为 GPU 的像素读不回宿主。
+    back: Option<BackBuffer>,
+}
+
+/// 常驻后备色纹理。格式与 surface 一致（present 前要整张拷过去）。
+struct BackBuffer {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    /// 内容是否已被至少一个整窗帧铺满过。
+    ///
+    /// 刚建出来的纹理内容是未定义的，此时「保留上一帧」无从谈起——必须先有一个整窗帧
+    /// 把它铺满。窗口 resize 会重建它，故这不是只在首帧才成立的条件。
+    seeded: bool,
 }
 
 impl WindowGpu {
@@ -82,7 +101,8 @@ impl WindowGpu {
         };
         let (w, h) = clamp_size(&gpu, size)?;
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // `COPY_DST`：帧末把后备缓冲整张拷进本帧的 drawable（见 [`BackBuffer`]）。
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format,
             // 颜色空间交后端定（= 历史行为）。本项目的通道值本就是 sRGB 编码字节，
             // 不走宽色域/HDR——那会改变「写进去的字节即最终像素」这条全链约定。
@@ -104,6 +124,7 @@ impl WindowGpu {
             config,
             prim,
             needs_reconfigure: false,
+            back: None,
         })
     }
 
@@ -151,7 +172,9 @@ impl WindowGpu {
         self.needs_reconfigure = false;
     }
 
-    /// 取本帧纹理并用 `clear` 铺底，返回可供绘制的一帧。
+    /// 取本帧纹理，返回可供绘制的一帧。`clear` 是窗口底色，供目标在宿主宣告「整窗重绘」
+    /// 时铺底——**开帧不再无条件清屏**，理由见 [`crate::render::RenderTarget::begin_damage`]：
+    /// 这一帧是局部还是整窗，要等宿主看过脏区/浮层/结构签名才知道。
     ///
     /// 调用方须在丢弃 [`Frame`] 之前画完，并调 [`Frame::present`] 上屏；不 present 就丢弃
     /// 等于放弃这一帧（不会泄漏，只是屏幕上没有变化）。
@@ -160,18 +183,52 @@ impl WindowGpu {
             self.surface.configure(self.gpu.device(), &self.config);
             self.needs_reconfigure = false;
         }
+        self.ensure_back();
         let texture = self.acquire()?;
-        let view = texture
+        let surface_view = texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        self.clear(&view, clear);
+        let size = (self.config.width, self.config.height);
         Ok(Frame {
             gpu: self.gpu.clone(),
             texture,
-            view,
+            surface_view,
+            // 分字段借用：`back` 与 `prim` 是两个字段，可同时可变借出。
+            back: self.back.as_mut(),
             prim: &mut self.prim,
-            size: (self.config.width, self.config.height),
+            size,
+            bg: clear,
         })
+    }
+
+    /// 按需（重）建后备色纹理。尺寸与 surface 配置一致；尺寸变了就换一张，新的那张
+    /// 未 seeded，于是下一帧必然被判成整窗——这正是 resize 之后应有的行为。
+    fn ensure_back(&mut self) {
+        let size = (self.config.width, self.config.height);
+        if self.back.as_ref().is_some_and(|b| b.size == size) {
+            return;
+        }
+        let texture = self.gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("windui window backbuffer"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.back = Some(BackBuffer {
+            texture,
+            view,
+            size,
+            seeded: false,
+        });
     }
 
     /// 取一帧纹理，失败时按 wgpu 的建议重配一次再试。
@@ -201,38 +258,6 @@ impl WindowGpu {
             }
         }
     }
-
-    /// 用 `color` 铺底（一个只做 `LoadOp::Clear` 的 pass）。
-    ///
-    /// 图元 pass 是 `LoadOp::Load`（painter's algorithm），所以底必须先铺——对应软路径每帧
-    /// 的 `pixmap.fill(bg)`。surface 纹理是轮转复用的，不清就会看到两三帧之前的内容。
-    fn clear(&self, view: &wgpu::TextureView, color: Color) {
-        let mut encoder =
-            self.gpu
-                .device()
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("windui surface clear"),
-                });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("windui surface clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_color(color)),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
-        self.gpu.queue().submit([encoder.finish()]);
-    }
 }
 
 /// 已取到纹理、已铺底的一帧。
@@ -242,20 +267,30 @@ impl WindowGpu {
 pub struct Frame<'a> {
     gpu: Arc<SharedGpu>,
     texture: wgpu::SurfaceTexture,
-    view: wgpu::TextureView,
+    /// 本帧 drawable 的视图。有后备缓冲时它只是 present 前那次拷贝的目标；没有时
+    /// （纹理建不出来的退化路径）绘制直接打在它上面，此时局部重绘不可用。
+    surface_view: wgpu::TextureView,
+    back: Option<&'a mut BackBuffer>,
     prim: &'a mut PrimRenderer,
     size: (u32, u32),
+    /// 窗口底色，交给目标在「整窗重绘」时铺底。
+    bg: Color,
 }
 
 impl Frame<'_> {
     /// 本帧的渲染目标。交给宿主的 `render(&mut dyn RenderTarget, size)`。
     pub fn target(&mut self) -> WgpuTarget<'_> {
+        let (view, partial) = match self.back.as_deref() {
+            Some(b) => (&b.view, b.seeded),
+            None => (&self.surface_view, false),
+        };
         WgpuTarget::new(
             self.gpu.clone(),
-            &self.view,
+            view,
             &mut *self.prim,
             self.size,
-            None,
+            partial,
+            Some(self.bg),
         )
     }
 
@@ -267,14 +302,57 @@ impl Frame<'_> {
     /// 上屏。**调用前须先丢弃 [`Self::target`] 返回的目标**——`WgpuCanvas` 是在析构时
     /// 才把攒下的图元提交的（见 `canvas.rs`），提前 present 就会 present 一张空底。
     /// `target()` 借的是 `&mut self`，而本方法按值取 `self`，这条顺序由借用检查保证。
-    pub fn present(self) {
+    pub fn present(mut self) {
+        self.blit_back();
+        if let Some(b) = self.back.as_mut() {
+            // 走到这里说明本帧已经画完并拷上屏了，后备缓冲于是持有一份完整画面——
+            // 下一帧可以只重画脏区。局部帧不改变这个事实（它本来就建立在完整画面上）。
+            b.seeded = true;
+        }
         let Self {
-            gpu, texture, view, ..
+            gpu,
+            texture,
+            surface_view,
+            ..
         } = self;
         // 视图先于纹理交还：present 之后这张纹理就回到 surface 的轮转队列里了，
         // 不该再有视图指着它。
-        drop(view);
+        drop(surface_view);
         gpu.queue().present(texture);
+    }
+
+    /// 后备缓冲 → 本帧的 drawable。
+    ///
+    /// **整张拷，不只拷脏区**：drawable 是轮转的，这一张上的旧内容是两三帧之前的画面，
+    /// 只补脏区会让其余区域跳回过去。一次全窗纹理拷在 M4 上是几十微秒量级的 GPU 时间，
+    /// 且不占 CPU——而它换来的是「局部帧不必重画整棵树」。
+    fn blit_back(&self) {
+        let Some(b) = self.back.as_deref() else {
+            return;
+        };
+        // `Suboptimal` 那一帧的 drawable 尺寸可能已经与配置不符，取三者的交集。
+        let st = self.texture.texture.size();
+        let w = self.size.0.min(st.width).min(b.size.0);
+        let h = self.size.1.min(st.height).min(b.size.1);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut encoder =
+            self.gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("windui backbuffer blit"),
+                });
+        encoder.copy_texture_to_texture(
+            b.texture.as_image_copy(),
+            self.texture.texture.as_image_copy(),
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.gpu.queue().submit([encoder.finish()]);
     }
 }
 
@@ -305,20 +383,6 @@ fn clamp_size(gpu: &SharedGpu, (w, h): (u32, u32)) -> Option<(u32, u32)> {
         return None;
     }
     Some((w.clamp(1, max), h.clamp(1, max)))
-}
-
-/// `Color`（非预乘 sRGB 字节）→ 清屏值。与 `offscreen.rs` 的同名函数同一份算法：
-/// 先预乘再归一化，`Unorm` 目标下能逐字节还原预期结果。两处各留一份而不是抽公共函数，
-/// 是因为它短到抽出去反而要多绕一层——但改动必须同步。
-fn clear_color(c: Color) -> wgpu::Color {
-    let a = c.a as u32;
-    let premul = |v: u8| ((v as u32 * a + 127) / 255) as f64 / 255.0;
-    wgpu::Color {
-        r: premul(c.r),
-        g: premul(c.g),
-        b: premul(c.b),
-        a: c.a as f64 / 255.0,
-    }
 }
 
 #[cfg(test)]
@@ -354,18 +418,5 @@ mod tests {
         use wgpu::TextureFormat as F;
         assert_eq!(pick_format(&[F::Bgra8UnormSrgb, F::Rgba8UnormSrgb]), None);
         assert_eq!(pick_format(&[]), None);
-    }
-
-    /// 预乘清屏色：50% 红 → (0.5, 0, 0, 0.5)。与离屏那份必须给出同一结果，
-    /// 否则同一个 `bg` 在窗口与截图里会是两个颜色。
-    #[test]
-    fn clear_color_is_premultiplied() {
-        let c = clear_color(Color::rgba(255, 0, 0, 128));
-        assert!((c.r - 128.0 / 255.0).abs() < 0.005, "实得 {}", c.r);
-        assert_eq!(c.g, 0.0);
-        assert_eq!(c.b, 0.0);
-        assert!((c.a - 128.0 / 255.0).abs() < 0.005, "实得 {}", c.a);
-        let o = clear_color(Color::rgb(255, 255, 255));
-        assert_eq!((o.r, o.g, o.b, o.a), (1.0, 1.0, 1.0, 1.0));
     }
 }

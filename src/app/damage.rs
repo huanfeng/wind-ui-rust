@@ -10,7 +10,7 @@ use tiny_skia::Pixmap;
 
 use crate::core::DamageReq;
 use crate::geometry::{Point, Rect, Size};
-use crate::render::{RenderTarget, SkiaCanvas};
+use crate::render::{Paint, RenderTarget, SkiaCanvas};
 
 use super::UiHost;
 
@@ -107,12 +107,17 @@ impl UiHost {
                 win > 0 && (d.w as i64 * d.h as i64) * 2 <= win
             })
             .unwrap_or(false);
-        let do_full = self.damage.needs_full
-            || !back_ok
-            || overlay
-            || !scale_ok
-            || !damage_small
-            || target.as_pixmap().is_none();
+        // 「上一帧的画面还在不在」是局部重绘的前提，两条后端各有各的落点：软后端是宿主
+        // 维护的后备 `Pixmap`（`back_ok`），GPU 后端是目标自己的常驻色纹理
+        // （`supports_partial`，见 `render/gpu/surface.rs` 的 `BackBuffer`）。d2d 两者都没有，
+        // 恒 false → 恒整窗，与此前的行为逐字相同。
+        let partial_ok = if target.as_pixmap().is_some() {
+            back_ok
+        } else {
+            target.supports_partial()
+        };
+        let do_full =
+            self.damage.needs_full || !partial_ok || overlay || !scale_ok || !damage_small;
         self.damage.needs_full = false;
         #[cfg(test)]
         {
@@ -159,21 +164,62 @@ impl UiHost {
     /// 局部重绘：把脏区渲染进脏区大小的子 pixmap（tiny-skia 按 pixmap 边界自动剔除框外
     /// 图元，成本降到脏区面积），合成进后备缓冲，再整窗拷给平台 pixmap。复用上一全窗帧的
     /// 布局（当前动画均为视觉位移、不改布局）。
-    pub(super) fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {
-        // 脏区外扩 AA 余量并钳到窗口逻辑范围。
+    /// 脏区规整（两条局部路径共用）：外扩 AA 余量、对齐到 4 逻辑像素网格、钳回窗口。
+    ///
+    /// 网格对齐是软路径的硬需求：Windows DPI 缩放恒为 25% 的倍数（scale = m/4），4 的
+    /// 倍数 ×scale 必为整数，子 pixmap 的物理原点 `dmg.origin × scale` 于是精确无取整，
+    /// 文字定位与全窗帧逐像素一致——不对齐的症状是局部帧的纵向 1px 抖动。GPU 路径画在
+    /// 绝对坐标上，没有这个问题，但两条路径的脏区口径保持一致更好对账。
+    fn align_damage(&self, damage: Rect) -> Rect {
         let raw = damage
             .inflate(DAMAGE_MARGIN)
             .intersect(&Rect::from_size(self.logical_size));
-        // 原点对齐到 4 逻辑像素网格：Windows DPI 缩放恒为 25% 的倍数（scale=m/4），故 4 的倍数 ×scale
-        // 必为整数，子 pixmap 物理原点 dmg.origin×scale 精确无取整 → 文字定位与全窗帧逐像素一致，
-        // 消除局部帧的纵向 1px 抖动。
         const GRID: i32 = 4;
         let x0 = raw.x - raw.x.rem_euclid(GRID);
         let y0 = raw.y - raw.y.rem_euclid(GRID);
         let x1 = raw.right() + (GRID - raw.right().rem_euclid(GRID)) % GRID;
         let y1 = raw.bottom() + (GRID - raw.bottom().rem_euclid(GRID)) % GRID;
-        let dmg =
-            Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&Rect::from_size(self.logical_size));
+        Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&Rect::from_size(self.logical_size))
+    }
+
+    /// GPU 后端的局部重绘：画在目标的常驻色纹理上，范围由 scissor（片元）与
+    /// `Canvas::cull_rect`（CPU 侧的节点剔除）两头收窄。
+    ///
+    /// 与软路径的结构差异只有一处：软路径要开一张脏区大小的子 pixmap 再合成回后备缓冲
+    /// （因而绘制带一个原点偏移），GPU 直接画在绝对坐标的常驻纹理上，没有子目标也没有
+    /// 合成。相同的那一处是**脏区铺底**：常驻纹理里留着上一帧的像素，不铺底的话半透明
+    /// 图元会叠在旧内容上（对应软路径子 pixmap 的 `fill(bg)`）。
+    pub(super) fn render_partial_gpu(
+        &mut self,
+        target: &mut dyn RenderTarget,
+        size: Size,
+        s: f32,
+        damage: Rect,
+    ) {
+        let dmg = self.align_damage(damage);
+        let pdmg = dmg.scaled(s).intersect(&Rect::new(0, 0, size.w, size.h));
+        if pdmg.is_empty() {
+            // 本帧没有实际可绘区域：常驻纹理保持上一帧内容，present 照样把它拷上屏。
+            self.last_present = Some(pdmg);
+            return;
+        }
+        target.begin_damage(Some(pdmg), self.bg);
+        {
+            let mut canvas = target.make_canvas(&mut self.engine, s);
+            canvas.fill_rect(
+                dmg.x as f32,
+                dmg.y as f32,
+                dmg.w as f32,
+                dmg.h as f32,
+                &Paint::fill(self.bg),
+            );
+            self.tree.paint(&mut *canvas);
+        }
+        self.last_present = Some(pdmg);
+    }
+
+    pub(super) fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {
+        let dmg = self.align_damage(damage);
         // 物理化并钳到 pixmap 边界。
         let pdmg = dmg.scaled(s).intersect(&Rect::new(0, 0, size.w, size.h));
         if pdmg.is_empty() {

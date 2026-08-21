@@ -1753,8 +1753,14 @@ impl AppHandler for UiHost {
         let (do_full, damage) = self.decide_repaint(target, size);
 
         if !do_full {
-            let pixmap = target.as_pixmap().expect("软目标必有 pixmap");
-            self.render_partial(pixmap, size, s, damage.unwrap());
+            let damage = damage.expect("局部帧必有脏区（无脏区时 decide_repaint 判整窗）");
+            // 两条局部路径的分岔点：软后端有 pixmap 可以直接落笔，GPU 后端的像素读不回来，
+            // 靠目标自己的常驻色纹理 + scissor（见 `render_partial_gpu`）。
+            if let Some(pixmap) = target.as_pixmap() {
+                self.render_partial(pixmap, size, s, damage);
+            } else {
+                self.render_partial_gpu(target, size, s, damage);
+            }
             self.finish_frame_damage();
             prof_frame("partial", frame_t0);
             return;
@@ -1763,6 +1769,11 @@ impl AppHandler for UiHost {
         // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果种入后备缓冲供后续局部帧复用。----
         // 清底由这里做，不再由平台每帧无条件 fill：局部帧根本不需要清（内容随后被脏区
         // 覆盖），而那一次 fill 是整窗的，与脏区多小无关。
+        //
+        // 两条后端各铺各的底：软后端直接 fill pixmap；GPU 后端要等宿主宣告「本帧整窗」
+        // 才清常驻纹理——开帧时清就得靠平台层预测这一帧是局部还是整窗，而预测错一次
+        // 的代价是整窗内容丢失（见 `RenderTarget::begin_damage`）。
+        target.begin_damage(None, self.bg);
         if let Some(pixmap) = target.as_pixmap() {
             pixmap.fill(tiny_skia::Color::from_rgba8(
                 self.bg.r, self.bg.g, self.bg.b, self.bg.a,
