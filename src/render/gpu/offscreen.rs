@@ -107,7 +107,7 @@ impl OffscreenGpu {
         }
         // 分字段借用：gpu/view 只读、prim 可变，互不冲突。
         let prim = self.prim.as_mut().expect("prim renderer 刚建好");
-        WgpuTarget::new(self.gpu.clone(), &self.view, prim, (self.w, self.h))
+        WgpuTarget::new(self.gpu.clone(), &self.view, prim, (self.w, self.h), None)
     }
 
     /// 物理像素尺寸 (w, h)。

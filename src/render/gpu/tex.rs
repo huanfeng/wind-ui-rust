@@ -216,6 +216,8 @@ pub(super) struct ImageRenderer {
     globals_bg: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
+    /// 本帧已占用的实例槽数。见 [`super::prim::PrimRenderer::used`]。
+    used: usize,
     format: wgpu::TextureFormat,
     cache: LruCache<ImageKey, Bound>,
     pool: LayerPool,
@@ -362,6 +364,7 @@ impl ImageRenderer {
             globals_bg,
             instances,
             capacity: INIT_CAPACITY,
+            used: 0,
             format,
             cache: LruCache::new("图片纹理缓存", MAX_IMAGE_ENTRIES, MAX_IMAGE_BYTES),
             pool: LayerPool::new(),
@@ -465,6 +468,7 @@ impl ImageRenderer {
         &mut self,
         gpu: &Arc<SharedGpu>,
         size: (u32, u32),
+        encoder: &mut wgpu::CommandEncoder,
     ) -> Option<LayerTexture> {
         let format = self.format;
         let layer = match self.pool.take(size) {
@@ -476,7 +480,7 @@ impl ImageRenderer {
             }
         };
         // 复用的那张带着上一次的内容，必须清干净（见 `LayerTexture::clear`）。
-        layer.clear(gpu);
+        layer.clear(encoder);
         self.pool.acquired();
         Some(layer)
     }
@@ -486,9 +490,10 @@ impl ImageRenderer {
         self.pool.put(layer);
     }
 
-    /// 帧末回收池里的超额纹理（`WgpuCanvas` 析构时调）。
+    /// 帧末收尾（`WgpuCanvas` 析构时调）：回收池里的超额纹理、归零帧内实例游标。
     pub(super) fn end_frame(&mut self) {
         self.pool.end_frame();
+        self.used = 0;
     }
 
     /// 把 `batch` 里攒下的图片画掉，随后清空。
@@ -500,6 +505,8 @@ impl ImageRenderer {
         gpu: &Arc<SharedGpu>,
         view: &wgpu::TextureView,
         size: (u32, u32),
+        scissor: Option<[u32; 4]>,
+        encoder: &mut wgpu::CommandEncoder,
         batch: &mut Vec<ImageItem>,
     ) {
         if batch.is_empty() || size.0 == 0 || size.1 == 0 {
@@ -516,20 +523,22 @@ impl ImageRenderer {
                 _pad: [0.0; 2],
             }),
         );
-        if batch.len() > self.capacity {
-            let mut cap = self.capacity.max(1);
-            while cap < batch.len() {
+        let n = batch.len();
+        // 帧内游标：一帧只提交一次，各批必须各占一段（理由同 `prim.rs::flush`）。
+        if self.used + n > self.capacity {
+            let mut cap = self.capacity.max(1) * 2;
+            while cap < n {
                 cap *= 2;
             }
             self.instances = new_instance_buffer(device, cap);
             self.capacity = cap;
+            self.used = 0;
         }
+        let stride = std::mem::size_of::<ImageInstance>() as u64;
+        let off = self.used as u64 * stride;
         let insts: Vec<ImageInstance> = batch.iter().map(|i| i.inst).collect();
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
+        queue.write_buffer(&self.instances, off, bytemuck::cast_slice(&insts));
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("windui image encoder"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("windui image pass"),
@@ -548,15 +557,18 @@ impl ImageRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(r) = scissor {
+                pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
+            pass.set_vertex_buffer(0, self.instances.slice(off..off + n as u64 * stride));
             for (i, item) in batch.iter().enumerate() {
                 pass.set_bind_group(1, &item.bound.bind_group, &[]);
                 pass.draw(0..6, i as u32..i as u32 + 1);
             }
         }
-        queue.submit([encoder.finish()]);
+        self.used += n;
         batch.clear();
     }
 }

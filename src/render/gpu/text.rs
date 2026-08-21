@@ -31,14 +31,14 @@
 //! **0.08 ms**、整帧 5.6 ms。也就是说缓存查找 + 放置合计约 1.7 µs/条，而交错带来的
 //! **每条一次 command buffer 提交**约 90 µs/次。
 //!
-//! 为什么不能把这些提交合并成一次：几何管线的实例缓冲与渐变表都写在偏移 0
-//! （`prim.rs::flush`），而 `queue.write_buffer` 的写入是相对**提交**定序的，不是相对
-//! 录制定序——一个 encoder 里录两个 pass，第二批的数据会在第一批执行前就把缓冲覆盖掉。
-//! 要合并就得给每批分配独立的缓冲区段（渐变表还需要 256 对齐的 dynamic offset），那是
-//! P1 批处理的重新设计，不属于本阶段。
+//! **那 90 µs/次已经不存在了**：三条管线现在都录进 `WgpuCanvas` 持有的同一个 encoder，
+//! 一帧只提交一次。挡在前面的「`queue.write_buffer` 相对提交定序、后一批会在前一批执行
+//! 前把缓冲覆盖掉」这条，靠帧内游标（各批依次占实例缓冲的一段）与渐变表帧内累积增量写
+//! 解掉了，不需要 dynamic offset。交错的**次数**没变，也不该变——它是叠放次序的语义。
 //!
-//! 结论摆在这里供 P5 取舍：atlas 的收益不只是显存和命中率，更是把「每条文字一次提交」
-//! 压回「整帧一次」。作为对照，同一场景的软后端整帧 211 ms（debug，fill-bound）。
+//! 于是 atlas 的收益回到它本来的那几样：显存、动态文本（输入框逐字变化）的命中率、
+//! 以及把「一条 run 一个 draw call + 一次 bind group 切换」压成一次 instanced draw。
+//! 作为对照，同一场景的软后端整帧 211 ms（debug，fill-bound）。
 //!
 //! # 缓存挂在哪
 //!
@@ -357,6 +357,8 @@ pub(super) struct TextRenderer {
     globals_bg: wgpu::BindGroup,
     instances: wgpu::Buffer,
     capacity: usize,
+    /// 本帧已占用的实例槽数。见 [`super::prim::PrimRenderer::used`]。
+    used: usize,
     cache: LruCache<RunKey, RunTexture>,
 }
 
@@ -481,6 +483,7 @@ impl TextRenderer {
             globals_bg,
             instances,
             capacity: INIT_CAPACITY,
+            used: 0,
             cache: LruCache::new("文字 run-cache", MAX_ENTRIES, MAX_BYTES),
         }
     }
@@ -576,6 +579,8 @@ impl TextRenderer {
         gpu: &Arc<SharedGpu>,
         view: &wgpu::TextureView,
         size: (u32, u32),
+        scissor: Option<[u32; 4]>,
+        encoder: &mut wgpu::CommandEncoder,
         batch: &mut Vec<TextItem>,
     ) {
         if batch.is_empty() || size.0 == 0 || size.1 == 0 {
@@ -592,20 +597,22 @@ impl TextRenderer {
                 _pad: [0.0; 2],
             }),
         );
-        if batch.len() > self.capacity {
-            let mut cap = self.capacity.max(1);
-            while cap < batch.len() {
+        let n = batch.len();
+        // 帧内游标：一帧只提交一次，各批必须各占一段（理由同 `prim.rs::flush`）。
+        if self.used + n > self.capacity {
+            let mut cap = self.capacity.max(1) * 2;
+            while cap < n {
                 cap *= 2;
             }
             self.instances = new_instance_buffer(device, cap);
             self.capacity = cap;
+            self.used = 0;
         }
+        let stride = std::mem::size_of::<TextInstance>() as u64;
+        let off = self.used as u64 * stride;
         let insts: Vec<TextInstance> = batch.iter().map(|i| i.inst).collect();
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
+        queue.write_buffer(&self.instances, off, bytemuck::cast_slice(&insts));
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("windui text encoder"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("windui text pass"),
@@ -624,16 +631,24 @@ impl TextRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(r) = scissor {
+                pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.globals_bg, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
+            pass.set_vertex_buffer(0, self.instances.slice(off..off + n as u64 * stride));
             for (i, item) in batch.iter().enumerate() {
                 pass.set_bind_group(1, &item.tex.bind_group, &[]);
                 pass.draw(0..6, i as u32..i as u32 + 1);
             }
         }
-        queue.submit([encoder.finish()]);
+        self.used += n;
         batch.clear();
+    }
+
+    /// 帧末归零帧内游标。见 [`super::prim::PrimRenderer::end_frame`]。
+    pub(super) fn end_frame(&mut self) {
+        self.used = 0;
     }
 }
 

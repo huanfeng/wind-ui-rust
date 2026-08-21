@@ -30,7 +30,12 @@
 //! 文字：另一条管线（要纹理绑定，几何那条没有），一条 run 一张 R8 覆盖度纹理、一个
 //! draw call。图片是第三条（采完整的预乘 RGBA、外加一个圆角 SDF 遮罩）。三条管线
 //! **按 `Canvas` 调用顺序交替 flush**（谁要入批就先把另两批画掉），叠放次序于是恒等于
-//! 提交次序。详见 `text.rs`、`tex.rs` 与 `canvas.rs::before_prim`。
+//! 录制次序。详见 `text.rs`、`tex.rs` 与 `canvas.rs::before_prim`。
+//!
+//! 交错的次数与控件数同阶，但**整帧只提交一次** command buffer：三条管线都录进
+//! `WgpuCanvas` 持有的同一个 encoder，实例数据各占缓冲的一段（帧内游标），渐变表帧内
+//! 累积、增量写。此前是每批一次 `queue.submit`（Metal 上实测约 90 µs/次），一帧上百批
+//! 就是十几毫秒——判据见 `canvas.rs` 的 `a_frame_submits_once_no_matter_how_many_batches`。
 //!
 //! 层：`push_layer` 从纹理池取一张与目标同尺寸的透明纹理并把后续绘制重定向进去，
 //! `pop_layer` 把它整张按 opacity 合成回父目标（走图片管线）。嵌套即栈。详见 `layer.rs`。

@@ -45,6 +45,8 @@ pub struct WgpuTarget<'t> {
     renderer: &'t mut PrimRenderer,
     /// 目标物理尺寸（像素）。
     size: (u32, u32),
+    /// 本帧只允许落笔的物理矩形（`x, y, w, h`），`None` = 整窗。见 [`WgpuCanvas::scissor`]。
+    scissor: Option<[u32; 4]>,
 }
 
 impl<'t> WgpuTarget<'t> {
@@ -53,12 +55,14 @@ impl<'t> WgpuTarget<'t> {
         view: &'t wgpu::TextureView,
         renderer: &'t mut PrimRenderer,
         size: (u32, u32),
+        scissor: Option<[u32; 4]>,
     ) -> Self {
         Self {
             gpu,
             view,
             renderer,
             size,
+            scissor,
         }
     }
 }
@@ -77,6 +81,8 @@ impl RenderTarget for WgpuTarget<'_> {
             batch: PrimBatch::default(),
             text_batch: Vec::new(),
             image_batch: Vec::new(),
+            encoder: None,
+            scissor: self.scissor,
             size: self.size,
             scale: scale.max(0.01),
             clips: Vec::new(),
@@ -101,6 +107,18 @@ pub struct WgpuCanvas<'a> {
     text_batch: Vec<TextItem>,
     /// 待画的图片（含 `pop_layer` 的合成 quad）。同上，与另两批互斥非空。
     image_batch: Vec<ImageItem>,
+    /// 本帧的命令 encoder（懒建）：三条管线的每一批都录进它，**帧末一次提交**。
+    ///
+    /// 见 [`WgpuCanvas::before_prim`]：交错 flush 的次数与控件数同阶（一帧上百次），
+    /// 而每次 `queue.submit` 实测约 90 µs。录进同一个 encoder 后交错次数不变、提交
+    /// 次数降到 1——叠放次序仍由录制顺序保证（同一 encoder 内的 pass 按录制顺序执行）。
+    encoder: Option<wgpu::CommandEncoder>,
+    /// 本帧的裁剪盒（物理整数 `x, y, w, h`），`None` = 整窗。局部重绘帧由调用方设上，
+    /// 三条管线的每个 pass 都据它切 scissor——落在脏区外的片元于是连混合都不做。
+    ///
+    /// 与实例里那个逐像素 `clip` 字段是两回事：那个是 `Canvas::clip_rect` 的语义裁剪
+    /// （必须逐像素、且与软后端的 mask 边界逐字对齐），这个是整帧一律生效的呈现窗口。
+    scissor: Option<[u32; 4]>,
     size: (u32, u32),
     scale: f32,
     /// 裁剪栈：存**逻辑**矩形，每一层已是各级交集（只会收窄）。
@@ -114,6 +132,20 @@ pub struct WgpuCanvas<'a> {
     /// 直接画到最近的外层目标上（opacity 失效，内容仍在），对标软后端「分配失败退化成
     /// 1×1/0 透明度」那条守卫的同一个意图：宁可少一层效果，不可乱栈。
     layers: Vec<Option<LayerTexture>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 本线程提交过的 command buffer 数。理由同 `layer.rs` 的 `ALLOCS`：「一帧只提交
+    /// 一次」是这次改动的**收益本身**，而它不改变任何一个像素——退回「每批一提交」
+    /// 只会让帧时间翻几倍，没有计数器就只能等下次量帧率才发现。
+    static SUBMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 本线程已提交的 command buffer 数（测试判据用）。
+#[cfg(test)]
+pub(super) fn submit_count() -> u64 {
+    SUBMITS.with(|c| c.get())
 }
 
 /// 当前绘制目标：最近一个成功分配的层纹理，没有则是基础目标。
@@ -165,37 +197,86 @@ impl WgpuCanvas<'_> {
         if self.batch.len() >= MAX_BATCH {
             self.flush_prims();
         }
+        // 渐变表在帧内累积（见 `PrimBatch::clear`），满了必须**真提交**一次再重置：
+        // 表里的色标被已录制、尚未提交的实例引用着，不提交就重置会让它们在执行时
+        // 读到后来者的颜色。一帧超过 64 组渐变本就罕见，退化成多一次提交即可。
+        if self.batch.grads_full() {
+            self.flush_prims();
+            self.submit();
+            self.batch.reset_grads();
+        }
     }
 
-    /// 编码并提交本批几何实例（画到**当前**目标：层栈顶或基础目标）。
+    /// 本帧 encoder（懒建）。一帧一个图元都没有的目标不该付一次 encoder 分配。
+    fn ensure_encoder(&mut self) {
+        if self.encoder.is_none() {
+            let enc = self
+                .gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("windui frame encoder"),
+                });
+            self.encoder = Some(enc);
+        }
+    }
+
+    /// 把已录下的所有 pass 一次提交掉。帧末调一次；渐变表满时也会提前调。
+    fn submit(&mut self) {
+        if let Some(enc) = self.encoder.take() {
+            self.gpu.queue().submit([enc.finish()]);
+            #[cfg(test)]
+            SUBMITS.with(|c| c.set(c.get() + 1));
+        }
+    }
+
+    /// 录制本批几何实例（画到**当前**目标：层栈顶或基础目标）。
     fn flush_prims(&mut self) {
+        if self.batch.is_empty() {
+            return;
+        }
+        self.ensure_encoder();
         let view = current_view(&self.layers, self.view);
-        self.renderer
-            .flush(&self.gpu, view, self.size, self.scale, &mut self.batch);
+        let scissor = self.scissor;
+        let enc = self.encoder.as_mut().expect("ensure_encoder 刚建过");
+        self.renderer.flush(
+            &self.gpu,
+            view,
+            self.size,
+            self.scale,
+            scissor,
+            enc,
+            &mut self.batch,
+        );
     }
 
-    /// 编码并提交本批文字。
+    /// 录制本批文字。
     fn flush_text(&mut self) {
         if self.text_batch.is_empty() {
             return;
         }
+        self.ensure_encoder();
         let gpu = self.gpu.clone();
         let view = current_view(&self.layers, self.view);
+        let (size, scissor) = (self.size, self.scissor);
+        let enc = self.encoder.as_mut().expect("ensure_encoder 刚建过");
         self.renderer
             .text(&gpu)
-            .flush(&gpu, view, self.size, &mut self.text_batch);
+            .flush(&gpu, view, size, scissor, enc, &mut self.text_batch);
     }
 
-    /// 编码并提交本批图片（含层合成 quad）。
+    /// 录制本批图片（含层合成 quad）。
     fn flush_images(&mut self) {
         if self.image_batch.is_empty() {
             return;
         }
+        self.ensure_encoder();
         let gpu = self.gpu.clone();
         let view = current_view(&self.layers, self.view);
+        let (size, scissor) = (self.size, self.scissor);
+        let enc = self.encoder.as_mut().expect("ensure_encoder 刚建过");
         self.renderer
             .image(&gpu)
-            .flush(&gpu, view, self.size, &mut self.image_batch);
+            .flush(&gpu, view, size, scissor, enc, &mut self.image_batch);
     }
 
     /// 把三批全部画到当前目标。切换绘制目标（push/pop 层）前必须调——攒着的实例属于
@@ -215,9 +296,11 @@ impl WgpuCanvas<'_> {
     /// 调用次序。反过来（各攒到帧末再画）会让所有文字压在所有几何之上：文字被输入框
     /// 背景盖住、或者反过来浮在滚动区之外，都是这一条错了的症状。
     ///
-    /// 代价是每次交错各一次 command buffer 提交（实测约 90 µs/次，见 `text.rs` 模块头
-    /// 的实测表）。合并成一次提交要先给每批实例/渐变表分配独立缓冲区段，属于 P1 批处理
-    /// 的重新设计——**不要**为了省这几次提交而把三边都攒到帧末，那是在拿正确性换性能。
+    /// 交错的**次数**与控件数同阶，这是语义要求，省不掉；能省的是每次交错的代价。
+    /// 三批现在都录进同一个帧 encoder（[`WgpuCanvas::encoder`]），一帧只提交一次——
+    /// 实例数据各占缓冲的一段（`prim.rs` 的帧内游标）、渐变表帧内累积增量写，于是
+    /// 「后写的数据覆盖掉前一批」这条坑不再成立。**不要**为了再省几次 pass 而把三边
+    /// 攒到帧末合并，那是在拿正确性换性能。
     fn before_prim(&mut self) {
         self.flush_text();
         self.flush_images();
@@ -262,7 +345,10 @@ impl Drop for WgpuCanvas<'_> {
         self.flush_prims();
         self.flush_text();
         self.flush_images();
-        // 帧末回收层纹理池里的超额纹理（见 `layer.rs`）。
+        // 本帧唯一一次提交。**必须早于 end_frame**：后者把帧内实例游标归零，而游标
+        // 归零意味着下一帧从缓冲头部重写，未提交的批次还指着那些字节。
+        self.submit();
+        // 帧末回收层纹理池里的超额纹理、归零帧内游标（见 `layer.rs` 与 `prim.rs`）。
         self.renderer.end_frame();
     }
 }
@@ -592,9 +678,11 @@ impl Canvas for WgpuCanvas<'_> {
         // 切目标前把攒着的三批画到**当前**目标——它们属于层外，跟着切进层里就等于
         // 被层的 opacity 又调制了一遍。
         self.flush_all();
+        self.ensure_encoder();
         let gpu = self.gpu.clone();
         let size = self.size;
-        let layer = self.renderer.image(&gpu).acquire_layer(&gpu, size);
+        let enc = self.encoder.as_mut().expect("ensure_encoder 刚建过");
+        let layer = self.renderer.image(&gpu).acquire_layer(&gpu, size, enc);
         match layer {
             Some(mut l) => {
                 l.opacity = opacity.clamp(0.0, 1.0);
@@ -2212,6 +2300,145 @@ mod tests {
                 want(*ch)
             );
         }
+    }
+
+    // ---- 帧末一次提交（一帧一个 encoder，P5 的地基）----
+
+    /// 同一帧内前后两次 `push_layer` 复用同一张池纹理时，后一层的清屏不得抹掉前一层。
+    ///
+    /// 这是帧 encoder 引入的新风险：层清屏若自己 `submit`，会插到整帧序列**最前面**
+    /// 执行，而池是复用纹理的——`push A → pop A（合成时采样 A）→ push B（池里取回同
+    /// 一张）`这条路径下，B 的清屏会赶在「合成 A」之前跑掉，把 A 的像素抹成透明。
+    /// 症状是「前一层的内容凭空消失」或「后一层带着前一层的残留一起合成」，而成因
+    /// 都在那两层之外。故清屏必须录进同一个 encoder（`layer.rs::LayerTexture::clear`）。
+    ///
+    /// **形状是判据的一部分**：两层若都不透明且互不重叠，残留恰好被同色覆盖，画面
+    /// 完全正确——第一版判据就是这么写的，把清屏改回自己提交仍然全绿。这里让第一层
+    /// 铺满、第二层只占右半且都取 50% 不透明：漏清时左半会多叠一次 50% 红，明显更深。
+    #[test]
+    fn a_reused_layer_in_the_same_frame_keeps_the_earlier_composite() {
+        const BLUE: Color = Color::rgb(40, 70, 210);
+        assert_matches_soft(
+            "layer_reuse_same_frame",
+            40,
+            40,
+            1.0,
+            WHITE,
+            &[(2, 2, 16, 36), (22, 2, 16, 36)],
+            |c| {
+                c.push_layer(0.5);
+                c.fill_rect(0.0, 0.0, 40.0, 40.0, &Paint::fill(RED));
+                c.pop_layer();
+                c.push_layer(0.5);
+                c.fill_rect(20.0, 0.0, 20.0, 40.0, &Paint::fill(BLUE));
+                c.pop_layer();
+            },
+        );
+    }
+
+    /// 一帧内的渐变组数超过表容量（`GRAD_MAX` = 64）时，第 65 组之后**仍然是渐变**。
+    ///
+    /// 渐变表配合帧末一次提交改成了帧内累积，表满的处理随之从「退化成纯色」变为
+    /// 「提前真提交一次再重置表」——重置前必须提交，否则表里的色标被已录制、尚未
+    /// 提交的实例引用着，它们在执行时会读到后来者的颜色。
+    ///
+    /// 判据取跨过 64 那道坎的最后两行与软后端逐像素比：退纯色的话它们会整块变成
+    /// 首标色（黑），内部像素与墨量都对不上。
+    #[test]
+    fn gradients_beyond_table_capacity_stay_gradients() {
+        const COLS: u32 = 10;
+        const CELL: u32 = 10;
+        const N: u32 = 80; // > GRAD_MAX(64)
+        let draw = |c: &mut dyn Canvas| {
+            for i in 0..N {
+                let (x, y) = ((i % COLS) * CELL, (i / COLS) * CELL);
+                let g = Gradient::linear(
+                    (0.0, 0.0),
+                    (1.0, 0.0),
+                    vec![(0.0, Color::rgb(0, 0, 0)), (1.0, WHITE)],
+                );
+                c.fill_rect(
+                    x as f32,
+                    y as f32,
+                    CELL as f32,
+                    CELL as f32,
+                    &Paint::gradient(g),
+                );
+            }
+        };
+        let interior: Vec<Box2> = (60..N)
+            .map(|i| ((i % COLS) * CELL + 2, (i / COLS) * CELL + 2, 6, 6))
+            .collect();
+        assert_matches_soft(
+            "grad_beyond_capacity",
+            COLS * CELL,
+            (N / COLS) * CELL,
+            1.0,
+            WHITE,
+            &interior,
+            draw,
+        );
+    }
+
+    /// 一帧内的实例总数超过缓冲容量时，帧中途换缓冲不能丢掉先前录的批。
+    ///
+    /// 帧末一次提交之后，同一个实例缓冲要装下帧内**所有**批次（各批依次往后排）；
+    /// 装不下就在帧中途换一张更大的并把游标归零。已录制的 pass 各自持着旧缓冲的
+    /// 引用，换掉字段是安全的——这条判据钉的正是「换缓冲那一刻之前录的批还在画」。
+    ///
+    /// 造多批的手段是 `push_layer`：每次 push/pop 各强制 flush 一次。20 层 × 30 个
+    /// 图元 = 600 个实例，超过 `prim.rs` 的 INIT_CAPACITY（512）。
+    #[test]
+    fn instance_buffer_growth_mid_frame_keeps_every_batch() {
+        const LAYERS: i32 = 20;
+        const PER: i32 = 30;
+        assert_matches_soft(
+            "instance_growth",
+            60,
+            40,
+            1.0,
+            WHITE,
+            &[(10, 8, 20, 24)],
+            |c| {
+                for i in 0..LAYERS {
+                    c.push_layer(1.0);
+                    // 同一层内画多个**重叠**的不透明矩形：视觉上等价于画一个，
+                    // 但实例数是 PER 倍——这里要的是实例数，不是画面复杂度。
+                    for _ in 0..PER {
+                        c.fill_rect(4.0 + i as f32, 4.0, 24.0, 24.0, &Paint::fill(RED));
+                    }
+                    c.pop_layer();
+                }
+            },
+        );
+    }
+
+    /// 一帧只提交一次 command buffer，无论帧内交错出多少批。
+    ///
+    /// 这条钉的是改动的**收益本身**。交错的次数与控件数同阶（一帧上百次），每次
+    /// `queue.submit` 在 Metal 上实测约 90 µs——退回「每批一提交」不会画错任何一个
+    /// 像素，只会让帧时间翻几倍，没有计数器就只能等到下次量帧率才发现。
+    #[test]
+    fn a_frame_submits_once_no_matter_how_many_batches() {
+        let Some(mut off) = offscreen(40, 40) else {
+            return;
+        };
+        let mut eng = crate::text::NullTextEngine;
+        let before = submit_count();
+        draw_on(&mut off, 1.0, WHITE, &mut eng, &|c: &mut dyn Canvas| {
+            // 10 次 push/pop = 至少 30 批（层清屏、层内几何、合成 quad 各一批）。
+            for i in 0..10 {
+                c.push_layer(1.0);
+                c.fill_rect(i as f32, 0.0, 8.0, 40.0, &Paint::fill(RED));
+                c.pop_layer();
+            }
+        })
+        .expect("readback");
+        assert_eq!(
+            submit_count() - before,
+            1,
+            "一帧应只提交一次 command buffer（回归成每批一提交了？）"
+        );
     }
 
     /// `push_layer` 后不 `pop_layer`：帧末断言必须炸。

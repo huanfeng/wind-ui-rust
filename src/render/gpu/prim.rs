@@ -113,8 +113,14 @@ pub(super) fn color_f32(c: Color) -> [f32; 4] {
 #[derive(Default)]
 pub(super) struct PrimBatch {
     instances: Vec<Instance>,
-    /// 渐变表，按 `GRAD_STRIDE` 一组连续存放。
+    /// 渐变表，按 `GRAD_STRIDE` 一组连续存放。**帧内累积**（`clear` 不动它）。
     grads: Vec<[f32; 4]>,
+    /// 已写进 GPU 渐变缓冲的 `vec4` 数（增量写的水位）。
+    ///
+    /// 存在 batch 上而不是 `PrimRenderer` 上：batch 每帧新建，水位于是自动随帧归零，
+    /// 也与 [`Self::reset_grads`] 天然配对——放渲染器上则两处都要各自记得重置，漏一处
+    /// 的症状是「此后整帧的渐变全部读到上一批的色标」，而现场看不出任何异常。
+    written: usize,
 }
 
 impl PrimBatch {
@@ -126,9 +132,23 @@ impl PrimBatch {
         self.instances.len()
     }
 
+    /// 清掉已画出去的实例。**渐变表不清**：它在帧内累积，见
+    /// [`PrimRenderer::flush`] 里「增量写」那段的理由。
     pub(super) fn clear(&mut self) {
         self.instances.clear();
+    }
+
+    /// 渐变表是否已满（本帧再登记就会退纯色）。满了要由调用方真提交一次并
+    /// [`Self::reset_grads`]——见 `canvas.rs::maybe_flush`。
+    pub(super) fn grads_full(&self) -> bool {
+        self.grads.len() / GRAD_STRIDE >= GRAD_MAX
+    }
+
+    /// 丢弃已累积的渐变表。**只能在引用它的实例都已提交之后调用**，否则那些实例
+    /// 会在执行时读到被覆盖的色标。
+    pub(super) fn reset_grads(&mut self) {
         self.grads.clear();
+        self.written = 0;
     }
 
     /// 登记一组渐变，返回 `(基址, 色标数, flags 里的渐变类型位)`。
@@ -400,6 +420,13 @@ pub(super) struct PrimRenderer {
     instances: wgpu::Buffer,
     /// 实例缓冲当前能放几个实例。
     capacity: usize,
+    /// 本帧已占用的实例槽数（帧内游标）。
+    ///
+    /// 一帧只提交一次之后，同一个缓冲要装下帧内**所有**批次：几何与文字交错时
+    /// 一帧有上百批，各批若都写偏移 0，后写的会在前一批执行前把数据覆盖掉
+    /// （`queue.write_buffer` 相对**提交**定序，不是相对录制定序——这正是 P2 记下
+    /// 的那条坑）。故各批依次往后排，帧末由 [`Self::end_frame`] 归零。
+    used: usize,
     /// 附着格式。文字/图片管线懒建时要用。
     format: wgpu::TextureFormat,
     /// 文字管线 + run-cache（懒建）。
@@ -522,9 +549,24 @@ impl PrimRenderer {
             grads,
             instances,
             capacity: INIT_CAPACITY,
+            used: 0,
             format,
             text: None,
             image: None,
+        }
+    }
+
+    /// 帧末收尾（三条管线一起）：归零帧内实例游标、收缩层纹理池。
+    ///
+    /// **必须在本帧的提交之后调用**——游标归零意味着下一帧会从缓冲头部重新写，而
+    /// 未提交的批次还指着那些字节。
+    pub(super) fn end_frame(&mut self) {
+        self.used = 0;
+        if let Some(t) = self.text.as_mut() {
+            t.end_frame();
+        }
+        if let Some(i) = self.image.as_mut() {
+            i.end_frame();
         }
     }
 
@@ -542,13 +584,6 @@ impl PrimRenderer {
             .get_or_insert_with(|| ImageRenderer::new(gpu, format))
     }
 
-    /// 帧末回收：目前只有层纹理池要收缩（没建过图片渲染器就没有池，直接跳过）。
-    pub(super) fn end_frame(&mut self) {
-        if let Some(img) = self.image.as_mut() {
-            img.end_frame();
-        }
-    }
-
     /// 把 `batch` 里攒的图元编码成一个 render pass 并提交，随后清空 batch。
     /// `LoadOp::Load`：目标已有内容（清屏或上一批）必须保留——painter's algorithm。
     pub(super) fn flush(
@@ -557,6 +592,8 @@ impl PrimRenderer {
         view: &wgpu::TextureView,
         size: (u32, u32),
         scale: f32,
+        scissor: Option<[u32; 4]>,
+        encoder: &mut wgpu::CommandEncoder,
         batch: &mut PrimBatch,
     ) {
         if batch.is_empty() || size.0 == 0 || size.1 == 0 {
@@ -575,24 +612,37 @@ impl PrimRenderer {
                 _pad: 0.0,
             }),
         );
-        if !batch.grads.is_empty() {
-            queue.write_buffer(&self.grads, 0, bytemuck::cast_slice(&batch.grads));
+        // 渐变表**增量写**：它在帧内只增不减，而一帧要提交上百批。每批重写全表是
+        // 每帧几 MB 的白搬运；只写新增的那一段则总量恒等于表本身。已写过的前缀不再
+        // 触碰，故先录的批次读到的仍是它登记时的那几组色标。
+        if batch.grads.len() > batch.written {
+            let from = batch.written;
+            queue.write_buffer(
+                &self.grads,
+                (from * 16) as u64,
+                bytemuck::cast_slice(&batch.grads[from..]),
+            );
+            batch.written = batch.grads.len();
         }
-        if batch.instances.len() > self.capacity {
+        let n = batch.instances.len();
+        if self.used + n > self.capacity {
             // 容量不足时翻倍（而不是恰好扩到需要的大小）：滚动/动画帧的图元数会在一个
             // 区间里反复抖动，恰好扩会变成每帧重建缓冲。
-            let mut cap = self.capacity.max(1);
-            while cap < batch.instances.len() {
+            //
+            // 帧中途换缓冲是安全的：本帧已录制的 pass 各自持着旧缓冲的引用（wgpu 内部
+            // 计数），换掉字段不会让它们悬空。新缓冲从头开始排，故游标一并归零。
+            let mut cap = self.capacity.max(1) * 2;
+            while cap < n {
                 cap *= 2;
             }
             self.instances = new_instance_buffer(device, cap);
             self.capacity = cap;
+            self.used = 0;
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&batch.instances));
+        let stride = std::mem::size_of::<Instance>() as u64;
+        let off = self.used as u64 * stride;
+        queue.write_buffer(&self.instances, off, bytemuck::cast_slice(&batch.instances));
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("windui prim encoder"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("windui prim pass"),
@@ -610,12 +660,15 @@ impl PrimRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some(r) = scissor {
+                pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..6, 0..batch.instances.len() as u32);
+            pass.set_vertex_buffer(0, self.instances.slice(off..off + n as u64 * stride));
+            pass.draw(0..6, 0..n as u32);
         }
-        queue.submit([encoder.finish()]);
+        self.used += n;
         batch.clear();
     }
 }

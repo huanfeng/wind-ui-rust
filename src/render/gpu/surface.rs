@@ -250,7 +250,13 @@ pub struct Frame<'a> {
 impl Frame<'_> {
     /// 本帧的渲染目标。交给宿主的 `render(&mut dyn RenderTarget, size)`。
     pub fn target(&mut self) -> WgpuTarget<'_> {
-        WgpuTarget::new(self.gpu.clone(), &self.view, &mut *self.prim, self.size)
+        WgpuTarget::new(
+            self.gpu.clone(),
+            &self.view,
+            &mut *self.prim,
+            self.size,
+            None,
+        )
     }
 
     /// 物理像素尺寸。

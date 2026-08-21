@@ -82,12 +82,12 @@ impl LayerTexture {
 
     /// 清成全透明。层必须从透明开始——它的 alpha 就是子树的覆盖度，残留上一帧的内容
     /// 会在合成时以「上一帧的影子」形式渗出来。
-    pub(super) fn clear(&self, gpu: &SharedGpu) {
-        let mut encoder = gpu
-            .device()
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("windui layer clear"),
-            });
+    ///
+    /// **录进调用方的帧 encoder，不自己提交**。自己提交会插到帧序列的最前面执行，而
+    /// 池是复用纹理的：`push A → pop A（合成时采样 A）→ push B（池里取回同一张）`
+    /// 这条路径下，B 的清屏会赶在「合成 A」之前跑掉，把 A 的像素抹成透明——症状是
+    /// 前一个层凭空消失，而成因在两层之外。
+    pub(super) fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("windui layer clear"),
@@ -106,7 +106,6 @@ impl LayerTexture {
                 multiview_mask: None,
             });
         }
-        gpu.queue().submit([encoder.finish()]);
     }
 }
 
