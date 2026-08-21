@@ -92,7 +92,7 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 事件循环 | `GetMessageW` 阻塞循环 | `NSApplication::run`，或自管 `NSEvent` 取 + `NSRunLoop` |
 | 创建窗口 | `CreateWindowExW` | `NSWindow::initWithContentRect_styleMask_...` |
 | 自绘视图 | 窗口类 + `WM_PAINT` | 自定义 `NSView` 子类，重写 `drawRect:` |
-| **blit 像素图** | `SetDIBitsToDevice`（R/B 原地交换为 BGRA） | `CGBitmapContext` 包裹 `Pixmap` 缓冲 → `CGImage` → `CGContextDrawImage`。⚠️ CG 坐标 Y 轴向上，需翻转 |
+| **blit 像素图** | `SetDIBitsToDevice`（R/B 原地交换为 BGRA） | `CGBitmapContext` 包裹 `Pixmap` 缓冲 → `CGImage` → `CGContextDrawImage`。⚠️ CG 坐标 Y 轴向上，需翻转；⚠️ 色彩空间见下 |
 | 请求重绘 | `InvalidateRect` | `NSView::setNeedsDisplay` |
 | HiDPI | `GetDpiForWindow` / `WM_DPICHANGED` | `NSWindow::backingScaleFactor` → `handler.set_scale`；监听 `windowDidChangeBackingProperties` |
 | 鼠标 | `WM_LBUTTONDOWN`/`MOUSEMOVE`/`MOUSEWHEEL` | `mouseDown:`/`mouseDragged:`/`mouseMoved:`/`scrollWheel:` → `PointerEvent` |
@@ -103,6 +103,18 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 文件拖放 | `WM_DROPFILES`（用 `on_drop_files()`） | `NSDraggingDestination`：`draggingEntered:`/`performDragOperation:` |
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
 | 窗口操作 | `take_window_op()` → `ShowWindow(SW_MINIMIZE/MAXIMIZE...)` | `NSWindow::miniaturize`/`zoom`/`close` |
+
+**呈现的色彩空间必须两边一致（性能不变量，别动）**：交出去的 `CGImage` 与窗口后备缓冲
+（`NSWindow::setColorSpace`）都用 **sRGB**。两者一旦不一致，`CGContextDrawImage` 就会在
+`CABackingStoreUpdate_` 里跑一次**整窗色彩管理转换**（`CGColorTransformConvertUsingCMSConverter`
+→ vImage `AnyToAny`：8 位查表升 16 位 → 过色调响应曲线 → 转回），实测占该平台每帧 CPU 的
+**61%**，比绘制本身贵一个量级；改对之后同一界面每帧 12.9ms → 8.3ms，闲置闪烁光标 6.3% → 1.8%。
+
+选 sRGB 而非"直接标成显示器的色彩空间"：后者同样能让转换退化成直通，但那是把 sRGB 像素值
+当作显示器原生值解释，广色域屏上颜色会整体变艳。声明 sRGB 是**陈述事实**（tiny-skia 画的就是
+sRGB 值），系统随后在合成器里做一次 sRGB→显示器的转换，与其他应用同路。原先用的 `DeviceRGB`
+是"设备相关"、没有 ICC 数据，解释方式没有保证——已实测它与 sRGB 经 Display P3 落地**逐字节
+相同**（含 `200,60,30 → 185,71,44` 这类大幅转换），故换成 sRGB 不改变任何颜色。
 
 **触摸/惯性（已定案，别再移植 win32 那套）**：触控板抬指后 AppKit 会继续投递
 `momentumPhase != None` 的 `scrollWheel:` 事件，动量/摩擦/衰减全由系统按用户的触控板设置算好，

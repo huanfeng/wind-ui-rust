@@ -21,15 +21,16 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
 
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSCursor, NSDragOperation,
-    NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase, NSGraphicsContext,
-    NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace, NSCursor,
+    NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase,
+    NSGraphicsContext, NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
 use objc2_app_kit::NSFilenamesPboardType;
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorRenderingIntent, CGColorSpace, CGContext, CGDataProvider, CGImage,
     CGImageAlphaInfo,
@@ -51,6 +52,21 @@ use crate::geometry::{Color, Point, Size};
 use crate::platform::{to_skia_color, Renderer};
 #[cfg(feature = "gpu")]
 use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
+
+/// sRGB 色彩空间（取不到时退回 DeviceRGB）。
+///
+/// `objc2-core-graphics` 没暴露 `CGColorSpaceCreateWithName`，故经 `NSColorSpace` 取。
+/// 与 [`create_window`] 里给窗口设的那份是同一个空间——两处必须一致，理由见
+/// `ContentView::new` 里对色彩管理开销的说明。
+fn srgb_color_space() -> Retained<CGColorSpace> {
+    NSColorSpace::sRGBColorSpace()
+        .CGColorSpace()
+        .unwrap_or_else(|| {
+            CGColorSpace::new_device_rgb()
+                .expect("CGColorSpaceCreateDeviceRGB 失败")
+                .into()
+        })
+}
 
 /// 帧截止的上限（秒）：控件自报的"下次才需要"再长也不超过这个。兜底而非配速——
 /// 控件报得过长（或算错）时，界面顶多迟钝 5 秒而不是永远冻住。对应 win32 的
@@ -298,7 +314,7 @@ struct ViewState {
     /// 随窗口存活；进程退出时连同 run loop 一并销毁（对照 win32 的 SetTimer）。
     interval_timers: Vec<Retained<NSTimer>>,
     /// 复用的 DeviceRGB 色彩空间。
-    color_space: CFRetained<CGColorSpace>,
+    color_space: Retained<CGColorSpace>,
     /// GPU 呈现目标。`Some` = 本窗走 GPU 路径（`pixmap` 与 CGImage 拷屏那一整套全不走）。
     ///
     /// **声明顺序即析构顺序，这两个字段的先后是必须的**：`WindowGpu` 里的 `wgpu::Surface`
@@ -687,7 +703,18 @@ impl ContentView {
         bg: Color,
         frameless: bool,
     ) -> Retained<Self> {
-        let color_space = CGColorSpace::new_device_rgb().expect("CGColorSpaceCreateDeviceRGB 失败");
+        // **sRGB 而非 DeviceRGB**，且必须与窗口后备缓冲的色彩空间（见 `create_window` 里的
+        // `setColorSpace`）一致——两边对上，`CGContextDrawImage` 才是直通拷贝。
+        //
+        // 不一致的代价是每帧一次**整窗色彩管理转换**：CoreGraphics 在 `CABackingStoreUpdate_`
+        // 里跑 `CGColorTransformConvertUsingCMSConverter` → vImage `AnyToAny`（8 位查表升 16 位
+        // → 过色调响应曲线 → 转回）。实测占 macOS 每帧 CPU 的 61%，比绘制本身贵一个量级。
+        //
+        // 选 sRGB 而不是"直接标成显示器的色彩空间"：后者同样能让转换退化成直通，但那是把
+        // 我们的 sRGB 像素值当作显示器原生值去解释，广色域屏上颜色会整体变艳。声明 sRGB 是
+        // **陈述事实**——tiny-skia 画的就是 sRGB 值——系统随后在合成器里做一次 sRGB→显示器
+        // 的转换，与其他应用走同一条路。DeviceRGB 则是"设备相关"，解释方式没有保证。
+        let color_space = srgb_color_space();
         let state = ViewState {
             handler,
             bg,
@@ -1730,6 +1757,9 @@ fn create_window(
         )
     };
     window.setTitle(&NSString::from_str(&cfg.title));
+    // 后备缓冲也用 sRGB：与我们交出去的 CGImage 同一个空间，`CGContextDrawImage` 才走直通，
+    // 否则每帧一次整窗 CMS 转换（占该平台每帧 CPU 的 61%）。详见 `ContentView::new`。
+    window.setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
     // 生命周期归 [`WINDOWS`] 表，不让 AppKit 在 `close` 时替我们 release——否则表里那份
     // `Retained` 立刻悬垂。详见 `WINDOWS` 的说明。
     //
