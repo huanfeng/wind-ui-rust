@@ -1197,6 +1197,9 @@ struct UiHost {
     /// 窗口在帧首 `anim::reset_request()` 会清掉前一个窗口刚提出的续帧请求，让它的动画
     /// 掉帧甚至冻住。收进实例字段后，每个宿主只回答自己那一份。
     wants_anim: bool,
+    /// 上一帧续帧请求里最早的截止（距那一帧的毫秒数），0 = 下一帧就要。与 `wants_anim`
+    /// 同源同期收割，理由相同（多窗口下不能读线程全局位）。`wants_anim` 为假时无意义。
+    next_delay: u32,
     /// 所属窗口是否激活（前台）。平台经 `on_window_activated` 通知，每帧注入给
     /// `ui::caret`：失活窗口的光标转静态、不再续帧。
     window_active: bool,
@@ -1382,6 +1385,7 @@ impl UiHost {
             pending_windows: Vec::new(),
             scope: None,
             wants_anim: false,
+            next_delay: 0,
             window_active: true,
             last_present: None,
         }
@@ -2085,6 +2089,10 @@ impl AppHandler for UiHost {
         // 那些路径各自有 `InvalidateRect` 兜底把帧唤起来，本方法只回答"上一帧画完后
         // 还要不要继续按帧驱动"这一件事。
         self.wants_anim
+    }
+
+    fn next_frame_delay_ms(&self) -> u32 {
+        self.next_delay
     }
 
     fn intervals(&self) -> Vec<std::time::Duration> {
@@ -3055,6 +3063,80 @@ mod tests {
         assert!(a.on_window_activated(true));
         frame!();
         assert!(a.wants_animation(), "重新激活应恢复续帧");
+    }
+
+    /// 帧截止：闪烁光标只需要"半周期之后"的那一帧，不该被按刷新率唤醒。
+    ///
+    /// 这是把方波光标的续帧开销压到接近静态的关键。判据故意宽松（只验数量级），
+    /// 精确的曲线对拍在 `ui::caret` 那边；这里验的是"控件报的截止确实传到了宿主"。
+    #[test]
+    fn blinking_caret_reports_a_far_frame_deadline() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::ui::caret::{BLINK_HALF_MS, TYPING_PAUSE_MS};
+        use tiny_skia::Pixmap;
+        crate::ui::caret::set_animated(true);
+        crate::ui::caret::set_window_active(true);
+        crate::ui::caret::set_blink_period_ms(Some(BLINK_HALF_MS as u32));
+
+        let text = crate::signal::signal(String::from("abc"));
+        let mut a = App::new("a", 120, 60)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::text_input(text, "").width_match().autofocus()),
+            )
+            .into_handler_for_test();
+        a.set_scale(1.0);
+        let mut pm = Pixmap::new(120, 60).unwrap();
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 60));
+        assert!(a.wants_animation(), "闪烁光标应请求续帧");
+        let d = a.next_frame_delay_ms();
+        // 刚出现的光标处在"打字暂停"里：先睡到暂停结束，再睡满一个亮半周期。
+        let ceiling = (TYPING_PAUSE_MS + BLINK_HALF_MS + 1) as u32;
+        assert!(
+            (100..=ceiling).contains(&d),
+            "闪烁光标不该要求按刷新率出帧（应在 100..={ceiling}ms），实报 {d}ms"
+        );
+
+        // 连续动画（不确定进度条）必须报 0：它每帧都在变，推迟唤醒就是掉帧。
+        let mut b = App::new("b", 120, 60)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::progress_indeterminate().width_match().height(8)),
+            )
+            .into_handler_for_test();
+        b.set_scale(1.0);
+        b.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 60));
+        assert!(b.wants_animation());
+        assert_eq!(b.next_frame_delay_ms(), 0, "连续动画应要求下一帧就出");
+
+        // 同窗口里两者并存 → 取较早的那个（0）。一个控件不能把整窗睡过去。
+        let text2 = crate::signal::signal(String::from("abc"));
+        let mut c = App::new("c", 120, 90)
+            .content(
+                Element::col()
+                    .fill()
+                    .child(Element::text_input(text2, "").width_match().autofocus())
+                    .child(Element::progress_indeterminate().width_match().height(8)),
+            )
+            .into_handler_for_test();
+        c.set_scale(1.0);
+        let mut pm2 = Pixmap::new(120, 90).unwrap();
+        c.render(&mut PixmapTarget { pixmap: &mut pm2 }, Size::new(120, 90));
+        assert_eq!(
+            c.next_frame_delay_ms(),
+            0,
+            "有连续动画在场时整窗必须回到满帧配速"
+        );
+
+        // 各宿主各记各的：`anim` 的截止是线程全局量，帧首会被清掉——与 `wants_anim`
+        // 同一个坑（见 `UiHost::wants_anim`），漏收就是"别的窗口把我的截止改了"。
+        assert!(
+            a.next_frame_delay_ms() >= 100,
+            "A 的截止不得被 B/C 的帧清成 0"
+        );
     }
 
     /// 回归（多窗口地基）：对话框栈必须归各自的树所有。

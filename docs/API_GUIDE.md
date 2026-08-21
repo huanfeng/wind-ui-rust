@@ -480,8 +480,11 @@ caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行
 > 即瞬移）。应用可用 `App::animations(false)` 一并关掉闪烁与滑行。
 
 > 闪烁只重绘光标那一条（自报脏区），不是整个输入框；局部帧还会跳过落在脏区外的节点自绘、
-> 只把脏区那几行呈现到窗口。**窗口失活、隐藏或最小化时一律不再驱动动画帧**——切到别的
-> 应用或托盘常驻应用「关窗即隐藏」后，留着焦点的输入框不会在后台空烧 CPU（实测失焦后 0%）。
+> 只把脏区那几行呈现到窗口。**方波闪烁还会报出下一次翻面的时刻**，帧驱动据此一直睡到那时
+> 才醒——一个半周期只出两帧而不是三十几帧（实测前台闪烁 2.2% → 0.3% 单核）。渐变类风格
+> （`Smooth`/`Phase`）每帧 alpha 都在变，仍按刷新率出帧，这也是 `Blink` 作默认的原因之一。
+> **窗口失活、隐藏或最小化时一律不再驱动动画帧**——切到别的应用或托盘常驻应用
+> 「关窗即隐藏」后，留着焦点的输入框不会在后台空烧 CPU（实测失焦后 0%）。
 > `--screenshot` 路径恒实心且强制整帧，保证视觉回归可比对。
 
 > 文本框支持输入 emoji 等补充平面字符（自动拼接 UTF-16 代理对），并以整个 emoji 为单位编辑（光标移动、删除按字符走）；emoji 彩色显示。
@@ -1551,6 +1554,13 @@ let dot = Element::leaf().widget(Dot { on: state });
 
 **持续动画**：在 `paint` 中调用 `windui::anim::request_repaint()` 即请求下一帧；框架会按显示器刷新率（≤60fps）驱动，停止请求即回到零 CPU 空闲。
 
+**定时动画**：画面每帧都在变时（补间、进度条）用上面那个；若下一次变化在若干毫秒之后
+（闪烁、秒级刷新的时钟），改用 `anim::request_repaint_in_after(rect, delay_ms)` 报出截止，
+框架会一直睡到那时才唤醒——文本光标正是靠它把方波闪烁的开销降到接近静态（实测同一界面
+2.2% → 0.3% 单核）。宿主取本帧所有请求里**最早**的那个，故同窗口里只要还有别的控件在
+连续动画，你报的截止就被压回满帧配速，不存在"某个控件把整窗睡过去"。
+**报早了只是白付几帧，报晚了会让动画卡在旧画面上**——拿不准就传 0。
+
 ### 9.1 测试收 `EventCtx` 的回调
 
 `EventCtx` 由宿主在真实分发路径上借出，字段私有、你造不出来。要在单元测试里跑一段收 ctx 的回调（菜单动作、`App::channel` 的 on_message、`Widget::on_event`），用 `windui::testing`：
@@ -1708,7 +1718,7 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::event` | `Event / PointerEvent / KeyEvent / Key / MenuItem` |
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
-| `windui::anim` | `request_repaint()`（驱动动画） |
+| `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画） |
 | `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.1） |
 
 更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口等）。

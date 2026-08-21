@@ -1048,12 +1048,15 @@ unsafe fn run_windowed(
     d2d::release_shared_device();
 }
 
-/// 消息循环：无动画时阻塞至下一条消息（零 CPU）；有动画时按**帧截止时间**配速——
-/// 唤醒后只要距上帧 ≥ FRAME_MS 就重绘一帧，故连续输入下不会超 60fps 空转，
-/// 拖动时也不会饿死动画。最小化时强制阻塞避免空转。
+/// 帧截止的上限（ms）：控件自报的"下次才需要"再长也不超过这个。
 ///
-/// 已知限制：OS 驱动的模态循环（窗口拖拽/缩放、系统菜单跟踪）期间本循环不执行，
-/// 动画会暂停至用户释放——单窗口小工具可接受；如需模态期间也动画，需补 WM_TIMER 兜底。
+/// 兜底，不是配速。控件报得过长（或算错）时，界面顶多迟钝 5 秒而不是永远冻住；
+/// 代价是最坏情况下每 5 秒一次空唤醒，可以忽略。光标那点周期（≤1.1s）够不着它。
+const MAX_FRAME_DELAY_MS: u128 = 5_000;
+/// 帧截止小于等于这个值才提升系统定时器分辨率（见 `TimerResolution`）。
+/// 约两个默认 tick（15.6ms）：超过这个尺度，等待被 tick 向上取整的误差已不影响观感。
+const HIRES_MAX_MS: u128 = 32;
+
 /// 提升系统定时器分辨率到 1ms 的 RAII 守卫。Drop 时 `timeEndPeriod` 归还，
 /// 覆盖 panic 展开与所有 return 路径，避免进程级 1ms 分辨率泄漏（影响系统电源）。
 struct TimerResolution;
@@ -1073,6 +1076,16 @@ impl Drop for TimerResolution {
     }
 }
 
+/// 消息循环：无动画时阻塞至下一条消息（零 CPU）；有动画时按**帧截止时间**配速——
+/// 唤醒后只要距上帧到了截止就重绘一帧，故连续输入下不会超刷新率空转，拖动时也不会
+/// 饿死动画。最小化/隐藏时不参与配速，避免空转。
+///
+/// 截止 = `max(刷新率间隔, 各窗口自报的下次变化时刻)`。前者是上界，后者是下界：控件说
+/// "我 530ms 后才变"（方波光标）就真的睡到那时，而不是按刷新率把同一幅画面重画 31 遍。
+/// 见 [`AppHandler::next_frame_delay_ms`](crate::platform::AppHandler::next_frame_delay_ms)。
+///
+/// 已知限制：OS 驱动的模态循环（窗口拖拽/缩放、系统菜单跟踪）期间本循环不执行，
+/// 动画会暂停至用户释放——单窗口小工具可接受；如需模态期间也动画，需补 WM_TIMER 兜底。
 unsafe fn run_message_loop() {
     let mut msg = MSG::default();
     let mut last_frame = std::time::Instant::now();
@@ -1106,14 +1119,32 @@ unsafe fn run_message_loop() {
             .collect();
         let animating = !pending.is_empty();
         if animating {
+            // 本轮的帧截止：不早于刷新率间隔（上界，不超 60/120fps），也不早于所有窗口
+            // 自报的"下次画面变化"时刻（下界，见 `AppHandler::next_frame_delay_ms`）。
+            //
+            // 取各窗口的**最小值**：只要还有一个窗口在连续动画，整条循环就回到满帧配速。
+            // 这条循环是共享的，按最慢的那个配速会让别的窗口掉帧。
+            let ask = pending
+                .iter()
+                .filter_map(|&h| state_from(h).map(|s| s.handler.next_frame_delay_ms() as u128))
+                .min()
+                .unwrap_or(0);
+            let due = frame_ms.max(ask.min(MAX_FRAME_DELAY_MS));
             // 提升定时器分辨率到 1ms：否则 MsgWait 超时被默认 ~15.6ms tick 向上取整，
             // 16ms 等待常变成 ~31ms → 实测掉到 ~30fps。
-            if hires.is_none() {
-                hires = Some(TimerResolution::raise());
+            //
+            // 只在真按帧配速时才提：1ms 分辨率是**进程级**的开销（拖低整机空闲功耗），
+            // 而截止在几百毫秒开外时（方波光标半周期才翻一次面）多等半个 tick 没人看得出。
+            if due <= HIRES_MAX_MS {
+                if hires.is_none() {
+                    hires = Some(TimerResolution::raise());
+                }
+            } else {
+                hires = None;
             }
             // 等待输入，至多到下一帧截止；零句柄，仅作可被输入中断的定时等待。
             let elapsed = last_frame.elapsed().as_millis();
-            let wait = frame_ms.saturating_sub(elapsed) as u32;
+            let wait = due.saturating_sub(elapsed).min(u32::MAX as u128) as u32;
             MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             // 非阻塞排空所有待处理消息。
             while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
@@ -1124,7 +1155,11 @@ unsafe fn run_message_loop() {
                 DispatchMessageW(&msg);
             }
             // 到达帧截止才推进一帧（与唤醒原因解耦，保证 ≤刷新率且不冻结）。
-            if last_frame.elapsed().as_millis() >= frame_ms {
+            //
+            // 门槛用 `due` 而非 `frame_ms`：被别的消息（鼠标移动、定时器）提前唤醒时，
+            // 若还没到画面该变的那一刻就不该白画一帧——那正是"拖着鼠标经过窗口时
+            // 光标窗口跟着满帧空转"的来源。
+            if last_frame.elapsed().as_millis() >= due {
                 for h in pending {
                     // 上一轮 PeekMessage 排空期间该窗口可能已被销毁（点了自己的关闭
                     // 按钮），`pending` 是那之前的快照，故逐个复核仍然有效。

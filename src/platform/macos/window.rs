@@ -52,6 +52,11 @@ use crate::platform::{to_skia_color, Renderer};
 #[cfg(feature = "gpu")]
 use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
 
+/// 帧截止的上限（秒）：控件自报的"下次才需要"再长也不超过这个。兜底而非配速——
+/// 控件报得过长（或算错）时，界面顶多迟钝 5 秒而不是永远冻住。对应 win32 的
+/// `MAX_FRAME_DELAY_MS`。
+const MAX_FRAME_DELAY_SECS: f64 = 5.0;
+
 thread_local! {
     /// 仍存活的 windui 窗口，**并且是它们的所有者**——对照 win32 的 `LiveWindows`。
     ///
@@ -1044,7 +1049,14 @@ impl ContentView {
                 return;
             }
         }
-        let interval = self.display_frame_interval();
+        // 帧截止 = max(刷新率间隔, 控件自报的"下次画面变化"时刻)。前者是上界（不超刷新率），
+        // 后者是下界（不早于真会变的那一刻）：方波光标每 530ms 才翻一次面，按刷新率调度
+        // 意味着中间 31 次定时器回调画出的像素与上一帧完全相同。对应 win32 循环里的 `due`。
+        //
+        // 先把值读进局部再建定时器：`ivars()` 的借用不能跨到 AppKit 调用里去（铁律 6）。
+        let ask = (self.ivars().borrow().handler.next_frame_delay_ms() as f64 / 1000.0)
+            .min(MAX_FRAME_DELAY_SECS);
+        let interval = self.display_frame_interval().max(ask);
         // repeats=false：一次性；下一帧 do_draw 再续约，故动画停止即自然停。
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(

@@ -5,6 +5,8 @@
 //!   宿主每帧绘制前 [`reset_request`]，绘制后读 [`animation_requested`] 决定是否继续驱动帧。
 //!   平台据此选唤醒机制（Win32 带超时的消息等待），无动画时回阻塞空闲（零 CPU）。
 //!   控件用 [`clock_ms`] 取当前帧单调时钟算动画相位。
+//!   续帧请求还带一个**截止时间**（[`next_frame_delay_ms`]）：控件可以说"我 530ms 后才需要
+//!   下一帧"，平台据此把唤醒推迟到那时——见 [`request_repaint_in_after`]。
 //! - **补间**（新增）：[`Easing`] 缓动曲线 + [`Transition`] 时间补间助手 + [`enabled`] 全局开关。
 //!   控件把 `Cell<Transition<T>>` 当字段持有，paint 内据状态 `retarget` 并 `animate()` 取值
 //!   （详见模块顶部"接入模式"）。全局关闭时所有补间瞬时收敛到目标值、不再续帧。
@@ -27,6 +29,19 @@ thread_local! {
     static DAMAGE_FULL: Cell<bool> = const { Cell::new(false) };
     /// 本帧是否有控件请求「下一帧重排」（布局动画：高度补间等每帧改变几何）。
     static RELAYOUT: Cell<bool> = const { Cell::new(false) };
+    /// 本帧续帧请求里**最早**的那个截止（距本帧的毫秒数）。`None` = 本帧没有续帧请求。
+    /// 取最小值：任何一个控件说"我马上要"，整窗就得按刷新率走。
+    static NEXT_DELAY: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// 记一笔续帧截止（毫秒），与本帧已有的取较早者。
+fn note_delay(delay_ms: u64) {
+    NEXT_DELAY.with(|c| {
+        c.set(Some(match c.get() {
+            Some(cur) => cur.min(delay_ms),
+            None => delay_ms,
+        }))
+    });
 }
 
 /// 本帧动画脏区。`Full`=需整窗重绘；`Rect`=仅该区域；`None`=无动画脏区。
@@ -39,6 +54,7 @@ pub(crate) enum Damage {
 /// 控件请求持续动画（在 paint 内调用）。宿主据此驱动下一帧，并把脏区归到当前绘制节点。
 pub fn request_repaint() {
     REQUEST.with(|c| c.set(true));
+    note_delay(0);
     match PAINT_RECT.with(|c| c.get()) {
         Some(r) => DAMAGE.with(|d| {
             let merged = match d.get() {
@@ -59,7 +75,24 @@ pub fn request_repaint() {
 /// 整棵树（见 `app::damage::render_partial`），报小了不会画错内容，只会把没进脏区的
 /// 那部分留成上一帧的残影。
 pub fn request_repaint_in(r: Rect) {
+    request_repaint_in_after(r, 0);
+}
+
+/// 同 [`request_repaint_in`]，但附带**截止时间**：`delay_ms` 毫秒之内画面不会变，平台可以
+/// 一直睡到那时再唤醒。
+///
+/// 这是「定时动画」与「连续动画」的分水岭。方波闪烁的光标每 530ms 才翻一次面，此前 31 帧
+/// 画出来的像素与上一帧完全相同——却照样把整条流水线（唤醒、遍历、光栅、上传）跑一遍。
+/// 报出截止后，它一个周期只出两帧，代价从"按刷新率续帧"塌回接近静态光标
+/// （[`CaretStyle::Solid`](crate::ui::CaretStyle::Solid)）。渐变类动画每帧 alpha 都在变，
+/// 仍传 0。
+///
+/// **报早了只是白付几帧；报晚了会让动画卡在旧画面上**，所以拿不准就传 0。宿主取本帧所有
+/// 请求里最早的那个（见 [`next_frame_delay_ms`]）：同窗口里只要还有别的控件在连续动画，
+/// 这条截止就被它压回 0，不存在"某个控件把整窗睡过去"的可能。
+pub fn request_repaint_in_after(r: Rect, delay_ms: u64) {
     REQUEST.with(|c| c.set(true));
+    note_delay(delay_ms);
     DAMAGE.with(|d| {
         let merged = match d.get() {
             Some(cur) => cur.union(&r),
@@ -135,11 +168,20 @@ pub(crate) fn reset_request() {
     DAMAGE_FULL.with(|c| c.set(false));
     PAINT_RECT.with(|c| c.set(None));
     RELAYOUT.with(|c| c.set(false));
+    NEXT_DELAY.with(|c| c.set(None));
 }
 
 /// 宿主/平台：本帧是否有控件请求了动画。
 pub(crate) fn animation_requested() -> bool {
     REQUEST.with(|c| c.get())
+}
+
+/// 宿主：本帧续帧请求里最早的截止（距本帧的毫秒数）。`None` = 本帧无续帧请求。
+///
+/// `Some(0)` 与 `None` 是**两回事**：前者是"下一帧就要"，后者是"不需要下一帧"。
+/// 平台先看 [`animation_requested`] 决定要不要驱动帧，再看这里决定隔多久驱动。
+pub(crate) fn next_frame_delay_ms() -> Option<u64> {
+    NEXT_DELAY.with(|c| c.get())
 }
 
 /// 宿主：设置当前帧时钟。
@@ -368,6 +410,51 @@ mod tests {
             "改向半程应约 25，实得 {}",
             tr.value()
         );
+    }
+
+    /// 截止时间取本帧所有请求里**最早**的那个：一个控件说"我可以睡 530ms"，另一个说
+    /// "我下一帧就要"，整窗必须按后者走。反过来才是 bug——那会让连续动画掉到 2fps。
+    #[test]
+    fn next_frame_delay_takes_the_earliest() {
+        let r = Rect::new(0, 0, 10, 10);
+        reset_request();
+        assert_eq!(next_frame_delay_ms(), None, "没人请求时应为 None");
+        assert!(!animation_requested());
+
+        request_repaint_in_after(r, 530);
+        assert_eq!(next_frame_delay_ms(), Some(530));
+        request_repaint_in_after(r, 90);
+        assert_eq!(next_frame_delay_ms(), Some(90), "应取较早者");
+        request_repaint_in_after(r, 800);
+        assert_eq!(next_frame_delay_ms(), Some(90), "较晚的请求不得推迟截止");
+
+        // 任何一个"马上要"都把整窗压回满帧。
+        request_repaint_in(r);
+        assert_eq!(next_frame_delay_ms(), Some(0));
+
+        // Some(0) 与 None 语义不同：前者要下一帧，后者不需要帧。
+        reset_request();
+        assert_eq!(next_frame_delay_ms(), None);
+        request_repaint_in_after(r, 0);
+        assert!(animation_requested());
+        assert_eq!(next_frame_delay_ms(), Some(0));
+        reset_request();
+    }
+
+    /// 节点级 `request_repaint`（补间 `animate()` 走这条）恒为"下一帧就要"：它不知道
+    /// 自己的曲线什么时候才变，只能按最保守的报。
+    #[test]
+    fn node_level_repaint_is_immediate() {
+        reset_request();
+        set_enabled(true);
+        set_clock(0);
+        let mut tr = Transition::new(0.0f32);
+        tr.retarget(100.0, 200, Easing::Linear);
+        set_clock(100);
+        tr.animate();
+        assert!(animation_requested());
+        assert_eq!(next_frame_delay_ms(), Some(0), "补间进行中应每帧都要");
+        reset_request();
     }
 
     #[test]

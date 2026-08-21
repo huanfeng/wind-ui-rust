@@ -149,6 +149,11 @@ impl UiHost {
         // 东西，都必须在下一帧 `reset_request` 抹掉它们之前收进本宿主。少收这一样，
         // 多窗口下就是"另一个窗口的帧把我的动画请求清了"（见 `UiHost::wants_anim`）。
         self.wants_anim = crate::anim::animation_requested();
+        // 续帧的**截止**同样是本帧的产物，与请求位一起收割。饱和到 u32：光标那点周期
+        // 远够用，而真出现天文数字（静态风格误入此路）时截成上限只是多睡一会儿。
+        self.next_delay = crate::anim::next_frame_delay_ms()
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32;
     }
 
     /// 局部重绘：把脏区渲染进脏区大小的子 pixmap（tiny-skia 按 pixmap 边界自动剔除框外

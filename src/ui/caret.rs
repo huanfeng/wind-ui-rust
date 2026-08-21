@@ -9,9 +9,10 @@
 //!   闪，闪烁只是"我在这儿等你"的空闲提示。
 //! - **移动**：同一视觉行内的位置变化用 [`MOVE_MS`] 缓出补间滑过去；换行、改行高、
 //!   首次出现则瞬移（跨行滑行会让光标斜着飞越文字，观感是拖沓而非流畅）。
-//! - **续帧与脏区**：paint 内自报脏区续帧（[`crate::anim::request_repaint_in`]），
+//! - **续帧与脏区**：paint 内自报脏区续帧（[`crate::anim::request_repaint_in_after`]），
 //!   脏区取「上一帧 ∪ 本帧」光标矩形，故闪烁每帧只重绘光标附近十几像素宽的一条，
-//!   而不是整个输入框。
+//!   而不是整个输入框。续帧还带**截止时间**（[`next_change_ms`]）：方波风格报出"下次翻面
+//!   在 530ms 后"，帧驱动就一直睡到那时，一个半周期只出两帧而不是三十几帧。
 //!
 //! **闪烁与「客户区动画」是两个开关**。系统的减弱动态效果（Windows
 //! `SPI_GETCLIENTAREAANIMATION`、macOS 减弱动态效果）管的是窗口/控件过渡，插入符闪烁另有
@@ -111,9 +112,10 @@ pub enum CaretStyle {
     Solid,
     /// 经典方波（默认）：亮/灭各半周期硬切换，与系统插入符一致。
     ///
-    /// 之所以是默认而非 [`Smooth`](Self::Smooth)：它只有两个状态，绝大多数帧画面不变，
-    /// 实测同一界面比渐变省三分之一 CPU（2.34% → 1.56% 单核）；观感上也是各系统
-    /// 文本框几十年的样子。要更柔和的过渡就切 `Smooth`。
+    /// 之所以是默认而非 [`Smooth`](Self::Smooth)：它只有两个状态，半周期内画面恒定，
+    /// 于是能报出"下次翻面在什么时候"（[`next_change_ms`]）让帧驱动睡过去——实测同一
+    /// 界面 0.3% 单核，而渐变风格每帧 alpha 都在变、只能按刷新率出帧，要 2.0%。
+    /// 观感上它也是各系统文本框几十年的样子。要更柔和的过渡就切 `Smooth`。
     #[default]
     Blink,
     /// 平滑呼吸：缓入缓出地淡入淡出，两端各驻留一小段。每帧 alpha 都在变，代价最高。
@@ -207,6 +209,41 @@ pub fn alpha_at(style: CaretStyle, phase_ms: u64, half_ms: u64) -> f32 {
     }
 }
 
+/// 给定风格与相位，求 [`alpha_at`] 的值**下次变化**还有多少毫秒。
+///
+/// 与 `alpha_at` 严格配对的另一半：一个答"现在多亮"，一个答"下次变亮/变暗是什么时候"。
+/// 有了后者，帧驱动才能从"按刷新率轮询"改成"睡到该变的那一刻"（见
+/// [`crate::anim::request_repaint_in_after`]）——方波光标一个周期只需两帧，而不是 60 帧。
+///
+/// 返回 `0` 表示**连续变化**（每帧都不一样，只能按刷新率出帧）；[`u64::MAX`] 表示永不变化。
+/// 两个端点都必须诚实：报晚了光标会卡在旧画面上，报早了只是白付几帧。
+pub fn next_change_ms(style: CaretStyle, phase_ms: u64, half_ms: u64) -> u64 {
+    let half = half_ms.max(1);
+    match style {
+        CaretStyle::Solid => u64::MAX,
+        // 方波：亮/灭各占半周期，下次翻面在本半周期结束时。
+        CaretStyle::Blink => half - phase_ms % half,
+        // 平滑呼吸：两端各有一段恒定的"保持"，中间是连续淡变。分支结构与 `alpha_at`
+        // 逐条对应——两处若各写各的，迟早在某个边界上一个说"还是 1.0"另一个说"该变了"。
+        CaretStyle::Smooth => {
+            let (hold, fade) = smooth_segments(half);
+            let t = phase_ms % (2 * half);
+            let fade_out_end = hold + fade;
+            let dark_end = fade_out_end + hold;
+            if t < hold {
+                hold - t
+            } else if t < fade_out_end {
+                0
+            } else {
+                // 暗端保持段 → 睡到保持结束；再往后是淡入段（连续变化）→ 饱和到 0。
+                dark_end.saturating_sub(t)
+            }
+        }
+        // 正弦起伏：任意两帧都不同值。
+        CaretStyle::Phase => 0,
+    }
+}
+
 /// 单个光标的运行时状态。控件按 `Cell` 内部可变持有（paint 取 `&self`）。
 #[derive(Debug, Default)]
 pub struct CaretState {
@@ -263,6 +300,31 @@ impl CaretState {
             // 暂停期内：实心。
             None => 1.0,
             Some(phase) => alpha_at(style, phase, half),
+        }
+    }
+
+    /// 本帧画面**下次变化**还有多少毫秒（0 = 连续变化，须按刷新率出帧）。
+    ///
+    /// 比 [`next_change_ms`] 多算一层打字暂停：暂停期内画面恒定，先睡到暂停结束，再加上
+    /// 相位 0 处到首次变化的距离。不闪（静态风格/系统关闭/窗口失活）时返回 [`u64::MAX`]，
+    /// 不过那种情况下 paint 根本不会续帧。
+    ///
+    /// 末尾 `+1`：睡到"刚好那一刻"会被时钟粒度磨成差 1ms 醒来，于是画出一模一样的一帧、
+    /// 再报 1ms——白付一帧还把翻面拖到下一个帧间隔。多睡 1ms 落在边界之后，稳。
+    fn next_change(&self, style: CaretStyle, now: u64) -> u64 {
+        let Some(half) = self.blink_half(style) else {
+            return u64::MAX;
+        };
+        let since = now.saturating_sub(self.last_activity.get());
+        let d = match since.checked_sub(TYPING_PAUSE_MS) {
+            None => (TYPING_PAUSE_MS - since).saturating_add(next_change_ms(style, 0, half)),
+            Some(phase) => next_change_ms(style, phase, half),
+        };
+        // 连续变化的风格保持 0：加了 1 就成了"1ms 后再来"，语义仍是每帧，但白绕一圈。
+        if d == 0 {
+            0
+        } else {
+            d.saturating_add(1)
         }
     }
 
@@ -345,7 +407,14 @@ impl CaretState {
         .inflate(1);
         self.last_rect.set(Some(rect));
         if self.blink_half(opts.style).is_some() || moving {
-            anim::request_repaint_in(dirty);
+            // 滑行中每帧都在动；否则睡到 alpha 下次变化那一刻。方波光标由此从"每帧都要"
+            // 变成"一个半周期两帧"，静止界面的续帧开销塌回接近静态光标。
+            let delay = if moving {
+                0
+            } else {
+                self.next_change(opts.style, now)
+            };
+            anim::request_repaint_in_after(dirty, delay);
         }
 
         if alpha <= ALPHA_EPS {
@@ -441,6 +510,111 @@ mod tests {
             (alpha_at(CaretStyle::Phase, 0, HALF) - 1.0).abs() < 1e-6,
             "相位 0 应最亮"
         );
+    }
+
+    /// `next_change_ms` 与 `alpha_at` 必须说同一件事：睡到它报的那一刻，alpha 一定
+    /// 已经变了；在那之前的任何一刻，alpha 一定还没变。这条对拍把两个函数钉在一起——
+    /// 它们各写各的分支，靠人眼对齐边界迟早出错，而错法是"光标卡在旧画面上"这种
+    /// 只有真跑窗口才看得出来的症状。
+    #[test]
+    fn next_change_agrees_with_alpha_curve() {
+        for style in [CaretStyle::Blink, CaretStyle::Smooth, CaretStyle::Phase] {
+            for half in [250u64, HALF, 1200] {
+                for phase in (0..(2 * half)).step_by(7) {
+                    let now = alpha_at(style, phase, half);
+                    let d = next_change_ms(style, phase, half);
+                    if d == 0 {
+                        continue; // 连续变化，无边界可验
+                    }
+                    // 截止**之前**（半开区间 [0, d)）恒定：报晚了会让光标卡在旧画面上。
+                    for t in [0, d / 3, d / 2, d - 1] {
+                        assert_eq!(
+                            alpha_at(style, phase + t, half),
+                            now,
+                            "{style:?} half={half} phase={phase}：距变化还有 {d}ms，\
+                             但 +{t}ms 就变了（报晚了 → 光标会卡住）"
+                        );
+                    }
+                    // 截止**当刻**：要么值已经变了（方波翻面），要么进入了逐帧变化的区间
+                    // （呼吸的淡变段起点，值还等于保持段的端点，但从此每帧都在动）。
+                    // 只断言前者会误伤后者，只断言后者则放过"报早了"。
+                    let changed = alpha_at(style, phase + d, half) != now;
+                    let continuous = next_change_ms(style, phase + d, half) == 0;
+                    assert!(
+                        changed || continuous,
+                        "{style:?} half={half} phase={phase}：报的 {d}ms 到了，\
+                         既没变值也不是连续段（白醒一帧）"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn next_change_endpoints() {
+        assert_eq!(
+            next_change_ms(CaretStyle::Solid, 0, HALF),
+            u64::MAX,
+            "永不变"
+        );
+        assert_eq!(next_change_ms(CaretStyle::Blink, 0, HALF), HALF);
+        assert_eq!(next_change_ms(CaretStyle::Blink, HALF - 1, HALF), 1);
+        assert_eq!(
+            next_change_ms(CaretStyle::Blink, HALF, HALF),
+            HALF,
+            "翻面即刻"
+        );
+        assert_eq!(next_change_ms(CaretStyle::Phase, 123, HALF), 0, "连续变化");
+        // 平滑呼吸：亮端保持段内可以睡到保持结束，淡变段内每帧都要。
+        let (hold, fade) = smooth_segments(HALF);
+        assert_eq!(next_change_ms(CaretStyle::Smooth, 0, HALF), hold);
+        assert_eq!(next_change_ms(CaretStyle::Smooth, hold, HALF), 0);
+        assert_eq!(next_change_ms(CaretStyle::Smooth, hold + fade / 2, HALF), 0);
+    }
+
+    /// 打字暂停期内画面恒定，可以一直睡到暂停结束（再加上相位 0 到首次变化的距离）。
+    /// 少算这一段，打字时光标就会按刷新率白白出帧——正是最该省的时候在最费。
+    #[test]
+    fn next_change_covers_typing_pause() {
+        set_animated(true);
+        set_window_active(true);
+        set_blink_period_ms(Some(BLINK_HALF_MS as u32));
+        let c = CaretState::new();
+        c.bump(10_000);
+        // 刚敲完：睡到暂停结束 + 半周期（暂停结束时相位 0 是亮的，还要亮满半周期）。
+        assert_eq!(
+            c.next_change(CaretStyle::Blink, 10_000),
+            TYPING_PAUSE_MS + BLINK_HALF_MS + 1
+        );
+        // 暂停中途。
+        assert_eq!(
+            c.next_change(CaretStyle::Blink, 10_000 + 200),
+            TYPING_PAUSE_MS - 200 + BLINK_HALF_MS + 1
+        );
+        // 暂停结束后按相位算。
+        assert_eq!(
+            c.next_change(CaretStyle::Blink, 10_000 + TYPING_PAUSE_MS + 100),
+            BLINK_HALF_MS - 100 + 1
+        );
+        // 连续变化的风格不加余量，仍是 0（= 每帧）。
+        assert_eq!(c.next_change(CaretStyle::Phase, 10_000 + 9_000), 0);
+    }
+
+    /// 不闪的三种情形都不需要下一帧：静态风格、系统关闭闪烁、窗口失活。
+    #[test]
+    fn static_caret_never_needs_a_frame() {
+        set_animated(true);
+        set_window_active(true);
+        set_blink_period_ms(Some(BLINK_HALF_MS as u32));
+        let c = CaretState::new();
+        c.bump(0);
+        assert_eq!(c.next_change(CaretStyle::Solid, 5_000), u64::MAX);
+        set_blink_period_ms(None);
+        assert_eq!(c.next_change(CaretStyle::Blink, 5_000), u64::MAX);
+        set_blink_period_ms(Some(BLINK_HALF_MS as u32));
+        set_window_active(false);
+        assert_eq!(c.next_change(CaretStyle::Blink, 5_000), u64::MAX);
+        set_window_active(true);
     }
 
     /// 渲染一次光标，返回 (非零列数, 非零行数, 是否存在半透明像素)。
