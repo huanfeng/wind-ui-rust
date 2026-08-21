@@ -72,6 +72,9 @@ fn srgb_color_space() -> Retained<CGColorSpace> {
 /// 控件报得过长（或算错）时，界面顶多迟钝 5 秒而不是永远冻住。对应 win32 的
 /// `MAX_FRAME_DELAY_MS`。
 const MAX_FRAME_DELAY_SECS: f64 = 5.0;
+/// 两帧之间的最小间隔（秒）。帧耗时超过目标间隔时的兜底：见
+/// [`ContentView::schedule_next_frame`] 里为什么不能取 0。
+const MIN_FRAME_DELAY_SECS: f64 = 0.001;
 
 thread_local! {
     /// 仍存活的 windui 窗口，**并且是它们的所有者**——对照 win32 的 `LiveWindows`。
@@ -310,6 +313,9 @@ struct ViewState {
     wheel_residual: f32,
     /// 动画帧的一次性定时器（仅动画期间存在；空闲为 None → 零唤醒）。每帧续约前先废止旧的。
     frame_timer: Option<Retained<NSTimer>>,
+    /// 本帧**开始绘制**的时刻。帧截止从这里起算而不是从帧画完起算——理由见
+    /// [`ContentView::schedule_next_frame`]。
+    frame_start: std::time::Instant,
     /// `on_interval` 的周期定时器（按 handler.intervals() 顺序，下标即回调 idx）。
     /// 随窗口存活；进程退出时连同 run loop 一并销毁（对照 win32 的 SetTimer）。
     interval_timers: Vec<Retained<NSTimer>>,
@@ -727,6 +733,7 @@ impl ContentView {
             capturing: false,
             wheel_residual: 0.0,
             frame_timer: None,
+            frame_start: std::time::Instant::now(),
             interval_timers: Vec::new(),
             color_space,
             #[cfg(feature = "gpu")]
@@ -807,6 +814,9 @@ impl ContentView {
 
     /// 渲染一帧并 blit 到屏。
     fn do_draw(&self) {
+        // 帧起点：`schedule_next_frame` 据此把下一帧排在「本帧开始 + 间隔」，而不是
+        // 「本帧画完 + 间隔」。软件路径与 GPU 路径都从这里进，故记在最前面就够。
+        self.ivars().borrow_mut().frame_start = std::time::Instant::now();
         let bounds = self.bounds();
         let scale = self
             .window()
@@ -1059,8 +1069,15 @@ impl ContentView {
         }
     }
 
-    /// 动画帧驱动：废止上一个待触发的帧定时器，若仍在动画则按刷新率调度下一次一次性重绘。
-    /// 仅在动画期间存在定时器，空闲时无定时器（零唤醒，优于常驻定时器）。对应 win32 消息循环的帧配速。
+    /// 动画帧驱动：废止上一个待触发的帧定时器，若仍在动画则排下一次一次性重绘。
+    /// 仅在动画期间存在定时器，空闲时无定时器（零唤醒，优于常驻定时器）。
+    /// 对应 win32 消息循环的帧配速。
+    ///
+    /// **两档**，判据是控件自报的截止与刷新周期谁大（详见下面 `delay` 处）：连续动画
+    /// 交给 CoreAnimation 的 vsync 配速、定时器尽早响；定时动画（光标闪烁）才由定时器
+    /// 按截止睡。非绘制路径（`windowDidBecomeKey:`、`show_and_activate`）也会调本方法，
+    /// 那时 `frame_start` 是上一帧的、已经很旧，于是延时落到最小值——正好，那些场合
+    /// 本就该立刻出一帧；随后的 `do_draw` 会把起点刷新，配速自动回正。
     fn schedule_next_frame(&self) {
         if let Some(t) = self.ivars().borrow_mut().frame_timer.take() {
             t.invalidate();
@@ -1081,13 +1098,40 @@ impl ContentView {
         // 意味着中间 31 次定时器回调画出的像素与上一帧完全相同。对应 win32 循环里的 `due`。
         //
         // 先把值读进局部再建定时器：`ivars()` 的借用不能跨到 AppKit 调用里去（铁律 6）。
-        let ask = (self.ivars().borrow().handler.next_frame_delay_ms() as f64 / 1000.0)
-            .min(MAX_FRAME_DELAY_SECS);
-        let interval = self.display_frame_interval().max(ask);
+        let (ask, spent) = {
+            let st = self.ivars().borrow();
+            (
+                (st.handler.next_frame_delay_ms() as f64 / 1000.0).min(MAX_FRAME_DELAY_SECS),
+                st.frame_start.elapsed().as_secs_f64(),
+            )
+        };
+        let refresh = self.display_frame_interval();
+        // **连续动画的配速器是 CoreAnimation 的 vsync，不是这个定时器。**
+        //
+        // 定时器只负责"再要一帧"：`frameTick:` 标脏之后，CA 至多每个 vsync 出一帧，
+        // 天然封顶在刷新率。所以这一档要**尽早**响——实测延时取 1ms 得到正好 60.1fps，
+        // 而且 CPU 与帧数成正比（没有多余唤醒，一帧仍只有一次定时器回调）。
+        //
+        // 反过来按"刷新率间隔"排是错的，实测只有 35.7fps：真正的像素工作发生在
+        // `drawRect:` 返回**之后**的 `CABackingStoreUpdate_` 里，本方法在 `do_draw` 末尾
+        // 量到的 `spent` 远小于一帧的真实耗时，于是定时器总在 vsync 截止之后才响，
+        // 每帧都要多等一个刷新周期。取一半（0.5×）也只到 52.5fps——差的不是补偿多少，
+        // 而是这一档根本不该由定时器定节奏。
+        let delay = if ask <= refresh {
+            MIN_FRAME_DELAY_SECS
+        } else {
+            // 定时动画（方波光标每 530ms 才翻面）：截止远大于刷新周期，按截止睡。
+            // 减去本帧已花掉的时间，使周期是 `ask` 而不是 `帧耗时 + ask`；晚一个 vsync
+            // 在这个尺度上无感，重要的是别累加。
+            //
+            // 兜底 `MIN_FRAME_DELAY_SECS` 而非 0：取 0 会让定时器永远处于"已到期"，
+            // 与输入源抢 run loop。
+            (ask - spent).max(MIN_FRAME_DELAY_SECS)
+        };
         // repeats=false：一次性；下一帧 do_draw 再续约，故动画停止即自然停。
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-                interval,
+                delay,
                 self,
                 sel!(frameTick:),
                 None,

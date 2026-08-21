@@ -104,6 +104,15 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
 | 窗口操作 | `take_window_op()` → `ShowWindow(SW_MINIMIZE/MAXIMIZE...)` | `NSWindow::miniaturize`/`zoom`/`close` |
 
+**连续动画的配速器是 CoreAnimation 的 vsync，不是 NSTimer**：`schedule_next_frame` 的定时器
+只负责"再要一帧"——`setNeedsDisplay` 之后 CA 至多每个 vsync 出一帧，天然封顶在刷新率。故
+控件要的是满帧时，定时器应**尽早**响（实测延时 1ms → 正好 60.1fps，且一帧仍只有一次定时器
+回调，CPU 与帧数成正比）。按"刷新率间隔"排反而只有 35.7fps：真正的像素工作在 `drawRect:`
+返回**之后**的 `CABackingStoreUpdate_` 里，帧末量到的耗时远小于真实耗时，定时器总在 vsync
+截止之后才响，每帧多等一个刷新周期；补偿到一半（0.5×）也只有 52.5fps——差的不是补偿多少，
+而是这一档根本不该由定时器定节奏。只有控件自报的截止**大于**刷新周期时（方波光标 530ms）
+才由定时器按截止睡，那时要减去本帧已花掉的时间，避免周期变成 `帧耗时 + 截止`。
+
 **呈现的色彩空间必须两边一致（性能不变量，别动）**：交出去的 `CGImage` 与窗口后备缓冲
 （`NSWindow::setColorSpace`）都用 **sRGB**。两者一旦不一致，`CGContextDrawImage` 就会在
 `CABackingStoreUpdate_` 里跑一次**整窗色彩管理转换**（`CGColorTransformConvertUsingCMSConverter`
