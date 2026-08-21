@@ -77,7 +77,7 @@ use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 
 use super::{to_skia_color, AppHandler, NewWindow, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
-use crate::geometry::{Color, Point, Size};
+use crate::geometry::{Color, Point, Rect, Size};
 
 thread_local! {
     /// wnd_proc 入口处写入当前 HWND；PickDialog::pick_* 读取以注入父窗口。
@@ -500,9 +500,12 @@ impl WinRenderBackend for SkiaBackend {
             let mut tgt = crate::render::PixmapTarget { pixmap };
             handler.render(&mut tgt, size);
         }
-        // 本帧宿主实际重画了哪些行（None = 整窗）。缓冲刚重建时内容还不完整，按整窗处理。
+        // 本帧宿主实际重画的**矩形**（None = 整窗）。缓冲刚重建时内容还不完整，按整窗处理。
+        //
+        // 必须留住矩形而不只是行范围：R/B 交换要按矩形做，按整行会把脏区左右两侧
+        // 已是 BGRA 的像素翻第二次（见 `swap_rb_rect`）。
         let drawn = match (self.fresh, handler.last_frame_damage()) {
-            (false, Some(d)) => Some((d.y.clamp(0, self.buf_h), d.bottom().clamp(0, self.buf_h))),
+            (false, Some(d)) => Some(d.intersect(&Rect::new(0, 0, self.buf_w, self.buf_h))),
             _ => None,
         };
         self.fresh = false;
@@ -521,7 +524,7 @@ impl WinRenderBackend for SkiaBackend {
             ps.rcPaint.top.clamp(0, self.buf_h),
             ps.rcPaint.bottom.clamp(0, self.buf_h),
         );
-        let (dy0, dy1) = drawn.unwrap_or((0, self.buf_h));
+        let (dy0, dy1) = drawn.map_or((0, self.buf_h), |d| (d.y, d.bottom()));
         let (y0, y1) = if py1 > py0 {
             (dy0.min(py0), dy1.max(py1))
         } else {
@@ -532,10 +535,18 @@ impl WinRenderBackend for SkiaBackend {
             return false;
         }
         let pixmap = self.pixmap.as_mut().unwrap();
-        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。**只翻本帧重画过的行**：
-        // 其余行早已是上一帧交换过的 BGRA，再翻一次就成了红蓝颠倒。
+        // RGBA 预乘 → BGRA（GDI 32bpp 字节序）原地交换 R/B。**只翻本帧重画过的那个矩形**：
+        // 其余像素早已是上一帧交换过的 BGRA，再翻一次就成了红蓝颠倒。按整行翻是不够的
+        // ——脏区左右两侧同样是"已翻过"的（见 `swap_rb_rect`）。
+        //
+        // 交换之后整张缓冲恒为 BGRA，故下面按行上传 union 范围是安全的。
         let stride = (self.buf_w * 4) as usize;
-        swap_rb_inplace(&mut pixmap.data_mut()[dy0 as usize * stride..dy1 as usize * stride]);
+        match drawn {
+            Some(d) => swap_rb_rect(pixmap.data_mut(), self.buf_w, d),
+            None => swap_rb_inplace(
+                &mut pixmap.data_mut()[dy0 as usize * stride..dy1 as usize * stride],
+            ),
+        }
         let bits = pixmap.data()[y0 as usize * stride..].as_ptr() as *const c_void;
 
         // top-down DIB 描述：直接从缓冲拷到设备，无需独立 DIB section。
@@ -700,6 +711,20 @@ impl WindowState {
 }
 
 /// 原地把 RGBA 缓冲逐像素交换 R/B（→ BGRA），供 GDI 直接呈现。
+/// 只对缓冲里的一个**矩形**做 R/B 交换（按行切片，逐行只翻 `[x, x+w)` 那一段）。
+///
+/// 局部帧只把脏**矩形**重画成 RGBA，其余像素仍是上一帧交换过的 BGRA。若按整行翻，
+/// 脏区左右两侧那些已是 BGRA 的像素会被翻第二次 → 红蓝颠倒。灰/白/黑处 R≈G≈B 看不出来，
+/// 只有饱和色显形，故这类错误极易漏网——务必按矩形翻。
+fn swap_rb_rect(data: &mut [u8], buf_w: i32, r: Rect) {
+    let stride = buf_w as usize * 4;
+    for y in r.y..r.bottom() {
+        let row = y as usize * stride;
+        let (a, b) = (row + r.x as usize * 4, row + r.right() as usize * 4);
+        swap_rb_inplace(&mut data[a..b]);
+    }
+}
+
 fn swap_rb_inplace(data: &mut [u8]) {
     let n = data.len() / 4;
     let p = data.as_mut_ptr() as *mut u32;
@@ -2537,7 +2562,7 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
 
 #[cfg(test)]
 mod live_windows_tests {
-    use super::LiveWindows;
+    use super::{swap_rb_inplace, swap_rb_rect, LiveWindows, Rect};
 
     /// 单窗口：关掉它就是关掉最后一个，消息循环该退出。
     #[test]
@@ -2570,6 +2595,52 @@ mod live_windows_tests {
         w.add(20, None);
         assert!(!w.remove(10));
         assert!(w.remove(20));
+    }
+
+    /// 回归：局部帧的 R/B 交换必须按**矩形**做，不能按整行。
+    ///
+    /// 曾按整行翻：脏区左右两侧那些**已是 BGRA** 的像素会被翻第二次，红蓝颠倒。
+    /// 灰/白/黑处 R≈G≈B 看不出来，只有饱和色显形——所以示例界面全绿、用户应用里
+    /// 有彩色的那几行出错。这里用一个红色底（R 与 B 差别最大）建模整条序列。
+    #[test]
+    fn partial_frame_swaps_only_the_damage_rect() {
+        const W: i32 = 8;
+        const H: i32 = 4;
+        let rgba_red = [0xFFu8, 0x00, 0x00, 0xFF]; // R=255 B=0
+        let bgra_red = [0x00u8, 0x00, 0xFF, 0xFF]; // 交换后
+        let mut buf: Vec<u8> = rgba_red
+            .iter()
+            .copied()
+            .cycle()
+            .take((W * H * 4) as usize)
+            .collect();
+
+        // 第一帧：整窗。宿主画出 RGBA，平台整窗交换 → 全缓冲变 BGRA。
+        swap_rb_inplace(&mut buf);
+        assert!(buf.chunks(4).all(|p| p == bgra_red), "整窗帧后应全为 BGRA");
+
+        // 第二帧：局部。宿主只把脏矩形重画成 RGBA（模拟 blit_back_rect_to：逐行只写这几列）。
+        let dmg = Rect::new(2, 1, 3, 2);
+        let stride = (W * 4) as usize;
+        for y in dmg.y..dmg.bottom() {
+            for x in dmg.x..dmg.right() {
+                let o = y as usize * stride + x as usize * 4;
+                buf[o..o + 4].copy_from_slice(&rgba_red);
+            }
+        }
+        swap_rb_rect(&mut buf, W, dmg);
+
+        // 判据：整张缓冲仍恒为 BGRA。脏区左右两侧若被二次交换，这里就会读到 RGBA。
+        for y in 0..H {
+            for x in 0..W {
+                let o = y as usize * stride + x as usize * 4;
+                assert_eq!(
+                    &buf[o..o + 4],
+                    &bgra_red,
+                    "({x},{y}) 应为 BGRA；脏区是 {dmg:?}，此处若成 RGBA 即被翻了两次"
+                );
+            }
+        }
     }
 
     /// 注销一个没登记过的句柄不得报告「已空」。
