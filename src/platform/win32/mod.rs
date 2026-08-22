@@ -57,19 +57,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, PostQuitMessage,
     RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
-    GWLP_USERDATA, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT,
-    HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, MINMAXINFO, MSG,
-    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK,
-    SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE,
-    WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM,
+    MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
+    SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
+    SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
+    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE,
+    WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_THICKFRAME,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -882,6 +883,9 @@ unsafe fn create_window(
     if let Some(s) = state_from(hwnd) {
         s.handler.set_scale(scale);
     }
+    // 初始状态推一次。不能只等 `WM_SIZE`：那条消息在窗口显示前不一定来过，而首次事件
+    // 分发（乃至首帧绘制）可能早于它——那时宿主读到的还是建窗配置推导出的猜测值。
+    push_window_state(hwnd);
 
     // GPU 后端选择：`cfg.renderer` 想要 GPU（或调试环境变量 WINDUI_D2D=1 强制）时，
     // 尝试用 Direct2D 后端替换软后端。try_create 需要已就绪的 HWND 与客户区尺寸，
@@ -1327,6 +1331,9 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_SIZE => {
+            // 状态推送在最小化早退**之前**：最小化本身就是一次状态变化，跳过它，
+            // 宿主眼里窗口就永远没最小化过。
+            push_window_state(hwnd);
             // 最小化（客户区 0×0）：无可见内容，跳过 resize/重绘，避免 1×1 无效缓冲。
             if wparam.0 as u32 == SIZE_MINIMIZED {
                 return LRESULT(0);
@@ -1610,6 +1617,26 @@ unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
 }
 
+/// 把窗口当前的状态与能力推给宿主（见 `AppHandler::on_window_state`）。
+///
+/// 能力位从**样式位**读而不是缓存 `cfg.resizable`：两者建窗时一致，但样式位是运行期的
+/// 真值。将来若加运行期改可缩放的能力，缓存那份会悄悄过期，而这里不会。
+///
+/// 两段式（铁律 6）：四个 OS 查询先做完，再借 `state_from` 写入。查询本身不重入，
+/// 但"OS 调用不留在借用里"是这一层的统一纪律——留一个例外，下一个人就得重新判断一遍。
+unsafe fn push_window_state(hwnd: HWND) {
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+    let st = crate::event::WindowState {
+        maximized: IsZoomed(hwnd).as_bool(),
+        minimized: IsIconic(hwnd).as_bool(),
+        maximizable: style & WS_MAXIMIZEBOX.0 != 0,
+        minimizable: style & WS_MINIMIZEBOX.0 != 0,
+    };
+    if let Some(state) = state_from(hwnd) {
+        state.handler.on_window_state(st);
+    }
+}
+
 /// 无边框窗口非客户区计算：客户区铺满整窗（去系统标题栏/边框）。
 /// 最大化时窗口会超出工作区一个边框厚度——按 DPI 内缩客户区，避免内容溢出屏幕/盖任务栏，
 /// 但**不重新插入标题栏**（这正是此前最大化露出系统标题栏的根因：当时误调了 DefWindowProc）。
@@ -1807,6 +1834,13 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
                 SW_MAXIMIZE
             };
             let _ = ShowWindow(hwnd, cmd);
+        }
+        Some(WindowOp::Maximize) => {
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+        }
+        // SW_RESTORE 同时覆盖"从最大化还原"与"从最小化还原"，这正是本 op 的语义。
+        Some(WindowOp::Restore) => {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         Some(WindowOp::Show) => show_and_activate(hwnd),
         Some(WindowOp::Hide) => {

@@ -1604,6 +1604,23 @@ impl EventCtx<'_> {
     pub fn toggle_maximize(&mut self) {
         self.out.window_op = Some(WindowOp::ToggleMaximize);
     }
+    /// 请求最大化窗口（已最大化则无操作）。
+    ///
+    /// 与 [`toggle_maximize`](Self::toggle_maximize) 的分工见 [`WindowOp::Maximize`]：
+    /// 按钮用 toggle，"最大化"与"还原"并列的菜单项用这一对。
+    pub fn maximize(&mut self) {
+        self.out.window_op = Some(WindowOp::Maximize);
+    }
+    /// 请求从最大化 / 最小化还原（本就是常规态则无操作）。
+    pub fn restore(&mut self) {
+        self.out.window_op = Some(WindowOp::Restore);
+    }
+    /// 当前窗口的状态与能力快照（是否最大化、能否最大化/最小化）。
+    ///
+    /// 读的是宿主在本次分发前注入的线程局部，见 [`crate::event::window_state`]。
+    pub fn window_state(&self) -> crate::event::WindowState {
+        crate::event::window_state()
+    }
     /// 请求显示并前置窗口。
     pub fn show_window(&mut self) {
         self.out.window_op = Some(WindowOp::Show);

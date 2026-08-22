@@ -28,7 +28,8 @@ pub mod ui;
 pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::event::{
-        CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, ToastKind,
+        window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, ToastKind,
+        WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::platform::{PickDialog, Renderer, Tray, TrayCtx, TrayMenuItem};

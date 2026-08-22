@@ -140,11 +140,36 @@ pub(super) fn run_window_op_on_main(op: WindowOp) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    apply_window_op(&win, op, mtm);
+}
+
+/// 在某个具体窗口上落地一个 [`WindowOp`]——**窗口操作语义的唯一实现**。
+///
+/// 两条入口（托盘/热键走 [`run_window_op_on_main`]、控件请求走视图的 `after_event`）此前
+/// 各写一份 `match`，注释也写着"实现必须一致"，实际已经走偏过一次（那份漏了
+/// `deminiaturize`）。同一个枚举在两处 `match`，加一个变体就要记得改两处——收口于此之后
+/// 编译器替我们记。对照 win32 的 `run_window_op`。
+pub(super) fn apply_window_op(win: &NSWindow, op: WindowOp, mtm: MainThreadMarker) {
     match op {
         WindowOp::Minimize => win.miniaturize(None),
         WindowOp::ToggleMaximize => win.zoom(None),
+        // macOS 的 `zoom` 是开关式的，故"只最大化"必须先问状态——直接调会把已经放大的
+        // 窗口缩回去，与本 op 的语义正好相反。
+        WindowOp::Maximize => {
+            if !win.isZoomed() {
+                win.zoom(None);
+            }
+        }
+        // 还原覆盖两种"非常规态"：最小化优先（此时 `isZoomed` 的值没有意义）。
+        WindowOp::Restore => {
+            if win.isMiniaturized() {
+                win.deminiaturize(None);
+            } else if win.isZoomed() {
+                win.zoom(None);
+            }
+        }
         // 三个入口（托盘点击 / 控件请求 / 全局热键）共用 `show_and_activate`，不再各写一份。
-        WindowOp::Show => show_and_activate(&win, mtm),
+        WindowOp::Show => show_and_activate(win, mtm),
         WindowOp::Hide => win.orderOut(None),
     }
 }
@@ -1555,14 +1580,9 @@ impl ContentView {
         }
         if let Some(op) = op {
             if let Some(win) = self.window() {
-                match op {
-                    WindowOp::Minimize => win.miniaturize(None),
-                    WindowOp::ToggleMaximize => win.zoom(None),
-                    // 与托盘、热键共用 `show_and_activate`（此前这份漏了 deminiaturize，
-                    // 最小化时从控件请求唤起不会还原窗口）。
-                    WindowOp::Show => show_and_activate(&win, MainThreadMarker::from(self)),
-                    WindowOp::Hide => win.orderOut(None),
-                }
+                // 与托盘、热键共用同一份实现（见 `apply_window_op`）：此前这里各写一份
+                // `match`，漏了 deminiaturize，最小化时从控件请求唤起不会还原窗口。
+                apply_window_op(&win, op, MainThreadMarker::from(self));
             }
         }
         // 此时 borrow_mut 已释放：对话框自带模态消息泵，运行期间会重入本视图的事件

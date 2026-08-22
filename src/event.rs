@@ -17,11 +17,97 @@ pub enum WindowOp {
     Minimize,
     /// 最大化 / 还原切换。
     ToggleMaximize,
+    /// 最大化窗口（已最大化时无操作）。
+    ///
+    /// 与 [`ToggleMaximize`](Self::ToggleMaximize) 并存而非取代它：标题栏的最大化**按钮**
+    /// 是一个能翻转的开关（toggle 正好），而系统菜单里「最大化」与「还原」是**两个并列
+    /// 的项**、其中一个恒为禁用——toggle 表达不了"点这一项只会最大化"。
+    Maximize,
+    /// 从最大化 / 最小化还原（本就是常规态时无操作）。
+    Restore,
     /// 显示并前置窗口（从隐藏态唤起）。
     Show,
     /// 隐藏窗口（进程继续存活）。配合托盘或全局热键使用；
     /// 无托盘图标也无热键时隐藏窗口，用户将无法再唤起它。
     Hide,
+}
+
+/// 窗口的当前状态与能力快照。
+///
+/// 平台层单向推送（`AppHandler::on_window_state`），宿主缓存一份并在事件分发 / 绘制前
+/// 注入线程局部，供 [`window_state()`] 与 `EventCtx::window_state()` 读取。典型用途是
+/// 自绘标题栏：系统菜单据此禁用不适用的项、最大化按钮据此在"方框"与"还原"图标间切换。
+///
+/// **不含 `resizable`**：可缩放与可最大化在 win32 上是同一个样式位的两面
+/// （`resizable(false)` 会同时剥掉 `WS_THICKFRAME` 与 `WS_MAXIMIZEBOX`），暴露两个字段
+/// 只会让调用方纠结该看哪个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    /// 当前已最大化。
+    pub maximized: bool,
+    /// 当前已最小化。
+    pub minimized: bool,
+    /// 可最大化。win32 下等价于窗口带 `WS_MAXIMIZEBOX`（`App::resizable(false)` 会剥掉它）。
+    pub maximizable: bool,
+    /// 可最小化。win32 下等价于窗口带 `WS_MINIMIZEBOX`。
+    pub minimizable: bool,
+}
+
+impl WindowState {
+    /// 一无所知时的保守快照：既没最大化也没最小化，且**什么都不能做**。
+    ///
+    /// 故意全 false 而不是"看着合理"的全 true。这个值只在**没有任何宿主注入过**时才会被
+    /// 读到（裸单测、库被当纯渲染器用），而那时框架确实不知道窗口能干什么。全 true 的
+    /// 失败模式是"菜单项可点、点了没反应"——无声且难查；全 false 的失败模式是"菜单项全灰"
+    /// ——一眼看得见。默认值本身就是答案的字段，必须选那个错得显眼的。
+    pub const UNKNOWN: Self = Self {
+        maximized: false,
+        minimized: false,
+        maximizable: false,
+        minimizable: false,
+    };
+
+    /// 建窗配置推导出的初始快照——平台推来真值**之前**就已经是对的。
+    ///
+    /// 不等平台推送是承重的：`resizable(false)` 的对话框式窗口若在首次推送前被问到
+    /// `maximizable`，拿到 `true` 就会画出一个可点的"最大化"菜单项。这与
+    /// `CoreTextEngine` 漏实现 `scale()` 拿默认 1.0 是同一类事故——默认值本身就是错的，
+    /// 且不报错。
+    pub(crate) fn from_config(resizable: bool) -> Self {
+        Self {
+            maximized: false,
+            minimized: false,
+            // 可最大化 == 可缩放：win32 建窗时 `resizable(false)` 一并剥掉 WS_MAXIMIZEBOX。
+            maximizable: resizable,
+            // 最小化不受可缩放影响：不可缩放的对话框照样能最小化。
+            minimizable: true,
+        }
+    }
+}
+
+thread_local! {
+    /// 当前窗口状态快照。宿主每次事件分发 / 绘制前注入（多窗口下各注各的，
+    /// 与主题快照、帧时钟同一套路数）。
+    static WINDOW_STATE: std::cell::Cell<WindowState> =
+        const { std::cell::Cell::new(WindowState::UNKNOWN) };
+}
+
+/// 当前窗口的状态与能力快照。
+///
+/// **仅在事件回调 / 菜单构建 / `paint` 期间有效**：宿主在进入这些阶段前注入，
+/// 与 [`theme::current()`](crate::theme::current) 同一机制。在这些阶段之外读到的是上一次
+/// 注入的残值（或 [`WindowState::UNKNOWN`]）。
+///
+/// 有 `EventCtx` 时优先用 `EventCtx::window_state()`——同一个值，但读的路径显式。
+/// 本自由函数是为**拿不到 ctx** 的地方准备的：`Element::on_context_menu` 的构建器签名是
+/// `Fn() -> Vec<MenuItem>`，不收 ctx。
+pub fn window_state() -> WindowState {
+    WINDOW_STATE.with(|s| s.get())
+}
+
+/// 注入当前窗口状态（宿主专用）。
+pub(crate) fn set_window_state(st: WindowState) {
+    WINDOW_STATE.with(|s| s.set(st));
 }
 
 /// 全局热键的修饰键组合。

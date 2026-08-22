@@ -998,6 +998,7 @@ impl App {
         } else if let Some(root) = self.content {
             Box::new(UiHost::new(
                 root,
+                &cfg,
                 theme_src,
                 cfg.bg,
                 !self.bg_explicit,
@@ -1023,6 +1024,7 @@ impl App {
         };
         UiHost::new(
             self.content.unwrap(),
+            &self.cfg,
             theme_src,
             self.cfg.bg,
             !self.bg_explicit,
@@ -1206,6 +1208,12 @@ struct UiHost {
     /// 本帧实际更新的物理区域；`None` = 整帧。供平台收窄呈现范围（见
     /// [`crate::platform::AppHandler::last_frame_damage`]）。
     last_present: Option<Rect>,
+    /// 本窗口的状态与能力快照（平台经 `on_window_state` 推送）。
+    ///
+    /// 每次事件分发 / 绘制前注入线程局部供控件与菜单构建器读取。**必须每次都注**、
+    /// 不做"变了才写"的优化：同线程多窗口下，注入是在回答"现在跑的是哪个窗口"，
+    /// 而不是在同步一个会变的值——省掉这一次，A 窗的菜单就会读到 B 窗的状态。
+    window_state: crate::event::WindowState,
 }
 
 impl Drop for UiHost {
@@ -1334,6 +1342,7 @@ impl UiHost {
 
     fn new(
         root: Element,
+        cfg: &WindowConfig,
         theme_src: ThemeHandle,
         bg: Color,
         bg_follows_theme: bool,
@@ -1346,6 +1355,10 @@ impl UiHost {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
         let theme = theme_src.current();
         crate::theme::set_current(theme.clone());
+        // 同理尽早注入窗口状态：平台的首次 `on_window_state` 要等到建窗完成，而
+        // `root.build` 期间就可能有人读它。这一份从建窗配置推导，能力位已经是对的。
+        let window_state = crate::event::WindowState::from_config(cfg.resizable);
+        crate::event::set_window_state(window_state);
         let mut tree = Tree::new();
         tree.root = Some(root.build(&mut tree));
         tree.clipboard = Some(Box::new(crate::platform::Clipboard));
@@ -1388,6 +1401,7 @@ impl UiHost {
             next_delay: 0,
             window_active: true,
             last_present: None,
+            window_state,
         }
     }
 
@@ -1403,6 +1417,18 @@ impl UiHost {
         let now = self.start.elapsed().as_millis() as u64;
         crate::anim::set_clock_ms(now);
         now
+    }
+
+    /// 本宿主开始干活了：把**属于这个窗口**的状态注入线程局部。
+    ///
+    /// 回答的是"现在跑的是哪个窗口"，不是"这个值变了没有"——所以无条件写，
+    /// 不做脏检查。同线程多窗口下省掉这一次，A 窗的标题栏菜单就会照着 B 窗的
+    /// 最大化状态画。
+    ///
+    /// **新增任何会跑用户回调或绘制的 `AppHandler` 方法时，先调它。** 漏掉的症状是
+    /// 那条路径上读到的窗口状态属于上一个活动的窗口——单窗口下永远看不出来。
+    fn enter(&self) {
+        crate::event::set_window_state(self.window_state);
     }
 
     /// 结构变化后按当前指针位置重新求值 hover：合成一个 Move 事件复用既有的 Enter/Leave
@@ -1534,6 +1560,8 @@ impl UiHost {
 
     /// 帧起始：排空跨线程通道、刷新主题快照与清屏色。
     fn begin_frame(&mut self) {
+        // 先于排空通道：`on_message` 回调拿到的 EventCtx 也该读到本窗口的状态。
+        self.enter();
         self.drain_channels();
         // 窗口激活态注入线程局部，供光标判定要不要闪（与帧时钟、主题快照同一套路数：
         // 多窗口下每帧各注各的）。
@@ -1813,6 +1841,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_pointer(&mut self, mut ev: crate::event::PointerEvent) -> bool {
+        self.enter();
         self.sync_clock();
         // 物理坐标 → 逻辑坐标（布局与命中均在逻辑空间）。
         let s = self.scale;
@@ -1927,6 +1956,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_window_shown(&mut self) -> bool {
+        self.enter();
         // 让 autofocus 重新兑现一次：从托盘/热键唤起是一段新交互的开始，与页面重新载入
         // 同构——查询框该重新拿到焦点、上次的词该重新被全选。没有这一步，第二次唤起时
         // 焦点还停在上次离开的地方，`autofocus_select_all` 的"全选"也不会再发生。
@@ -1944,6 +1974,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
+        self.enter();
         self.sync_clock();
         // 菜单激活时由浮层独占键盘：↑↓ 选项、←→ 进出子菜单、回车/空格执行、
         // Escape 关闭，其余吞掉（避免打到被遮住的控件上）。
@@ -1996,6 +2027,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_close_request(&mut self) -> bool {
+        self.enter();
         self.resolve_close()
     }
 
@@ -2053,6 +2085,7 @@ impl AppHandler for UiHost {
                 let root: Element = scope.collect(|| req.content.take());
                 let mut host = UiHost::new(
                     root,
+                    &cfg,
                     self.theme_src.clone(),
                     bg,
                     !bg_explicit,
@@ -2117,6 +2150,7 @@ impl AppHandler for UiHost {
     /// `interval_cbs` 与 `tree` 是不相交字段，可同时借；副作用消费要整个 `&mut self`，
     /// 故排在 `cb` 的借用结束之后。
     fn on_interval_fired(&mut self, idx: usize) -> bool {
+        self.enter();
         let Some(root) = self.tree.root else {
             return false;
         };
@@ -2129,6 +2163,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_drop_files(&mut self, pos: Point, paths: Vec<std::path::PathBuf>) -> bool {
+        self.enter();
         self.damage.needs_full = true;
         // 物理 → 逻辑（命中在逻辑空间），路由到落点下的控件。
         let s = self.scale;
@@ -2188,6 +2223,13 @@ impl AppHandler for UiHost {
         self.pending_window_op.take()
     }
 
+    fn on_window_state(&mut self, st: crate::event::WindowState) {
+        self.window_state = st;
+        // 立即注入而不是只等下一个入口：平台可能在 `WM_SIZE` 里推完就同步走到绘制，
+        // 中间不经过 `enter()`。重复注入是无害的（同一个值写两遍）。
+        self.enter();
+    }
+
     /// 控件经 `EventCtx` 请求的对话框优先；没有则取延迟闭包队列（已废弃的自由函数
     /// `defer_blocking` 的遗留入口）。
     fn take_dialog_request(&mut self) -> Option<DialogRequest> {
@@ -2207,6 +2249,7 @@ impl AppHandler for UiHost {
     }
 
     fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
+        self.enter();
         self.pan(pos, dy)
     }
 
@@ -3825,5 +3868,177 @@ mod tests {
             "#0g1",
             "复用槽位必须带出代际，否则与被回收的旧 id 在输出里长得一样"
         );
+    }
+
+    // ---- 窗口状态快照（P1：系统菜单的判据来源） ----
+
+    /// 跑一帧把布局算出来。命中测试靠的是 `abs_bounds`，而它要等第一次 arrange——
+    /// 不跑这一帧就直接合成点击，树里每个节点都是 0×0，点击静静地落空。
+    fn layout_once(host: &mut UiHost, w: u32, h: u32) {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let mut pm = tiny_skia::Pixmap::new(w, h).unwrap();
+        host.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            Size::new(w as i32, h as i32),
+        );
+    }
+
+    /// **这条是防"看起来合理的错误答案"的**：不可缩放窗口在平台推来第一次状态**之前**
+    /// 就必须报告 `maximizable == false`。
+    ///
+    /// 若初始值取 `true`（"多数窗口都能最大化"这个看着合理的猜测），对话框式窗口会画出
+    /// 一个可点的"最大化"菜单项——点了什么也不会发生，且不报错。默认值本身就是答案的
+    /// 字段，必须在构造时就问对，不能等推送。同类事故见 CoreTextEngine 漏实现 scale()。
+    #[test]
+    fn window_state_capability_is_right_before_any_platform_push() {
+        let host = App::new("t", 100, 100)
+            .resizable(false)
+            .content(Element::col())
+            .into_handler_for_test();
+        assert!(
+            !host.window_state.maximizable,
+            "resizable(false) 的窗口在首次推送前就该报告不可最大化"
+        );
+        assert!(
+            host.window_state.minimizable,
+            "不可缩放不等于不可最小化：对话框照样能最小化"
+        );
+        assert!(!host.window_state.maximized && !host.window_state.minimized);
+
+        let host = App::new("t", 100, 100)
+            .content(Element::col())
+            .into_handler_for_test();
+        assert!(host.window_state.maximizable, "默认可缩放窗口应可最大化");
+    }
+
+    /// 构造期就注入线程局部：`root.build` 与首个事件都早于平台的首次推送，
+    /// 它们读到的必须已经是本窗口的能力位，而不是 `WindowState::UNKNOWN`。
+    #[test]
+    fn window_state_is_injected_at_construction() {
+        let _host = App::new("t", 100, 100)
+            .content(Element::col())
+            .into_handler_for_test();
+        assert!(
+            crate::event::window_state().maximizable,
+            "构造完成时线程局部里就该是本窗口的状态"
+        );
+    }
+
+    /// 平台推送后，控件经 `EventCtx::window_state()` 读到的是新值——走真实的
+    /// 指针分发路径，不直接读字段。
+    #[test]
+    fn pushed_window_state_reaches_widget_callbacks() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind, WindowState};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use std::cell::Cell;
+
+        let seen = std::rc::Rc::new(Cell::new(None::<WindowState>));
+        let s = seen.clone();
+        let app = App::new("t", 200, 100).content(
+            Element::col()
+                .fill()
+                .clickable()
+                .on_click(move |ctx| s.set(Some(ctx.window_state()))),
+        );
+        let mut host = app.into_handler_for_test();
+        layout_once(&mut host, 200, 100);
+        host.on_window_state(WindowState {
+            maximized: true,
+            minimized: false,
+            maximizable: true,
+            minimizable: true,
+        });
+
+        let at = Point::new(20, 20);
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            at,
+            MouseButton::Left,
+        ));
+        host.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+
+        let seen = seen.get().expect("点击回调应跑到");
+        assert!(seen.maximized, "回调里读到的应是平台推送后的状态");
+    }
+
+    /// 同线程多窗口：每个宿主在自己的入口重注状态，A 窗的回调不能读到 B 窗的状态。
+    ///
+    /// 单窗口下这条永远是绿的——它钉的正是那个只在多窗口下才现形的缺陷。
+    #[test]
+    fn each_host_reinjects_its_own_window_state() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind, WindowState};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        use std::cell::Cell;
+
+        let seen = std::rc::Rc::new(Cell::new(None::<WindowState>));
+        let s = seen.clone();
+        // A 窗：可缩放，且已最大化。
+        let mut a = App::new("a", 200, 100)
+            .content(
+                Element::col()
+                    .fill()
+                    .clickable()
+                    .on_click(move |ctx| s.set(Some(ctx.window_state()))),
+            )
+            .into_handler_for_test();
+        layout_once(&mut a, 200, 100);
+        a.on_window_state(WindowState {
+            maximized: true,
+            minimized: false,
+            maximizable: true,
+            minimizable: true,
+        });
+        // B 窗后构造 —— 构造期会把**自己的**状态注入线程局部，覆盖掉 A 的。
+        let _b = App::new("b", 200, 100)
+            .resizable(false)
+            .content(Element::col())
+            .into_handler_for_test();
+
+        let at = Point::new(20, 20);
+        a.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            at,
+            MouseButton::Left,
+        ));
+        a.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+
+        let seen = seen.get().expect("点击回调应跑到");
+        assert!(
+            seen.maximized && seen.maximizable,
+            "A 窗的回调必须读到 A 的状态，读成 B 的说明入口处漏了重注：{seen:?}"
+        );
+    }
+
+    /// 「最大化」「还原」是两个并列的意图，不是一个开关——菜单里两项各自只做一件事。
+    #[test]
+    fn maximize_and_restore_are_separate_intents() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+
+        for (op, click) in [(WindowOp::Maximize, true), (WindowOp::Restore, false)] {
+            let app = App::new("t", 200, 100).content(Element::col().fill().clickable().on_click(
+                move |ctx| {
+                    if click {
+                        ctx.maximize()
+                    } else {
+                        ctx.restore()
+                    }
+                },
+            ));
+            let mut host = app.into_handler_for_test();
+            layout_once(&mut host, 200, 100);
+            let at = Point::new(20, 20);
+            host.on_pointer(PointerEvent::single(
+                PointerKind::Down,
+                at,
+                MouseButton::Left,
+            ));
+            host.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+            assert_eq!(host.take_window_op(), Some(op));
+        }
     }
 }
