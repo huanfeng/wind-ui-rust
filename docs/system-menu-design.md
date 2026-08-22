@@ -325,6 +325,23 @@ cargo run --example frameless -- --screenshot artifacts/frameless-sysmenu.png --
 | **P3** | win32 `WM_NCRBUTTONDOWN/UP` 打通 + `handle_pointer` 重构 | 手工清单全过 |
 | **P4** | 文档（`API_GUIDE` 章节 + 平台差异表）、`CHANGELOG`、`examples/frameless.rs` 演示覆盖用法 | `cargo build --examples` |
 
+### 实施后的修正（与上面的方案有出入之处）
+
+1. **默认接管加了平台门控**（`fill_system_menu` 里 `cfg!(target_os = "windows")`）。原方案
+   以为"macOS 侧留缝不实现"就等于不生效——错了：注入点在**宿主层**、完全平台无关，
+   而 macOS 的 frameless 右键本就直达控件树，不门控它照样会弹。且 macOS 不推送窗口状态，
+   弹出来「还原」永远是灰的。宁可不弹，也不弹一个状态说谎的菜单。
+2. **必须显式置 `res.repaint = true`**。原方案漏了这条：平台层只在 `on_pointer` 返回 true 时
+   `InvalidateRect`。不置它，菜单已经建在宿主里却一直不上屏——**逻辑测试全绿**，只有真窗口
+   才看得见。既有的 `on_context_menu` 路径没有显式置它却能工作，靠的是紧随其后的
+   `WM_RBUTTONUP`（菜单浮层的 `Up` 分支无条件返回 true，顺带触发了那一帧）；NC 路径刻意
+   不合成 `Up`，那份"顺带"就没有了。
+3. **`handle_pointer` 用加一层而非改签名**：拆出 `handle_pointer_at(hwnd, kind, button, x, y)`，
+   原函数保留为解包 lParam 的薄包装。既有 5 处调用点因此一行没动。
+4. **踩到一个 API 陷阱**：`MenuItem::run(label, f, bool)` 的第三个参数是 `checked`，而紧邻的
+   `MenuItem::key(label, key, bool)` 是 `enabled`。同形状、同为 bool、含义不同，写错不报错。
+   `system_menu_items` 一律走 `.enabled(..)` builder 绕开；`API_GUIDE` §8.2 加了警示。
+
 ### 顺带可做（不默认包含，需单独确认）
 
 - **`WindowButton::Maximize` 的还原图标**：P1 落地后，该按钮就能读到 `window_state()`，

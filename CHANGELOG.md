@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+- **自绘标题栏右键弹出窗口系统菜单**（Windows）：还原 / 最小化 / 最大化 / 关闭，按窗口
+  当前状态与能力自动置灰——已最大化时「最大化」灰而「还原」亮，`resizable(false)` 的
+  对话框式窗口两者皆灰。`frameless` 窗口**默认接管、零代码**；`App::system_menu(false)`
+  关掉；拖动区节点上写 `on_context_menu` 则用户菜单优先，要保留系统项就把
+  `windui::event::system_menu_items()` 拼进去。
+  三处值得记下来的：
+  - **win32 上标题栏右键此前是个黑洞**。拖动区在 `WM_NCHITTEST` 里答 `HTCAPTION`，
+    那块区域的鼠标消息因此全部走非客户区，客户区**永远收不到** `WM_RBUTTONDOWN`——
+    `on_context_menu` 挂在自绘标题栏上是天然失效的。现在拦 `WM_NCRBUTTONDOWN/UP`
+    转成客户区右键补进控件树，并**吞掉**这两条消息（不转 `DefWindowProcW`），
+    否则系统的灰色原生菜单会与自绘菜单一起冒出来。
+  - **框架此前问不出窗口状态**。新增 `WindowState`（是否最大化/最小化、能否最大化/
+    最小化），平台经 `AppHandler::on_window_state` 单向推送，`EventCtx::window_state()`
+    与自由函数 `windui::event::window_state()` 两条读法（后者供 `on_context_menu` 这类
+    拿不到 `ctx` 的构建器）。初始值**从建窗配置推导**而不是 `Default`：不可缩放的窗口在
+    平台推来真值之前就得报告"不可最大化"，取"看着合理"的 `true` 会画出一个可点却没反应
+    的菜单项，且不报错。
+  - **`WindowOp::{Maximize,Restore}`**：按钮是能翻转的开关（`ToggleMaximize` 正合适），
+    而菜单里「最大化」与「还原」是两个并列项、其中一个恒为禁用，toggle 表达不了。
+    macOS 侧顺带把 `WindowOp` 的两处重复 `match` 收成一个 `apply_window_op`——它们本就
+    写着"实现必须一致"却已走偏过（有一份漏了 `deminiaturize`）。
+  仅 Windows：macOS 无此惯例，且其平台层尚未推送窗口状态，弹出来禁用态会说谎，故不接管。
+
 - **单实例二次唤起真正把主窗带到前台**（Windows）。此前已有的
   `AllowSetForegroundWindow` 授权并不够：那个授权是**一次性**的，且在调用方失去前台、
   或期间发生用户输入时失效。实测「窗口开着时双击关联文件」正落在这一档——argv 送达、

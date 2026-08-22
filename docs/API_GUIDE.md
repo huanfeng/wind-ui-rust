@@ -644,6 +644,20 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 - `Element::window_drag()` 标记拖动区（自定义标题栏）：命中非交互区拖窗、命中可聚焦控件（按钮/输入）则不拖、交控件处理。
   判定**沿父链自内向外，先遇到谁听谁**：可聚焦节点算交互控件、`window_drag` 算拖动区。故拖动区里放 `.clickable()` 容器是安全的——容器内的文字、图标一并算交互区（这些子节点自己不可聚焦，只看落定节点的话会被判成拖窗，表现为"只有文字周围的空隙能点"）。反过来，可聚焦容器里再嵌一条 `window_drag` 也成立：内层更具体，拖动区赢。
 - `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`——关闭键与系统 × 同走关闭决策链，`on_close_request` 一样拦得住（见 §8.7）。
+- **拖动区右键弹出窗口系统菜单**（还原 / 最小化 / 最大化 / 关闭），按窗口当前状态与能力自动置灰——已最大化时「最大化」灰、「还原」亮；`resizable(false)` 的对话框式窗口两者皆灰。**默认开启，零代码**；`App::system_menu(false)` / `Window::system_menu(false)` 关掉。
+  项数恒为五（含分隔线）、只改可用性，与 Windows 系统菜单一致：项数固定，「第三行是最大化」这种肌肉记忆才成立。
+  「关闭」走 `request_close()`，与自绘 × 同一条关闭决策链，`on_close_request` 一样拦得住——右键菜单不是绕过守卫的后门。
+  要在系统菜单基础上**加自己的项**，在拖动区节点上写 `on_context_menu` 并拼进 `windui::event::system_menu_items()`（用户菜单存在时宿主不再插手）：
+  ```rust
+  Element::row().window_drag().on_context_menu(|| {
+      let mut items = windui::event::system_menu_items();
+      items.push(MenuItem::separator());
+      items.push(MenuItem::run("关于…", |ctx| ctx.toast("v0.1"), false));
+      items
+  })
+  ```
+  **仅 Windows**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
+- 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
 
@@ -1082,6 +1096,10 @@ ctx.show_context_menu(pos, vec![
 ]);
 ```
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
+
+⚠ 两个构造器的**第三个参数含义不同**：`run` 收 `checked`（勾选标记），`key` 收 `enabled`（可用性）。
+同样的位置、同样是 `bool`，写错不报错——症状是"该灰的项没灰，还多了个勾"。拿不准就传 `false`
+再链 `.enabled(..)` / `.check(..)` 显式表达。
 
 `MenuItem` 是 `#[non_exhaustive]` 的：**只能**经 `run` / `key` / `separator` / `submenu`
 四个构造器建，再链设置器改属性（`icon` / `shortcut` / `check` / `subtitle` / `badge` /
@@ -1679,6 +1697,8 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 | 窗口 / 事件循环 / 文字 / 触摸 / 剪贴板 / 托盘 / 文件拖放 / 无边框窗口 | ✓ | ✓ |
 | 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） |
 | 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 |
+| 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 |
+| 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
 | GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（feature `gpu`，默认**关**；不开该 feature 时 `Renderer::Gpu` 报错终止） |

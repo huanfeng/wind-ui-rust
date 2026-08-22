@@ -1458,6 +1458,13 @@ impl UiHost {
         ev: crate::event::PointerEvent,
         res: &mut crate::core::DispatchResult,
     ) {
+        // 默认接管**仅限 Windows**。macOS 没有"标题栏右键出系统菜单"这个惯例，更要紧的是
+        // 它的平台层还不推送窗口状态（`on_window_state` 未实现），真弹出来「还原」会永远
+        // 是灰的、「最大化」在已放大时也还亮着——宁可不弹，也不弹一个状态说谎的菜单。
+        // 想在 macOS 上自己做，`window_state()` 与 `system_menu_items()` 照常可用。
+        if !cfg!(target_os = "windows") {
+            return;
+        }
         if !self.frameless
             || !self.system_menu
             || ev.kind != PointerKind::Down
@@ -4184,6 +4191,7 @@ mod tests {
     }
 
     /// 默认接管：无边框窗口的拖动区右键，零代码弹出系统菜单。
+    #[cfg(target_os = "windows")]
     #[test]
     fn frameless_drag_region_right_click_opens_system_menu() {
         use crate::event::MouseButton;
@@ -4278,6 +4286,7 @@ mod tests {
     ///
     /// 用 End+Enter 而不是算像素点最后一项：项高/内边距是菜单的实现细节，
     /// 按它们算坐标的测试会在改版式时误报。
+    #[cfg(target_os = "windows")]
     #[test]
     fn system_menu_close_goes_through_the_close_guard() {
         use crate::event::{Key, KeyEvent, MouseButton};
@@ -4308,5 +4317,24 @@ mod tests {
 
         assert_eq!(asked.get(), 1, "菜单的关闭必须问过 on_close_request");
         assert!(!host.wants_close(), "守卫拒绝时不该关窗");
+    }
+
+    /// macOS 上默认**不**接管：系统无此惯例，且平台层还不推送窗口状态——
+    /// 弹出来的菜单会拿 `from_config` 那份猜测值画禁用态，「还原」永远是灰的、
+    /// 「最大化」在已放大时也还亮。宁可不弹，也不弹一个状态说谎的菜单。
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn system_menu_is_windows_only_for_now() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert!(
+            menu_rows(&host).is_empty(),
+            "非 Windows 平台不该默认接管标题栏右键"
+        );
     }
 }

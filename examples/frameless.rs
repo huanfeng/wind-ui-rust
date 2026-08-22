@@ -6,6 +6,8 @@
 //! - 拖动深色标题栏空白处移动窗口（按钮区自动排除，仍可点击）。
 //! - 标题栏上的「历史」是拖动区里的 `clickable()` 容器：**文字上**按下应弹提示，而不是拖窗。
 //! - 右上角三个按钮：最小化 / 最大化-还原 / 关闭。
+//! - **标题栏右键弹出窗口系统菜单**（Windows）：还原/最小化/最大化/关闭，按窗口状态自动置灰。
+//!   本例演示的是「系统菜单 + 自己的项」这一档——不写 `on_context_menu` 也有默认那四项。
 //! - 窗口四边/四角可缩放；保留 Aero 吸附与窗口投影。
 
 use windui::prelude::*;
@@ -23,6 +25,19 @@ fn main() {
         .cross(Align::Stretch)
         .bg(Color::hex(TITLE_BG))
         .window_drag()
+        // 标题栏右键：系统菜单 + 本应用自己的项。不写这一段也有默认的系统菜单
+        // （frameless 窗口开箱即接管）；写了则以本构建器为准，故要保留系统项就得
+        // 自己拼进去。项**每次右击现建**，禁用态因而总反映右击当刻的窗口状态。
+        .on_context_menu(|| {
+            let mut items = windui::event::system_menu_items();
+            items.push(MenuItem::separator());
+            items.push(MenuItem::run(
+                "关于 windui…",
+                |ctx| ctx.toast("windui — 自绘标题栏示例"),
+                false,
+            ));
+            items
+        })
         .child(
             Element::label("   windui — 无边框窗口")
                 .font_size(14.0)
