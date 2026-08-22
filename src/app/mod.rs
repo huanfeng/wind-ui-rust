@@ -121,6 +121,7 @@ impl Window {
                 resizable: true,
                 centered: false,
                 frameless: false,
+                system_menu: true,
                 min_width: 0,
                 min_height: 0,
                 bg: None,
@@ -212,6 +213,12 @@ impl Window {
     /// 无标题栏窗口（自定义标题栏），同 [`App::frameless`]。
     pub fn frameless(mut self, on: bool) -> Self {
         self.req.frameless = on;
+        self
+    }
+
+    /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单，同 [`App::system_menu`]。
+    pub fn system_menu(mut self, on: bool) -> Self {
+        self.req.system_menu = on;
         self
     }
 
@@ -446,6 +453,7 @@ impl App {
                 hotkeys: Vec::new(),
                 start_hidden: false,
                 frameless: false,
+                system_menu: true,
                 animations: None,
                 renderer: Renderer::default(),
                 min_width: 0,
@@ -822,6 +830,17 @@ impl App {
     /// `Element::window_button(...)` 放最小化/最大化/关闭按钮。
     pub fn frameless(mut self) -> Self {
         self.cfg.frameless = true;
+        self
+    }
+
+    /// 自绘标题栏的拖动区右键是否弹出**窗口系统菜单**（还原/最小化/最大化/关闭）。
+    /// 默认开启，仅 [`frameless`](Self::frameless) 窗口有意义。
+    ///
+    /// 三档取舍：什么都不写就有；想在系统菜单基础上加自己的项，在拖动区节点上写
+    /// `on_context_menu` 并拼进 [`system_menu_items`](crate::event::system_menu_items)
+    /// （用户菜单优先，宿主不再插手）；整个不要才关掉它。
+    pub fn system_menu(mut self, on: bool) -> Self {
+        self.cfg.system_menu = on;
         self
     }
 
@@ -1208,6 +1227,11 @@ struct UiHost {
     /// 本帧实际更新的物理区域；`None` = 整帧。供平台收窄呈现范围（见
     /// [`crate::platform::AppHandler::last_frame_damage`]）。
     last_present: Option<Rect>,
+    /// 无边框（自绘标题栏）模式。只有它为真时，拖动区右键才该弹系统菜单；
+    /// 带系统标题栏的窗口，那一下本就由系统自己处理了。
+    frameless: bool,
+    /// 拖动区右键是否默认接管为系统菜单（`App::system_menu`）。
+    system_menu: bool,
     /// 本窗口的状态与能力快照（平台经 `on_window_state` 推送）。
     ///
     /// 每次事件分发 / 绘制前注入线程局部供控件与菜单构建器读取。**必须每次都注**、
@@ -1401,6 +1425,8 @@ impl UiHost {
             next_delay: 0,
             window_active: true,
             last_present: None,
+            frameless: cfg.frameless,
+            system_menu: cfg.system_menu,
             window_state,
         }
     }
@@ -1417,6 +1443,39 @@ impl UiHost {
         let now = self.start.elapsed().as_millis() as u64;
         crate::anim::set_clock_ms(now);
         now
+    }
+
+    /// 无边框窗口的标题栏右键：控件树没人认领这次右键时，补上窗口系统菜单。
+    ///
+    /// **补在分发之后**，覆盖机制就是白拿的：拖动区节点上写了 `on_context_menu` 的话，
+    /// `res.menu` 已被用户的构建器填满，这里直接不插手——不需要另立一套优先级规则。
+    ///
+    /// 判据用 `drag_hit_at` 而**不是**"命中节点带 window_drag"：它与 win32 在
+    /// `WM_NCHITTEST` 里答 HTCAPTION 用的是同一个函数。两边若各判各的，就会出现
+    /// "这块地方拖得动却不弹菜单"（或反过来）的错位。
+    fn fill_system_menu(
+        &self,
+        ev: crate::event::PointerEvent,
+        res: &mut crate::core::DispatchResult,
+    ) {
+        if !self.frameless
+            || !self.system_menu
+            || ev.kind != PointerKind::Down
+            || ev.button != crate::event::MouseButton::Right
+            || res.menu.is_some()
+            || !self.tree.drag_hit_at(ev.pos)
+        {
+            return;
+        }
+        res.menu = Some(crate::event::MenuRequest {
+            pos: ev.pos,
+            items: crate::event::system_menu_items(),
+            min_width: 0,
+            anchor_top: None,
+            // 无粘滞项（四项点完即走），故不需要重建器。
+            rebuild: None,
+        });
+        res.consumed = true;
     }
 
     /// 本宿主开始干活了：把**属于这个窗口**的状态注入线程局部。
@@ -1879,6 +1938,7 @@ impl AppHandler for UiHost {
         let mut hover = self.hover;
         let mut capture = self.capture;
         let mut res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
+        self.fill_system_menu(ev, &mut res);
         // 诊断快照：命中的是哪个节点、有没有被消费。用 `hit_test` 而不是 `hover`——
         // 后者在 Up/Leave 上会被清掉，而我们要记的是「这一下点到哪儿了」。
         let hit = self.tree.hit_test(ev.pos);
@@ -2072,6 +2132,7 @@ impl AppHandler for UiHost {
                     centered: req.centered,
                     resizable: req.resizable,
                     frameless: req.frameless,
+                    system_menu: req.system_menu,
                     min_width: req.min_width,
                     min_height: req.min_height,
                     single: req.single,
@@ -4040,5 +4101,208 @@ mod tests {
             host.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
             assert_eq!(host.take_window_op(), Some(op));
         }
+    }
+
+    // ---- 标题栏系统菜单（P2） ----
+
+    /// 弹出的菜单顶级面板的（标签, 可用）列表；未弹菜单则为空。分隔线记作 `---`。
+    fn menu_rows(host: &UiHost) -> Vec<(String, bool)> {
+        match host.menu.active.as_ref() {
+            Some(m) => m.levels[0]
+                .items
+                .iter()
+                .map(|i| {
+                    let label = if i.separator {
+                        "---".to_string()
+                    } else {
+                        i.label.clone()
+                    };
+                    (label, i.enabled)
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 在客户区逻辑坐标处按下指定键。
+    fn press(host: &mut UiHost, x: i32, y: i32, button: crate::event::MouseButton) {
+        use crate::event::{PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(x, y),
+            button,
+        ));
+    }
+
+    /// 标题栏（整条可拖）+ 正文的最小无边框界面。
+    fn frameless_ui() -> Element {
+        Element::col()
+            .fill()
+            .child(Element::row().width_match().height(32).window_drag())
+            .child(Element::col().fill().weight(1.0))
+    }
+
+    /// 禁用矩阵：四种（已最大化 × 可最大化）组合下各项的可用性。
+    ///
+    /// 一并钉住**项数恒为五**（含分隔线）：同 Windows 系统菜单，只改可用性、不按条件增删。
+    /// 增删会让同一个位置每次点到不同的东西，"第三行是最大化"这种肌肉记忆就不成立了。
+    #[test]
+    fn system_menu_disable_matrix() {
+        use crate::event::WindowState;
+        for (maximized, maximizable, want_restore, want_max) in [
+            (false, true, false, true),   // 普通窗口，未最大化
+            (true, true, true, false),    // 普通窗口，已最大化
+            (false, false, false, false), // resizable(false)：对话框式窗口
+            (true, false, true, false),   // 不可最大化却已最大化（运行期改过样式）
+        ] {
+            crate::event::set_window_state(WindowState {
+                maximized,
+                minimized: false,
+                maximizable,
+                minimizable: true,
+            });
+            let rows = crate::event::system_menu_items();
+            assert_eq!(rows.len(), 5, "项数必须恒定");
+            assert_eq!(rows[0].label, "还原");
+            assert_eq!(rows[1].label, "最小化");
+            assert_eq!(rows[2].label, "最大化");
+            assert!(rows[3].separator, "第四行必须是分隔线");
+            assert_eq!(rows[4].label, "关闭");
+            assert_eq!(rows[0].enabled, want_restore, "还原：maximized={maximized}");
+            assert!(rows[1].enabled, "最小化不受可缩放影响");
+            assert_eq!(
+                rows[2].enabled, want_max,
+                "最大化：maximized={maximized} maximizable={maximizable}"
+            );
+            assert!(rows[4].enabled, "关闭恒可用");
+        }
+    }
+
+    /// 默认接管：无边框窗口的拖动区右键，零代码弹出系统菜单。
+    #[test]
+    fn frameless_drag_region_right_click_opens_system_menu() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+
+        let rows = menu_rows(&host);
+        assert_eq!(
+            rows.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
+            vec!["还原", "最小化", "最大化", "---", "关闭"],
+        );
+    }
+
+    /// 正文区右键不弹：系统菜单是"标题栏"的语义，不是"整个窗口"的。
+    #[test]
+    fn system_menu_only_on_the_drag_region() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 90, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "正文区不该弹系统菜单");
+    }
+
+    /// 带系统标题栏的窗口不接管：那一下本就由系统自己处理。
+    #[test]
+    fn non_frameless_window_does_not_take_over() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "非 frameless 窗口不该接管右键");
+    }
+
+    /// 关掉开关后彻底不弹。
+    #[test]
+    fn system_menu_switch_turns_it_off() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .system_menu(false)
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "system_menu(false) 后不该再弹");
+    }
+
+    /// 用户菜单优先：拖动区节点上写了 `on_context_menu` 时，宿主不再插手。
+    ///
+    /// 覆盖机制靠的是"补在分发之后"这个位置，不是另立的优先级规则——本测试钉住它。
+    #[test]
+    fn user_context_menu_wins_over_the_default() {
+        use crate::event::{MenuItem, MouseButton};
+        let ui = Element::col()
+            .fill()
+            .child(
+                Element::row()
+                    .width_match()
+                    .height(32)
+                    .window_drag()
+                    .on_context_menu(|| vec![MenuItem::run("自定义", |_| {}, true)]),
+            )
+            .child(Element::col().fill().weight(1.0));
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+
+        assert_eq!(
+            menu_rows(&host)
+                .iter()
+                .map(|(l, _)| l.as_str())
+                .collect::<Vec<_>>(),
+            vec!["自定义"],
+            "用户菜单应完整胜出，而不是与系统菜单拼在一起"
+        );
+    }
+
+    /// 菜单里的「关闭」走完整的关闭决策链，与自绘 × 按钮一致——否则右键菜单就成了
+    /// 绕过"有未保存的更改"守卫的后门。
+    ///
+    /// 用 End+Enter 而不是算像素点最后一项：项高/内边距是菜单的实现细节，
+    /// 按它们算坐标的测试会在改版式时误报。
+    #[test]
+    fn system_menu_close_goes_through_the_close_guard() {
+        use crate::event::{Key, KeyEvent, MouseButton};
+        use crate::platform::AppHandler;
+        use std::cell::Cell;
+        let asked = std::rc::Rc::new(Cell::new(0u32));
+        let a = asked.clone();
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .on_close_request(move |_ctx| {
+                a.set(a.get() + 1);
+                false
+            })
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert_eq!(menu_rows(&host).len(), 5, "菜单应已弹出");
+
+        let key = |k: Key| KeyEvent {
+            key: k,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+        };
+        host.on_key(key(Key::End)); // 跳到最后一项（关闭）
+        host.on_key(key(Key::Enter));
+
+        assert_eq!(asked.get(), 1, "菜单的关闭必须问过 on_close_request");
+        assert!(!host.wants_close(), "守卫拒绝时不该关窗");
     }
 }

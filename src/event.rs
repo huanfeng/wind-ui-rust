@@ -110,6 +110,55 @@ pub(crate) fn set_window_state(st: WindowState) {
     WINDOW_STATE.with(|s| s.set(st));
 }
 
+/// 标准窗口系统菜单四项：还原 / 最小化 / 最大化 /（分隔）/ 关闭。
+///
+/// 禁用态按 [`window_state()`] 当场决定，故**必须在菜单弹出的那一刻调用**（`on_context_menu`
+/// 的构建器里正合适），不能在构建界面时预先算好一份存起来——那份会停在窗口刚建出来的状态上。
+///
+/// 无边框窗口默认已经接管了标题栏右键（见 `App::system_menu`），本函数是给"想要系统菜单
+/// **再加几项自己的**"准备的：
+///
+/// ```no_run
+/// # use windui::prelude::*;
+/// Element::row().window_drag().on_context_menu(|| {
+///     let mut items = windui::event::system_menu_items();
+///     items.push(MenuItem::separator());
+///     items.push(MenuItem::run("关于", |ctx| ctx.toast("v0.1"), true));
+///     items
+/// });
+/// ```
+///
+/// **项数恒为五（含分隔线），只改可用性**，与 Windows 系统菜单一致：项数固定，用户的
+/// 肌肉记忆（"第三行是最大化"）才成立；按条件增删会让同一个位置每次点到不同的东西。
+pub fn system_menu_items() -> Vec<MenuItem> {
+    let st = window_state();
+    // 关闭的快捷键是**平台惯例**、不是框架注册的绑定：win32 上 Alt+F4 由 DefWindowProc
+    // 处理。别的平台上不写——标一个按了没反应的快捷键比不标更糟。
+    // 一律走 `.enabled(..)` builder，**不用** `MenuItem::run` 的第三个参数——那个是
+    // `checked`（勾选标记），而紧邻的 `MenuItem::key` 第三个参数却是 `enabled`。
+    // 两个构造器同形状、同为 bool、含义不同，写错的症状是"该灰的项没灰，还多了个勾"。
+    let item = |label: &str, enabled: bool, f: fn(&mut crate::core::EventCtx)| {
+        MenuItem::run(label, f, false).enabled(enabled)
+    };
+    let close = item("关闭", true, |ctx| ctx.request_close());
+    let close = if cfg!(target_os = "windows") {
+        close.shortcut("Alt+F4")
+    } else {
+        close
+    };
+    vec![
+        // 「还原」只在最大化时可用。最小化态在这里不可达（窗口最小化时标题栏点不到），
+        // 但 `ctx.restore()` 两种都能还原，故无需分支。
+        item("还原", st.maximized, |ctx| ctx.restore()),
+        item("最小化", st.minimizable, |ctx| ctx.minimize()),
+        item("最大化", st.maximizable && !st.maximized, |ctx| {
+            ctx.maximize()
+        }),
+        MenuItem::separator(),
+        close,
+    ]
+}
+
 /// 全局热键的修饰键组合。
 ///
 /// `meta` 在 Windows 上是 Win 键、macOS 上是 Command 键——同一概念的平台命名差异
@@ -651,6 +700,8 @@ pub struct WindowRequest {
     pub resizable: bool,
     pub centered: bool,
     pub frameless: bool,
+    /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
+    pub system_menu: bool,
     /// 最小客户区尺寸（逻辑 dp，0=不限制）。
     pub min_width: i32,
     pub min_height: i32,

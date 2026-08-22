@@ -1621,6 +1621,13 @@ impl EventCtx<'_> {
     pub fn window_state(&self) -> crate::event::WindowState {
         crate::event::window_state()
     }
+    /// 在 `pos`（逻辑坐标）弹出窗口系统菜单（还原/最小化/最大化/关闭，按当前状态禁用）。
+    ///
+    /// 无边框窗口的标题栏右键**默认就会弹**，无需调用本方法。它是为默认之外的入口准备的：
+    /// 标题栏左端的应用图标点一下弹菜单、自定义快捷键唤起等。
+    pub fn show_system_menu(&mut self, pos: Point) {
+        self.show_context_menu(pos, crate::event::system_menu_items());
+    }
     /// 请求显示并前置窗口。
     pub fn show_window(&mut self) {
         self.out.window_op = Some(WindowOp::Show);

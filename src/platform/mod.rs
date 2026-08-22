@@ -499,6 +499,9 @@ pub struct WindowConfig {
     pub start_hidden: bool,
     /// 无标题栏窗口（自定义标题栏）：客户区铺满整窗，保留系统级吸附/阴影/缩放。
     pub frameless: bool,
+    /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
+    /// 非 `frameless` 窗口上无意义——那时系统标题栏自己带原生菜单。
+    pub system_menu: bool,
     /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
     pub animations: Option<bool>,
     /// 渲染后端选择。默认 [`Renderer::Software`]。
@@ -532,6 +535,7 @@ impl Default for WindowConfig {
             hotkeys: Vec::new(),
             start_hidden: false,
             frameless: false,
+            system_menu: true,
             animations: None,
             renderer: Renderer::default(),
             min_width: 0,
