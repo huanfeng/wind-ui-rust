@@ -1476,6 +1476,10 @@ impl UiHost {
             rebuild: None,
         });
         res.consumed = true;
+        // 请求重绘。平台层只在 `on_pointer` 返回 true 时才 `InvalidateRect`——不置它，
+        // 菜单已经建在宿主里了却一直不上屏，直到下一次鼠标移动凑巧触发一帧。
+        // 脏区那一半不用操心：`menu.is_open()` 会把本帧升成整窗（见 `damage.rs` 的 overlay）。
+        res.repaint = true;
     }
 
     /// 本宿主开始干活了：把**属于这个窗口**的状态注入线程局部。

@@ -68,9 +68,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
-    WM_NCMOUSEMOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE,
-    WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
-    WS_THICKFRAME,
+    WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -1424,6 +1424,21 @@ unsafe extern "system" fn wnd_proc(
             handle_pointer(hwnd, PointerKind::Up, MouseButton::Right, lparam);
             LRESULT(0)
         }
+        // 无边框窗口的标题栏右键。拖动区在 `WM_NCHITTEST` 里答的是 HTCAPTION，于是那块
+        // 区域的鼠标消息全部走非客户区，客户区**永远收不到** WM_RBUTTONDOWN——
+        // `on_context_menu` 在自绘标题栏上因此天然失效。这两条分支把它接回客户区。
+        //
+        // 两条都**吞掉**（返回 0，不转 DefWindowProcW），这是"不出现两个菜单"的唯一保证：
+        // DefWindowProc 对 WM_NCRBUTTONUP 的默认处理就是弹系统的灰色原生菜单，与自绘
+        // 标题栏视觉割裂。非 HTCAPTION 的部位（缩放边框）同样吞掉、不弹任何东西——
+        // 无边框窗口没有系统外框，那里本就不该有系统菜单。
+        WM_NCRBUTTONDOWN if is_frameless(hwnd) => LRESULT(0),
+        WM_NCRBUTTONUP if is_frameless(hwnd) => {
+            if wparam.0 as u32 == HTCAPTION {
+                nc_right_click(hwnd, lparam);
+            }
+            LRESULT(0)
+        }
         WM_MOUSEWHEEL => {
             handle_wheel(hwnd, wparam, lparam);
             LRESULT(0)
@@ -1615,6 +1630,26 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
 /// 该窗口是否为无边框（自定义标题栏）模式。
 unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
+}
+
+/// 无边框窗口标题栏（HTCAPTION）上的右键：转成客户区右键**按下**交给控件树。
+///
+/// **在抬起时才弹、合成的却是 `Down`**——这处不对称是刻意的，别顺手改齐：
+/// - 抬起时弹是 Windows 惯例（原生标题栏系统菜单就是 `WM_NCRBUTTONUP` 才出），而且
+///   "右键按住在标题栏上移动"没有任何别的语义，按下即弹只会让菜单跟着乱跑；
+/// - 合成 `Down` 是因为框架的上下文菜单统一在 `Down` 上开（`Tree::dispatch_pointer`
+///   只在「非左键 + Down」时才建 `MenuRequest`）。合成 `Up` 什么也不会发生。
+///
+/// 坐标：NC 消息的 lParam 是**屏幕**坐标，客户区消息的是客户区坐标，两者不能混用。
+/// 转换后仍是物理像素，÷scale 由宿主 `on_pointer` 统一做——漏掉任一步的症状都是
+/// "高 DPI 下菜单弹在离光标几十像素的地方"。
+unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
+    let mut pt = POINT {
+        x: (lparam.0 & 0xffff) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+    };
+    let _ = ScreenToClient(hwnd, &mut pt);
+    handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
 }
 
 /// 把窗口当前的状态与能力推给宿主（见 `AppHandler::on_window_state`）。
@@ -2045,12 +2080,21 @@ unsafe fn frame_size_for_client(
 /// 两段式：先借 state 分发事件并读取意图，**释放借用后**再调用会同步重入
 /// WndProc 的 OS API（SetCapture/ReleaseCapture/DestroyWindow），避免 &mut 别名 UB。
 unsafe fn handle_pointer(hwnd: HWND, kind: PointerKind, button: MouseButton, lparam: LPARAM) {
+    let x = (lparam.0 & 0xffff) as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+    handle_pointer_at(hwnd, kind, button, x, y);
+}
+
+/// 同 [`handle_pointer`]，但直接收**已经是客户区物理像素**的坐标。
+///
+/// 单独一份是因为坐标来源有两种约定：客户区消息（`WM_*BUTTON*`）的 lParam 本就是客户区
+/// 坐标，而非客户区消息（`WM_NC*`）的 lParam 是**屏幕**坐标、须先 `ScreenToClient`。
+/// 让两种约定各自在调用方转换完再进来，比在这里塞一个"要不要转"的开关更难写错。
+unsafe fn handle_pointer_at(hwnd: HWND, kind: PointerKind, button: MouseButton, x: i32, y: i32) {
     // 触摸提升的鼠标消息：忽略（触摸已由 WM_TOUCH 完整处理，避免点击双重触发）。
     if is_touch_event() {
         return;
     }
-    let x = (lparam.0 & 0xffff) as i16 as i32;
-    let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
     // 仅按下时计算连续点击数；其余动作恒为单击。
     let click_count = if matches!(kind, PointerKind::Down) {
         let btn = match button {
