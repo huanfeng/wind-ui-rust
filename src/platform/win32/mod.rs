@@ -710,7 +710,6 @@ impl WindowState {
     }
 }
 
-/// 原地把 RGBA 缓冲逐像素交换 R/B（→ BGRA），供 GDI 直接呈现。
 /// 只对缓冲里的一个**矩形**做 R/B 交换（按行切片，逐行只翻 `[x, x+w)` 那一段）。
 ///
 /// 局部帧只把脏**矩形**重画成 RGBA，其余像素仍是上一帧交换过的 BGRA。若按整行翻，
@@ -725,6 +724,7 @@ fn swap_rb_rect(data: &mut [u8], buf_w: i32, r: Rect) {
     }
 }
 
+/// 原地把一段 RGBA 逐像素交换 R/B（→ BGRA），供 GDI 直接呈现。
 fn swap_rb_inplace(data: &mut [u8]) {
     let n = data.len() / 4;
     let p = data.as_mut_ptr() as *mut u32;

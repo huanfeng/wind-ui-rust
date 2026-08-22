@@ -798,6 +798,12 @@ pub(super) fn glyph_item(
 /// 加拉丁字母，按每个字号一份算），远比"每条 run 一张纹理"省。超过设备上限时按上限收。
 pub(super) const ATLAS_SIZE: u32 = 2048;
 
+/// 连续多少帧装不下就认定"稳态工作集超了"，关掉 atlas。
+///
+/// 取小值是因为这里判的是**稳态**：偶发的溢出（切页、一次性的大字号标题）只会连着一两帧,
+/// 重置一次就过去了；真的装不下则每帧都会撞上。
+const MAX_OVERFLOW_STREAK: u32 = 4;
+
 /// 货架之间允许的高度浪费比例：找不到高度足够接近的货架就新开一层。
 ///
 /// 放得太宽会让矮字形占着高货架（一层 40px 的货架塞满 12px 的字形，浪费 70%），
@@ -849,6 +855,12 @@ pub(super) struct GlyphAtlas {
     slots: HashMap<GlyphKey, AtlasSlot>,
     /// 本帧有字形没塞进去。帧末据此重置整张图（见结构体文档）。
     overflowed: bool,
+    /// 连续溢出的帧数。**稳态**工作集就装不下时（CJK 密集界面 × 多字号 × 2× DPI），
+    /// "溢出→帧末重置→下一帧全部重新光栅→再溢出"会每帧循环一遍，比根本不用 atlas
+    /// 还慢——而且悄无声息。连着几帧都这样就认定装不下，见 [`Self::end_frame`]。
+    overflow_streak: u32,
+    /// 已认定装不下，本目标不再用 atlas（文字全部退回整段光栅）。
+    disabled: bool,
     /// 已装入的字形数与像素数（`WINDUI_PROF` 报告用）。
     glyphs: usize,
     px: usize,
@@ -868,6 +880,8 @@ impl GlyphAtlas {
             shelves: Vec::new(),
             slots: HashMap::new(),
             overflowed: false,
+            overflow_streak: 0,
+            disabled: false,
             glyphs: 0,
             px: 0,
         }
@@ -946,6 +960,9 @@ impl GlyphAtlas {
         src: &mut dyn GlyphSource,
         key: &GlyphKey,
     ) -> Option<AtlasSlot> {
+        if self.disabled {
+            return None;
+        }
         if let Some(s) = self.slots.get(key) {
             return Some(*s);
         }
@@ -1021,6 +1038,24 @@ impl GlyphAtlas {
         sampler: &wgpu::Sampler,
     ) {
         if !self.overflowed {
+            // 有一帧没溢出，就说明工作集装得下，此前那次是偶发（换页、临时的大字号）。
+            self.overflow_streak = 0;
+            return;
+        }
+        self.overflow_streak += 1;
+        if self.overflow_streak >= MAX_OVERFLOW_STREAK {
+            // 连着这么多帧都装不下 ⇒ **稳态**工作集就超了。继续"重置→重光栅→再溢出"
+            // 只会每帧把所有字形重新过一遍 Core Text，比根本不用 atlas 还慢。索性关掉,
+            // 退回整段光栅那条已知可用的路——并且**明确报出来**：这是一处性能悬崖，
+            // 悄悄地慢下去比慢本身更难查。
+            self.disabled = true;
+            self.slots.clear();
+            self.shelves.clear();
+            self.overflowed = false;
+            notice_once(
+                &ATLAS_FULL,
+                "windui: gpu 字形 atlas 连续装不下（字形工作集超过一张 2048² 图），                 已关闭 atlas，文字改走整段光栅——绘制会变慢但画面不受影响",
+            );
             return;
         }
         notice_once(

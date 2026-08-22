@@ -63,6 +63,9 @@ pub struct WindowGpu {
     /// 会跳回过去。软后端的对应物是宿主维护的后备 `Pixmap`（`app/damage.rs`）；这边把
     /// 它放在目标侧，因为 GPU 的像素读不回宿主。
     back: Option<BackBuffer>,
+    /// surface 的纹理能否当拷贝目标（`COPY_DST`）。为假时不建后备缓冲，绘制直接打在
+    /// drawable 上、恒整窗重绘。见 [`Self::new`] 里那段。
+    can_back: bool,
 }
 
 /// 常驻后备色纹理。格式与 surface 一致（present 前要整张拷过去）。
@@ -100,9 +103,22 @@ impl WindowGpu {
             wgpu::CompositeAlphaMode::Auto
         };
         let (w, h) = clamp_size(&gpu, size)?;
+        // `COPY_DST` 是局部重绘的前提（帧末要把后备缓冲整张拷进 drawable，见 [`BackBuffer`]）,
+        // 但**不是 GPU 后端本身的前提**。surface 不给这个用法时降级成"没有后备缓冲"——
+        // 恒整窗重绘，与本次改动之前一模一样——而不是整个回退软件路径。
+        //
+        // 必须查 `caps.usages`：`configure` 收到不支持的用法会抛验证错误，而 wgpu 的验证
+        // 错误默认是未捕获的（→ panic）。那等于把"这台机器的 swapchain 不支持拷入"变成
+        // 崩溃，比降级糟得多，也绕过了本函数其余三处（格式/呈现模式/alpha）精心留好的
+        // 优雅回退。
+        let want = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST;
+        let can_back = caps.usages.contains(want);
         let config = wgpu::SurfaceConfiguration {
-            // `COPY_DST`：帧末把后备缓冲整张拷进本帧的 drawable（见 [`BackBuffer`]）。
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
+            usage: if can_back {
+                want
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
             format,
             // 颜色空间交后端定（= 历史行为）。本项目的通道值本就是 sRGB 编码字节，
             // 不走宽色域/HDR——那会改变「写进去的字节即最终像素」这条全链约定。
@@ -125,6 +141,7 @@ impl WindowGpu {
             prim,
             needs_reconfigure: false,
             back: None,
+            can_back,
         })
     }
 
@@ -204,6 +221,9 @@ impl WindowGpu {
     /// 按需（重）建后备色纹理。尺寸与 surface 配置一致；尺寸变了就换一张，新的那张
     /// 未 seeded，于是下一帧必然被判成整窗——这正是 resize 之后应有的行为。
     fn ensure_back(&mut self) {
+        if !self.can_back {
+            return;
+        }
         let size = (self.config.width, self.config.height);
         if self.back.as_ref().is_some_and(|b| b.size == size) {
             return;

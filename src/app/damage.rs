@@ -9,7 +9,7 @@
 use tiny_skia::Pixmap;
 
 use crate::core::DamageReq;
-use crate::geometry::{Point, Rect, Size};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::{Paint, RenderTarget, SkiaCanvas};
 
 use super::UiHost;
@@ -206,12 +206,22 @@ impl UiHost {
         target.begin_damage(Some(pdmg), self.bg);
         {
             let mut canvas = target.make_canvas(&mut self.engine, s);
+            // 脏区铺底要的是**替换**，不是叠加：常驻纹理里留着上一帧的像素，而软后端那条
+            // 路走的是 `sub.fill(bg)`（覆盖）、GPU 整窗帧走的是 `LoadOp::Clear`（覆盖）。
+            // 这里只能经图元管线，而它恒是预乘 over 混合——`bg` 若带透明度，每个局部帧
+            // 就会把底色再叠一层到旧像素上，动的那个元素在脏区里拖出残影，而窗口其余部分
+            // （由整窗帧重画）看着正常。
+            //
+            // 故显式取不透明的那一份：`a = 255` 时 over 恰好退化成覆盖。丢掉 alpha 是安全的
+            // ——窗口的合成模式是 `Opaque`（见 `render/gpu/surface.rs`），drawable 的 alpha
+            // 本就被窗口系统忽略。
+            let opaque_bg = Color::rgb(self.bg.r, self.bg.g, self.bg.b);
             canvas.fill_rect(
                 dmg.x as f32,
                 dmg.y as f32,
                 dmg.w as f32,
                 dmg.h as f32,
-                &Paint::fill(self.bg),
+                &Paint::fill(opaque_bg),
             );
             self.tree.paint(&mut *canvas);
         }
@@ -344,6 +354,67 @@ mod tests {
     use crate::app::App;
     use crate::geometry::Point;
     use crate::ui::Element;
+
+    /// GPU 局部帧的脏区铺底必须是**替换**，不是把底色叠在上一帧的像素上。
+    ///
+    /// 软后端那条路走 `sub.fill(bg)`（覆盖）、GPU 整窗帧走 `LoadOp::Clear`（覆盖），而
+    /// 局部帧只能经图元管线，它恒是预乘 over 混合。`theme.palette.bg` 是公开的 `Color`,
+    /// 可以带透明度——那时"叠加"会让脏区每帧更深一层，动的那个元素在脏区里拖出残影,
+    /// 而窗口其余部分（由整窗帧重画）看着完全正常，最难查的那种。
+    ///
+    /// 判据取**幂等**：连做两个局部帧，脏区像素必须一模一样。叠加语义下第二帧一定更深,
+    /// 而替换语义下第二帧与第一帧逐字节相同。
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_partial_frame_replaces_the_dirty_rect_rather_than_blending_over_it() {
+        use crate::geometry::Color;
+        use crate::platform::AppHandler;
+        use crate::render::gpu::OffscreenGpu;
+        let Some(mut off) = OffscreenGpu::new(60, 60) else {
+            println!("跳过：本机没有可用的 wgpu 适配器，GPU 局部帧铺底判据未执行");
+            return;
+        };
+        // 半透明底色：不透明的 bg 下 over 恰好退化成覆盖，这条判据就测不到东西了。
+        let mut theme = crate::theme::Theme::default();
+        theme.palette.bg = Color::rgba(0, 0, 255, 128);
+        let app = App::new("t", 60, 60)
+            .theme(theme)
+            .content(Element::col().width(60).height(60));
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+
+        // 首帧：整窗，把常驻纹理铺满底色。
+        {
+            let mut t = off.target();
+            handler.render(&mut t, Size::new(60, 60));
+        }
+        assert!(handler.damage.last_frame_full, "首帧应为全窗");
+
+        let mut shot = Vec::new();
+        for i in 0..2 {
+            handler.damage.event = Some(Rect::new(10, 10, 12, 12));
+            {
+                let mut t = off.target();
+                handler.render(&mut t, Size::new(60, 60));
+            }
+            assert!(
+                !handler.damage.last_frame_full,
+                "第 {i} 个局部帧被升成了整窗"
+            );
+            let pm = off.readback().expect("readback");
+            let px = {
+                let i = ((16 * 60 + 16) * 4) as usize;
+                let d = pm.data();
+                [d[i], d[i + 1], d[i + 2], d[i + 3]]
+            };
+            shot.push(px);
+        }
+        assert_eq!(
+            shot[0], shot[1],
+            "两个局部帧的脏区像素应完全相同（铺底成了叠加？{:?} → {:?}）",
+            shot[0], shot[1]
+        );
+    }
 
     #[test]
     fn interaction_takes_partial_path() {

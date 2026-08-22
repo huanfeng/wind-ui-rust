@@ -1802,7 +1802,9 @@ impl AppHandler for UiHost {
         }
         drop(canvas);
         // 种入后备缓冲（整窗），供后续局部帧重建未变区域。
-        // GPU 后端（as_pixmap=None）不走局部重绘，seed_back 无需调用；软后端必有 pixmap。
+        // 只有软后端要做这一步：它的后备缓冲在**宿主**这边（`damage.back`），得从刚画好的
+        // pixmap 拷一份。GPU 后端同样走局部重绘，但它的"上一帧"就在目标自己的常驻色纹理
+        // 上——绘制本来就画在那张上面，无所谓种入（见 `render/gpu/surface.rs::BackBuffer`）。
         if let Some(pixmap) = target.as_pixmap() {
             self.seed_back(pixmap, size);
         }

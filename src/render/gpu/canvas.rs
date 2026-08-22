@@ -180,8 +180,11 @@ impl RenderTarget for WgpuTarget<'_> {
             layers: Vec::new(),
         })
     }
-    // `as_pixmap` 用 trait 默认的 None：GPU 侧像素读不回来，调用方据此走全窗重绘
-    // （与 d2d 后端同一档待遇）。
+    // `as_pixmap` 用 trait 默认的 None：GPU 的像素读不回宿主。
+    //
+    // 但**局部重绘不再依赖它**——那条能力现在由 `supports_partial` + `begin_damage`
+    // 承担（见本文件下方的 `RenderTarget` 实现与 `surface.rs::BackBuffer`）。`as_pixmap`
+    // 退回它本来的语义：软后端局部重绘快路取原始 Pixmap 的那个口子，GPU 与 d2d 都没有。
 }
 
 /// 攒图元的 `Canvas`。析构时把本帧攒下的实例一次画完。
@@ -685,8 +688,9 @@ impl Canvas for WgpuCanvas<'_> {
         if opacity <= 0.0 {
             return;
         }
-        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。GPU 后端没有软后端那个
-        // 局部重绘的 offset（`as_pixmap` 恒为 None，调用方走全窗重绘）。
+        // 逻辑 dst → 物理像素（与图形/裁剪同源的边界取整）。没有软后端局部帧那个原点
+        // 偏移：那边把脏区画进一张脏区大小的子 pixmap（故带偏移），这边直接画在绝对坐标
+        // 的常驻纹理上，范围由 scissor 收窄。
         let s = self.scale;
         let pdst = dst.scaled(s);
         if pdst.is_empty() {
@@ -2897,6 +2901,50 @@ mod tests {
         assert!(
             ink_bounds(&pm, bg).is_some(),
             "退回之后仍要把这段文字画出来，不能什么都不画"
+        );
+    }
+
+    /// 稳态装不下时 atlas 会**关掉自己**，而不是每帧"重置→全部重光栅→再溢出"。
+    ///
+    /// 那个循环比根本不用 atlas 还慢（每帧把所有字形重新过一遍平台文字栈），而且悄无声息
+    /// ——`notice_once` 早在第一次溢出时就用掉了。判据看的是"还试不试"：关掉之后
+    /// `raster_glyph` 不该再被调用，文字则继续由整段光栅画出来。
+    #[test]
+    fn an_atlas_that_keeps_overflowing_turns_itself_off() {
+        let Some(mut off) = offscreen(60, 20) else {
+            return;
+        };
+        // 单个字形宽 2500 > ATLAS_SIZE(2048)，货架分配必然失败 ⇒ 每帧都溢出。
+        let mut eng = MockGlyphEngine::new((2500, 8));
+        let draw = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "x",
+                Rect::new(0, 0, 60, 20),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(8.0),
+            );
+        };
+        // 前几帧：每帧都试一次 atlas（各光栅一个字形），并退回整段。
+        for _ in 0..4 {
+            draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("readback");
+        }
+        let tried = eng.glyph_calls;
+        assert!(tried > 0, "前几帧应当真的试过 atlas");
+        // 连续溢出到阈值后关掉：此后不再碰 raster_glyph。
+        for _ in 0..3 {
+            draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("readback");
+        }
+        assert_eq!(
+            eng.glyph_calls, tried,
+            "atlas 应已关闭，不该再光栅字形（实得 {} 次，关闭前 {tried} 次）",
+            eng.glyph_calls
+        );
+        // 画面照旧：文字由整段光栅补上。
+        let pm = draw_on(&mut off, 1.0, WHITE, &mut eng, &draw).expect("readback");
+        assert!(
+            ink_bounds(&pm, bg_bytes(WHITE)).is_some(),
+            "关掉 atlas 之后仍要把文字画出来"
         );
     }
 

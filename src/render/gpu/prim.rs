@@ -420,6 +420,9 @@ pub(super) struct PrimRenderer {
     instances: wgpu::Buffer,
     /// 实例缓冲当前能放几个实例。
     capacity: usize,
+    /// 本帧写进 globals 的 (视口, scale 位)。仅用于 debug 断言"帧内它不变"——
+    /// 那是 globals 敢恒写偏移 0 的全部依据，见 [`Self::flush`] 里那段。
+    globals_frame: Option<((u32, u32), u32)>,
     /// 本帧已占用的实例槽数（帧内游标）。
     ///
     /// 一帧只提交一次之后，同一个缓冲要装下帧内**所有**批次：几何与文字交错时
@@ -550,6 +553,7 @@ impl PrimRenderer {
             instances,
             capacity: INIT_CAPACITY,
             used: 0,
+            globals_frame: None,
             format,
             text: None,
             image: None,
@@ -562,6 +566,7 @@ impl PrimRenderer {
     /// 未提交的批次还指着那些字节。
     pub(super) fn end_frame(&mut self, gpu: &Arc<SharedGpu>) {
         self.used = 0;
+        self.globals_frame = None;
         if let Some(t) = self.text.as_mut() {
             t.end_frame(gpu);
         }
@@ -603,6 +608,22 @@ impl PrimRenderer {
         let device = gpu.device();
         let queue = gpu.queue();
 
+        // ⚠️ globals **恒写偏移 0**，而一帧只提交一次——`queue.write_buffer` 相对提交定序,
+        // 于是本帧最后一次写入是**所有**已录 pass 看到的值。这与实例缓冲/渐变表那两处
+        // 是同一类坑，这里之所以安全，靠的是一条不变量：
+        //
+        //   **`size` 与 `scale` 在一个 `WgpuCanvas` 的生命周期内恒定。**
+        //
+        // 层纹理与目标同尺寸（`acquire_layer` 传的就是 `self.size`），scale 由 `make_canvas`
+        // 一次定死。哪天引入"不同尺寸的层"或"逐批 scale"，这条就断了——症状是帧内先录的
+        // 那些 pass 全部按最后一批的视口/缩放去画，不报错、无测试能抓。真要那么改，就得
+        // 像实例缓冲那样给 globals 也开帧内游标（uniform 要 256 对齐的 dynamic offset）。
+        debug_assert!(
+            self.globals_frame
+                .is_none_or(|g| g == (size, scale.to_bits())),
+            "帧内 globals 变了（视口 {size:?} scale {scale}）——见本处注释，需要改成帧内游标"
+        );
+        self.globals_frame = Some((size, scale.to_bits()));
         queue.write_buffer(
             &self.globals,
             0,

@@ -847,7 +847,7 @@ impl ContentView {
     /// 只需把这一小块搬进后备缓冲——闪烁光标每帧只脏十几像素宽的一条，此前却按整窗
     /// 付账（实测该项占每帧 3.1ms / 38%）。
     ///
-    /// 外扩 [`INVALIDATE_PAD_PX`]：宿主的 `render_partial` 会把脏区再外扩 AA 余量并对齐到
+    /// 外扩 [`INVALIDATE_PAD_PT`]：宿主的 `render_partial` 会把脏区再外扩 AA 余量并对齐到
     /// 4 逻辑像素网格，实际重绘范围略大于这里的预测；报小了那圈边会留成上一帧的残影。
     ///
     /// 借用不跨 AppKit 调用（铁律 6）：`setNeedsDisplay*` 可能**同步**走到绘制路径，
@@ -895,7 +895,11 @@ impl ContentView {
         // 本次绘制是否由局部失效发起。**取走即复位**，且必须在下面 GPU 路径的提前返回
         // **之前**取：AppKit 自己发起的重绘（暴露、缩放）不该被上一次 tick 的标志带跑，
         // 而 GPU 路径若把它留在原地，这个字段就会一直停在某次 tick 的旧值上。
-        // GPU 路径整个 surface 每帧重画，不需要这份对账，取走丢掉即可。
+        // GPU 路径不需要这份对账，取走丢掉即可——但**理由不是"它每帧整窗重画"**（它现在
+        // 也做局部重绘）：对账要防的是"宿主画到了失效区之外、被 AppKit 裁掉留成残影"，
+        // 而 GPU 根本不经 AppKit 的绘图上下文。它画在自己的常驻后备纹理上（那张始终持有
+        // 完整画面），帧末整张拷进 drawable，present 的也是整张——失效区只决定何时唤起
+        // `updateLayer`，裁不到内容。
         let partial = {
             let mut st = self.ivars().borrow_mut();
             st.partial_invalidate.take()
