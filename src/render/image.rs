@@ -318,7 +318,7 @@ impl Image {
     fn from_decoded(d: DecodedImage) -> Result<Self, ImageError> {
         let size = IntSize::from_wh(d.width, d.height).ok_or(ImageError::InvalidRgba)?;
         let mut data = Vec::with_capacity(d.rgba.len());
-        for px in d.rgba.chunks_exact(4) {
+        for px in d.rgba.as_chunks::<4>().0 {
             let c = ColorU8::from_rgba(px[0], px[1], px[2], px[3]).premultiply();
             data.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }

@@ -566,7 +566,7 @@ impl GlyphSource for CoreTextEngine {
         drop(ctx);
 
         // 白底黑字 → 覆盖度是通道的补。三个颜色通道等值（黑字灰度 AA），取红即可。
-        let data = rgba.chunks_exact(4).map(|p| 255 - p[0]).collect();
+        let data = rgba.as_chunks::<4>().0.iter().map(|p| 255 - p[0]).collect();
         // 首行基线距块顶：单行分支就是上面手动定位用的 ascent；折行分支交给 CTFrame
         // 排版，显式行高时首行基线在「行高 − descent」处，否则同样是 ascent。
         let baseline = if single {
@@ -737,7 +737,7 @@ impl GlyphSource for CoreTextEngine {
         unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&pos), 1, &ctx) };
         drop(ctx);
 
-        let data = rgba.chunks_exact(4).map(|p| 255 - p[0]).collect();
+        let data = rgba.as_chunks::<4>().0.iter().map(|p| 255 - p[0]).collect();
         Some(GlyphBitmap {
             data,
             width: w,

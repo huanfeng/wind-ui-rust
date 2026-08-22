@@ -1111,7 +1111,9 @@ mod tests {
     /// （memory「视觉效果要量化验证」的同一条教训）。
     fn ink(pm: &Pixmap, bg: [u8; 4]) -> f64 {
         pm.data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 (0..4)
                     .map(|i| (p[i] as i32 - bg[i] as i32).unsigned_abs() as f64)
@@ -1670,8 +1672,10 @@ mod tests {
         };
         let painted = pm
             .data()
-            .chunks_exact(4)
-            .any(|p| p != [255u8, 255, 255, 255]);
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p != &[255u8, 255, 255, 255]);
         if disabled {
             assert!(!painted, "WINDUI_NOSHADOW 已置位，不应画出任何阴影像素");
         } else {
@@ -3013,7 +3017,9 @@ mod tests {
         /// 白底上的总墨量（各通道相对 255 的偏离之和）。
         fn ink_amount(pm: &Pixmap) -> f64 {
             pm.data()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| (0..3).map(|i| (255 - p[i]) as f64).sum::<f64>())
                 .sum()
         }
