@@ -458,7 +458,8 @@ impl App {
                 renderer: Renderer::default(),
                 min_width: 0,
                 min_height: 0,
-                // 主窗本就唯一，不参与单例去重（`Window::single` 只给子窗）。
+                // 默认不登记单例键：单窗应用没有"第二个自己"可谈。多窗应用要让子窗
+                // 能把主窗拉回前台时用 [`App::single_window`]。
                 single: None,
             },
             render: None,
@@ -474,6 +475,32 @@ impl App {
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// 给**主窗**登记单例键，与 [`Window::single`] 是同一个键空间。
+    ///
+    /// 登记之后，别处的 `ctx.open_window(Window::new(..).single(同一个键))` 会把主窗
+    /// **激活到前台**（最小化的会还原）而不是再开一个出来。没有它，主窗就是个匿名窗口：
+    /// 子窗想把它拉回前台**无路可走**——`EventCtx` 里没有"激活某个窗口"的原语，激活
+    /// 只能由平台层在单例判定命中时代做。
+    ///
+    /// 多窗应用需要它的典型场景：子窗上有个动作，其界面在主窗里（"回到主界面"、
+    /// 只挂在主窗上的对话框）。子窗此时若照常 `open_window`，主窗开着就会得到**第二个
+    /// 主窗**——两棵树抢同一批 `Signal`，而这不会报任何错。
+    ///
+    /// 与 [`App::single_instance`] 不是一回事：那个管的是"同一个可执行文件只跑一个
+    /// 进程"，这个管的是"同一个进程里只有一个这样的窗口"。
+    ///
+    /// 主窗按运行参数承载不同界面时，键要跟着分——同一个键指向了不同的界面，
+    /// 后来者只会被激活到一个"看起来不对"的窗口上。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::new("设置", 900, 640).single_window("main");
+    /// ```
+    pub fn single_window(mut self, key: impl Into<String>) -> Self {
+        self.cfg.single = Some(key.into());
+        self
     }
 
     /// 窗口背景色。命名与 `Element::bg` 统一。
@@ -2957,6 +2984,24 @@ mod tests {
         assert!(
             matches!(made[0], NewWindow::Create(..)),
             "只有 settings 开着，about 该照常建出来"
+        );
+    }
+
+    /// 主窗的单例键要真的进 `WindowConfig` —— 平台层就是拿它登记进活动窗口表的
+    /// （win32 `register_window` / macOS 同名函数，两边都读 `cfg.single`）。
+    ///
+    /// 漏传的症状不是崩溃：子窗此后 `open_window(single(同键))` 找不到主窗，于是**再建
+    /// 一个主窗**，两棵树抢同一批 `Signal`，而这一路没有任何报错。
+    #[test]
+    fn single_window_key_reaches_the_window_config() {
+        assert_eq!(
+            App::new("main", 200, 200).cfg.single,
+            None,
+            "默认不登记：单窗应用没有「第二个自己」可谈"
+        );
+        assert_eq!(
+            App::new("main", 200, 200).single_window("main").cfg.single,
+            Some("main".to_string())
         );
     }
 
