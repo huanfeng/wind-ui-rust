@@ -449,6 +449,13 @@ pub struct Tree {
     /// 当前无调用方使用水平 offset（拖拽重排只写 y），如需支持应改内缩判定本身，
     /// 而不是让 arrange 去读 offset。
     arrange_origin: Point,
+    /// 本帧根节点尺寸（`layout_root` 入口记录）。
+    ///
+    /// 与 `root.bounds` 的区别只在**时机**：bounds 要等 `arrange` 才更新，而响应式相位
+    /// （`Widget::on_update`）跑在 `measure` 之前——那时读任何节点的 bounds 拿到的都是
+    /// 上一帧的值。需要在响应式相位就知道"这一帧窗口有多大"的控件读这个字段，典型是
+    /// 虚拟滚动：它按视口高决定构建多少行，而视口再大也不会超过窗口。
+    pub layout_size: Size,
     /// 本树上所有对话框遮罩的显示信号，按 `build` 的先序遍历登记（父在前、子在后），
     /// 故**栈顶即最内层**：嵌套对话框下 ESC 先关最里面那个。
     ///
@@ -474,6 +481,7 @@ impl Tree {
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
             arrange_origin: Point::new(0, 0),
+            layout_size: Size::ZERO,
             modals: Vec::new(),
         }
     }
@@ -661,6 +669,9 @@ impl Tree {
 
     /// 用窗口尺寸测量并排布整棵树。
     pub fn layout_root(&mut self, size: Size, text: &mut dyn TextEngine) {
+        // 先记本帧尺寸再广播响应式更新：`on_update` 里读得到"这一帧窗口多大"，
+        // 而节点的 bounds 此刻还停在上一帧（见 `layout_size`）。
+        self.layout_size = size;
         // 先让响应式节点重建子树结构，再 measure/arrange
         self.dispatch_reactive_updates();
         if let Some(root) = self.root {
