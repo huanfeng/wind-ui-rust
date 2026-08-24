@@ -19,6 +19,7 @@ pub mod select;
 pub mod sortable_table;
 pub mod stepper;
 pub mod text_content;
+pub mod virtual_list;
 pub mod window_buttons;
 
 use std::cell::{Cell, RefCell};
@@ -51,6 +52,7 @@ pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
 pub use sortable_table::{SortKey, SortStyle};
 pub use stepper::Stepper;
 pub use text_content::TextContent;
+pub use virtual_list::TABLE_ROW_H;
 pub use window_buttons::{WindowButton, WindowButtonKind};
 
 /// 图标与文字之间的间距（Button 等）。
@@ -2574,15 +2576,17 @@ impl Element {
         }
     }
 
-    /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
-    /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
-    pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
-        // 表头：加粗、弱化色、次级表面底。内边距在每列格内部（与正文同分布，列对齐）。
+    /// 表格表头行：加粗、弱化色、次级表面底。内边距在每列格内部（与正文同分布，列对齐）。
+    ///
+    /// 由 [`table_custom`](Self::table_custom) 与 [`table_virtual`](Self::table_virtual)
+    /// 共用——两者正文的构建方式完全不同（全量 vs 虚拟），表头却必须逐像素一致，
+    /// 否则列宽会与正文错开。
+    fn table_header(columns: &[(String, f32)]) -> Self {
         let mut header = Element::row()
             .width_match()
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
-        for (title, w) in &columns {
+        for (title, w) in columns {
             header = header.child(
                 Element::stack()
                     .weight(*w)
@@ -2597,6 +2601,13 @@ impl Element {
                     ),
             );
         }
+        header
+    }
+
+    /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
+    /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
+    pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
+        let header = Self::table_header(&columns);
         // 正文：逐行，斑马纹 + 行下分隔线。`cross(Stretch)` 让单元格撑满行高（便于整格高亮）；
         // 行本身不设内边距——内边距在各单元格内部（见 table_cell_pad / table_editable）。
         let mut scroll = Element::scroll().fill();
@@ -2785,6 +2796,99 @@ impl Element {
             .child(header)
             .child(Element::divider())
             .child(scroll.weight(1.0))
+    }
+
+    /// 虚拟滚动列表：只构建**视口内**的行，容量与行数无关——十万行与一百行的每帧成本
+    /// 相同。适合"一个列表里显示超长内容"这类常规列表撑不住的场景。
+    ///
+    /// 与 [`list_signal`](Self::list_signal) 的取舍：那个把每一行都建成真实节点，行数一多
+    /// 建树 / 每帧重排 / 每帧绘制三条 O(N) 成本一条都躲不掉，且滚动一格就全付一遍。本方法
+    /// 用固定行高换掉这三条，代价见 [`virtual_list`] 模块文档的
+    /// 「已知限制」（变高行、Tab 焦点环、行内部状态、拖拽重排）。**几百行以内用
+    /// `list_signal` 就好**，虚拟化的复杂度只在行数真的多起来时才划算。
+    ///
+    /// - `data`：数据源信号；写入新 `Vec` 即刷新（排序/过滤/增删均可）。
+    /// - `row_height`：**固定**行高（逻辑 px）。行元素会被强制设成该高度，故占位高度与
+    ///   实际布局永远一致，不会出现滚动条与内容错位。
+    /// - `row_fn(索引, 条目)`：行构建函数。索引是**数据里的真实下标**（不是显示位置），
+    ///   可直接用于回调绑定。
+    ///
+    /// 应放在限高容器内（本方法返回滚动容器本身，`.height(..)` / `.weight(..)` 均可）。
+    /// 忘了限高**不会**卡死——渲染量按窗口高封顶，不看容器解析出多高——但列表会一路撑到
+    /// 整份数据的高度，视觉上多半不是你要的。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let items = signal((0..100_000).map(|i| format!("第 {i} 项")).collect::<Vec<_>>());
+    /// Element::virtual_list(items, 36, |i, s| {
+    ///     Element::row()
+    ///         .padding_xy(12, 0)
+    ///         .cross(Align::Center)
+    ///         .child(Element::label(format!("{i}: {s}")))
+    /// })
+    /// .height(400)
+    /// ```
+    pub fn virtual_list<T>(
+        data: Signal<Vec<T>>,
+        row_height: i32,
+        row_fn: impl Fn(usize, T) -> Self + 'static,
+    ) -> Self
+    where
+        T: Clone + 'static,
+    {
+        // 正文挂在滚动容器**内部**的列上，滚动容器保留自带的 ScrollWidget——换掉它
+        // 就丢了滚轮与滚动条拖拽（同 `table_sortable` 的接法）。
+        let mut body = Self::col().width_match();
+        body.set_widget(Box::new(virtual_list::VirtualList::new(
+            data, row_height, row_fn,
+        )));
+        body.reactive = true;
+        Self::scroll().fill().child(body)
+    }
+
+    /// 虚拟滚动表格：列模型与视觉同 [`table`](Self::table)（固定表头 + 斑马纹 + 悬停高亮），
+    /// 正文改用虚拟滚动——行数再多也只构建视口内那几十行。
+    ///
+    /// - `columns` 为 (列标题, 权重)；`rows` 为整表数据信号，写入即刷新。
+    /// - `row_height` 为固定行高，默认用 [`TABLE_ROW_H`]（与非虚拟表格的单行高一致）。
+    ///
+    /// 排序请在写入 `rows` 前自行完成（或沿用
+    /// [`table_sortable_server`](Self::table_sortable_server) 的分页思路）：本方法不做
+    /// 内部排序——对超长表格，每次点表头全量重排本身就是须由调用方掌控的成本。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let rows = signal((0..50_000)
+    ///     .map(|i| vec![format!("文件_{i}.txt"), format!("{}", i * 37 % 9999)])
+    ///     .collect::<Vec<_>>());
+    /// Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows, TABLE_ROW_H).height(320)
+    /// ```
+    pub fn table_virtual(
+        columns: Vec<(impl Into<String>, f32)>,
+        rows: Signal<Vec<Vec<String>>>,
+        row_height: i32,
+    ) -> Self {
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+        let header = Self::table_header(&cols);
+
+        let mut body = Self::col().width_match();
+        body.set_widget(Box::new(virtual_list::VirtualList::new(
+            rows,
+            row_height,
+            // 斑马纹按**真实行下标**交替（而非在视口里的位置）——否则滚动时深浅条纹会
+            // 随渲染窗口的起点来回跳。
+            move |i, cells: Vec<String>| {
+                sortable_table::body_row(i, i, &cells, &weights, None, None, 1, None, None)
+            },
+        )));
+        body.reactive = true;
+
+        Self::col()
+            .width_match()
+            .child(header)
+            .child(Self::divider())
+            .child(Self::scroll().fill().child(body).weight(1.0))
     }
 
     /// 可排序 + 可多选表格：首列复选框 + 表头全选（全/无/部分三态）+ 选中行高亮，

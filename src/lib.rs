@@ -43,6 +43,6 @@ pub mod prelude {
     pub use crate::ui::{
         CaretStyle, CheckMenuItem, CommitMode, DropdownItem, Element, ImageContent, ImageView,
         Link, Para, RichColor, RichDoc, SortKey, SortOrder, SortStyle, SpanStyle, TextContent,
-        Truncate, WindowButton, WindowButtonKind,
+        Truncate, WindowButton, WindowButtonKind, TABLE_ROW_H,
     };
 }

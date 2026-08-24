@@ -301,6 +301,8 @@ Element::table_sortable(columns, rows, sort)
 Element::table_sortable_server(columns, rows, sort, |ctx, new_sort| { /* 拉数据后 rows.set(..) */ })
 // 可多选：首列复选框 + 表头三态全选；selected: Vec<Signal<bool>>（长度 == rows，按原始行下标索引）
 Element::table_selectable(columns, rows, selected, sort)
+// 虚拟滚动：只构建视口内的行，行数再多每帧成本不变；要求行高固定（详见 §6.6）
+Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H)
 ```
 
 扩展修饰符（链在上述表格返回的元素上）：
@@ -318,16 +320,20 @@ Element::table_selectable(columns, rows, selected, sort)
 > release 下静默忽略**（口径同 §5 的 text_input 专属修饰符），panic 位置指向你的调用行。
 > 照下表核对：
 >
-> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` |
-> |---|---|---|---|---|---|---|
-> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ |
-> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
-> | `cell_render` / `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
-> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） |
-> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ |
+> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_virtual` |
+> |---|---|---|---|---|---|---|---|
+> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
+> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
+> | `cell_render` / `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
+> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✗ |
+> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
 >
 > `table` / `table_editable` 内部会转成 `table_custom` 的结构，三者都不带响应式表头/正文
 > widget，因此整列扩展点都不适用——需要排序或行级交互，请直接从 `table_sortable` 起步。
+>
+> `table_virtual` 的正文换成了虚拟滚动 widget（不是 `SortableBody`），同样整列不适用。
+> 需要行级交互又要虚拟滚动时，用通用的 `Element::virtual_list` 自己拼行——`row_fn` 里
+> 想放什么放什么（见 §6.6）。
 >
 > **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
 > 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
@@ -821,6 +827,72 @@ fn main() {
 > **拖动手柄**，你**必须**把它放进返回的元素树里，否则该行拖不动（另见 §6.2 陷阱三）。
 
 完整可运行示例：`examples/dyn_list.rs`（排序 + 过滤）、`examples/fullshowcase.rs` 的排序页。
+
+### 6.6 虚拟滚动（超长列表 / 超长表格）
+
+§6.5 那一族把**每一行**都建成真实节点。行数一多，三条 O(N) 成本一条都躲不掉——建树、
+每帧 measure/arrange、每帧 paint——而滚动一格就要全付一遍（滚动会触发重排）。实测 3 列
+表格在 release 下的稳态重排：
+
+| 行数 | | 节点数 | 建树 | 滚动时的重排/帧 |
+|---|---|---|---|---|
+| 1 000 | `table_custom` | 6 011 | 2.9ms | 0.58ms |
+| 10 000 | `table_custom` | 60 011 | 31ms | **90ms** |
+| 1 000 | `table_virtual` | 230 | 0.010ms | 0.079ms |
+| 10 000 | `table_virtual` | 230 | 0.009ms | 0.083ms |
+| 100 000 | `table_virtual` | 230 | 0.004ms | 0.075ms |
+
+（Windows / release / DirectWrite 真实排版，滚动 200 帧取均值。）
+
+两点值得留意：**成本不是随行数平滑劣化的**——1 000 行还很体面的 0.58ms，到 10 000 行就
+成了 90ms（一格滚动都要等十几帧），中间那道坎有一半来自文字测量缓存被撑爆后反复清空。
+而虚拟档的三行数字**彼此没有差别**，因为每帧真正参与布局的永远是视口里那二十来行。
+
+`Element::virtual_list` / `Element::table_virtual` 只构建**视口内**的行，两端各插一个空
+占位节点撑出未渲染部分的高度。十万行与一百行的每帧成本相同（实测 20µs 量级）。
+
+```rust
+use windui::prelude::*;
+
+// 通用列表：row_fn 收到的是数据里的**真实下标**，可直接用于回调绑定
+let items = signal((0..100_000usize).collect::<Vec<_>>());
+Element::virtual_list(items, 34, |i, v| {
+    Element::row().width_match().cross(Align::Center).padding_xy(12, 0)
+        .child(Element::label(format!("第 {} 项 · {}", i + 1, v)).weight(1.0))
+})
+.height(400)          // 需置于限高容器内（返回的就是滚动容器本身）
+
+// 表格：视觉与 Element::table 一致（固定表头 + 斑马纹 + 行悬停高亮）
+let rows = signal(vec![vec!["a.txt".to_string(), "12".to_string()]]);
+Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows, TABLE_ROW_H).height(320)
+```
+
+**占位撑高**这一招的好处是核心层零改动：内容总高照常由 measure 算出，于是滚动钳制、
+滚动条滑块的尺寸与位置、`scroll_into_view` 全部自动正确——没有一处需要知道"这个列表是
+虚拟的"。
+
+> **渲染多少行是按窗口高算的，不是按容器实际解析出的高度。** 决定渲染量的时机（响应式
+> 相位）早于布局，那时读任何节点的几何拿到的都是上一帧的值——窗口最大化时它偏小（新视口
+> 铺不满，底部留白，而 resize 只触发一次布局，没有"下一帧"来补），放进无限高父容器时它
+> 偏大（"视口"收敛成整个内容高，十万行全建出来）。窗口高没有这两个毛病，且视口再大也不会
+> 超过窗口。代价是视口远小于窗口时多渲染几行，几十微秒的事。
+>
+> 实际影响：**忘了给列表限高不会卡死**，只是列表会撑到整份数据的高度。
+
+代价与限制如下，**动手前请逐条对照**：
+
+| 限制 | 说明 |
+|---|---|
+| **行高必须固定** | 索引与像素偏移靠一次乘法互换。行元素会被强制设成 `row_height`，故占位高度与实际布局永远一致（不会出现滚动条与内容错位），但内容更高时会被裁掉。表格的多行单元格（`cell_lines > 1`）因此不能用虚拟模式。 |
+| **Tab 焦点环只覆盖已渲染的行** | 焦点顺序遍历真实节点，未渲染的行不在环里，`scroll_into_view` 也够不着。行内放可聚焦控件时，键盘用户会在列表边界"掉出去"——需要全键盘可达就别用。 |
+| **行的内部状态每次重建都会重置** | hover、补间动画这类挂在行控件里的临时状态，滚动跨行时会丢。选中态等必须由外部 `Signal` 承载。 |
+| **与拖拽重排互斥** | `reorder_list` 依赖所有行同时存在并写绘制偏移。 |
+| **不做内部排序** | 排序请在写入数据信号前自行完成。对超长表格，每次点表头全量重排本身就是须由调用方掌控的成本。 |
+
+> **什么时候才该用它？** 几百行以内用 §6.5 的 `list_signal` 就好——它没有上面任何一条
+> 限制。虚拟化的复杂度只在行数真的多起来时才划算。
+
+完整可运行示例：`examples/virtual_list.rs`（十万行列表 + 一万行表格 + 行数骤变）。
 
 ---
 
@@ -1668,6 +1740,8 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 - `list` 当前每行是独立 Tab 停靠点，超长列表会拉长焦点链（计划：单 Tab 停靠 + 方向键导航）。
 - `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
 - 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
+- **虚拟滚动要求行高固定**，且 Tab 焦点环只覆盖已渲染的行、行内部临时状态随重建重置、
+  与拖拽重排互斥（见 §6.6 的限制表）。几百行以内用 `list_signal` 更省心。
 - `Signal` 只能在 UI 线程使用（`!Send`），跨线程更新走 `App::channel`（见 §8.5）。
 - **离屏层上的文字没有 ClearType**：子树 `opacity()` 与半透明文字色都要经离屏层合成，
   而次像素抗锯齿要求每个通道各有一个 alpha、RGBA 只有一个，层内因此退化为灰度抗锯齿

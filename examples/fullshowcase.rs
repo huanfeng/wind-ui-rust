@@ -278,6 +278,9 @@ fn main() {
     let om = order_msg;
     // 数据驱动重排演示：顺序存在信号里，故「恢复默认」这类反向同步才做得到。
     let dict_order = signal(default_dict_order());
+    // 虚拟滚动演示数据：十万行。存的是 usize 而非预格式化的 String——十万个 String
+    // 会平白多占十几 MB，而本库的立身之本正是极低内存。
+    let huge_rows = signal((0..100_000usize).collect::<Vec<_>>());
     let components_body = Element::col()
         .width_match()
         .spacing(14)
@@ -765,6 +768,43 @@ fn main() {
                 .child(Element::field("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg_role(Role::Text).weight(1.0)))
                 .child(Element::field("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg_role(Role::Text).weight(1.0)))
                 .child(Element::field("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg_role(Role::Text).weight(1.0))),
+        ))
+        .child(Element::card(
+            "虚拟滚动列表 virtual_list（10 万行；只构建视口内那几行，滚多远都不变慢）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(
+                    Element::label(
+                        "常规列表每行都是真实节点，行数一多建树/重排/绘制三条 O(N) 成本一条都躲不掉，\
+                         且滚一格就全付一遍。虚拟列表两端用空占位撑出未渲染部分的高度，滚动条与钳制照常正确。",
+                    )
+                    .font_size(12.5)
+                    .fg_role(Role::TextMuted)
+                    .width_match(),
+                )
+                .child(
+                    // 数据是 Vec<usize>，行文本在构建行时才生成——不必预先格式化十万个 String。
+                    Element::virtual_list(huge_rows, 32, |i, v: usize| {
+                        Element::row()
+                            .width_match()
+                            .cross(Align::Center)
+                            .padding_xy(10, 0)
+                            .spacing(10)
+                            .child(
+                                Element::label(format!("{:>6}", i + 1))
+                                    .font_size(12.5)
+                                    .fg_role(Role::TextMuted)
+                                    .width(54),
+                            )
+                            .child(
+                                Element::label(format!("第 {} 项 · 值 {}", i + 1, v * 7 % 100_000))
+                                    .font_size(13.5)
+                                    .weight(1.0),
+                            )
+                    })
+                    .height(220),
+                ),
         ));
     let components = Element::scroll().fill().child(components_body);
 
@@ -857,6 +897,18 @@ fn main() {
     // 可排序 + 多选：每行一个选择信号，选中集可被 app 读取。
     let sel: Vec<Signal<bool>> = (0..file_rows().len()).map(|_| signal(false)).collect();
     let sel_count = signal(String::from("已选 0 项"));
+    // 虚拟表格演示数据：1 万行——正是非虚拟表格开始滚不动的量级（实测稳态重排 47ms/帧）。
+    let huge_table = signal(
+        (0..10_000)
+            .map(|i| {
+                vec![
+                    format!("file_{i:05}.dat"),
+                    format!("{}", i * 37 % 9999),
+                    format!("2026-{:02}-{:02}", i % 12 + 1, i % 28 + 1),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
     let tables_body = Element::col()
         .width_match()
         .spacing(14)
@@ -1028,6 +1080,15 @@ fn main() {
                 )
                 .height(200)
             },
+        ))
+        .child(Element::card(
+            "虚拟滚动表格 table_virtual（1 万行；表头/斑马纹/悬停高亮与普通表格一致）",
+            Element::table_virtual(
+                vec![("名称", 3.0), ("大小(KB)", 1.0), ("修改日期", 1.5)],
+                huge_table,
+                TABLE_ROW_H,
+            )
+            .height(240),
         ));
     let tables = Element::scroll().fill().child(tables_body);
 

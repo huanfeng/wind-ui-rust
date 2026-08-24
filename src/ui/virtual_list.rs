@@ -1,0 +1,643 @@
+//! 虚拟滚动列表 widget（`Element::virtual_list` / `Element::table_virtual` 的内部驱动）。
+//!
+//! 常规列表（[`dyn_list::DynList`](super::dyn_list::DynList)、
+//! [`SortableBody`](super::sortable_table)）把**每一行**都建成真实节点：行数一多，
+//! 建树、每帧 measure/arrange、每帧 paint 三条 O(N) 成本一条都躲不掉，且滚动一格就要
+//! 全付一遍（`ScrollWidget` 滚动即 `mark_layout_dirty`）。实测 3 列表格在 release 下
+//! 10000 行的稳态重排是 47ms/帧——已经不是"有点卡"，是滚不动。
+//!
+//! `VirtualList` 只构建**视口内**的行，两端各插一个空占位节点撑出被略过那部分的高度：
+//!
+//! ```text
+//! scroll ┌─────────────────┐
+//!        │ spacer  first×h │ ← 上方未渲染行的总高
+//!        ├─────────────────┤
+//!        │ row  first      │ ┐
+//!        │ …               │ ├ 视口内 + 上下 overscan，真实节点
+//!        │ row  last-1     │ ┘
+//!        ├─────────────────┤
+//!        │ spacer (n-last)×h │ ← 下方未渲染行的总高
+//!        └─────────────────┘
+//! ```
+//!
+//! 占位节点撑高这一招的价值在于**核心层零改动**：`Tree::measure_scroll` 照常把占位节点的
+//! 高度计进 `content_h`，于是滚动钳制、滚动条滑块的高度与位置、`scroll_into_view` 全部
+//! 自动正确——没有任何一处需要知道"这个列表是虚拟的"。
+//!
+//! 代价是**行高必须固定**：索引与像素偏移之间靠一次乘法互换。行高由构建器参数给定，且
+//! 行元素会被强制设成该高度（见 `rebuild`）——即便调用方传的值与行内容的自然高度不符，
+//! 占位高度与实际布局也**永远**一致，不会出现滚动条与内容错位这种最难查的故障。
+//!
+//! # 已知限制
+//!
+//! - **变高行不支持**。表格的多行单元格（`cell_lines > 1`）因此不能用虚拟模式。
+//! - **Tab 焦点环只覆盖已渲染的行**。`Tree::focusable_order` 遍历真实节点，未渲染的行
+//!   不在环里，`scroll_into_view` 也够不着它们。行内放可聚焦控件时键盘用户会在列表边界
+//!   "掉出去"——需要全键盘可达的场景暂不适用。
+//! - **行的内部状态每次重建都会重置**。hover、补间动画这类挂在行 widget 里的 `Cell`
+//!   状态，滚动跨行时会丢。选中态等必须由外部 `Signal` 承载（`Element::list` 的
+//!   `Signal<usize>` 选中模型天然满足）。
+//! - **与拖拽重排互斥**。[`ReorderList`](super::reorder::ReorderList) 依赖所有行同时
+//!   存在并写 `offset`/`raised`。
+
+use std::rc::Rc;
+
+use crate::core::{EventCtx, Layout, NodeId, Tree, Widget};
+use crate::signal::{Signal, SignalScope};
+use crate::ui::Element;
+
+/// [`Element::table_virtual`](super::Element::table_virtual) 的推荐行高：与非虚拟表格的
+/// 单行高逐像素一致（单元格 20px 单行盒 + 上下内边距 + 行下分隔线 1px）。
+///
+/// 只有内边距是与 `table_cell_pad_lines` 共享的常量，单元格 20px 的单行盒与行下分隔线的
+/// 1px 在这里是**第二份**字面量——那边改了这边不会自动跟上。两者不分叉靠的是
+/// `table_row_height_matches_the_non_virtual_table` 那条测试（它拿真实布局对账），
+/// 不是靠这个表达式。
+pub const TABLE_ROW_H: i32 = 20 + 2 * super::TABLE_CELL_PAD_Y + 1;
+
+/// 视口上下各多渲染的行数。
+///
+/// 不为零是因为滚动偏移不必是行高的整数倍，且 `Node::over_scroll`（撞界回弹）会让内容
+/// 整体临时位移——两者都会让视口边缘露出"下一行"。多画几行远比露白便宜。
+const OVERSCAN: usize = 4;
+
+// 渲染多少行由**本帧窗口高**决定，而不是滚动容器上一帧的实测视口高。
+//
+// 实测值看着更精确，却有两个方向的失真，各自对应一个可见故障：
+//
+// - **偏小**：`on_update` 跑在 `measure` 之前，读到的是上一帧的 `bounds`。窗口最大化、
+//   侧栏收起这类让视口骤然变大的操作，本帧按旧视口算出的行数不够铺满新视口，底部留白；
+//   而 resize 只触发一次布局，那个"下一帧"根本不会来（除非用户又动了鼠标）。
+// - **偏大**：把列表放进无限高的父容器（页面级 `scroll` 里不设高度），滚动容器的高度会
+//   收敛成**整个内容高**，于是"视口"等于全表——十万行全部建出来，静默卡死。
+//
+// 窗口高没有这两个毛病：`layout_root` 入口就记下了本帧的值（`Tree::layout_size`），且
+// 视口再大也不可能超过窗口。代价是视口远小于窗口时会多渲染几行——一个 2000px 的窗口里
+// 摆着 200px 高的表格，多建约 (2000−200)/行高 行，几十微秒的事，换掉上面两个可见故障。
+
+/// 虚拟滚动正文：挂在滚动容器**内部的列容器**上，按当前滚动量重建可见行。
+///
+/// 刻意不挂在滚动节点自己身上：`Element::scroll()` 自带的
+/// [`ScrollWidget`](super::containers::ScrollWidget) 才是滚轮与滚动条拖拽的实现，
+/// 换掉它列表就滚不动了。这与 `SortableBody` 的挂法是同一条理由。
+pub(super) struct VirtualList<T: Clone + 'static> {
+    data: Signal<Vec<T>>,
+    row_h: i32,
+    row_fn: Rc<dyn Fn(usize, T) -> Element>,
+    /// 上次构建的 `(首行, 末行(不含), 数据版本)`。三者全同才跳过重建——只比区间的话，
+    /// 原地改数据（`Signal::set` 同长度新 Vec）就刷不出来了。
+    last: Option<(usize, usize, u64)>,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（同 `DynList`）。
+    rows: SignalScope,
+}
+
+impl<T: Clone + 'static> VirtualList<T> {
+    pub(super) fn new(
+        data: Signal<Vec<T>>,
+        row_h: i32,
+        row_fn: impl Fn(usize, T) -> Element + 'static,
+    ) -> Self {
+        Self {
+            data,
+            // 行高必须为正：0 或负会让 `scroll_y / row_h` 除零或算出负索引。
+            row_h: row_h.max(1),
+            row_fn: Rc::new(row_fn),
+            last: None,
+            rows: SignalScope::new(),
+        }
+    }
+
+    /// 当前应渲染的行区间 `[first, last)`。
+    fn range(&self, scroll_y: i32, view_h: i32, n: usize) -> (usize, usize) {
+        let max_scroll = (n as i32 * self.row_h - view_h).max(0);
+        let scroll_y = scroll_y.clamp(0, max_scroll);
+        let first = (scroll_y / self.row_h) as usize;
+        let first = first.saturating_sub(OVERSCAN).min(n);
+        // 视口能露出的行数：向上取整，再 +1 补上顶部被切掉半行时末尾多出来的那一行。
+        let span = (view_h + self.row_h - 1) / self.row_h + 1;
+        let last = first
+            .saturating_add(span as usize)
+            .saturating_add(OVERSCAN * 2)
+            .min(n);
+        (first, last)
+    }
+
+    /// 按区间重建子节点：`[占位, 行…, 占位]`。
+    fn rebuild(&mut self, tree: &mut Tree, self_id: NodeId, first: usize, last: usize, n: usize) {
+        // 只克隆可见的那几十行。`Signal::with` 借用期间不得回调用户代码——`row_fn` 里若
+        // 写回同一个信号会撞上 RefCell 双借用，故先取出、放掉借用，再构建。
+        let visible: Vec<T> = self
+            .data
+            .with(|v| v[first.min(v.len())..last.min(v.len())].to_vec());
+        let before = first as i32 * self.row_h;
+        let after = (n.saturating_sub(last)) as i32 * self.row_h;
+
+        let mut rows = std::mem::take(&mut self.rows);
+        clear_children(tree, self_id, &mut rows);
+        let (row_fn, row_h) = (self.row_fn.clone(), self.row_h);
+        rows.collect(|| {
+            push(tree, self_id, spacer(before));
+            for (k, item) in visible.into_iter().enumerate() {
+                // 强制行高：占位高度按 `row_h` 算，行的实际高度就必须是 `row_h`，
+                // 否则内容会与滚动条渐行渐远。
+                push(
+                    tree,
+                    self_id,
+                    row_fn(first + k, item).width_match().height(row_h),
+                );
+            }
+            push(tree, self_id, spacer(after));
+        });
+        self.rows = rows;
+    }
+}
+
+impl<T: Clone + 'static> Widget for VirtualList<T> {
+    fn on_update(&mut self, ctx: &mut EventCtx) {
+        let self_id = ctx.id();
+        let ver = self.data.version();
+        let n = self.data.with(Vec::len);
+        let tree = ctx.tree_mut();
+        // 滚动量取自最近的滚动祖先，是事件刚写进去的**当前**值；渲染量则按本帧窗口高算
+        // （理由见文件上方那段注释）。两者时序不同，但都不滞后。
+        let scroll_y = scroll_offset(tree, self_id);
+        let view_h = tree.layout_size.h.max(1);
+
+        let (first, last) = self.range(scroll_y, view_h, n);
+        if self.last == Some((first, last, ver)) {
+            return;
+        }
+        self.last = Some((first, last, ver));
+        let tree = ctx.tree_mut();
+        self.rebuild(tree, self_id, first, last, n);
+    }
+}
+
+/// 空占位节点：只有高度，不画任何东西。
+fn spacer(h: i32) -> Element {
+    Element::leaf().width_match().height(h.max(0))
+}
+
+fn push(tree: &mut Tree, parent: NodeId, el: Element) {
+    let id = el.build(tree);
+    tree.add_child(parent, id);
+}
+
+/// 清空某节点的全部子节点（递归释放子树 arena slot），并同刻回收这批子树在**构建期**
+/// 创建的信号。
+///
+/// 两件事绑在一个函数里是有意的：所有按数据/排序/滚动整批重建行的宿主（本模块的
+/// [`VirtualList`]，以及 `sortable_table` 的表头 / 正文 / 分页正文 / 可选正文）都要求
+/// 节点与其构建期信号同生共死——只删节点会漏槽位，只回收信号会让还挂着的节点读到已死的信号。
+pub(super) fn clear_children(tree: &mut Tree, id: NodeId, signals: &mut SignalScope) {
+    let old: Vec<_> = tree.get(id).map(|n| n.children.clone()).unwrap_or_default();
+    for c in old {
+        tree.remove(c);
+    }
+    if let Some(n) = tree.get_mut(id) {
+        n.children.clear();
+    }
+    signals.dispose();
+}
+
+/// 最近的滚动祖先的滚动量；没有滚动祖先时返回 0。
+///
+/// 用祖先而非自身，是因为本 widget 挂在滚动容器**内部**的列上（见 [`VirtualList`] 的
+/// 说明）。这个值不滞后：滚轮/拖拽/触摸惯性都是在事件里直接写 `scroll_y`，而本函数在
+/// 随后那一帧的响应式相位读它。**只读滚动量，不读视口高**——后者在这个时点是上一帧的
+/// 值，会两头失真（见文件上方那段注释）。
+fn scroll_offset(tree: &Tree, id: NodeId) -> i32 {
+    let mut cur = tree.get(id).and_then(|n| n.parent);
+    while let Some(p) = cur {
+        let Some(node) = tree.get(p) else { break };
+        if matches!(node.layout, Layout::Scroll) {
+            return node.scroll_y;
+        }
+        cur = node.parent;
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::core::{NodeId, Tree};
+    use crate::event::{MouseButton, PointerEvent, PointerKind};
+    use crate::geometry::{Point, Size};
+    use crate::signal::{signal, Signal};
+    use crate::ui::Element;
+
+    const ROW_H: i32 = 40;
+    const VIEW_H: i32 = 200;
+
+    /// 记录 `row_fn` 每次被调用时收到的索引——"哪些行真的被构建了"只能从这里看出来，
+    /// 数节点个数看不出行的身份。
+    type Seen = Rc<RefCell<Vec<usize>>>;
+
+    /// 造一棵 `[限高容器 → virtual_list]` 的树并布局一次。
+    ///
+    /// **只布局一次**是有意的：渲染量按本帧窗口高算，首帧就该正确。多布局一帧会掩盖
+    /// "第一帧渲染不足"这类故障——这条测试基建本身就踩过（见 `viewport_growth_*`）。
+    fn setup(n: usize, view_h: i32) -> (Tree, NodeId, Seen, Signal<Vec<usize>>) {
+        let data = signal((0..n).collect::<Vec<usize>>());
+        let seen: Seen = Rc::new(RefCell::new(Vec::new()));
+        let rec = seen.clone();
+        let root = Element::col().width(300).height(view_h).child(
+            Element::virtual_list(data, ROW_H, move |i, _v: usize| {
+                rec.borrow_mut().push(i);
+                Element::leaf().width_match()
+            })
+            .fill(),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(300, view_h), &mut te);
+        seen.borrow_mut().clear(); // 只关心稳态之后的重建
+        (tree, id, seen, data)
+    }
+
+    fn relayout(tree: &mut Tree, view_h: i32) {
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(300, view_h), &mut te);
+    }
+
+    /// 滚动容器节点（root → `virtual_list` 返回的 scroll）。
+    fn scroll_of(tree: &Tree, root: NodeId) -> NodeId {
+        tree.get(root).unwrap().children[0]
+    }
+
+    fn wheel(d: i32) -> PointerEvent {
+        PointerEvent::single(
+            PointerKind::Wheel(d),
+            Point::new(150, 100),
+            MouseButton::Left,
+        )
+    }
+
+    /// 树里的节点总数——虚拟化的全部意义就是让它与行数脱钩。
+    fn node_count(tree: &Tree, id: NodeId) -> usize {
+        let Some(n) = tree.get(id) else { return 0 };
+        1 + n
+            .children
+            .iter()
+            .map(|&c| node_count(tree, c))
+            .sum::<usize>()
+    }
+
+    #[test]
+    fn builds_only_visible_rows_regardless_of_length() {
+        let (tree, root, _seen, _data) = setup(100_000, VIEW_H);
+        // 视口 200 / 行高 40 = 5 行可见，加两端 overscan，几十个节点封顶。
+        let n = node_count(&tree, root);
+        assert!(n < 40, "10 万行只应建视口内那几行，实际节点数 {n}");
+    }
+
+    #[test]
+    fn spacers_make_content_height_exact() {
+        // 占位节点撑高是整个设计的地基：content_h 对了，滚动钳制、滚动条滑块尺寸与
+        // 位置、scroll_into_view 才全部自动正确——核心层一行都不用改。
+        let (mut tree, root, _seen, _data) = setup(1_000, VIEW_H);
+        let sc = scroll_of(&tree, root);
+        assert_eq!(
+            tree.get(sc).unwrap().content_h,
+            1_000 * ROW_H,
+            "内容总高应等于 行数 × 行高，与非虚拟列表无从区分"
+        );
+        // 必须滚开再验一次：停在顶部时上方占位天然为 0，那种状态下"忘了撑高上方"
+        // 与"撑对了"完全同形——只测初始态等于没测。
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..50 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, VIEW_H);
+        assert_eq!(
+            tree.get(sc).unwrap().content_h,
+            1_000 * ROW_H,
+            "滚到中段后内容总高不应变化（上下占位之和必须补齐未渲染的部分）"
+        );
+    }
+
+    #[test]
+    fn wheel_scroll_moves_the_rendered_window() {
+        let (mut tree, root, seen, _data) = setup(10_000, VIEW_H);
+        let (mut h, mut cap) = (None, None);
+        // 滚 40 格：每格 48px（ScrollWidget 的 120→48 换算），共 1920px = 48 行。
+        for _ in 0..40 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, VIEW_H);
+
+        let sc = scroll_of(&tree, root);
+        let scroll_y = tree.get(sc).unwrap().scroll_y;
+        assert_eq!(scroll_y, 40 * 48, "滚轮应累加滚动量");
+
+        let rows = seen.borrow().clone();
+        let first_visible = (scroll_y / ROW_H) as usize;
+        assert!(
+            rows.contains(&first_visible),
+            "视口首行 {first_visible} 应被构建，实际构建了 {:?}",
+            &rows[..rows.len().min(8)]
+        );
+        assert!(
+            rows.iter().all(|&i| i > 20),
+            "滚过 48 行后不该再构建顶部的行，实际最小索引 {:?}",
+            rows.iter().min()
+        );
+    }
+
+    #[test]
+    fn rendered_rows_land_where_the_spacers_promise() {
+        // 最容易悄悄坏掉的一条：占位高度按 row_h 算，行的真实高度若与之不符，内容会与
+        // 滚动条渐行渐远。这里直接拿绝对几何对账。
+        let (mut tree, root, _seen, _data) = setup(10_000, VIEW_H);
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..10 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, VIEW_H);
+
+        let sc = scroll_of(&tree, root);
+        let scroll_y = tree.get(sc).unwrap().scroll_y;
+        let body = tree.get(sc).unwrap().children[0];
+        let kids = tree.get(body).unwrap().children.clone();
+        // [占位, 行…, 占位]：第二个子节点就是渲染窗口的首行。
+        let first_row = kids[1];
+        // 索引取自 `row_fn` 实际收到的值，**不从占位高度反推**——反推等于拿被测量
+        // 自己当标尺，占位一旦算错，期望值会跟着一起错，测试永远通过。
+        let first_idx = *_seen.borrow().iter().min().expect("应至少构建一行") as i32;
+        let expect_y = first_idx * ROW_H - scroll_y;
+        assert_eq!(
+            tree.abs_bounds(first_row).y,
+            expect_y,
+            "首个渲染行的实际 y 必须等于 索引×行高 − 滚动量"
+        );
+        assert_eq!(
+            tree.abs_bounds(first_row).h,
+            ROW_H,
+            "行高应被强制为 row_height"
+        );
+    }
+
+    #[test]
+    fn scrolls_to_the_very_last_row() {
+        let (mut tree, root, seen, _data) = setup(1_000, VIEW_H);
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..2_000 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, VIEW_H);
+
+        let sc = scroll_of(&tree, root);
+        assert_eq!(
+            tree.get(sc).unwrap().scroll_y,
+            1_000 * ROW_H - VIEW_H,
+            "应钳制到最大滚动量"
+        );
+        assert!(
+            seen.borrow().contains(&999),
+            "滚到底应能构建最后一行，实际最大索引 {:?}",
+            seen.borrow().iter().max()
+        );
+    }
+
+    #[test]
+    fn data_change_rebuilds_in_place() {
+        let (mut tree, root, seen, data) = setup(1_000, VIEW_H);
+        seen.borrow_mut().clear();
+        data.set((0..20).collect()); // 行数骤减
+        relayout(&mut tree, VIEW_H);
+
+        assert!(!seen.borrow().is_empty(), "数据版本变化应触发重建");
+        let sc = scroll_of(&tree, root);
+        assert_eq!(
+            tree.get(sc).unwrap().content_h,
+            20 * ROW_H,
+            "内容总高应跟随新数据"
+        );
+    }
+
+    #[test]
+    fn handles_empty_and_shorter_than_viewport() {
+        let (tree, root, _seen, _data) = setup(0, VIEW_H);
+        assert_eq!(tree.get(scroll_of(&tree, root)).unwrap().content_h, 0);
+
+        // 行数不足一屏：不应越界取数据，稳态后也不该反复重建。
+        let (tree, root, seen, _data) = setup(3, VIEW_H);
+        assert_eq!(
+            tree.get(scroll_of(&tree, root)).unwrap().content_h,
+            3 * ROW_H
+        );
+        assert_eq!(*seen.borrow(), Vec::<usize>::new(), "稳态后无需重建");
+    }
+
+    #[test]
+    fn viewport_growth_fills_the_new_viewport_in_the_same_frame() {
+        // 窗口最大化 / 侧栏收起会让视口骤然变大。这**必须在当帧补足**——resize 只触发一次
+        // 布局，没有"下一帧"可以指望（除非用户又动了鼠标）。故这里只布局一帧。
+        //
+        // 早先这条测试连着调两次 relayout，于是"第一帧渲染不足、第二帧才补上"照样绿；
+        // 实际表现是窗口一最大化，列表下半截空白，直到你动一下鼠标才填上。
+        let (mut tree, root, seen, _data) = setup(10_000, 100);
+        seen.borrow_mut().clear();
+        relayout(&mut tree, 900);
+
+        // 几何对账：最后一个渲染行的底边必须盖过视口底，否则就是留白。
+        let sc = scroll_of(&tree, root);
+        let body = tree.get(sc).unwrap().children[0];
+        let kids = tree.get(body).unwrap().children.clone();
+        let last_row = kids[kids.len() - 2]; // 末尾那个是下方占位
+        let bottom = tree.abs_bounds(last_row).bottom();
+        assert!(
+            bottom >= 900,
+            "视口变高到 900 后，最后一渲染行的底边应盖过视口底，实际 {bottom}（差 {} px 留白）",
+            900 - bottom
+        );
+        assert!(!seen.borrow().is_empty(), "应在这一帧就补建新行");
+    }
+
+    #[test]
+    fn table_row_height_matches_the_non_virtual_table() {
+        // 两种表格的行高一旦分叉，同一份数据换个构建器行距就变了。用真实布局对账，
+        // 而不是让两个字面量各自漂移。
+        let mut te = crate::text::NullTextEngine;
+        let plain = Element::col().width(400).height(300).child(Element::table(
+            vec![("A", 1.0), ("B", 1.0)],
+            vec![vec!["x", "y"], vec!["z", "w"]],
+        ));
+        let mut tree = Tree::new();
+        let id = plain.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(400, 300), &mut te);
+        // col[table] → table = col[header, divider, scroll] → scroll 的首个子即第一行。
+        let table = tree.get(id).unwrap().children[0];
+        let scroll = tree.get(table).unwrap().children[2];
+        let row0 = tree.get(scroll).unwrap().children[0];
+        assert_eq!(
+            tree.get(row0).unwrap().bounds.h,
+            super::TABLE_ROW_H,
+            "TABLE_ROW_H 必须等于非虚拟表格的实际单行高"
+        );
+    }
+
+    /// 建一棵 `table_virtual` 的树并布局到稳态，返回 `(树, 根, 滚动节点)`。
+    fn setup_table(n: usize, view_h: i32) -> (Tree, NodeId, NodeId) {
+        let rows = signal(
+            (0..n)
+                .map(|i| vec![format!("r{i}"), format!("{}", i * 3)])
+                .collect::<Vec<_>>(),
+        );
+        let root = Element::col().width(400).height(view_h).child(
+            Element::table_virtual(vec![("名称", 2.0), ("值", 1.0)], rows, super::TABLE_ROW_H)
+                .fill(),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, view_h), &mut te);
+        tree.layout_root(Size::new(400, view_h), &mut te);
+        // col[table] → table = col[header, divider, scroll]
+        let table = tree.get(id).unwrap().children[0];
+        let scroll = tree.get(table).unwrap().children[2];
+        (tree, id, scroll)
+    }
+
+    /// 行是否有斑马纹底色（`body_row` 给奇数显示位置铺 `Role::SurfaceAlt`）。
+    fn is_striped(tree: &Tree, row: NodeId) -> bool {
+        // body_row 返回 col[tr, divider]，底色在 tr 上。
+        let tr = tree.get(row).unwrap().children[0];
+        matches!(
+            tree.get(tr).unwrap().style.bg,
+            Some(crate::style::Brush::Role(crate::style::Role::SurfaceAlt))
+        )
+    }
+
+    #[test]
+    fn table_virtual_stripes_follow_the_real_row_index() {
+        // 截图看不出的一类故障：斑马纹若按"在渲染窗口里的第几个"交替，滚动时深浅条纹
+        // 会随窗口起点来回跳，肉眼是"列表在闪"，几何断言却全绿。这里钉死它按真实下标走。
+        let (mut tree, _root, scroll) = setup_table(5_000, 300);
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..7 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, 300);
+
+        let body = tree.get(scroll).unwrap().children[0];
+        let kids = tree.get(body).unwrap().children.clone();
+        let first_idx = (tree.get(kids[0]).unwrap().bounds.h / super::TABLE_ROW_H) as usize;
+        assert!(first_idx > 0, "滚动后上方应有被略过的行");
+        // 取渲染窗口里相邻两行：底色必须与各自**真实下标**的奇偶一致。
+        for k in 0..2 {
+            let idx = first_idx + k;
+            assert_eq!(
+                is_striped(&tree, kids[1 + k]),
+                idx % 2 == 1,
+                "第 {idx} 行的斑马纹应由真实下标奇偶决定"
+            );
+        }
+    }
+
+    #[test]
+    fn table_virtual_keeps_header_outside_the_scroll() {
+        // 表头必须留在滚动容器**外面**，否则会跟着正文一起滚走。
+        let (tree, root, scroll) = setup_table(1_000, 300);
+        let table = tree.get(root).unwrap().children[0];
+        let kids = tree.get(table).unwrap().children.clone();
+        assert_eq!(
+            kids.len(),
+            3,
+            "table_virtual 应为 col[表头, 分隔线, 滚动区]"
+        );
+        assert_ne!(kids[0], scroll, "表头不应在滚动区内");
+        assert_eq!(
+            tree.get(scroll).unwrap().content_h,
+            1_000 * super::TABLE_ROW_H,
+            "正文内容高应等于 行数 × TABLE_ROW_H"
+        );
+    }
+
+    #[test]
+    fn never_asks_for_extra_frames() {
+        // 「空闲零 CPU」是本库的立身指标之一。渲染量改按本帧窗口高算之后，首帧就是对的，
+        // 于是这里的契约比"只请求一次"更强：**一次都不请求**。
+        //
+        // 这条盯着的退化是：某天有人为了修某个几何问题在 on_update 里加回
+        // `request_relayout()`，界面看起来一切正常，代价是空闲 CPU 再也回不到零——
+        // 那种退化不会有任何测试或视觉表现暴露它。
+        let data = signal((0..10_000usize).collect::<Vec<_>>());
+        let root = Element::col().width(300).height(VIEW_H).child(
+            Element::virtual_list(data, ROW_H, |_i, _v: usize| Element::leaf().width_match())
+                .fill(),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+
+        crate::anim::take_relayout(); // 清掉别处遗留的请求
+        tree.layout_root(Size::new(300, VIEW_H), &mut te);
+        assert!(!crate::anim::take_relayout(), "首帧不该请求续帧");
+
+        for _ in 0..3 {
+            tree.layout_root(Size::new(300, VIEW_H), &mut te);
+        }
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..20 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        tree.layout_root(Size::new(300, VIEW_H), &mut te);
+        assert!(
+            !crate::anim::take_relayout(),
+            "滚动与重排都不该请求续帧（否则空闲 CPU 永不归零）"
+        );
+
+        // 视口高为 0（列表在收起的分组或未激活的页里）同样不能续帧。
+        let data2 = signal((0..1_000usize).collect::<Vec<_>>());
+        let hidden = Element::col().width(300).height(0).child(
+            Element::virtual_list(data2, ROW_H, |_i, _v: usize| Element::leaf().width_match())
+                .fill(),
+        );
+        let mut tree2 = Tree::new();
+        let id2 = hidden.build(&mut tree2);
+        tree2.root = Some(id2);
+        crate::anim::take_relayout();
+        for _ in 0..5 {
+            tree2.layout_root(Size::new(300, 0), &mut te);
+        }
+        assert!(
+            !crate::anim::take_relayout(),
+            "视口为 0 时也不得请求续帧——每帧都请求等于把空闲 CPU 钉在满转"
+        );
+    }
+
+    #[test]
+    fn unbounded_height_parent_does_not_materialize_everything() {
+        // 最阴的一种用错法：把列表直接丢进页面级 scroll 而不给高度。滚动容器按无限高度
+        // 测量子元素，于是这个列表的"视口"会收敛成**整个内容高**——按实测视口高算渲染量
+        // 的话，十万行会全部建出来，没有 panic、没有警告，就是卡死。
+        //
+        // 渲染量按窗口高算天然封顶：窗口只有那么高，视口不可能更大。
+        let data = signal((0..50_000usize).collect::<Vec<_>>());
+        let page = Element::scroll().width(300).height(600).child(
+            // 注意：这里**没有** .height()/.weight()，正是那种用错法。
+            Element::virtual_list(data, ROW_H, |_i, _v: usize| Element::leaf().width_match()),
+        );
+        let mut tree = Tree::new();
+        let id = page.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(300, 600), &mut te);
+        tree.layout_root(Size::new(300, 600), &mut te); // 第二帧才是原本会爆的那一帧
+
+        let total = node_count(&tree, id);
+        assert!(
+            total < 100,
+            "无限高父容器下也必须只建视口那几行，实际节点数 {total}"
+        );
+    }
+}

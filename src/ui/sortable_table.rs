@@ -23,6 +23,7 @@ use crate::spec::{Align, Dimension};
 use crate::style::{Role, Style};
 use crate::text::TextEngine;
 
+use super::virtual_list::clear_children;
 use super::{Element, SortOrder, Truncate, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y, TABLE_HEADER_PAD_Y};
 
 /// 排序键：按**哪一列**、以**什么方向**排。表格排序状态一律用 `Option<SortKey>`
@@ -485,27 +486,6 @@ fn with_row_menu(row: Element, idx: usize, menu: Option<&OnRowMenu>) -> Element 
         }
         None => row,
     }
-}
-
-/// 清空某节点的全部子节点（递归释放子树 arena slot），并同刻回收这批子树在**构建期**
-/// 创建的信号。
-///
-/// 两件事绑在一个函数里是有意的：本表格的四个宿主（表头/正文/分页正文/可选正文）都会
-/// 按排序或数据变化整批重建行，节点与其构建期信号必须同生共死——只删节点会漏槽位，
-/// 只回收信号会让还挂着的节点读到已死的信号。
-fn clear_children(
-    tree: &mut crate::core::Tree,
-    id: crate::core::NodeId,
-    signals: &mut crate::signal::SignalScope,
-) {
-    let old: Vec<_> = tree.get(id).map(|n| n.children.clone()).unwrap_or_default();
-    for c in old {
-        tree.remove(c);
-    }
-    if let Some(n) = tree.get_mut(id) {
-        n.children.clear();
-    }
-    signals.dispose();
 }
 
 /// 响应式表头：首次布局构建单元格；排序状态变化时重建（刷新箭头方向）。
