@@ -14,6 +14,7 @@ pub mod nav;
 pub mod progress;
 pub mod reorder;
 pub mod rich;
+pub mod row_source;
 pub mod segmented;
 pub mod select;
 pub mod sortable_table;
@@ -47,6 +48,7 @@ pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use progress::ProgressBar;
 pub use reorder::{CommitMode, DragHandle, ReorderList};
 pub use rich::{Para, RichColor, RichDoc, RichText, SpanStyle};
+pub use row_source::{RowRequest, RowSource, ROW_CACHE_SEGMENTS, ROW_CHUNK};
 pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
 pub use sortable_table::{SortKey, SortStyle};
@@ -2891,6 +2893,87 @@ impl Element {
         let mut body = Self::col().width_match();
         body.set_widget(Box::new(sortable_table::VirtualTableBody::new(
             rows, weights, row_height,
+        )));
+        body.reactive = true;
+
+        Self::col()
+            .width_match()
+            .child(header)
+            .child(Self::divider())
+            .child(Self::scroll().fill().child(body).weight(1.0))
+    }
+
+    /// 虚拟滚动 + **服务端分页**表格：整份数据在后端，前端只按滚动位置按段取。
+    ///
+    /// 与 [`table_virtual`](Self::table_virtual) 的分界不在"数据从哪来"，而在**整份数据
+    /// 在不在本地内存里**。在本地就用 `table_virtual`（一次性 `set` 进信号即可，哪怕是
+    /// 接口拉回来的）；十万行文本在本地是十几 MB，而本库的立身指标之一是约 3.6MB 常驻——
+    /// 数据真在后端时用这个。
+    ///
+    /// - `source`：[`RowSource`]，握着总行数、已到货的分段与当前排序。滚动条按**总行数**
+    ///   撑高，所以第一帧的滚动条就是对的，不会随数据到货跳来跳去。
+    /// - `on_need(ctx, req)`：视口进到还没到货的段时调用一次。同步取数就地
+    ///   [`fill`](RowSource::fill)，异步取数把 `req` 一起搬进回调、到货时再 `fill`。
+    ///   **同一段不会重复请求**（行源记着在途台账）；取数失败调
+    ///   [`retry`](RowSource::retry) 才会再问一次。
+    ///
+    /// 还没到货的行画**骨架灰条**（无动画——流光效果要每帧重绘，会把空闲 CPU 钉在满转）。
+    ///
+    /// # 排序
+    ///
+    /// 表头可点，排序状态就是 `source.sort()`。**排序变化会自动作废整份缓存**并按新排序
+    /// 重新请求——这一步不交给应用，因为忘了它的表现是"行还在原位、内容按新序错位"，
+    /// 看着像数据错乱，查不到排序头上。应用只需在 `on_need` 里照 `req.sort` 取数。
+    ///
+    /// # 行内交互
+    ///
+    /// [`actions`](Self::actions) / [`cell_render`](Self::cell_render) /
+    /// [`cell_lines`](Self::cell_lines) / [`on_row_activate`](Self::on_row_activate) /
+    /// [`on_row_context_menu`](Self::on_row_context_menu) /
+    /// [`sort_indicator`](Self::sort_indicator) 全部可用——比
+    /// [`table_virtual`](Self::table_virtual) 还多一个排序箭头样式（这里的表头是响应式的）。
+    /// 回调拿到的是**真实行下标**（在整份数据里的位置，不是页内位置、也不是渲染窗口里的
+    /// 位置）。行高的注意事项同 `table_virtual`。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let src = RowSource::new(db.count());
+    /// Element::table_virtual_server(
+    ///     vec![("名称", 3.0), ("大小", 1.0)],
+    ///     src,
+    ///     TABLE_ROW_H,
+    ///     move |_ctx, req| {
+    ///         let rows = db.page(req.sort, req.rows.clone()); // 后端排好序再取这一段
+    ///         src.fill(&req, rows);
+    ///     },
+    /// )
+    /// .height(400)
+    /// ```
+    pub fn table_virtual_server(
+        columns: Vec<(impl Into<String>, f32)>,
+        source: row_source::RowSource,
+        row_height: i32,
+        on_need: impl FnMut(&mut EventCtx, row_source::RowRequest) + 'static,
+    ) -> Self {
+        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+
+        // 表头：响应式，绑定行源自己的排序信号。这里不传 on_sort——点表头只改信号，
+        // 作废缓存与按新排序重新请求由正文接手（见 VirtualServerBody::on_update）。
+        let mut header = Self::row()
+            .width_match()
+            .cross(Align::Stretch)
+            .bg_role(Role::SurfaceAlt);
+        header.set_widget(Box::new(sortable_table::SortableHeader::new(
+            cols,
+            source.sort(),
+            None,
+        )));
+        header.reactive = true;
+
+        let mut body = Self::col().width_match();
+        body.set_widget(Box::new(sortable_table::VirtualServerBody::new(
+            source, weights, row_height, on_need,
         )));
         body.reactive = true;
 

@@ -23,7 +23,8 @@ use crate::spec::{Align, Dimension};
 use crate::style::{Role, Style};
 use crate::text::TextEngine;
 
-use super::virtual_list::{clear_children, VirtualList};
+use super::row_source::{RowRequest, RowSource};
+use super::virtual_list::{clear_children, VirtualWindow};
 use super::{Element, SortOrder, Truncate, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y, TABLE_HEADER_PAD_Y};
 
 /// 排序键：按**哪一列**、以**什么方向**排。表格排序状态一律用 `Option<SortKey>`
@@ -1232,70 +1233,74 @@ pub(super) const fn select_col_w() -> i32 {
 }
 
 /// 构造操作列配置（供 `Element::actions` 组装）。
-/// 虚拟滚动表格的正文：把通用的 [`VirtualList`] 包一层，好让 `Element::actions` 这批
-/// 行内修饰符有个定位得到、也改得动的落点。
-///
-/// 不把这些字段直接塞进 `VirtualList` 是有意的——那是个与表格无关的通用列表，行长什么样
-/// 完全由调用方给的 `row_fn` 决定。表格特有的操作列/自定义格/行回调收在这里，与另外三种
-/// 正文（[`SortableBody`] / [`PagedBody`] / [`SelectableBody`]）并列，`set_body_*` 也就
-/// 多一个分支的事。
-///
-/// 修饰符改的是共享的 [`VirtualRowCfg`]：`row_fn` 在构造时就捕获了它的 `Rc` 克隆，每次
-/// 建行现读。于是"先造 Element、再链式设修饰符"这个既有用法照常成立，不必为了改一个
-/// 配置把整个 `row_fn` 重做一遍。
-pub(super) struct VirtualTableBody {
-    inner: VirtualList<Vec<String>>,
-    cfg: Rc<RefCell<VirtualRowCfg>>,
-}
-
-/// 行的构建配置：与 [`SortableBody`] 上那组同名字段一一对应，只是改由 `Rc<RefCell<..>>`
-/// 共享给 `row_fn`。
-struct VirtualRowCfg {
+/// 行的构建配置：与 [`SortableBody`] 上那组同名字段一一对应，收成一个结构体是因为两种
+/// 虚拟正文（本地的 [`VirtualTableBody`]、服务端的 [`VirtualServerBody`]）都要原样带着它，
+/// 而 `body_row` 是九个参数——每处各摊平一遍，加一项配置就要改三处调用。
+#[derive(Default)]
+pub(super) struct RowCfg {
     actions: Option<ActionCol>,
     render: Option<CellRender>,
+    /// 默认文本格最多显示行数；`0` 视作 1（`Default` 派生出来的就是 0）。
     lines: usize,
     activate: Option<OnRowActivate>,
     menu: Option<OnRowMenu>,
 }
 
+impl RowCfg {
+    fn row(&self, disp: usize, orig: usize, cells: &[String], weights: &[f32]) -> Element {
+        body_row(
+            disp,
+            orig,
+            cells,
+            weights,
+            self.actions.as_ref(),
+            self.render.as_ref(),
+            self.lines.max(1),
+            self.activate.as_ref(),
+            self.menu.as_ref(),
+        )
+    }
+
+    /// 操作列的列宽权重（没有操作列时 `None`）。骨架行据此补一个空的操作格——
+    /// 少了它，骨架行比数据行少一列，两者的列边界会错开。
+    fn actions_weight(&self) -> Option<f32> {
+        self.actions.as_ref().map(|a| a.weight)
+    }
+}
+
+/// 虚拟滚动表格的正文（数据在本地）：把 [`VirtualWindow`] 的窗口计算与占位撑高，接到
+/// 表格自己的行构建上。
+///
+/// 表格特有的操作列/自定义格/行回调收在这里，与另外三种正文
+/// （[`SortableBody`] / [`PagedBody`] / [`SelectableBody`]）并列，`set_body_*` 也就多一个
+/// 分支的事；通用的窗口逻辑留在 `virtual_list`，与表格无关。
+pub(super) struct VirtualTableBody {
+    rows: Signal<Vec<Vec<String>>>,
+    weights: Vec<f32>,
+    cfg: RowCfg,
+    win: VirtualWindow,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
+    signals: crate::signal::SignalScope,
+}
+
 impl VirtualTableBody {
     pub(super) fn new(rows: Signal<Vec<Vec<String>>>, weights: Vec<f32>, row_h: i32) -> Self {
-        let cfg = Rc::new(RefCell::new(VirtualRowCfg {
-            actions: None,
-            render: None,
-            lines: 1,
-            activate: None,
-            menu: None,
-        }));
-        let c = cfg.clone();
-        let inner = VirtualList::new(rows, row_h, move |i, cells: Vec<String>| {
-            // 借用只活在建这一行的期间：`body_row` 不会回头再碰配置，而修饰符都在
-            // 构建期之外调用，两者撞不上。
-            let c = c.borrow();
-            // 两个下标都传真实行号：斑马纹因此跟着**数据行**走，而不是跟着它在渲染窗口
-            // 里的位置——否则滚动时深浅条纹会随窗口起点整体跳一格。
-            body_row(
-                i,
-                i,
-                &cells,
-                &weights,
-                c.actions.as_ref(),
-                c.render.as_ref(),
-                c.lines,
-                c.activate.as_ref(),
-                c.menu.as_ref(),
-            )
-        });
-        Self { inner, cfg }
+        Self {
+            rows,
+            weights,
+            cfg: RowCfg::default(),
+            win: VirtualWindow::new(row_h),
+            signals: crate::signal::SignalScope::new(),
+        }
     }
 
     /// 改配置并作废已建行。
     ///
-    /// 不假设"修饰符一定在首帧之前设进来"：`VirtualList` 只在区间或数据版本变化时重建，
-    /// 少了这次作废，运行中才挂上的操作列要等用户滚动一下才出现。
-    fn edit(&mut self, f: impl FnOnce(&mut VirtualRowCfg)) {
-        f(&mut self.cfg.borrow_mut());
-        self.inner.invalidate();
+    /// 不假设"修饰符一定在首帧之前设进来"：窗口只在区间或数据版本变化时重建，少了这次
+    /// 作废，运行中才挂上的操作列得等用户滚动一下才出现，且没有任何报错提示。
+    fn edit(&mut self, f: impl FnOnce(&mut RowCfg)) {
+        f(&mut self.cfg);
+        self.win.invalidate();
     }
 
     pub(super) fn set_actions(&mut self, actions: ActionCol) {
@@ -1317,11 +1322,186 @@ impl VirtualTableBody {
 
 impl Widget for VirtualTableBody {
     fn on_update(&mut self, ctx: &mut EventCtx) {
-        self.inner.on_update(ctx);
+        let ver = self.rows.version();
+        let n = self.rows.with(Vec::len);
+        let Some((first, mut last)) = self.win.poll(ctx, n, ver) else {
+            return;
+        };
+        // 只克隆可见的那几十行；借用在建行之前就放掉（`cell_render` 等用户闭包可能写回
+        // 同一个信号，撞上 RefCell 双借用）。
+        let visible: Vec<Vec<String>> = self
+            .rows
+            .with(|v| v[first.min(v.len())..last.min(v.len())].to_vec());
+        last = first + visible.len();
+
+        let self_id = ctx.id();
+        let (weights, cfg) = (&self.weights, &self.cfg);
+        let mut signals = std::mem::take(&mut self.signals);
+        self.win
+            .rebuild(ctx.tree_mut(), self_id, first, last, n, &mut signals, |i| {
+                // 两个下标都传真实行号：斑马纹因此跟着**数据行**走，而不是跟着它在渲染
+                // 窗口里的位置——否则滚动时深浅条纹会随窗口起点整体跳一格。
+                cfg.row(i, i, &visible[i - first], weights)
+            });
+        self.signals = signals;
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
+}
+
+/// 取数请求回调：视口进到还没到货的段时调用一次。
+pub(super) type OnNeedRows = Box<dyn FnMut(&mut EventCtx, RowRequest)>;
+
+/// 虚拟滚动表格的正文（数据在服务端）：滚动条按**总行数**撑高，行按段到货，
+/// 还没到的画骨架占位并发一次请求。
+///
+/// 与本地版 [`VirtualTableBody`] 的差别只在数据从哪来——窗口计算、占位撑高、行内修饰符
+/// 全都共用。多出来的是三件事：**发请求**（去重靠行源的在途台账）、**画骨架**、以及
+/// **排序变化时自动作废缓存**——最后这条不该由应用记得做，旧顺序的缓存拿新排序去读就是
+/// 张冠李戴，而且看着一切正常。
+pub(super) struct VirtualServerBody {
+    src: RowSource,
+    weights: Vec<f32>,
+    cfg: RowCfg,
+    win: VirtualWindow,
+    signals: crate::signal::SignalScope,
+    on_need: OnNeedRows,
+    /// 上次见到的排序版本，用来发现"表头被点过了"。
+    last_sort: u64,
+}
+
+impl VirtualServerBody {
+    pub(super) fn new(
+        src: RowSource,
+        weights: Vec<f32>,
+        row_h: i32,
+        on_need: impl FnMut(&mut EventCtx, RowRequest) + 'static,
+    ) -> Self {
+        Self {
+            // 记下**当前**版本而不是 0：否则首帧会误判成"排序变过"，白作废一次并多写
+            // 一次信号（信号一写就请求重绘）。
+            last_sort: src.sort_version(),
+            src,
+            weights,
+            cfg: RowCfg::default(),
+            win: VirtualWindow::new(row_h),
+            signals: crate::signal::SignalScope::new(),
+            on_need: Box::new(on_need),
+        }
+    }
+
+    fn edit(&mut self, f: impl FnOnce(&mut RowCfg)) {
+        f(&mut self.cfg);
+        self.win.invalidate();
+    }
+
+    pub(super) fn set_actions(&mut self, actions: ActionCol) {
+        self.edit(|c| c.actions = Some(actions));
+    }
+    pub(super) fn set_cell_render(&mut self, render: CellRender) {
+        self.edit(|c| c.render = Some(render));
+    }
+    pub(super) fn set_cell_lines(&mut self, lines: usize) {
+        self.edit(|c| c.lines = lines.max(1));
+    }
+    pub(super) fn set_activate(&mut self, activate: OnRowActivate) {
+        self.edit(|c| c.activate = Some(activate));
+    }
+    pub(super) fn set_menu(&mut self, menu: OnRowMenu) {
+        self.edit(|c| c.menu = Some(menu));
+    }
+}
+
+impl Widget for VirtualServerBody {
+    fn on_update(&mut self, ctx: &mut EventCtx) {
+        // 排序变了：整份缓存作废。放在这里而不是交给应用，是因为忘了这一步的表现是
+        // "行还在原位、内容却按新序错位"——看着像数据错乱，查不到排序头上。
+        let sv = self.src.sort_version();
+        if sv != self.last_sort {
+            self.last_sort = sv;
+            self.src.invalidate();
+            self.win.invalidate();
+        }
+
+        // 用 `span` 而不是 `total`：总行数还没被后端确认时先按引导请求那一段撑着，
+        // 首屏因此看得见骨架而不是一张空表（见 `RowSource::span`）。
+        let total = self.src.span();
+        let Some((first, last)) = self.win.poll(ctx, total, self.src.version()) else {
+            return;
+        };
+
+        // 先记窗口（淘汰要绕开它）再发请求，顺序不能反：反了的话本次请求刚到货就可能
+        // 被当成最久没用的段淘汰掉。
+        self.src.set_window(first..last);
+        for req in self.src.take_requests(first..last) {
+            (self.on_need)(ctx, req);
+        }
+
+        // 同步取数的应用会在上面那个回调里就把数据写回来，故这一步放在发请求之后：
+        // 数据当帧就能画出来，不必先闪一帧骨架。
+        let visible = self.src.visible(first..last);
+        let self_id = ctx.id();
+        let (weights, cfg) = (&self.weights, &self.cfg);
+        let mut signals = std::mem::take(&mut self.signals);
+        self.win.rebuild(
+            ctx.tree_mut(),
+            self_id,
+            first,
+            last,
+            total,
+            &mut signals,
+            |i| match &visible[i - first] {
+                Some(cells) => cfg.row(i, i, cells, weights),
+                None => skeleton_row(i, weights, cfg.actions_weight()),
+            },
+        );
+        self.signals = signals;
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+}
+
+/// 还没到货的行：每列一根骨架灰条。
+///
+/// **刻意不做流光动画**：那要每帧重绘，而「空闲零 CPU」是本库的立身指标之一——为了一个
+/// 加载态把整个窗口钉在满转，不划算。参差不齐的条宽已经足够说明"这不是数据"。
+fn skeleton_row(row: usize, weights: &[f32], actions_col: Option<f32>) -> Element {
+    let mut tr = Element::row().width_match().cross(Align::Stretch);
+    // 斑马纹照常按真实行下标交替：骨架与到货的行混在一起时条纹才不会断。
+    if row % 2 == 1 {
+        tr = tr.bg_role(Role::SurfaceAlt);
+    }
+    for (ci, &w) in weights.iter().enumerate() {
+        tr = tr.child(skeleton_cell(row, ci, w));
+    }
+    if let Some(aw) = actions_col {
+        // 空的操作格：不画东西，只占住那一列，否则骨架行与数据行的列边界对不齐。
+        tr = tr.child(Element::row().weight(aw));
+    }
+    Element::col()
+        .width_match()
+        .child(tr)
+        .child(Element::divider())
+}
+
+fn skeleton_cell(row: usize, col: usize, w: f32) -> Element {
+    // 条宽在 45%~85% 之间按下标确定性地变化：整齐划一的等宽灰条看着像"数据"，参差不齐
+    // 才像"还没来"。用下标而不是随机数，是为了同一行滚出去再滚回来长得一样。
+    let frac = 0.45 + ((row * 7 + col * 13) % 41) as f32 / 100.0;
+    Element::row()
+        .weight(w)
+        .cross(Align::Center)
+        .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
+        .child(
+            Element::leaf()
+                .weight(frac)
+                .height(10)
+                .corner(3.0)
+                .bg_role(Role::Border),
+        )
+        .child(Element::leaf().weight(1.0 - frac))
 }
 
 pub(super) fn action_col(
@@ -1398,6 +1578,10 @@ pub(super) fn set_body_actions(el: &mut Element, ac: &ActionCol) -> bool {
         b.set_actions(ac.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualServerBody>() {
+        b.set_actions(ac.clone());
+        return true;
+    }
     false
 }
 
@@ -1423,6 +1607,10 @@ pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> boo
         b.set_cell_render(render.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualServerBody>() {
+        b.set_cell_render(render.clone());
+        return true;
+    }
     false
 }
 
@@ -1442,6 +1630,10 @@ pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> b
         return true;
     }
     if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_activate(activate.clone());
+        return true;
+    }
+    if let Some(b) = a.downcast_mut::<VirtualServerBody>() {
         b.set_activate(activate.clone());
         return true;
     }
@@ -1473,6 +1665,10 @@ pub(super) fn set_body_menu(el: &mut Element, menu: &OnRowMenu) -> bool {
         b.set_menu(menu.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualServerBody>() {
+        b.set_menu(menu.clone());
+        return true;
+    }
     false
 }
 
@@ -1495,6 +1691,10 @@ pub(super) fn set_body_cell_lines(el: &mut Element, lines: usize) -> bool {
         return true;
     }
     if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_cell_lines(lines);
+        return true;
+    }
+    if let Some(b) = a.downcast_mut::<VirtualServerBody>() {
         b.set_cell_lines(lines);
         return true;
     }

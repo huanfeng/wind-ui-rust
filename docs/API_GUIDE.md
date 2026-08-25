@@ -304,6 +304,8 @@ Element::table_selectable(columns, rows, selected, sort)
 // 虚拟滚动：只构建视口内的行，行数再多每帧成本不变；要求行高固定（详见 §6.6）
 //   行内修饰符（actions / cell_render / on_row_activate / on_row_context_menu）照常可用
 Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H)
+// 虚拟滚动 + 服务端分页：整份数据在后端，按滚动位置按段取；未到货的行画骨架（详见 §6.7）
+Element::table_virtual_server(columns, src /* RowSource */, TABLE_ROW_H, |ctx, req| { /* 取数后 src.fill(&req, rows) */ })
 ```
 
 扩展修饰符（链在上述表格返回的元素上）：
@@ -321,21 +323,22 @@ Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H
 > release 下静默忽略**（口径同 §5 的 text_input 专属修饰符），panic 位置指向你的调用行。
 > 照下表核对：
 >
-> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_virtual` |
-> |---|---|---|---|---|---|---|---|
-> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-> | `cell_render` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
-> | `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓（须自行调大 `row_height`） |
-> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✓ |
-> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_virtual` | `table_virtual_server` |
+> |---|---|---|---|---|---|---|---|---|
+> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ |
+> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_render` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓（须自行调大 `row_height`） | ✓（同左） |
+> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✓ | ✓ |
+> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
 >
 > `table` / `table_editable` 内部会转成 `table_custom` 的结构，三者都不带响应式表头/正文
 > widget，因此整列扩展点都不适用——需要排序或行级交互，请直接从 `table_sortable` 起步。
 >
 > `table_virtual` 只差 `sort_indicator`：它的表头是**静态行**（不重建，也就无从画排序箭头），
-> 排序请在写进数据信号之前自己排好。行内交互则与非虚拟表格完全一致——行怎么建是同一个
-> `body_row`，操作列、自定义格、双击、右键走的是同一条接线。
+> 排序请在写进数据信号之前自己排好。`table_virtual_server` 的表头是响应式的，因此整列都齐。
+> 行内交互则与非虚拟表格完全一致——行怎么建是同一个 `body_row`，操作列、自定义格、双击、
+> 右键走的是同一条接线。
 >
 > 只有一处要自己把关：**行高**。虚拟滚动要求行高固定，行元素会被强制设成 `row_height`，
 > 而 `TABLE_ROW_H` 是按**纯文本行**给的（单行文本盒 20px），装不下按钮。行里放控件或用
@@ -345,8 +348,8 @@ Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H
 > **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
 > 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
 > 后仍锁定同一数据行，可直接索引 `selected[row]`），服务端表格（`table_sortable_server`）
-> 是当前页内的**显示下标**，虚拟表格（`table_virtual`）是数据里的**真实行下标**——不是它在
-> 渲染窗口里的位置，滚到哪一行，闭包拿到的就是哪一行。
+> 是当前页内的**显示下标**，两种虚拟表格（`table_virtual` / `table_virtual_server`）是数据里的
+> **真实行下标**——不是它在渲染窗口里的位置、也不是段内位置，滚到哪一行，闭包拿到的就是哪一行。
 
 > **可编辑表格**：`cells: Vec<Vec<Signal<String>>>`（每格一个信号，显示自动跟随）。点单元格触发
 > `on_edit(ctx, row, col)`，由 app 据 (row,col) 弹出编辑框（如 `dialog_panel` + `text_input` 绑定临时
@@ -910,7 +913,72 @@ Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows2, 30 + 9 * 2
 > **什么时候才该用它？** 几百行以内用 §6.5 的 `list_signal` 就好——它没有上面任何一条
 > 限制。虚拟化的复杂度只在行数真的多起来时才划算。
 
-完整可运行示例：`examples/virtual_list.rs`（十万行列表 + 一万行表格 + 行数骤变）。
+完整可运行示例：`examples/virtual_list.rs`（十万行列表 + 一万行表格 + 行数骤变 +
+行内按钮/徽章/双击/右键菜单）。**数据在后端**时见下一节。
+
+---
+
+### 6.7 服务端分页（数据在后端）
+
+§6.6 的 `table_virtual` 要求**整份数据在本地**（`Signal<Vec<Vec<String>>>`）。分界线不在
+"数据从哪来"——接口一次性拉回来放进信号，照样用 `table_virtual`——而在**整份数据在不在
+本地内存**。十万行三列文本在本地是十几 MB，而本库的立身指标之一是约 3.6MB 常驻；数据
+真在后端时用 `table_virtual_server`。
+
+```text
+总行数 200000  ← 滚动条按它撑高，第一帧就是对的
+┌────────────────────────────────────────────┐
+│ 段 0     段 1     段 2   …   段 1999        │  每段 100 行
+│  ✗        ✓        ✓             ✗          │  ✓=已到货  ✗=画骨架灰条
+└────────────────────────────────────────────┘
+          └─视口─┘                             视口进到空洞就发一次请求
+```
+
+```rust
+use windui::prelude::*;
+
+// 总行数先给 0：行源会先发一次引导请求（0..chunk），应用在响应里连总数一起补上，
+// 正是真实后端"首屏一次 COUNT + 第一页"的形状。已知总数就直接 RowSource::new(total)。
+let src = RowSource::new(0);
+
+Element::table_virtual_server(
+    vec![("名称", 3.0), ("大小", 1.0)],
+    src,
+    TABLE_ROW_H,
+    move |_ctx, req| {
+        // 视口进到还没到货的段时调用一次。同一段不会重复问。
+        let rows = backend.query(req.sort, req.rows.clone()); // ORDER BY … LIMIT … OFFSET …
+        src.set_total(backend.count());
+        src.fill(&req, rows);      // ← 带上 req，不只是起始下标
+    },
+)
+.height(400)
+```
+
+**回填要带上收到的那个 `req`**，而不只是起始下标：它同时带着代次，排序在请求发出后变过
+的话这次写入会被丢弃。异步取数最经典的一个 bug 就是慢响应盖掉新排序的数据——表现是
+"排了序内容却是旧的"，且只在网络慢时偶发。
+
+三条设计上的取舍，用之前值得知道：
+
+| 取舍 | 怎么定的 | 影响到你 |
+|---|---|---|
+| **按固定分段拉取**（默认 100 行，`RowSource::chunk` 可改） | 视口的实际区间随滚动位置漂移，滚 3 像素就是一个新区间，既没法去重也没法缓存 | 后端拿到的就是 `LIMIT n OFFSET m×n`；同一段滚过去再滚回来不重复请求 |
+| **缓存有上限**（默认 32 段 ≈ 3200 行，`RowSource::cache_segments` 可改） | 不淘汰的话，把十万行滚一遍就等于把整份数据搬进了内存 | 滚得够远时早先的段会被丢弃，滚回去要重拉。淘汰**绕开当前视口**覆盖的段 |
+| **未到货的行画骨架灰条**（无动画） | 留白与"这一行本来就没内容"无从区分 | 流光动画要每帧重绘，会把「空闲零 CPU」写死，故刻意不做 |
+
+**排序**：表头可点，排序状态就是 `src.sort()`。排序变化会**自动作废整份缓存**并按新排序
+重新请求——这一步不交给应用，因为忘了它的表现是"行还在原位、内容按新序错位"，看着像
+数据错乱，查不到排序头上。应用只需在回调里照 `req.sort` 取数。
+
+**取数失败**：调 `src.retry(&req)` 把那一段标记回"未请求"，它会立刻被重新发出。不调的话
+那一段会永远停在"在途"，骨架条再也不会变成数据，且不会有任何报错。
+
+其余限制与 `table_virtual` 相同（行高固定、Tab 焦点环只覆盖已渲染的行、行内部临时状态
+随重建重置）。行内修饰符也相同，见 §5 的适用矩阵。
+
+完整可运行示例：`examples/virtual_table_server.rs`（二十万行 + 模拟慢后端 + 失败重试 +
+排序 + 行内按钮）。
 
 ---
 

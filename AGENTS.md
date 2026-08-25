@@ -52,7 +52,7 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 | `src/app.rs` | `App` 构建器 + `UiHost`（交互宿主：render / 事件 / 焦点 / 菜单 / 触摸惯性） |
 | `src/core.rs` | `Tree`（generational arena）+ `Node` + `Widget` trait + `EventCtx` + 三阶段布局 + 事件分发 |
 | `src/ui/mod.rs` | `Element` 构建器（控件构造 + 链式修饰符 + `build`） |
-| `src/ui/{inputs,select,progress,stepper,list,containers,virtual_list}.rs` | 各 `Widget` 实现 |
+| `src/ui/{inputs,select,progress,stepper,list,containers,virtual_list,row_source}.rs` | 各 `Widget` 实现 |
 | `src/geometry.rs` | `Color / Point / Size / Rect / Insets` |
 | `src/spec.rs` | `Align / Axis / Dimension / MeasureSpec` |
 | `src/style.rs` | `Style`（内联视觉属性） |

@@ -77,35 +77,25 @@ const OVERSCAN: usize = 4;
 // 视口再大也不可能超过窗口。代价是视口远小于窗口时会多渲染几行——一个 2000px 的窗口里
 // 摆着 200px 高的表格，多建约 (2000−200)/行高 行，几十微秒的事，换掉上面两个可见故障。
 
-/// 虚拟滚动正文：挂在滚动容器**内部的列容器**上，按当前滚动量重建可见行。
+/// 视口窗口的计算与「占位撑高」的重建骨架，三种虚拟滚动正文共用
+/// （[`VirtualList`]、`VirtualTableBody`、`VirtualServerBody`）。
 ///
-/// 刻意不挂在滚动节点自己身上：`Element::scroll()` 自带的
-/// [`ScrollWidget`](super::containers::ScrollWidget) 才是滚轮与滚动条拖拽的实现，
-/// 换掉它列表就滚不动了。这与 `SortableBody` 的挂法是同一条理由。
-pub(super) struct VirtualList<T: Clone + 'static> {
-    data: Signal<Vec<T>>,
+/// 抽出来是因为这两件事**必须只有一份**：占位高度按 `first × row_h` / `(n − last) × row_h`
+/// 算，而行的位置由同一个 `first` 决定——两处一旦分头演化，滚动条与内容就会渐行渐远，
+/// 而且是那种滚很远才看得出来的偏移。
+pub(super) struct VirtualWindow {
     row_h: i32,
-    row_fn: Rc<dyn Fn(usize, T) -> Element>,
     /// 上次构建的 `(首行, 末行(不含), 数据版本)`。三者全同才跳过重建——只比区间的话，
     /// 原地改数据（`Signal::set` 同长度新 Vec）就刷不出来了。
     last: Option<(usize, usize, u64)>,
-    /// 当前这批行在构建期创建的信号，重建时整批回收（同 `DynList`）。
-    rows: SignalScope,
 }
 
-impl<T: Clone + 'static> VirtualList<T> {
-    pub(super) fn new(
-        data: Signal<Vec<T>>,
-        row_h: i32,
-        row_fn: impl Fn(usize, T) -> Element + 'static,
-    ) -> Self {
+impl VirtualWindow {
+    pub(super) fn new(row_h: i32) -> Self {
         Self {
-            data,
             // 行高必须为正：0 或负会让 `scroll_y / row_h` 除零或算出负索引。
             row_h: row_h.max(1),
-            row_fn: Rc::new(row_fn),
             last: None,
-            rows: SignalScope::new(),
         }
     }
 
@@ -133,54 +123,109 @@ impl<T: Clone + 'static> VirtualList<T> {
         (first, last)
     }
 
-    /// 按区间重建子节点：`[占位, 行…, 占位]`。
-    fn rebuild(&mut self, tree: &mut Tree, self_id: NodeId, first: usize, last: usize, n: usize) {
-        // 只克隆可见的那几十行。`Signal::with` 借用期间不得回调用户代码——`row_fn` 里若
-        // 写回同一个信号会撞上 RefCell 双借用，故先取出、放掉借用，再构建。
-        let visible: Vec<T> = self
-            .data
-            .with(|v| v[first.min(v.len())..last.min(v.len())].to_vec());
-        let before = first as i32 * self.row_h;
-        let after = (n.saturating_sub(last)) as i32 * self.row_h;
-
-        let mut rows = std::mem::take(&mut self.rows);
-        clear_children(tree, self_id, &mut rows);
-        let (row_fn, row_h) = (self.row_fn.clone(), self.row_h);
-        rows.collect(|| {
-            push(tree, self_id, spacer(before));
-            for (k, item) in visible.into_iter().enumerate() {
-                // 强制行高：占位高度按 `row_h` 算，行的实际高度就必须是 `row_h`，
-                // 否则内容会与滚动条渐行渐远。
-                push(
-                    tree,
-                    self_id,
-                    row_fn(first + k, item).width_match().height(row_h),
-                );
-            }
-            push(tree, self_id, spacer(after));
-        });
-        self.rows = rows;
-    }
-}
-
-impl<T: Clone + 'static> Widget for VirtualList<T> {
-    fn on_update(&mut self, ctx: &mut EventCtx) {
+    /// 本帧该渲染的区间；与上次完全相同（区间与数据版本都没变）时返回 `None`，
+    /// 调用方据此跳过重建。
+    pub(super) fn poll(
+        &mut self,
+        ctx: &mut EventCtx,
+        n: usize,
+        ver: u64,
+    ) -> Option<(usize, usize)> {
         let self_id = ctx.id();
-        let ver = self.data.version();
-        let n = self.data.with(Vec::len);
         let tree = ctx.tree_mut();
         // 滚动量取自最近的滚动祖先，是事件刚写进去的**当前**值；渲染量则按本帧窗口高算
         // （理由见文件上方那段注释）。两者时序不同，但都不滞后。
         let scroll_y = scroll_offset(tree, self_id);
         let view_h = tree.layout_size.h.max(1);
-
         let (first, last) = self.range(scroll_y, view_h, n);
         if self.last == Some((first, last, ver)) {
-            return;
+            return None;
         }
         self.last = Some((first, last, ver));
-        let tree = ctx.tree_mut();
-        self.rebuild(tree, self_id, first, last, n);
+        Some((first, last))
+    }
+
+    /// 按区间重建子节点：`[占位, 行…, 占位]`。`row(i)` 按**真实行下标**产出行元素。
+    pub(super) fn rebuild(
+        &self,
+        tree: &mut Tree,
+        self_id: NodeId,
+        first: usize,
+        last: usize,
+        n: usize,
+        signals: &mut SignalScope,
+        mut row: impl FnMut(usize) -> Element,
+    ) {
+        let before = first as i32 * self.row_h;
+        let after = (n.saturating_sub(last)) as i32 * self.row_h;
+        let row_h = self.row_h;
+
+        let mut sc = std::mem::take(signals);
+        clear_children(tree, self_id, &mut sc);
+        sc.collect(|| {
+            push(tree, self_id, spacer(before));
+            for i in first..last {
+                // 强制行高：占位高度按 `row_h` 算，行的实际高度就必须是 `row_h`，
+                // 否则内容会与滚动条渐行渐远。
+                push(tree, self_id, row(i).width_match().height(row_h));
+            }
+            push(tree, self_id, spacer(after));
+        });
+        *signals = sc;
+    }
+}
+
+/// 虚拟滚动正文：挂在滚动容器**内部的列容器**上，按当前滚动量重建可见行。
+///
+/// 刻意不挂在滚动节点自己身上：`Element::scroll()` 自带的
+/// [`ScrollWidget`](super::containers::ScrollWidget) 才是滚轮与滚动条拖拽的实现，
+/// 换掉它列表就滚不动了。这与 `SortableBody` 的挂法是同一条理由。
+pub(super) struct VirtualList<T: Clone + 'static> {
+    data: Signal<Vec<T>>,
+    row_fn: Rc<dyn Fn(usize, T) -> Element>,
+    win: VirtualWindow,
+    /// 当前这批行在构建期创建的信号，重建时整批回收（同 `DynList`）。
+    rows: SignalScope,
+}
+
+impl<T: Clone + 'static> VirtualList<T> {
+    pub(super) fn new(
+        data: Signal<Vec<T>>,
+        row_h: i32,
+        row_fn: impl Fn(usize, T) -> Element + 'static,
+    ) -> Self {
+        Self {
+            data,
+            row_fn: Rc::new(row_fn),
+            win: VirtualWindow::new(row_h),
+            rows: SignalScope::new(),
+        }
+    }
+}
+
+impl<T: Clone + 'static> Widget for VirtualList<T> {
+    fn on_update(&mut self, ctx: &mut EventCtx) {
+        let ver = self.data.version();
+        let n = self.data.with(Vec::len);
+        let Some((first, mut last)) = self.win.poll(ctx, n, ver) else {
+            return;
+        };
+        // 只克隆可见的那几十行。`Signal::with` 借用期间不得回调用户代码——`row_fn` 里若
+        // 写回同一个信号会撞上 RefCell 双借用，故先取出、放掉借用，再构建。
+        let visible: Vec<T> = self
+            .data
+            .with(|v| v[first.min(v.len())..last.min(v.len())].to_vec());
+        // 数据比 `n` 报的还短时按实到长度收窄，行数与占位高度因此始终对得上。
+        last = first + visible.len();
+
+        let self_id = ctx.id();
+        let row_fn = self.row_fn.clone();
+        let mut signals = std::mem::take(&mut self.rows);
+        self.win
+            .rebuild(ctx.tree_mut(), self_id, first, last, n, &mut signals, |i| {
+                row_fn(i, visible[i - first].clone())
+            });
+        self.rows = signals;
     }
 }
 
@@ -238,7 +283,8 @@ mod tests {
     use crate::event::{MouseButton, PointerEvent, PointerKind};
     use crate::geometry::{Point, Size};
     use crate::signal::{signal, Signal};
-    use crate::ui::Element;
+    use crate::ui::row_source::RowSource;
+    use crate::ui::{Element, SortKey, SortOrder};
 
     const ROW_H: i32 = 40;
     const VIEW_H: i32 = 200;
@@ -922,5 +968,251 @@ mod tests {
             .and_then(|a| a.downcast_mut::<crate::ui::Label>())
             .and_then(|l| l.max_lines);
         assert_eq!(lines, Some(2), "cell_lines(2) 应传到虚拟表格的文本格上");
+    }
+    // ---- 服务端分页（table_virtual_server / RowSource）----
+
+    type Asked = Rc<RefCell<Vec<std::ops::Range<usize>>>>;
+
+    /// 造一棵 `[限高容器 → table_virtual_server]` 的树。
+    ///
+    /// `auto_fill` 为真时在回调里**同步**回填（模拟本地库或极快的后端）；为假时只记录
+    /// 请求、永不回填——那正是"数据还在路上"的状态，骨架占位与滚动条都要在这个状态下成立。
+    fn setup_server(
+        total: usize,
+        view_h: i32,
+        auto_fill: bool,
+        f: impl FnOnce(Element) -> Element,
+    ) -> (Tree, NodeId, RowSource, Asked) {
+        let src = RowSource::new(total);
+        let asked: Asked = Rc::new(RefCell::new(Vec::new()));
+        let rec = asked.clone();
+        let table = f(Element::table_virtual_server(
+            vec![("名称", 2.0), ("值", 1.0)],
+            src,
+            super::TABLE_ROW_H,
+            move |_ctx, req| {
+                rec.borrow_mut().push(req.rows.clone());
+                if auto_fill {
+                    let rows = req
+                        .rows
+                        .clone()
+                        .map(|i| vec![format!("r{i}"), format!("{}", i * 3)])
+                        .collect();
+                    src.fill(&req, rows);
+                }
+            },
+        ));
+        let root = Element::col().width(400).height(view_h).child(table.fill());
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, view_h), &mut te);
+        (tree, id, src, asked)
+    }
+
+    /// 服务端表格的滚动容器（root → table → scroll）。
+    fn server_scroll(tree: &Tree, root: NodeId) -> NodeId {
+        let table = tree.get(root).unwrap().children[0];
+        tree.get(table).unwrap().children[2]
+    }
+
+    /// 该行是不是骨架占位（首格里装的是灰条而非文本）。
+    fn is_skeleton(tree: &Tree, row: NodeId) -> bool {
+        let bar = tree.get(first_cell(tree, row)).unwrap().children[0];
+        matches!(
+            tree.get(bar).unwrap().style.bg,
+            Some(crate::style::Brush::Role(crate::style::Role::Border))
+        )
+    }
+
+    #[test]
+    fn server_scrollbar_spans_the_dataset_before_any_row_arrives() {
+        // 滚动条按**总行数**撑高，第一帧就是对的。若改成按已到货行数撑，滑块会随数据到货
+        // 不停缩小、位置乱跳，滚动体验就散了。
+        let (tree, root, _src, _asked) = setup_server(50_000, 300, false, |t| t);
+        let sc = server_scroll(&tree, root);
+        assert_eq!(
+            tree.get(sc).unwrap().content_h,
+            50_000 * super::TABLE_ROW_H,
+            "一行都没到货时，内容高也应等于 总行数 × 行高"
+        );
+    }
+
+    #[test]
+    fn server_missing_rows_render_as_skeletons() {
+        // 未到货 ≠ 空行。空白与"这一行本来就没内容"无从区分，用户只会以为表格坏了。
+        let (tree, root, _src, asked) = setup_server(50_000, 300, false, |t| t);
+        let sc = server_scroll(&tree, root);
+        assert!(
+            is_skeleton(&tree, rendered_row(&tree, sc, 0)),
+            "还没到货的行应画骨架占位"
+        );
+        assert!(!asked.borrow().is_empty(), "首帧就该为视口内的段发出请求");
+    }
+
+    #[test]
+    fn server_asks_for_each_chunk_only_once_across_scrolling() {
+        // 去重靠的是行源的在途台账，不是"窗口没动就不重算"——用户来回滚动时窗口一直在动，
+        // 每一步都会走到发请求那一步。这条来回滚几趟，断言同一段只被问过一次。
+        //
+        // 早先这条只是原地重排 20 帧：窗口没变，压根走不到发请求那一步，把台账整个删掉
+        // 它照样绿。反向验证才照出来。
+        let (mut tree, _root, _src, asked) = setup_server(50_000, 300, false, |t| t);
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..3 {
+            for _ in 0..30 {
+                tree.dispatch_pointer(wheel(-1200), &mut h, &mut cap);
+                relayout(&mut tree, 300);
+            }
+            for _ in 0..30 {
+                tree.dispatch_pointer(wheel(1200), &mut h, &mut cap);
+                relayout(&mut tree, 300);
+            }
+        }
+        let got = asked.borrow();
+        let mut uniq: Vec<usize> = got.iter().map(|r| r.start).collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(
+            uniq.len() >= 3,
+            "来回滚动应跨过至少三段，否则这条测不到什么；实际只碰到 {} 段",
+            uniq.len()
+        );
+        assert_eq!(
+            got.len(),
+            uniq.len(),
+            "同一段被重复请求了：共发 {} 次，却只有 {} 个不同的段",
+            got.len(),
+            uniq.len()
+        );
+        for r in got.iter() {
+            assert_eq!(r.start % crate::ui::ROW_CHUNK, 0, "请求应对齐分段边界");
+        }
+    }
+
+    #[test]
+    fn server_idle_frames_ask_for_nothing() {
+        // 「空闲零 CPU」的端到端烟测：稳态下响应式相位一个信号都不写（信号一写就是一次
+        // 重绘请求）。
+        //
+        // 它的灵敏度有限，别指望它单独兜住这条性质：窗口没变时 `VirtualWindow::poll` 会
+        // 提前返回，发请求与记窗口那两步压根不跑，所以"台账被无条件写"这类退化它照不出来
+        // ——那条由 `row_source` 的 `idle_never_writes_the_signals` 直接钉住。
+        let (mut tree, _root, _src, _asked) = setup_server(50_000, 300, true, |t| t);
+        for _ in 0..4 {
+            relayout(&mut tree, 300);
+        }
+        crate::anim::reset_request();
+        for _ in 0..5 {
+            relayout(&mut tree, 300);
+        }
+        assert!(
+            !crate::anim::animation_requested(),
+            "稳态下不该再请求重绘——信号一写就是一次请求"
+        );
+    }
+
+    #[test]
+    fn server_sort_change_refetches_with_the_new_sort() {
+        // 排序变了旧顺序的缓存就是错的。作废这一步由正文替应用做——忘了它的表现是
+        // "行还在原位、内容按新序错位"，看着像数据错乱，查不到排序头上。
+        let (mut tree, _root, src, asked) = setup_server(50_000, 300, true, |t| t);
+        assert!(src.loaded_rows() > 0, "首帧应已到货");
+        asked.borrow_mut().clear();
+
+        src.sort().set(Some(SortKey::new(1, SortOrder::Desc)));
+        relayout(&mut tree, 300);
+
+        let got = asked.borrow();
+        assert!(!got.is_empty(), "排序变化后应按新排序重新请求");
+        assert!(
+            src.loaded_rows() > 0,
+            "重新请求的数据应当帧回填（同步取数不必先闪骨架）"
+        );
+    }
+
+    #[test]
+    fn server_row_callbacks_see_the_real_row_index() {
+        // 同本地虚拟表格的那条：期望值取自数据本身（首格文本 `r{i}`），不从几何反推。
+        // 服务端版还多一层风险——下标若按"段内位置"给，滚到第二段时就全错了。
+        let seen: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let rec = seen.clone();
+        let (mut tree, _root, _src, _asked) = setup_server(50_000, 300, true, move |t| {
+            t.cell_render(move |row, col, text| {
+                if col == 0 {
+                    rec.borrow_mut().push((row, text.to_string()));
+                }
+                None
+            })
+        });
+        // 滚过第一段（100 行 × 行高），否则"段内位置"与"真实下标"恰好相等，测不出差别。
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..200 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+            relayout(&mut tree, 300);
+        }
+        // 清空之后再滚一格，好让这一帧确实重建（上面已滚到稳态，不动就不会重建）。
+        seen.borrow_mut().clear();
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        relayout(&mut tree, 300);
+
+        let seen = seen.borrow();
+        assert!(!seen.is_empty(), "滚动后应重建出一批新行");
+        assert!(
+            seen.iter().any(|(i, _)| *i >= crate::ui::ROW_CHUNK),
+            "应已滚过第一段，否则测不出段内下标与真实下标的差别"
+        );
+        for (row, text) in seen.iter() {
+            assert_eq!(
+                text,
+                &format!("r{row}"),
+                "回调说这是第 {row} 行，格里装的却是 {text} 的数据"
+            );
+        }
+    }
+
+    #[test]
+    fn server_actions_reach_header_and_rows() {
+        // 服务端表格的表头是**响应式**的（要画排序箭头），故操作列走的是与本地虚拟表格
+        // 不同的那条接线——单独钉一条。
+        let (tree, root, _src, _asked) = setup_server(50_000, 300, true, |t| {
+            t.actions("操作", 1.0, |_row| Element::label("·"))
+        });
+        let table = tree.get(root).unwrap().children[0];
+        let header = tree.get(table).unwrap().children[0];
+        assert_eq!(
+            tree.get(header).unwrap().children.len(),
+            3,
+            "表头应为 2 数据列 + 1 操作列"
+        );
+        let sc = server_scroll(&tree, root);
+        let tr = tree.get(rendered_row(&tree, sc, 0)).unwrap().children[0];
+        assert_eq!(tree.get(tr).unwrap().children.len(), 3, "正文行也应三列");
+    }
+
+    #[test]
+    fn server_skeleton_rows_keep_the_action_column() {
+        // 骨架行若少一列，未到货区与已到货区的列边界会错开——滚动时列宽像在呼吸。
+        let (tree, root, _src, _asked) = setup_server(50_000, 300, false, |t| {
+            t.actions("操作", 1.0, |_row| Element::label("·"))
+        });
+        let sc = server_scroll(&tree, root);
+        let row = rendered_row(&tree, sc, 0);
+        assert!(is_skeleton(&tree, row), "这一行应是骨架");
+        let tr = tree.get(row).unwrap().children[0];
+        assert_eq!(
+            tree.get(tr).unwrap().children.len(),
+            3,
+            "骨架行也要占住操作列，否则列边界与数据行对不齐"
+        );
+        let table = tree.get(root).unwrap().children[0];
+        let header = tree.get(table).unwrap().children[0];
+        let hcols = tree.get(header).unwrap().children.clone();
+        let bcols = tree.get(tr).unwrap().children.clone();
+        for (ci, (&hc, &bc)) in hcols.iter().zip(bcols.iter()).enumerate() {
+            let (hb, bb) = (tree.abs_bounds(hc), tree.abs_bounds(bc));
+            assert_eq!((hb.x, hb.w), (bb.x, bb.w), "第 {ci} 列应逐像素对齐");
+        }
     }
 }
