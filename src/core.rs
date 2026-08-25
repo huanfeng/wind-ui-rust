@@ -392,7 +392,11 @@ pub struct Node {
     /// 越界回弹的瞬时视觉偏移（不参与钳制，仅惯性撞界时短暂非零）。
     /// 正=内容下移（顶部回弹），负=内容上移（底部回弹）。
     pub over_scroll: i32,
-    /// 上一次 `reset_hidden_interactions` 扫描时的有效可见性（显隐翻转检测用）。
+    /// 上一次 [`Tree::reset_hidden_interactions`] 扫描时**是否参与交互**
+    /// （祖先链累积可见 ∧ 祖先链累积启用）。用于检测「退出交互」的翻转。
+    ///
+    /// 名字里只有 `visible` 是历史遗留：这里存的一直是"控件还收不收得到事件"，
+    /// 而**被禁用**与被隐藏一样会让它收不到（见那个方法的文档）。
     pub prev_visible: Cell<bool>,
     /// **绘制/命中偏移**（逻辑 px，相对布局位置）：不参与 measure/arrange，只在绘制与
     /// 命中时叠加到绝对坐标上。用于"视觉位移但布局不变"的场景——拖拽重排的让位与浮起、
@@ -1925,24 +1929,37 @@ impl Tree {
         h.finish()
     }
 
-    /// 显隐翻转后重置交互态：从根遍历，按**祖先链累积可见性**（父隐藏则子也隐藏）对每个
-    /// 节点判定真实可见，对**由可见变为隐藏**者调 `Widget::reset_interaction`（清 hover/press、
-    /// 令补间瞬时落定）。修正"控件在按下/悬停态被隐藏（如关闭它所在的对话框）、其状态/动画
-    /// 冻结、下次显示瞬间闪出旧态"。
+    /// **退出交互**后重置控件的交互态（名字里只有 `hidden` 是历史遗留，禁用同样在管）：
+    /// 从根遍历，按祖先链累积的可见性与启用态判定每个
+    /// 节点是否仍参与交互，对**由参与变为不参与**者调 `Widget::reset_interaction`
+    /// （清 hover/press、令补间瞬时落定）。
     ///
-    /// 注意：必须用累积可见性而非节点局部 `effective_visible`——对话框关闭只翻转对话框节点本身，
-    /// 其子节点（关闭按钮等）的局部可见性不变，仅靠局部判定会漏掉它们。
-    /// 由宿主在结构签名变化时调用（对齐 Flutter MouseTracker / Qt 模态弹出补发 leave 的做法）。
+    /// 「被隐藏」与「被禁用」是同一个问题的两种形态——控件不再收事件，其状态就**冻结在
+    /// 最后一刻**，故必须一并处理：
+    /// - **被隐藏**：控件在按下/悬停态被隐藏（如关闭它所在的对话框），下次显示瞬间闪出旧态。
+    /// - **被禁用**：[`Self::hit_node`] 并不看启用态（禁用节点照样当得成 hover target），而
+    ///   [`Self::call_on_event`] 对禁用节点（含父链）**直接丢弃事件**。于是按钮在 hover 态
+    ///   被禁用后，指针移开时那记 Leave 被丢掉，`state` 冻结在 `Hover`；等它重新启用，就带着
+    ///   一个指针早已不在的高亮显示出来，非得再移进移出一次才消得掉。分页条的「上一页 /
+    ///   下一页」正是这个形态：翻到首末页即禁用，而指针多半就停在刚点过的那枚按钮上。
+    ///
+    /// 注意：必须用**累积**值而非节点局部的 `effective_visible`/`own_enabled`——对话框关闭
+    /// 只翻转对话框节点本身，其子节点（关闭按钮等）的局部值不变，仅靠局部判定会漏掉它们。
+    ///
+    /// 由宿主在结构签名变化时调用；[`Self::layout_signature`] 已含 `own_enabled`，故启用翻转
+    /// 同样会触发这条路径。对齐 Flutter MouseTracker / Qt 模态弹出补发 leave 的做法。
+    ///
+    /// ⚠️ 新增分页器一类"到边界即禁用"的控件时，这条通路就是它们不残留高亮的依据。
     pub fn reset_hidden_interactions(&mut self) {
         if let Some(root) = self.root {
             self.reset_hidden_rec(root, true);
         }
     }
 
-    fn reset_hidden_rec(&mut self, id: NodeId, parent_visible: bool) {
-        let (vis, children, transitioned) = match self.get(id) {
+    fn reset_hidden_rec(&mut self, id: NodeId, parent_interactive: bool) {
+        let (interactive, children, transitioned) = match self.get(id) {
             Some(n) => {
-                let v = parent_visible && n.effective_visible();
+                let v = parent_interactive && n.effective_visible() && n.own_enabled();
                 let prev = n.prev_visible.replace(v);
                 (v, n.children.clone(), prev && !v)
             }
@@ -1954,7 +1971,7 @@ impl Tree {
             }
         }
         for c in children {
-            self.reset_hidden_rec(c, vis);
+            self.reset_hidden_rec(c, interactive);
         }
     }
 
@@ -2844,6 +2861,72 @@ mod tests {
 
     fn ptr(kind: PointerKind, p: Point) -> PointerEvent {
         PointerEvent::single(kind, p, MouseButton::Left)
+    }
+
+    /// 记录 `reset_interaction` 被调次数的探针控件。
+    struct ResetProbe(Rc<std::cell::Cell<usize>>);
+    impl Widget for ResetProbe {
+        fn reset_interaction(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// 控件**被禁用**时必须复位交互态，与「被隐藏」同等对待。
+    ///
+    /// 不复位时错在哪：`hit_node` 不看启用态，禁用节点照样是 hover target；而
+    /// `call_on_event` 对禁用节点直接丢事件——指针移开时那记 Leave 被丢掉，控件的
+    /// hover/press 就冻结在最后一刻，等它重新启用便带着一个指针早已不在的高亮出现。
+    /// 分页条的「上一页/下一页」正是这形态（翻到首末页即禁用）。
+    #[test]
+    fn disabling_a_node_resets_its_interaction() {
+        let hits = Rc::new(std::cell::Cell::new(0usize));
+        let on = signal(true);
+        let mut tree = layout(
+            Element::col().child(
+                Element::leaf()
+                    .width(50)
+                    .height(20)
+                    .widget(ResetProbe(hits.clone()))
+                    .enabled_signal(on),
+            ),
+            100,
+            100,
+        );
+
+        // 建立基线（prev_visible = true），不该复位。
+        tree.reset_hidden_interactions();
+        assert_eq!(hits.get(), 0);
+
+        on.set(false);
+        tree.reset_hidden_interactions();
+        assert_eq!(hits.get(), 1, "启用 → 禁用应复位交互态");
+
+        // 只在**退出**交互那一刻复位；回到启用不重复触发（否则每次翻页都白跑一趟）。
+        on.set(true);
+        tree.reset_hidden_interactions();
+        assert_eq!(hits.get(), 1, "禁用 → 启用不该再复位");
+    }
+
+    /// 父链禁用同样要复位子节点——判据必须是**累积**启用态。
+    /// 只看局部 `own_enabled` 的话，禁用容器时内部控件的局部值没变，会被整片漏掉。
+    #[test]
+    fn disabling_a_container_resets_children() {
+        let hits = Rc::new(std::cell::Cell::new(0usize));
+        let on = signal(true);
+        let mut tree = layout(
+            Element::col().enabled_signal(on).child(
+                Element::leaf()
+                    .width(50)
+                    .height(20)
+                    .widget(ResetProbe(hits.clone())),
+            ),
+            100,
+            100,
+        );
+        tree.reset_hidden_interactions();
+        on.set(false);
+        tree.reset_hidden_interactions();
+        assert_eq!(hits.get(), 1, "父链禁用要传导到子节点");
     }
     fn rptr(kind: PointerKind, p: Point) -> PointerEvent {
         PointerEvent::single(kind, p, MouseButton::Right)
