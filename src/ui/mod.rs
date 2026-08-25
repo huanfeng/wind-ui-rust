@@ -1342,7 +1342,15 @@ impl Element {
         self
     }
 
-    /// 复选框（绑定 `Signal<bool>`）。
+    /// 复选框（绑定 `Signal<bool>`）。点击/空格/回车翻转绑定的信号。
+    ///
+    /// ⚠️ 链上 [`on_click`](Self::on_click) 是**接管**而不是追加：回调一挂，翻转信号那一步
+    /// 就不再自动做了，得在回调里自己写 `state.set(!state.get())`。这样设计是为了让
+    /// "先弹确认框、确认了才勾上"这类流程能否决翻转；代价是忘了自己翻的话，复选框点了
+    /// 不打勾、绑定的信号一直是初值，而且没有任何报错。
+    ///
+    /// 只想在勾选变化时做点事、不想管翻转，用 [`enabled_when`](Self::enabled_when) /
+    /// [`visible_when`](Self::visible_when) 这类每帧求值的联动，或直接读那个信号。
     pub fn checkbox(label: impl Into<TextContent>, state: Signal<bool>) -> Self {
         Self::base(Layout::None).widget(CheckBox::new(label, state))
     }
