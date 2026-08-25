@@ -73,6 +73,16 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
 ] }
 
+# ---- 示例（examples/）专用依赖 ----
+# 右下角定位演示（examples/corner.rs）在 `on_ready` 回调里直接调 Win32 API 定位+显示，
+# 属于平台句柄回调的演示，不进入库的公共 API 面，故仅作为 dev-dependency 供示例使用。
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+] }
+
 # ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
 # objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
 # 缺哪个类型就在对应 features 里补哪个。

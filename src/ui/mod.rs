@@ -1608,13 +1608,17 @@ impl Element {
         // DynList widget 持有 Rc 副本，信号变更时重建子节点
         let row_fn_clone = row_fn.clone();
         let widget = dyn_list::DynList::new(data, move |item: T| row_fn_clone(item));
-        let mut container = Self::scroll().fill();
-        container.widget = Box::new(widget);
-        container.reactive = true;
+        // 响应式重建挂在内层 col 上（同 `table_sortable` 正文的做法）：
+        // **滚动容器保留内置 ScrollWidget**（滚轮 + 滚动条拖动）。若直接把 DynList
+        // 装进 scroll（替换其 widget），会丢滚轮/拖动能力——ScrollWidget 才负责
+        // Wheel 与滚动条 Down/Move/Up，DynList 的 on_event 恒返回 false。
+        let mut body = Self::col().width_match();
+        body.widget = Box::new(widget);
+        body.reactive = true;
         for el in initial {
-            container.children.push(el);
+            body = body.child(el);
         }
-        container
+        Self::scroll().fill().child(body)
     }
 
     /// 响应式动态宿主：同 [`list_signal`](Self::list_signal)，但容器是**普通列容器**（非滚动）——
@@ -2823,6 +2827,83 @@ mod tests {
             tree.get(root).unwrap().children.len(),
             2,
             "信号变化后应按新数据重建子元素"
+        );
+    }
+
+    #[test]
+    fn list_signal_scrolls_on_wheel_and_scrollbar_drag() {
+        // 回归：list_signal 的滚动容器须保留内置 ScrollWidget（滚轮 + 滚动条拖动）。
+        // 此前直接把 DynList 装进 scroll（替换其 widget）导致滚轮/拖动全部失效——
+        // ScrollWidget 才负责 Wheel 与滚动条 Down/Move/Up，DynList 的 on_event 恒返回 false。
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        let rows = signal((0..20).map(|i| format!("r{i}")).collect::<Vec<String>>());
+        let list = Element::list_signal(rows.clone(), |s: &String| s.clone(), |s| {
+            Element::label(s).height(24).width_match()
+        });
+        let mut tree = layout(list);
+
+        // 结构：scroll（保留 ScrollWidget）> col（DynList 挂在 col 上重建行）。
+        let root = tree.root.unwrap();
+        let scroll = *tree.get(root).unwrap().children.last().unwrap();
+        assert!(
+            matches!(tree.get(scroll).unwrap().layout, crate::core::Layout::Scroll),
+            "list_signal 容器应为滚动布局"
+        );
+        assert!(
+            tree.scroll_range(scroll).is_some_and(|(_, max)| max > 0),
+            "20 行 × 24px 应超出视口，列表应可滚"
+        );
+
+        let mut h = None;
+        let mut cap = None;
+        // 滚轮：在正文区域派发向下滚轮（delta<0），正文应滚动。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Wheel(-120), Point::new(100, 100), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        assert!(
+            tree.get(scroll).unwrap().scroll_y > 0,
+            "滚轮应滚动 list_signal 列表（ScrollWidget 未被替换）"
+        );
+
+        // 滚动条拖动：在滚动条命中区按下 → 向下移动 → 滚动位置应改变。
+        let sb = tree.get(scroll).unwrap().bounds;
+        let (lo, hi) = tree.scrollbar_hit_zone(sb);
+        let x = (lo + hi) / 2;
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(x, 60), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, Point::new(x, 120), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        let y_after_drag = tree.get(scroll).unwrap().scroll_y;
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(x, 120), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        assert!(
+            y_after_drag > 0,
+            "拖动滚动条应改变 list_signal 列表的滚动位置"
+        );
+
+        // 信号更新仍生效：数据变化后 col 子节点按新数据重建。
+        rows.set((0..3).map(|i| format!("x{i}")).collect());
+        tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
+        let col = *tree.get(scroll).unwrap().children.last().unwrap();
+        assert_eq!(
+            tree.get(col).unwrap().children.len(),
+            3,
+            "信号变化后应按新数据重建行"
         );
     }
 
