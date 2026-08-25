@@ -513,6 +513,14 @@ pub struct WindowConfig {
     ///
     /// 只对 `ctx.open_window` 开出的子窗有意义：主窗本就唯一，`App` 不提供这个设置。
     pub single: Option<String>,
+    /// 窗口/应用图标（`None` = 用系统默认，Windows 下即窗口类从 exe 资源取的那个）。
+    ///
+    /// 存的是**源**而非位图：平台层要按当前 DPI 决定光栅化到多少像素（Windows 150%
+    /// 缩放要 24/48，200% 要 32/64），且 DPI 变了要重画。见 [`crate::icon::IconSource`]。
+    ///
+    /// 落点两平台不同：Windows 是 `WM_SETICON`（标题栏/Alt-Tab/任务栏），
+    /// macOS 没有窗口级图标，落到应用 Dock 图标上。
+    pub icon: Option<crate::icon::IconSource>,
 }
 
 impl Default for WindowConfig {
@@ -541,6 +549,7 @@ impl Default for WindowConfig {
             min_width: 0,
             min_height: 0,
             single: None,
+            icon: None,
         }
     }
 }

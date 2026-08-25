@@ -1,0 +1,7 @@
+// windui 示例程序的图标资源。
+//
+// 用数字序号 1 而不是名字 "MAINICON"：打包工具（wind-packer/editpe）按惯例用
+// "MAINICON" 注入正式图标，窗口类的 LoadIconW 也优先按那个名字取。序号 1 是
+// 让位给它的**占位图**语义——开发态直接 cargo run 时取到这张，打包后取到那张。
+// 详见 src/platform/win32/mod.rs 的 register_window_class。
+1 ICON "windui.ico"

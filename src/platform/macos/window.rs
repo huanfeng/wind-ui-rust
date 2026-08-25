@@ -23,7 +23,7 @@ use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThrea
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace, NSCursor,
     NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase,
-    NSGraphicsContext, NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea,
+    NSGraphicsContext, NSImage, NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
@@ -36,7 +36,7 @@ use objc2_core_graphics::{
     CGImageAlphaInfo,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound,
+    MainThreadMarker, NSArray, NSAttributedString, NSAttributedStringKey, NSData, NSNotFound,
     NSNotification, NSObjectProtocol, NSPoint, NSRange, NSRangePointer, NSRect, NSSize, NSString,
     NSTimer, NSUInteger,
 };
@@ -1914,6 +1914,11 @@ fn create_window(
         )
     };
     window.setTitle(&NSString::from_str(&cfg.title));
+    // 图标（`App::icon`）。macOS 没有窗口级图标，落到应用 Dock 图标上——多窗口时
+    // 最后建出来的那个窗口的图标生效，这一点在 `App::icon` 的文档里写明了。
+    if let Some(src) = &cfg.icon {
+        apply_app_icon(mtm, src);
+    }
     // 后备缓冲也用 sRGB：与我们交出去的 CGImage 同一个空间，`CGContextDrawImage` 才走直通，
     // 否则每帧一次整窗 CMS 转换（占该平台每帧 CPU 的 61%）。详见 `ContentView::new`。
     window.setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
@@ -1987,6 +1992,36 @@ fn create_window(
     view.install_interval_timers();
 
     window
+}
+
+/// Dock 图标的光栅尺寸。
+///
+/// Dock 最大能显示到 128pt，Retina 下就是 256 物理像素，放大的图在那儿一眼就看得出。
+/// 取 512 留一档余量（macOS 的 `.icns` 也止步于 512@2x），代价是建窗时一次约 26 万像素
+/// 的填充——发生一次，换 Dock 上永远不糊。
+const DOCK_ICON_PX: u32 = 512;
+
+/// 把图标设为**应用** Dock 图标。
+///
+/// 与 Windows 分两档不同，这里只要一张大的：Dock 图标是应用级的单张图，AppKit 自己
+/// 按需缩小，而缩小不会糊。所以 `IconSource` 在这儿直接问它要 [`DOCK_ICON_PX`]。
+///
+/// 经 PNG 而不是 `NSBitmapImageRep` 把像素交给 `NSImage`：后者要多开一个
+/// objc2-app-kit feature 并手工摆弄 planes/bytesPerRow，而 `NSImage::initWithData`
+/// 只要已有的 `NSImage` + `NSData` 两个 feature，编码那点开销发生在建窗一次。
+///
+/// 失败（编码不出 PNG、AppKit 认不出数据）就保持系统默认图标，不打断建窗。
+fn apply_app_icon(mtm: MainThreadMarker, src: &crate::icon::IconSource) {
+    let Some(png) = src.at(DOCK_ICON_PX).to_png() else {
+        return;
+    };
+    let data = NSData::with_bytes(&png);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        return;
+    };
+    // `setApplicationIconImage` 是 unsafe：AppKit 侧要求主线程调用，而这一点由参数里的
+    // `MainThreadMarker` 担保 —— 它只能在主线程上造出来，拿得到就说明我们在主线程。
+    unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
 }
 
 /// 窗口端运行：创建 `NSApplication` + 主窗，进入事件循环（阻塞至退出）。

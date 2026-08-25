@@ -69,8 +69,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
     WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+};
+// 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
+use windows::Win32::UI::WindowsAndMessaging::{
+    DestroyIcon, SendMessageW, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -614,6 +618,32 @@ struct WindowState {
     /// 据此在 WM_SIZE 里分流：拖拽中走异步重绘（免 vsync 节流拖累手感），
     /// 非拖拽的最大化/还原走同步重绘（避免 DWM 动画采样到旧尺寸缓冲被拉伸变形）。
     in_size_move: bool,
+    /// 本窗口自有的图标句柄（`App::icon`），依次为 ICON_SMALL / ICON_BIG。
+    ///
+    /// 两档**分别**光栅化而不是共用一张：任务栏取的是 ICON_BIG，150% 缩放下它要 48px、
+    /// 200% 下要 64px，而标题栏的 ICON_SMALL 同时只要 24/32——喂同一张位图，必有一头
+    /// 在放大，那正是"任务栏图标发虚"的来源。
+    ///
+    /// `WM_SETICON` **不转移所有权**：窗口只是记住句柄，销毁时不会替我们释放，
+    /// 故随 `WindowState` 一起 Drop。
+    icons: [Option<HICON>; 2],
+    /// 图标源。留着是为了 DPI 变化时按新尺寸重画（见 `handle_dpi_changed`）——
+    /// 固定位图源没这个必要，故那种情况下不重建。
+    icon_src: Option<crate::icon::IconSource>,
+}
+
+impl Drop for WindowState {
+    fn drop(&mut self) {
+        // 窗口类的图标（LoadIconW 取自 exe 资源）是共享资源，不能销毁；这里销毁的
+        // 只有我们自己 CreateIconIndirect 出来的那两个。
+        for slot in &mut self.icons {
+            if let Some(icon) = slot.take() {
+                unsafe {
+                    let _ = DestroyIcon(icon);
+                }
+            }
+        }
+    }
 }
 
 /// 触摸拖动判定状态。区分"点击"（按下抬起未越阈值）与"滑动滚动"（越阈值后拖动）。
@@ -695,6 +725,8 @@ impl WindowState {
             min_w: 0,
             min_h: 0,
             in_size_move: false,
+            icons: [None, None],
+            icon_src: None,
         }
     }
 
@@ -863,6 +895,15 @@ unsafe fn create_window(
     // 放在 CreateWindowExW **返回之后**而非 WM_NCCREATE 里：创建期间的消息还够不到消息
     // 循环，而创建失败的那条路径上根本没有窗口需要注销。
     register_window(hwnd, cfg.single.clone());
+
+    // 自定义窗口图标，覆盖窗口类那份（`register_window_class` 从 exe 资源取的）。
+    // 放在 register_window 之后：这时 WindowState 已经挂在 HWND 上，HICON 才存得进去。
+    if let Some(src) = &cfg.icon {
+        if let Some(state) = state_from(hwnd) {
+            state.icon_src = Some(src.clone());
+        }
+        apply_window_icon(hwnd, src);
+    }
 
     // 用实际窗口 DPI 设置内容缩放（可能与系统 DPI 不同，如多显示器）。
     let dpi = GetDpiForWindow(hwnd);
@@ -1569,6 +1610,52 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
+/// 按窗口当前 DPI 设置图标：ICON_SMALL 与 ICON_BIG **各自**光栅化到系统要的像素数。
+///
+/// 尺寸取自 `GetSystemMetricsForDpi` 而不是写死或让调用方猜：100% 下是 16/32，
+/// 150% 是 24/48，200% 是 32/64。**任务栏取的是 ICON_BIG**——喂它一张 32px 的图，
+/// 150% 屏上就要放大 1.5 倍，这正是"任务栏图标发虚"的成因。
+///
+/// 源是固定位图时两档拿到同一张，退回系统缩放；这是 `IconSource` 的语义，不在这里补救。
+///
+/// `WM_SETICON` 不接管 HICON 的所有权，销毁窗口也不会替我们释放——句柄因此存回
+/// `WindowState`，由它的 `Drop` 调 `DestroyIcon`。存不进去（拿不到 state）就地销毁，
+/// 宁可这一次没图标，也不留没人认领的 GDI 句柄。
+unsafe fn apply_window_icon(hwnd: HWND, src: &crate::icon::IconSource) {
+    let dpi = match GetDpiForWindow(hwnd) {
+        0 => 96,
+        d => d,
+    };
+    // 槽位与 `WindowState::icons` 一一对应：0 = ICON_SMALL，1 = ICON_BIG。
+    let wanted = [
+        (ICON_SMALL, GetSystemMetricsForDpi(SM_CXSMICON, dpi)),
+        (ICON_BIG, GetSystemMetricsForDpi(SM_CXICON, dpi)),
+    ];
+    for (slot, (which, px)) in wanted.into_iter().enumerate() {
+        let px = if px > 0 { px as u32 } else { 32 };
+        let icon = src.at(px);
+        let Some(hicon) =
+            tray::hicon_from_rgba(icon.width() as i32, icon.height() as i32, icon.rgba())
+        else {
+            continue;
+        };
+        let Some(state) = state_from(hwnd) else {
+            let _ = DestroyIcon(hicon);
+            return;
+        };
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(which as usize)),
+            Some(LPARAM(hicon.0 as isize)),
+        );
+        // 先设新的再销毁旧的：反过来的话，窗口会有一瞬持有已释放的句柄。
+        if let Some(old) = state.icons[slot].replace(hicon) {
+            let _ = DestroyIcon(old);
+        }
+    }
+}
+
 /// 按形状加载并设置系统光标（应答 WM_SETCURSOR）。加载失败时静默退回类光标。
 unsafe fn apply_cursor(shape: CursorShape) {
     let id = match shape {
@@ -2248,6 +2335,14 @@ unsafe fn handle_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     }
     if let Some(s) = state_from(hwnd) {
         s.handler.set_scale(scale);
+    }
+    // 图标按新 DPI 重画：窗口拖到另一块缩放比不同的屏上，任务栏要的像素数跟着变，
+    // 不重画就等着被系统拉伸。固定位图源重画也还是那一张，跳过。
+    let resized = state_from(hwnd)
+        .and_then(|s| s.icon_src.clone())
+        .filter(|src| src.is_sized());
+    if let Some(src) = resized {
+        apply_window_icon(hwnd, &src);
     }
     let _ = InvalidateRect(Some(hwnd), None, false);
 }

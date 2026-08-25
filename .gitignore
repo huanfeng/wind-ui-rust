@@ -13,3 +13,6 @@ Cargo.lock.bak
 .superpowers/
 # 并行开发用的临时 git worktree（agent 隔离工作树）
 .claude/worktrees/
+
+# Python 工具脚本的字节码缓存（scripts/gen_icon.py 被 import 时产生）
+__pycache__/

@@ -29,6 +29,12 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:objc2-quartz-core"]
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
 
+# 构建脚本依赖：把 assets/windui.ico 嵌进示例 exe 的资源（见 build.rs）。
+# 只在 host 为 Windows 时拉取——Win32 资源在别的 host 上无从编译，那里 build.rs
+# 整段被 cfg 关掉，不需要这个依赖。
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 # 跨平台依赖（所有目标平台共用）。
 [dependencies]
 # 与 resvg 0.48 对齐到同一 tiny-skia 版本，避免依赖树编译两份。

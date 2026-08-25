@@ -721,6 +721,9 @@ pub struct WindowRequest {
     /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并把那个窗口激活到前台。
     /// 判定放在平台层而非应用层，是因为"把已有窗口拉到前台"只有平台做得到。
     pub single: Option<String>,
+    /// 窗口图标（`Window::icon`）。`None` 则跟随系统默认——子窗**不会**自动继承主窗
+    /// 那次 `App::icon`：那是设到主窗 HWND 上的，不是设到窗口类上的。
+    pub icon: Option<crate::icon::IconSource>,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

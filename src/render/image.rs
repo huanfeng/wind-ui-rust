@@ -368,6 +368,20 @@ impl Image {
         self.h
     }
 
+    /// 导出**非预乘** RGBA8（行优先，长度 `width * height * 4`）。
+    ///
+    /// 后端 `Pixmap` 存的是预乘像素，这里逐像素反预乘还原。窗口图标
+    /// （[`WindowIcon::from_image`](crate::icon::WindowIcon::from_image)）与平台
+    /// 位图 API 要的都是非预乘，这是它们的入口。
+    pub fn to_rgba(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity((self.w as usize) * (self.h as usize) * 4);
+        for p in self.pixmap.pixels() {
+            let c = p.demultiply();
+            out.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        }
+        out
+    }
+
     /// 后端 Pixmap 引用（供渲染层 blit）。
     pub(crate) fn pixmap(&self) -> &Pixmap {
         &self.pixmap

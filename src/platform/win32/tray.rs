@@ -275,7 +275,10 @@ fn wide_nul(s: &str) -> Vec<u16> {
 }
 
 /// 从非预乘 RGBA8 造 HICON（32bpp 彩色位图 + 空掩码，透明走 alpha 通道）。
-unsafe fn hicon_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<HICON> {
+///
+/// 托盘图标与窗口图标（`App::icon`）走的是同一条：Win32 里两者都是 HICON，
+/// 差别只在设给谁（`Shell_NotifyIconW` 还是 `WM_SETICON`）。
+pub(super) unsafe fn hicon_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<HICON> {
     if w <= 0 || h <= 0 || rgba.len() < (w * h * 4) as usize {
         return None;
     }

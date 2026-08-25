@@ -11,6 +11,7 @@ pub mod app;
 pub mod core;
 pub mod event;
 pub mod geometry;
+pub mod icon;
 pub mod platform;
 pub mod render;
 pub mod signal;
@@ -32,6 +33,7 @@ pub mod prelude {
         WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
+    pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{PickDialog, Renderer, Tray, TrayCtx, TrayMenuItem};
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixmapTarget, RenderTarget};

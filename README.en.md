@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/windui-256.png" width="96" alt="windui">
+</p>
+
 # windui
 
 [简体中文](README.md) · **English**

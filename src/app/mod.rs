@@ -131,6 +131,7 @@ impl Window {
                 close_handler: None,
                 intervals: Vec::new(),
                 single: None,
+                icon: None,
             },
         }
     }
@@ -250,6 +251,15 @@ impl Window {
     pub fn content(mut self, build: impl FnOnce() -> Element + 'static) -> WindowRequest {
         self.req.content = crate::event::WindowContent::new(build);
         self.req
+    }
+
+    /// 子窗图标。语义同 [`App::icon`]（含按 DPI 现画）。
+    ///
+    /// 子窗**不会**自动继承主窗那次 `App::icon`：`WM_SETICON` 设在具体 HWND 上，
+    /// 不在窗口类上。要一致就每个窗口都写一次。
+    pub fn icon(mut self, icon: impl Into<crate::icon::IconSource>) -> Self {
+        self.req.icon = Some(icon.into());
+        self
     }
 }
 
@@ -461,6 +471,7 @@ impl App {
                 // 默认不登记单例键：单窗应用没有"第二个自己"可谈。多窗应用要让子窗
                 // 能把主窗拉回前台时用 [`App::single_window`]。
                 single: None,
+                icon: None,
             },
             render: None,
             content: None,
@@ -500,6 +511,33 @@ impl App {
     /// ```
     pub fn single_window(mut self, key: impl Into<String>) -> Self {
         self.cfg.single = Some(key.into());
+        self
+    }
+
+    /// 窗口/应用图标。
+    ///
+    /// 两平台都只写这一行，但落点不同——这是系统模型的差异，不是实现偷懒：
+    /// - **Windows**：`WM_SETICON` 设到窗口上，标题栏、Alt-Tab、任务栏各自取所需尺寸。
+    ///   窗口类本身还会从 exe 资源里加载图标（打包工具注入的 `MAINICON`，或 `.rc` 烙入的
+    ///   占位图），本方法覆盖它。
+    /// - **macOS**：NSWindow 没有"窗口图标"这个概念，落到**应用级** Dock 图标上；
+    ///   多窗口时最后设置的那个生效。
+    ///
+    /// **尺寸由平台决定，不由调用方定死**：系统在不同场合要不同像素数（150% 缩放下
+    /// 标题栏要 24、任务栏要 48；200% 下要 32 与 64），窗口在显示器之间拖动导致 DPI
+    /// 变化时还会重画。传 [`brand_icon()`](crate::icon::brand_icon) 这类
+    /// [`IconSource::Sized`](crate::icon::IconSource::Sized) 才吃得到这个待遇；
+    /// 传一张 [`WindowIcon`](crate::icon::WindowIcon) 位图则退回"系统缩放"，高 DPI 下会糊。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::new("demo", 400, 300)
+    ///     .icon(brand_icon())            // 内置品牌图标：天蓝底 + 白色对称 W，DPI 自适应
+    ///     .content(Element::col())
+    ///     .run();
+    /// ```
+    pub fn icon(mut self, icon: impl Into<crate::icon::IconSource>) -> Self {
+        self.cfg.icon = Some(icon.into());
         self
     }
 
@@ -2174,6 +2212,7 @@ impl AppHandler for UiHost {
                     min_width: req.min_width,
                     min_height: req.min_height,
                     single: req.single,
+                    icon: req.icon,
                     // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
                     // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
                     ..WindowConfig::default()

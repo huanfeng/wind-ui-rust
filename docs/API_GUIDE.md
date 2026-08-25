@@ -594,6 +594,54 @@ Element::col().fill().on_drop_files(move |_ctx, paths| {   // paths: &[PathBuf]
 - **任意元素可接收**：`.on_drop_files(f)` 挂到 `.fill()` 根容器即"全窗接收"；落点会路由到落点下的元素，再沿父链冒泡到首个设了回调的节点（禁用子树不接收）。
 - 平台经 `WM_DROPFILES` 解出路径 + 落点交宿主路由（`Tree::dispatch_files`）；回调签名 `FnMut(&mut EventCtx, &[PathBuf])`，可读写信号（自动重绘）；改的若是自有的非信号状态，则显式 `ctx.mark_dirty()`。完整示例见 `examples/file_drop.rs`。
 
+### 窗口图标
+
+```rust
+App::new("我的应用", 480, 360)
+    .icon(brand_icon())            // 内置品牌图标：天蓝底 + 白色对称 W，DPI 自适应
+    .content(ui)
+    .run();
+
+// 自己的矢量/程序化图标：给尺寸出图，平台按实际需要的物理像素来要
+.icon(IconSource::sized(|px| my_render(px)))
+
+// 只有一张位图：直接传，缩放交给系统（高 DPI 下会糊）
+.icon(WindowIcon::from_rgba(64, 64, rgba).expect("长度须为 w*h*4"))
+.icon(WindowIcon::from_image(&Image::from_bytes(include_bytes!("logo.png"))?).unwrap())
+```
+
+- **尺寸由平台决定，不由调用方定死**。系统在不同场合要不同像素数——
+  `GetSystemMetricsForDpi` 实测：100% 要 16/32，125% 要 20/40，**150% 要 24/48**，
+  175% 要 28/56，**200% 要 32/64**。而**任务栏取的是大的那档**。
+  给一张固定位图，平台层只能交给系统缩放，没有哪个尺寸能同时对上 40/48/56/64 ——
+  选哪个都只是把模糊从一个 DPI 挪到另一个。实测过渡像素占比：150% 屏上把 32 拉到 48
+  是 19.2%，直接画 48 只有 6.7%；200% 屏上 20.1% 对 5.1%。
+  `IconSource::Sized`（`brand_icon()` 即是）把光栅化推迟到平台层知道要多大之后，
+  ICON_SMALL 与 ICON_BIG **各画各的**，每档 1:1。
+- **DPI 变了会重画**。窗口从 150% 屏拖到 200% 屏，`WM_DPICHANGED` 里按新尺寸重建
+  （固定位图源跳过——重建也还是那一张）。两块缩放比不同的显示器上这条是刚需。
+- **两平台同一行，落点不同**——这是系统模型的差异，不是实现偷懒：
+  - **Windows**：`WM_SETICON` 设到窗口上，标题栏取 ICON_SMALL、任务栏与 Alt-Tab 取 ICON_BIG。
+  - **macOS**：NSWindow 没有"窗口图标"这个概念，落到**应用级** Dock 图标上；多窗口时
+    最后设置的那个生效。那边只要一张大的（512px），Dock 自己缩小，而缩小不会糊。
+- **子窗不继承主窗的图标**：`WM_SETICON` 设在具体 HWND 上，不在窗口类上。`Window::icon`
+  要每个窗口写一次。
+- **exe 资源是另一条路，与本 API 互补**。Windows 的窗口类会从可执行文件资源里加载图标
+  （见 `platform/win32` 的 `register_window_class`：先按名字找打包工具注入的 `MAINICON`，
+  再回退到 `.rc` 烙入的序号 1），那是一份**多尺寸 `.ico`**，每档都是原生分辨率。本仓库的
+  示例两条都走：`build.rs` 把 `assets/windui.ico` 嵌进 examples，`App::icon` 再设一次
+  运行时图标——后者覆盖前者，但保证了 macOS 上 Dock 也有图标。`.ico` 里的档位就是上面
+  那张表的并集（16/20/24/28/32/40/48/56/64/80 + 128/256）：少一档，那个缩放比下系统
+  就得拉伸最近的一档。
+  > 库本身**不会**把图标烙进下游应用：`cargo:rustc-link-arg` 只作用于本 package 里经过
+  > 链接器的 target（examples/tests），而库产出的 rlib 不经链接器。
+- **托盘图标**走 `Tray::icon_rgba(w, h, rgba)`，要的是具体位图，用 `brand_icon_at(size)`：
+  `.icon_rgba(32, 32, brand_icon_at(32).rgba())`。托盘实际显示 16/20/24（随 DPI），
+  从 32 缩下去——缩小不糊，故这里不必跟着做 DPI 自适应。
+- 内置的 `brand_icon` 是**几何构造的原创路径，不取自任何字体**——字形轮廓受字体版权保护，
+  随本 crate 的 MIT/Apache 双许可分发有风险。造型参数与生成器在 `scripts/gen_icon.py`，
+  那里也是 `assets/windui.svg` / `.ico` 的唯一真相源。
+
 ### 系统托盘
 ```rust
 // 勾选态与禁用态都绑 Signal<bool>，与 UI 控件同一套状态原语。
