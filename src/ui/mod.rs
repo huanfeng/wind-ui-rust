@@ -11,6 +11,7 @@ pub mod inputs;
 pub mod link;
 pub mod list;
 pub mod nav;
+pub mod pager;
 pub mod progress;
 pub mod reorder;
 pub mod rich;
@@ -45,6 +46,7 @@ pub use inputs::{CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize
 pub use link::Link;
 pub use list::ListRow;
 pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
+pub use pager::page_count;
 pub use progress::ProgressBar;
 pub use reorder::{CommitMode, DragHandle, ReorderList};
 pub use rich::{Para, RichColor, RichDoc, RichText, SpanStyle};
@@ -2982,6 +2984,155 @@ impl Element {
             .child(header)
             .child(Self::divider())
             .child(Self::scroll().fill().child(body).weight(1.0))
+    }
+
+    /// 分页操作栏：条目总数 + 当前页 + 首/上/下/末页 + 跳转框。
+    ///
+    /// 独立控件，**不绑定任何表格**——它只读写两个信号并在翻页时回调一次，谁来渲染那一页
+    /// 是调用方的事。放在表格上方或下方均可（宽度已设为撑满）。
+    ///
+    /// - `page`：当前页，**0 基**（`offset = page * page_size` 直接可用）。界面上显示的是
+    ///   1 基的人类页码，跳转框里填的也是，两者只在显示层换算。
+    /// - `total_items`：**条目**总数，不是页数。由后端给；变化时页码栏自动跟着变，若当前页
+    ///   因此越界（换了筛选条件、删了数据）会自动钳到末页并触发一次 `on_page`。
+    /// - `page_size`：每页条目数。
+    /// - `on_page(ctx, 新页码)`：用户翻页时调用一次，应用据此拉那一页并写回数据信号。
+    ///   页码**真的变了**才触发——点已经到底的"下一页"不会白发一次请求。
+    ///
+    /// 边界上首/上或下/末页按钮**置灰而非隐藏**：位置不跳，也看得出"已经在第一页了"。
+    ///
+    /// 与虚拟滚动（[`table_virtual_server`](Self::table_virtual_server)）是两套并列的 UX，
+    /// 别叠着用：虚拟滚动没有"页"的概念，滚一下页码就变，用户会以为自己点错了。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// const PAGE_SIZE: usize = 50;
+    /// let page = signal(0usize);
+    /// let total = signal(0usize);
+    /// let rows = signal(Vec::new());
+    /// let sort = signal(None);
+    ///
+    /// Element::col()
+    ///     .child(
+    ///         Element::table_sortable_server(cols, rows, sort, move |_ctx, s| {
+    ///             page.set(0); // 换排序回到第一页
+    ///             let (r, n) = backend.page(s, 0, PAGE_SIZE);
+    ///             rows.set(r);
+    ///             total.set(n);
+    ///         })
+    ///         .weight(1.0),
+    ///     )
+    ///     .child(Element::pager(page, total, PAGE_SIZE, move |_ctx, p| {
+    ///         let (r, n) = backend.page(sort.get(), p, PAGE_SIZE);
+    ///         rows.set(r);
+    ///         total.set(n);
+    ///     }))
+    /// ```
+    pub fn pager(
+        page: Signal<usize>,
+        total_items: Signal<usize>,
+        page_size: usize,
+        on_page: impl FnMut(&mut EventCtx, usize) + 'static,
+    ) -> Self {
+        let size = page_size.max(1);
+        let cb: pager::OnPage = Rc::new(RefCell::new(on_page));
+        let count_text = crate::signal::signal(String::new());
+        let page_text = crate::signal::signal(String::new());
+        let jump = crate::signal::signal(String::new());
+
+        let at_start = move || page.get() > 0;
+        let at_end = move || page.get() + 1 < pager::page_count(total_items.get(), size);
+
+        let first = Self::icon_button("«")
+            .tooltip("第一页")
+            .enabled_when(at_start)
+            .on_click({
+                let cb = cb.clone();
+                move |ctx| pager::goto(page, total_items, size, &cb, ctx, 0)
+            });
+        let prev = Self::icon_button("‹")
+            .tooltip("上一页")
+            .enabled_when(at_start)
+            .on_click({
+                let cb = cb.clone();
+                move |ctx| {
+                    let target = page.get() as i64 - 1;
+                    pager::goto(page, total_items, size, &cb, ctx, target)
+                }
+            });
+        let next = Self::icon_button("›")
+            .tooltip("下一页")
+            .enabled_when(at_end)
+            .on_click({
+                let cb = cb.clone();
+                move |ctx| {
+                    let target = page.get() as i64 + 1;
+                    pager::goto(page, total_items, size, &cb, ctx, target)
+                }
+            });
+        let last = Self::icon_button("»")
+            .tooltip("最后一页")
+            .enabled_when(at_end)
+            .on_click({
+                let cb = cb.clone();
+                move |ctx| {
+                    let target = pager::page_count(total_items.get(), size) as i64 - 1;
+                    pager::goto(page, total_items, size, &cb, ctx, target)
+                }
+            });
+
+        // 页码文本固定宽度、左右各垫一个弹性空位居中：位数从 1 位变 2 位时，两侧按钮
+        // 不会跟着挪一下。
+        let info = Self::row()
+            .width(104)
+            .cross(Align::Center)
+            .child(Self::leaf().weight(1.0))
+            .child(
+                Self::label_signal(page_text)
+                    .font_size(12.5)
+                    .fg_role(Role::Text),
+            )
+            .child(Self::leaf().weight(1.0));
+
+        let mut bar = Self::row()
+            .width_match()
+            .cross(Align::Center)
+            .spacing(6)
+            .child(
+                Self::label_signal(count_text)
+                    .font_size(12.5)
+                    .fg_role(Role::TextMuted),
+            )
+            .child(Self::leaf().weight(1.0))
+            .child(first)
+            .child(prev)
+            .child(info)
+            .child(next)
+            .child(last)
+            .child(
+                Self::label("跳至")
+                    .font_size(12.5)
+                    .fg_role(Role::TextMuted)
+                    .padding_xy(6, 0),
+            )
+            .child(Self::text_input(jump, "").width(52).on_submit({
+                let cb = cb.clone();
+                move |ctx| pager::jump_to(page, total_items, size, jump, &cb, ctx)
+            }))
+            .child(Self::button("跳转").neutral().outline().small().on_click({
+                let cb = cb.clone();
+                move |ctx| pager::jump_to(page, total_items, size, jump, &cb, ctx)
+            }));
+        bar.set_widget(Box::new(pager::PagerBar::new(
+            page,
+            total_items,
+            size,
+            count_text,
+            page_text,
+            cb,
+        )));
+        bar.reactive = true;
+        bar
     }
 
     /// 可排序 + 可多选表格：首列复选框 + 表头全选（全/无/部分三态）+ 选中行高亮，

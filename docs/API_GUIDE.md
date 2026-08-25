@@ -306,6 +306,8 @@ Element::table_selectable(columns, rows, selected, sort)
 Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H)
 // 虚拟滚动 + 服务端分页：整份数据在后端，按滚动位置按段取；未到货的行画骨架（详见 §6.7）
 Element::table_virtual_server(columns, src /* RowSource */, TABLE_ROW_H, |ctx, req| { /* 取数后 src.fill(&req, rows) */ })
+// 分页操作栏：总数 + 第 P/T 页 + 首/上/下/末页 + 跳转。独立控件，与上面任一表格搭配（详见 §6.8）
+Element::pager(page /* Signal<usize>, 0 基 */, total_items, PAGE_SIZE, |ctx, p| { /* 取第 p 页 */ })
 ```
 
 扩展修饰符（链在上述表格返回的元素上）：
@@ -979,6 +981,63 @@ Element::table_virtual_server(
 
 完整可运行示例：`examples/virtual_table_server.rs`（二十万行 + 模拟慢后端 + 失败重试 +
 排序 + 行内按钮）。
+
+---
+
+### 6.8 分页操作栏
+
+`Element::pager(page, total_items, page_size, on_page)` —— 条目总数 + 当前页 + 首/上/下/末页
++ 跳转框。**独立控件，不绑定任何表格**：它只读写两个信号并在翻页时回调一次，谁来渲染那
+一页是调用方的事，配 `table_sortable_server`、客户端切片、甚至卡片列表都行。
+
+```text
+共 1234 条                    «  ‹   第 3 / 103 页   ›  »   跳至 [ 37 ] [跳转]
+```
+
+```rust
+use windui::prelude::*;
+
+const PAGE_SIZE: usize = 12;
+let page = signal(0usize);      // 0 基：offset = page * PAGE_SIZE
+let total = signal(0usize);     // 条目总数，不是页数
+let rows = signal(Vec::new());
+let sort = signal(None);
+
+Element::col()
+    .child(
+        Element::table_sortable_server(cols, rows, sort, move |_ctx, s| {
+            sort.set(s);
+            page.set(0);                  // 换排序回到第一页
+            reload(rows, total, page, sort);
+        })
+        .weight(1.0),
+    )
+    .child(Element::pager(page, total, PAGE_SIZE, move |_ctx, _p| {
+        // 页码栏已经把新页码写进 page 了，这里只管去取那一页
+        reload(rows, total, page, sort);
+    }))
+```
+
+几点：
+
+- **页码 0 基**，`offset = page * page_size` 直接可用；界面上显示的、跳转框里填的都是
+  1 基的人类页码，只在显示层换算。
+- `total_items` 是**条目**总数，不是页数。它变了页码栏自动跟着变；**当前页若因此越界会
+  自动钳到末页并触发一次 `on_page`**——换了筛选条件之后停在一个不存在的页上，界面会显示
+  "第 100 / 4 页"配一张空表，而且怎么点都回不来。
+- 边界上按钮**置灰而非隐藏**：位置不跳，也看得出"已经在第一页了"。
+- `on_page` 只在页码**真的变了**时触发；点已经到底的"下一页"、或跳到当前页，都不会白发
+  一次请求。
+- 跳转框解析失败（空/非数字/0）时**原样留着不动**——把用户打错的字悄悄清掉，他就不知道
+  自己错在哪了；成功后才清空。回车与点「跳转」等效。
+- 需要总页数时用 `windui::ui::page_count(total_items, page_size)`（**至少返回 1**：0 条
+  也是一页）。
+
+**别和虚拟滚动叠着用。** 两者是并列的 UX：翻页适合"结果集要被逐条看过"，虚拟滚动
+（§6.6 / §6.7）适合"翻着找"。给虚拟滚动的表格挂页码栏，"当前页"没有对应的视觉锚点，
+滚一下页码就变，用户会以为自己点错了。
+
+完整可运行示例：`examples/table_pager.rs`（1234 条 + 排序 + 筛选导致的页码钳回）。
 
 ---
 
