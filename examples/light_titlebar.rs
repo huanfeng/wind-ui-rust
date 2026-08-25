@@ -109,6 +109,7 @@ fn main() {
         .child(body.weight(1.0));
 
     App::new("星尘输入法", 600, 460)
+        .icon(brand_icon())
         .frameless()
         .screenshot_from_args()
         .content(ui)

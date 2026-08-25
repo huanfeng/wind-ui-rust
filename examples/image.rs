@@ -229,6 +229,7 @@ fn main() {
     );
 
     App::new("windui — 图片示例", 480, 760)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

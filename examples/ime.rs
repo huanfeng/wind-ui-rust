@@ -694,7 +694,9 @@ fn main() {
 
     // 主题先于建树装好：setting_row 等组合子在构造期读主题定行高/字号，
     // 晚装会让 compact_form 的紧凑度量静默失效。
-    let mut app = App::new("中文输入法界面 · 复刻", 960, 820).theme(theme_for(start_dark));
+    let mut app = App::new("中文输入法界面 · 复刻", 960, 820)
+        .icon(brand_icon())
+        .theme(theme_for(start_dark));
     let th = app.theme_handle();
 
     // 可选 `--tab N` 指定初始标签页（截图各页用）。

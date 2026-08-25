@@ -212,6 +212,7 @@ fn main() {
             );
 
     App::new("windui — 虚拟滚动", 680, 700)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

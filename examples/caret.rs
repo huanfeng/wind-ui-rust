@@ -56,12 +56,9 @@ fn main() {
     let phys = signal(false);
     let desc = signal(String::from(STYLES[0].2));
 
-    let mut app = App::new("windui — 光标风格", 560, 470).theme(theme_for(
-        CaretStyle::Blink,
-        true,
-        true,
-        Len::Dp(2.0),
-    ));
+    let mut app = App::new("windui — 光标风格", 560, 470)
+        .icon(brand_icon())
+        .theme(theme_for(CaretStyle::Blink, true, true, Len::Dp(2.0)));
     let handle = app.theme_handle();
 
     // 四个开关共用一条应用路径：任一变化都重算整份主题再灌进去。

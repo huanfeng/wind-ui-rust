@@ -150,7 +150,9 @@ fn main() {
     theme.form.label_weight = Some(600);
     theme.form.desc_size = Some(12.5);
     theme.form.row_pad_y = Some(0);
-    let app = App::new("应用设置 — windui 示例", 1000, 680).theme(theme);
+    let app = App::new("应用设置 — windui 示例", 1000, 680)
+        .icon(brand_icon())
+        .theme(theme);
 
     let nav = signal(0usize);
     let main_scheme = signal(0usize);

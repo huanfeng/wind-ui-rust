@@ -59,6 +59,7 @@ fn main() {
         );
 
     App::new("windui — 多行/密码", 420, 360)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

@@ -79,6 +79,7 @@ fn main() {
         );
 
     App::new("Phase 2 — 文字", 600, 420)
+        .icon(brand_icon())
         .bg(Color::hex(0xFFFFFF))
         .screenshot_from_args()
         .content(ui)

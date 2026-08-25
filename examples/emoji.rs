@@ -25,6 +25,7 @@ fn main() {
         .child(line("更多: 🔥 💧 🌳 ⚡ 🎨 🍕"));
 
     App::new("windui — Emoji", 640, 360)
+        .icon(brand_icon())
         .bg(Color::hex(0xFFFFFF))
         .screenshot_from_args()
         .content(ui)

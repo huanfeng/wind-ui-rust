@@ -26,7 +26,9 @@ fn main() {
     // 主题必须在**建树之前**装好：setting_row 在构造期读主题定行高。
     let mut theme = Theme::default();
     theme.form.row_height = Some(44);
-    let app = App::new("输入法设置 — windui 示例", 720, 520).theme(theme);
+    let app = App::new("输入法设置 — windui 示例", 720, 520)
+        .icon(brand_icon())
+        .theme(theme);
 
     // —— 状态 ——
     let nav_sel = signal(0usize); // 侧栏选中项（常用）

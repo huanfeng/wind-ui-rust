@@ -233,6 +233,7 @@ Home/End 跳行首尾、Ctrl+A 全选，\
         );
 
     App::new("multiline_demo — 多行滚动压测", 560, 700)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

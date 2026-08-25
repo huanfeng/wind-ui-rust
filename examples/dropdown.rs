@@ -98,6 +98,7 @@ fn main() {
         );
 
     App::new("windui — 下拉选择", 320, 540)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

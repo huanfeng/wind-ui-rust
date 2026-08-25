@@ -7,16 +7,6 @@
 
 use windui::prelude::*;
 
-/// 生成 size×size 纯色 RGBA8（演示图标，免捆绑资源）。
-fn solid(size: u32, hex: u32) -> Vec<u8> {
-    let (r, g, b) = (
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    );
-    [r, g, b, 255].repeat((size * size) as usize)
-}
-
 fn main() {
     // 一个 Signal 同时驱动菜单对勾（check）与另一项的灰显（enabled）——
     // 二者自 0.12.0 起收的都是 Signal<bool>，不必再维护两份同义状态。
@@ -24,7 +14,7 @@ fn main() {
 
     let tray = Tray::new()
         .tooltip("windui 托盘示例")
-        .icon_rgba(16, 16, &solid(16, 0x4C8BF5))
+        .icon_rgba(32, 32, brand_icon_at(32).rgba())
         .on_left_click(|ctx| ctx.show_window())
         .on_double_click(|ctx| ctx.show_window())
         .menu(vec![
@@ -69,6 +59,7 @@ fn main() {
         );
 
     App::new("windui — 托盘", 420, 240)
+        .icon(brand_icon())
         .screenshot_from_args()
         .bg(Color::hex(0xFFFFFF))
         .tray(tray)

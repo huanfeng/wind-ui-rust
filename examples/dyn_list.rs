@@ -239,6 +239,7 @@ fn main() {
         .child(list.weight(1.0));
 
     App::new("windui — 响应式动态列表", 480, 560)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

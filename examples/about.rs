@@ -155,6 +155,7 @@ fn main() {
         .child(panel);
 
     App::new("关于 — windui 示例", 620, 560)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

@@ -165,7 +165,7 @@ fn main() {
         }));
 
     App::new("windui — 翻页表格", 760, 620)
-        .icon(brand_icon(32))
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

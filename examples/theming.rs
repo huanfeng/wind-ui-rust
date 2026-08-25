@@ -48,7 +48,7 @@ fn main() {
         "当前：border_width = 1.0（Dp）— 逻辑像素，125%/150% DPI 可见亚像素模糊",
     ));
 
-    let mut app = App::new("windui — border_width 单位对比", 440, 400);
+    let mut app = App::new("windui — border_width 单位对比", 440, 400).icon(brand_icon());
     let handle = app.theme_handle();
 
     let toggle_btn = {

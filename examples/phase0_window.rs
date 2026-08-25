@@ -9,6 +9,7 @@ use windui::render::RenderTarget;
 
 fn main() {
     App::new("Phase 0 — windui", 480, 320)
+        .icon(brand_icon())
         .bg(Color::hex(0x2B2B3C))
         .screenshot_from_args()
         .on_render(|target: &mut dyn RenderTarget, size: Size| {

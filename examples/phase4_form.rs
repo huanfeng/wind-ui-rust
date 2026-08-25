@@ -53,6 +53,7 @@ fn main() {
         );
 
     App::new("Phase 4 — 输入控件", 480, 420)
+        .icon(brand_icon())
         .bg(Color::hex(0xF5F6FA))
         .screenshot_from_args()
         .content(ui)

@@ -195,6 +195,7 @@ fn main() {
     );
 
     App::new("windui — 动画总览", 520, 820)
+        .icon(brand_icon())
         .animations(true) // 强制开启：无视系统"显示动画"设置
         .screenshot_from_args()
         .content(ui)

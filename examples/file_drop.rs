@@ -53,6 +53,7 @@ fn main() {
         );
 
     App::new("windui — 文件拖放", 480, 380)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

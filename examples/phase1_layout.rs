@@ -63,6 +63,7 @@ fn main() {
         );
 
     App::new("Phase 1 — 布局", 560, 420)
+        .icon(brand_icon())
         .bg(Color::hex(0x1E1E2E))
         .screenshot_from_args()
         .content(ui)

@@ -40,6 +40,7 @@ fn main() {
         .child(Element::progress_indeterminate().width_match());
 
     App::new("windui — 进度条", 320, 280)
+        .icon(brand_icon())
         .screenshot_from_args()
         .content(ui)
         .run();

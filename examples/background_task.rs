@@ -10,7 +10,7 @@ fn main() {
     let clock = signal(String::from("已运行 0 秒"));
     let ticks = signal(0u32);
 
-    let mut app = App::new("后台任务", 360, 180);
+    let mut app = App::new("后台任务", 360, 180).icon(brand_icon());
 
     // 后台线程：每 40ms 发一次进度，channel 驱动 UI（有更新才唤醒一帧）。
     // on_message 收 ctx：写信号刷 UI 之外，完成时还能弹一条宿主级 toast

@@ -74,6 +74,7 @@ fn main() {
         .child(pill.height(150));
 
     App::new("标签条风格演示", 540, 460)
+        .icon(brand_icon())
         .bg(Color::hex(0xF3F3F3))
         .screenshot_from_args()
         .content(ui)

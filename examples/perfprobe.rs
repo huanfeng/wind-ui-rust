@@ -74,7 +74,9 @@ fn main() {
     }
     let ui = ui.child(grid);
 
-    let mut app = App::new("windui perf probe", 640, 760).theme(theme);
+    let mut app = App::new("windui perf probe", 640, 760)
+        .icon(brand_icon())
+        .theme(theme);
     if full_mode {
         app = app.on_interval(std::time::Duration::from_millis(16), move |_| {
             tick.set(tick.get() + 1);

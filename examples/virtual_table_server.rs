@@ -63,7 +63,7 @@ fn main() {
     let slow = signal(true);
     let fail_next = signal(false);
 
-    let mut app = App::new("windui — 服务端分页 + 虚拟滚动", 760, 620);
+    let mut app = App::new("windui — 服务端分页 + 虚拟滚动", 760, 620).icon(brand_icon());
 
     // 后端回应落回 UI 线程：这里才碰 RowSource（它是线程局部的信号句柄，不能跨线程）。
     let tx = app.channel::<Page>(move |ctx, page| {

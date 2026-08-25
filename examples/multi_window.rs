@@ -24,7 +24,7 @@ use windui::prelude::*;
 use windui::style::Role;
 
 fn main() {
-    let mut app = App::new("多窗口示例", 520, 380);
+    let mut app = App::new("多窗口示例", 520, 380).icon(brand_icon());
     let theme = app.theme_handle();
     let dark = signal(false);
     // 跨窗共享的状态：主窗显示、设置窗编辑。
@@ -52,6 +52,7 @@ fn main() {
                             let th = th_child.clone();
                             ctx.open_window(
                                 Window::new("设置", 420, 320)
+                                    .icon(brand_icon())
                                     .centered(true)
                                     .min_size(320, 260)
                                     // 单例：再点一次不会开第二个，已有的那个跳到前台。
@@ -64,6 +65,7 @@ fn main() {
                         .child(Element::button("关于…").on_click(|ctx| {
                             ctx.open_window(
                                 Window::new("关于", 360, 220)
+                                    .icon(brand_icon())
                                     .resizable(false)
                                     .centered(true)
                                     .single("about")
@@ -74,6 +76,7 @@ fn main() {
                         .child(Element::button("便签（可开多个）").on_click(|ctx| {
                             ctx.open_window(
                                 Window::new("便签", 300, 200)
+                                    .icon(brand_icon())
                                     .centered(true)
                                     .content(note_page),
                             );

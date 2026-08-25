@@ -100,6 +100,7 @@ fn main() {
         .child(dialog);
 
     App::new("Phase 5 — 容器与导航", 480, 440)
+        .icon(brand_icon())
         .bg(Color::hex(0xEFF1F4))
         .screenshot_from_args()
         .content(ui)

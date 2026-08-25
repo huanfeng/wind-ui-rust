@@ -60,16 +60,6 @@ const WORDS: &[(&str, &str)] = &[
     ("parse", "解析；剖析"),
 ];
 
-/// 生成 size×size 纯色 RGBA8（演示图标，免捆绑资源）。
-fn solid(size: u32, hex: u32) -> Vec<u8> {
-    let (r, g, b) = (
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    );
-    [r, g, b, 255].repeat((size * size) as usize)
-}
-
 /// 命中查询的候选**下标**（按 WORDS 原序）。空查询给全部。
 ///
 /// 游标索引的是这个列表而不是 `WORDS`——过筛后「第 0 项」指的是屏幕上第一行，
@@ -188,7 +178,7 @@ fn main() {
 
     let tray = Tray::new()
         .tooltip("windui 命令面板示例（Ctrl+Alt+P 唤起）")
-        .icon_rgba(16, 16, &solid(16, 0x6C5CE7))
+        .icon_rgba(32, 32, brand_icon_at(32).rgba())
         .on_left_click(|ctx| ctx.show_window())
         .menu(vec![
             TrayMenuItem::item("唤起面板", |ctx| ctx.show_window()),
@@ -197,6 +187,7 @@ fn main() {
         ]);
 
     App::new("命令面板", 460, 420)
+        .icon(brand_icon())
         .start_hidden()
         // Esc / 标题栏 × 收回窗口而不退出——常驻工具的退出只走托盘。
         .hide_on_close()

@@ -61,6 +61,7 @@ fn main() {
         );
 
     App::new("Toast — 轻提示", 480, 300)
+        .icon(brand_icon())
         .bg(Color::hex(0xF3F3F3))
         .screenshot_from_args()
         .content(ui)

@@ -89,7 +89,7 @@ fn main() {
     let volume = signal(0.7f32);
     let show_about = signal(std::env::args().any(|a| a == "--dialog"));
 
-    let mut app = App::new("windui — 综合示例", 520, 560);
+    let mut app = App::new("windui — 综合示例", 520, 560).icon(brand_icon());
     let th = app.theme_handle();
 
     // 设置页（内容较多，包进滚动容器）

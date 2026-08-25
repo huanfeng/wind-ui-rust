@@ -16,16 +16,6 @@
 
 use windui::prelude::*;
 
-/// 生成 size×size 纯色 RGBA8（演示图标，免捆绑资源）。
-fn solid(size: u32, hex: u32) -> Vec<u8> {
-    let (r, g, b) = (
-        ((hex >> 16) & 0xff) as u8,
-        ((hex >> 8) & 0xff) as u8,
-        (hex & 0xff) as u8,
-    );
-    [r, g, b, 255].repeat((size * size) as usize)
-}
-
 fn main() {
     let hits = signal(0u32);
     let hits_text = signal(String::from("热键唤起次数：0"));
@@ -34,7 +24,7 @@ fn main() {
 
     let tray = Tray::new()
         .tooltip("windui 全局热键示例")
-        .icon_rgba(16, 16, &solid(16, 0x6C5CE7))
+        .icon_rgba(32, 32, brand_icon_at(32).rgba())
         .on_left_click(|ctx| ctx.show_window())
         .menu(vec![
             TrayMenuItem::item("显示窗口", |ctx| ctx.show_window()),
@@ -43,6 +33,7 @@ fn main() {
         ]);
 
     let mut app = App::new("全局热键", 420, 300)
+        .icon(brand_icon())
         .tray(tray)
         .start_hidden()
         // ESC 与标题栏 × 均隐藏而非退出——常驻工具里「关闭」的意思是「收起来」。

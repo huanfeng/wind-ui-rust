@@ -65,6 +65,7 @@ fn main() {
         );
 
     App::new("Phase 3 — 按钮与事件", 560, 360)
+        .icon(brand_icon())
         .bg(Color::hex(0xF5F6FA))
         .screenshot_from_args()
         .content(ui)
