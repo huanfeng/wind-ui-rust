@@ -2863,6 +2863,22 @@ impl Element {
     ///     .collect::<Vec<_>>());
     /// Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows, TABLE_ROW_H).height(320)
     /// ```
+    ///
+    /// # 行内交互
+    ///
+    /// [`actions`](Self::actions) / [`cell_render`](Self::cell_render) /
+    /// [`cell_lines`](Self::cell_lines) / [`on_row_activate`](Self::on_row_activate) /
+    /// [`on_row_context_menu`](Self::on_row_context_menu) 与非虚拟表格通用——行由同一个
+    /// 构建器产出，接线也是同一条。回调拿到的是数据里的**真实行下标**，不是它在渲染窗口
+    /// 里的位置。
+    ///
+    /// 只有一处要自己把关：**行高**。虚拟滚动要求行高固定，行会被强制设成 `row_height`，
+    /// 而 `TABLE_ROW_H` 是按纯文本行给的（单行文本盒 20px），装不下按钮。行里放控件时按
+    /// `控件高 + TABLE_CELL_PAD_Y×2 + 1` 自己算大（`.small()` 按钮约 30px，即 49），
+    /// 短了内容会溢出到邻行。
+    ///
+    /// 不支持的只有 [`sort_indicator`](Self::sort_indicator)：表头是静态行、不重建，
+    /// 也就无从画排序箭头。排序请在写进数据信号之前自己排好。
     pub fn table_virtual(
         columns: Vec<(impl Into<String>, f32)>,
         rows: Signal<Vec<Vec<String>>>,
@@ -2873,14 +2889,8 @@ impl Element {
         let header = Self::table_header(&cols);
 
         let mut body = Self::col().width_match();
-        body.set_widget(Box::new(virtual_list::VirtualList::new(
-            rows,
-            row_height,
-            // 斑马纹按**真实行下标**交替（而非在视口里的位置）——否则滚动时深浅条纹会
-            // 随渲染窗口的起点来回跳。
-            move |i, cells: Vec<String>| {
-                sortable_table::body_row(i, i, &cells, &weights, None, None, 1, None, None)
-            },
+        body.set_widget(Box::new(sortable_table::VirtualTableBody::new(
+            rows, weights, row_height,
         )));
         body.reactive = true;
 
@@ -2986,10 +2996,13 @@ impl Element {
     /// 在表格尾部追加一个**操作列**：表头显示 `title`（不可排序），每行单元格由
     /// `build(行下标)` 生成任意控件（如 查看/编辑/删除 按钮组），列宽按 `weight` 参与分配。
     /// 仅对 [`table_sortable`](Self::table_sortable) / [`table_selectable`](Self::table_selectable) /
-    /// [`table_sortable_server`](Self::table_sortable_server) 返回的元素有效。
+    /// [`table_sortable_server`](Self::table_sortable_server) /
+    /// [`table_virtual`](Self::table_virtual) 返回的元素有效。
     ///
     /// 传给 `build` 的行下标：客户端表格为**原始行下标**（排序后仍锁定同一数据行，与选择语义
-    /// 一致，可直接用作 `cells[row]` / `selected[row]` 索引）；服务端表格为当前页内**显示下标**。
+    /// 一致，可直接用作 `cells[row]` / `selected[row]` 索引）；服务端表格为当前页内**显示下标**；
+    /// 虚拟表格（[`table_virtual`](Self::table_virtual)）为数据里的**真实行下标**，不是它在
+    /// 渲染窗口里的位置。
     /// 在 `build` 内 `move` 捕获该下标即可为每行绑定独立回调。
     ///
     /// 性能：操作列不改变重建触发条件——排序/换页才重建，悬停/选择不重建；`build` 只在重建时
@@ -3015,35 +3028,44 @@ impl Element {
         build: impl Fn(usize) -> Element + 'static,
     ) -> Self {
         const WHO: &str = "actions() 只能用于 Element::table_sortable(..) / \
-             table_sortable_server(..) / table_selectable(..)";
+             table_sortable_server(..) / table_selectable(..) / table_virtual(..)";
         let ac = sortable_table::action_col(title.into(), weight, build);
-        // 结构 col[ header, divider, scroll ]。表头行可能直接挂 SortableHeader
-        // （table_sortable/server），或其子行 subrow 挂 SortableHeader（table_selectable 的全选列在前）。
-        let mut header_ok = false;
-        if let Some(header) = self.children.get_mut(0) {
-            header_ok = sortable_table::set_header_actions(header, &ac);
-            if !header_ok {
-                if let Some(sub) = header.children.get_mut(1) {
-                    header_ok = sortable_table::set_header_actions(sub, &ac);
-                }
-            }
-        }
-        debug_assert!(header_ok, "{WHO}（未定位到表头）");
-        // 正文：scroll 为末子，其首个子节点（内层 col）挂响应式正文 widget。
+        // 结构 col[ header, divider, scroll ]。**先认正文**，因为它决定表头走哪条路：三种
+        // 响应式表格的表头自己会重建（重建时把操作列表头一并建出来），而虚拟表格的表头是
+        // 静态行、永不重建，得当场把表头单元格塞进去。
+        // 正文一律在 scroll（末子）的首个子节点（内层 col）上。
         let mut body_ok = false;
+        let mut virtual_body = false;
         if let Some(scroll) = self.children.last_mut() {
             if let Some(body) = scroll.children.get_mut(0) {
+                virtual_body = sortable_table::is_virtual_table_body(body);
                 body_ok = sortable_table::set_body_actions(body, &ac);
             }
         }
         debug_assert!(body_ok, "{WHO}（未定位到正文）");
+        let mut header_ok = false;
+        if let Some(header) = self.children.get_mut(0) {
+            header_ok = if virtual_body {
+                sortable_table::append_static_action_header(header, &ac)
+            } else {
+                // 表头行可能直接挂 SortableHeader（table_sortable/server），或其子行 subrow
+                // 挂 SortableHeader（table_selectable 的全选列在前）。
+                sortable_table::set_header_actions(header, &ac)
+                    || header
+                        .children
+                        .get_mut(1)
+                        .is_some_and(|sub| sortable_table::set_header_actions(sub, &ac))
+            };
+        }
+        debug_assert!(header_ok, "{WHO}（未定位到表头）");
         self
     }
 
     /// 自定义**数据单元格**渲染：`build(行下标, 列下标, 单元格文本)` 返回 `Some` 时该格
     /// 用自定义控件（徽章/彩色标签/图标等），返回 `None` 回退默认文本渲染。仅对
     /// [`table_sortable`](Self::table_sortable) / [`table_selectable`](Self::table_selectable) /
-    /// [`table_sortable_server`](Self::table_sortable_server) 返回的元素有效。
+    /// [`table_sortable_server`](Self::table_sortable_server) /
+    /// [`table_virtual`](Self::table_virtual) 返回的元素有效。
     ///
     /// 排序仍基于单元格**文本**（渲染与排序键解耦）；自定义格与操作列同款包裹
     /// （水平内边距 + 垂直居中，不强制 20px 行高，较高控件不被压扁）。行下标语义同
@@ -3077,7 +3099,7 @@ impl Element {
         debug_assert!(
             ok,
             "cell_render() 只能用于 Element::table_sortable(..) / \
-             table_sortable_server(..) / table_selectable(..)"
+             table_sortable_server(..) / table_selectable(..) / table_virtual(..)"
         );
         self
     }
@@ -3086,7 +3108,8 @@ impl Element {
     /// 长高至多 `lines` 行、内容不足则更矮，超出部分精确裁切（不再溢出到相邻行）。仅影响走默认
     /// 文本渲染的格；自定义渲染格（`cell_render` 返回 `Some`）与操作列不受影响。仅对
     /// [`table_sortable`](Self::table_sortable) / [`table_selectable`](Self::table_selectable) /
-    /// [`table_sortable_server`](Self::table_sortable_server) 返回的元素有效。
+    /// [`table_sortable_server`](Self::table_sortable_server) /
+    /// [`table_virtual`](Self::table_virtual) 返回的元素有效。
     ///
     /// # 示例
     /// ```ignore
@@ -3104,7 +3127,7 @@ impl Element {
         debug_assert!(
             ok,
             "cell_lines() 只能用于 Element::table_sortable(..) / \
-             table_sortable_server(..) / table_selectable(..)"
+             table_sortable_server(..) / table_selectable(..) / table_virtual(..)"
         );
         self
     }
@@ -3113,7 +3136,8 @@ impl Element {
     /// `on_activate(ctx, 行下标)`，常用于「双击进入编辑」。行下标语义同 [`actions`](Self::actions)：
     /// 客户端表格（[`table_sortable`](Self::table_sortable)）为原始行下标，服务端表格
     /// （[`table_sortable_server`](Self::table_sortable_server)）为页内显示下标。
-    /// 仅对上述两类（HoverRow 型正文）有效；可多选表格（[`table_selectable`](Self::table_selectable)）
+    /// 虚拟表格（[`table_virtual`](Self::table_virtual)）为数据里的**真实行下标**。
+    /// 仅对上述三类（HoverRow 型正文）有效；可多选表格（[`table_selectable`](Self::table_selectable)）
     /// 因首列复选框语义冲突不支持。
     ///
     /// # 示例
@@ -3136,7 +3160,8 @@ impl Element {
         }
         debug_assert!(
             ok,
-            "on_row_activate() 只能用于 Element::table_sortable(..) / table_sortable_server(..)；\
+            "on_row_activate() 只能用于 Element::table_sortable(..) / table_sortable_server(..) / \
+             table_virtual(..)；\
              table_selectable(..) 因首列复选框语义冲突不支持整行激活"
         );
         self
@@ -3146,7 +3171,8 @@ impl Element {
     /// 返回空 `Vec` 则不弹。行下标语义同 [`actions`](Self::actions)：客户端表格
     /// （[`table_sortable`](Self::table_sortable) / [`table_selectable`](Self::table_selectable)）
     /// 为原始行下标，服务端表格（[`table_sortable_server`](Self::table_sortable_server)）
-    /// 为页内显示下标。三类表格均支持——右键不与首列复选框争语义（复选框只吃左键）。
+    /// 为页内显示下标，虚拟表格（[`table_virtual`](Self::table_virtual)）为数据里的**真实行
+    /// 下标**。四类表格均支持——右键不与首列复选框争语义（复选框只吃左键）。
     ///
     /// 菜单项**每次右击现取现建**：这样勾选态（`check`）、禁用态（`enabled`）
     /// 都反映右击当刻的数据。回调挂在行容器上，右击行内任何位置（含空白、自定义单元格、
@@ -3182,7 +3208,7 @@ impl Element {
         debug_assert!(
             ok,
             "on_row_context_menu() 只能用于 Element::table_sortable(..) / \
-             table_sortable_server(..) / table_selectable(..)；\
+             table_sortable_server(..) / table_selectable(..) / table_virtual(..)；\
              普通容器/控件请用 on_context_menu()"
         );
         self

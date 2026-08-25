@@ -30,7 +30,9 @@
 //!
 //! # 已知限制
 //!
-//! - **变高行不支持**。表格的多行单元格（`cell_lines > 1`）因此不能用虚拟模式。
+//! - **变高行不支持**。行高由调用方给定并被强制施加，内容更高会溢出到邻行。表格的行内
+//!   控件（`actions`）与多行单元格（`cell_lines`）照常可用，但 `row_height` 得自己按内容
+//!   调大——`TABLE_ROW_H` 只够放单行文本。
 //! - **Tab 焦点环只覆盖已渲染的行**。`Tree::focusable_order` 遍历真实节点，未渲染的行
 //!   不在环里，`scroll_into_view` 也够不着它们。行内放可聚焦控件时键盘用户会在列表边界
 //!   "掉出去"——需要全键盘可达的场景暂不适用。
@@ -105,6 +107,15 @@ impl<T: Clone + 'static> VirtualList<T> {
             last: None,
             rows: SignalScope::new(),
         }
+    }
+
+    /// 作废上次构建结果，令下一帧无条件重建。
+    ///
+    /// 给的是"行怎么建"变了的场合（表格的操作列/自定义单元格/行回调是构建期设进来的，
+    /// 见 [`VirtualTableBody`](super::sortable_table::VirtualTableBody)）——区间和数据版本
+    /// 都没动，不作废的话新配置要等到下次滚动才生效。
+    pub(super) fn invalidate(&mut self) {
+        self.last = None;
     }
 
     /// 当前应渲染的行区间 `[first, last)`。
@@ -520,6 +531,10 @@ mod tests {
     fn table_virtual_stripes_follow_the_real_row_index() {
         // 截图看不出的一类故障：斑马纹若按"在渲染窗口里的第几个"交替，滚动时深浅条纹
         // 会随窗口起点来回跳，肉眼是"列表在闪"，几何断言却全绿。这里钉死它按真实下标走。
+        //
+        // 这条自己有个盲区：整体偏移了**偶数**行时条纹奇偶不变，它看不出来。把"下标"
+        // 锚到数据上的是 `table_virtual_row_callbacks_see_the_real_row_index`（拿单元格
+        // 文本对账），两条合起来才完整。
         let (mut tree, _root, scroll) = setup_table(5_000, 300);
         let (mut h, mut cap) = (None, None);
         for _ in 0..7 {
@@ -639,5 +654,273 @@ mod tests {
             total < 100,
             "无限高父容器下也必须只建视口那几行，实际节点数 {total}"
         );
+    }
+    /// 同 [`setup_table`]，但允许先对 `table_virtual` 链上行内修饰符。
+    fn setup_table_with(
+        n: usize,
+        view_h: i32,
+        f: impl FnOnce(Element) -> Element,
+    ) -> (Tree, NodeId, NodeId) {
+        let rows = signal(
+            (0..n)
+                .map(|i| vec![format!("r{i}"), format!("{}", i * 3)])
+                .collect::<Vec<_>>(),
+        );
+        let table = f(Element::table_virtual(
+            vec![("名称", 2.0), ("值", 1.0)],
+            rows,
+            super::TABLE_ROW_H,
+        ));
+        let root = Element::col().width(400).height(view_h).child(table.fill());
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, view_h), &mut te);
+        tree.layout_root(Size::new(400, view_h), &mut te);
+        let table = tree.get(id).unwrap().children[0];
+        let scroll = tree.get(table).unwrap().children[2];
+        (tree, id, scroll)
+    }
+
+    /// 渲染窗口里第 `k` 行（`body` 的子节点是 `[占位, 行…, 占位]`）。
+    fn rendered_row(tree: &Tree, scroll: NodeId, k: usize) -> NodeId {
+        let body = tree.get(scroll).unwrap().children[0];
+        tree.get(body).unwrap().children[1 + k]
+    }
+
+    /// 视口内第一行**完整可见**的行，连同由几何独立算出的真实下标。
+    ///
+    /// 两点都不是随手写的：渲染窗口的头几行是视口**上方**的 overscan，被滚动容器裁掉、
+    /// 点不到；下标取自"该行相对内容顶端的偏移 ÷ 行高"（即占位撑出来的那段），与回调
+    /// 自己报的下标是两条来路——把窗口内位置当行号传给回调，用它做期望值才照得出来。
+    fn first_visible_row(tree: &Tree, scroll: NodeId) -> (NodeId, usize) {
+        let body = tree.get(scroll).unwrap().children[0];
+        let vp = tree.abs_bounds(scroll);
+        let kids = tree.get(body).unwrap().children.clone();
+        let row = kids[1..kids.len() - 1]
+            .iter()
+            .copied()
+            .find(|&r| {
+                let b = tree.abs_bounds(r);
+                b.y >= vp.y && b.bottom() <= vp.bottom()
+            })
+            .expect("视口内应有完整可见的行");
+        let idx = ((tree.abs_bounds(row).y - tree.abs_bounds(body).y) / super::TABLE_ROW_H).max(0);
+        (row, idx as usize)
+    }
+
+    /// 某行的首个数据单元格（`body_row` 结构为 `col[tr, divider]`）。
+    fn first_cell(tree: &Tree, row: NodeId) -> NodeId {
+        let tr = tree.get(row).unwrap().children[0];
+        tree.get(tr).unwrap().children[0]
+    }
+
+    fn center(tree: &Tree, id: NodeId) -> Point {
+        let b = tree.abs_bounds(id);
+        Point::new(b.x + b.w / 2, b.y + b.h / 2)
+    }
+
+    #[test]
+    fn table_virtual_actions_add_a_column_to_both_header_and_rows() {
+        // 操作列必须同时进表头和正文。只进正文的话列数对不上，权重分配随之错位——
+        // 表头三列的边界与正文两列的边界从此各画各的。
+        let (tree, root, scroll) = setup_table_with(5_000, 300, |t| {
+            t.actions("操作", 1.0, |_row| Element::label("·"))
+        });
+        let table = tree.get(root).unwrap().children[0];
+        let header = tree.get(table).unwrap().children[0];
+        assert_eq!(
+            tree.get(header).unwrap().children.len(),
+            3,
+            "表头应为 2 数据列 + 1 操作列"
+        );
+        let tr = tree.get(rendered_row(&tree, scroll, 0)).unwrap().children[0];
+        assert_eq!(
+            tree.get(tr).unwrap().children.len(),
+            3,
+            "正文行也应为 2 数据列 + 1 操作列"
+        );
+        // 逐列对齐：表头与正文的每一列左右边界必须重合。
+        let hcols = tree.get(header).unwrap().children.clone();
+        let bcols = tree.get(tr).unwrap().children.clone();
+        for (ci, (&h, &b)) in hcols.iter().zip(bcols.iter()).enumerate() {
+            let (hb, bb) = (tree.abs_bounds(h), tree.abs_bounds(b));
+            assert_eq!(
+                (hb.x, hb.w),
+                (bb.x, bb.w),
+                "第 {ci} 列的表头与正文应逐像素对齐"
+            );
+        }
+    }
+
+    #[test]
+    fn table_virtual_row_callbacks_see_the_real_row_index() {
+        // 虚拟滚动特有的错法：把"在渲染窗口里的第几个"当成行下标传给回调。首屏发现不了
+        // ——窗口起点是 0，两者恰好相等；滚下去之后每个按钮都绑到错误的行上。
+        //
+        // 期望值取自**数据本身**（单元格文本 `r{i}`），不从渲染窗口的几何反推：后者一旦
+        // 算错，期望值会跟着一起错，那就等于没测。
+        let seen: Rc<RefCell<Vec<(usize, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let rec = seen.clone();
+        let acted: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let rec_a = acted.clone();
+        let (mut tree, _root, _scroll) = setup_table_with(5_000, 300, move |t| {
+            t.cell_render(move |row, col, text| {
+                if col == 0 {
+                    rec.borrow_mut().push((row, text.to_string()));
+                }
+                None
+            })
+            .actions("操作", 1.0, move |row| {
+                rec_a.borrow_mut().push(row);
+                Element::label("·")
+            })
+        });
+        seen.borrow_mut().clear();
+        acted.borrow_mut().clear();
+
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..9 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, 300);
+
+        let seen = seen.borrow();
+        let acted = acted.borrow();
+        assert!(!seen.is_empty(), "滚动后应重建出一批新行");
+        assert!(seen.iter().any(|(i, _)| *i > 0), "应已滚离首行");
+        for (row, text) in seen.iter() {
+            assert_eq!(
+                text,
+                &format!("r{row}"),
+                "回调说这是第 {row} 行，格里装的却是 {text} 的数据"
+            );
+        }
+        assert_eq!(
+            *acted,
+            seen.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            "操作列与单元格渲染应看到同一批行下标"
+        );
+    }
+
+    #[test]
+    fn table_virtual_context_menu_targets_the_scrolled_row() {
+        // 右击的是屏幕上那一行，菜单必须按**它的真实下标**构建。
+        //
+        // 期望下标由几何独立算出（行相对内容顶端的偏移 ÷ 行高，即占位撑出来的那段），
+        // 与回调自己报的下标是两条来路——把窗口内位置当行号传给回调，这条就会红。
+        let seen: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+        let rec = seen.clone();
+        let (mut tree, _root, scroll) = setup_table_with(5_000, 300, move |t| {
+            t.on_row_context_menu(move |idx| {
+                *rec.borrow_mut() = Some(idx);
+                vec![crate::event::MenuItem::run("删除", |_ctx| {}, false)]
+            })
+        });
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..9 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, 300);
+
+        let (row, expect) = first_visible_row(&tree, scroll);
+        assert!(expect > 0, "滚动后渲染窗口不应还停在首行");
+        let at = center(&tree, first_cell(&tree, row));
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at, MouseButton::Right),
+            &mut h,
+            &mut cap,
+        );
+        assert!(res.menu.is_some(), "右击虚拟表格的行应弹出上下文菜单");
+        assert_eq!(
+            *seen.borrow(),
+            Some(expect),
+            "菜单构建器应收到被右击那一行的真实下标"
+        );
+    }
+
+    #[test]
+    fn table_virtual_rebuilds_when_a_modifier_arrives_after_the_first_frame() {
+        // 修饰符正常都在 build 之前链上，首帧就带着它们建行。但 `VirtualList` 只在
+        // 区间或数据版本变化时重建——若哪天配置能在运行中改，少了这次作废，新的操作列
+        // 得等用户滚动一下才出现，且没有任何报错提示。
+        let (mut tree, _root, scroll) = setup_table_with(5_000, 300, |t| t);
+        let tr = tree.get(rendered_row(&tree, scroll, 0)).unwrap().children[0];
+        assert_eq!(tree.get(tr).unwrap().children.len(), 2, "起始应只有两列");
+
+        let body = tree.get(scroll).unwrap().children[0];
+        let ac =
+            super::super::sortable_table::action_col("操作".into(), 1.0, |_| Element::label("·"));
+        tree.get_mut(body)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<super::super::sortable_table::VirtualTableBody>())
+            .expect("table_virtual 的正文应是 VirtualTableBody")
+            .set_actions(ac);
+        relayout(&mut tree, 300);
+
+        let tr = tree.get(rendered_row(&tree, scroll, 0)).unwrap().children[0];
+        assert_eq!(
+            tree.get(tr).unwrap().children.len(),
+            3,
+            "设入操作列后应当帧重建出三列，而不是等下次滚动"
+        );
+    }
+    #[test]
+    fn table_virtual_double_click_activates_the_scrolled_row() {
+        // 与右键菜单同源（都挂在 HoverRow 上），但走的是另一个 setter，单独钉一条：
+        // 少接一个分支的表现是"双击没反应"，没有任何报错。
+        use std::cell::Cell as StdCell;
+        let seen: Rc<StdCell<Option<usize>>> = Rc::new(StdCell::new(None));
+        let rec = seen.clone();
+        let (mut tree, _root, scroll) = setup_table_with(5_000, 300, move |t| {
+            t.on_row_activate(move |_ctx, idx| rec.set(Some(idx)))
+        });
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..9 {
+            tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        }
+        relayout(&mut tree, 300);
+
+        let (row, expect) = first_visible_row(&tree, scroll);
+        assert!(expect > 0, "滚动后渲染窗口不应还停在首行");
+        let at = center(&tree, first_cell(&tree, row));
+
+        tree.dispatch_pointer(
+            PointerEvent {
+                kind: PointerKind::Down,
+                pos: at,
+                button: MouseButton::Left,
+                click_count: 2,
+            },
+            &mut h,
+            &mut cap,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        assert_eq!(seen.get(), Some(expect), "双击应回报被点那一行的真实下标");
+    }
+
+    #[test]
+    fn table_virtual_cell_lines_reaches_the_text_cells() {
+        // `cell_lines` 装的是文本格的裁切围栏（`max_lines`）。虚拟模式下行高是强制的，
+        // 少了这个围栏，两行文本会直接画到下一行身上——而行高看着仍然规整，
+        // 几何断言一条都不会红。
+        let (mut tree, _root, scroll) = setup_table_with(1_000, 300, |t| t.cell_lines(2));
+        let cell = first_cell(&tree, rendered_row(&tree, scroll, 0));
+        let label = tree.get(cell).unwrap().children[0];
+        let lines = tree
+            .get_mut(label)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<crate::ui::Label>())
+            .and_then(|l| l.max_lines);
+        assert_eq!(lines, Some(2), "cell_lines(2) 应传到虚拟表格的文本格上");
     }
 }

@@ -302,6 +302,7 @@ Element::table_sortable_server(columns, rows, sort, |ctx, new_sort| { /* 拉数�
 // 可多选：首列复选框 + 表头三态全选；selected: Vec<Signal<bool>>（长度 == rows，按原始行下标索引）
 Element::table_selectable(columns, rows, selected, sort)
 // 虚拟滚动：只构建视口内的行，行数再多每帧成本不变；要求行高固定（详见 §6.6）
+//   行内修饰符（actions / cell_render / on_row_activate / on_row_context_menu）照常可用
 Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H)
 ```
 
@@ -323,22 +324,29 @@ Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H
 > | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_virtual` |
 > |---|---|---|---|---|---|---|---|
 > | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
-> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
-> | `cell_render` / `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
-> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✗ |
-> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ |
+> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_render` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓（须自行调大 `row_height`） |
+> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✓ |
+> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ |
 >
 > `table` / `table_editable` 内部会转成 `table_custom` 的结构，三者都不带响应式表头/正文
 > widget，因此整列扩展点都不适用——需要排序或行级交互，请直接从 `table_sortable` 起步。
 >
-> `table_virtual` 的正文换成了虚拟滚动 widget（不是 `SortableBody`），同样整列不适用。
-> 需要行级交互又要虚拟滚动时，用通用的 `Element::virtual_list` 自己拼行——`row_fn` 里
-> 想放什么放什么（见 §6.6）。
+> `table_virtual` 只差 `sort_indicator`：它的表头是**静态行**（不重建，也就无从画排序箭头），
+> 排序请在写进数据信号之前自己排好。行内交互则与非虚拟表格完全一致——行怎么建是同一个
+> `body_row`，操作列、自定义格、双击、右键走的是同一条接线。
+>
+> 只有一处要自己把关：**行高**。虚拟滚动要求行高固定，行元素会被强制设成 `row_height`，
+> 而 `TABLE_ROW_H` 是按**纯文本行**给的（单行文本盒 20px），装不下按钮。行里放控件或用
+> `cell_lines(2)` 时，`row_height` 得按 `控件高 + 9×2 + 1` 自己算大（`.small()` 按钮约
+> 30px，即 49）——短了内容会溢出到邻行。
 >
 > **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
 > 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
 > 后仍锁定同一数据行，可直接索引 `selected[row]`），服务端表格（`table_sortable_server`）
-> 是当前页内的**显示下标**。
+> 是当前页内的**显示下标**，虚拟表格（`table_virtual`）是数据里的**真实行下标**——不是它在
+> 渲染窗口里的位置，滚到哪一行，闭包拿到的就是哪一行。
 
 > **可编辑表格**：`cells: Vec<Vec<Signal<String>>>`（每格一个信号，显示自动跟随）。点单元格触发
 > `on_edit(ctx, row, col)`，由 app 据 (row,col) 弹出编辑框（如 `dialog_panel` + `text_input` 绑定临时
@@ -865,6 +873,16 @@ Element::virtual_list(items, 34, |i, v| {
 // 表格：视觉与 Element::table 一致（固定表头 + 斑马纹 + 行悬停高亮）
 let rows = signal(vec![vec!["a.txt".to_string(), "12".to_string()]]);
 Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows, TABLE_ROW_H).height(320)
+
+// 行内交互与非虚拟表格是同一套；行里放按钮时行高要自己给够（TABLE_ROW_H 只够单行文本）
+let rows2 = signal(vec![vec!["a.txt".to_string(), "12".to_string()]]);
+Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows2, 30 + 9 * 2 + 1)
+    .actions("操作", 2.0, |row| {
+        Element::button("删除").danger().outline().small()
+            .on_click(move |ctx| ctx.toast_err(format!("删除第 {} 行", row + 1)))
+    })
+    .on_row_context_menu(|row| vec![MenuItem::run("编辑…", move |_ctx| { let _ = row; }, false)])
+    .height(320)
 ```
 
 **占位撑高**这一招的好处是核心层零改动：内容总高照常由 measure 算出，于是滚动钳制、
@@ -883,7 +901,7 @@ Element::table_virtual(vec![("名称", 3.0), ("大小", 1.0)], rows, TABLE_ROW_H
 
 | 限制 | 说明 |
 |---|---|
-| **行高必须固定** | 索引与像素偏移靠一次乘法互换。行元素会被强制设成 `row_height`，故占位高度与实际布局永远一致（不会出现滚动条与内容错位），但内容更高时会被裁掉。表格的多行单元格（`cell_lines > 1`）因此不能用虚拟模式。 |
+| **行高必须固定** | 索引与像素偏移靠一次乘法互换。行元素会被强制设成 `row_height`，故占位高度与实际布局永远一致（不会出现滚动条与内容错位），但内容更高时会溢出到邻行。行里放控件（`actions`）或用 `cell_lines(2)` 时，`row_height` 要按 `控件高 + 9×2 + 1` 自己调大；`TABLE_ROW_H` 只够放单行文本。 |
 | **Tab 焦点环只覆盖已渲染的行** | 焦点顺序遍历真实节点，未渲染的行不在环里，`scroll_into_view` 也够不着。行内放可聚焦控件时，键盘用户会在列表边界"掉出去"——需要全键盘可达就别用。 |
 | **行的内部状态每次重建都会重置** | hover、补间动画这类挂在行控件里的临时状态，滚动跨行时会丢。选中态等必须由外部 `Signal` 承载。 |
 | **与拖拽重排互斥** | `reorder_list` 依赖所有行同时存在并写绘制偏移。 |

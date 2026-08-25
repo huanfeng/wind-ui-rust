@@ -23,7 +23,7 @@ use crate::spec::{Align, Dimension};
 use crate::style::{Role, Style};
 use crate::text::TextEngine;
 
-use super::virtual_list::clear_children;
+use super::virtual_list::{clear_children, VirtualList};
 use super::{Element, SortOrder, Truncate, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y, TABLE_HEADER_PAD_Y};
 
 /// 排序键：按**哪一列**、以**什么方向**排。表格排序状态一律用 `Option<SortKey>`
@@ -1232,6 +1232,98 @@ pub(super) const fn select_col_w() -> i32 {
 }
 
 /// 构造操作列配置（供 `Element::actions` 组装）。
+/// 虚拟滚动表格的正文：把通用的 [`VirtualList`] 包一层，好让 `Element::actions` 这批
+/// 行内修饰符有个定位得到、也改得动的落点。
+///
+/// 不把这些字段直接塞进 `VirtualList` 是有意的——那是个与表格无关的通用列表，行长什么样
+/// 完全由调用方给的 `row_fn` 决定。表格特有的操作列/自定义格/行回调收在这里，与另外三种
+/// 正文（[`SortableBody`] / [`PagedBody`] / [`SelectableBody`]）并列，`set_body_*` 也就
+/// 多一个分支的事。
+///
+/// 修饰符改的是共享的 [`VirtualRowCfg`]：`row_fn` 在构造时就捕获了它的 `Rc` 克隆，每次
+/// 建行现读。于是"先造 Element、再链式设修饰符"这个既有用法照常成立，不必为了改一个
+/// 配置把整个 `row_fn` 重做一遍。
+pub(super) struct VirtualTableBody {
+    inner: VirtualList<Vec<String>>,
+    cfg: Rc<RefCell<VirtualRowCfg>>,
+}
+
+/// 行的构建配置：与 [`SortableBody`] 上那组同名字段一一对应，只是改由 `Rc<RefCell<..>>`
+/// 共享给 `row_fn`。
+struct VirtualRowCfg {
+    actions: Option<ActionCol>,
+    render: Option<CellRender>,
+    lines: usize,
+    activate: Option<OnRowActivate>,
+    menu: Option<OnRowMenu>,
+}
+
+impl VirtualTableBody {
+    pub(super) fn new(rows: Signal<Vec<Vec<String>>>, weights: Vec<f32>, row_h: i32) -> Self {
+        let cfg = Rc::new(RefCell::new(VirtualRowCfg {
+            actions: None,
+            render: None,
+            lines: 1,
+            activate: None,
+            menu: None,
+        }));
+        let c = cfg.clone();
+        let inner = VirtualList::new(rows, row_h, move |i, cells: Vec<String>| {
+            // 借用只活在建这一行的期间：`body_row` 不会回头再碰配置，而修饰符都在
+            // 构建期之外调用，两者撞不上。
+            let c = c.borrow();
+            // 两个下标都传真实行号：斑马纹因此跟着**数据行**走，而不是跟着它在渲染窗口
+            // 里的位置——否则滚动时深浅条纹会随窗口起点整体跳一格。
+            body_row(
+                i,
+                i,
+                &cells,
+                &weights,
+                c.actions.as_ref(),
+                c.render.as_ref(),
+                c.lines,
+                c.activate.as_ref(),
+                c.menu.as_ref(),
+            )
+        });
+        Self { inner, cfg }
+    }
+
+    /// 改配置并作废已建行。
+    ///
+    /// 不假设"修饰符一定在首帧之前设进来"：`VirtualList` 只在区间或数据版本变化时重建，
+    /// 少了这次作废，运行中才挂上的操作列要等用户滚动一下才出现。
+    fn edit(&mut self, f: impl FnOnce(&mut VirtualRowCfg)) {
+        f(&mut self.cfg.borrow_mut());
+        self.inner.invalidate();
+    }
+
+    pub(super) fn set_actions(&mut self, actions: ActionCol) {
+        self.edit(|c| c.actions = Some(actions));
+    }
+    pub(super) fn set_cell_render(&mut self, render: CellRender) {
+        self.edit(|c| c.render = Some(render));
+    }
+    pub(super) fn set_cell_lines(&mut self, lines: usize) {
+        self.edit(|c| c.lines = lines.max(1));
+    }
+    pub(super) fn set_activate(&mut self, activate: OnRowActivate) {
+        self.edit(|c| c.activate = Some(activate));
+    }
+    pub(super) fn set_menu(&mut self, menu: OnRowMenu) {
+        self.edit(|c| c.menu = Some(menu));
+    }
+}
+
+impl Widget for VirtualTableBody {
+    fn on_update(&mut self, ctx: &mut EventCtx) {
+        self.inner.on_update(ctx);
+    }
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+}
+
 pub(super) fn action_col(
     title: String,
     weight: f32,
@@ -1242,6 +1334,34 @@ pub(super) fn action_col(
         weight,
         build: Rc::new(build),
     }
+}
+
+/// 若 `el` 挂的是虚拟滚动正文（[`VirtualTableBody`]）则返回 true。
+///
+/// 供 [`Element::actions`](super::Element::actions) 判断表头该怎么加操作列：虚拟表格的
+/// 表头是**静态行**，没有 `SortableHeader` 可设，得直接往里塞一个表头单元格。
+#[must_use]
+pub(super) fn is_virtual_table_body(el: &mut Element) -> bool {
+    el.widget
+        .as_any_mut()
+        .is_some_and(|a| a.is::<VirtualTableBody>())
+}
+
+/// 给静态表头（`Element::table_header` 建的普通行，不挂响应式 widget）末尾追加一个操作列
+/// 表头单元格；`header` 若挂着 widget 则不动它并返回 false。
+///
+/// 与响应式表头那条路（`set_header_actions`）的差别只在**谁来建这个单元格**：那边由
+/// `SortableHeader` 下次重建时连同排序箭头一起建，这边表头不会重建，故当场建好塞进去。
+/// 两边用的是同一个 `action_header_cell`，列宽与样式因此不会分叉。
+#[must_use]
+pub(super) fn append_static_action_header(header: &mut Element, ac: &ActionCol) -> bool {
+    if header.widget.as_any_mut().is_some() {
+        return false;
+    }
+    header
+        .children
+        .push(action_header_cell(&ac.title, ac.weight));
+    true
 }
 
 /// 若 `el` 挂的是 `SortableHeader` 则设入操作列并返回 true，否则 false（供定位表头）。
@@ -1256,7 +1376,7 @@ pub(super) fn set_header_actions(el: &mut Element, ac: &ActionCol) -> bool {
     false
 }
 
-/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入操作列并返回 true。
+/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable/Virtual）则设入操作列并返回 true。
 #[must_use]
 pub(super) fn set_body_actions(el: &mut Element, ac: &ActionCol) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
@@ -1274,10 +1394,14 @@ pub(super) fn set_body_actions(el: &mut Element, ac: &ActionCol) -> bool {
         b.set_actions(ac.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_actions(ac.clone());
+        return true;
+    }
     false
 }
 
-/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入自定义单元格渲染并返回 true。
+/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable/Virtual）则设入自定义单元格渲染并返回 true。
 #[must_use]
 pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
@@ -1295,10 +1419,14 @@ pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> boo
         b.set_cell_render(render.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_cell_render(render.clone());
+        return true;
+    }
     false
 }
 
-/// 若 `el` 挂的是 HoverRow 型响应式正文（Sortable/Paged）则设入整行双击激活回调并返回 true。
+/// 若 `el` 挂的是 HoverRow 型响应式正文（Sortable/Paged/Virtual）则设入整行双击激活回调并返回 true。
 /// 可选表格（SelectableBody/SelectableRow）不支持整行激活（首列复选框语义冲突），返回 false。
 #[must_use]
 pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> bool {
@@ -1313,10 +1441,14 @@ pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> b
         b.set_activate(activate.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_activate(activate.clone());
+        return true;
+    }
     false
 }
 
-/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入整行右键菜单并返回 true。
+/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable/Virtual）则设入整行右键菜单并返回 true。
 ///
 /// 与整行双击激活不同，可选表格**也支持**：右键不与首列复选框争语义（复选框只吃左键），
 /// 而"右击某行做点什么"在多选表格里同样成立。
@@ -1337,10 +1469,14 @@ pub(super) fn set_body_menu(el: &mut Element, menu: &OnRowMenu) -> bool {
         b.set_menu(menu.clone());
         return true;
     }
+    if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
+        b.set_menu(menu.clone());
+        return true;
+    }
     false
 }
 
-/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable）则设入默认文本格最多行数并返回 true。
+/// 若 `el` 挂的是任一响应式正文（Sortable/Paged/Selectable/Virtual）则设入默认文本格最多行数并返回 true。
 #[must_use]
 pub(super) fn set_body_cell_lines(el: &mut Element, lines: usize) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
@@ -1355,6 +1491,10 @@ pub(super) fn set_body_cell_lines(el: &mut Element, lines: usize) -> bool {
         return true;
     }
     if let Some(b) = a.downcast_mut::<SelectableBody>() {
+        b.set_cell_lines(lines);
+        return true;
+    }
+    if let Some(b) = a.downcast_mut::<VirtualTableBody>() {
         b.set_cell_lines(lines);
         return true;
     }
