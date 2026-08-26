@@ -16,7 +16,7 @@
 `Native platform windows` · `tiny-skia vector rendering` · `Native text shaping` · No runtime · No GC.
 
 <p align="center">
-  <img src="docs/images/fullshowcase.png" width="640" alt="windui comprehensive demo">
+  <img src="docs/images/settings-input.png" width="880" alt="windui settings window: custom title bar + icon sidebar + content + action bar">
 </p>
 
 | Platform | Window / Present | Text |
@@ -55,28 +55,33 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 
 ## Preview
 
-All screenshots below are captured automatically via off-screen rendering (`--screenshot`, see [`scripts/screenshots.ps1`](scripts/screenshots.ps1)).
+Every screenshot below is captured automatically via off-screen rendering (`--screenshot`, see [`scripts/readme_shots.ps1`](scripts/readme_shots.ps1)) with no retouching.
+The main examples all use frameless windows with a self-drawn title bar — **the title bar is part of the widget tree**, laid out and themed exactly like the rest of the window.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/ime_settings.png" alt="IME settings scenario"></td>
-<td width="50%"><img src="docs/images/theming.png" alt="Custom theme"></td>
+<td width="50%"><img src="docs/images/fullshowcase.png" alt="Widget tour"></td>
+<td width="50%"><img src="docs/images/theming.png" alt="Theming"></td>
 </tr>
 <tr>
-<td><sub>Real scenario: sidebar nav + segmented control + switches + drill-in rows</sub></td>
-<td><sub>TOML theme override: reskin the same widget set in one shot</sub></td>
+<td><sub>Widget tour: seven tabs grouped by widget family (forms / buttons / layout / text / data / images / about)</sub></td>
+<td><sub>Theming: partial TOML overrides + <code>Role</code>-based coloring, hot-swapped across the whole tree at runtime</sub></td>
 </tr>
 <tr>
-<td><img src="docs/images/image.png" alt="Image and SVG support"></td>
-<td><img src="docs/images/list.png" alt="List widget"></td>
+<td><img src="docs/images/settings-dialog.png" alt="Modal dialog with an editable table"></td>
+<td><img src="docs/images/virtual-list.png" alt="Virtual scrolling"></td>
 </tr>
 <tr>
-<td><sub>Images: PNG/SVG, Fit modes, rounded clipping, monochrome tinting</sub></td>
-<td><sub>List: single-select / highlight / scroll / icons</sub></td>
+<td><sub>Modal dialog: backdrop scrim + titled panel + click-to-edit table cells</sub></td>
+<td><sub>Virtual scrolling: 100k-row list / 10k-row table, only viewport rows are built</sub></td>
 </tr>
 <tr>
-<td><img src="docs/images/dialog.png" alt="Modal dialog"></td>
-<td valign="center"><sub>Modal dialog + multi-tab navigation.<br>See the Widgets table below, or run <code>cargo run --release --example fullshowcase</code> to try it.</sub></td>
+<td><img src="docs/images/image.png" alt="Images and vectors"></td>
+<td><img src="docs/images/about.png" alt="About page"></td>
+</tr>
+<tr>
+<td><sub>Images &amp; vectors: PNG/SVG, Fit modes, rounded clipping, monochrome tinting</sub></td>
+<td><sub>About page: clickable cards + pill badges + outline buttons + toasts</sub></td>
 </tr>
 </table>
 
@@ -137,7 +142,16 @@ cargo test                                                  # run unit tests
 cargo clippy --all-targets                                  # lint
 ```
 
-Examples: `fullshowcase` (comprehensive), `settings` (settings window: sidebar + tables + dialogs), `dyn_list` (data-driven dynamic list), `about` (cards + toasts), `background_task` (cross-thread updates), `animation`, `theming` (TOML themes + runtime switching), `image`, `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline`, `emoji` (color emoji rendering), `frameless`, `light_titlebar`, `tray`, `hotkey` (global hotkeys + start hidden), `multi_window` (child windows + cross-window shared state), `file_drop`, `ime`, `ime_settings`, plus `phase0`–`phase5` staged demos.
+Examples fall into four groups:
+
+| Group | Examples |
+|-------|----------|
+| **Complete apps** | `settings` (settings window: title bar + icon sidebar + content + action bar + two dialogs), `about` (about page), `ime_settings` (IME settings scenario), `light_titlebar` (installer-style light title bar) |
+| **Widgets & capabilities** | `fullshowcase` (widget tour, seven tabs), `theming` (TOML themes + runtime reskin), `image` (images/SVG), `animation`, `emoji` (color emoji), `caret` (four caret styles) |
+| **Data display** | `virtual_list` (virtual list + table), `virtual_table_server` (server-side paging), `table_pager` (pager bar), `dyn_list` (data-driven dynamic list), `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline` |
+| **System integration** | `tray` (system tray), `hotkey` (global hotkeys + start hidden), `multi_window` (child windows + shared state), `file_drop`, `frameless` (custom title bar + system menu), `background_task` (cross-thread updates), `ime` |
+
+Plus `phase0`–`phase5` staged demos and the `perfprobe` performance probe, used for development and regression comparison.
 
 ## Architecture
 

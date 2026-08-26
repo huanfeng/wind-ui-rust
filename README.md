@@ -16,7 +16,7 @@
 `平台原生窗口` · `tiny-skia 矢量渲染` · `平台原生文字排版` · 无运行时 · 无 GC。
 
 <p align="center">
-  <img src="docs/images/fullshowcase.png" width="640" alt="windui 综合示例界面">
+  <img src="docs/images/settings-input.png" width="880" alt="windui 设置窗：自绘标题栏 + 图标侧栏 + 内容区 + 底部操作栏">
 </p>
 
 | 平台 | 窗口/呈现 | 文字 |
@@ -55,28 +55,33 @@
 
 ## 界面预览
 
-下列截图全部由离屏渲染自动截取（`--screenshot`，见 [`scripts/screenshots.ps1`](scripts/screenshots.ps1)）。
+下列截图全部由离屏渲染自动截取（`--screenshot`，见 [`scripts/readme_shots.ps1`](scripts/readme_shots.ps1)），未作任何后期修饰。
+主要示例统一走无边框窗口 + 自绘标题栏——**标题栏本身就是控件树的一部分**，和正文用同一套布局与主题。
 
 <table>
 <tr>
-<td width="50%"><img src="docs/images/ime_settings.png" alt="输入法设置场景"></td>
-<td width="50%"><img src="docs/images/theming.png" alt="自定义主题"></td>
+<td width="50%"><img src="docs/images/fullshowcase.png" alt="控件总览"></td>
+<td width="50%"><img src="docs/images/theming.png" alt="主题与换肤"></td>
 </tr>
 <tr>
-<td><sub>真实场景：侧栏导航 + 分段控件 + 开关 + 钻入行</sub></td>
-<td><sub>TOML 主题覆盖：同一套控件一键换肤</sub></td>
+<td><sub>控件总览：七个分页按控件族分组（表单 / 按钮 / 布局 / 文字 / 数据 / 图片 / 关于）</sub></td>
+<td><sub>主题：TOML 部分覆盖 + <code>Role</code> 角色着色，运行期整树热切换</sub></td>
 </tr>
 <tr>
-<td><img src="docs/images/image.png" alt="图片与 SVG 能力"></td>
-<td><img src="docs/images/list.png" alt="列表控件"></td>
+<td><img src="docs/images/settings-dialog.png" alt="模态对话框与可编辑表格"></td>
+<td><img src="docs/images/virtual-list.png" alt="虚拟滚动"></td>
 </tr>
 <tr>
-<td><sub>图片能力：PNG/SVG、Fit 模式、圆角裁剪、单色着色</sub></td>
-<td><sub>列表：单选 / 高亮 / 滚动 / 图标</sub></td>
+<td><sub>模态对话框：背景遮罩 + 带标题栏的面板 + 点单元格即编辑的表格</sub></td>
+<td><sub>虚拟滚动：列表 10 万行 / 表格 1 万行，只构建视口内的行</sub></td>
 </tr>
 <tr>
-<td><img src="docs/images/dialog.png" alt="模态对话框"></td>
-<td valign="center"><sub>模态对话框 + 多标签页导航。<br>更多控件见下方「控件」表，或运行 <code>cargo run --release --example fullshowcase</code> 亲自体验。</sub></td>
+<td><img src="docs/images/image.png" alt="图片与矢量"></td>
+<td><img src="docs/images/about.png" alt="关于页"></td>
+</tr>
+<tr>
+<td><sub>图片与矢量：PNG/SVG、Fit 模式、圆角裁剪、单色着色</sub></td>
+<td><sub>关于页：可点击卡片 + 胶囊徽章 + 描边按钮 + Toast</sub></td>
 </tr>
 </table>
 
@@ -135,7 +140,16 @@ cargo test                                                  # 运行单元测试
 cargo clippy --all-targets                                  # 静态检查
 ```
 
-示例一览：`fullshowcase`（综合）、`settings`（设置窗：侧栏 + 表格 + 对话框）、`dyn_list`（数据驱动动态列表）、`about`（卡片 + Toast）、`background_task`（跨线程更新）、`animation`、`theming`（TOML 主题 + 运行期切换）、`image`、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline`、`emoji`（彩色 emoji 渲染）、`frameless`、`light_titlebar`、`tray`、`hotkey`（全局热键 + 启动即隐藏）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`ime`、`ime_settings`，以及 `phase0`–`phase5` 分阶段演示。
+示例按用途分四类：
+
+| 类别 | 示例 |
+|------|------|
+| **完整应用** | `settings`（设置窗：标题栏 + 图标侧栏 + 内容 + 底部操作栏 + 两个对话框）、`about`（关于页）、`ime_settings`（输入法设置场景）、`light_titlebar`（安装器风格的浅色标题栏） |
+| **控件与能力** | `fullshowcase`（控件总览，七个分页）、`theming`（TOML 主题 + 运行期换肤）、`image`（图片/SVG）、`animation`、`emoji`（彩色 emoji）、`caret`（文本光标四风格） |
+| **数据展示** | `virtual_list`（虚拟滚动列表 + 表格）、`virtual_table_server`（服务端分页）、`table_pager`（分页操作栏）、`dyn_list`（数据驱动动态列表）、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline` |
+| **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`ime` |
+
+另有 `phase0`–`phase5` 分阶段演示与 `perfprobe` 性能探针，供开发与回归比对使用。
 
 ## 架构
 

@@ -1,4 +1,4 @@
-# 一键生成所有示例截屏，用于自动化回归比对。
+﻿# 一键生成所有示例截屏，用于自动化回归比对。
 # 用法：powershell scripts/screenshots.ps1
 $ErrorActionPreference = "Stop"
 $out = "artifacts"
