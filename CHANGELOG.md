@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.14.0] - 2026-08-26
 
 - **窗口/应用图标** `App::icon(..)` / `Window::icon(..)`，配内置品牌图标
   `brand_icon()`（天蓝 `#1E90FF` 底 + 白色对称 W）。全部 36 个示例统一接入。
@@ -354,6 +354,16 @@
   ——主窗关闭后仍能从通道里开出新窗口，正是本次改动要换来的能力。
 
 ### Added
+- **主窗可登记单例键 `App::single_window(key)`**。键送进 `WindowConfig.single`，与
+  `Window::single` 同一个键空间；平台两侧的登记与激活逻辑本就现成，缺的只是主窗从来
+  没登记过——它一直是个匿名窗口。匿名的代价只在多窗应用里显形：子窗上有个动作、其界面
+  却在主窗里（「回到主界面」、只挂在主窗根上的对话框），此时想把主窗拉到前台**无路可走**
+  ——`EventCtx` 没有「激活某个窗口」的原语，激活只能由平台层在单例判定命中时代做，而子窗
+  照常 `open_window` 的结果不是激活、是**再建一个主窗**：两棵树抢同一批 `Signal`，
+  且这一路不会有任何报错。与 `App::single_instance`（管「同一个可执行文件只跑一个进程」）
+  不是一回事，这个管「同一个进程里只有一个这样的窗口」。默认仍是 `None`——单窗应用没有
+  「第二个自己」可谈，让它白白参与一次键比对没有意义。
+
 - **派生信号 `Signal::map(f) -> Signal<U>`**。同一份状态以另一种形态喂给控件——应用只维护
   一个语气信号，颜色（`fg_role_signal`）与文案（`label_signal`）都从它派生，改一处两处
   同时跟上。没有它时只能在每个写入点同时维护两个信号（漏一处就静默不同步），或者建两个
@@ -537,6 +547,29 @@
   本 API 尚未随版本发布，故直接改签名而非留弃用别名。
 
 ### Fixed
+- **折线拐点不再留缺口，对勾在高 DPI 下不再裂开**。复选框的对勾是两次独立的 `draw_line`
+  拼的、共享 V 底那个拐点，而 `draw_line` 用 `LineCap::Butt`——每段线的端面垂直于**自己**
+  的方向，两段方向不同（+45° 与 −53°）端面就不重合，夹角外侧留一块楔形谁也没盖到。
+  缺口的**逻辑**尺寸固定（≈ 笔宽 × tan(半夹角)），但占多少**物理**像素随 DPI 放大：
+  100% 下不足一个像素、被抗锯齿抹成一点灰，150% 以上就是实心豁口——所以它只在高分屏上
+  显形，低 DPI 截图比对会完全放过，这正是它一直留到现在的原因（18px 方框内对勾从 276
+  像素补到 286 像素，多出的正是那块楔形）。
+  Canvas 新增 `draw_polyline`：**默认实现就是正确答案**而非占位——逐段描边后在每个内部
+  拐点补一个直径等于笔宽的圆点，几何上恰好等于 round join，故 D2D 与 wgpu 后端不覆盖
+  也画不错；只补内部拐点，两端不补，否则就成了 round cap、改变既有图形的观感。skia
+  后端覆盖成一次性路径描边（少两次提交，接缝的抗锯齿也不会两遍叠加）。接缝统一取
+  **round** 而非 tiny-skia 默认的 miter，让软件路径与 D2D/wgpu 画出同一个形状——否则开
+  `--accelerated` 图标会微妙变形。同一缺陷的其他现场一并改：nav 的两个 chevron、
+  dropdown 的下拉箭头、表头全选的对勾。
+
+- **控件被禁用时复位交互态，不再残留悬停高亮**。`hit_node` 不看启用态（禁用节点照样当得成
+  hover target），而 `call_on_event` 对禁用节点直接丢弃事件——按钮在 hover 态被禁用后，
+  指针移开时那记 Leave 被丢掉，state 冻结在 Hover；等它重新启用，就带着一个指针早已不在
+  的高亮显示出来，非得再移进移出一次才消得掉。「被隐藏」与「被禁用」是同一个冻结的两种
+  形态，故 `reset_hidden_rec` 的判据从「祖先链累积可见」扩到「累积可见 ∧ 累积启用」；
+  触发链路本就是通的（`layout_signature` 早已含 `own_enabled`），只差判据。分页条的
+  「上一页/下一页」是典型现场：翻到首末页即禁用，而指针多半就停在刚点过的那枚按钮上。
+
 - **`src/ui/inputs.rs` 两处失实注释**。原文写的是「多行：Enter 插入换行。单行不处理
   （冒泡，留给默认行为）」与「单行不消费（冒泡）」——**冒泡这件事不存在**，按键分发没有
   沿父链的循环。这比缺口本身更危险：它描述的是作者以为的架构，下游照它去写「外层容器挂
@@ -1617,7 +1650,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.11.0...v0.11.1
