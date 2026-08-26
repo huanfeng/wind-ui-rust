@@ -102,7 +102,7 @@ impl WindowIcon {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn to_png(&self) -> Option<Vec<u8>> {
         let mut pm = Pixmap::new(self.width, self.height)?;
-        for (dst, src) in pm.pixels_mut().iter_mut().zip(self.rgba.chunks_exact(4)) {
+        for (dst, src) in pm.pixels_mut().iter_mut().zip(self.rgba.as_chunks::<4>().0) {
             *dst = tiny_skia::ColorU8::from_rgba(src[0], src[1], src[2], src[3]).premultiply();
         }
         pm.encode_png().ok()
@@ -348,7 +348,9 @@ mod tests {
             if size >= 16 {
                 let white = icon
                     .rgba()
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .filter(|p| p[0] > 200 && p[1] > 200 && p[2] > 200 && p[3] > 200)
                     .count();
                 assert!(white > 0, "{size}px 下 W 消失了");
