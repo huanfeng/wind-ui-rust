@@ -18,6 +18,10 @@
 
 use windui::prelude::*;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{page_title, Shell};
+
 /// 列表行高（逻辑 px）。虚拟滚动要求行高固定——索引与像素偏移靠一次乘法互换。
 const ROW_H: i32 = 34;
 
@@ -112,108 +116,104 @@ fn main() {
                 .weight(1.0),
         );
 
-    let ui =
-        Element::col()
-            .fill()
-            .bg_role(Role::Bg)
-            .padding(18)
-            .spacing(10)
-            .child(
-                Element::label("虚拟滚动")
-                    .font_size(22.0)
-                    .fg_role(Role::Text)
-                    .height(32)
-                    .width_match(),
-            )
-            .child(
-                Element::label(
-                    "只构建视口内的行，两端用空占位撑出未渲染部分的高度 —— 滚动条、\
+    let ui = Element::col()
+        .fill()
+        .bg_role(Role::Bg)
+        .padding(18)
+        .spacing(10)
+        .child(page_title("虚拟滚动", "列表 10 万行 / 表格 1 万行，只构建视口内的行").height(32))
+        .child(
+            Element::label(
+                "两端用空占位撑出未渲染部分的高度 —— 滚动条、\
                  滚动钳制与 scroll_into_view 因此无需任何特殊处理",
-                )
+            )
+            .font_size(12.5)
+            .fg_role(Role::TextMuted)
+            .width_match(),
+        )
+        .child(toolbar)
+        .child(
+            Element::virtual_list(items, ROW_H, row)
+                .bg_role(Role::Surface)
+                .border_role(Role::Border, 1)
+                .corner(6.0)
+                .weight(1.0),
+        )
+        .child(
+            Element::label("表格 table_virtual — 末列按钮 / 状态徽章 / 双击整行 / 右键菜单")
                 .font_size(12.5)
                 .fg_role(Role::TextMuted)
                 .width_match(),
+        )
+        .child(
+            Element::table_virtual(
+                vec![("名称", 3.0), ("大小(KB)", 1.0), ("状态", 1.2)],
+                table,
+                // 注意不是 TABLE_ROW_H：行里有按钮，得给够高度（见常量说明）。
+                ACTION_ROW_H,
             )
-            .child(toolbar)
-            .child(
-                Element::virtual_list(items, ROW_H, row)
-                    .bg_role(Role::Surface)
-                    .border_role(Role::Border, 1)
-                    .corner(6.0)
-                    .weight(1.0),
-            )
-            .child(
-                Element::label("表格 table_virtual — 末列按钮 / 状态徽章 / 双击整行 / 右键菜单")
-                    .font_size(12.5)
-                    .fg_role(Role::TextMuted)
-                    .width_match(),
-            )
-            .child(
-                Element::table_virtual(
-                    vec![("名称", 3.0), ("大小(KB)", 1.0), ("状态", 1.2)],
-                    table,
-                    // 注意不是 TABLE_ROW_H：行里有按钮，得给够高度（见常量说明）。
-                    ACTION_ROW_H,
-                )
-                // 末列按行生成按钮组。row 是**真实行下标**（不是它在渲染窗口里的位置），
-                // 滚到哪一行、闭包拿到的就是哪一行——这点与非虚拟表格一致。
-                .actions("操作", 2.2, move |row| {
-                    Element::row()
-                        .spacing(6)
-                        .child(
-                            Element::button("查看")
-                                .neutral()
-                                .outline()
-                                .small()
-                                .on_click(move |ctx| ctx.toast(format!("查看第 {} 行", row + 1))),
-                        )
-                        .child(
-                            Element::button("删除").danger().outline().small().on_click(
-                                move |ctx| ctx.toast_err(format!("删除第 {} 行", row + 1)),
-                            ),
-                        )
-                })
-                // 状态列渲染成彩色徽章；返回 None 的列走默认文本。
-                .cell_render(|_row, col, text| {
-                    if col != 2 {
-                        return None;
-                    }
-                    let role = match text {
-                        "已同步" => Role::Success,
-                        "冲突" => Role::Danger,
-                        _ => Role::TextMuted,
-                    };
-                    Some(
-                        Element::label(text)
-                            .font_size(11.0)
-                            .fg_role(role)
-                            .padding_xy(6, 2)
-                            .corner(4.0)
-                            .border_role(role, 1),
+            // 末列按行生成按钮组。row 是**真实行下标**（不是它在渲染窗口里的位置），
+            // 滚到哪一行、闭包拿到的就是哪一行——这点与非虚拟表格一致。
+            .actions("操作", 2.2, move |row| {
+                Element::row()
+                    .spacing(6)
+                    .child(
+                        Element::button("查看")
+                            .neutral()
+                            .outline()
+                            .small()
+                            .on_click(move |ctx| ctx.toast(format!("查看第 {} 行", row + 1))),
                     )
-                })
-                .on_row_activate(|ctx, row| ctx.toast(format!("双击进入第 {} 行", row + 1)))
-                .on_row_context_menu(|row| {
-                    vec![
-                        MenuItem::run(
-                            "复制名称",
-                            move |ctx| ctx.clipboard_set(&format!("file_{row:05}.dat")),
-                            false,
-                        ),
-                        MenuItem::separator(),
-                        MenuItem::run(
-                            "删除",
-                            move |ctx| ctx.toast_err(format!("删除第 {} 行", row + 1)),
-                            false,
-                        ),
-                    ]
-                })
-                .weight(1.0),
-            );
+                    .child(
+                        Element::button("删除")
+                            .danger()
+                            .outline()
+                            .small()
+                            .on_click(move |ctx| ctx.toast_err(format!("删除第 {} 行", row + 1))),
+                    )
+            })
+            // 状态列渲染成彩色徽章；返回 None 的列走默认文本。
+            .cell_render(|_row, col, text| {
+                if col != 2 {
+                    return None;
+                }
+                let role = match text {
+                    "已同步" => Role::Success,
+                    "冲突" => Role::Danger,
+                    _ => Role::TextMuted,
+                };
+                Some(
+                    Element::label(text)
+                        .font_size(11.0)
+                        .fg_role(role)
+                        .padding_xy(6, 2)
+                        .corner(4.0)
+                        .border_role(role, 1),
+                )
+            })
+            .on_row_activate(|ctx, row| ctx.toast(format!("双击进入第 {} 行", row + 1)))
+            .on_row_context_menu(|row| {
+                vec![
+                    MenuItem::run(
+                        "复制名称",
+                        move |ctx| ctx.clipboard_set(&format!("file_{row:05}.dat")),
+                        false,
+                    ),
+                    MenuItem::separator(),
+                    MenuItem::run(
+                        "删除",
+                        move |ctx| ctx.toast_err(format!("删除第 {} 行", row + 1)),
+                        false,
+                    ),
+                ]
+            })
+            .weight(1.0),
+        );
 
     App::new("windui — 虚拟滚动", 680, 700)
         .icon(brand_icon())
+        .frameless()
         .screenshot_from_args()
-        .content(ui)
+        .content(Shell::new("虚拟滚动").wrap(ui))
         .run();
 }

@@ -7,6 +7,10 @@
 
 use windui::prelude::*;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{page_title, Shell};
+
 /// 生成 w×h 的对角渐变 RGBA8（左上洋红 → 右下青）。
 fn gradient(w: u32, h: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity((w * h * 4) as usize);
@@ -213,24 +217,20 @@ fn main() {
         .child(Element::card("SVG 矢量（resvg 光栅化 + 着色）", svg_body))
         .child(Element::card("列表行图标（list_icons）", icon_list));
 
-    let ui = Element::stack().fill().bg_role(Role::Bg).child(
-        Element::col()
-            .fill()
-            .padding(18)
-            .spacing(12)
-            .child(
-                Element::label("图片支持")
-                    .font_size(24.0)
-                    .fg_role(Role::Text)
-                    .height(34)
-                    .width_match(),
-            )
-            .child(Element::scroll().fill().child(body)),
-    );
+    let page = Element::col()
+        .fill()
+        .bg_role(Role::Bg)
+        .padding(18)
+        .spacing(12)
+        .child(page_title("图片与矢量", "PNG / SVG · Fit 模式 · 圆角裁剪 · 单色着色").height(34))
+        .child(Element::scroll().fill().child(body));
 
-    App::new("windui — 图片示例", 480, 760)
+    // 原来 480 宽：最宽的那一行（SVG 三张缩略图 + 「SVG 图标」按钮）排不下，
+    // 按钮被裁掉半个。640 宽容得下它。
+    App::new("windui — 图片示例", 640, 760)
         .icon(brand_icon())
+        .frameless()
         .screenshot_from_args()
-        .content(ui)
+        .content(Shell::new("图片").wrap(page))
         .run();
 }

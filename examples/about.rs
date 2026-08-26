@@ -7,6 +7,10 @@
 
 use windui::prelude::*;
 
+#[path = "common/mod.rs"]
+mod common;
+use common::{brand_logo, Shell};
+
 /// 彩色圆角图标方块 + 居中白色字形（替代真实 SVG 图标，验证布局）。
 fn icon_box(bg: Color, glyph: &str, size: i32) -> Element {
     Element::stack().size(size, size).corner(12.0).bg(bg).child(
@@ -55,7 +59,7 @@ fn main() {
     let header = Element::row()
         .width_match()
         .spacing(20)
-        .child(icon_box(Color::hex(0x4C8BF5), "W", 96))
+        .child(brand_logo(88))
         .child(
             Element::col()
                 .weight(1.0)
@@ -148,15 +152,16 @@ fn main() {
                 .text_align(Align::Center),
         );
 
-    let ui = Element::col()
+    let body = Element::col()
         .fill()
-        .padding(16)
+        .padding(18)
         .bg_role(Role::Bg)
         .child(panel);
 
-    App::new("关于 — windui 示例", 620, 560)
+    App::new("关于 — windui 示例", 620, 556)
         .icon(brand_icon())
+        .frameless()
         .screenshot_from_args()
-        .content(ui)
+        .content(Shell::new("关于").no_maximize().wrap(body))
         .run();
 }
