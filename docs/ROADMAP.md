@@ -1,7 +1,8 @@
 # windui — 实施路线图（MVP）
 
-> **状态：MVP 完成（Phase 0–6 全部交付并经独立审查）。** 实测 release 二进制 0.49MB、
-> 私有内存 3.65MB（520×560 窗口）。详见 README。
+> **状态：MVP 完成（Phase 0–6 全部交付并经独立审查）。** 当时实测 release 二进制 0.49MB、
+> 私有内存 3.65MB（520×560 窗口，100% 缩放）——这是 MVP 那一刻的快照，此后控件集与
+> 示例都长了不少。**当前数字以 README 为准**，跑 `scripts/measure_footprint.ps1` 可复现。
 
 每个阶段都**必须能编译运行并产出一张可验证的截屏 PNG**，完成后做一次审查（code-reviewer）再 commit。
 

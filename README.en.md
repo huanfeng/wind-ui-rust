@@ -32,11 +32,20 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 
 | Metric | Measured |
 |--------|----------|
-| Binary size (release, LTO+strip) | minimal window app **0.44 MB**; comprehensive demo (with SVG + full widget set) **1.07 MB** |
-| Private memory (PrivateBytes, 520×560 window) | **3.65 MB** |
+| Binary size (release, LTO+strip) | minimal window app **0.64 MB**; comprehensive demo (full widget set + SVG) **1.38 MB** |
+| Private memory (PrivateBytes, 100% scaling) | minimal window 480×320 **2.7 MB**; about window 620×556 **5.5 MB** |
+| Same, at 200% scaling | **4.6 MB** / **14.2 MB** |
 | Cross-platform direct deps | tiny-skia (render) · resvg (SVG, on by default, stripped by LTO if unused) · serde + toml (theming); platform system bindings pulled in by target |
 
-> Working set is ~14MB, mostly **shared** system DLL mappings (gdi32/dwrite, etc.); the process's truly private memory is only ~3.6MB.
+> **A memory number means nothing without its DPI.** The bulk of it is the ~2.5 full-window RGBA
+> buffers the software rasterizer keeps, and those are allocated in **physical** pixels — at 200%
+> scaling the same window covers 4× the physical area, and the memory scales with it. The two rows
+> above are the same binaries measured at two scaling factors, not two different builds.
+>
+> The working set additionally covers **shared** system DLL mappings (gdi32/dwrite, etc. — about
+> 22MB for the about window at 100%); the only memory the process truly owns is the private figure above.
+>
+> Every number is measured by [`scripts/measure_footprint.ps1`](scripts/measure_footprint.ps1) and reproducible by running it.
 
 ## Features
 
