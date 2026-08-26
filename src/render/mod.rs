@@ -139,6 +139,34 @@ pub trait Canvas {
         paint: &Paint,
     );
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint);
+
+    /// 折线描边：`pts` 逐点相连，**拐点处不留缺口**。
+    ///
+    /// 与"连着调几次 [`draw_line`](Self::draw_line)"的差别只在拐点。`draw_line` 用的是
+    /// 平头端面（`LineCap::Butt`），两段方向不同的线各画各的，夹角外侧那块楔形谁也没盖到——
+    /// 对勾、折返箭头这类图形因此会在拐点裂开。缺口的**逻辑**尺寸是固定的
+    /// （≈ 笔宽 × tan(半夹角)），但占多少**物理**像素随 DPI 放大：100% 下不足一个像素、
+    /// 被抗锯齿抹成一点灰，150%/200% 就是肉眼可见的豁口。所以它只在高 DPI 上显形，
+    /// 低 DPI 截图比对会完全放过。
+    ///
+    /// 默认实现逐段描边，并在每个内部拐点补一个直径等于笔宽的圆点填平接缝——
+    /// 视觉上等价于圆角连接（round join）。这是**正确**的实现，不是占位：后端可以
+    /// 覆盖成一次性的路径描边（少几次提交、接缝质量更好），但不覆盖也不会画错。
+    ///
+    /// 少于两个点时不绘制。
+    fn draw_polyline(&mut self, pts: &[(f32, f32)], width: f32, paint: &Paint) {
+        if pts.len() < 2 {
+            return;
+        }
+        for seg in pts.windows(2) {
+            let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
+            self.draw_line(x0, y0, x1, y1, width, paint);
+        }
+        // 只补**内部**拐点：两端点是线头，补圆会变成 round cap，改变外观。
+        for &(x, y) in &pts[1..pts.len() - 1] {
+            self.fill_circle(x, y, width / 2.0, paint);
+        }
+    }
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
     /// 绘制圆角矩形投影（drop shadow）：投影矩形 (x,y,w,h)、`radius` 圆角、
     /// `blur` 模糊半径（逻辑 px）、`color`（含 alpha）。绘制在节点背景之下；

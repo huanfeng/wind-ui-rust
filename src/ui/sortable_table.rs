@@ -1048,19 +1048,13 @@ impl Widget for SelectAllCheck {
         let mark = Paint::fill(p.on_accent);
         let s = sz / 18.0; // 18px 基准（与 CheckBox 对勾坐标一致）
         if all {
-            canvas.draw_line(
-                box_x + 4.0 * s,
-                box_y + 9.0 * s,
-                box_x + 8.0 * s,
-                box_y + 13.0 * s,
-                2.0,
-                &mark,
-            );
-            canvas.draw_line(
-                box_x + 8.0 * s,
-                box_y + 13.0 * s,
-                box_x + 14.0 * s,
-                box_y + 5.0 * s,
+            // 与 CheckBox 同源：折线一次画完，拐点才不会在高 DPI 下裂开。
+            canvas.draw_polyline(
+                &[
+                    (box_x + 4.0 * s, box_y + 9.0 * s),
+                    (box_x + 8.0 * s, box_y + 13.0 * s),
+                    (box_x + 14.0 * s, box_y + 5.0 * s),
+                ],
                 2.0,
                 &mark,
             );

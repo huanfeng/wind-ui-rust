@@ -38,15 +38,22 @@ enum State {
 /// 在 `(cx, cy)` 处画一个朝右的箭头 `>`（NavRow 钻入 / 折叠收起态）。
 fn chevron_right(canvas: &mut dyn Canvas, cx: f32, cy: f32, color: crate::geometry::Color) {
     let p = Paint::fill(color);
-    canvas.draw_line(cx - 2.0, cy - 4.0, cx + 2.0, cy, 1.6, &p);
-    canvas.draw_line(cx + 2.0, cy, cx - 2.0, cy + 4.0, 1.6, &p);
+    // 折线而非两段独立线：拐点处 Butt 端面盖不住夹角外侧，高 DPI 下会裂开。
+    canvas.draw_polyline(
+        &[(cx - 2.0, cy - 4.0), (cx + 2.0, cy), (cx - 2.0, cy + 4.0)],
+        1.6,
+        &p,
+    );
 }
 
 /// 在 `(cx, cy)` 处画一个朝下的箭头 `v`（折叠展开态，与 Dropdown 一致）。
 fn chevron_down(canvas: &mut dyn Canvas, cx: f32, cy: f32, color: crate::geometry::Color) {
     let p = Paint::fill(color);
-    canvas.draw_line(cx - 4.0, cy - 2.0, cx, cy + 3.0, 1.6, &p);
-    canvas.draw_line(cx, cy + 3.0, cx + 4.0, cy - 2.0, 1.6, &p);
+    canvas.draw_polyline(
+        &[(cx - 4.0, cy - 2.0), (cx, cy + 3.0), (cx + 4.0, cy - 2.0)],
+        1.6,
+        &p,
+    );
 }
 
 /// 折叠/手风琴面板头的共用绘制：可选 hover 底色 + 左标题 + 右侧三角（展开 `v` / 收起 `>`）。

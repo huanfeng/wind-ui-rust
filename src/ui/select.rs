@@ -142,12 +142,15 @@ fn paint_field_chrome(
     };
     canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
-    // 右侧下拉箭头 ▼（两段线）。
+    // 右侧下拉箭头 ▼（一条折线：两段独立线会在尖底裂开，高 DPI 可见）。
     let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
     let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
     let p = Paint::fill(chevron);
-    canvas.draw_line(cx - 4.0, cy - 2.0, cx, cy + 3.0, 1.6, &p);
-    canvas.draw_line(cx, cy + 3.0, cx + 4.0, cy - 2.0, 1.6, &p);
+    canvas.draw_polyline(
+        &[(cx - 4.0, cy - 2.0), (cx, cy + 3.0), (cx + 4.0, cy - 2.0)],
+        1.6,
+        &p,
+    );
 
     text_color
 }

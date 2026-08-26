@@ -178,22 +178,17 @@ impl Widget for CheckBox {
         if amount > 0.0 {
             // 启用用 intent 解析的对比色（浅底自动转深）；禁用回退 on_accent。
             let check = if enabled { check_fg } else { p.on_accent };
-            // 勾：两段线按 amount 淡入；坐标按方框尺寸等比缩放。
+            // 勾：一条三点折线按 amount 淡入；坐标按方框尺寸等比缩放。
+            // 必须走 `draw_polyline` 而不是两次 `draw_line`——后者在 V 底那个拐点
+            // 留一块楔形缺口，低 DPI 被抗锯齿糊过去，150% 以上就是肉眼可见的裂口。
             let paint = Paint::fill(check.scale_alpha(amount));
             let s = sz / 18.0; // 18px 为基准尺寸
-            canvas.draw_line(
-                bx + 4.0 * s,
-                by + 9.0 * s,
-                bx + 8.0 * s,
-                by + 13.0 * s,
-                check_stroke,
-                &paint,
-            );
-            canvas.draw_line(
-                bx + 8.0 * s,
-                by + 13.0 * s,
-                bx + 14.0 * s,
-                by + 5.0 * s,
+            canvas.draw_polyline(
+                &[
+                    (bx + 4.0 * s, by + 9.0 * s),
+                    (bx + 8.0 * s, by + 13.0 * s),
+                    (bx + 14.0 * s, by + 5.0 * s),
+                ],
                 check_stroke,
                 &paint,
             );

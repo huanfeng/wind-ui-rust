@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use tiny_skia::{
-    FillRule, FilterQuality, GradientStop as SkStop, LineCap, LinearGradient, Mask,
+    FillRule, FilterQuality, GradientStop as SkStop, LineCap, LineJoin, LinearGradient, Mask,
     Paint as SkPaint, PathBuilder, Pixmap, PixmapPaint, Point as SkPoint, RadialGradient, Shader,
     SpreadMode, Stroke, Transform,
 };
@@ -269,6 +269,33 @@ impl Canvas for SkiaCanvas<'_> {
             let stroke = Stroke {
                 width,
                 line_cap: LineCap::Butt,
+                ..Default::default()
+            };
+            let tf = self.tf();
+            self.stroke_path_on_target(&path, &sp, &stroke, tf);
+        }
+    }
+
+    fn draw_polyline(&mut self, pts: &[(f32, f32)], width: f32, paint: &Paint) {
+        if pts.len() < 2 {
+            return;
+        }
+        let _g = super::prof::scope(super::prof::STROKE);
+        let mut pb = PathBuilder::new();
+        pb.move_to(pts[0].0, pts[0].1);
+        for &(x, y) in &pts[1..] {
+            pb.line_to(x, y);
+        }
+        if let Some(path) = pb.finish() {
+            let sp = Self::sk_paint(paint);
+            // 端头保持平头（与 `draw_line` 一致，换成圆头会改变既有图形的外观）。
+            // 拐点用 **round** 而非 tiny-skia 默认的 miter：默认实现补的那个圆点
+            // 恰好就是 round join 的定义域，两边取同一种连接，软件路径与 D2D/wgpu
+            // 才画得出同一个形状。笔宽 2px 的对勾上，round 与 miter 的差别不足半像素。
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Butt,
+                line_join: LineJoin::Round,
                 ..Default::default()
             };
             let tf = self.tf();
@@ -784,6 +811,67 @@ mod tests {
     fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
         let p = pm.pixel(x, y).unwrap();
         (p.red(), p.green(), p.blue())
+    }
+
+    /// V 形折线的拐点必须实心：`draw_polyline` 要把夹角外侧那块楔形盖住。
+    ///
+    /// 这条守的是"高 DPI 下对勾裂开"那个缺陷。同一个 V，用两次 `draw_line` 画会在
+    /// 尖底留下缺口——测试里连这个**反例一起断言**，否则阈值一松，测试对两种画法
+    /// 都是绿的，也就守不住任何东西。
+    #[test]
+    fn polyline_joint_is_solid_where_two_lines_would_gap() {
+        // V 形：左上 → 底 → 右上。夹角约 90°，笔宽 6 —— 放大到能稳定采样的尺度。
+        const PTS: [(f32, f32); 3] = [(20.0, 20.0), (50.0, 70.0), (80.0, 20.0)];
+        const W: f32 = 6.0;
+        // 采样点取尖底正下方：两段线的 Butt 端面都够不到这里，正是缺口所在。
+        const SX: u32 = 50;
+        const SY: u32 = 72;
+
+        let paint = Paint::fill(Color::hex(0x000000));
+
+        let mut good = Pixmap::new(100, 100).unwrap();
+        good.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut good);
+            c.draw_polyline(&PTS, W, &paint);
+        }
+
+        let mut naive = Pixmap::new(100, 100).unwrap();
+        naive.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut naive);
+            c.draw_line(PTS[0].0, PTS[0].1, PTS[1].0, PTS[1].1, W, &paint);
+            c.draw_line(PTS[1].0, PTS[1].1, PTS[2].0, PTS[2].1, W, &paint);
+        }
+
+        let (gr, _, _) = px(&good, SX, SY);
+        let (nr, _, _) = px(&naive, SX, SY);
+        assert!(gr < 80, "draw_polyline 的拐点应是实心笔色，实得亮度 {gr}");
+        assert!(
+            nr > 200,
+            "反例失效：两次 draw_line 本应在此留白（实得亮度 {nr}）——             采样点或几何被改过，这条测试已不再能抓住拐点缺口"
+        );
+    }
+
+    /// 折线的两端保持平头（Butt），不因为修拐点而变成圆头——
+    /// 圆头会让既有图标（对勾、chevron）的观感整体变化。
+    #[test]
+    fn polyline_keeps_butt_caps_at_the_ends() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            // 水平两段折线，端点在 x=20 / x=80，笔宽 8。
+            c.draw_polyline(
+                &[(20.0, 50.0), (50.0, 50.0), (80.0, 50.0)],
+                8.0,
+                &Paint::fill(Color::hex(0x000000)),
+            );
+        }
+        // Butt 端头在端点处齐平截断：端点外 2px 必须仍是白底。
+        // 若退化成 Round cap，这里会被半圆盖住。
+        let (r, _, _) = px(&pm, 17, 50);
+        assert!(r > 200, "折线端头应平齐截断（Butt），实得亮度 {r}");
     }
 
     /// 在一个薄裁剪矩形内填充，验证裁剪内的像素确实被绘制（复现进度条隐患）。
