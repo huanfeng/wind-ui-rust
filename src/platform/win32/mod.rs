@@ -59,7 +59,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
     GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
     HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
+    IDC_SIZEWE, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
     SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
     SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
@@ -69,8 +69,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
     WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SIZE, WM_TIMER, WM_TOUCH, WNDCLASSEXW,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -319,12 +319,43 @@ unsafe extern "system" fn app_host_proc(
             }
             LRESULT(0)
         }
+        // 系统设置变更。**只认主题那一项**——字体、区域、鼠标速度、电源计划都走同一条
+        // 消息，不筛就会在用户改任何系统设置时白重建一次界面。
+        WM_SETTINGCHANGE => {
+            let is_theme = lparam.0 != 0 && {
+                let name = windows::core::PCWSTR(lparam.0 as *const u16);
+                name.to_string().is_ok_and(|s| s == "ImmersiveColorSet")
+            };
+            if is_theme {
+                // 先读完再借宿主：`system_prefers_dark` 会调 OS，而「OS 调用不留在
+                // 借用里」是这一层的统一纪律（铁律 6）。
+                let dark = system_prefers_dark();
+                let repaint =
+                    state_from(hwnd).is_some_and(|s| s.handler.on_system_theme_changed(dark));
+                if repaint {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
+            LRESULT(0)
+        }
         // 全局热键：系统投递到本窗口队列（事件驱动，不轮询，故不破坏空闲零 CPU）。
         //
         // 严格两段式（铁律 6）：第一段借 host 跑回调、取出意图；借用在语句结束时释放。
         // 第二段才碰 OS——`ShowWindow`/`SetForegroundWindow` 会同步派发 WM_SHOWWINDOW /
         // WM_ACTIVATE 到主窗口的 wnd_proc，那里会再借一次它自己的 state。
         WM_HOTKEY => {
+            // 先把窗口状态刷新一次，再跑热键回调。
+            //
+            // 热键是**唯一**能在窗口隐藏、毫无消息往来的状态下抵达的输入：其余路径
+            // （指针、按键、绘制）都以窗口可见为前提，顺带保证了 thread_local 里那份
+            // 快照是新鲜的。不刷新的话，回调读到的 `visible` 可能是窗口被藏起来之前
+            // 留下的陈值——而「切换显隐」这个最常见的热键语义恰恰只看这一位。
+            let main = app_host()
+                .map(|h| h.main)
+                .unwrap_or(HWND(std::ptr::null_mut()));
+            if !main.0.is_null() {
+                push_window_state(main);
+            }
             let (op, main) = match app_host() {
                 Some(h) => (
                     h.hotkeys.as_mut().and_then(|hs| hs.dispatch(wparam.0)),
@@ -1661,6 +1692,7 @@ unsafe fn apply_cursor(shape: CursorShape) {
     let id = match shape {
         CursorShape::Hand => IDC_HAND,
         CursorShape::Text => IDC_IBEAM,
+        CursorShape::SizeWE => IDC_SIZEWE,
         CursorShape::Arrow => IDC_ARROW,
     };
     if let Ok(cur) = LoadCursorW(None, id) {
@@ -1739,6 +1771,33 @@ unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
     handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
 }
 
+/// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。
+///
+/// 读 `HKCU\...\Themes\Personalize\AppsUseLightTheme`：0 = 暗，非 0 或读不到 = 亮。
+/// 这是 Windows 记录「应用模式」的地方（与「系统模式」`SystemUsesLightTheme` 分开，
+/// 后者管的是任务栏与开始菜单，应用不该跟着它走）。
+///
+/// 读不到按**亮色**处理：那是出厂默认，且亮色界面在暗色系统上只是不协调，反过来更
+/// 容易被当成程序坏了。
+pub(crate) fn system_prefers_dark() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let mut light: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let st = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut light as *mut u32 as *mut std::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    st.is_ok() && light == 0
+}
+
 /// 把窗口当前的状态与能力推给宿主（见 `AppHandler::on_window_state`）。
 ///
 /// 能力位从**样式位**读而不是缓存 `cfg.resizable`：两者建窗时一致，但样式位是运行期的
@@ -1751,6 +1810,7 @@ unsafe fn push_window_state(hwnd: HWND) {
     let st = crate::event::WindowState {
         maximized: IsZoomed(hwnd).as_bool(),
         minimized: IsIconic(hwnd).as_bool(),
+        visible: IsWindowVisible(hwnd).as_bool(),
         maximizable: style & WS_MAXIMIZEBOX.0 != 0,
         minimizable: style & WS_MINIMIZEBOX.0 != 0,
     };

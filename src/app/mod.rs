@@ -277,8 +277,13 @@ type AppCallback = Box<dyn FnMut(&mut EventCtx)>;
 type CloseHandler = Box<dyn FnMut(&mut EventCtx) -> bool>;
 /// 窗口唤起回调。与 `on_click` 同形（ctx 在首位），无返回值——唤起不是一次可否决的请求。
 type ShowHandler = Box<dyn FnMut(&mut EventCtx)>;
+/// 窗口级快捷键回调（见 [`App::on_shortcut`]）。返回 `true` = 已处理，宿主不再走
+/// Tab / Escape 兜底。
+type ShortcutHandler =
+    Box<dyn FnMut(&mut crate::event::ShortcutCtx, crate::event::KeyEvent) -> bool>;
+/// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。参数为「是否暗色」。
+type SystemThemeHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
 
-/// 应用构建器。命令式 API 的根入口。
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
 /// 控件 paint 期读 `theme::current()` 自动跟随；用 `Brush::Role`/`bg_role` 等
 /// 主题角色的背景/边框/文字也随之刷新，写死的 `bg(Color)` 定格色不变。
@@ -420,6 +425,7 @@ impl HotkeyHandle {
     }
 }
 
+/// 应用构建器。命令式 API 的根入口。
 pub struct App {
     cfg: WindowConfig,
     render: Option<RenderClosure>,
@@ -432,6 +438,10 @@ pub struct App {
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
     show_handler: Option<ShowHandler>,
+    /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
+    shortcut: Option<ShortcutHandler>,
+    /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。
+    system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
@@ -482,6 +492,8 @@ impl App {
             single: None,
             close_handler: None,
             show_handler: None,
+            shortcut: None,
+            system_theme: None,
             hide_on_close: false,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
@@ -1061,6 +1073,66 @@ impl App {
         self
     }
 
+    /// 窗口级快捷键：焦点控件**没要**这个键时才轮到，返回 `true` 表示已处理。
+    ///
+    /// 为什么需要它：键盘事件只发给焦点节点，而「Ctrl+L 回到搜索框」「F5 刷新」这类
+    /// 快捷键在焦点落在任何地方时都该生效。没有这个入口，应用只能把同一段处理复制到
+    /// 每一个可聚焦控件的 `on_nav_key` 里——漏一个，那个控件上的快捷键就哑了。
+    ///
+    /// **兜底而非抢先**，与 Tab 焦点导航、Escape 关窗同级：键先到焦点控件，它要了就
+    /// 轮不到这里。这是网页的模型（焦点元素 `preventDefault()` 掉就没浏览器什么事），
+    /// 也保证了输入框里打字不会被应用的快捷键截胡。
+    ///
+    /// 但它排在 Tab / Escape **之前**：应用得能覆盖那两个默认行为。典型场景是设置页里
+    /// 的 Escape——它该退回上一页，而不是把整个窗口关掉。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # use windui::event::Key;
+    /// App::new("t", 400, 300).on_shortcut(|ctx, ev| match ev.key {
+    ///     Key::Char('l') | Key::Char('L') if ev.ctrl => {
+    ///         ctx.focus_main_input();
+    ///         true
+    ///     }
+    ///     _ => false,
+    /// });
+    /// ```
+    pub fn on_shortcut(
+        mut self,
+        f: impl FnMut(&mut crate::event::ShortcutCtx, crate::event::KeyEvent) -> bool + 'static,
+    ) -> Self {
+        self.shortcut = Some(Box::new(f));
+        self
+    }
+
+    /// 系统外观偏好在亮 / 暗之间切换时回调，参数为**切换之后**是否为暗色。
+    ///
+    /// 配合 [`event::system_prefers_dark`](crate::event::system_prefers_dark) 使用：
+    /// 后者答「此刻是什么」（启动时读一次），这个负责之后的跟随。
+    ///
+    /// 常驻类应用尤其需要它——一次会话可能横跨日出日落，而进程一直不重启；只在启动时
+    /// 读一次的话，用户在系统里切了暗色，得把应用重开才生效。
+    ///
+    /// 只在**主题这一项**变化时触发：平台已经筛掉了字体、区域等其他系统设置的变更
+    /// （它们在 Windows 上共用同一条消息）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let (light, dark) = (Theme::default(), Theme::default());
+    /// let mut app = App::new("t", 400, 300);
+    /// let theme = app.theme_handle();
+    /// app.on_system_theme_changed(move |_ctx, is_dark| {
+    ///     theme.set(if is_dark { dark.clone() } else { light.clone() });
+    /// });
+    /// ```
+    pub fn on_system_theme_changed(
+        &mut self,
+        f: impl FnMut(&mut EventCtx, bool) + 'static,
+    ) -> &mut Self {
+        self.system_theme = Some(Box::new(f));
+        self
+    }
+
     pub fn run(mut self) {
         // 窗口会被隐藏（启动即隐 / 关闭转隐）却无任何唤起途径 = 用户再也看不到窗口，
         // 只能去任务管理器结束进程。在 run() 而非各 setter 里查：tray/hotkey 可能在其后才链上。
@@ -1090,6 +1162,8 @@ impl App {
                 self.intervals,
                 self.close_handler,
                 self.show_handler,
+                self.shortcut,
+                self.system_theme,
                 self.hide_on_close,
             ))
         } else {
@@ -1116,6 +1190,8 @@ impl App {
             self.intervals,
             self.close_handler,
             self.show_handler,
+            self.shortcut,
+            self.system_theme,
             self.hide_on_close,
         )
     }
@@ -1262,6 +1338,10 @@ struct UiHost {
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
     show_handler: Option<ShowHandler>,
+    /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
+    shortcut: Option<ShortcutHandler>,
+    /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。
+    system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
     /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
@@ -1439,6 +1519,8 @@ impl UiHost {
         intervals: Vec<(std::time::Duration, AppCallback)>,
         close_handler: Option<CloseHandler>,
         show_handler: Option<ShowHandler>,
+        shortcut: Option<ShortcutHandler>,
+        system_theme: Option<SystemThemeHandler>,
         hide_on_close: bool,
     ) -> Self {
         // 尽早注入，使首个事件（首帧渲染前）也能读到正确主题。
@@ -1482,6 +1564,8 @@ impl UiHost {
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
             close_handler,
             show_handler,
+            shortcut,
+            system_theme,
             hide_on_close,
             resolving_close: false,
             pending_windows: Vec::new(),
@@ -2091,6 +2175,25 @@ impl AppHandler for UiHost {
         true
     }
 
+    fn on_system_theme_changed(&mut self, dark: bool) -> bool {
+        self.enter();
+        let Some(mut h) = self.system_theme.take() else {
+            return false;
+        };
+        // 与 `run_show_handler` 逐行同款：`take` 出来再放回去，回调内才能安全地借
+        // `self`（它多半要 `ThemeHandle::set`，而那会经 `EventCtx` 摸到树）。
+        let root = self.tree.root;
+        if let Some(root) = root {
+            let res = self.tree.run_detached(root, |ctx| h(ctx, dark));
+            self.apply_app_effects(res);
+        }
+        self.system_theme = Some(h);
+        // 换主题不改结构，但所有颜色都变了——必须整窗重绘，局部脏区无从算起。
+        self.damage.needs_full = true;
+        self.damage.needs_relayout = true;
+        true
+    }
+
     fn on_window_shown(&mut self) -> bool {
         self.enter();
         // 让 autofocus 重新兑现一次：从托盘/热键唤起是一段新交互的开始，与页面重新载入
@@ -2138,6 +2241,42 @@ impl AppHandler for UiHost {
             self.damage.needs_relayout = true;
         }
         if !consumed {
+            // 应用级快捷键先于 Tab / Escape 兜底，理由见 `App::on_shortcut`。
+            //
+            // `take` 出来再放回去：回调借着 `self` 里的一块，而落地它请求的副作用
+            // （`rearm_autofocus`、`resolve_close`）同样要 `&mut self`。
+            let mut handled = false;
+            if let Some(mut h) = self.shortcut.take() {
+                let mut sc = crate::event::ShortcutCtx::default();
+                handled = h(&mut sc, ev);
+                self.shortcut = Some(h);
+                if sc.focus_main {
+                    // 与热键唤起窗口走同一条路：交还焦点并重新兑现 autofocus（含全选）。
+                    self.rearm_autofocus();
+                    self.damage.needs_relayout = true;
+                    self.damage.needs_full = true;
+                    repaint = true;
+                }
+                if sc.close && self.resolve_close() {
+                    self.close = true;
+                }
+            }
+            if handled {
+                // 应用要了这个键，就必然改了些什么（切页、改信号、翻状态）——**必须**
+                // 请求重排与重绘。
+                //
+                // 不置的话，界面会停在旧样子，直到下一次鼠标移动之类的事件顺带把它刷
+                // 出来：症状是「按了快捷键像没反应，晃一下鼠标才生效」。上面
+                // `focus_main` 那条自己置了，所以焦点类快捷键看着正常，而应用自行改
+                // 信号的那些（切页、切页签）全都中招——这个不对称正是最难查的部分。
+                //
+                // 走整窗而非局部脏区：宿主无从知道应用改了什么，`visible_when` 一翻转
+                // 就是结构变化，局部区域根本算不出来。快捷键是低频输入，整窗重绘的代价
+                // 可以忽略。
+                self.damage.needs_relayout = true;
+                self.damage.needs_full = true;
+                return true;
+            }
             match ev.key {
                 // 焦点导航。焦点环跨节点变化（低频）→ 整窗。
                 Key::Tab => {
@@ -2238,6 +2377,12 @@ impl AppHandler for UiHost {
                     req.close_handler,
                     // 唤起回调也不给子窗：子窗没有隐藏→唤起这条路（托盘与热键唤的是主窗），
                     // 给了也永远不触发。
+                    None,
+                    // 快捷键回调同理不给子窗：它登记在应用上、面向主窗那一套界面，
+                    // 而子窗有自己的内容与焦点环，套用主窗的快捷键只会张冠李戴。
+                    None,
+                    // 系统主题回调也不给：它的用途是换主题，而主题是**应用级**的
+                    // （`ThemeHandle` 全窗共享），由主窗换一次即可，子窗跟着走。
                     None,
                     // `hide_on_close` 不给子窗：隐藏后没有唤起途径（托盘唤的是主窗），
                     // 只会留下一个关不掉也看不见的窗口。
@@ -4103,6 +4248,7 @@ mod tests {
         host.on_window_state(WindowState {
             maximized: true,
             minimized: false,
+            visible: true,
             maximizable: true,
             minimizable: true,
         });
@@ -4144,6 +4290,7 @@ mod tests {
         a.on_window_state(WindowState {
             maximized: true,
             minimized: false,
+            visible: true,
             maximizable: true,
             minimizable: true,
         });
@@ -4254,6 +4401,7 @@ mod tests {
             crate::event::set_window_state(WindowState {
                 maximized,
                 minimized: false,
+                visible: true,
                 maximizable,
                 minimizable: true,
             });

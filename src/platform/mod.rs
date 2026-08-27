@@ -20,6 +20,8 @@ pub use win32::clipboard::WinClipboard as Clipboard;
 pub use win32::open_url;
 #[cfg(windows)]
 pub(crate) use win32::run;
+#[cfg(windows)]
+pub(crate) use win32::system_prefers_dark;
 
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -29,6 +31,8 @@ pub use macos::clipboard::MacClipboard as Clipboard;
 pub use macos::open_url;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::run;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::system_prefers_dark;
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
@@ -820,6 +824,14 @@ pub trait AppHandler {
     /// 省，否则首次事件分发读到的还是配置推导出的初始值。未推送的平台上宿主沿用
     /// 由建窗配置推导的初始快照——那是保守但正确的能力位，不是谎报。
     fn on_window_state(&mut self, _st: crate::event::WindowState) {}
+
+    /// 系统外观偏好变了（亮 ↔ 暗）。返回是否需要重绘。
+    ///
+    /// 平台只在**主题这一项**变化时调它。Windows 上所有系统设置的变更共用一条
+    /// `WM_SETTINGCHANGE`，不筛的话用户改字体、区域、鼠标速度都会把界面重建一遍。
+    fn on_system_theme_changed(&mut self, _dark: bool) -> bool {
+        false
+    }
 
     /// 取出并清除待执行的原生文件对话框请求。平台在事件分发**完全返回**（OS 侧鼠标
     /// 捕获已同步）之后才调用，避免在事件回调栈内重入阻塞式模态对话框。

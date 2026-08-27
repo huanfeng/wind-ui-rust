@@ -3554,6 +3554,17 @@ impl Element {
         self.padding = Insets::all(p);
         self
     }
+    /// 四边各自指定的内边距。
+    ///
+    /// [`padding`](Self::padding) 与 [`padding_xy`](Self::padding_xy) 覆盖了绝大多数
+    /// 情形，但有一类真实需求它们表达不了：**只在滚动条那一侧留出空间**。滚动条画在
+    /// 滚动容器的全矩形边缘，而内容排在 padding 内——想让正文不被滚动条压住，就得单独
+    /// 给右侧加一档，左侧照旧。用对称 padding 凑的话，左边会跟着白白缩进同样多。
+    pub fn padding_edges(mut self, p: Insets) -> Self {
+        self.padding = p;
+        self
+    }
+
     pub fn padding_xy(mut self, h: i32, v: i32) -> Self {
         self.padding = Insets::symmetric(h, v);
         self

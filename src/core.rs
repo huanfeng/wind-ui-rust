@@ -440,6 +440,13 @@ pub struct Tree {
     /// 丢弃整个 `EventOutcome`，其中的 toast 无处上交宿主；单独在此累积，由宿主在
     /// layout 后 `take_pending_toasts` 取走上屏（否则 `toast_sink` 等经信号触发的提示全被吞）。
     pending_toasts: Vec<ToastRequest>,
+    /// on_update 相位里控件请求的**焦点转移**暂存区。与 `pending_toasts` 同因同治：
+    /// 该相位丢弃整个 `EventOutcome`，`EventCtx::request_focus` 设的那一位也随之消失。
+    ///
+    /// 需要它的场景：一块列表整体占一个焦点位（roving tabindex），而点击是列表**行**
+    /// 自己消费的——行没法替父容器要焦点，只能由父容器在 on_update 里替自己要。没有
+    /// 这条通道，鼠标点完一行之后方向键就落不到列表上，键盘与鼠标接不起来。
+    pending_focus: Option<NodeId>,
     /// arrange 递归中当前节点父级的绝对左上角。
     ///
     /// `arrange` 全程使用相对父的坐标，但滚动条要判断"本容器是否贴着窗口右缘"必须知道
@@ -484,6 +491,7 @@ impl Tree {
             clipboard: None,
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
+            pending_focus: None,
             arrange_origin: Point::new(0, 0),
             layout_size: Size::ZERO,
             modals: Vec::new(),
@@ -493,6 +501,11 @@ impl Tree {
     /// 取走 on_update 相位累积的 toast 请求（宿主在 layout 后调用上屏），并清空暂存。
     pub fn take_pending_toasts(&mut self) -> Vec<ToastRequest> {
         std::mem::take(&mut self.pending_toasts)
+    }
+
+    /// 取走 on_update 相位攒下的焦点转移请求（见 `pending_focus`）。
+    pub fn take_pending_focus(&mut self) -> Option<NodeId> {
+        self.pending_focus.take()
     }
 
     /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
@@ -606,11 +619,17 @@ impl Tree {
         // 唯 toast 需上交宿主——on_update 相位不经 DispatchResult，若一并丢弃则 toast_sink
         // 等在此发的提示永不上屏，故先取出暂存（见 pending_toasts / take_pending_toasts）。
         let requested_toast = ctx.out.toast.take();
+        let requested_focus = ctx.out.focus.take();
         if let Some(n) = self.get_mut(id) {
             n.widget = widget;
         }
         if let Some(req) = requested_toast {
             self.pending_toasts.push(req);
+        }
+        // 后来者覆盖前者：同一轮里多个控件都要焦点时，只可能满足一个，取最后那个与
+        // 事件路径的语义一致（`EventOutcome::focus` 本身也是单值）。
+        if let Some(id) = requested_focus {
+            self.pending_focus = Some(id);
         }
     }
 

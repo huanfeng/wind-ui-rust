@@ -47,6 +47,16 @@ pub struct WindowState {
     pub maximized: bool,
     /// 当前已最小化。
     pub minimized: bool,
+    /// 窗口当前可见（未被隐藏）。
+    ///
+    /// 常驻托盘类应用要用它：全局热键的通常语义是**切换**——窗口露着就收起、藏着就唤起，
+    /// 而应用侧自己跟不住这个状态。`App::on_show` 只在唤起时回调，隐藏则可能发生在
+    /// 框架内部（ESC 关窗、`hide_on_close` 的关闭按钮），应用完全收不到通知，自建的
+    /// 布尔标志迟早与真实状态对不上。
+    ///
+    /// 与 [`minimized`](Self::minimized) 是两件事：最小化的窗口仍然「可见」（在任务栏上、
+    /// 能被还原），隐藏的窗口则从任务栏与 Alt-Tab 里整个消失。
+    pub visible: bool,
     /// 可最大化。win32 下等价于窗口带 `WS_MAXIMIZEBOX`（`App::resizable(false)` 会剥掉它）。
     pub maximizable: bool,
     /// 可最小化。win32 下等价于窗口带 `WS_MINIMIZEBOX`。
@@ -63,6 +73,12 @@ impl WindowState {
     pub const UNKNOWN: Self = Self {
         maximized: false,
         minimized: false,
+        // 与其余字段的「错得显眼」原则不同，这一项取 true。
+        //
+        // 它不是能力位而是**当前事实**，没有对应的菜单项会因此变灰；而取 false 的
+        // 失败模式很具体：热键的切换逻辑会以为窗口藏着，于是去「显示」一个本就显示着
+        // 的窗口——按下去毫无反应。取 true 时最坏是多隐藏一次，用户再按一下就回来了。
+        visible: true,
         maximizable: false,
         minimizable: false,
     };
@@ -77,6 +93,10 @@ impl WindowState {
         Self {
             maximized: false,
             minimized: false,
+            // 建窗配置推不出可见性：`App::start_hidden()` 的窗口建出来就是藏着的，而这个
+            // 构造函数拿不到那个标志。平台会在首次 `push_window_state` 推来真值——在那
+            // 之前只有 `root.build` 期间的读取会看到这里的值，那段里没人问可见性。
+            visible: true,
             // 可最大化 == 可缩放：win32 建窗时 `resizable(false)` 一并剥掉 WS_MAXIMIZEBOX。
             maximizable: resizable,
             // 最小化不受可缩放影响：不可缩放的对话框照样能最小化。
@@ -108,6 +128,47 @@ pub fn window_state() -> WindowState {
 /// 注入当前窗口状态（宿主专用）。
 pub(crate) fn set_window_state(st: WindowState) {
     WINDOW_STATE.with(|s| s.set(st));
+}
+
+/// 系统是否偏好**暗色**外观。
+///
+/// Windows 上读的是「设置 → 个性化 → 颜色 → 选择应用模式」那一项。读不到时按**亮色**
+/// 处理：那是 Windows 的出厂默认，且亮色界面在暗色系统上只是不协调，反过来（暗色界面
+/// 配亮色系统）更容易让人以为程序坏了。
+///
+/// 只回答「此刻是什么」。要在用户改动系统设置时**当场跟随**，用
+/// [`App::on_system_theme_changed`](crate::app::App::on_system_theme_changed)——
+/// 常驻类应用尤其需要它：一次会话可能横跨日出日落，而进程一直不重启。
+pub fn system_prefers_dark() -> bool {
+    crate::platform::system_prefers_dark()
+}
+
+/// 窗口级快捷键回调的受控句柄：收集意图，由宿主在回调返回后落地。
+///
+/// 与 [`HotkeyCtx`] 同构（那个管全局热键，这个管窗口内的快捷键），也同样是**纯意图
+/// 收集**而不是立即执行——回调跑在按键分发的中途，此时宿主正借着焦点状态与节点树，
+/// 在这里直接改它们会撞上借用，也会让副作用的发生顺序变得难以推理。
+#[derive(Default)]
+pub struct ShortcutCtx {
+    pub(crate) focus_main: bool,
+    pub(crate) close: bool,
+}
+
+impl ShortcutCtx {
+    /// 把键盘焦点交还给声明了 [`Element::autofocus`](crate::ui::Element::autofocus)
+    /// 的那个控件，并按其模式处理（`autofocus_select_all` 会一并全选）。
+    ///
+    /// 这正是「Ctrl+L 回到搜索框」这类快捷键要的语义——与热键唤起窗口时发生的是同
+    /// 一件事，故复用同一条路径，而不是让应用去记那个控件的 id（它也拿不到）。
+    pub fn focus_main_input(&mut self) {
+        self.focus_main = true;
+    }
+
+    /// 请求关闭窗口，走完整的关闭决策链（关顶层对话框 → 问 `on_close_request` →
+    /// `hide_on_close`）。常驻托盘类应用据此把 Ctrl+W 落成「收起窗口」。
+    pub fn request_close(&mut self) {
+        self.close = true;
+    }
 }
 
 /// 标准窗口系统菜单四项：还原 / 最小化 / 最大化 /（分隔）/ 关闭。
@@ -264,6 +325,11 @@ pub enum CursorShape {
     Hand,
     /// 文本 I 形（文本输入/可编辑区）。
     Text,
+    /// 左右调整（↔）。分栏分隔条、可拖宽的列边界。
+    ///
+    /// 没有它时只能退而用 [`Hand`](Self::Hand)——手型说的是「这里能点」，而分隔条
+    /// 要说的是「这里能左右拖」，两者指向不同的操作，用户据此预期的动作也不同。
+    SizeWE,
 }
 
 /// 指针动作。

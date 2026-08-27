@@ -122,6 +122,25 @@ fn os_caret_blink_half_ms() -> Option<u32> {
     }
 }
 
+/// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。
+///
+/// macOS 把它放在 `NSUserDefaults` 的 `AppleInterfaceStyle`：暗色时值为 `"Dark"`，
+/// 亮色时**这个键根本不存在**——不是空串也不是 `"Light"`，故只能按「读得到且等于 Dark」
+/// 来判定。对照 win32 那边读的 `AppsUseLightTheme` DWORD。
+///
+/// 读不到按亮色处理，理由同 win32 侧：那是出厂默认，且暗色界面配亮色系统更容易被当成
+/// 程序坏了。
+///
+/// 尚未接运行期跟随（`AppHandler::on_system_theme_changed` 在本平台不触发）：那要监听
+/// `NSApp.effectiveAppearance` 的 KVO 或 `AppleInterfaceThemeChangedNotification`，
+/// 与本函数是两件事。启动时读一次已经可用。
+pub(crate) fn system_prefers_dark() -> bool {
+    use objc2_foundation::{NSString, NSUserDefaults};
+    let d = NSUserDefaults::standardUserDefaults();
+    d.stringForKey(&NSString::from_str("AppleInterfaceStyle"))
+        .is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
+}
+
 /// 用系统默认程序打开 URL/路径（链接点击）。对照 win32 `ShellExecuteW`。
 pub fn open_url(url: &str) {
     use objc2_app_kit::NSWorkspace;

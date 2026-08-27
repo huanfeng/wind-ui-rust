@@ -48,6 +48,12 @@ impl UiHost {
                 self.focus.current = None;
             }
         }
+        // 控件在 on_update 里要过的焦点：在 autofocus **之前**落地。
+        //
+        // 顺序是承重的：这是用户动作（点了一行）直接引发的请求，而 autofocus 是
+        // 「没人要焦点时给个归宿」的兜底。反过来的话，兜底会先把焦点安给查询框，
+        // 这条请求再把它抢走——白抢一次，且 `autofocus_select_all` 的全选也白做了。
+        self.apply_pending_focus();
         // 声明式初始焦点：在归一化**之后**兑现——归一化可能刚把失效焦点抹成 None，
         // 那正是"此刻没有焦点"该由 autofocus 接手的时机。
         self.honor_autofocus();
@@ -64,6 +70,37 @@ impl UiHost {
     /// 只在**隐藏→可见的跃迁**上调用（平台层判定），故已经可见时再按热键不会重置界面。
     pub(super) fn rearm_autofocus(&mut self) {
         self.focus.autofocus_done = false;
+        // 还得把焦点**让出来**，只清标志不够。
+        //
+        // 窗口隐藏不清焦点（`focus.current` 原样留着上次那个控件），而
+        // `honor_autofocus` 有一步「不抢已有焦点」——于是重新 arm 之后它当场让位，
+        // 既不把焦点移回查询框，也不会重新全选。表现是：用户上次把焦点留在了别处
+        // （Tab 到列表、点了某个按钮），再按热键唤起就得先自己点回输入框；即便焦点
+        // 本来就在输入框上，「全选上次的词」也从第二次唤起起就再没发生过——那正是
+        // `autofocus_select_all` 存在的全部理由。
+        //
+        // 只在隐藏→可见的跃迁上走这一条（调用方保证），故不会打断用户正在进行的操作。
+        if let Some(f) = self.focus.current.take() {
+            self.tree.set_focused(None, Some(f));
+        }
+    }
+
+    /// 落地 on_update 相位攒下的焦点转移请求（见 `Tree::pending_focus`）。
+    ///
+    /// 请求的目标必须仍在焦点环里——它是上一帧的节点 id，而这中间可能刚重建过子树。
+    /// 不在就丢弃：把焦点交给一个已经不存在的节点，等于让键盘事件无处可去。
+    fn apply_pending_focus(&mut self) {
+        let Some(id) = self.tree.take_pending_focus() else {
+            return;
+        };
+        if !self.focus.order.contains(&id) || self.focus.current == Some(id) {
+            return;
+        }
+        let old = self.focus.current;
+        self.tree.set_focused(Some(id), old);
+        self.focus.current = Some(id);
+        // 不点亮焦点环：这条路径的触发者是鼠标点击，沿用 `:focus-visible` 的判据
+        // ——环显不显示取决于用户最近一次交互用的什么设备。理由同 `honor_autofocus`。
     }
 
     /// 兑现 [`Autofocus`]：节点首次进入焦点环那一帧把焦点交给它，只做一次。
@@ -740,6 +777,97 @@ mod tests {
             "新",
             "唤起后应重新全选，打字覆盖旧词——否则用户每次都得先手动删"
         );
+    }
+
+    /// 唤起时焦点**停在另一个控件上**（不是没有焦点）也要收回来。
+    ///
+    /// 与上一条的分野是承重的：那条测的是「焦点已被清空」，此时 `honor_autofocus`
+    /// 本就会接手；而常驻词典的真实情形是焦点**有主**——用户上次 Tab 到了列表、
+    /// 或点了某个按钮就把窗口收了。`honor_autofocus` 有一步「不抢已有焦点」，于是
+    /// 重新 arm 之后当场让位：焦点留在原处，`autofocus_select_all` 的全选也不再发生。
+    ///
+    /// 修法是 `rearm_autofocus` 一并把焦点让出来。这条测试钉住的就是那几行——它们
+    /// 看起来像是多余的（标志已经清了），删掉之后本测试立刻红。
+    #[test]
+    fn window_shown_takes_focus_back_from_another_control() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let text = crate::signal::signal(String::from("上次查的词"));
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .child(
+                    Element::text_input(text, "查词…")
+                        .height(30)
+                        .autofocus_select_all(),
+                )
+                .child(Element::button("别处").height(30)),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        macro_rules! frame {
+            () => {
+                handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200))
+            };
+        }
+        frame!();
+        assert!(handler.focus.current.is_some(), "首帧应兑现 autofocus");
+
+        // Tab 到按钮上：焦点**有主**，这正是与上一条测试的分野。
+        let k = crate::app::test_support::key_ev();
+        handler.on_key(k(Key::Tab));
+        frame!();
+        assert_eq!(
+            handler.focus.current,
+            handler.focus.order.get(1).copied(),
+            "前提：焦点已经交给了按钮"
+        );
+
+        // 收起再唤起。
+        assert!(handler.on_window_shown(), "唤起应请求重绘");
+        frame!();
+        assert_eq!(
+            handler.focus.current,
+            handler.focus.order.first().copied(),
+            "唤起后焦点必须收回查询框，而不是留在用户上次离开的那个控件上"
+        );
+
+        handler.on_key(k(Key::Char('新')));
+        assert_eq!(
+            text.get(),
+            "新",
+            "收回焦点还不够，全选也要跟着重新兑现——否则打字是追加不是覆盖"
+        );
+    }
+
+    /// 应用处理了快捷键 → 宿主必须请求重绘。
+    ///
+    /// 缺了这一步的症状很具体：按下快捷键界面纹丝不动，晃一下鼠标才刷出来——因为要
+    /// 等别的事件顺带触发一次重绘。而 `focus_main_input()` 那条路径自己置了标志，
+    /// 于是「Ctrl+L 正常、Esc 切页没反应」，这个不对称最难查。
+    #[test]
+    fn handled_shortcut_requests_a_repaint() {
+        use crate::platform::AppHandler;
+        let hit = crate::signal::signal(false);
+        let app = App::new("t", 200, 100)
+            .on_shortcut(move |_ctx, ev| {
+                if ev.key == Key::Escape {
+                    // 典型的应用侧动作：改一个驱动 `visible_when` 的信号。
+                    hit.set(true);
+                    return true;
+                }
+                false
+            })
+            .content(Element::col().child(Element::button("b").height(30)));
+        let mut handler = app.into_handler_for_test();
+        let k = crate::app::test_support::key_ev();
+        assert!(
+            handler.on_key(k(Key::Escape)),
+            "应用要了这个键就必须请求重绘，否则界面要等下一个事件才更新"
+        );
+        assert!(hit.get(), "前提：回调确实跑了");
     }
 
     /// `App::on_show` 回调应在唤起时触发，且它请求的副作用要落地。

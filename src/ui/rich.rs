@@ -2866,6 +2866,29 @@ mod tests {
         );
     }
 
+    /// 反向：纯静态文本经 `.focusable(true)` **进得了**焦点环。
+    ///
+    /// 这条不是为对称而写。`RichText::focusable()` 默认只认「含可折叠 Section」，于是
+    /// 一整篇没有 Section 的正文拿不到焦点——而它的 `on_event` 里 Ctrl+C / Ctrl+A 是
+    /// 齐全的，键盘事件只发给焦点节点，那段代码就永远跑不到：鼠标划得动、右键菜单复制
+    /// 得了，独独 Ctrl+C 没反应。词典类应用（wind-dict）正是靠这个覆盖把复制快捷键接
+    /// 起来的，故它是**被依赖的契约**，不能随默认值一起改掉。
+    #[test]
+    fn focusable_override_adds_static_text_to_tab_order() {
+        let doc = RichDoc::new().para("一段没有可折叠区的正文");
+        let mut tree = Tree::new();
+        let root = Element::col()
+            .child(Element::rich(doc).focusable(true))
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 300), &mut crate::text::NullTextEngine);
+        assert_eq!(
+            tree.focusable_order().len(),
+            1,
+            ".focusable(true) 应让纯静态富文本进入 Tab 焦点环，否则 Ctrl+C 无处可去"
+        );
+    }
+
     #[test]
     fn focusable_override_removes_from_tab_order() {
         let doc = RichDoc::new().section("头", signal(false), |d| d.para("体"));
