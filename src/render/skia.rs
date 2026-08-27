@@ -210,6 +210,15 @@ impl Canvas for SkiaCanvas<'_> {
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
         let _g = super::prof::scope(super::prof::FILL);
+        // 对齐物理像素整数坐标，**与 `stroke_round_rect` 用同一套公式**。
+        //
+        // 缺了这一步的症状：描边那侧早就对齐了（见其注释），填充这侧却按原始亚像素坐标
+        // 走，于是 125% / 150% 这类非整数 DPI 下，同一个矩形的底色边界与它的边框错开半个
+        // 物理像素——看起来就是「圆角的边框有点偏」。两者必须同源，单独对齐一侧只会把
+        // 错位从「都糊」变成「错开」。
+        //
+        // 对无边框的填充同样是改善：边界落在整数像素上，不再有一列半透明的抗锯齿边。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
         if let Some(path) = rounded_rect_path(x, y, w, h, radius) {
             let sp = Self::fill_paint(paint, x, y, w, h);
             let tf = self.tf();
@@ -233,12 +242,7 @@ impl Canvas for SkiaCanvas<'_> {
         // 各 0.5px 恰好覆盖完整一列物理像素，消除非整数 DPI（125%/150%/175% 等）下的亚像素
         // 抗锯齿模糊。tf() 的局部重绘 offset 已按 4 逻辑像素网格对齐（offset×scale 为整数），
         // 故此处对齐逻辑坐标后经变换仍落在物理整数。
-        let s = self.scale;
-        let x0 = (x * s).round() / s;
-        let y0 = (y * s).round() / s;
-        let x1 = ((x + w) * s).round() / s;
-        let y1 = ((y + h) * s).round() / s;
-        let (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
 
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;

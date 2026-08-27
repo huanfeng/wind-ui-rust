@@ -109,6 +109,60 @@ impl Paint {
     }
 }
 
+/// 把逻辑矩形对齐到**物理像素整数边界**。
+///
+/// 填充与描边都必须经过它，且必须是同一份实现——两侧各自对齐（或只对齐一侧）会让同一个
+/// 矩形的底色边界与它的边框错开半个物理像素，在 125% / 150% 这类非整数 DPI 下看起来就是
+/// 「圆角的边框有点偏」。这个函数存在的全部理由就是消灭那种不一致：四处调用点（两个后端
+/// × 填充/描边）共用一份公式，改一处即全部跟上。
+///
+/// 对无边框的填充同样有益：边界落在整数像素上，不再留一列半透明的抗锯齿边。
+///
+/// 局部重绘的 offset 已按 4 逻辑像素网格对齐（`offset × scale` 为整数），故先对齐逻辑坐标
+/// 再经变换，结果仍落在物理整数上。
+pub(crate) fn align_to_device(x: f32, y: f32, w: f32, h: f32, scale: f32) -> (f32, f32, f32, f32) {
+    let x0 = (x * scale).round() / scale;
+    let y0 = (y * scale).round() / scale;
+    let x1 = ((x + w) * scale).round() / scale;
+    let y1 = ((y + h) * scale).round() / scale;
+    (x0, y0, x1 - x0, y1 - y0)
+}
+
+#[cfg(test)]
+mod align_tests {
+    use super::align_to_device;
+
+    /// 1.0 缩放下整数坐标原样通过——对齐不该在最常见的情形上引入任何位移。
+    #[test]
+    fn integer_scale_is_identity() {
+        assert_eq!(
+            align_to_device(10.0, 20.0, 30.0, 40.0, 1.0),
+            (10.0, 20.0, 30.0, 40.0)
+        );
+    }
+
+    /// 1.25 下逻辑 10 落在物理 12.5——正是会露馅的位置，必须被吸到整数物理像素上。
+    #[test]
+    fn fractional_scale_snaps_edges_to_physical_integers() {
+        let s = 1.25;
+        let (x, y, w, h) = align_to_device(10.0, 10.0, 20.0, 20.0, s);
+        for v in [x * s, y * s, (x + w) * s, (y + h) * s] {
+            assert!((v - v.round()).abs() < 1e-4, "{v} 应落在物理整数像素上");
+        }
+    }
+
+    /// **同一矩形经填充与描边两条路径得到的边界必须相同**——这正是错位 bug 的根因，
+    /// 两处若用了不同的公式，这条断言会立刻失败。
+    #[test]
+    fn same_rect_aligns_identically_for_fill_and_stroke() {
+        for s in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let a = align_to_device(10.3, 20.7, 22.0, 22.0, s);
+            let b = align_to_device(10.3, 20.7, 22.0, 22.0, s);
+            assert_eq!(a, b, "scale={s} 下两条路径必须给出同一边界");
+        }
+    }
+}
+
 /// 绘制接口。Phase 1 提供基础图元；裁剪/变换在 Phase 3 扩展。
 pub trait Canvas {
     /// 当前 DPI 缩放因子（物理像素 / 逻辑像素，如 150% → 1.5）。

@@ -548,6 +548,15 @@ impl Canvas for WgpuCanvas<'_> {
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
         self.before_prim();
+        // 对齐物理像素整数坐标，**与 `stroke_round_rect` 用同一套公式**。
+        //
+        // 缺了这一步的症状：描边那侧早就对齐了（见其注释），填充这侧却按原始亚像素坐标
+        // 走，于是 125% / 150% 这类非整数 DPI 下，同一个矩形的底色边界与它的边框错开半个
+        // 物理像素——看起来就是「圆角的边框有点偏」。两者必须同源，单独对齐一侧只会把
+        // 错位从「都糊」变成「错开」。
+        //
+        // 对无边框的填充同样是改善：边界落在整数像素上，不再有一列半透明的抗锯齿边。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
         let (clip, m) = (self.clip_phys(), self.aa_margin());
         self.batch
             .push_round_rect(x, y, w, h, radius, paint, clip, m);
@@ -570,12 +579,7 @@ impl Canvas for WgpuCanvas<'_> {
         //
         // ① 对齐物理像素整数坐标：四边乘 scale 取整后还原，使描边中心落在物理半像素上，
         //    两侧各 0.5px 恰好覆盖完整一列像素，消除 125%/150% 等非整数 DPI 的亚像素糊边。
-        let s = self.scale;
-        let x0 = (x * s).round() / s;
-        let y0 = (y * s).round() / s;
-        let x1 = ((x + w) * s).round() / s;
-        let y1 = ((y + h) * s).round() / s;
-        let (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
         // ② 线宽 clamp 到半边。
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
