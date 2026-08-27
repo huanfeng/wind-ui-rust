@@ -1123,12 +1123,11 @@ impl App {
     /// let theme = app.theme_handle();
     /// app.on_system_theme_changed(move |_ctx, is_dark| {
     ///     theme.set(if is_dark { dark.clone() } else { light.clone() });
-    /// });
+    /// })
+    /// .content(Element::col())
+    /// .run();
     /// ```
-    pub fn on_system_theme_changed(
-        &mut self,
-        f: impl FnMut(&mut EventCtx, bool) + 'static,
-    ) -> &mut Self {
+    pub fn on_system_theme_changed(mut self, f: impl FnMut(&mut EventCtx, bool) + 'static) -> Self {
         self.system_theme = Some(Box::new(f));
         self
     }
