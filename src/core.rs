@@ -346,7 +346,17 @@ pub struct Node {
     pub padding: Insets,
     pub margin: Insets,
     /// 自身对齐覆盖：None=继承容器交叉轴对齐；Some(a)=显式覆盖。
+    ///
+    /// 在 `Layout::Frame`（stack）里它同时管两个轴——`Align::End` 就是右下角。要把
+    /// 子元素放到"右上"这类**两轴取值不同**的位置，再补 [`Node::align_v`]。
     pub align: Option<Align>,
+    /// **纵轴对齐覆盖**（仅 `Layout::Frame`）：`None` 时纵轴跟随 [`Node::align`]，
+    /// `Some(a)` 时纵轴单独取 `a`、`align` 只管横轴。
+    ///
+    /// 只为 Frame 而设：线性容器的主轴由排布本身决定、交叉轴才用 `align`，本就不存在
+    /// "两轴各要一个值"的问题。stack 则是唯一能把子元素摆到任意角的布局，而角落是
+    /// 两轴的组合——对话框右上角的小关闭按钮正是如此。
+    pub align_v: Option<Align>,
     pub layout: Layout,
     pub widget: Box<dyn Widget>,
     pub style: Style,
@@ -1091,15 +1101,23 @@ impl Tree {
             let cs = self.measured_of(c);
             let cm = self.margin_of(c);
             let align = self.get(c).and_then(|n| n.align).unwrap_or(Align::Start);
+            // 纵轴可单独覆盖（见 `Node::align_v`）：未设时跟随 `align`，两轴同值即旧行为。
+            let align_v = self.get(c).and_then(|n| n.align_v).unwrap_or(align);
             let avail_w = (inner.w - cm.horizontal()).max(0);
             let avail_h = (inner.h - cm.vertical()).max(0);
-            let (cw, ch) = if align == Align::Stretch {
-                (avail_w, avail_h)
+            // Stretch 按轴各判各的：横轴 Stretch + 纵轴 Start 是合法组合（顶部通栏）。
+            let cw = if align == Align::Stretch {
+                avail_w
             } else {
-                (cs.w, cs.h)
+                cs.w
+            };
+            let ch = if align_v == Align::Stretch {
+                avail_h
+            } else {
+                cs.h
             };
             let x = inner.x + cm.left + align_offset(align, avail_w, cw);
-            let y = inner.y + cm.top + align_offset(align, avail_h, ch);
+            let y = inner.y + cm.top + align_offset(align_v, avail_h, ch);
             self.arrange(c, Rect::new(x, y, cw, ch));
         }
     }

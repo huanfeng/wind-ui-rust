@@ -691,6 +691,8 @@ pub struct Element {
     padding: Insets,
     margin: Insets,
     align: Option<Align>,
+    /// 纵轴对齐覆盖（仅 stack），见 [`Element::align_xy`]。
+    align_v: Option<Align>,
     weight: Option<f32>,
     layout: Layout,
     style: Style,
@@ -731,6 +733,7 @@ impl Element {
             padding: Insets::default(),
             margin: Insets::default(),
             align: None,
+            align_v: None,
             weight: None,
             layout,
             style: Style::default(),
@@ -2176,20 +2179,70 @@ impl Element {
     /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
     /// `show` 绑定显示标志。
     ///
+    /// **面板可拖动**：按住面板顶部约 52px 的区域（通常正是标题行）即可把对话框拖开，
+    /// 去看它盖住的内容。落在这条带里的按钮/输入框照常响应点击。拖动写的是
+    /// `Node::offset`（视觉位移、布局不变），故只对**当次**生效——关掉再弹出回到居中。
+    /// 拖动**不要求**面板整体留在窗口内，只保证拖动带还留得住、抓得回来，
+    /// 细节见 `containers::DIALOG_DRAG_BAND_H`。
+    ///
     /// 无边框窗口下遮罩对**窗口拖动区判定**透明（`ModalScrim::scrim_passthrough`）：
     /// 对话框弹出后自绘标题栏仍可拖窗，窗口按钮则照旧被模态屏蔽。因此 `content`
     /// 面板须自带背景（`bg_role(Role::Surface)` 等），否则面板空白区会穿透遮罩、
     /// 让其下的标题栏被误判成拖动区。
+    ///
+    /// 要在面板右上角加一个不抢视觉的小 ×，用 [`dialog_closable`](Self::dialog_closable)。
     pub fn dialog(show: Signal<bool>, content: Element) -> Self {
+        Self::dialog_frame(show, content, None)
+    }
+
+    /// 同 [`dialog`](Self::dialog)，额外在面板**右上角**叠一个小关闭按钮。
+    ///
+    /// 按钮只有一个淡色的 ×、无背景无边框，压在面板已有内容之上而不占布局位——这是
+    /// 刻意的：它是"随手关掉"的兜底入口，不该跟底栏的「取消」抢注意力，更不该把已经
+    /// 排好的标题行挤变形。也正因为它压在上面，**面板顶部右侧已有控件的对话框不要用它**，
+    /// 会盖住；那种情况用 [`dialog`](Self::dialog) 即可，ESC 与底栏按钮都还在。
+    ///
+    /// `on_close` 通常是 `move |_| show.set(false)`，与底栏「取消」做同一件事。
+    pub fn dialog_closable(
+        show: Signal<bool>,
+        content: Element,
+        on_close: impl FnMut(&mut EventCtx) + 'static,
+    ) -> Self {
+        Self::dialog_frame(show, content, Some(Box::new(on_close)))
+    }
+
+    /// `dialog` / `dialog_closable` 的共同骨架。
+    fn dialog_frame(show: Signal<bool>, content: Element, on_close: Option<ClickFn>) -> Self {
+        // 有关闭按钮时把面板与 × 并进一层 stack：遮罩必须**恒只有一个子**，拖动就是
+        // 挪它（见 `ModalScrim::panel`）。两者分作遮罩的两个子会拖散架。
+        let panel = match on_close {
+            None => content,
+            Some(click) => {
+                let th = crate::theme::current();
+                let close = Element::icon_button("\u{2715}")
+                    .size(24, 24)
+                    .font_size(11.0)
+                    .fg_role(crate::style::Role::TextMuted)
+                    // 右上角：stack 里一个 align 管两轴、End 只能是右下，故分轴给值。
+                    .align_xy(Align::End, Align::Start)
+                    .margin(th.metrics.spacing)
+                    .on_click(click);
+                Element::stack().child(content).child(close)
+            }
+        };
         // 遮罩自己带着显示信号，`build` 时登记进所属 `Tree`，使 ESC / WM_CLOSE 能优先
         // 关闭此对话框。登记推迟到 build 而非在此直接做，是为了让归属跟着树走——
         // 否则同线程多窗口下，先构建的那棵树会把后构建的对话框一并收走。
+        //
+        // `reactive()` 是拖动位移的复位钩子：每次 layout 前调 `ModalScrim::on_update`，
+        // 在那里识别"重新弹出"并把位移清零。
         Element::stack()
             .fill()
             .widget(containers::ModalScrim::new(show))
             .bg(Color::rgba(0, 0, 0, 120))
             .visible_when(move || show.get())
-            .child(content.align(Align::Center))
+            .reactive()
+            .child(panel.align(Align::Center))
     }
 
     /// 带标题栏 + 关闭按钮 + 底栏的对话框面板（在 `dialog` 遮罩之上居中）。
@@ -3583,6 +3636,20 @@ impl Element {
         self.align = Some(a);
         self
     }
+    /// **两轴分别对齐**（仅 stack / `Layout::Frame` 内有效）：`h` 管横轴、`v` 管纵轴。
+    ///
+    /// [`align`](Self::align) 在 stack 里一个值同时管两轴，`Align::End` 因此只能是
+    /// 右**下**角。要把元素摆到右上（对话框角上的小关闭按钮）就得分开给值。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let close = Element::icon_button("\u{2715}").align_xy(Align::End, Align::Start);
+    /// ```
+    pub fn align_xy(mut self, h: Align, v: Align) -> Self {
+        self.align = Some(h);
+        self.align_v = Some(v);
+        self
+    }
     /// 线性容器主轴子间距。
     pub fn spacing(mut self, s: i32) -> Self {
         if let Layout::Linear { spacing, .. } = &mut self.layout {
@@ -3790,6 +3857,7 @@ impl Element {
             padding: self.padding,
             margin: self.margin,
             align: self.align,
+            align_v: self.align_v,
             layout: self.layout,
             widget,
             style: self.style,
@@ -5256,6 +5324,217 @@ mod tests {
         assert!(
             tree.drag_hit_at(Point::new(20, 20)),
             "面板左侧露出的标题栏区域仍可拖窗"
+        );
+    }
+
+    // ---- 对话框面板拖动 ----
+
+    /// 200×200 窗口里居中的 120×120 对话框面板（拖动带 y 40..92）。
+    /// `body` 是面板内容；面板自带背景，故命中在它这里落定、再冒泡到遮罩。
+    fn dialog_tree(show: Signal<bool>, body: Element) -> Tree {
+        layout(Element::dialog(
+            show,
+            Element::col()
+                .width(120)
+                .height(120)
+                .bg(Color::rgba(40, 40, 40, 255))
+                .child(body),
+        ))
+    }
+
+    /// 对话框面板节点：遮罩（根）的唯一子。
+    fn dialog_panel_id(tree: &Tree) -> crate::core::NodeId {
+        tree.get(tree.root.unwrap()).unwrap().children[0]
+    }
+
+    fn press(tree: &mut Tree, at: Point, hover: &mut Option<NodeId>, cap: &mut Option<NodeId>) {
+        tree.dispatch_pointer(
+            crate::event::PointerEvent::single(
+                PointerKind::Down,
+                at,
+                crate::event::MouseButton::Left,
+            ),
+            hover,
+            cap,
+        );
+    }
+
+    fn drag_to(tree: &mut Tree, at: Point, hover: &mut Option<NodeId>, cap: &mut Option<NodeId>) {
+        tree.dispatch_pointer(
+            crate::event::PointerEvent::single(
+                PointerKind::Move,
+                at,
+                crate::event::MouseButton::Left,
+            ),
+            hover,
+            cap,
+        );
+    }
+
+    #[test]
+    fn dialog_drag_band_moves_panel() {
+        let show = signal(true);
+        let mut tree = dialog_tree(show, Element::leaf().width(120).height(120));
+        let panel = dialog_panel_id(&tree);
+        let (mut hover, mut cap) = (None, None);
+
+        // 面板顶部带内按下（面板 y 40..160，带 40..92）。
+        press(&mut tree, Point::new(60, 50), &mut hover, &mut cap);
+        assert!(cap.is_some(), "在拖动带内按下应捕获指针");
+
+        drag_to(&mut tree, Point::new(80, 70), &mut hover, &mut cap);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(20, 20),
+            "面板应精确跟随指针位移"
+        );
+
+        // 位移写在 offset 上，relayout 不该冲掉它（居中布局照旧）。
+        relayout(&mut tree);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(20, 20),
+            "relayout 不应清掉拖动位移"
+        );
+    }
+
+    #[test]
+    fn dialog_body_press_does_not_drag() {
+        let show = signal(true);
+        let mut tree = dialog_tree(show, Element::leaf().width(120).height(120));
+        let panel = dialog_panel_id(&tree);
+        let (mut hover, mut cap) = (None, None);
+
+        // 面板正文区（y=150，远在拖动带 40..92 之外）。
+        press(&mut tree, Point::new(60, 150), &mut hover, &mut cap);
+        assert!(cap.is_none(), "拖动带之外按下不应起拖");
+        drag_to(&mut tree, Point::new(120, 190), &mut hover, &mut cap);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(0, 0),
+            "拖动带之外的拖拽不应挪动面板"
+        );
+    }
+
+    #[test]
+    fn dialog_drag_band_yields_to_button() {
+        // 拖动带里的按钮照常响应点击：按下被按钮消费，冒泡不到遮罩。
+        // 这是白拿的——拖动挂在最外层遮罩上，靠的正是"谁先消费谁优先"。
+        let show = signal(true);
+        let mut tree = dialog_tree(
+            show,
+            Element::row()
+                .width(120)
+                .height(40)
+                .child(Element::button("确定").width(40).height(40)),
+        );
+        let panel = dialog_panel_id(&tree);
+        let (mut hover, mut cap) = (None, None);
+
+        // 按钮占面板左上 x 40..80、y 40..80，在拖动带内。
+        press(&mut tree, Point::new(60, 60), &mut hover, &mut cap);
+        drag_to(&mut tree, Point::new(100, 100), &mut hover, &mut cap);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(0, 0),
+            "按在拖动带里的按钮上不应拖动面板"
+        );
+
+        // 同一条带里按钮右侧的空白处则可拖。
+        let (mut hover, mut cap) = (None, None);
+        press(&mut tree, Point::new(100, 60), &mut hover, &mut cap);
+        drag_to(&mut tree, Point::new(110, 70), &mut hover, &mut cap);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(10, 10),
+            "带内非交互区仍应可拖"
+        );
+    }
+
+    #[test]
+    fn dialog_drag_keeps_band_reachable() {
+        // 不要求面板整体留在窗口内（大对话框正要能拖开），只保证拖动带还抓得回来。
+        let show = signal(true);
+        let mut tree = dialog_tree(show, Element::leaf().width(120).height(120));
+        let panel = dialog_panel_id(&tree);
+        let (mut hover, mut cap) = (None, None);
+
+        press(&mut tree, Point::new(60, 50), &mut hover, &mut cap);
+        drag_to(&mut tree, Point::new(900, 900), &mut hover, &mut cap);
+
+        let r = tree.abs_bounds(panel);
+        // 窗口 200×200，keep_w=96：面板左缘最远到 200-96=104。
+        assert_eq!(r.x, 104, "右拖应停在仍露出 96px 的位置");
+        // keep_h=32：面板顶最远到 200-32=168。
+        assert_eq!(r.y, 168, "下拖应停在拖动带仍露出 32px 的位置");
+
+        // 反向拖同样有界：向上不越过窗口顶，向左至少留 96px。
+        drag_to(&mut tree, Point::new(-900, -900), &mut hover, &mut cap);
+        let r = tree.abs_bounds(panel);
+        assert_eq!(r.x, 96 - 120, "左拖应停在仍露出 96px 的位置");
+        assert_eq!(r.y, 0, "上拖不应越过窗口顶");
+    }
+
+    #[test]
+    fn dialog_reopen_resets_drag_offset() {
+        // 拖动只对当次生效：这些节点是常驻树的，位移不会因隐藏自己清掉，
+        // 必须靠 ModalScrim 在 on_update 里识别"重新弹出"来复位。
+        let show = signal(true);
+        let mut tree = dialog_tree(show, Element::leaf().width(120).height(120));
+        let panel = dialog_panel_id(&tree);
+        let (mut hover, mut cap) = (None, None);
+
+        press(&mut tree, Point::new(60, 50), &mut hover, &mut cap);
+        drag_to(&mut tree, Point::new(80, 70), &mut hover, &mut cap);
+        tree.dispatch_pointer(
+            crate::event::PointerEvent::single(
+                PointerKind::Up,
+                Point::new(80, 70),
+                crate::event::MouseButton::Left,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        assert_ne!(tree.get(panel).unwrap().offset, Point::new(0, 0));
+
+        show.set(false);
+        relayout(&mut tree);
+        show.set(true);
+        relayout(&mut tree);
+        assert_eq!(
+            tree.get(panel).unwrap().offset,
+            Point::new(0, 0),
+            "重新弹出应回到居中"
+        );
+    }
+
+    #[test]
+    fn align_xy_places_child_at_top_right() {
+        // stack 里一个 align 管两轴（End = 右下），要"右上"必须分轴给值。
+        // 根节点由 layout_root 撑到窗口尺寸 200×200，故 20px 的子右缘落在 180。
+        let tree = layout(
+            Element::stack()
+                .fill()
+                .child(Element::leaf().width(20).height(20).align(Align::End))
+                .child(
+                    Element::leaf()
+                        .width(20)
+                        .height(20)
+                        .align_xy(Align::End, Align::Start),
+                ),
+        );
+        let kids = tree.get(tree.root.unwrap()).unwrap().children.clone();
+        let bottom_right = tree.get(kids[0]).unwrap().bounds;
+        let top_right = tree.get(kids[1]).unwrap().bounds;
+        assert_eq!(
+            (bottom_right.x, bottom_right.y),
+            (180, 180),
+            "align(End)=右下"
+        );
+        assert_eq!(
+            (top_right.x, top_right.y),
+            (180, 0),
+            "align_xy(End,Start)=右上"
         );
     }
 
