@@ -233,6 +233,12 @@ pub struct Style {
     pub font_weight: u16,
     /// 字体族（None = 系统默认）。
     pub font_family: Option<String>,
+    /// 斜体。
+    ///
+    /// 与字重分开而非合成一个「字形变体」枚举：二者在字体里是**正交**的两个轴，
+    /// DirectWrite 的 weight 与 style 也是分开的参数。合成一个枚举就表达不了
+    /// 「粗斜体」，而词典正文里那正是常见组合（粗体词性 + 斜体例句）。
+    pub font_italic: bool,
     /// 行高倍数（相对字号）。`None` 用字体自带行距。
     ///
     /// 影响**多行文字的行间距**，单行文字只影响其占位高度。取倍数而非绝对像素，
@@ -259,6 +265,7 @@ impl Default for Style {
             font_size: 14.0,
             font_weight: crate::text::WEIGHT_NORMAL,
             font_family: None,
+            font_italic: false,
             line_height: None,
             text_align: Align::Start,
             shadow: None,

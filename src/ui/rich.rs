@@ -103,6 +103,7 @@ pub struct SpanStyle {
     family: Option<String>,
     fg: Option<RichColor>,
     bg: Option<RichColor>,
+    italic: bool,
     underline: bool,
     strike: bool,
     chip: bool,
@@ -142,6 +143,15 @@ impl SpanStyle {
         self
     }
     /// 下划线。
+    /// 斜体。
+    ///
+    /// 词典正文里斜体承载语义而非装饰：例句、语体标注（*informal*）、拉丁学名都靠它。
+    /// 剥掉 CSS 的 HTML 里，`<em>`/`<i>` 往往是**唯一**幸存的语义信号。
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
     pub fn underline(mut self) -> Self {
         self.underline = true;
         self
@@ -166,6 +176,9 @@ impl SpanStyle {
             family: self.family.clone().or_else(|| base.family.clone()),
             fg: self.fg.or(base.fg),
             bg: self.bg.or(base.bg),
+            // 与 underline/strike 同为「或」而非「覆盖」：它们是开关不是取值，
+            // 命名样式开了斜体、内联再开一次不该把它关掉。
+            italic: self.italic || base.italic,
             underline: self.underline || base.underline,
             strike: self.strike || base.strike,
             chip: self.chip || base.chip,
@@ -461,6 +474,7 @@ struct FragStyle {
     line_height: Option<f32>,
     fg: Option<RichColor>,
     bg: Option<RichColor>,
+    italic: bool,
     underline: bool,
     strike: bool,
     chip: bool,
@@ -472,6 +486,7 @@ impl FragStyle {
             family: self.family.as_deref(),
             size: self.size,
             weight: self.weight,
+            italic: self.italic,
             line_height: self.line_height,
         }
     }
@@ -766,6 +781,7 @@ impl Walker<'_> {
             line_height: base.line_height,
             fg: s.fg,
             bg: s.bg,
+            italic: s.italic,
             underline: s.underline,
             strike: s.strike,
             chip: s.chip,
@@ -966,6 +982,7 @@ impl Walker<'_> {
             line_height: base.line_height,
             fg: Some(RichColor::Accent),
             bg: None,
+            italic: false,
             underline: false,
             strike: false,
             chip: false,
@@ -2046,6 +2063,51 @@ impl Widget for RichText {
 
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
+    }
+}
+
+#[cfg(test)]
+mod italic_tests {
+    use super::*;
+
+    /// 斜体必须传到 `TextStyle`，否则引擎收不到它。
+    #[test]
+    fn 斜体传得到文字样式() {
+        let fs = FragStyle {
+            size: 14.0,
+            weight: 400,
+            family: None,
+            line_height: None,
+            fg: None,
+            bg: None,
+            italic: true,
+            underline: false,
+            strike: false,
+            chip: false,
+        };
+        assert!(fs.ts().italic, "FragStyle 的斜体没传进 TextStyle");
+    }
+
+    /// 斜体是开关不是取值：命名样式开了，内联样式不该把它关掉。
+    ///
+    /// 若写成 `self.italic`（覆盖语义），命名样式里的斜体会被任何一个内联样式清掉，
+    /// 而 underline / strike 早已按「或」处理——三者必须一致，否则同一份文档里
+    /// 三个开关的行为不同。
+    #[test]
+    fn 斜体按或合并而非覆盖() {
+        let 底 = SpanStyle::new().italic();
+        let 上 = SpanStyle::new().bold();
+        assert!(上.over(&底).italic, "命名样式的斜体被内联样式清掉了");
+        assert!(SpanStyle::new().italic().over(&SpanStyle::new()).italic);
+        assert!(!SpanStyle::new().over(&SpanStyle::new()).italic);
+    }
+
+    /// 斜体与字重正交——「粗斜体」必须能同时表达。
+    #[test]
+    fn 粗体与斜体可以并存() {
+        let s = SpanStyle::new().bold().italic();
+        assert!(s.italic);
+        assert!(s.weight.is_some_and(|w| w > crate::text::WEIGHT_NORMAL));
     }
 }
 

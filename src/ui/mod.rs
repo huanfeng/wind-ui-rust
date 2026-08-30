@@ -3798,6 +3798,17 @@ impl Element {
         self.style.font_family = Some(name.into());
         self
     }
+    /// 斜体。
+    ///
+    /// 与 `font_weight` 正交——字体里字重与倾斜是两个轴，故「粗斜体」是合法组合，
+    /// 不必也不该合成一个「字形变体」枚举。
+    ///
+    /// 同 `font_family`：字体没有斜体字面时 DirectWrite 会**合成**一个（几何倾斜），
+    /// 不报错。效果不如真斜体，但不会缺字。
+    pub fn italic(mut self) -> Self {
+        self.style.font_italic = true;
+        self
+    }
     /// 行高倍数（相对字号）。不设则用字体自带行距。
     ///
     /// 主要影响**多行文字**的行间距；单行文字只影响其占位高度。取倍数而非绝对像素，

@@ -47,6 +47,8 @@ pub struct TextStyle<'a> {
     pub size: f32,
     /// 字重，`WEIGHT_NORMAL` 为常规。
     pub weight: u16,
+    /// 斜体。与字重正交——字体里这是两个轴，故「粗斜体」是合法组合。
+    pub italic: bool,
     /// 行高倍数（相对字号）。`None` 用字体自带的行距。
     ///
     /// 单位取**倍数**而非绝对像素，因为行距的本意是随字号缩放的排版节奏；写死像素
@@ -61,6 +63,7 @@ impl<'a> TextStyle<'a> {
             family: None,
             size,
             weight: WEIGHT_NORMAL,
+            italic: false,
             line_height: None,
         }
     }
@@ -71,6 +74,7 @@ impl<'a> TextStyle<'a> {
             family: style.font_family.as_deref(),
             size: style.font_size,
             weight: style.font_weight,
+            italic: style.font_italic,
             line_height: style.line_height,
         }
     }
@@ -83,6 +87,11 @@ impl<'a> TextStyle<'a> {
     /// 换一个字重，其余不变。
     pub fn with_weight(self, weight: u16) -> Self {
         Self { weight, ..self }
+    }
+
+    /// 换一个斜体设置，其余不变。
+    pub fn with_italic(self, italic: bool) -> Self {
+        Self { italic, ..self }
     }
 
     /// 行高解析为绝对像素；未指定行高时返回 `None`，由引擎沿用字体自带行距。

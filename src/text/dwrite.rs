@@ -27,10 +27,11 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory3, IDWriteFontCollection1, IDWriteFontSetBuilder1, IDWriteGdiInterop,
     IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat,
     IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_COLOR_F,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION,
-    DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
-    DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
+    DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS,
+    DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
 };
 use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
 
@@ -258,7 +259,7 @@ pub struct DWriteEngine {
     gdi_interop: IDWriteGdiInterop,
     renderer: IDWriteTextRenderer,
     /// 缓存 TextFormat，按 (family, 物理字号 bits, 字重, 行高 bits) 复用。
-    formats: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+    formats: HashMap<(String, u32, u16, bool, Option<u32>), IDWriteTextFormat>,
     /// 文本测量缓存：键为 (文本+字体+字号+换行宽+字重+行高+scale) 的 64 位哈希，值为逻辑尺寸。
     /// 避免每帧对稳定文本重复 CreateTextLayout/GetMetrics（DirectWrite COM 往返昂贵）。
     /// 用哈希键省去每次查表的字符串分配；64 位空间碰撞概率可忽略。
@@ -352,7 +353,9 @@ impl DWriteEngine {
         // 行距进缓存键：同字族同字号但行距不同，是两套格式。漏掉它会让先构造的那套
         // 被后者复用，表现为行高时灵时不灵——取决于谁先进缓存。
         let lh_key = ts.line_height.map(f32::to_bits);
-        let key = (fam.clone(), psize.to_bits(), weight, lh_key);
+        // 斜体进缓存键。漏掉它，同字族同字号的正体与斜体会互相顶替——先构造的那套
+        // 被后者复用，表现为斜体时灵时不灵，取决于谁先进缓存。同 `lh_key` 的教训。
+        let key = (fam.clone(), psize.to_bits(), weight, ts.italic, lh_key);
         if let Some(f) = self.formats.get(&key) {
             return Some(f.clone());
         }
@@ -369,7 +372,11 @@ impl DWriteEngine {
                     PCWSTR(fam_w.as_ptr()),
                     None,
                     dw_weight,
-                    DWRITE_FONT_STYLE_NORMAL,
+                    if ts.italic {
+                        DWRITE_FONT_STYLE_ITALIC
+                    } else {
+                        DWRITE_FONT_STYLE_NORMAL
+                    },
                     DWRITE_FONT_STRETCH_NORMAL,
                     psize,
                     PCWSTR(locale.as_ptr()),
@@ -466,6 +473,7 @@ impl TextEngine for DWriteEngine {
             size.to_bits().hash(&mut h);
             max_width.map(f32::to_bits).hash(&mut h);
             ts.weight.hash(&mut h);
+            ts.italic.hash(&mut h);
             ts.line_height.map(f32::to_bits).hash(&mut h);
             self.scale.to_bits().hash(&mut h);
             h.finish()
@@ -515,6 +523,7 @@ impl TextEngine for DWriteEngine {
             ts.family.hash(&mut h);
             ts.size.to_bits().hash(&mut h);
             ts.weight.hash(&mut h);
+            ts.italic.hash(&mut h);
             ts.line_height.map(f32::to_bits).hash(&mut h);
             self.scale.to_bits().hash(&mut h);
             h.finish()
