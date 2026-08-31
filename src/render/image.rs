@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tiny_skia::{ColorU8, IntSize, Pixmap};
 
@@ -261,10 +262,16 @@ fn decode_with_registry(bytes: &[u8]) -> Result<DecodedImage, ImageError> {
     })
 }
 
+/// 图片身份 id 的全局分配器。单调递增、**永不复用**——这一点是正确性前提，见
+/// [`Image::cache_id`]。从 1 开始，0 留作"未分配"的哨兵值（当前无人用，留给将来）。
+static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+
 /// 解码后的图片资源。`Rc` 共享，克隆廉价；paint 期只做 blit，不再解码。
 #[derive(Clone)]
 pub struct Image {
     pixmap: Rc<Pixmap>,
+    /// 身份 id：见 [`Image::cache_id`]。随 `Clone` 复制，故同一张图的所有克隆共享它。
+    id: u64,
     w: u32,
     h: u32,
 }
@@ -330,6 +337,7 @@ impl Image {
         let (w, h) = (pm.width(), pm.height());
         Self {
             pixmap: Rc::new(pm),
+            id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed),
             w,
             h,
         }
@@ -352,8 +360,11 @@ impl Image {
             data.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
         let pm = Pixmap::from_vec(data, size).expect("着色 Pixmap 尺寸匹配");
+        // 像素内容与 `self` 不同，必须是**新身份**：沿用 `self.id` 会让渲染后端把
+        // 着色前的位图当成着色后的用。
         Self {
             pixmap: Rc::new(pm),
+            id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed),
             w: self.w,
             h: self.h,
         }
@@ -387,12 +398,28 @@ impl Image {
         &self.pixmap
     }
 
-    /// 稳定缓存键：底层 `Rc<Pixmap>` 指针。同一图片的 `Rc` 克隆共享此 id
-    /// （供 D2D 后端按图片身份缓存 device-dependent 位图，避免每帧重建）。
-    /// 仅 Windows + `d2d` 后端是消费者；其余平台/配置下无人使用，显式放行 dead_code。
-    #[cfg_attr(not(all(windows, feature = "d2d")), allow(dead_code))]
-    pub(crate) fn cache_id(&self) -> usize {
-        std::rc::Rc::as_ptr(&self.pixmap) as usize
+    /// 稳定缓存键：构造时分配的**单调递增 id**。同一张图的 `Clone` 共享它，两张不同的
+    /// 图永不共享（供渲染后端按图片身份缓存 device-dependent 位图/纹理，免每帧重建）。
+    ///
+    /// # 为什么不是 `Rc::as_ptr`
+    ///
+    /// 这里曾经用底层 `Rc<Pixmap>` 的指针值。指针只在对象活着时唯一：图片一旦释放，
+    /// 下一次分配可能**复用同一地址**，于是新图命中一条本属于旧图的缓存条目，画出的是
+    /// 上一张图——ABA。当时的取舍写着"UI 图片随窗口常驻，不会释放"，这个前提被 DPI
+    /// 感知的 SVG 打破了：[`ImageContent`](crate::ui::ImageContent) 在 DPI 变化时会
+    /// 重新光栅每一个图标，旧 `Pixmap` 依次释放、新 `Pixmap` 依次分配，而同一批图标
+    /// 尺寸相同（同一分配器 size class），复用地址是常态而非偶然。表现为跨不同 DPI 的
+    /// 屏幕拖动窗口后，某个图标画成了另一个图标；下一次重绘又可能恢复。
+    ///
+    /// 单调递增的 id 从根上消除这一类，代价只是每张图多 8 字节。
+    ///
+    /// 消费者是 d2d / gpu 后端；其余平台+feature 组合下无人使用，显式放行 dead_code。
+    #[cfg_attr(
+        not(any(all(windows, feature = "d2d"), feature = "gpu")),
+        allow(dead_code)
+    )]
+    pub(crate) fn cache_id(&self) -> u64 {
+        self.id
     }
 }
 
@@ -405,6 +432,59 @@ mod tests {
         let mut pm = Pixmap::new(w, h).unwrap();
         pm.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 255));
         pm.encode_png().unwrap()
+    }
+
+    /// 身份 id 必须**单调递增**：一张图释放后新建的图不得拿到旧 id。
+    ///
+    /// 这条曾经不成立——`cache_id` 取的是 `Rc<Pixmap>` 指针，`a` 释放后 `b` 复用同一
+    /// 地址就会相等，渲染后端于是把 `a` 的位图当成 `b` 画出来。
+    ///
+    /// 注意它是**契约护栏而非捕获判据**：实测把实现改回指针时单次 drop 未必复用地址，
+    /// 本测试仍会绿。真正能抓住那个缺陷的是下面的 `cache_id_unique_across_realloc_churn`
+    /// 与 `ui::image` 的 `svg_rerasterize_never_reuses_cache_id`（两者在指针实现下确认变红）。
+    #[test]
+    fn cache_id_never_reused_after_drop() {
+        let a = Image::from_png_bytes(&red_png(18, 18)).unwrap();
+        let old = a.cache_id();
+        drop(a);
+        let b = Image::from_png_bytes(&red_png(18, 18)).unwrap();
+        assert!(
+            b.cache_id() > old,
+            "新图的 cache_id({}) 应严格大于已释放图的 {old}",
+            b.cache_id()
+        );
+    }
+
+    /// 复刻现场：DPI 变化时每个图标依次「释放旧光栅、分配新光栅」，尺寸全都相同。
+    /// 指针作键时分配器几乎必然复用地址，这里会收到重复 id。
+    #[test]
+    fn cache_id_unique_across_realloc_churn() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let img = Image::from_png_bytes(&red_png(18, 18)).unwrap();
+            assert!(
+                seen.insert(img.cache_id()),
+                "cache_id {} 重复——释放后的身份被复用了",
+                img.cache_id()
+            );
+            // 立刻释放，把这块内存还给分配器供下一轮复用。
+            drop(img);
+        }
+    }
+
+    /// 同一张图的克隆共享身份：否则每次 `clone` 都会让后端重传一遍纹理。
+    #[test]
+    fn cache_id_shared_by_clone() {
+        let a = Image::from_png_bytes(&red_png(4, 4)).unwrap();
+        assert_eq!(a.clone().cache_id(), a.cache_id());
+    }
+
+    /// 着色产生新像素，必须是新身份——沿用原 id 会让后端画出**未着色**的那张。
+    #[test]
+    fn tinted_gets_new_cache_id() {
+        let a = Image::from_png_bytes(&red_png(4, 4)).unwrap();
+        let b = a.tinted(Color::rgb(0, 0, 255));
+        assert_ne!(a.cache_id(), b.cache_id());
     }
 
     #[test]

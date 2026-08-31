@@ -372,6 +372,43 @@ mod tests {
     #[cfg(feature = "svg")]
     const BAR_SVG: &[u8] = br##"<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 10h12" stroke="#000000" stroke-width="2"/></svg>"##;
 
+    /// 20 网格 / 2px 描边的竖线：与 [`BAR_SVG`] 同尺寸、不同内容——用来暴露
+    /// 「画成了另一个图标」这类身份串位。
+    #[cfg(feature = "svg")]
+    const PIPE_SVG: &[u8] = br##"<svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 4v12" stroke="#000000" stroke-width="2"/></svg>"##;
+
+    /// 复刻线上现场：一排常驻图标控件，窗口在不同 DPI 的屏幕间来回拖动，每次 DPI 变化
+    /// 都触发全体重光栅——旧 `Pixmap` 依次释放、新的依次分配，且所有图标尺寸相同。
+    ///
+    /// 缓存键取 `Rc<Pixmap>` 指针时，分配器复用刚释放的地址会让新光栅拿到旧图的身份，
+    /// 渲染后端于是把上一个图标的位图画到这一个的位置上（下一次重绘又可能自行恢复）。
+    /// 身份 id 必须全程互不重复。
+    #[cfg(feature = "svg")]
+    #[test]
+    fn svg_rerasterize_never_reuses_cache_id() {
+        let icons: Vec<_> = [BAR_SVG, PIPE_SVG, BAR_SVG, PIPE_SVG]
+            .iter()
+            .map(|svg| ImageContent::from_svg_bytes(svg, None))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        // 相邻两档必须不同，否则单条缓存直接命中、不会发生重光栅。
+        for w in [20u32, 25, 30, 40, 20, 30, 25, 40] {
+            for c in &icons {
+                let img = c
+                    .svg
+                    .as_ref()
+                    .expect("from_svg_bytes(_, None) 持有矢量源")
+                    .resolve(w, c.tint)
+                    .expect("光栅化成功");
+                assert!(
+                    seen.insert(img.cache_id()),
+                    "物理宽 {w} 的重光栅拿到了已用过的 cache_id {}——身份被复用，                     渲染后端会画出上一个图标",
+                    img.cache_id()
+                );
+            }
+        }
+    }
+
     /// 矢量源的光栅宽须跟随 DPI——写死光栅宽只在恰好等于该倍率的 DPI 下是 1:1，
     /// 其余倍率都要经一次双线性重采样，细描边会被摊成灰边。
     #[cfg(feature = "svg")]

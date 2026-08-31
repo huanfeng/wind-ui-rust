@@ -97,7 +97,7 @@ pub(super) struct D2DBackend {
     /// `ID2D1Bitmap1`。绝不每帧重建——图片每帧可画几十次，每次 `CreateBitmap` 会 churn 驱动内存
     /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
     /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
-    image_cache: HashMap<usize, ID2D1Bitmap1>,
+    image_cache: HashMap<u64, ID2D1Bitmap1>,
     /// 离屏烘焙用的第二个设备上下文：主帧 BeginDraw 期间主 ctx 禁止 SetTarget，故用独立 ctx
     /// 把「模糊后的阴影」一次性渲到离屏位图缓存。device-dependent，设备丢失随 `*self=fresh` 重建。
     bake_ctx: ID2D1DeviceContext,
@@ -480,7 +480,7 @@ struct D2DTarget<'a> {
     dwrite_factory: &'a IDWriteFactory,
     format_cache: &'a mut HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
-    image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
+    image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
     bake_ctx: &'a ID2D1DeviceContext,
     shadow_effect: &'a mut Option<ID2D1Effect>,
     shadow_cache: &'a mut HashMap<ShadowKey, ID2D1Bitmap1>,
@@ -532,7 +532,7 @@ struct D2DCanvas<'a> {
     format_cache: &'a mut HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
-    image_cache: &'a mut HashMap<usize, ID2D1Bitmap1>,
+    image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
     /// 离屏烘焙阴影用的第二个设备上下文（借入）。
     bake_ctx: &'a ID2D1DeviceContext,
     /// 阴影模糊效果（借入，可变 Option，建在 bake_ctx 上）：lazy 建一次后复用。
@@ -1651,7 +1651,7 @@ pub(crate) mod offscreen {
         grad_cache: HashMap<GradKey, ID2D1Brush>,
         format_cache: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
         layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
-        image_cache: HashMap<usize, ID2D1Bitmap1>,
+        image_cache: HashMap<u64, ID2D1Bitmap1>,
         shadow_effect: Option<ID2D1Effect>,
         shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
     }
