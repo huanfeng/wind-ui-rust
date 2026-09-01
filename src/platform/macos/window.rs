@@ -1663,11 +1663,17 @@ impl ContentView {
     }
 
     /// 按当前悬停控件期望形状设置光标。
+    ///
+    /// `resizeLeftRightCursor` 在新 SDK 上标记为弃用（建议改 `columnResizeCursorInDirections:`），
+    /// 但那两个替代 API 要求 macOS 15+。为一个光标形状抬高整库的最低系统版本不划算，
+    /// 故沿用旧 API 并抑制告警——与本文件对 `NSFilenamesPboardType` 的处理同例。
+    #[allow(deprecated)]
     fn apply_cursor(&self) {
         let shape = self.ivars().borrow().handler.cursor();
         let cursor = match shape {
             crate::event::CursorShape::Hand => NSCursor::pointingHandCursor(),
             crate::event::CursorShape::Text => NSCursor::IBeamCursor(),
+            crate::event::CursorShape::SizeWE => NSCursor::resizeLeftRightCursor(),
             crate::event::CursorShape::Arrow => NSCursor::arrowCursor(),
         };
         cursor.set();
