@@ -48,6 +48,45 @@ fn deliver_notification(title: &str, body: &str) {
     center.deliverNotification(&note);
 }
 
+thread_local! {
+    /// 已安装的状态栏图标。
+    ///
+    /// `TrayHandle` 的运行期意图要够得着它，而 `TrayState` 是 `run` 里的一个局部变量
+    /// ——window.rs 的 `after_event` 拿不到。win32 那边靠 `app_host()` 上挂着的
+    /// `TrayState`，这里补一个同样作用的登记处。
+    static INSTALLED: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
+}
+
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip`），与 win32 的 `apply_tray_ops` 对齐。
+///
+/// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
+/// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
+pub(crate) fn apply_tray_ops() {
+    let ops = crate::platform::tray::take_tray_ops();
+    if ops.is_empty() {
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    INSTALLED.with(|cell| {
+        let borrowed = cell.borrow();
+        let Some(item) = borrowed.as_ref() else {
+            return;
+        };
+        let Some(button) = item.button(mtm) else {
+            return;
+        };
+        for op in ops {
+            match op {
+                crate::platform::tray::TrayOp::SetTooltip(s) => {
+                    button.setToolTip(Some(&NSString::from_str(&s)));
+                }
+            }
+        }
+    });
+}
+
 /// `TrayTarget` 的内部状态。
 struct TargetIvars {
     tray: RefCell<Tray>,
@@ -229,6 +268,7 @@ pub(crate) struct TrayState {
 
 impl Drop for TrayState {
     fn drop(&mut self) {
+        INSTALLED.with(|cell| *cell.borrow_mut() = None);
         if let Some(mtm) = MainThreadMarker::new() {
             NSStatusBar::systemStatusBar().removeStatusItem(&self.status_item);
             let _ = mtm;
@@ -259,6 +299,7 @@ pub(crate) fn install(
     if !tooltip.is_empty() {
         button.setToolTip(Some(&NSString::from_str(&tooltip)));
     }
+    INSTALLED.with(|cell| *cell.borrow_mut() = Some(status_item.clone()));
     // 左键/右键均派发到 statusClick:，由其按事件类型分流。
     unsafe {
         button.setTarget(Some(&target));

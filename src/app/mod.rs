@@ -631,6 +631,15 @@ impl App {
 
     /// 获取运行期主题句柄（多次调用返回同一共享源的克隆）。把它克隆进控件回调，
     /// 调 `set(theme)` 即可在窗口内热切换暗/亮主题，下一帧整树跟随刷新。
+    /// 托盘的运行期句柄：造好之后仍能改托盘图标的属性（当前是提示文字）。
+    ///
+    /// 与 [`Self::theme_handle`] / [`Self::hotkey_handle`] 并列。取句柄**不要求**先
+    /// 调过 [`Self::tray`]——链式构建里两者的先后是调用方的自由，而没装托盘时意图
+    /// 只是被丢弃（见 `TrayHandle::set_tooltip`）。
+    pub fn tray_handle(&mut self) -> crate::platform::TrayHandle {
+        crate::platform::TrayHandle::new()
+    }
+
     pub fn theme_handle(&mut self) -> ThemeHandle {
         let init = Rc::new(self.theme.clone().unwrap_or_default());
         self.theme_src

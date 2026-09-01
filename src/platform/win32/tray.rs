@@ -212,6 +212,20 @@ pub(crate) fn notify(hwnd: HWND, uid: u32, title: &str, body: &str) {
     }
 }
 
+/// 换鼠标悬停提示（`NIF_TIP` + `NIM_MODIFY`）。
+///
+/// **自由函数而非 `&TrayState` 方法，理由同 [`notify`]**：`Shell_NotifyIconW` 会经
+/// `SendMessageTimeout` 与 shell 的托盘窗口跨线程通信，期间本线程泵入站消息。签名
+/// 只收 hwnd/uid，借用便无处可藏。
+pub(crate) fn set_tooltip(hwnd: HWND, uid: u32, tip: &str) {
+    unsafe {
+        let mut nid = base_nid(hwnd, uid);
+        nid.uFlags = NIF_TIP;
+        copy_wide(&mut nid.szTip, tip);
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
 /// 弹出原生右键菜单，返回选中项的命令 id（0=未选/取消）。按值消费 `menu`，
 /// 其 `Drop` 负责 `DestroyMenu`（含提前返回与 panic 路径）。
 ///

@@ -775,15 +775,42 @@ impl Widget for IconButton {
     }
 }
 
-/// 标签条中的一项：标题 + 可选前置图标。
+/// 标签条中的一项：标题 + 可选前置图标 + 是否可选。
 pub struct TabItem {
     pub label: String,
     pub icon: Option<ImageContent>,
+    /// 可选与否，`None` = 恒可选。`false` 时文字走 `text_disabled`、悬停不亮、
+    /// 点击与键盘都跳过它。
+    ///
+    /// **禁用不是隐藏**：一个「本次没内容」的标签留在原位、置灰，位置就是稳定的，
+    /// 用户「总是点第三个」这条肌肉记忆才成立；把它摘掉则每次结果一变，后面所有
+    /// 标签就整体左移一格，看着像换了一条标签条。
+    ///
+    /// **收信号而非布尔**（与 [`TrayMenuItem::enabled`](crate::platform::TrayMenuItem::enabled)
+    /// 一致）：禁用与否往往随数据变，而标签条本身不变。收布尔就意味着「哪一项能点」
+    /// 一改就得重建整条——重建会丢掉悬停态、并让选中滑块从头落定而不是滑过去。
+    pub enabled: Option<Signal<bool>>,
 }
 
 impl TabItem {
     pub fn new(label: String) -> Self {
-        Self { label, icon: None }
+        Self {
+            label,
+            icon: None,
+            enabled: None,
+        }
+    }
+
+    /// 绑定可用态：`flag` 为 false 时该项灰显且不可选（每帧现读）。
+    /// 永久禁用可传 `signal(false)`。
+    pub fn enabled(mut self, flag: Signal<bool>) -> Self {
+        self.enabled = Some(flag);
+        self
+    }
+
+    /// 此刻是否可选。未绑信号即恒可选。
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.is_none_or(|f| f.get())
     }
     /// 前置图标（图片内容）。
     pub fn icon_content(mut self, icon: ImageContent) -> Self {
@@ -935,16 +962,25 @@ impl TabBar {
     }
 
     /// 按**相对条左缘**的 x 命中某标签（绝对坐标须先减去 `bounds.x`）。
+    /// 落在哪一项上。**禁用项返回 `None`**——悬停高亮与点击选中都走这一个入口，
+    /// 在这里挡住，两条路径就不会各判一次然后漏掉其中一条。
     fn index_at(&self, rel_x: i32) -> Option<usize> {
-        self.layout
+        let i = self
+            .layout
             .borrow()
             .iter()
-            .position(|(ix, iw)| (*ix..*ix + *iw).contains(&rel_x))
+            .position(|(ix, iw)| (*ix..*ix + *iw).contains(&rel_x))?;
+        self.items.get(i).filter(|it| it.is_enabled()).map(|_| i)
     }
 
     /// 切到第 `i` 项。切页改变 `visible_when` 绑定的内容面板显隐（非局部 + 布局
     /// 变化）→ 重排整窗。
     fn select(&mut self, i: usize, ctx: &mut EventCtx) {
+        // 禁用项不可选。`index_at` 已经挡过鼠标那条路，这里管的是键盘那条——两条
+        // 路径最终都收在这一句上，日后再添第三条入口也不会绕开它。
+        if !self.items.get(i).is_some_and(|it| it.is_enabled()) {
+            return;
+        }
         if i < self.items.len() && self.group.get() != i {
             self.group.set(i);
             ctx.mark_layout_dirty();
@@ -952,13 +988,22 @@ impl TabBar {
     }
 
     /// 键盘导航的目标项：Left/Right 循环、Home/End 跳首尾、Enter/Space 保持当前。
-    fn key_target(key: Key, cur: usize, n: usize) -> Option<usize> {
+    ///
+    /// **禁用项要跳过而不是停在上面**：Left/Right 一路找下一个可选项（最多绕一圈），
+    /// Home/End 从两端往里找第一个可选的。否则按一下方向键「没反应」，用户分不清是
+    /// 键坏了还是标签坏了。全都禁用时返回 `None`，什么也不做。
+    fn key_target(&self, key: Key, cur: usize, n: usize) -> Option<usize> {
+        let step = |dir: isize| {
+            (1..=n as isize)
+                .map(|k| ((cur as isize + dir * k).rem_euclid(n as isize)) as usize)
+                .find(|&i| self.items[i].is_enabled())
+        };
         match key {
-            Key::Left => Some((cur + n - 1) % n),
-            Key::Right => Some((cur + 1) % n),
-            Key::Home => Some(0),
-            Key::End => Some(n - 1),
-            Key::Enter | Key::Space => Some(cur),
+            Key::Left => step(-1),
+            Key::Right => step(1),
+            Key::Home => (0..n).find(|&i| self.items[i].is_enabled()),
+            Key::End => (0..n).rev().find(|&i| self.items[i].is_enabled()),
+            Key::Enter | Key::Space => Some(cur).filter(|&i| self.items[i].is_enabled()),
             _ => None,
         }
     }
@@ -1059,6 +1104,10 @@ impl Widget for TabBar {
 
             // 文字色：禁用 > 选中 > 悬停 > 普通，三态补间；首帧落定。
             // 选中色随风格：下划线用 accent 本色，胶囊用 on_accent（压在实底胶囊上要反色）。
+            //
+            // 整条禁用与**单项**禁用在这里合流：两者对这一项的效果完全一样，故只取
+            // 一个布尔往下走，不必在每处判断里写两遍。
+            let enabled = enabled && self.items[i].is_enabled();
             let sel_color = if pill { pal.on_accent } else { tab.accent(pal) };
             let target_color = if !enabled {
                 pal.text_disabled
@@ -1171,7 +1220,7 @@ impl Widget for TabBar {
             },
             Event::Key(k) if k.pressed && !self.items.is_empty() => {
                 let n = self.items.len();
-                match Self::key_target(k.key, self.selected(), n) {
+                match self.key_target(k.key, self.selected(), n) {
                     Some(i) => {
                         self.select(i, ctx);
                         true
@@ -1343,29 +1392,92 @@ mod tests {
         assert!(total <= natural - 60, "收缩后应放得进可用宽，实得 {total}");
     }
 
+    /// 造一条标签条，`off` 里的下标为禁用项。
+    fn bar_with_disabled(labels: &[&str], off: &[usize], g: Signal<usize>) -> TabBar {
+        TabBar::new(
+            labels
+                .iter()
+                .enumerate()
+                .map(|(i, s)| TabItem::new((*s).into()).enabled(signal(!off.contains(&i))))
+                .collect(),
+            g,
+        )
+    }
+
     #[test]
     fn tab_arrow_keys_cycle_selection() {
+        let b = bar(&["A", "B", "C"], signal(0));
         let n = 3;
-        assert_eq!(TabBar::key_target(Key::Right, 0, n), Some(1));
+        assert_eq!(b.key_target(Key::Right, 0, n), Some(1));
+        assert_eq!(b.key_target(Key::Right, 2, n), Some(0), "末项右移回首项");
+        assert_eq!(b.key_target(Key::Left, 0, n), Some(2), "首项左移到末项");
+        assert_eq!(b.key_target(Key::Left, 2, n), Some(1));
+        assert_eq!(b.key_target(Key::Home, 2, n), Some(0));
+        assert_eq!(b.key_target(Key::End, 0, n), Some(2));
+        assert_eq!(b.key_target(Key::Enter, 1, n), Some(1));
+        assert_eq!(b.key_target(Key::Up, 1, n), None, "上下键不归标签条处理");
+    }
+
+    /// 方向键**跳过**禁用项，而不是停在上面。
+    ///
+    /// 停在上面时按键看着「没反应」，用户分不清是键坏了还是标签坏了。
+    #[test]
+    fn tab_arrow_keys_skip_disabled() {
+        let b = bar_with_disabled(&["A", "B", "C", "D"], &[1, 2], signal(0));
+        let n = 4;
         assert_eq!(
-            TabBar::key_target(Key::Right, 2, n),
-            Some(0),
-            "末项右移回首项"
+            b.key_target(Key::Right, 0, n),
+            Some(3),
+            "跨过中间两个禁用项"
         );
-        assert_eq!(
-            TabBar::key_target(Key::Left, 0, n),
-            Some(2),
-            "首项左移到末项"
-        );
-        assert_eq!(TabBar::key_target(Key::Left, 2, n), Some(1));
-        assert_eq!(TabBar::key_target(Key::Home, 2, n), Some(0));
-        assert_eq!(TabBar::key_target(Key::End, 0, n), Some(2));
-        assert_eq!(TabBar::key_target(Key::Enter, 1, n), Some(1));
-        assert_eq!(
-            TabBar::key_target(Key::Up, 1, n),
-            None,
-            "上下键不归标签条处理"
-        );
+        assert_eq!(b.key_target(Key::Left, 3, n), Some(0));
+        assert_eq!(b.key_target(Key::Home, 3, n), Some(0));
+        assert_eq!(b.key_target(Key::End, 0, n), Some(3), "末项禁用则再往里找");
+    }
+
+    /// 首尾也禁用时，Home/End 要落到里面第一个可选项上。
+    #[test]
+    fn tab_home_end_land_on_enabled() {
+        let b = bar_with_disabled(&["A", "B", "C", "D"], &[0, 3], signal(1));
+        assert_eq!(b.key_target(Key::Home, 1, 4), Some(1));
+        assert_eq!(b.key_target(Key::End, 1, 4), Some(2));
+    }
+
+    /// 全部禁用：什么也不做，而不是死循环或恐慌。
+    #[test]
+    fn tab_all_disabled_goes_nowhere() {
+        let b = bar_with_disabled(&["A", "B"], &[0, 1], signal(0));
+        assert_eq!(b.key_target(Key::Right, 0, 2), None);
+        assert_eq!(b.key_target(Key::Home, 0, 2), None);
+        assert_eq!(b.key_target(Key::Enter, 0, 2), None);
+    }
+
+    /// 禁用项不参与命中测试——悬停与点击共用 `index_at`，在那里挡住即两条路都挡住。
+    #[test]
+    fn tab_disabled_item_is_not_hit() {
+        let b = bar_with_disabled(&["A", "B"], &[1], signal(0));
+        // 直接摆一份布局，免得依赖真实文字测量。
+        b.layout.replace(vec![(0, 50), (50, 50)]);
+        assert_eq!(b.index_at(10), Some(0));
+        assert_eq!(b.index_at(60), None, "落在禁用项上不该命中");
+        assert_eq!(b.index_at(999), None, "落在条外仍是 None");
+    }
+
+    /// `TabItem` 默认可选——不写 `.enabled(..)` 的既有调用方行为不变。
+    #[test]
+    fn tab_item_enabled_by_default() {
+        assert!(TabItem::new("A".into()).is_enabled());
+        assert!(!TabItem::new("A".into()).enabled(signal(false)).is_enabled());
+    }
+
+    /// 绑了信号之后，改信号即改可用态——不必重建标签条。这正是收信号而非布尔的理由。
+    #[test]
+    fn tab_enabled_follows_signal() {
+        let flag = signal(true);
+        let it = TabItem::new("A".into()).enabled(flag);
+        assert!(it.is_enabled());
+        flag.set(false);
+        assert!(!it.is_enabled());
     }
 
     #[test]

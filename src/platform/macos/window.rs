@@ -1723,6 +1723,9 @@ impl ContentView {
                     .take_new_windows(&|key| find_single_window(key).is_some()),
             )
         };
+        // 运行期托盘操作（`TrayHandle::set_tooltip`）。同样是应用级的线程局部状态，
+        // 与本窗的 `ViewState` 无关，借用已释放。
+        super::tray::apply_tray_ops();
         // 运行期热键操作（`HotkeyHandle` 改绑/启停）。热键状态是应用级的（thread_local），
         // 与本窗的 `ViewState` 是两份东西——借用已释放，这里不会与之相撞。
         for (id, hop) in hotkey_ops {

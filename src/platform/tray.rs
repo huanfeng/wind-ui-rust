@@ -19,6 +19,97 @@
 //! 收口后：一个类型、一套语义、一份测试，两平台都跑。
 
 use crate::signal::Signal;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// 应用**在运行期**对托盘图标提出的改动。
+///
+/// 与 [`TrayAction`] 分开是因为两者的来源与时机都不同：`TrayAction` 是**托盘回调**
+/// 发出的（用户点了托盘菜单），`TrayOp` 是**应用自己**发出的（设置改了、状态变了），
+/// 后者与托盘上有没有发生交互毫无关系。混成一个枚举会让「谁能发这条」失去约束。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayOp {
+    /// 换鼠标悬停提示。
+    SetTooltip(String),
+}
+
+thread_local! {
+    /// 运行期托盘意图队列。**线程局部而非穿过各层构造器**：托盘是**应用级单例**
+    /// （一个进程一个图标，装在 app 宿主上），不属于任何一个窗口；把它的队列挂进
+    /// 每个窗口的 handler，等于把「哪个窗口的托盘」这个不存在的问题引进来。
+    ///
+    /// 热键那条队列穿构造器是有理由的——热键有 id、可以有多个，且注册绑在窗口上。
+    static TRAY_OPS: Rc<RefCell<Vec<TrayOp>>> = Rc::new(RefCell::new(Vec::new()));
+}
+
+/// 托盘的运行期句柄：造好之后仍能改托盘图标的属性。
+///
+/// **为什么需要它**：[`Tray`] 是构造器，`App::tray` 之后就消费掉了，而提示文字往往
+/// 要随应用状态变（「Ctrl+Alt+D 查询」——用户改了热键，这句话就成了假话）。没有这条
+/// 路子时，唯一的出路是让提示不提任何会变的东西，那是拿信息量换正确性。
+///
+/// 与 [`ThemeHandle`](crate::app::ThemeHandle) / [`HotkeyHandle`](crate::app::HotkeyHandle)
+/// 同一条路子：句柄只**排队意图**，平台层在事件分发之后落地——托盘的 OS 调用
+/// （`Shell_NotifyIcon`）会跨线程发消息并泵入站消息，在借用里直接调是铁律 6 的老问题。
+#[derive(Clone)]
+pub struct TrayHandle {
+    queue: Rc<RefCell<Vec<TrayOp>>>,
+}
+
+impl Default for TrayHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrayHandle {
+    /// 连宿主的句柄。`App::tray_handle()` 走这里。
+    pub fn new() -> Self {
+        Self {
+            queue: TRAY_OPS.with(|q| q.clone()),
+        }
+    }
+
+    /// 造一个**不连宿主**的句柄，供下游给自己的应用状态写测试。理由同
+    /// [`HotkeyHandle::detached`](crate::app::HotkeyHandle::detached)：真句柄要有
+    /// `App`，而 `App` 在测试里建不起来（要开窗口），于是持有它的整个状态结构都
+    /// 造不出实例。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// use windui::platform::TrayOp;
+    /// let t = TrayHandle::detached();
+    /// t.set_tooltip("清风词典 — Ctrl+Alt+D 查询");
+    /// assert_eq!(
+    ///     t.pending_ops(),
+    ///     vec![TrayOp::SetTooltip("清风词典 — Ctrl+Alt+D 查询".into())],
+    /// );
+    /// ```
+    pub fn detached() -> Self {
+        Self {
+            queue: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    /// 换鼠标悬停提示。下一次事件分发之后落地。
+    pub fn set_tooltip(&self, s: impl Into<String>) {
+        self.queue.borrow_mut().push(TrayOp::SetTooltip(s.into()));
+        // 排完队要**踢一帧**，否则这条意图要等到下一次有人动鼠标才被消费。改提示
+        // 多半发生在设置页里，而那之后用户可能直接去托盘上悬停——中间一个事件都没有。
+        crate::anim::request_repaint();
+    }
+
+    /// 已排队、尚未被平台层消费的意图（按调用顺序）。**只读不取走**，故对真句柄
+    /// 调用也是安全的，不会把宿主该执行的改动偷掉。
+    pub fn pending_ops(&self) -> Vec<TrayOp> {
+        self.queue.borrow().clone()
+    }
+}
+
+/// 取走并清空运行期托盘意图。平台层在事件分发之后调用。
+pub(crate) fn take_tray_ops() -> Vec<TrayOp> {
+    TRAY_OPS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
 
 /// 托盘回调想做的事。**纯意图，不含任何 OS 调用**。
 ///

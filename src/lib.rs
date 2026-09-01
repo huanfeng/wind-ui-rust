@@ -34,7 +34,9 @@ pub mod prelude {
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
-    pub use crate::platform::{PickDialog, Renderer, Tray, TrayCtx, TrayMenuItem};
+    pub use crate::platform::{
+        PickDialog, Renderer, Tray, TrayCtx, TrayHandle, TrayMenuItem, TrayOp,
+    };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixmapTarget, RenderTarget};
     pub use crate::signal::{signal, Signal};

@@ -39,7 +39,7 @@ compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
 
 /// 托盘的平台无关声明层（`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction`）。
 pub mod tray;
-pub use tray::{Tray, TrayAction, TrayCtx, TrayMenuItem};
+pub use tray::{Tray, TrayAction, TrayCtx, TrayHandle, TrayMenuItem, TrayOp};
 
 use std::cell::Cell;
 use std::path::Path;

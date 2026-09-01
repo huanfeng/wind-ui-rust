@@ -1910,6 +1910,8 @@ unsafe fn apply_window_op(hwnd: HWND) {
     // 运行期热键操作与窗口操作同点消费（HotkeyHandle 排队 → 此处落地）。
     // Register/UnregisterHotKey 不向本窗口同步派发消息，可在借用内直接执行。
     apply_hotkey_ops(hwnd);
+    // 运行期托盘操作同点消费（TrayHandle 排队 → 此处落地）。
+    apply_tray_ops();
     // 开窗请求同点消费（`ctx.open_window` 排队 → 此处落地）。
     open_pending_windows(hwnd);
     // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。
@@ -1983,6 +1985,32 @@ unsafe fn open_pending_windows(hwnd: HWND) {
 /// 故要跨两个 state。**先取完队列、释放窗口那份借用，再借宿主**：两份借用不重叠，
 /// 与铁律 6 同一个理由——中间隔着的 `Register/UnregisterHotKey` 虽不向本线程同步派发
 /// 消息，但让两个 `&mut` 同时活着本身就是别名。
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip`）。
+///
+/// 队列是线程局部的（托盘是应用级单例，不属于任何窗口），故这里不需要 hwnd——
+/// 投递目标从 app 宿主上的 `TrayState` 取。**先取出目标释放借用，再调
+/// `Shell_NotifyIconW`**：它会跨线程发消息，与 `TrayAction::Notify` 同一个理由。
+///
+/// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
+/// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
+unsafe fn apply_tray_ops() {
+    let ops = crate::platform::tray::take_tray_ops();
+    if ops.is_empty() {
+        return;
+    }
+    let target = app_host()
+        .and_then(|h| h.tray.as_ref())
+        .map(|ts| ts.notify_target());
+    let Some((h, uid)) = target else {
+        return;
+    };
+    for op in ops {
+        match op {
+            crate::platform::tray::TrayOp::SetTooltip(s) => tray::set_tooltip(h, uid, &s),
+        }
+    }
+}
+
 unsafe fn apply_hotkey_ops(hwnd: HWND) {
     let ops = match state_from(hwnd) {
         Some(state) => state.handler.take_hotkey_ops(),
