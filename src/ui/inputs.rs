@@ -1727,7 +1727,10 @@ impl Widget for TextInput {
         self.caret_local
             .set(Some((cxx - bounds.x, ly - bounds.y, line_h)));
         // 光标绘制分三档：
-        // - 有合成串（macOS 等自绘平台）：**要画**，且画在合成串内部——那是唯一的光标。
+        // - 有合成串（macOS 等自绘平台）：**要画**，画在合成串内 `pe.caret` 处。
+        //   真机三个输入法对比确认过：不画的话合成期间完全没有插入点，反而不如原生。
+        //   位置正确与否取决于输入法通过 `setMarkedText:selectedRange:` 报的编辑点，
+        //   个别输入法报得不对——那是它的问题，平台层已做越界兜底（见 macos/window.rs）。
         // - `composing`（win32）：**不画**，系统组合浮层自带一个跟随组合进度的光标，
         //   两者并存会显得我们的光标"卡在组合开始前"。
         // - 常规：照常闪烁。
@@ -2482,32 +2485,37 @@ mod tests {
 
     /// 合成串的下划线必须真的画出来，且**长度随合成串增长**。
     ///
-    /// 后半条是关键：只断言"有墨"会被一个画固定小方块的实现蒙混过去。取 1 字符与
-    /// 4 字符两档比墨量，下划线若真按合成串宽度画，后者应显著更多。
+    /// 只断言"有墨"会被一个画固定小方块的实现蒙混过去，故取 1/2/4 三档长度看**增量**：
+    /// 下划线若按合成串宽度画，墨量应是 `C + n·U` 的形式（C 是与长度无关的固定差异），
+    /// 于是 `ink4-ink2` 应约为 `ink2-ink1` 的两倍。比增量而不是比绝对值，是为了消掉 C
+    /// ——基线帧画了插入光标而合成帧不画（见绘制处注释），这个固定差异会淹没短下划线。
     ///
     /// 注意本路径下 `SkiaCanvas::new` 不带文本引擎，`draw_text` 是空操作、字形不出墨；
     /// 但 `measure_text` 有估算回退，故**布局与下划线几何是真实的**。这个测试覆盖的是
     /// 下划线几何，字形本身的渲染要靠真机验证。
     #[test]
     fn preedit_underline_scales_with_length() {
-        // 光标恒实心，排除闪烁相位对墨量的干扰。
         with_caret_style(crate::ui::CaretStyle::Solid);
-        // 三者光标都落在 x=0（空正文 + pe.caret=0），故差异只来自下划线。
         let base = caret_frame(&input_with("", 0, Preedit::default()), 0);
-        let one = caret_frame(&input_with("", 0, preedit("a", 0)), 0);
-        let four = caret_frame(&input_with("", 0, preedit("abcd", 0)), 0);
-        let ink1 = frame_diff(&one, &base);
-        let ink4 = frame_diff(&four, &base);
-        assert!(ink1 > 0, "合成串应画出下划线，实测墨量 {ink1}");
+        let ink = |s: &str| frame_diff(&caret_frame(&input_with("", 0, preedit(s, 0)), 0), &base);
+        let (i1, i2, i4) = (ink("a"), ink("ab"), ink("abcd"));
+        let (d1, d2) = (i2 as i64 - i1 as i64, i4 as i64 - i2 as i64);
         assert!(
-            ink4 > ink1 * 2,
-            "下划线应随合成串变长：1 字符 {ink1} vs 4 字符 {ink4}"
+            d1 > 0,
+            "下划线应随合成串变长：1 字符 {i1} vs 2 字符 {i2}（增量 {d1}）"
+        );
+        assert!(
+            d2 > d1,
+            "多两个字符的增量应大于多一个字符的：+1 字符 {d1} vs +2 字符 {d2}（相等说明下划线宽度不随长度变）"
         );
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 
-    /// 合成内光标随 `pe.caret` 右移——输入法边打边移动它，光标钉在合成串开头
-    /// 就会显得"打字光标不动"。这个位置同时是候选窗的定位点。
+    /// 合成期间 `ime_caret()` 报告的位置随 `pe.caret` 右移。
+    ///
+    /// 合成态本身**不画**插入光标（跟随原生，见绘制处注释），所以这个位置现在的唯一
+    /// 用途是给输入法定位候选窗（`firstRectForCharacterRange:`）——它必须跟着合成进度
+    /// 走，否则候选窗会钉在合成开始前的原光标处，长拼音串下会压住已输入的内容。
     #[test]
     fn caret_follows_preedit_progress() {
         with_caret_style(crate::ui::CaretStyle::Solid);

@@ -226,8 +226,8 @@ win32 的 `run_offscreen`（渲染一帧存 PNG、不开窗，供自动化截屏
 | 改动 | 位置 | 真机验法与预期 |
 |---|---|---|
 | `windowDidResignKey:` → `on_capture_lost` | `platform/macos/window.rs` | 跑 `examples/reorder.rs`，按住一行拖到列表中部**不松手**，Cmd+Tab 切走再切回：该行应已落回合法位置，不再跟随指针 |
-| `windowDidResignKey:` → 收掉合成态 | 同上 `abort_composition` | 跑 `examples/ime.rs`，拼音打到一半（候选窗已弹）时 Cmd+Tab 切走再切回：内联的拼音串应已消失、光标恢复闪烁，候选窗不残留，已输入的拼音不会莫名上屏 |
-| 合成串内联显示 | 同上 `setMarkedText:` → `TextInput` | 跑 `examples/ime.rs` 打拼音：**编码应逐字母出现在文本框内**、带下划线，光标停在合成串内并随打字右移，候选窗跟在下方 |
+| `windowDidResignKey:` → 收掉合成态 | 同上 `abort_composition` | 跑 `examples/fullshowcase.rs`（`examples/ime.rs` 是输入法**界面**复刻，不含输入框），拼音打到一半（候选窗已弹）时 Cmd+Tab 切走再切回：内联的拼音串应已消失、光标恢复闪烁，候选窗不残留，已输入的拼音不会莫名上屏 |
+| 合成串内联显示 | 同上 `setMarkedText:` → `TextInput` | 跑 `examples/fullshowcase.rs` 或 `examples/caret.rs` 打拼音：**编码应逐字母出现在文本框内**、带下划线，光标停在合成串内并随打字右移，候选窗跟在下方 |
 | 合成中点别处 | 同上 `mouseDown:` → `abort_composition` | 拼音打到一半时点文本框另一处：合成串应消失、光标落到点击位置，不留悬空的拼音 |
 | 滚轮亚像素残差 | 同上 `on_wheel` | 触控板在长列表上**极慢**地推：应逐点跟手滚动，而不是"轻推没反应、猛推才动" |
 | 原生动量滚动 | 同上 `on_wheel` | 触控板两指快滑后抬手：列表应继续滑行并逐渐停下；滑行途中把两指放回触控板应**立即停住**而非加速 |

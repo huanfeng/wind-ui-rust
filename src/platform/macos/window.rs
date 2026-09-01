@@ -591,19 +591,29 @@ define_class!(
         fn do_command_by_selector(&self, _selector: Sel) {}
 
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, replacement: NSRange) {
             // 输入法传来的常是 NSAttributedString（带分句属性）而非 NSString，
             // anyobject_to_string 两者都收。
             let text = anyobject_to_string(string);
-            // selected 是合成串**内部**的范围，以 UTF-16 码元计（见 utf16_to_char_index）。
-            let caret = utf16_to_char_index(&text, selected.location);
-            let sel = (selected.length > 0).then(|| {
+            // `selected` 是合成串**内部**的范围，以 UTF-16 码元计（见 utf16_to_char_index）。
+            //
+            // 越界兜底：`NSNotFound`（"无选区"的约定值）与任何超出合成串长度的值都退到
+            // **末尾**，不是开头。绝大多数输入法合成时的编辑点就在末尾（边打边追加），
+            // 退到开头会让光标停在刚打出来的字母之前，比没有光标更让人困惑。
+            let u16_len = text.encode_utf16().count();
+            let caret = if selected.location > u16_len {
+                text.chars().count()
+            } else {
+                utf16_to_char_index(&text, selected.location)
+            };
+            let sel = (selected.length > 0 && selected.location <= u16_len).then(|| {
                 (
                     caret,
                     utf16_to_char_index(&text, selected.location + selected.length),
                 )
             });
             let pe = Preedit { text, caret, sel };
+            ime_debug(&pe, selected, replacement, u16_len);
             self.ivars().borrow_mut().preedit = pe.clone();
             self.dispatch_preedit(&pe);
         }
@@ -615,21 +625,46 @@ define_class!(
 
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
-            // 输入法据此了解插入点/选区上下文（联想、重转换）。返回恒 {0,0} 会让
-            // 部分第三方 IME 误判文档为空。索引要换算成 UTF-16 码元。
-            let (sel, text) = {
-                let st = self.ivars().borrow();
-                (st.handler.ime_selection(), st.handler.ime_text())
+            // 输入法据此了解插入点/选区上下文（联想、重转换、候选窗定位）。
+            // 返回恒 {0,0} 会让部分第三方 IME 误判文档为空。索引换算成 UTF-16 码元。
+            let st = self.ivars().borrow();
+            let text = st.handler.ime_text();
+            let Some((s, e)) = st.handler.ime_selection() else {
+                return NSRange {
+                    location: NSNotFound as NSUInteger,
+                    length: 0,
+                };
             };
-            match sel {
-                Some((s, e)) => {
-                    let (s16, e16) = (
-                        char_to_utf16_index(&text, s),
-                        char_to_utf16_index(&text, e),
-                    );
-                    NSRange { location: s16, length: e16.saturating_sub(s16) }
+            if !st.preedit.is_active() {
+                let (s16, e16) = (
+                    char_to_utf16_index(&text, s),
+                    char_to_utf16_index(&text, e),
+                );
+                return NSRange {
+                    location: s16,
+                    length: e16.saturating_sub(s16),
+                };
+            }
+            // 合成期间：选区落在 marked text **内部**，必须与 markedRange 同一坐标系。
+            //
+            // 上层给的 `ime_selection` 是合成串在文档中的**插入点**（合成串不属于正文，
+            // 控件的 cursor 停在插入位置不动），直接返回它等于告诉输入法"编辑点永远在
+            // 合成串开头"——与 markedRange 自相矛盾。依赖本值定位的输入法会因此错乱，
+            // 不读本值的输入法则看不出问题，故这类偏差只在换一个输入法时才暴露。
+            let base = char_to_utf16_index(&text, s);
+            let (off, len) = match st.preedit.sel {
+                // 有选中分句（日文分节转换）：选区就是那一段。
+                Some((ss, se)) => {
+                    let a = char_to_utf16_index(&st.preedit.text, ss);
+                    let b = char_to_utf16_index(&st.preedit.text, se);
+                    (a, b.saturating_sub(a))
                 }
-                None => NSRange { location: NSNotFound as NSUInteger, length: 0 },
+                // 无分句：折叠到合成内光标处。
+                None => (char_to_utf16_index(&st.preedit.text, st.preedit.caret), 0),
+            };
+            NSRange {
+                location: base + off,
+                length: len,
             }
         }
 
@@ -791,6 +826,43 @@ define_class!(
 );
 
 /// NSString 或 NSAttributedString（输入法回灌的文本载体）→ Rust String。
+/// 输入法协议诊断（环境变量 `WINDUI_IME` 非空且非 `0` 时启用，同 `WINDUI_HITS` 惯例）。
+///
+/// **为什么值得常驻一个开关**：不同输入法对 `NSTextInputClient` 的用法差别很大，而
+/// 差别的后果（光标画错位置、候选窗跑偏）在界面上长得都一样，靠看现象分不出是哪一步
+/// 出的问题。合成串是输入法**给我们**的，报错的那一方不在我们代码里——只有把它报的
+/// 原始值打出来，才能分清"我们算错了"还是"它报的就不对"。
+///
+/// 输出示例（合成串 "zhong"、编辑点在末尾）：
+/// ```text
+/// [windui-ime] marked="zhong" utf16_len=5 selected={5,0} → caret=5 sel=None replacement={NSNotFound,0}
+/// ```
+/// 若某个输入法始终报 `selected={0,0}`，光标就会停在合成串开头——那是它的问题。
+fn ime_debug(pe: &Preedit, selected: NSRange, replacement: NSRange, u16_len: usize) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("WINDUI_IME").is_ok_and(|v| v != "0" && !v.is_empty())) {
+        return;
+    }
+    let notfound = NSNotFound as NSUInteger;
+    let fmt = |r: NSRange| {
+        if r.location == notfound {
+            format!("{{NSNotFound,{}}}", r.length)
+        } else {
+            format!("{{{},{}}}", r.location, r.length)
+        }
+    };
+    eprintln!(
+        "[windui-ime] marked={:?} utf16_len={} selected={} → caret={} sel={:?} replacement={}",
+        pe.text,
+        u16_len,
+        fmt(selected),
+        pe.caret,
+        pe.sel,
+        fmt(replacement),
+    );
+}
+
 /// UTF-16 码元下标 → 字符下标。越界钳到末尾。
 ///
 /// **这个换算不能省**：`NSRange` 以 UTF-16 码元计，Rust 的 `char` 迭代以码点计。
@@ -2250,5 +2322,27 @@ mod ime_tests {
         // 越界钳到末尾，不 panic。
         assert_eq!(utf16_to_char_index(s, 999), 3);
         assert_eq!(char_to_utf16_index(s, 999), 4);
+    }
+
+    /// 输入法报的编辑点不可信时，兜底方向必须是**末尾**而不是开头。
+    ///
+    /// `NSNotFound`（"无选区"的约定值）会以一个极大的 NSUInteger 传进来；也有输入法
+    /// 会报出超过合成串长度的位置。两种情况都得退到末尾——合成时的编辑点几乎总在末尾
+    /// （边打边追加），退到开头会让光标停在刚打出来的字母之前，比没有光标更困惑。
+    ///
+    /// 这里直接验换算函数的越界语义，`set_marked_text` 依赖的就是它。
+    #[test]
+    fn out_of_range_caret_falls_back_to_end_not_start() {
+        let s = "zhong"; // 5 个 ASCII 字符 = 5 个 UTF-16 码元
+        let n = s.chars().count();
+        // NSNotFound 量级的值。
+        assert_eq!(utf16_to_char_index(s, usize::MAX), n, "应退到末尾");
+        // 仅仅越界一位。
+        assert_eq!(utf16_to_char_index(s, 6), n, "应退到末尾");
+        // 边界本身合法（光标在末尾）。
+        assert_eq!(utf16_to_char_index(s, 5), n);
+        // 正常值不受影响，尤其不能被"兜底"顺手改成末尾。
+        assert_eq!(utf16_to_char_index(s, 0), 0, "报 0 就是 0，不替它猜");
+        assert_eq!(utf16_to_char_index(s, 3), 3);
     }
 }
