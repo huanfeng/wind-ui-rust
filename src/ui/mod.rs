@@ -49,7 +49,7 @@ pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use pager::page_count;
 pub use progress::ProgressBar;
 pub use reorder::{CommitMode, DragHandle, ReorderList};
-pub use rich::{Para, RichColor, RichDoc, RichText, SpanStyle};
+pub use rich::{Para, RichColor, RichDoc, RichText, SelectionScope, SpanStyle};
 pub use row_source::{RowRequest, RowSource, ROW_CACHE_SEGMENTS, ROW_CHUNK};
 pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
@@ -1145,6 +1145,27 @@ impl Element {
     #[track_caller]
     pub fn on_span_click(self, f: impl FnMut(&mut EventCtx, &str) + 'static) -> Self {
         self.config_rich(move |r| r.set_on_span_click(Box::new(f)))
+    }
+
+    /// 把这个富文本挂进一个[选择域](rich::SelectionScope)：域里所有控件共用一份选区，
+    /// 拖拽可以从一个控件一路延伸到另一个，Ctrl+C、Ctrl+A 与右键复制取的也是整个域的
+    /// 选区。
+    ///
+    /// 用在「一屏内容被拆成多个富文本」的地方——词典条目就是如此：词头一个控件、音标
+    /// 一个、每段释义一个（词头要与星标按钮并排，而富文本里放不进按钮）。不挂域的富文本
+    /// 各管各的选区，行为一字不变。
+    ///
+    /// ```no_run
+    /// use windui::prelude::*;
+    ///
+    /// let scope = SelectionScope::new();
+    /// let page = Element::col()
+    ///     .child(Element::rich(RichDoc::new().para("词头")).selection_scope(scope.clone()))
+    ///     .child(Element::rich(RichDoc::new().para("释义")).selection_scope(scope.clone()));
+    /// ```
+    #[track_caller]
+    pub fn selection_scope(self, scope: rich::SelectionScope) -> Self {
+        self.config_rich(move |r| r.set_selection_scope(scope))
     }
 
     /// 富文本内建右键「复制全部」菜单开关（默认开）。应用要挂自定义

@@ -45,7 +45,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
@@ -466,6 +466,109 @@ fn char_offsets(m: &mut dyn Measurer, text: &str, ts: &TextStyle, full_w: i32) -
     }
     out.push(full_w);
     out
+}
+
+/// 绝对坐标 → 相对某个控件 content 原点的局部坐标。
+fn local_of(pos: Point, content: Rect) -> Point {
+    Point::new(pos.x - content.x, pos.y - content.y)
+}
+
+/// 局部坐标最近的碎片。**吸附**：点落在碎片之外也归到最近的那个，于是拖到行尾空白
+/// 处、段落之间的空隙里，选区照样跟着走。
+///
+/// 拆成自由函数而不是留作方法：跨控件划选时，捕获指针的那个控件要在**别人**的布局上
+/// 做同一件事，而那时它手上只有一个 `&RichLayout`。
+fn frag_near_in(lay: &RichLayout, local: Point) -> Option<usize> {
+    let mut best: Option<(i32, i32, usize)> = None;
+    for (i, f) in lay.frags.iter().enumerate() {
+        let dy = if local.y < f.rect.y {
+            f.rect.y - local.y
+        } else if local.y >= f.rect.y + f.rect.h {
+            local.y - (f.rect.y + f.rect.h) + 1
+        } else {
+            0
+        };
+        let dx = if local.x < f.rect.x {
+            f.rect.x - local.x
+        } else if local.x >= f.rect.x + f.rect.w {
+            local.x - (f.rect.x + f.rect.w) + 1
+        } else {
+            0
+        };
+        if best.map(|(by, bx, _)| (dy, dx) < (by, bx)).unwrap_or(true) {
+            best = Some((dy, dx, i));
+        }
+    }
+    best.map(|(_, _, i)| i)
+}
+
+/// 局部坐标最近的选区端点：先由 [`frag_near_in`] 选碎片，再在碎片内落到最近的字符
+/// 边界上。
+fn caret_near_in(lay: &RichLayout, local: Point) -> Option<Caret> {
+    let i = frag_near_in(lay, local)?;
+    let f = lay.frags.get(i)?;
+    let x = local.x - f.text_rect.x;
+    let last = f.char_x.len().saturating_sub(1);
+    // chip 不可分：词性胶囊那样的东西是一个整体的视觉块，从中间切开既难看又没有
+    // 意义。落到就近的那一端，于是它要么整个进选区、要么整个不进。
+    if f.style.chip {
+        let ch = if x * 2 >= f.text_rect.w { last } else { 0 };
+        return Some(Caret { frag: i, ch });
+    }
+    // 最近的那个边界——两个边界的中点为界，与文本控件放光标的手感一致。
+    let mut best = 0usize;
+    let mut bd = i32::MAX;
+    for (k, cx) in f.char_x.iter().enumerate() {
+        let d = (x - cx).abs();
+        if d < bd {
+            bd = d;
+            best = k;
+        }
+    }
+    Some(Caret { frag: i, ch: best })
+}
+
+/// 一段选区的纯文本：按阅读序拼接，跨块补换行，块内软换行按 CJK/Latin 边界决定要不要
+/// 补空格（折行时被丢弃的词间空格在此还原）。箭头与「… 展开」标记不入文。
+///
+/// 自由函数而非方法：选择域要在**别的成员**的布局上做同一件事，那时手上只有一个
+/// `&RichLayout`。
+fn slice_text(lay: &RichLayout, a: Caret, b: Caret) -> Option<String> {
+    let (a, b) = (a.min(b), a.max(b));
+    let mut out = String::new();
+    let mut prev: Option<&Frag> = None;
+    for i in a.frag..=b.frag.min(lay.frags.len().saturating_sub(1)) {
+        let f = lay.frags.get(i)?;
+        if f.chevron || f.expand.is_some() {
+            continue;
+        }
+        // 首尾两个碎片只取选中的那一段，中间的整片都要。
+        let from = if i == a.frag { a.ch } else { 0 };
+        let to = if i == b.frag {
+            b.ch
+        } else {
+            f.char_x.len().saturating_sub(1)
+        };
+        // 空片不入文，**也不更新 `prev`**：它没有贡献任何字符，让它去参与「要不要补
+        // 空格/换行」的判断只会凭空多出一个分隔。
+        if to <= from {
+            continue;
+        }
+        if let Some(p) = prev {
+            if f.block != p.block {
+                out.push('\n');
+            } else if f.line != p.line {
+                let cjk_join = p.text.chars().last().map(is_cjk).unwrap_or(false)
+                    && f.text.chars().next().map(is_cjk).unwrap_or(false);
+                if !cjk_join {
+                    out.push(' ');
+                }
+            }
+        }
+        out.extend(f.text.chars().skip(from).take(to - from));
+        prev = Some(f);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 struct EngineMeasurer<'a>(&'a mut dyn TextEngine);
@@ -1339,7 +1442,13 @@ fn lighten(c: Color, t: f32) -> Color {
 /// 富文本控件（见模块文档）。经 [`super::Element::rich`] 构造。
 pub struct RichText {
     doc: RichDoc,
-    cache: RefCell<Option<RichLayout>>,
+    /// 布局缓存。
+    ///
+    /// 包一层 `Rc` 是为了**选择域**：跨控件划选时，捕获指针的那个控件要拿全局坐标去
+    /// 问别的成员「这落在你第几个字上」，而成员的碎片几何全在这里。`Rc` 让那次询问
+    /// 是零拷贝的；否则每帧都要把一屏几百个碎片的文本与字符偏移复制一份，而拖选期间
+    /// 每一帧都在重绘。
+    cache: RefCell<Option<Rc<RichLayout>>>,
     /// 最近一帧 paint 的 content 绝对矩形（事件坐标换算用）。
     last_content: Cell<Rect>,
     /// 悬停中的折叠头下标（headers 序）。
@@ -1381,6 +1490,18 @@ pub struct RichText {
     doc_sig: Option<Signal<RichDoc>>,
     /// 已消化的文档信号版本。
     doc_version: Cell<u64>,
+    /// 所属选择域（`Element::selection_scope` 注入）。
+    ///
+    /// 挂了域之后，选区的存放、绘制、复制全部改走域；本地的 `sel` 闲置。不挂域的控件
+    /// 行为一字不变——windui 的别的用处（对话框正文、说明段落）用不着跨控件选择，不该
+    /// 为此背上一份共享状态。
+    scope: Option<ScopeMember>,
+}
+
+/// 控件与所属选择域的连接。
+struct ScopeMember {
+    scope: SelectionScope,
+    cell: Rc<MemberCell>,
 }
 
 /// span 点击回调类型：`ctx` 在前（全库回调统一），其后是被点 span 的 id。
@@ -1407,6 +1528,41 @@ impl RichText {
             sect_anims: RefCell::new(Vec::new()),
             doc_sig: None,
             doc_version: Cell::new(0),
+            scope: None,
+        }
+    }
+
+    /// 加入一个选择域（供 `Element::selection_scope`）。
+    pub fn set_selection_scope(&mut self, scope: SelectionScope) {
+        let cell = scope.join();
+        self.scope = Some(ScopeMember { scope, cell });
+    }
+
+    /// 本控件当前该高亮的那段选区：挂了域就问域，否则用本地的。
+    fn effective_sel(&self) -> Option<(Caret, Caret)> {
+        match &self.scope {
+            Some(sm) => sm.scope.local_sel(&sm.cell),
+            None => self.sel.get(),
+        }
+    }
+
+    /// 清掉选区并请求重绘。挂了域时脏的是**整个域**的范围——高亮可能落在别的控件上，
+    /// 而 `ctx.mark_dirty()` 只标记自己那一块，用它的话别人身上的高亮会留在屏幕上不走。
+    fn clear_sel(&self, ctx: &mut EventCtx) {
+        match &self.scope {
+            Some(sm) => {
+                if sm.scope.clear() {
+                    match sm.scope.bounds() {
+                        Some(r) => ctx.mark_dirty_rect(r),
+                        None => ctx.mark_dirty(),
+                    }
+                }
+            }
+            None => {
+                if self.sel.take().is_some() {
+                    ctx.mark_dirty();
+                }
+            }
         }
     }
 
@@ -1473,9 +1629,15 @@ impl RichText {
         if !hit {
             let key = self.layout_key(wrap_w, style, &th, scale);
             let mut anims = self.sect_anims.borrow_mut();
-            *cache = Some(layout_doc(&self.doc, key, style, m, &th, &mut anims));
-            // 重排后碎片下标不再稳定，选区随之失效。
+            *cache = Some(Rc::new(layout_doc(
+                &self.doc, key, style, m, &th, &mut anims,
+            )));
+            // 重排后碎片下标不再稳定，选区随之失效。域里那份一并清掉：它记的是
+            // 「第几个成员的第几个碎片」，本控件重排之后那个下标已经指向别的字了。
             self.sel.set(None);
+            if let Some(sm) = &self.scope {
+                sm.scope.clear();
+            }
         }
     }
 
@@ -1536,62 +1698,16 @@ impl RichText {
     /// 空隙或行首行尾外侧时吸附到最近处，与文本编辑器的划选手感一致。
     fn frag_near(&self, pos: Point) -> Option<usize> {
         let content = self.last_content.get();
-        let local = Point::new(pos.x - content.x, pos.y - content.y);
         let cache = self.cache.borrow();
-        let lay = cache.as_ref()?;
-        let mut best: Option<(i32, i32, usize)> = None;
-        for (i, f) in lay.frags.iter().enumerate() {
-            let dy = if local.y < f.rect.y {
-                f.rect.y - local.y
-            } else if local.y >= f.rect.y + f.rect.h {
-                local.y - (f.rect.y + f.rect.h) + 1
-            } else {
-                0
-            };
-            let dx = if local.x < f.rect.x {
-                f.rect.x - local.x
-            } else if local.x >= f.rect.x + f.rect.w {
-                local.x - (f.rect.x + f.rect.w) + 1
-            } else {
-                0
-            };
-            if best.map(|(by, bx, _)| (dy, dx) < (by, bx)).unwrap_or(true) {
-                best = Some((dy, dx, i));
-            }
-        }
-        best.map(|(_, _, i)| i)
+        frag_near_in(cache.as_ref()?, local_of(pos, content))
     }
 
     /// 指针最近的选区端点：先由 [`Self::frag_near`] 选碎片（那套「最近碎片」的吸附
     /// 规则原样不动），再在碎片内落到最近的字符边界上。
     fn caret_near(&self, pos: Point) -> Option<Caret> {
-        let i = self.frag_near(pos)?;
         let content = self.last_content.get();
         let cache = self.cache.borrow();
-        let f = cache.as_ref()?.frags.get(i)?;
-        let local_x = pos.x - content.x - f.text_rect.x;
-        let last = f.char_x.len().saturating_sub(1);
-        // chip 不可分：词性胶囊那样的东西是一个整体的视觉块，从中间切开既难看又没有
-        // 意义。落到就近的那一端，于是它要么整个进选区、要么整个不进。
-        if f.style.chip {
-            let ch = if local_x * 2 >= f.text_rect.w {
-                last
-            } else {
-                0
-            };
-            return Some(Caret { frag: i, ch });
-        }
-        // 最近的那个边界——两个边界的中点为界，与文本控件放光标的手感一致。
-        let mut best = 0usize;
-        let mut bd = i32::MAX;
-        for (k, x) in f.char_x.iter().enumerate() {
-            let d = (local_x - x).abs();
-            if d < bd {
-                bd = d;
-                best = k;
-            }
-        }
-        Some(Caret { frag: i, ch: best })
+        caret_near_in(cache.as_ref()?, local_of(pos, content))
     }
 
     /// 把一段碎片范围整体转成选区端点对（双击选词、三击选段、Ctrl+A 全选都用它）。
@@ -1674,49 +1790,332 @@ impl RichText {
     /// 边界决定是否补空格（折行时被丢弃的词间空格在此还原）。箭头不入文。
     fn selected_text(&self) -> Option<String> {
         let (a, b) = self.sel.get()?;
-        let (a, b) = (a.min(b), a.max(b));
         let cache = self.cache.borrow();
-        let lay = cache.as_ref()?;
-        let mut out = String::new();
-        let mut prev: Option<&Frag> = None;
-        for i in a.frag..=b.frag.min(lay.frags.len().saturating_sub(1)) {
-            let f = lay.frags.get(i)?;
-            if f.chevron || f.expand.is_some() {
-                continue;
+        slice_text(cache.as_ref()?, a, b)
+    }
+
+    /// 复制：有选区取选区，否则取全文。
+    ///
+    /// 挂了域就以域为准。用户拖过好几段，Ctrl+C 只给当前这一段，是把一次明确的意图
+    /// 砍掉大半。
+    fn copy_text(&self) -> String {
+        if let Some(sm) = &self.scope {
+            if let Some(t) = sm.scope.selected_text() {
+                return t;
             }
-            // 首尾两个碎片只取选中的那一段，中间的整片都要。
-            let from = if i == a.frag { a.ch } else { 0 };
-            let to = if i == b.frag {
-                b.ch
+        }
+        self.selected_text()
+            .unwrap_or_else(|| self.doc.plain_text())
+    }
+
+    /// 当前有没有选区（挂了域就问域）。
+    fn has_any_sel(&self) -> bool {
+        match &self.scope {
+            Some(sm) => sm.scope.has_sel(),
+            None => self.sel.get().is_some(),
+        }
+    }
+}
+
+// ── 跨控件选择域 ────────────────────────────────────────────────────────────
+//
+// 一个 `RichText` 自己是一个独立的选择域。而一屏内容常常被拆成好几个控件——词典条目
+// 里词头一个、音标一个、每段释义一个（词头要与星标按钮并排，而富文本里放不进按钮），
+// 于是选区跨不过去：用户拖过词头再往下拖，释义那段不会被选中。网页没有这个毛病，因为
+// 整页共用一份 selection。
+//
+// 做法：成员在 `paint` 时把自己的布局（`Rc<RichLayout>`，零拷贝）连同 content 的绝对
+// 矩形交给选择域。拖拽时指针被起始控件捕获、事件全送给它，它拿**全局坐标**去问选择域
+// 「这落在谁的第几个字上」——不必访问别的控件，只读那份共享布局。
+
+/// 选择域里的一个位置。
+///
+/// `member` 是**视觉序下标**，不是成员的身份。成员集合一变（查了新词、装卸词典），
+/// 这个下标的含义就变了——而那时旧选区本就该作废，故不是缺陷：结果都换了，选区留着
+/// 只会指到别的东西上。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct ScopeCaret {
+    member: usize,
+    frag: usize,
+    ch: usize,
+}
+
+/// 一个成员交给选择域的快照。
+struct MemberSnap {
+    lay: Rc<RichLayout>,
+    /// content 区的**绝对**矩形（`paint` 收到的那个）。
+    content: Rect,
+}
+
+/// 成员在选择域里的槽位。
+///
+/// 控件持 `Rc`、域持 `Weak`：控件被销毁（重建结果区、切词条）后域这边自然失效，不需要
+/// 谁去注销它——控件的析构没有一个能拿到域的可靠时机，而漏注销会让域里堆着一串指向
+/// 旧布局的成员，选区于是落在早就不在屏幕上的东西上。
+struct MemberCell {
+    snap: RefCell<Option<MemberSnap>>,
+}
+
+#[derive(Default)]
+struct ScopeState {
+    members: RefCell<Vec<Weak<MemberCell>>>,
+    /// 全局选区：(锚点, 延伸点)，无序存储、取用时排序。
+    sel: Cell<Option<(ScopeCaret, ScopeCaret)>>,
+    /// 拖拽锚点。
+    anchor: Cell<Option<ScopeCaret>>,
+}
+
+/// 跨控件选择域：让若干富文本共用一份选区，拖拽可以从一个控件一路延伸到另一个。
+///
+/// 克隆即共享同一个域。用 [`Element::selection_scope`](super::Element::selection_scope)
+/// 把控件挂进来：
+///
+/// ```no_run
+/// use windui::prelude::*;
+///
+/// let scope = SelectionScope::new();
+/// let page = Element::col()
+///     .child(Element::rich(RichDoc::new().para("标题")).selection_scope(scope.clone()))
+///     .child(Element::rich(RichDoc::new().para("正文")).selection_scope(scope.clone()));
+/// ```
+///
+/// 没挂域的控件行为完全不变，仍是各管各的选区。
+#[derive(Clone, Default)]
+pub struct SelectionScope(Rc<ScopeState>);
+
+impl SelectionScope {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 加入一个成员，拿回它的槽位。
+    fn join(&self) -> Rc<MemberCell> {
+        let cell = Rc::new(MemberCell {
+            snap: RefCell::new(None),
+        });
+        self.0.members.borrow_mut().push(Rc::downgrade(&cell));
+        cell
+    }
+
+    /// 成员按**视觉序**（上、左）。顺带把已销毁的槽位清掉。
+    ///
+    /// 视觉序而不是注册序：注册序取决于首次 `paint` 的次序，而那个次序在滚动、重建
+    /// 之后并不稳定。对垂直流式布局，视觉序就是阅读序。
+    ///
+    /// 每次询问都重排一遍。成员是一屏之内的几十个，这点开销远小于「维护一份增量有序
+    /// 表」要付的正确性代价——那份表得在每个成员每次移动时更新，漏一次就错到底。
+    fn ordered(&self) -> Vec<(Rc<MemberCell>, Rect)> {
+        let mut ms = self.0.members.borrow_mut();
+        ms.retain(|w| w.strong_count() > 0);
+        let mut out: Vec<(Rc<MemberCell>, Rect)> = ms
+            .iter()
+            .filter_map(|w| {
+                let m = w.upgrade()?;
+                // 还没画过的成员没有几何可言，跳过——它进不了选区，也不该占一个下标。
+                let r = m.snap.borrow().as_ref().map(|s| s.content)?;
+                Some((m, r))
+            })
+            .collect();
+        out.sort_by_key(|(_, r)| (r.y, r.x));
+        out
+    }
+
+    /// 全局坐标 → 域里的位置。
+    ///
+    /// 先挑成员：落在谁的 content 里就是谁；都不在则取**垂直距离最近**的那个。拖到
+    /// 卡片之间的空隙、拖出结果区的上下边界时，选区仍要跟着走——这和浏览器一致，也是
+    /// 「从头拖到尾」这个动作能成立的前提（中途必然扫过控件之间的缝）。
+    fn caret_at(&self, pos: Point) -> Option<ScopeCaret> {
+        let ms = self.ordered();
+        let mut best: Option<(i32, usize)> = None;
+        for (i, (_, r)) in ms.iter().enumerate() {
+            let dy = if pos.y < r.y {
+                r.y - pos.y
+            } else if pos.y >= r.y + r.h {
+                pos.y - (r.y + r.h) + 1
             } else {
-                f.char_x.len().saturating_sub(1)
+                0
             };
-            // 空片不入文，**也不更新 `prev`**：它没有贡献任何字符，让它去参与
-            // 「要不要补空格/换行」的判断只会凭空多出一个分隔。
-            if to <= from {
+            if best.map(|(bd, _)| dy < bd).unwrap_or(true) {
+                best = Some((dy, i));
+            }
+        }
+        let (_, i) = best?;
+        let (m, content) = &ms[i];
+        let snap = m.snap.borrow();
+        let lay = &snap.as_ref()?.lay;
+        let c = caret_near_in(lay, local_of(pos, *content))?;
+        Some(ScopeCaret {
+            member: i,
+            frag: c.frag,
+            ch: c.ch,
+        })
+    }
+
+    /// 起划选：只记锚点，不落选区（拖出锚点字符才成选区）。
+    fn begin(&self, pos: Point) {
+        self.0.anchor.set(self.caret_at(pos));
+    }
+
+    /// 延伸到新位置。返回选区是否变了（变了才需要重绘）。
+    fn extend(&self, pos: Point) -> bool {
+        let (Some(a), Some(c)) = (self.0.anchor.get(), self.caret_at(pos)) else {
+            return false;
+        };
+        let new = (c != a).then_some((a, c));
+        if new != self.0.sel.get() {
+            self.0.sel.set(new);
+            return true;
+        }
+        false
+    }
+
+    fn end(&self) {
+        self.0.anchor.set(None);
+    }
+
+    /// 清掉选区，返回原先是否有选区。
+    fn clear(&self) -> bool {
+        self.0.sel.take().is_some()
+    }
+
+    fn has_sel(&self) -> bool {
+        self.0.sel.get().is_some()
+    }
+
+    /// 把某个成员内部的一段碎片范围提升为全域选区（双击选词、三击选段）。
+    fn set_within(&self, me: &Rc<MemberCell>, a: Caret, b: Caret) -> bool {
+        let Some(i) = self.index_of(me) else {
+            return false;
+        };
+        self.0.sel.set(Some((
+            ScopeCaret {
+                member: i,
+                frag: a.frag,
+                ch: a.ch,
+            },
+            ScopeCaret {
+                member: i,
+                frag: b.frag,
+                ch: b.ch,
+            },
+        )));
+        true
+    }
+
+    /// 全选整个域。Ctrl+A 在域里的意思是「这一屏」，不是「我碰巧聚焦的这一段」。
+    fn select_all(&self) -> bool {
+        let ms = self.ordered();
+        let Some((last, _)) = ms.last() else {
+            return false;
+        };
+        let snap = last.snap.borrow();
+        let Some(sn) = snap.as_ref() else {
+            return false;
+        };
+        let n = sn.lay.frags.len();
+        if n == 0 {
+            return false;
+        }
+        let end = ScopeCaret {
+            member: ms.len() - 1,
+            frag: n - 1,
+            ch: sn.lay.frags[n - 1].char_x.len().saturating_sub(1),
+        };
+        self.0.sel.set(Some((
+            ScopeCaret {
+                member: 0,
+                frag: 0,
+                ch: 0,
+            },
+            end,
+        )));
+        true
+    }
+
+    fn index_of(&self, me: &Rc<MemberCell>) -> Option<usize> {
+        self.ordered().iter().position(|(m, _)| Rc::ptr_eq(m, me))
+    }
+
+    /// 全局选区落在某个成员身上的那一段（用它自己的碎片下标表示）。
+    fn local_sel(&self, me: &Rc<MemberCell>) -> Option<(Caret, Caret)> {
+        let ms = self.ordered();
+        let idx = ms.iter().position(|(m, _)| Rc::ptr_eq(m, me))?;
+        let (a, b) = self.0.sel.get()?;
+        let (a, b) = (a.min(b), a.max(b));
+        if idx < a.member || idx > b.member {
+            return None;
+        }
+        let snap = me.snap.borrow();
+        let lay = &snap.as_ref()?.lay;
+        let n = lay.frags.len();
+        if n == 0 {
+            return None;
+        }
+        // 首尾成员按各自的端点切，中间的成员整个进选区。
+        let start = if idx == a.member {
+            Caret {
+                frag: a.frag,
+                ch: a.ch,
+            }
+        } else {
+            Caret { frag: 0, ch: 0 }
+        };
+        let end = if idx == b.member {
+            Caret {
+                frag: b.frag,
+                ch: b.ch,
+            }
+        } else {
+            Caret {
+                frag: n - 1,
+                ch: lay.frags[n - 1].char_x.len().saturating_sub(1),
+            }
+        };
+        Some((start, end))
+    }
+
+    /// 全域选区的纯文本。成员之间补换行——它们在界面上本就是分开的块。
+    fn selected_text(&self) -> Option<String> {
+        let ms = self.ordered();
+        let (a, b) = self.0.sel.get()?;
+        let (a, b) = (a.min(b), a.max(b));
+        let mut out = String::new();
+        for idx in a.member..=b.member.min(ms.len().saturating_sub(1)) {
+            let (m, _) = ms.get(idx)?;
+            let Some((s, e)) = self.local_sel(m) else {
                 continue;
-            }
-            if let Some(p) = prev {
-                if f.block != p.block {
+            };
+            let snap = m.snap.borrow();
+            let Some(sn) = snap.as_ref() else { continue };
+            if let Some(t) = slice_text(&sn.lay, s, e) {
+                if !out.is_empty() {
                     out.push('\n');
-                } else if f.line != p.line {
-                    let cjk_join = p.text.chars().last().map(is_cjk).unwrap_or(false)
-                        && f.text.chars().next().map(is_cjk).unwrap_or(false);
-                    if !cjk_join {
-                        out.push(' ');
-                    }
                 }
+                out.push_str(&t);
             }
-            out.extend(f.text.chars().skip(from).take(to - from));
-            prev = Some(f);
         }
         (!out.is_empty()).then_some(out)
     }
 
-    /// 复制：有选区取选区，否则取全文。
-    fn copy_text(&self) -> String {
-        self.selected_text()
-            .unwrap_or_else(|| self.doc.plain_text())
+    /// 所有成员的并集矩形。
+    ///
+    /// 拿它去 `mark_dirty_rect`：清选区、跨控件延伸时脏的是**别人**的像素，而
+    /// `ctx.mark_dirty()` 只标记自己那一块——用它的话，别的控件上的高亮会留在屏幕上
+    /// 不走。
+    fn bounds(&self) -> Option<Rect> {
+        let ms = self.ordered();
+        let mut it = ms.iter().map(|(_, r)| *r);
+        let first = it.next()?;
+        let (mut x0, mut y0) = (first.x, first.y);
+        let (mut x1, mut y1) = (first.x + first.w, first.y + first.h);
+        for r in it {
+            x0 = x0.min(r.x);
+            y0 = y0.min(r.y);
+            x1 = x1.max(r.x + r.w);
+            y1 = y1.max(r.y + r.h);
+        }
+        Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
 }
 
@@ -1753,6 +2152,18 @@ impl Widget for RichText {
         let cache = self.cache.borrow();
         let Some(lay) = cache.as_ref() else { return };
 
+        // 把这一帧的几何交给选择域。`Rc::clone` 而不是拷贝碎片：拖选期间每帧都在重绘，
+        // 一屏几百个碎片的文本与字符偏移复制一遍是白花的钱。
+        //
+        // 写完立刻放开借用：下面 `effective_sel` 要读回所有成员的快照（含自己这一份），
+        // 借用还攥在手里就会撞上 `RefCell` 的运行期检查。
+        if let Some(sm) = &self.scope {
+            *sm.cell.snap.borrow_mut() = Some(MemberSnap {
+                lay: Rc::clone(lay),
+                content,
+            });
+        }
+
         // 高度动画进行中：请求下一帧重排（经正规门，见 anim::request_relayout）。
         if lay.animated {
             crate::anim::request_relayout();
@@ -1761,7 +2172,7 @@ impl Widget for RichText {
         // 选区高亮：先于文字整片铺底（空白碎片也在碎片列表里，词隙不断档）。
         // 纵向按行盒铺满（非碎片自身高）：对齐系统文本控件——下伸部完整包住、
         // 同行混排字号顶底齐平、多行选中行与行之间无白缝。
-        if let Some((a, b)) = self.sel.get() {
+        if let Some((a, b)) = self.effective_sel() {
             let (a, b) = (a.min(b), a.max(b));
             let selc = th.rich.selection(pal);
             for i in a.frag..=b.frag.min(lay.frags.len().saturating_sub(1)) {
@@ -1941,9 +2352,23 @@ impl Widget for RichText {
                     .as_ref()
                     .map(|l| l.frags.len())
                     .unwrap_or(0);
-                if n > 0 {
-                    self.sel.set(self.whole_frags(0, n - 1));
-                    ctx.mark_dirty();
+                match &self.scope {
+                    // 进了域，Ctrl+A 的意思是「这一屏」，不是「我碰巧聚焦的这一段」
+                    // ——焦点落在哪一段是上一次点击的副产物，用户按全选时并不在想它。
+                    Some(sm) => {
+                        if sm.scope.select_all() {
+                            match sm.scope.bounds() {
+                                Some(r) => ctx.mark_dirty_rect(r),
+                                None => ctx.mark_dirty(),
+                            }
+                        }
+                    }
+                    None => {
+                        if n > 0 {
+                            self.sel.set(self.whole_frags(0, n - 1));
+                            ctx.mark_dirty();
+                        }
+                    }
                 }
                 return true;
             }
@@ -1984,13 +2409,28 @@ impl Widget for RichText {
                 // 拖拽划选中：更新延伸点（capture 保证界外 Move 也送达）。
                 // 未拖出锚点碎片前不产生选区；拖回锚点碎片则选区消失。
                 if self.selecting.get() {
-                    if let (Some(anchor), Some(i)) =
-                        (self.drag_anchor.get(), self.caret_near(p.pos))
-                    {
-                        let new = (i != anchor).then_some((anchor, i));
-                        if new != self.sel.get() {
-                            self.sel.set(new);
-                            ctx.mark_dirty();
+                    match &self.scope {
+                        // 挂了域：拿**全局坐标**去问域。指针被本控件捕获，界外的 Move
+                        // 也照样送到这里，于是拖到别的成员身上时那个坐标依然有效——跨
+                        // 控件划选就成立在这一点上。
+                        Some(sm) => {
+                            if sm.scope.extend(p.pos) {
+                                match sm.scope.bounds() {
+                                    Some(r) => ctx.mark_dirty_rect(r),
+                                    None => ctx.mark_dirty(),
+                                }
+                            }
+                        }
+                        None => {
+                            if let (Some(anchor), Some(i)) =
+                                (self.drag_anchor.get(), self.caret_near(p.pos))
+                            {
+                                let new = (i != anchor).then_some((anchor, i));
+                                if new != self.sel.get() {
+                                    self.sel.set(new);
+                                    ctx.mark_dirty();
+                                }
+                            }
                         }
                     }
                     return true;
@@ -2032,7 +2472,7 @@ impl Widget for RichText {
                     ctrl: true,
                 };
                 let mut items = Vec::new();
-                if self.sel.get().is_some() {
+                if self.has_any_sel() {
                     items.push(MenuItem::key("复制", key(0x43, false), true));
                     items.push(MenuItem::key("复制全部", key(0x43, true), true));
                 } else {
@@ -2044,9 +2484,7 @@ impl Widget for RichText {
             }
             PointerKind::Down if p.button == MouseButton::Left => {
                 // 任何左键按下先清旧选区（与编辑器习惯一致）。
-                if self.sel.take().is_some() {
-                    ctx.mark_dirty();
-                }
+                self.clear_sel(ctx);
                 // 「… 展开」标记最具体，按下即展开（Signal 自动重绘，布局键随
                 // 展开态失效重排）。
                 if let Some(sig) = self.expander_at(p.pos) {
@@ -2076,16 +2514,27 @@ impl Widget for RichText {
                     } else {
                         self.word_range_at(i)
                     };
-                    self.sel.set(self.whole_frags(ra, rb));
+                    let range = self.whole_frags(ra, rb);
+                    match (&self.scope, range) {
+                        // 双击/三击选中的仍是本控件内的一段，但它得记进域里——否则
+                        // 域里那份选区还是空的，Ctrl+C 会拿不到刚选中的词。
+                        (Some(sm), Some((a, b))) => {
+                            sm.scope.set_within(&sm.cell, a, b);
+                        }
+                        _ => self.sel.set(range),
+                    }
                     ctx.mark_dirty();
                     return true;
                 }
-                // 起划选：只记锚点，不落选区（拖出锚点碎片才出现高亮）。
+                // 起划选：只记锚点，不落选区（拖出锚点字符才出现高亮）。
                 // 先聚焦——物理 Ctrl+C 与菜单 SendKey 都路由到焦点节点。
                 let Some(i) = self.caret_near(p.pos) else {
                     return false;
                 };
                 ctx.request_focus();
+                if let Some(sm) = &self.scope {
+                    sm.scope.begin(p.pos);
+                }
                 self.drag_anchor.set(Some(i));
                 self.selecting.set(true);
                 ctx.capture();
@@ -2096,6 +2545,9 @@ impl Widget for RichText {
                     // 锚点延迟落地后，原地单击本就无选区，Up 只收尾。
                     self.selecting.set(false);
                     self.drag_anchor.set(None);
+                    if let Some(sm) = &self.scope {
+                        sm.scope.end();
+                    }
                     ctx.release_capture();
                     ctx.mark_dirty();
                     return true;
@@ -2139,6 +2591,9 @@ impl Widget for RichText {
             self.doc = sig.get();
             *self.cache.borrow_mut() = None;
             self.sel.set(None);
+            if let Some(sm) = &self.scope {
+                sm.scope.clear();
+            }
             // 换文档不做高度动画：清空补间状态，新文档首帧静止落定。
             self.sect_anims.borrow_mut().clear();
             // 悬停/按下/键盘焦点都是旧文档碎片下标——不复位会在新文档上产生
@@ -2987,6 +3442,125 @@ mod tests {
     }
 
     /// 构造带连击计数的按下事件。
+    /// 真跑一帧绘制。
+    ///
+    /// 选择域的几何是在 `paint` 里登记的，不画一帧就一个成员也没有——这与真实运行
+    /// 一致：控件没画出来之前，它在屏幕上没有位置可言。
+    fn paint_once(tree: &mut Tree, w: i32, h: i32) {
+        let mut pm = tiny_skia::Pixmap::new(w as u32, h as u32).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text_offset(
+            &mut pm,
+            &mut eng,
+            1.0,
+            crate::geometry::Point::new(0, 0),
+        );
+        tree.paint(&mut canvas);
+    }
+
+    /// 一次完整拖拽，**全程保持指针捕获**。
+    ///
+    /// 跨控件划选全靠这一点：Down 时控件调 `ctx.capture()`，之后即便指针移到别的控件
+    /// 上，事件仍送回它手里（`Tree::dispatch_pointer` 里 `capture.or_else(hit_test)`）。
+    /// 测试若像 `press_at` 那样每次新建一个空的 capture 槽，Move 就改走命中测试落到
+    /// 别人身上，跨控件那条路根本走不到。
+    fn drag(tree: &mut Tree, x0: i32, y0: i32, x1: i32, y1: i32) {
+        let (mut hover, mut cap) = (None, None);
+        for (kind, x, y) in [
+            (PointerKind::Down, x0, y0),
+            (PointerKind::Move, x1, y1),
+            (PointerKind::Up, x1, y1),
+        ] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, crate::geometry::Point::new(x, y), MouseButton::Left),
+                &mut hover,
+                &mut cap,
+            );
+        }
+    }
+
+    /// 两段文字挂同一个选择域，各占一行（每行 14px 高、每字 9px 宽）。
+    fn two_member_scope() -> (
+        Tree,
+        crate::core::NodeId,
+        SelectionScope,
+        Rc<RefCell<String>>,
+    ) {
+        let scope = SelectionScope::new();
+        let a = Element::rich(RichDoc::new().para("汉字"))
+            .width(200)
+            .selection_scope(scope.clone());
+        let b = Element::rich(RichDoc::new().para("词典"))
+            .width(200)
+            .selection_scope(scope.clone());
+        let mut tree = Tree::new();
+        let root = Element::col().child(a).child(b).build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 300), &mut crate::text::NullTextEngine);
+        paint_once(&mut tree, 300, 300);
+        let first = tree.get(root).unwrap().children[0];
+        let clip = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        tree.clipboard = Some(Box::new(TestClip(clip.clone())));
+        (tree, first, scope, clip)
+    }
+
+    /// 选择域的正题：拖拽从一个控件延伸到另一个，复制拿到两段。
+    ///
+    /// 一个 `RichText` 本身是一个独立的选择域，而一屏内容常被拆成好几个控件（词典条目
+    /// 里词头一个、音标一个、每段释义一个）。没有域的话，用户拖过词头再往下拖，释义那
+    /// 段不会被选中——他得一段一段复制。
+    #[test]
+    fn scope_drag_spans_two_widgets() {
+        let (mut tree, first, _scope, clip) = two_member_scope();
+        // 从第一段的「汉」起，拖到第二段末尾之外（吸附到末字符边界）。
+        drag(&mut tree, 0, 7, 60, 21);
+        tree.dispatch_key(ctrl_key(0x43, false), Some(first));
+        assert_eq!(
+            &*clip.borrow(),
+            "汉字\n词典",
+            "选区应跨过控件边界，成员之间补换行"
+        );
+    }
+
+    /// 域里的 Ctrl+A 是「这一屏」，不是「我碰巧聚焦的这一段」。
+    #[test]
+    fn scope_select_all_covers_every_member() {
+        let (mut tree, first, _scope, clip) = two_member_scope();
+        tree.dispatch_key(ctrl_key(0x41, false), Some(first));
+        tree.dispatch_key(ctrl_key(0x43, false), Some(first));
+        assert_eq!(&*clip.borrow(), "汉字\n词典", "全选应覆盖域里每个成员");
+    }
+
+    /// 在域里单击一下就清掉选区——包括落在**别的**成员身上的那部分高亮。
+    #[test]
+    fn scope_click_clears_selection_everywhere() {
+        let (mut tree, first, scope, _clip) = two_member_scope();
+        tree.dispatch_key(ctrl_key(0x41, false), Some(first));
+        assert!(scope.has_sel(), "全选之后该有选区");
+        press_at(&mut tree, PointerKind::Down, 0, 7);
+        press_at(&mut tree, PointerKind::Up, 0, 7);
+        assert!(!scope.has_sel(), "原地单击应清掉整个域的选区");
+    }
+
+    /// 双击选词也要记进域里，否则 Ctrl+C 拿不到刚选中的那个词。
+    #[test]
+    fn scope_double_click_lands_in_scope() {
+        let (mut tree, first, scope, clip) = two_member_scope();
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(
+            multi_click(crate::geometry::Point::new(4, 7), 2),
+            &mut hover,
+            &mut cap,
+        );
+        assert!(scope.has_sel(), "双击的结果应落在域里");
+        tree.dispatch_key(ctrl_key(0x43, false), Some(first));
+        assert_eq!(
+            &*clip.borrow(),
+            "汉字",
+            "双击取连续汉字串（至标点/空白止），不是单字"
+        );
+    }
+
     fn multi_click(pos: crate::geometry::Point, count: u8) -> PointerEvent {
         PointerEvent {
             kind: PointerKind::Down,
