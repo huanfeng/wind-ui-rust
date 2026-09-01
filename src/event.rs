@@ -409,6 +409,42 @@ pub enum Event {
     Key(KeyEvent),
 }
 
+/// 输入法**未提交**的合成串（preedit / marked text）：拼音打到一半、还没选定候选词的那段。
+///
+/// 空 `text` 表示没有合成在进行（合成刚结束或从未开始）。
+///
+/// **为什么这个类型必须存在**：两个平台的输入法模型不同。Windows 的 IMM32 允许应用只用
+/// `ImmSetCompositionWindow` 告诉系统「画在哪」，合成串由系统 IME 自己画；AppKit 的
+/// `NSTextInputClient` 则**只有内联一档**——实现了协议就等于承诺自己画，系统绝不代画。
+/// Linux 的 GTK/IBus 同样把绘制责任交给客户端。故除 win32 外，合成串必须由本库自绘，
+/// 而自绘的前提是这段文字能从平台层送到控件层——这个类型就是那条通路上的载体。
+///
+/// 索引单位是**字符**（`char`），不是字节、也不是 UTF-16 码元。平台层是唯一知道
+/// UTF-16 的地方（`NSRange` 以码元计），换算在那里做完，上层因此与平台编码无关。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// 合成串本体。空串 = 无合成。
+    pub text: String,
+    /// 合成串**内部**的光标位置（字符索引，`0..=text.chars().count()`）。
+    /// 输入法边打边移动它，控件据此画合成内光标。
+    pub caret: usize,
+    /// 合成串内当前「选中分句」的字符范围。日文分节转换会把长串切成几段、
+    /// 高亮其中一段；中文拼音一般整段或 `None`。
+    pub sel: Option<(usize, usize)>,
+}
+
+impl Preedit {
+    /// 是否有合成在进行。等价于旧 `set_ime_composing(true)` 的语义。
+    pub fn is_active(&self) -> bool {
+        !self.text.is_empty()
+    }
+
+    /// 合成串字符数。
+    pub fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+}
+
 /// 浮层菜单/下拉项的动作。两种：向焦点控件合成按键（右键菜单复用控件键盘处理、
 /// 可移植），或运行任意闭包（下拉选择设置绑定值等）。
 ///

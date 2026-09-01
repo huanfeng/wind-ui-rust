@@ -29,8 +29,8 @@ pub mod ui;
 pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::event::{
-        window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, ToastKind,
-        WindowState,
+        window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, Preedit,
+        ToastKind, WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};

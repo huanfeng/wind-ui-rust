@@ -47,7 +47,7 @@ use objc2_quartz_core::{CAMetalLayer, CATransaction};
 use tiny_skia::Pixmap;
 
 use super::{AppHandler, NewWindow, WindowConfig};
-use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
+use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedit, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{to_skia_color, Renderer};
 #[cfg(feature = "gpu")]
@@ -347,8 +347,12 @@ struct ViewState {
     scale: f32,
     /// 无标题栏窗口：mouseDown 命中拖动区时走系统窗口拖动。
     frameless: bool,
-    /// 输入法合成进行中（有未提交的 marked text）：此间所有按键交输入法处理。
-    composing: bool,
+    /// 输入法未提交的合成串（marked text）。非空即"合成进行中"，
+    /// 此间所有按键交输入法处理。
+    ///
+    /// 存的是**整串**而不只是一个 bool：AppKit 把绘制 marked text 的责任完全交给
+    /// 客户端，系统不代画，所以这段文字必须能送到控件层去绘制（见 `Preedit`）。
+    preedit: Preedit,
     /// 逻辑捕获态镜像（每次指针事件后取 `handler.capture_active()`）。
     ///
     /// **macOS 没有 win32 `SetCapture` 的对应物，也不需要**：`mouseDown:` 之后的
@@ -456,6 +460,14 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, ev: &NSEvent) {
+            // 合成中点别处：先收掉合成串，再让点击照常定位光标。
+            //
+            // 不收的话，合成串会以「插在旧光标处」的姿态留在文本框里，而光标已经
+            // 跑到别处——原生 macOS 在这一步是提交合成串，我们取更保守的放弃，
+            // 因为提交需要把候选窗当前选中项也一并落定，那是输入法内部状态。
+            //
+            // 放在最前面：`pos_to_index` 要按**不含合成串**的显示串来算命中位置。
+            self.abort_composition();
             // 无边框窗口：命中自定义标题栏拖动区（且非交互控件）→ 交系统窗口拖动，不下发点击。
             if self.ivars().borrow().frameless {
                 let pos = self.loc_phys(ev);
@@ -556,20 +568,19 @@ define_class!(
         }
     }
 
-    // 输入法客户端（对应 win32 的 WM_IME_* + ImmSetCompositionWindow）。我们不内联显示
-    // 合成串（无对应上层 API），但跟踪合成态并把候选窗定位到光标处；提交文本经 insertText: 回灌。
+    // 输入法客户端（对应 win32 的 WM_IME_* + ImmSetCompositionWindow）。
     //
-    // 合成态经 setMarkedText:/unmarkText/insertText: 三处上报给上层
-    // （dispatch_composing → AppHandler::set_ime_composing），与 win32 的
-    // WM_IME_START/ENDCOMPOSITION 对齐；控件据此在合成期间不画自绘光标。
+    // **两平台的模型不同，这里是差异的落点**：win32 的 IMM32 允许应用只用
+    // `ImmSetCompositionWindow` 说「画在哪」，合成串由系统 IME 自己画；AppKit 则把
+    // 绘制 marked text 的责任**完全**交给客户端——实现了 NSTextInputClient 就等于
+    // 承诺自己画，系统绝不代画。
     //
-    // ⚠️ 两平台在这里有一处**未消除的语义差**：Windows 的 IME 自己会在
-    // ImmSetCompositionWindow 指定的位置画出合成串和它自带的光标，所以隐藏自绘光标是在
-    // 消除双光标；macOS 则把画 marked text 的责任完全交给客户端，而本后端不画——于是
-    // 合成期间文本框里既没有合成串也没有光标。这不是本次改动引入的（下发链路一直如此），
-    // 但根治需要上层给出「显示未提交合成串」的 API（RichText 的 span 模型可承载），
-    // 属于另一个量级的工作。真机上若观感不可接受，短期缓解是让 macOS 后端不上报
-    // composing=true（保留光标闪烁），代价是与 win32 的行为不再一致。
+    // 故这里把合成串整串上报给上层（dispatch_preedit → AppHandler::set_ime_preedit
+    // → Widget::set_preedit），由 TextInput 内联绘制；win32 那条 set_ime_composing
+    // 的路在 macOS 上**不再走**（走了就会藏掉光标，而这边没人画合成串）。
+    //
+    // 合成的三个收口点：setMarkedText:（更新）、unmarkText / insertText:（结束）、
+    // 以及窗口失活与 mouseDown 的兜底（abort_composition）。
     unsafe impl NSTextInputClient for ContentView {
         #[unsafe(method(insertText:replacementRange:))]
         fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
@@ -580,28 +591,60 @@ define_class!(
         fn do_command_by_selector(&self, _selector: Sel) {}
 
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
-        fn set_marked_text(&self, string: &AnyObject, _selected: NSRange, _replacement: NSRange) {
-            // 合成态 = 还有未提交的 marked text。
-            let composing = !anyobject_to_string(string).is_empty();
-            self.ivars().borrow_mut().composing = composing;
-            self.dispatch_composing(composing);
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+            // 输入法传来的常是 NSAttributedString（带分句属性）而非 NSString，
+            // anyobject_to_string 两者都收。
+            let text = anyobject_to_string(string);
+            // selected 是合成串**内部**的范围，以 UTF-16 码元计（见 utf16_to_char_index）。
+            let caret = utf16_to_char_index(&text, selected.location);
+            let sel = (selected.length > 0).then(|| {
+                (
+                    caret,
+                    utf16_to_char_index(&text, selected.location + selected.length),
+                )
+            });
+            let pe = Preedit { text, caret, sel };
+            self.ivars().borrow_mut().preedit = pe.clone();
+            self.dispatch_preedit(&pe);
         }
 
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
-            self.ivars().borrow_mut().composing = false;
-            self.dispatch_composing(false);
+            self.clear_preedit();
         }
 
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
-            NSRange { location: 0, length: 0 }
+            // 输入法据此了解插入点/选区上下文（联想、重转换）。返回恒 {0,0} 会让
+            // 部分第三方 IME 误判文档为空。索引要换算成 UTF-16 码元。
+            let (sel, text) = {
+                let st = self.ivars().borrow();
+                (st.handler.ime_selection(), st.handler.ime_text())
+            };
+            match sel {
+                Some((s, e)) => {
+                    let (s16, e16) = (
+                        char_to_utf16_index(&text, s),
+                        char_to_utf16_index(&text, e),
+                    );
+                    NSRange { location: s16, length: e16.saturating_sub(s16) }
+                }
+                None => NSRange { location: NSNotFound as NSUInteger, length: 0 },
+            }
         }
 
         #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
-            if self.ivars().borrow().composing {
-                NSRange { location: 0, length: 0 }
+            // 必须给出**真实长度**：与 hasMarkedText 自相矛盾（说有合成、长度却恒 0）
+            // 会让部分输入法走降级路径，表现为候选窗定位失准或合成行为异常。
+            let st = self.ivars().borrow();
+            if st.preedit.is_active() {
+                let sel = st.handler.ime_selection().map(|(s, _)| s).unwrap_or(0);
+                let text = st.handler.ime_text();
+                NSRange {
+                    location: char_to_utf16_index(&text, sel),
+                    length: st.preedit.text.encode_utf16().count(),
+                }
             } else {
                 NSRange { location: NSNotFound as NSUInteger, length: 0 }
             }
@@ -609,16 +652,23 @@ define_class!(
 
         #[unsafe(method(hasMarkedText))]
         fn has_marked_text(&self) -> bool {
-            self.ivars().borrow().composing
+            self.ivars().borrow().preedit.is_active()
         }
 
         #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
         fn attributed_substring(
             &self,
-            _range: NSRange,
+            range: NSRange,
             _actual: NSRangePointer,
         ) -> Option<Retained<NSAttributedString>> {
-            None
+            // 输入法用它读取文档已有内容（重转换、上下文联想）。返回纯文本即可，
+            // 我们不提供属性（validAttributesForMarkedText 也是空的）。
+            let text = self.ivars().borrow().handler.ime_text();
+            let u16: Vec<u16> = text.encode_utf16().collect();
+            let start = range.location.min(u16.len());
+            let end = (range.location + range.length).min(u16.len());
+            let sub = String::from_utf16_lossy(&u16[start..end]);
+            Some(NSAttributedString::from_nsstring(&NSString::from_str(&sub)))
         }
 
         #[unsafe(method_id(validAttributesForMarkedText))]
@@ -741,6 +791,28 @@ define_class!(
 );
 
 /// NSString 或 NSAttributedString（输入法回灌的文本载体）→ Rust String。
+/// UTF-16 码元下标 → 字符下标。越界钳到末尾。
+///
+/// **这个换算不能省**：`NSRange` 以 UTF-16 码元计，Rust 的 `char` 迭代以码点计。
+/// BMP 内的汉字两者恰好一致，所以**用中文怎么测都测不出问题**；但 emoji 与
+/// U+10000 以上的字在 UTF-16 里占 2 个码元，直接把码元下标当字符下标用会偏移，
+/// 且不会 panic——只是合成内光标画错位置。
+fn utf16_to_char_index(s: &str, utf16_idx: usize) -> usize {
+    let mut u16_pos = 0usize;
+    for (ci, ch) in s.chars().enumerate() {
+        if u16_pos >= utf16_idx {
+            return ci;
+        }
+        u16_pos += ch.len_utf16();
+    }
+    s.chars().count()
+}
+
+/// 字符下标 → UTF-16 码元下标。越界钳到末尾。见 [`utf16_to_char_index`] 的说明。
+fn char_to_utf16_index(s: &str, char_idx: usize) -> usize {
+    s.chars().take(char_idx).map(char::len_utf16).sum()
+}
+
 fn anyobject_to_string(obj: &AnyObject) -> String {
     if let Some(s) = obj.downcast_ref::<NSString>() {
         s.to_string()
@@ -781,7 +853,7 @@ impl ContentView {
             buf_h: 0,
             scale: 1.0,
             frameless,
-            composing: false,
+            preedit: Preedit::default(),
             capturing: false,
             wheel_residual: 0.0,
             frame_timer: None,
@@ -1359,7 +1431,7 @@ impl ContentView {
     /// 使中文/emoji 可在文本框输入（对照 win32 的 WM_KEYDOWN + WM_CHAR + IME）。
     fn on_key(&self, ev: &NSEvent) {
         // 合成进行中：全部交输入法（候选切换/确认/退格在 IME 内完成）。
-        if self.ivars().borrow().composing {
+        if self.ivars().borrow().preedit.is_active() {
             self.route_ime(ev);
             return;
         }
@@ -1416,8 +1488,9 @@ impl ContentView {
     /// 输入法提交文本（`insertText:`）：逐字符派发为 Key::Char，并结束合成态。
     fn ime_insert(&self, string: &AnyObject) {
         let text = anyobject_to_string(string);
-        self.ivars().borrow_mut().composing = false;
-        self.dispatch_composing(false);
+        // 先清合成串再派发字符：清空要经过 set_preedit 让控件把合成串从显示串里撤掉，
+        // 之后插入的字符才落在正确的位置上。
+        self.clear_preedit();
         for c in text.chars() {
             if c.is_control() {
                 continue;
@@ -1494,17 +1567,28 @@ impl ContentView {
         self.after_event();
     }
 
-    /// 通知焦点控件输入法组合态变化（见 win32 的 `WM_IME_START/ENDCOMPOSITION`）。
-    fn dispatch_composing(&self, composing: bool) {
+    /// 把输入法合成串下发给焦点控件（对照 win32 的 `WM_IME_COMPOSITION`，但那边
+    /// 只需通知「合成中」，串由系统画；这边串必须送到控件层去画）。
+    fn dispatch_preedit(&self, pe: &Preedit) {
         let repaint = {
             let _guard = crate::platform::EventDispatchGuard::enter();
-            self.ivars()
-                .borrow_mut()
-                .handler
-                .set_ime_composing(composing)
+            self.ivars().borrow_mut().handler.set_ime_preedit(pe)
         };
         if repaint {
             self.setNeedsDisplay(true);
+        }
+    }
+
+    /// 清掉合成串并通知上层（合成结束/提交/中止的共同收口）。
+    fn clear_preedit(&self) {
+        let had = {
+            let mut st = self.ivars().borrow_mut();
+            let had = st.preedit.is_active();
+            st.preedit = Preedit::default();
+            had
+        };
+        if had {
+            self.dispatch_preedit(&Preedit::default());
         }
     }
 
@@ -1531,10 +1615,10 @@ impl ContentView {
         }
     }
 
-    /// 窗口失活时收掉未提交的输入法合成：清本地合成态、通知上层恢复自绘光标，
-    /// 再让输入上下文丢弃 marked text。不收的话，合成中途切走应用后 `composing`
-    /// 会一直为 true，而组合态期间 `TextInput` 不画自绘光标——焦点文本框的光标就此
-    /// 再也不闪（win32 侧由 `WM_IME_ENDCOMPOSITION` 保证不会出现这种悬挂）。
+    /// 收掉未提交的输入法合成：清本地合成串、通知上层撤掉内联显示的那段，
+    /// 再让输入上下文丢弃 marked text。不收的话，合成中途切走应用后合成串
+    /// 会一直挂在文本框里，看着像已经输入了这几个字母
+    /// （win32 侧由 `WM_IME_ENDCOMPOSITION` 保证不会出现这种悬挂）。
     ///
     /// 两段式：先在借用内改本地状态并释放借用，再调可能重入本视图回调的
     /// `discardMarkedText`（它若反过来触发 `unmarkText:` 是幂等的）。
@@ -1543,16 +1627,10 @@ impl ContentView {
     /// （候选窗已弹出）时 Cmd+Tab 切走再切回——预期光标恢复闪烁、候选窗未残留、
     /// 已输入的拼音不会莫名其妙上屏。
     fn abort_composition(&self) {
-        let was_composing = {
-            let mut st = self.ivars().borrow_mut();
-            let was = st.composing;
-            st.composing = false;
-            was
-        };
-        if !was_composing {
+        if !self.ivars().borrow().preedit.is_active() {
             return;
         }
-        self.dispatch_composing(false);
+        self.clear_preedit();
         if let Some(ic) = self.inputContext() {
             ic.discardMarkedText();
         }
@@ -2129,5 +2207,48 @@ mod tests {
                 "{r:?} 应判定为跑出失效区"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ime_tests {
+    use super::{char_to_utf16_index, utf16_to_char_index};
+
+    /// UTF-16 码元下标 ↔ 字符下标的换算。
+    ///
+    /// **emoji 那一档是本测试存在的理由**：`NSRange` 以 UTF-16 码元计，Rust 按 `char`
+    /// 迭代。BMP 内的汉字两者恰好一致，所以「直接把码元下标当字符下标用」这个 bug
+    /// 用中文怎么测都测不出来；U+10000 以上的字在 UTF-16 里占 2 个码元，一测就露。
+    #[test]
+    fn utf16_char_index_roundtrip() {
+        // 纯 ASCII：两者一致。
+        assert_eq!(utf16_to_char_index("abc", 2), 2);
+        assert_eq!(char_to_utf16_index("abc", 2), 2);
+
+        // BMP 内汉字：每字 1 码元，仍然一致——单看这一档发现不了问题。
+        assert_eq!(utf16_to_char_index("中文字", 2), 2);
+        assert_eq!(char_to_utf16_index("中文字", 2), 2);
+
+        // 代理对（emoji，每个 2 码元）：这里才分得出来。
+        let s = "a😀b"; // 字符: a,😀,b  UTF-16: a,hi,lo,b
+        assert_eq!(char_to_utf16_index(s, 1), 1, "'a' 之后 = 1 码元");
+        assert_eq!(char_to_utf16_index(s, 2), 3, "emoji 之后 = 3 码元，不是 2");
+        assert_eq!(char_to_utf16_index(s, 3), 4);
+        assert_eq!(utf16_to_char_index(s, 1), 1);
+        assert_eq!(utf16_to_char_index(s, 3), 2, "第 3 个码元处 = 第 2 个字符");
+        assert_eq!(utf16_to_char_index(s, 4), 3);
+
+        // 往返一致。
+        for i in 0..=s.chars().count() {
+            assert_eq!(
+                utf16_to_char_index(s, char_to_utf16_index(s, i)),
+                i,
+                "i={i}"
+            );
+        }
+
+        // 越界钳到末尾，不 panic。
+        assert_eq!(utf16_to_char_index(s, 999), 3);
+        assert_eq!(char_to_utf16_index(s, 999), 4);
     }
 }

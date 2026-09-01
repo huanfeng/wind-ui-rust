@@ -674,7 +674,7 @@ App::new("…", w, h).tray(
 - `quit()` 是应用的真实出口，刻意**不受 `hide_on_close()` 影响**。
 - 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
 - **`Tray` 三件套是平台无关的**（定义在 `windui::platform::tray`，两平台共用同一份类型与语义）。此前它在 win32 与 macOS 各有一份完整副本，跨平台性只是「两边方法名恰好一样」的巧合——`TrayCtx` 一个累积意图、一个持有 `NSWindow` 立即调 OS。现在两个后端只负责执行 `TrayAction`。
-- **回调可测**：`windui::testing::run_with_tray_ctx(item)` 借一个受控 `TrayCtx` 跑菜单项回调，返回它请求的 `Vec<TrayAction>`；`run_with_tray_ctx_fn(f)` 用于 `on_left_click` 这类直接持有的闭包。见 [9.1](#91-测试收-eventctx-的回调)。
+- **回调可测**：`windui::testing::run_with_tray_ctx(item)` 借一个受控 `TrayCtx` 跑菜单项回调，返回它请求的 `Vec<TrayAction>`；`run_with_tray_ctx_fn(f)` 用于 `on_left_click` 这类直接持有的闭包。见 [9.2](#92-测试收-eventctx-的回调)。
 
 ### 全局热键与启动即隐藏
 
@@ -1851,7 +1851,30 @@ let dot = Element::leaf().widget(Dot { on: state });
 连续动画，你报的截止就被压回满帧配速，不存在"某个控件把整窗睡过去"。
 **报早了只是白付几帧，报晚了会让动画卡在旧画面上**——拿不准就传 0。
 
-### 9.1 测试收 `EventCtx` 的回调
+### 9.1 可编辑文本控件：接住输入法合成串
+
+自绘的可编辑文本控件（不是用 `TextInput` 的那种）要显示输入法未上屏的合成串
+（拼音等，即 preedit / marked text），需覆盖三个方法：
+
+```rust
+fn set_preedit(&mut self, pe: &windui::event::Preedit) { /* 存起来，paint 时插在光标处画 */ }
+fn selection_range(&self) -> Option<(usize, usize)> { /* 当前选区，字符索引 */ }
+fn ime_text(&self) -> Option<String> { /* 已提交正文，供 IME 重转换/联想；密码框返回 None */ }
+```
+
+`Preedit` 带 `text`（合成串）、`caret`（合成串**内部**的光标位置）、`sel`（选中分句，
+日文分节转换用）。索引单位一律是**字符**，平台层已把 UTF-16 码元换算掉。
+
+**为什么控件得自己画**：macOS 的 `NSTextInputClient` 把绘制 marked text 的责任完全交给
+客户端，系统绝不代画；Windows 的 IMM32 则是系统 IME 自己画。所以两平台走的是两条互斥的
+SPI——win32 走 `set_composing`（只给一个布尔，控件据此**藏起**自绘光标消除双光标），
+macOS 走 `set_preedit`（给整串，控件**画出来**）。控件两个都覆盖即可，框架保证只调其中一条；
+两边都自绘会在 Windows 上出现双份合成串。
+
+绘制惯例：合成串带下划线，选中分句那段加粗；光标画在 `caret` 处且恒实心不闪烁。
+可参考 `TextInput` 的实现与 `docs/ime-preedit-design.md`。
+
+### 9.2 测试收 `EventCtx` 的回调
 
 `EventCtx` 由宿主在真实分发路径上借出，字段私有、你造不出来。要在单元测试里跑一段收 ctx 的回调（菜单动作、`App::channel` 的 on_message、`Widget::on_event`），用 `windui::testing`：
 
@@ -2013,6 +2036,6 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
 | `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画） |
-| `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.1） |
+| `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.2） |
 
 更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口等）。

@@ -3,6 +3,37 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+- **macOS 输入法合成串现在能看见了**（修复用户反馈的「打拼音看不到编码」）。
+  根因是平台模型差异：Windows 的 IMM32 允许应用只用 `ImmSetCompositionWindow` 说
+  「画在哪」，合成串由系统 IME 自己画；AppKit 的 `NSTextInputClient` **只有内联一档**
+  ——实现了协议就等于承诺自己画，系统绝不代画。此前 macOS 后端在 `setMarkedText:` 里
+  只取了「字符串是否非空」这一个布尔，串本身被丢弃，而那个布尔的唯一用途是**藏起光标**
+  ——于是合成期间文本框里既没有拼音也没有光标，看着像打字没反应。
+  - 新增 `Preedit { text, caret, sel }` 与一条通路：`setMarkedText:` →
+    `AppHandler::set_ime_preedit` → `Widget::set_preedit` → `TextInput` 内联绘制
+    （下划线 + 合成内光标 + 参与换行测量）。这与 winit / Qt / Chromium / Flutter / SDL
+    的做法同构——它们都是把 preedit 整串抛给上层由控件渲染，没有哪个平台能让系统代画。
+  - **两平台分工互斥**：win32 继续走 `set_ime_composing` 用系统内联，`TextInput::preedit`
+    在那边恒空。两边同时自绘会出现**双份合成串**，这是本设计唯一的致命回归形态，
+    已加守卫测试。
+  - 索引单位在平台边界收口：`NSRange` 以 UTF-16 码元计，`Preedit` 以字符计。BMP 内的
+    汉字两者恰好一致，所以这个换算**用中文怎么测都测不出问题**，只有 emoji（代理对，
+    2 码元）会暴露——契约测试专门覆盖了这一档。
+  - 补齐四处 `NSTextInputClient` 协议 stub：`markedRange` 此前长度恒 0（与
+    `hasMarkedText` 自相矛盾，会让部分第三方输入法走降级路径）、`selectedRange` 恒
+    `{0,0}`、`attributedSubstringForProposedRange:` 恒 `None`（影响重转换与联想）。
+    新增 `AppHandler::ime_selection` / `ime_text` 供其取值；密码框不把内容交给输入法。
+  - 合成中点击文本框别处会先收掉合成串（`mouseDown:` → `abort_composition`），
+    不再留下悬空的拼音。
+  - 主题新增 `InputTheme::preedit_underline`（默认正文色 60% alpha）。
+- **修复 `TextInput` 判空看正文而非显示串**：正文为空但正在输入合成串时会走进
+  placeholder 分支，合成串一个字都画不出来——正是「只看到占位符」的那个现象。
+- **修复 macOS 上 `CursorShape::SizeWE` 未接**：该变体加进枚举时只在 Windows 上跑了门禁，
+  macOS 侧 `apply_cursor` 的 `match` 没跟上，**macOS 直接编译失败**（E0004 非穷尽匹配）。
+  枚举加变体是跨平台改动，每个平台都有一处 `match` 要跟着长。
+
 ## [0.14.0] - 2026-08-26
 
 - **窗口/应用图标** `App::icon(..)` / `Window::icon(..)`，配内置品牌图标

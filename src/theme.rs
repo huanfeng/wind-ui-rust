@@ -354,6 +354,9 @@ pub struct InputTheme {
     pub caret_rounded: Option<bool>,
     /// 光标位置变化时是否在同一视觉行内滑行过去（默认 true）。
     pub caret_smooth_move: Option<bool>,
+    /// 输入法合成串（未上屏的拼音等）下方那条下划线的颜色。
+    /// 默认取正文色的 60% alpha——要能看出「这段还没定下来」，又不能抢正文的注意力。
+    pub preedit_underline: Option<Color>,
     pub corner: Option<f32>,
 }
 
@@ -391,6 +394,13 @@ impl InputTheme {
     }
     pub fn caret_smooth_move(&self) -> bool {
         self.caret_smooth_move.unwrap_or(true)
+    }
+    /// 合成串下划线色。回退到正文色的 60% alpha。
+    pub fn preedit_underline(&self, p: &Palette) -> Color {
+        self.preedit_underline.unwrap_or_else(|| {
+            let t = self.text(p);
+            Color::rgba(t.r, t.g, t.b, (t.a as u16 * 60 / 100) as u8)
+        })
     }
     pub fn corner(&self, m: &Metrics) -> f32 {
         self.corner.unwrap_or(m.corner_md)

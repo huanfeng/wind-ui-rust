@@ -2562,6 +2562,32 @@ impl AppHandler for UiHost {
         self.tree.set_composing(focus, composing)
     }
 
+    fn set_ime_preedit(&mut self, pe: &crate::event::Preedit) -> bool {
+        let Some(focus) = self.focus.current else {
+            return false;
+        };
+        if !self.tree.set_preedit(focus, pe) {
+            return false;
+        }
+        // 合成串会改变文本宽度并可能触发换行——这是**非局部**变更：文本框内文字重排、
+        // 后续行整体移位，都超出「该节点原有边界」这个前提。per-node 脏区只对自包含
+        // 视觉安全，此处必须升整窗，否则合成串变长时旧字形留在脏区外擦不掉。
+        self.damage.needs_full = true;
+        true
+    }
+
+    fn ime_selection(&self) -> Option<(usize, usize)> {
+        let focus = self.focus.current?;
+        self.tree.selection_of(focus)
+    }
+
+    fn ime_text(&self) -> String {
+        self.focus
+            .current
+            .and_then(|f| self.tree.ime_text_of(f))
+            .unwrap_or_default()
+    }
+
     fn on_capture_lost(&mut self) -> bool {
         self.damage.needs_full = true;
         // 菜单滚动条拖拽不走 `self.capture`，得单独收尾（见 abort_scrollbar_drag）。

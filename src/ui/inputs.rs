@@ -7,7 +7,9 @@ use std::cell::{Cell, RefCell};
 
 use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
-use crate::event::{CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind};
+use crate::event::{
+    CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind, Preedit,
+};
 use crate::geometry::{Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
@@ -15,7 +17,7 @@ use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
 use crate::theme::Intent;
-use crate::ui::caret::{CaretOpts, CaretState};
+use crate::ui::caret::{CaretOpts, CaretState, CaretStyle};
 use crate::ui::containers::VScrollbar;
 use crate::ui::TextContent;
 
@@ -759,7 +761,16 @@ pub struct TextInput {
     font_size_hint: Cell<f32>,
     /// 输入法组合态（拼音等未上屏）：为 true 时暂不绘制自绘光标条，避免与系统
     /// 组合浮层里跟随组合进度的光标重叠、显得"卡在组合开始前"。
+    ///
+    /// **只有 win32 会置位**——那边系统 IME 自己画合成串，我们藏光标是在消除双光标。
+    /// 需要自绘合成串的平台（macOS、将来的 Linux）走 [`Self::preedit`]。
     composing: Cell<bool>,
+    /// 输入法未提交的合成串（见 [`crate::event::Preedit`]）。非空时内联绘制在光标处：
+    /// 参与测量与换行、带下划线、光标画在合成串内部。
+    ///
+    /// **win32 上恒为空**：那边系统 IME 已经在 `ImmSetCompositionWindow` 指定处画了一份，
+    /// 再自绘一份就成了双份合成串。
+    preedit: RefCell<Preedit>,
     /// 单行模式下 Enter 的出口（见 [`crate::ui::Element::on_submit`]）。
     on_submit: Option<SubmitFn>,
     /// 本控件**未处理**的导航键的出口（见 [`crate::ui::Element::on_nav_key`]）。
@@ -802,6 +813,7 @@ impl TextInput {
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
             composing: Cell::new(false),
+            preedit: RefCell::new(Preedit::default()),
             on_submit: None,
             on_nav_key: None,
             on_click: None,
@@ -885,16 +897,76 @@ impl TextInput {
         self.text.with(|t| t.chars().count())
     }
 
-    /// 实际用于显示与测量的字符串：密码模式下逐字符替换为掩码圆点，
-    /// 字符数与真实文本一一对应，故光标/选区索引可直接复用。
+    /// 实际用于显示与测量的字符串：密码模式下逐字符替换为掩码圆点；
+    /// 有输入法合成串时把它插在光标处。
+    ///
+    /// **两种变换的性质不同，别混为一谈**：密码掩码是**等字符数替换**，故索引可直接复用；
+    /// 合成串是**插入**，字符数变了，光标与选区索引必须过
+    /// [`to_display_index`](Self::to_display_index) 换算。全库只有 paint 消费本方法，
+    /// 那 5 处换算点都在 paint 里。
     fn display_string(&self) -> String {
-        self.text.with(|t| {
+        let base = self.text.with(|t| {
             if self.config.password {
                 t.chars().map(|_| PASSWORD_MASK).collect()
             } else {
                 t.clone()
             }
-        })
+        });
+        let pe = self.preedit.borrow();
+        if !pe.is_active() {
+            return base;
+        }
+        // 合成串插在逻辑光标处。
+        //
+        // 密码模式下合成串**不**掩码：候选窗就明晃晃浮在屏幕上，把合成串打码既没有
+        // 安全收益，又让用户无法确认自己打了什么——原生 NSSecureTextField 同样不掩码。
+        let cursor = self.cursor.min(base.chars().count());
+        let mut out: String = base.chars().take(cursor).collect();
+        out.push_str(&pe.text);
+        out.extend(base.chars().skip(cursor));
+        out
+    }
+
+    /// 逻辑字符索引 → 显示串字符索引。
+    ///
+    /// 合成串插在 `self.cursor` 处，故其后的索引整体右移合成串的长度。
+    /// 无合成时是恒等映射。
+    fn to_display_index(&self, i: usize) -> usize {
+        let pe = self.preedit.borrow();
+        if !pe.is_active() || i <= self.cursor {
+            i
+        } else {
+            i + pe.char_len()
+        }
+    }
+
+    /// 显示串字符索引 → 逻辑字符索引。
+    ///
+    /// 落在合成串**内部**的索引一律钳到 `self.cursor`——合成串不属于正文，
+    /// 没有对应的逻辑位置。（正常路径下点击会先中止合成，故这一档只在同帧竞态出现。）
+    fn to_logical_index(&self, d: usize) -> usize {
+        let pe = self.preedit.borrow();
+        if !pe.is_active() {
+            return d;
+        }
+        let n = pe.char_len();
+        if d <= self.cursor {
+            d
+        } else if d < self.cursor + n {
+            self.cursor
+        } else {
+            d - n
+        }
+    }
+
+    /// 合成串在**显示串**中的字符区间 `[start, end)`。无合成时返回 None。
+    fn preedit_span(&self) -> Option<(usize, usize)> {
+        let pe = self.preedit.borrow();
+        if !pe.is_active() {
+            return None;
+        }
+        let s = self.cursor.min(self.char_count());
+        Some((s, s + pe.char_len()))
     }
     fn clamp_cursor(&mut self) {
         let n = self.char_count();
@@ -1167,7 +1239,13 @@ impl TextInput {
                 best = j;
             }
         }
-        ln.start + best
+        // 视觉行里存的是**显示串**索引，而本方法的返回值要拿去赋给 `self.cursor`
+        // ——那是**逻辑**索引。有合成串时两者差一个合成串长度，故在此收口换算，
+        // 而不是让 5 个调用点各自记得包一层。
+        //
+        // 正常路径下点到这里时合成已被中止（平台层在 mouseDown 上先收合成），
+        // 故这层换算是防竞态的兜底，不是主路径。
+        self.to_logical_index(ln.start + best)
     }
 
     /// 上/下移动光标到相邻视觉行的目标列（粘性 goal_x）。返回是否移动。
@@ -1425,9 +1503,13 @@ impl Widget for TextInput {
         let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
-        // 显示串：密码模式为掩码圆点；测量/绘制/光标定位都基于它（字符数与真实文本一致）。
+        // 显示串：密码模式为掩码圆点、有输入法合成串时含合成串；
+        // 测量/绘制/光标定位都基于它。
         let disp = self.display_string();
-        let is_empty = self.text.with(|t| t.is_empty());
+        // 判空必须看**显示串**而不是正文：正文为空但正在输入合成串时，
+        // 看正文会走进 placeholder 分支——合成串一个字都画不出来，
+        // 用户看到的就是"打了字却只有占位符"。
+        let is_empty = disp.is_empty();
         let multiline = self.is_multiline();
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
@@ -1456,7 +1538,14 @@ impl Widget for TextInput {
             );
         }
         let wrap = self.config.wrap && multiline;
-        let cursor = self.cursor.min(disp.chars().count());
+        // 光标在**显示串**中的位置。合成期间它落在合成串内部——IME 边打边移动
+        // `pe.caret`（如拼音 "zhong" 打到第三个字母），光标要跟着走，否则会钉在
+        // 合成串开头，看着像"打字光标不动"。
+        let disp_len = disp.chars().count();
+        let cursor = match self.preedit_span() {
+            Some((ps, _)) => (ps + self.preedit.borrow().caret).min(disp_len),
+            None => self.cursor.min(disp_len),
+        };
 
         // 重建视觉行布局缓存。
         self.rebuild_layout(canvas, &disp, &crate::text::TextStyle::of(style), inner.w);
@@ -1512,7 +1601,12 @@ impl Widget for TextInput {
         canvas.clip_rect(inner);
 
         // 选区高亮（逐视觉行；跨行处延伸到行尾标示换行/折行被选中）。
-        if let Some((s, e)) = self.selection() {
+        // `selection()` 给的是**逻辑**索引，而下面按视觉行切分用的是**显示串**索引——
+        // 有合成串时两者差一个合成串长度，不换算就会整体偏移。
+        if let Some((s, e)) = self
+            .selection()
+            .map(|(s, e)| (self.to_display_index(s), self.to_display_index(e)))
+        {
             for (i, ln) in lay.lines.iter().enumerate() {
                 let ly = first_line_y + i as i32 * line_h;
                 if ly + line_h < inner.y || ly > inner.y + inner.h {
@@ -1565,14 +1659,80 @@ impl Widget for TextInput {
             }
         }
 
+        // 输入法合成串的下划线：告诉用户「这段还没定下来」。逐视觉行画，长合成串
+        // 折行后每段各有一条。画在文字之后、光标之前——压在字身下方，不挡字形。
+        if let Some((ps, pe_end)) = self.preedit_span() {
+            let pe = self.preedit.borrow();
+            let ul_color = inp.preedit_underline(pal);
+            // 1dp 实线。`fill_rect` 收**逻辑**坐标（canvas 内部再乘 DPI），故这里就是 1.0；
+            // 用 dpi_scale 算会画出 scale 倍粗。低于 1x 的缩放下兜底到 1 物理像素，
+            // 否则会被舍成 0、整条下划线消失。
+            let thin = 1.0f32.max(1.0 / canvas.dpi_scale());
+            // 选中分句（日文分节转换中正在转换的那一段）在**显示串**中的绝对范围。
+            let sel_abs = pe.sel.map(|(ss, se)| (ps + ss, ps + se));
+            for (i, ln) in lay.lines.iter().enumerate() {
+                let ly = first_line_y + i as i32 * line_h;
+                if ly + line_h < inner.y || ly > inner.y + inner.h {
+                    continue;
+                }
+                let a = ps.clamp(ln.start, ln.end);
+                let b = pe_end.clamp(ln.start, ln.end);
+                if b <= a {
+                    continue;
+                }
+                // 按选中分句把本行的合成段切成「细—粗—细」最多三段，各自画。
+                // 不能按整行判一个粗细：那样只要分句与本行有交集，整行都会加粗，
+                // 分节转换就完全看不出当前在转换哪一段了。
+                //
+                // 加粗而非背景高亮：背景会与选区高亮撞色，且原生 macOS 也是靠粗细区分。
+                let mut segs: [(usize, usize, bool); 3] = [(0, 0, false); 3];
+                let n_seg = match sel_abs {
+                    Some((gs, ge)) => {
+                        let (gs, ge) = (gs.clamp(a, b), ge.clamp(a, b));
+                        let mut k = 0;
+                        for seg in [(a, gs, false), (gs, ge, true), (ge, b, false)] {
+                            if seg.1 > seg.0 {
+                                segs[k] = seg;
+                                k += 1;
+                            }
+                        }
+                        k
+                    }
+                    None => {
+                        segs[0] = (a, b, false);
+                        1
+                    }
+                };
+                for &(s0, s1, bold) in segs.iter().take(n_seg) {
+                    let x1 = base_x + ln.x[s0 - ln.start];
+                    let x2 = base_x + ln.x[s1 - ln.start];
+                    let t = if bold { thin * 2.0 } else { thin };
+                    // 底边对齐行盒底（向上加粗），三段的基线因此始终齐平。
+                    canvas.fill_rect(
+                        x1 as f32,
+                        (ly + line_h - 1) as f32 - t,
+                        (x2 - x1) as f32,
+                        t,
+                        &Paint::fill(ul_color),
+                    );
+                }
+            }
+        }
+
         let ly = first_line_y + cl as i32 * line_h;
         let cxx = base_x + cx_in;
         // 记录光标局部位置（相对节点左上角）供输入法候选窗定位。
+        // 合成期间 `cl`/`cx_in` 已经是**合成串内**光标的位置，故候选窗自动跟着
+        // 合成进度往右走，不会钉在合成开始前的原光标处。
         self.caret_local
             .set(Some((cxx - bounds.x, ly - bounds.y, line_h)));
-        // 组合态期间不画自绘光标：系统组合浮层自带随组合进度前进的光标，
-        // 两者并存会显得我们的光标"卡在组合开始前"。
-        if focused && !self.composing.get() {
+        // 光标绘制分三档：
+        // - 有合成串（macOS 等自绘平台）：**要画**，且画在合成串内部——那是唯一的光标。
+        // - `composing`（win32）：**不画**，系统组合浮层自带一个跟随组合进度的光标，
+        //   两者并存会显得我们的光标"卡在组合开始前"。
+        // - 常规：照常闪烁。
+        let has_preedit = self.preedit.borrow().is_active();
+        if focused && (has_preedit || !self.composing.get()) {
             // 反色光标：先铺光标条，再裁到光标矩形、用输入框底色把本行文字重画一遍。
             // 于是压在字形笔画上的那一段翻成浅色（等同经典 XOR 插入符的观感），
             // 光标不会沉进深色文字里认不出位置；笔画之外仍是纯粹的光标条。
@@ -1580,7 +1740,14 @@ impl Widget for TextInput {
             // 之所以用「重画一遍再裁剪」而不是 difference 混合：D2D 后端（本库默认）
             // 的 SetPrimitiveBlend 只有 SourceOver/Copy/Min/Add，真反相要么改走
             // ID2D1Effect 离屏合成、要么每帧 GPU 读回，代价都远超此处所值。
-            let opts = CaretOpts::from_theme(inp);
+            let mut opts = CaretOpts::from_theme(inp);
+            if has_preedit {
+                // 合成期间恒实心、不滑行：合成串每按一键就重排，光标位置随之跳变，
+                // 闪烁与滑行都会和 IME 候选窗的动效互相干扰；原生 macOS 亦是静态光标。
+                // 顺带免掉合成期间的每帧续帧。
+                opts.style = CaretStyle::Solid;
+                opts.smooth_move = false;
+            }
             if let Some((caret, alpha)) =
                 // 竖直只内缩 1px：行盒本就含行距，再各缩 2px 会让光标明显短于字身，
                 // 视觉上"矮一截"。
@@ -1946,6 +2113,26 @@ impl Widget for TextInput {
     fn set_composing(&mut self, composing: bool) {
         self.composing.set(composing);
     }
+    fn set_preedit(&mut self, pe: &Preedit) {
+        // 合成串长度变化会改变文本宽度与换行，`rebuild_layout` 的缓存键第一项就是
+        // 显示串，故这里只需换掉数据、下一帧 paint 自动重排，无需手动失效布局。
+        *self.preedit.borrow_mut() = pe.clone();
+        // 合成开始/结束时把视口拉回光标：长合成串可能把光标推出可视区。
+        self.follow_cursor.set(true);
+    }
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        // 无选区时返回光标处的空范围——输入法要的是「插入点在哪」，
+        // 返回 None 会被理解成「没有文本上下文」。
+        Some(self.selection().unwrap_or((self.cursor, self.cursor)))
+    }
+    fn ime_text(&self) -> Option<String> {
+        // 密码框不把内容交给输入法：这段文字会被 IME 读去做联想与重转换，
+        // 密码不该流到那里。
+        if self.config.password {
+            return None;
+        }
+        Some(self.text.with(|t| t.clone()))
+    }
     fn reset_interaction(&mut self) {
         // 复用同一对话框切换编辑目标时（隐藏→再显示），清掉上一条残留的选区/拖选状态，
         // 光标落到（新填充文本的）文末，避免带着旧选区进入下一次编辑。
@@ -1970,7 +2157,7 @@ impl Widget for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{word_run, wrap_paragraph, TextInput, TextLayout, VisLine};
+    use super::{word_run, wrap_paragraph, Preedit, TextInput, TextLayout, VisLine};
     use crate::signal::signal;
 
     fn run(s: &str, idx: usize) -> (usize, usize) {
@@ -2221,6 +2408,182 @@ mod tests {
 
     fn dummy_input() -> TextInput {
         TextInput::new(signal(String::new()), String::new())
+    }
+
+    /// 构造带正文、光标位置与合成串的输入框。
+    fn input_with(text: &str, cursor: usize, pe: Preedit) -> TextInput {
+        use crate::core::Widget;
+        let mut ti = TextInput::new(signal(String::from(text)), String::new());
+        ti.cursor = cursor;
+        ti.set_preedit(&pe);
+        ti
+    }
+
+    fn preedit(text: &str, caret: usize) -> Preedit {
+        Preedit {
+            text: String::from(text),
+            caret,
+            sel: None,
+        }
+    }
+
+    /// 合成串插在光标处，且**不改动**正文信号本身。
+    #[test]
+    fn preedit_inserts_at_cursor_in_display_string() {
+        let ti = input_with("ab", 1, preedit("xyz", 0));
+        assert_eq!(ti.display_string(), "axyzb", "合成串应插在光标处");
+        assert_eq!(
+            ti.text.with(|t| t.clone()),
+            "ab",
+            "合成串不得写进正文——它还没上屏"
+        );
+        // 合成结束后显示串恢复原样。
+        let ti2 = input_with("ab", 1, Preedit::default());
+        assert_eq!(ti2.display_string(), "ab");
+    }
+
+    /// 密码框不给合成串打码：候选窗就浮在屏幕上，打码没有安全收益，
+    /// 只会让用户看不清自己打了什么（原生 NSSecureTextField 同此）。
+    #[test]
+    fn preedit_not_masked_in_password_field() {
+        let mut ti = input_with("ab", 2, preedit("pin", 0));
+        ti.config.password = true;
+        let disp = ti.display_string();
+        assert_eq!(disp, "\u{2022}\u{2022}pin", "正文掩码、合成串明文");
+    }
+
+    /// 逻辑索引 ↔ 显示索引的往返一致性。
+    ///
+    /// 这层映射是本功能最容易静默出错的地方：密码掩码是**等字符数替换**故索引可直接
+    /// 复用，合成串是**插入**，字符数变了。错了不会崩，只会让光标与选区偏移几个字符。
+    #[test]
+    fn preedit_index_mapping_roundtrips() {
+        let ti = input_with("abcd", 2, preedit("XY", 0));
+        // 光标前（含光标位）不移位。
+        assert_eq!(ti.to_display_index(0), 0);
+        assert_eq!(ti.to_display_index(2), 2);
+        // 光标后整体右移合成串长度。
+        assert_eq!(ti.to_display_index(3), 5);
+        assert_eq!(ti.to_display_index(4), 6);
+        // 往返回到原值。
+        for i in 0..=4 {
+            assert_eq!(ti.to_logical_index(ti.to_display_index(i)), i, "i={i}");
+        }
+        // 落在合成串内部的显示索引钳到光标处（合成串不属于正文，无对应逻辑位置）。
+        assert_eq!(ti.to_logical_index(3), 2);
+        assert_eq!(ti.to_logical_index(4), 2);
+        // 无合成时是恒等映射。
+        let plain = input_with("abcd", 2, Preedit::default());
+        for i in 0..=4 {
+            assert_eq!(plain.to_display_index(i), i);
+            assert_eq!(plain.to_logical_index(i), i);
+        }
+    }
+
+    /// 合成串的下划线必须真的画出来，且**长度随合成串增长**。
+    ///
+    /// 后半条是关键：只断言"有墨"会被一个画固定小方块的实现蒙混过去。取 1 字符与
+    /// 4 字符两档比墨量，下划线若真按合成串宽度画，后者应显著更多。
+    ///
+    /// 注意本路径下 `SkiaCanvas::new` 不带文本引擎，`draw_text` 是空操作、字形不出墨；
+    /// 但 `measure_text` 有估算回退，故**布局与下划线几何是真实的**。这个测试覆盖的是
+    /// 下划线几何，字形本身的渲染要靠真机验证。
+    #[test]
+    fn preedit_underline_scales_with_length() {
+        // 光标恒实心，排除闪烁相位对墨量的干扰。
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        // 三者光标都落在 x=0（空正文 + pe.caret=0），故差异只来自下划线。
+        let base = caret_frame(&input_with("", 0, Preedit::default()), 0);
+        let one = caret_frame(&input_with("", 0, preedit("a", 0)), 0);
+        let four = caret_frame(&input_with("", 0, preedit("abcd", 0)), 0);
+        let ink1 = frame_diff(&one, &base);
+        let ink4 = frame_diff(&four, &base);
+        assert!(ink1 > 0, "合成串应画出下划线，实测墨量 {ink1}");
+        assert!(
+            ink4 > ink1 * 2,
+            "下划线应随合成串变长：1 字符 {ink1} vs 4 字符 {ink4}"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 合成内光标随 `pe.caret` 右移——输入法边打边移动它，光标钉在合成串开头
+    /// 就会显得"打字光标不动"。这个位置同时是候选窗的定位点。
+    #[test]
+    fn caret_follows_preedit_progress() {
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        use crate::core::Widget;
+        let xs: Vec<i32> = (0..=4)
+            .map(|c| {
+                let ti = input_with("", 0, preedit("abcd", c));
+                caret_frame(&ti, 0); // paint 记录 caret_local
+                ti.ime_caret().expect("聚焦文本框应有光标位置").0
+            })
+            .collect();
+        assert!(
+            xs.windows(2).all(|w| w[1] > w[0]),
+            "合成内光标 x 应随合成进度单调右移，实测 {xs:?}"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 正文为空但正在合成时，显示串必须非空——paint 据此决定画正文还是 placeholder。
+    ///
+    /// 这里锁的是一个真实踩过的坑：判空看的是**正文**，于是"框里没字、正在打拼音"
+    /// 这个最常见的场景走进了 placeholder 分支，合成串一个字都画不出来，
+    /// 屏幕上只剩占位符——正是用户报的「看不到输入的编码」。
+    #[test]
+    fn empty_text_with_preedit_is_not_blank() {
+        let ti = input_with("", 0, preedit("zhongwen", 8));
+        assert!(
+            !ti.display_string().is_empty(),
+            "正文空但有合成串时，显示串必须非空，否则会被当成空框画 placeholder"
+        );
+        assert_eq!(ti.display_string(), "zhongwen");
+        // 真的空（无合成串）时才算空。
+        let blank = input_with("", 0, Preedit::default());
+        assert!(blank.display_string().is_empty());
+    }
+
+    /// 选中分句只加粗**那一段**，不是整条下划线。
+    ///
+    /// 按视觉行判一个粗细的实现会让「有交集就整行加粗」，日文分节转换于是完全
+    /// 看不出正在转换哪一段。取三档墨量：全细 < 中间一段加粗 < 全粗。
+    #[test]
+    fn preedit_bold_underline_covers_only_the_selected_clause() {
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let base = caret_frame(&input_with("", 0, Preedit::default()), 0);
+        let mut pe_none = preedit("abcdef", 0);
+        pe_none.sel = None;
+        let mut pe_mid = preedit("abcdef", 0);
+        pe_mid.sel = Some((2, 4));
+        let mut pe_all = preedit("abcdef", 0);
+        pe_all.sel = Some((0, 6));
+        let ink = |pe: Preedit| frame_diff(&caret_frame(&input_with("", 0, pe), 0), &base);
+        let (thin, mid, all) = (ink(pe_none), ink(pe_mid), ink(pe_all));
+        assert!(
+            thin < mid,
+            "加粗一段应比全细多墨：全细 {thin} vs 中段加粗 {mid}"
+        );
+        assert!(
+            mid < all,
+            "只加粗中间一段应比整条加粗少墨：中段 {mid} vs 全粗 {all}（相等说明整行都被加粗了）"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 合成串变化必须触发重排：布局缓存键的第一项就是显示串，漏了会让
+    /// 合成串变长时沿用旧的视觉行，光标落点与实际字形对不上。
+    #[test]
+    fn preedit_change_rebuilds_layout() {
+        use crate::core::Widget;
+        let mut ti = input_with("", 0, preedit("a", 1));
+        let a = caret_frame(&ti, 0);
+        ti.set_preedit(&preedit("abcd", 4));
+        let b = caret_frame(&ti, 0);
+        assert!(
+            frame_diff(&a, &b) > 0,
+            "合成串加长后画面必须跟着变（布局已重排）"
+        );
     }
 
     /// 在给定帧时钟渲染一次聚焦态空输入框，返回像素缓冲。

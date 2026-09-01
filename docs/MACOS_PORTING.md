@@ -98,7 +98,7 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 鼠标 | `WM_LBUTTONDOWN`/`MOUSEMOVE`/`MOUSEWHEEL` | `mouseDown:`/`mouseDragged:`/`mouseMoved:`/`scrollWheel:` → `PointerEvent` |
 | 指针捕获 | `SetCapture`/`ReleaseCapture` + `capture_active()` | ✅ 已接：AppKit 隐式续派发（`mouseDown:` 后的 `mouseDragged:`/`mouseUp:` 恒送同一 view，拖出窗口外照送），故**不做任何 OS 调用**，只镜像 `capture_active()`；`on_capture_lost` 挂在 `windowDidResignKey:`（对照 `WM_CAPTURECHANGED`） |
 | 键盘 | `WM_KEYDOWN` | `keyDown:`，特殊键映射到 `Key` |
-| 输入法 | `WM_IME_*` + `ImmSetCompositionWindow`（用 `ime_caret()`） | ✅ 已接：`NSTextInputClient`；`firstRectForCharacterRange:` 用 `ime_caret()` 定位候选窗；合成态经 `setMarkedText:`/`unmarkText`/`insertText:`（+ 窗口失活兜底）上报 `set_ime_composing`。⚠️ 语义差见 §8 |
+| 输入法 | `WM_IME_*` + `ImmSetCompositionWindow`（用 `ime_caret()`） | ✅ 已接：`NSTextInputClient`；合成串经 `setMarkedText:` 整串上报 `set_ime_preedit`，由 `TextInput` **内联绘制**（win32 那边是系统 IME 自己画，故那条路仍走 `set_ime_composing`）；`firstRectForCharacterRange:` 用 `ime_caret()` 定位候选窗，合成期间该位置自动落在合成串内；收尾三处：`unmarkText`/`insertText:` + 窗口失活与 `mouseDown` 兜底 |
 | 光标形状 | `WM_SETCURSOR`（用 `cursor()`） | `NSView::resetCursorRects` 或 `NSCursor::set`，按 `cursor()` 选 arrow/pointingHand/iBeam |
 | 文件拖放 | `WM_DROPFILES`（用 `on_drop_files()`） | `NSDraggingDestination`：`draggingEntered:`/`performDragOperation:` |
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
@@ -226,17 +226,32 @@ win32 的 `run_offscreen`（渲染一帧存 PNG、不开窗，供自动化截屏
 | 改动 | 位置 | 真机验法与预期 |
 |---|---|---|
 | `windowDidResignKey:` → `on_capture_lost` | `platform/macos/window.rs` | 跑 `examples/reorder.rs`，按住一行拖到列表中部**不松手**，Cmd+Tab 切走再切回：该行应已落回合法位置，不再跟随指针 |
-| `windowDidResignKey:` → 收掉合成态 | 同上 `abort_composition` | 跑 `examples/ime.rs`，拼音打到一半（候选窗已弹）时 Cmd+Tab 切走再切回：光标应恢复闪烁，候选窗不残留，已输入的拼音不会莫名上屏 |
+| `windowDidResignKey:` → 收掉合成态 | 同上 `abort_composition` | 跑 `examples/ime.rs`，拼音打到一半（候选窗已弹）时 Cmd+Tab 切走再切回：内联的拼音串应已消失、光标恢复闪烁，候选窗不残留，已输入的拼音不会莫名上屏 |
+| 合成串内联显示 | 同上 `setMarkedText:` → `TextInput` | 跑 `examples/ime.rs` 打拼音：**编码应逐字母出现在文本框内**、带下划线，光标停在合成串内并随打字右移，候选窗跟在下方 |
+| 合成中点别处 | 同上 `mouseDown:` → `abort_composition` | 拼音打到一半时点文本框另一处：合成串应消失、光标落到点击位置，不留悬空的拼音 |
 | 滚轮亚像素残差 | 同上 `on_wheel` | 触控板在长列表上**极慢**地推：应逐点跟手滚动，而不是"轻推没反应、猛推才动" |
 | 原生动量滚动 | 同上 `on_wheel` | 触控板两指快滑后抬手：列表应继续滑行并逐渐停下；滑行途中把两指放回触控板应**立即停住**而非加速 |
 | `phase()` 在滚轮事件上的取值 | 同上 | 鼠标滚轮的 `phase` 应恒为 `None`（走不到清残差分支）；仅用于清残差，取值即便有出入也只影响一格以内的滚动量 |
 
-**已知未消除的语义差（合成串不可见）**：Windows 的 IME 自己会在
+**合成串的绘制责任（已消除的语义差）**：Windows 的 IME 自己会在
 `ImmSetCompositionWindow` 指定处画出合成串及其光标，所以控件在合成态隐藏自绘光标是在
-**消除双光标**；macOS 把绘制 marked text 的责任完全交给客户端，而本后端不画——于是合成
-期间文本框里既没有合成串、也没有光标。这不是本轮引入的（下发链路一直如此），根治要上层
-先有"显示未提交合成串"的 API（`RichText` 的 span 模型可承载）。真机上若观感不可接受，
-短期缓解是让 macOS 后端不上报 `composing = true`（保留光标闪烁），代价是与 win32 行为分叉。
+**消除双光标**；macOS 把绘制 marked text 的责任完全交给客户端，系统绝不代画。
+此前本后端只上报一个 `composing` 布尔、把合成串丢掉，于是合成期间文本框里既没有合成串、
+也没有光标——表现就是「打拼音看不到编码」。
+
+现已打通 `Preedit` 通路（`setMarkedText:` → `set_ime_preedit` → `Widget::set_preedit`
+→ `TextInput` 内联绘制），两平台分工如下，**互斥、不可同时启用**：
+
+| | 合成串由谁画 | 走哪条 SPI |
+|---|---|---|
+| win32 | 系统 IME（`ImmSetCompositionWindow`） | `set_ime_composing`（布尔），控件藏起自绘光标 |
+| macOS | 本库自绘（下划线 + 合成内光标） | `set_ime_preedit`（整串 + 光标位置 + 分句） |
+
+win32 若也上报 preedit 会出现**双份合成串**（系统一份、自绘一份），这是本设计唯一的
+致命回归形态，`TextInput::preedit` 在 win32 上恒空即为守卫。三平台语义统一（让 win32
+也改自绘、取 `GCS_COMPSTR`）是长期收敛方向，但会动到当前正常的 Windows 路径，未做。
+
+细节见 `docs/ime-preedit-design.md`。
 
 **已知未覆盖的收尾路径（两平台同病）**：菜单浮层的滚动条拖拽状态（`app/menu.rs` 的
 `scrollbar_drag`）不走 `UiHost::capture`——菜单打开时 `on_pointer` 在进入控件树之前就

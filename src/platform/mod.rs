@@ -723,8 +723,38 @@ pub trait AppHandler {
 
     /// 输入法组合态开始/结束（拼音等未上屏文字合成中）时由平台层调用，转发给
     /// 当前焦点控件（见 `Widget::set_composing`）。返回 true 表示需要重绘。
+    ///
+    /// **仅 win32 走这条**：那边合成串由系统 IME 自己画（`ImmSetCompositionWindow`），
+    /// 上层只需知道「合成中」以便藏起自绘光标、消除双光标。需要自绘合成串的平台
+    /// （macOS、将来的 Linux）走 [`Self::set_ime_preedit`]。
     fn set_ime_composing(&mut self, _composing: bool) -> bool {
         false
+    }
+
+    /// 输入法合成串变化时由平台层调用，转发给当前焦点控件（见 `Widget::set_preedit`）。
+    /// 返回 true 表示需要重绘。
+    ///
+    /// 与 [`Self::set_ime_composing`] 互斥：**走系统内联绘制的平台（win32）永不调用本方法**，
+    /// 否则系统画一份、控件自绘一份，屏幕上会出现双份合成串。
+    fn set_ime_preedit(&mut self, _pe: &crate::event::Preedit) -> bool {
+        false
+    }
+
+    /// 焦点文本控件的当前选区（**字符**索引，`(start, end)` 且 `start <= end`）。
+    /// 无选区时返回光标处的空范围；无文本焦点返回 `None`。
+    ///
+    /// 供输入法查询上下文（macOS `selectedRange`）。返回错误的值不会崩，只会让
+    /// 部分输入法的候选联想与重转换失准，故值必须真实反映控件状态。
+    fn ime_selection(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// 焦点文本控件的**已提交**正文（不含未上屏的合成串）。无文本焦点返回空串。
+    ///
+    /// 供输入法读取上下文（macOS `attributedSubstringForProposedRange:`，用于重转换与
+    /// 联想），以及把字符索引换算成 UTF-16 码元。密码框返回空串——不把密码交给输入法。
+    fn ime_text(&self) -> String {
+        String::new()
     }
 
     /// 本帧是否有控件请求持续动画。平台层据此在阻塞空闲与按帧驱动之间切换。

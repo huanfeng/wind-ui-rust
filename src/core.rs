@@ -209,7 +209,28 @@ pub trait Widget {
     }
     /// 输入法组合态变化（拼音等未上屏文字开始/结束合成）时由框架通知焦点节点。
     /// 文本控件借此在组合期间暂不绘制自绘光标（系统组合浮层自带光标）。默认无操作。
+    ///
+    /// **仅 win32 这条路会调**——那边系统 IME 自己画合成串。需自绘的平台走
+    /// [`Self::set_preedit`]。
     fn set_composing(&mut self, _composing: bool) {}
+
+    /// 输入法合成串变化时由框架通知焦点节点。文本控件借此把未提交的合成串
+    /// 内联显示出来（见 `TextInput`）。默认无操作。
+    ///
+    /// 空 `text` 表示合成结束，控件应清掉合成串并恢复正常光标。
+    fn set_preedit(&mut self, _pe: &crate::event::Preedit) {}
+
+    /// 本控件当前选区（**字符**索引）。无选区的文本控件返回光标处空范围，
+    /// 非文本控件返回 `None`。供输入法查询上下文。
+    fn selection_range(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// 本控件的已提交正文（不含未上屏合成串），供输入法读取上下文。
+    /// 非文本控件返回 `None`；密码框应返回 `None`（不把密码交给输入法）。
+    fn ime_text(&self) -> Option<String> {
+        None
+    }
     /// layout 前由框架向**已注册的响应式节点**调用（见 `Tree::register_reactive`）。
     /// 响应式控件在此检测绑定信号的版本变化，若有变化则通过 `ctx.tree_mut()` 重建子节点。
     /// 默认无操作；普通控件无需实现。
@@ -2029,6 +2050,26 @@ impl Tree {
         };
         n.widget.set_composing(composing);
         true
+    }
+
+    /// 把输入法合成串下发给节点（见 `Widget::set_preedit`）。
+    /// 返回 true 表示节点存在且已通知（调用方据此判断是否需要重绘）。
+    pub fn set_preedit(&mut self, id: NodeId, pe: &crate::event::Preedit) -> bool {
+        let Some(n) = self.get_mut(id) else {
+            return false;
+        };
+        n.widget.set_preedit(pe);
+        true
+    }
+
+    /// 读节点当前选区（见 `Widget::selection_range`）。
+    pub fn selection_of(&self, id: NodeId) -> Option<(usize, usize)> {
+        self.get(id)?.widget.selection_range()
+    }
+
+    /// 读节点的已提交正文（见 `Widget::ime_text`）。
+    pub fn ime_text_of(&self, id: NodeId) -> Option<String> {
+        self.get(id)?.widget.ime_text()
     }
 
     /// 找 `p`（逻辑坐标）下最近的滚动容器节点（命中点向上找首个 `Layout::Scroll`）。
