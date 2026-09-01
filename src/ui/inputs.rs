@@ -852,8 +852,14 @@ impl TextInput {
 
     /// 触发 `on_click`。**无返回值**：这次点击归本控件消费是既定的，回调只是旁路通知。
     ///
-    /// 与 [`Self::fire_submit`] 的区别在这里——那个要如实报"本控件处理了没有"，
+    /// 与 [`Self::fire_submit`] 的区别在这里——那个要如实报「本控件处理了没有」，
     /// 因为宿主据此决定 Escape 关窗兜底走不走；点击没有这层歧义。
+    ///
+    /// ⚠ 回调跑在 `Down` 处理器的**中段**，其后本控件还要设 `dragging` 并 `ctx.capture()`。
+    /// 而 `EventOutcome.capture` 是单个 `Option`、后写覆盖先写——**回调里请求的捕获
+    /// 会被随后那句 `ctx.capture()` 无声抹掉**。这是「链上去不报错也不生效」的同一形状，
+    /// 故写在这里备案；不把 `fire_click` 挪到状态更新之后，是因为那会改变它与双击/三击
+    /// 分支的先后（选词、选段也该通知，见调用点）。
     fn fire_click(&mut self, ctx: &mut EventCtx) {
         if let Some(f) = self.on_click.as_mut() {
             f(ctx);
@@ -1651,7 +1657,13 @@ impl Widget for TextInput {
                     // 不是文字，后者要弹上下文菜单，再触发宿主的点击反应会打架。而双击/三击
                     // 在**下面**，故选词、选段同样会通知：用户双击输入框时，那个被收起的
                     // 浮层一样该回来。
-                    self.fire_click(ctx);
+                    //
+                    // ⚠ 只认左键。`wants_right_click()` 为 true 使得**所有**非左键的 Down
+                    // 都会投递进来（派发层的判据是 `button != Left`，见 `core.rs` 的
+                    // `secondary`），上面那道关只挡了 Right——中键会一路落到这儿。
+                    if p.button == MouseButton::Left {
+                        self.fire_click(ctx);
+                    }
                     // 双击选词 / 三击选段。不进入拖选。
                     match p.click_count {
                         2 => {
@@ -2039,6 +2051,79 @@ mod tests {
         assert_eq!(hits.get(), 1, "双击选词也应通知宿主");
     }
 
+    /// 中键**不**通知。
+    ///
+    /// `wants_right_click()` 为 true 使得**所有**非左键的 Down 都会投递进来（派发层
+    /// 的判据是 `button != Left`），而 Down 分支里只挡了 Right——中键曾一路落到
+    /// `fire_click`，与 `Element::on_click` 文档承诺的「右键与拖滚动条不触发」不符。
+    #[test]
+    fn middle_click_does_not_notify() {
+        use crate::event::MouseButton;
+        let hits = signal(0);
+        let mut tree = input_tree(
+            crate::ui::Element::text_input(signal(String::from("abc")), "")
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        press(&mut tree, 1, MouseButton::Middle);
+        assert_eq!(hits.get(), 0, "中键不该触发宿主的点击通知");
+    }
+
+    /// 拖多行输入框的滚动条**不**通知：点的是滚动条，不是文字。
+    ///
+    /// 这是触发点选址的理由之一，得有测试守着——否则日后有人把 `fire_click` 往上挪
+    /// 一行，不会有任何测试反对。
+    ///
+    /// 行布局是**手工塞**的：真实 layout 由 `paint` 构建，而那要拉起画布与字体，
+    /// 对一条只关心「命中落进哪个分支」的测试来说依赖太重。
+    #[test]
+    fn scrollbar_hit_does_not_notify() {
+        use crate::core::Widget;
+        use crate::event::{Event, MouseButton, PointerEvent, PointerKind};
+        let hits = signal(0);
+        let mut tree = crate::core::Tree::new();
+        let root = crate::ui::Element::leaf()
+            .width(160)
+            .height(60)
+            .build(&mut tree);
+        tree.root = Some(root);
+        // 视口与元素同尺寸：`ctx.bounds()` 取的是根节点布局后的矩形，视口更大时
+        // 根会被拉开，右缘就不在 160 上了——滚动条命中区是按 `bounds.right()` 算的。
+        tree.layout_root(
+            crate::geometry::Size::new(160, 60),
+            &mut crate::text::NullTextEngine,
+        );
+
+        let mut ti = TextInput::new(signal(String::from("x")), String::new());
+        ti.config_mut().multiline = true;
+        ti.take_click(Box::new(move |_| hits.set(hits.get() + 1)));
+        {
+            // 内容高远超视口 ⇒ 滚动条可见、可拖。
+            let mut lay = ti.layout.borrow_mut();
+            lay.lines = (0..20)
+                .map(|i| VisLine {
+                    start: i,
+                    end: i + 1,
+                    x: vec![0, 8],
+                    hard: true,
+                })
+                .collect();
+            lay.line_h = 16;
+        }
+        // 贴右缘落点，进滚动条命中区。
+        let at = crate::geometry::Point::new(160 - 2, 30);
+        crate::testing::run_with_ctx_in(&mut tree, root, |ctx| {
+            ti.on_event(
+                ctx,
+                &Event::Pointer(PointerEvent::single(
+                    PointerKind::Down,
+                    at,
+                    MouseButton::Left,
+                )),
+            );
+        });
+        assert_eq!(hits.get(), 0, "点滚动条不该触发宿主的点击通知");
+    }
+
     /// 右键**不**通知：它要弹上下文菜单，再触发宿主的点击反应会打架。
     #[test]
     fn right_click_does_not_notify() {
@@ -2052,21 +2137,47 @@ mod tests {
         assert_eq!(hits.get(), 0, "右键弹菜单，不应触发宿主的点击通知");
     }
 
+    /// 从树根取出那个 `TextInput` 的 `(cursor, dragging)`。
+    fn input_state(tree: &mut crate::core::Tree) -> (usize, bool) {
+        let root = tree.root.expect("树应有根");
+        let ti = tree
+            .get_mut(root)
+            .and_then(|n| n.widget.as_any_mut())
+            .and_then(|a| a.downcast_mut::<TextInput>())
+            .expect("根应当是 TextInput");
+        (ti.cursor, ti.dragging)
+    }
+
     /// **回归**：通知是旁路的，输入框自身的行为不能因此改变。
     ///
-    /// 装了回调就不定位光标、或不再进入拖选的话，这个"通知"就成了破坏——
+    /// 装了回调就不定位光标、或不再进入拖选的话，这个「通知」就成了破坏——
     /// 用户点一下，光标不动。
+    ///
+    /// （这条一度只比较两个**从未收过任何事件**的 `TextInput`：`cursor` 恒等于文末、
+    /// `dragging` 恒为 false，两条断言在任何实现下都成立，等于什么都没测。掏空
+    /// `take_click` 时它之所以变红，靠的是末尾那句「回调装上了没」的前置断言——
+    /// 而那查的是装配，不是行为。现在两棵树各真派发一次点击再比。）
     #[test]
     fn notify_does_not_disturb_the_input_itself() {
-        use crate::core::Widget;
-        let text = signal(String::from("hello"));
-        let mut plain = TextInput::new(text, String::new());
-        let mut noisy = TextInput::new(text, String::new());
-        noisy.take_click(Box::new(|_| {}));
-        // 两者对同一次点击应做出完全相同的内部反应。
-        assert_eq!(plain.cursor, noisy.cursor);
-        assert_eq!(plain.dragging, noisy.dragging);
-        assert!(noisy.on_click.is_some(), "前置：回调确实装上了");
+        use crate::event::MouseButton;
+        let hits = signal(0);
+        let mut plain = input_tree(crate::ui::Element::text_input(
+            signal(String::from("hello world")),
+            "",
+        ));
+        let mut noisy = input_tree(
+            crate::ui::Element::text_input(signal(String::from("hello world")), "")
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        press(&mut plain, 1, MouseButton::Left);
+        press(&mut noisy, 1, MouseButton::Left);
+        assert_eq!(hits.get(), 1, "前置：回调确实被调到了");
+
+        let (plain_cursor, plain_dragging) = input_state(&mut plain);
+        let (noisy_cursor, noisy_dragging) = input_state(&mut noisy);
+        assert_eq!(plain_cursor, noisy_cursor, "装了回调不该改变光标落点");
+        assert_eq!(plain_dragging, noisy_dragging, "装了回调不该改变拖选状态");
+        assert!(noisy_dragging, "左键按下应进入拖选（这次点击确实被处理了）");
     }
 
     // 每字符宽 10 的合成前缀，用于纯函数换行测试。

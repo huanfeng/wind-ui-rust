@@ -923,7 +923,8 @@ impl Element {
     ///
     /// 用在 [`Element::text_input`] 上时语义是**旁路通知**而非激活：输入框照常聚焦、
     /// 定位光标、起拖选，回调只是让宿主知道「这个框被点了」——例如重新展开一个被
-    /// Escape 收起的补全/结果浮层。右键（弹上下文菜单）与拖多行滚动条不触发。
+    /// Escape 收起的补全/结果浮层。**仅左键**：右键（弹上下文菜单）、中键、
+    /// 拖多行滚动条都不触发。
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
         self
