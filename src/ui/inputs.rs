@@ -764,6 +764,13 @@ pub struct TextInput {
     on_submit: Option<SubmitFn>,
     /// 本控件**未处理**的导航键的出口（见 [`crate::ui::Element::on_nav_key`]）。
     on_nav_key: Option<NavKeyFn>,
+    /// 「本控件被点了」的通知（见 [`crate::ui::Element::on_click`]）。
+    ///
+    /// 与 Button 的同名回调**语义不同**：那里 on_click 就是激活本身，这里只是旁路通知，
+    /// 输入框该定位光标、该起拖选照旧。宿主用它做的是「点了输入框」这件事的附带反应，
+    /// 例如重新展开一个被 Escape 收起的补全/结果浮层——那种状态只有宿主知道，
+    /// 而在此之前它连"用户又点了一次输入框"都收不到。
+    on_click: Option<ClickFn>,
 }
 
 /// 单行 Enter 回调。与 `on_click` 同形（`ctx` 在首位）。
@@ -797,6 +804,7 @@ impl TextInput {
             composing: Cell::new(false),
             on_submit: None,
             on_nav_key: None,
+            on_click: None,
         }
     }
 
@@ -839,6 +847,16 @@ impl TextInput {
         match &mut self.on_nav_key {
             Some(f) => f(ctx, ev),
             None => false,
+        }
+    }
+
+    /// 触发 `on_click`。**无返回值**：这次点击归本控件消费是既定的，回调只是旁路通知。
+    ///
+    /// 与 [`Self::fire_submit`] 的区别在这里——那个要如实报"本控件处理了没有"，
+    /// 因为宿主据此决定 Escape 关窗兜底走不走；点击没有这层歧义。
+    fn fire_click(&mut self, ctx: &mut EventCtx) {
+        if let Some(f) = self.on_click.as_mut() {
+            f(ctx);
         }
     }
 
@@ -1627,6 +1645,13 @@ impl Widget for TextInput {
                         ctx.show_context_menu(p.pos, items);
                         return true;
                     }
+                    // 到这里才算「用户点了这个输入框」，通知宿主。
+                    //
+                    // 位置有讲究：拖滚动条与右键都已在上面 return 掉了——前者点的是滚动条
+                    // 不是文字，后者要弹上下文菜单，再触发宿主的点击反应会打架。而双击/三击
+                    // 在**下面**，故选词、选段同样会通知：用户双击输入框时，那个被收起的
+                    // 浮层一样该回来。
+                    self.fire_click(ctx);
                     // 双击选词 / 三击选段。不进入拖选。
                     match p.click_count {
                         2 => {
@@ -1897,6 +1922,9 @@ impl Widget for TextInput {
     fn focusable(&self) -> bool {
         true
     }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
+    }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
@@ -1951,6 +1979,94 @@ mod tests {
         assert_eq!(ti.anchor, None, "复位后不应残留选区锚点");
         assert!(ti.selection().is_none(), "复位后选区应清空");
         assert_eq!(ti.cursor, ti.char_count(), "光标应落到文末");
+    }
+
+    // ── on_click：点输入框时通知宿主 ────────────────────────────────────────
+    //
+    // 补这条能力之前 TextInput 没实现 `Widget::take_click`，于是
+    // `Element::text_input(..).on_click(..)` 是**静默无效**的——链上去不报错也不生效。
+    // 宿主因此收不到"用户又点了一次输入框"，像「Escape 收起结果浮层后再点输入框、
+    // 浮层该回来」这类需求就无处落脚。
+
+    /// 建一棵只含单行输入框的树，输入框占满 160×28 的根节点。
+    fn input_tree(el: crate::ui::Element) -> crate::core::Tree {
+        let mut tree = crate::core::Tree::new();
+        let root = el.width(160).height(28).build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(
+            crate::geometry::Size::new(200, 60),
+            &mut crate::text::NullTextEngine,
+        );
+        tree
+    }
+
+    /// 往输入框正中派发一次按下。`count` 为连击数（2 = 双击）。
+    fn press(tree: &mut crate::core::Tree, count: u8, button: crate::event::MouseButton) {
+        use crate::event::{PointerEvent, PointerKind};
+        let ev = PointerEvent {
+            click_count: count,
+            ..PointerEvent::single(
+                PointerKind::Down,
+                crate::geometry::Point::new(20, 14),
+                button,
+            )
+        };
+        tree.dispatch_pointer(ev, &mut None, &mut None);
+    }
+
+    #[test]
+    fn click_notifies_host() {
+        use crate::event::MouseButton;
+        let hits = signal(0);
+        let mut tree = input_tree(
+            crate::ui::Element::text_input(signal(String::from("abc")), "")
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        press(&mut tree, 1, MouseButton::Left);
+        assert_eq!(hits.get(), 1, "左键点输入框应通知宿主一次");
+    }
+
+    /// 双击（选词）同样通知：用户双击输入框时，那个被收起的浮层一样该回来。
+    #[test]
+    fn double_click_also_notifies() {
+        use crate::event::MouseButton;
+        let hits = signal(0);
+        let mut tree = input_tree(
+            crate::ui::Element::text_input(signal(String::from("hello world")), "")
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        press(&mut tree, 2, MouseButton::Left);
+        assert_eq!(hits.get(), 1, "双击选词也应通知宿主");
+    }
+
+    /// 右键**不**通知：它要弹上下文菜单，再触发宿主的点击反应会打架。
+    #[test]
+    fn right_click_does_not_notify() {
+        use crate::event::MouseButton;
+        let hits = signal(0);
+        let mut tree = input_tree(
+            crate::ui::Element::text_input(signal(String::from("abc")), "")
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        press(&mut tree, 1, MouseButton::Right);
+        assert_eq!(hits.get(), 0, "右键弹菜单，不应触发宿主的点击通知");
+    }
+
+    /// **回归**：通知是旁路的，输入框自身的行为不能因此改变。
+    ///
+    /// 装了回调就不定位光标、或不再进入拖选的话，这个"通知"就成了破坏——
+    /// 用户点一下，光标不动。
+    #[test]
+    fn notify_does_not_disturb_the_input_itself() {
+        use crate::core::Widget;
+        let text = signal(String::from("hello"));
+        let mut plain = TextInput::new(text, String::new());
+        let mut noisy = TextInput::new(text, String::new());
+        noisy.take_click(Box::new(|_| {}));
+        // 两者对同一次点击应做出完全相同的内部反应。
+        assert_eq!(plain.cursor, noisy.cursor);
+        assert_eq!(plain.dragging, noisy.dragging);
+        assert!(noisy.on_click.is_some(), "前置：回调确实装上了");
     }
 
     // 每字符宽 10 的合成前缀，用于纯函数换行测试。
