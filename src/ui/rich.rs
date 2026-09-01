@@ -439,6 +439,35 @@ trait Measurer {
     fn scale(&self) -> f32;
 }
 
+/// 碎片内每个**字符边界**距文字起点的横向偏移。长度 = 字符数 + 1，首元素恒为 0、
+/// 末元素恒为 `full_w`。
+///
+/// 逐前缀测量，与 `TextInput` 的 `prefix` 是同一套做法（见 `ui/inputs.rs` 里
+/// `wrap_paragraph` 的入参）——同一件事用两种算法，会让同一段文字在两个控件里落点
+/// 不同，而那种差异只有拿尺子量才看得出来。
+///
+/// 单字符碎片直接给 `[0, full_w]`：CJK 逐字成片，正文里绝大多数碎片都是这一种，
+/// 为它们各跑一次 measure 是纯浪费。
+///
+/// 末元素取传入的 `full_w` 而不是再测一次整串：布局已经按那个宽度摆好了碎片，这里
+/// 若测出个差一像素的值，选区右边界就会与碎片右边界对不齐。
+fn char_offsets(m: &mut dyn Measurer, text: &str, ts: &TextStyle, full_w: i32) -> Vec<i32> {
+    let n = text.chars().count();
+    if n == 0 {
+        return vec![0];
+    }
+    if n == 1 {
+        return vec![0, full_w];
+    }
+    let mut out = Vec::with_capacity(n + 1);
+    out.push(0);
+    for (b, _) in text.char_indices().skip(1) {
+        out.push(m.size(&text[..b], ts).w);
+    }
+    out.push(full_w);
+    out
+}
+
 struct EngineMeasurer<'a>(&'a mut dyn TextEngine);
 impl Measurer for EngineMeasurer<'_> {
     fn size(&mut self, text: &str, ts: &TextStyle) -> Size {
@@ -492,6 +521,18 @@ impl FragStyle {
     }
 }
 
+/// 选区的一个端点：第几个碎片的第几个**字符边界**。
+///
+/// `ch` 是字符边界下标而非字节偏移——它直接拿去 [`Frag::char_x`] 取横坐标，也直接
+/// 拿去 `chars().skip/take` 切文本，两处用的是同一把尺子。
+///
+/// 派生的 `Ord` 恰好就是阅读序（先比碎片、再比字符），选区排序直接用它。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+struct Caret {
+    frag: usize,
+    ch: usize,
+}
+
 /// 已排版碎片。坐标相对控件 content 左上角（逻辑 px）。
 struct Frag {
     text: String,
@@ -509,6 +550,10 @@ struct Frag {
     style: FragStyle,
     /// Section 折叠箭头（fg 走 RichTheme.chevron）。
     chevron: bool,
+    /// 字符边界距 `text_rect` 左缘的横向偏移，长度 = 字符数 + 1。选区要能落在碎片
+    /// **内部**：一个 Latin 单词就是一个碎片，没有这份数据，「standby」这样的词头
+    /// 就只能整块选或者一点也选不中。见 [`char_offsets`]。
+    char_x: Vec<i32>,
     /// 可点击 span 的标识（词典交叉引用）。同一 span 换行拆出的多个碎片共享同一 Rc。
     id: Option<Rc<str>>,
     /// clamp 截断标记「… 展开」：点击置该信号为 true（段落展开）。
@@ -603,6 +648,8 @@ struct Item {
     id: Option<Rc<str>>,
     /// clamp 展开标记（透传到 Frag）。
     expand: Option<Signal<bool>>,
+    /// 字符边界横向偏移（透传到 Frag）。见 [`char_offsets`]。
+    char_x: Vec<i32>,
 }
 
 impl Item {
@@ -800,6 +847,7 @@ impl Walker<'_> {
         let ts = style.ts();
         let sz = self.m.size(text, &ts);
         let lm = self.m.metrics(text, &ts);
+        let char_x = char_offsets(&mut *self.m, text, &ts, sz.w);
         let pad = if style.chip {
             (
                 (style.size * 0.45).round() as i32,
@@ -819,6 +867,7 @@ impl Walker<'_> {
             pad,
             id,
             expand: None,
+            char_x,
         }
     }
 
@@ -849,6 +898,7 @@ impl Walker<'_> {
                 text: it.text,
                 rect,
                 text_rect,
+                char_x: it.char_x,
                 line_top,
                 line_h,
                 ascent: it.ascent,
@@ -1304,15 +1354,20 @@ pub struct RichText {
     pressed_span: Cell<Option<usize>>,
     /// span 点击回调（`Element::on_span_click` 注入；参数为 span 的 id）。
     on_span_click: Option<SpanClickFn>,
-    /// 划选选区：(锚点, 延伸点) 碎片下标（无序存储，使用时排序）。
-    /// 粒度为碎片级——CJK 逐字成片即中文天然字符级；Latin 整词吸附；chip 整体。
+    /// 划选选区：(锚点, 延伸点)（无序存储，使用时排序）。
+    ///
+    /// 粒度为**字符级**。此前是碎片级，而碎片的切法是「Latin 按空格断、CJK 逐字断」
+    /// ——于是 `standby` 这样的词头、`[ˈstændbaɪ]` 这样的音标各自只有一个碎片，拖动时
+    /// 延伸点永远等于锚点，选区恒为空：那些内容只能双击整选，拖不动。中文因为逐字
+    /// 成片才碰巧是可拖的。
+    ///
     /// 布局重排（宽度/折叠/字体变化）时失效清空（碎片下标已不稳定）。
-    sel: Cell<Option<(usize, usize)>>,
+    sel: Cell<Option<(Caret, Caret)>>,
     /// 是否正在拖拽划选（Down 起、Up 止，期间 Move 更新延伸点）。
     selecting: Cell<bool>,
-    /// 拖选锚点碎片（Down 只记录、不落选区——拖出锚点碎片才成选区，
-    /// 按下即选中单字不符合通用划选手感）。
-    drag_anchor: Cell<Option<usize>>,
+    /// 拖选锚点（Down 只记录、不落选区——拖出锚点字符才成选区，按下即选中一个字
+    /// 不符合通用划选手感）。
+    drag_anchor: Cell<Option<Caret>>,
     /// 指针悬停在正文文字上（I 形光标；span/折叠头的手型优先）。
     hover_text: Cell<bool>,
     /// 指针悬停在「… 展开」标记上（手型光标）。
@@ -1507,6 +1562,45 @@ impl RichText {
         best.map(|(_, _, i)| i)
     }
 
+    /// 指针最近的选区端点：先由 [`Self::frag_near`] 选碎片（那套「最近碎片」的吸附
+    /// 规则原样不动），再在碎片内落到最近的字符边界上。
+    fn caret_near(&self, pos: Point) -> Option<Caret> {
+        let i = self.frag_near(pos)?;
+        let content = self.last_content.get();
+        let cache = self.cache.borrow();
+        let f = cache.as_ref()?.frags.get(i)?;
+        let local_x = pos.x - content.x - f.text_rect.x;
+        let last = f.char_x.len().saturating_sub(1);
+        // chip 不可分：词性胶囊那样的东西是一个整体的视觉块，从中间切开既难看又没有
+        // 意义。落到就近的那一端，于是它要么整个进选区、要么整个不进。
+        if f.style.chip {
+            let ch = if local_x * 2 >= f.text_rect.w {
+                last
+            } else {
+                0
+            };
+            return Some(Caret { frag: i, ch });
+        }
+        // 最近的那个边界——两个边界的中点为界，与文本控件放光标的手感一致。
+        let mut best = 0usize;
+        let mut bd = i32::MAX;
+        for (k, x) in f.char_x.iter().enumerate() {
+            let d = (local_x - x).abs();
+            if d < bd {
+                bd = d;
+                best = k;
+            }
+        }
+        Some(Caret { frag: i, ch: best })
+    }
+
+    /// 把一段碎片范围整体转成选区端点对（双击选词、三击选段、Ctrl+A 全选都用它）。
+    fn whole_frags(&self, a: usize, b: usize) -> Option<(Caret, Caret)> {
+        let cache = self.cache.borrow();
+        let end = cache.as_ref()?.frags.get(b)?.char_x.len().saturating_sub(1);
+        Some((Caret { frag: a, ch: 0 }, Caret { frag: b, ch: end }))
+    }
+
     /// 指针是否精确落在某个碎片上（I 形光标判定；不吸附）。
     fn over_frag(&self, pos: Point) -> bool {
         let content = self.last_content.get();
@@ -1583,11 +1677,23 @@ impl RichText {
         let (a, b) = (a.min(b), a.max(b));
         let cache = self.cache.borrow();
         let lay = cache.as_ref()?;
-        let frags = lay.frags.get(a..=b)?;
         let mut out = String::new();
         let mut prev: Option<&Frag> = None;
-        for f in frags {
+        for i in a.frag..=b.frag.min(lay.frags.len().saturating_sub(1)) {
+            let f = lay.frags.get(i)?;
             if f.chevron || f.expand.is_some() {
+                continue;
+            }
+            // 首尾两个碎片只取选中的那一段，中间的整片都要。
+            let from = if i == a.frag { a.ch } else { 0 };
+            let to = if i == b.frag {
+                b.ch
+            } else {
+                f.char_x.len().saturating_sub(1)
+            };
+            // 空片不入文，**也不更新 `prev`**：它没有贡献任何字符，让它去参与
+            // 「要不要补空格/换行」的判断只会凭空多出一个分隔。
+            if to <= from {
                 continue;
             }
             if let Some(p) = prev {
@@ -1601,7 +1707,7 @@ impl RichText {
                     }
                 }
             }
-            out.push_str(&f.text);
+            out.extend(f.text.chars().skip(from).take(to - from));
             prev = Some(f);
         }
         (!out.is_empty()).then_some(out)
@@ -1656,13 +1762,30 @@ impl Widget for RichText {
         // 纵向按行盒铺满（非碎片自身高）：对齐系统文本控件——下伸部完整包住、
         // 同行混排字号顶底齐平、多行选中行与行之间无白缝。
         if let Some((a, b)) = self.sel.get() {
-            let (a, b) = (a.min(b), a.max(b).min(lay.frags.len().saturating_sub(1)));
+            let (a, b) = (a.min(b), a.max(b));
             let selc = th.rich.selection(pal);
-            for f in lay.frags.iter().take(b + 1).skip(a) {
+            for i in a.frag..=b.frag.min(lay.frags.len().saturating_sub(1)) {
+                let Some(f) = lay.frags.get(i) else { continue };
+                // `char_x` 相对 `text_rect`，而高亮铺在 `rect` 上（chip 含内边距），
+                // 故要把那段 padding 加回去。
+                let pad = f.text_rect.x - f.rect.x;
+                let x0 = if i == a.frag {
+                    pad + f.char_x.get(a.ch).copied().unwrap_or(0)
+                } else {
+                    0
+                };
+                let x1 = if i == b.frag {
+                    pad + f.char_x.get(b.ch).copied().unwrap_or(f.text_rect.w)
+                } else {
+                    f.rect.w
+                };
+                if x1 <= x0 {
+                    continue;
+                }
                 canvas.fill_rect(
-                    (content.x + f.rect.x) as f32,
+                    (content.x + f.rect.x + x0) as f32,
                     (content.y + f.line_top) as f32,
-                    f.rect.w as f32,
+                    (x1 - x0) as f32,
                     f.line_h as f32,
                     &Paint::fill(selc),
                 );
@@ -1819,7 +1942,7 @@ impl Widget for RichText {
                     .map(|l| l.frags.len())
                     .unwrap_or(0);
                 if n > 0 {
-                    self.sel.set(Some((0, n - 1)));
+                    self.sel.set(self.whole_frags(0, n - 1));
                     ctx.mark_dirty();
                 }
                 return true;
@@ -1861,7 +1984,8 @@ impl Widget for RichText {
                 // 拖拽划选中：更新延伸点（capture 保证界外 Move 也送达）。
                 // 未拖出锚点碎片前不产生选区；拖回锚点碎片则选区消失。
                 if self.selecting.get() {
-                    if let (Some(anchor), Some(i)) = (self.drag_anchor.get(), self.frag_near(p.pos))
+                    if let (Some(anchor), Some(i)) =
+                        (self.drag_anchor.get(), self.caret_near(p.pos))
                     {
                         let new = (i != anchor).then_some((anchor, i));
                         if new != self.sel.get() {
@@ -1947,18 +2071,18 @@ impl Widget for RichText {
                         return false;
                     };
                     ctx.request_focus();
-                    let range = if p.click_count >= 3 {
+                    let (ra, rb) = if p.click_count >= 3 {
                         self.para_range_at(i)
                     } else {
                         self.word_range_at(i)
                     };
-                    self.sel.set(Some(range));
+                    self.sel.set(self.whole_frags(ra, rb));
                     ctx.mark_dirty();
                     return true;
                 }
                 // 起划选：只记锚点，不落选区（拖出锚点碎片才出现高亮）。
                 // 先聚焦——物理 Ctrl+C 与菜单 SendKey 都路由到焦点节点。
-                let Some(i) = self.frag_near(p.pos) else {
+                let Some(i) = self.caret_near(p.pos) else {
                     return false;
                 };
                 ctx.request_focus();
@@ -2466,6 +2590,12 @@ mod tests {
         );
     }
 
+    /// 拖选跨越多个碎片，终点落在「词」的右半边 —— 该字整个进选区。
+    ///
+    /// 终点取 26 而不是 20：选区改成字符级之后，延伸点吸附到**最近的字符边界**，
+    /// 20 落在「词」的左半边（18..27 的中点是 22.5），最近边界是它的左缘，于是
+    /// 「词」不进选区、复制出来只有「汉字」。这不是回归，是字符级选区该有的样子
+    /// ——浏览器里也是拖过字的一半才选中它。
     #[test]
     fn drag_selection_copies_fragment_range() {
         // "汉字词典" 单行 4 片（每片 9px：汉 0..9、字 9..18、词 18..27、典 27..36）。
@@ -2482,17 +2612,74 @@ mod tests {
             &mut cap,
         );
         tree.dispatch_pointer(
-            PointerEvent::single(PointerKind::Move, pt(20), MouseButton::Left),
+            PointerEvent::single(PointerKind::Move, pt(26), MouseButton::Left),
             &mut hover,
             &mut cap,
         );
         tree.dispatch_pointer(
-            PointerEvent::single(PointerKind::Up, pt(20), MouseButton::Left),
+            PointerEvent::single(PointerKind::Up, pt(26), MouseButton::Left),
             &mut hover,
             &mut cap,
         );
         tree.dispatch_key(ctrl_key(0x43, false), Some(node));
-        assert_eq!(&*clip.borrow(), "汉字词", "拖选 0..=2 片应复制前三字");
+        assert_eq!(
+            &*clip.borrow(),
+            "汉字词",
+            "拖过「词」的右半边，该字应整个进选区"
+        );
+    }
+
+    /// 一个 Latin 单词就是一个碎片，选区必须能落在它**内部**。
+    ///
+    /// 这是选区从碎片级改成字符级的**全部理由**。此前选区要求延伸点与锚点不在同一
+    /// 碎片，于是 `standby` 这样的词头、`[ˈstændbaɪ]` 这样的音标怎么拖都选不出东西
+    /// ——它们各自只有一个碎片，`i != anchor` 永远不成立。用户看到的是「这行字只能
+    /// 双击整选，拖不动」，而中文因为逐字成片碰巧是可拖的，于是这个毛病看起来像
+    /// 「英文那块坏了」。
+    #[test]
+    fn drag_inside_one_latin_word_selects_characters() {
+        // Null 引擎每字符 9px（字号 15 × 0.6）：s0 t9 a18 n27 d36 b45 y54，末缘 63。
+        let doc = RichDoc::new().para("standby");
+        let (mut tree, node) = build(Element::rich(doc).width(200), 300, 300);
+        let clip = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        tree.clipboard = Some(Box::new(TestClip(clip.clone())));
+        press_at(&mut tree, PointerKind::Down, 0, 7);
+        press_at(&mut tree, PointerKind::Move, 45, 7);
+        press_at(&mut tree, PointerKind::Up, 45, 7);
+        tree.dispatch_key(ctrl_key(0x43, false), Some(node));
+        assert_eq!(&*clip.borrow(), "stand", "单个碎片内也要能拖出选区");
+    }
+
+    /// 首尾都落在碎片内部：两端都要按字符切，不能整片取。
+    #[test]
+    fn drag_selection_trims_both_ends() {
+        let doc = RichDoc::new().para("standby");
+        let (mut tree, node) = build(Element::rich(doc).width(200), 300, 300);
+        let clip = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        tree.clipboard = Some(Box::new(TestClip(clip.clone())));
+        press_at(&mut tree, PointerKind::Down, 45, 7);
+        press_at(&mut tree, PointerKind::Move, 18, 7);
+        press_at(&mut tree, PointerKind::Up, 18, 7);
+        tree.dispatch_key(ctrl_key(0x43, false), Some(node));
+        // 反向拖（右→左）同样成立：选区存的是锚点与延伸点，取用时才排序。
+        assert_eq!(&*clip.borrow(), "and", "两端都该按字符边界切");
+    }
+
+    /// 双击仍然整词选中：字符级不该把「双击选词」也变成半个词。
+    #[test]
+    fn double_click_still_takes_whole_word() {
+        let doc = RichDoc::new().para("standby");
+        let (mut tree, node) = build(Element::rich(doc).width(200), 300, 300);
+        let clip = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        tree.clipboard = Some(Box::new(TestClip(clip.clone())));
+        let (mut hover, mut cap) = (None, None);
+        tree.dispatch_pointer(
+            multi_click(crate::geometry::Point::new(30, 7), 2),
+            &mut hover,
+            &mut cap,
+        );
+        tree.dispatch_key(ctrl_key(0x43, false), Some(node));
+        assert_eq!(&*clip.borrow(), "standby", "双击应取整词");
     }
 
     #[test]
@@ -2543,13 +2730,20 @@ mod tests {
         assert_eq!(&*clip.borrow(), "汉\n字", "原地单击不留选区，复制回退全文");
     }
 
+    /// 测试里手搓选区用：碎片 `a` 的首字符 → 碎片 `b` 的末字符。
+    ///
+    /// 样例文本都是 CJK（逐字成片），故每个碎片只有一个字符、末边界恒为 1。
+    fn cjk_sel(a: usize, b: usize) -> (Caret, Caret) {
+        (Caret { frag: a, ch: 0 }, Caret { frag: b, ch: 1 })
+    }
+
     #[test]
     fn relayout_invalidates_selection() {
         let doc = RichDoc::new().para("汉汉汉汉");
         let rt = RichText::new(doc);
         let style = Style::default();
         rt.measure(Size::new(200, 0), &style, &mut crate::text::NullTextEngine);
-        rt.sel.set(Some((0, 3)));
+        rt.sel.set(Some(cjk_sel(0, 3)));
         // 收窄到自然宽（4×9=36）以下 → 折行点变 → 真重排 → 选区失效。
         rt.measure(Size::new(20, 0), &style, &mut crate::text::NullTextEngine);
         assert!(rt.sel.get().is_none(), "重排后选区应清空");
@@ -2567,7 +2761,7 @@ mod tests {
         // measure：父给 500 可用宽。
         let sz = rt.measure(Size::new(500, 0), &style, &mut crate::text::NullTextEngine);
         assert!(sz.w < 500, "自然宽应小于可用宽，否则测不到本回归");
-        rt.sel.set(Some((0, 3)));
+        rt.sel.set(Some(cjk_sel(0, 3)));
         // paint：以自然宽（节点实际分配宽）再确保一次布局。
         {
             let mut m = EngineMeasurer(&mut crate::text::NullTextEngine);
@@ -2575,12 +2769,16 @@ mod tests {
         }
         assert_eq!(
             rt.sel.get(),
-            Some((0, 3)),
+            Some(cjk_sel(0, 3)),
             "paint 的 content.w 不应清掉选区"
         );
         // 下一帧 measure 又回到 avail.w：同样不得重排。
         rt.measure(Size::new(500, 0), &style, &mut crate::text::NullTextEngine);
-        assert_eq!(rt.sel.get(), Some((0, 3)), "回到 avail.w 也不应清掉选区");
+        assert_eq!(
+            rt.sel.get(),
+            Some(cjk_sel(0, 3)),
+            "回到 avail.w 也不应清掉选区"
+        );
     }
 
     #[test]
@@ -2674,7 +2872,7 @@ mod tests {
         let style = Style::default();
         rt.measure(Size::new(60, 0), &style, &mut crate::text::NullTextEngine);
         let n = rt.cache.borrow().as_ref().unwrap().frags.len();
-        rt.sel.set(Some((0, n - 1)));
+        rt.sel.set(rt.whole_frags(0, n - 1));
         let text = rt.selected_text().unwrap();
         assert!(!text.contains("展开"), "「… 展开」标记不应进入复制文本");
         assert!(text.starts_with("汉"), "选区应为正文内容");
@@ -2698,7 +2896,7 @@ mod tests {
         let rt = RichText::new(RichDoc::new().para("汉汉"));
         let style = Style::default();
         rt.ensure_layout(Some(200), &style, &mut ScaledNull(1.0));
-        rt.sel.set(Some((0, 1)));
+        rt.sel.set(Some(cjk_sel(0, 1)));
         // 同宽同字体、仅 scale 变 → 必须 miss 重排（测量物理取整随 DPI 而变）。
         rt.ensure_layout(Some(200), &style, &mut ScaledNull(1.5));
         assert!(
