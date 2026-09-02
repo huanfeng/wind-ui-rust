@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+- **新增颜色选择器 `Element::color_picker(color)`**（`color: Signal<Color>`）。色块触发器 +
+  点开的取色面板：SV 方块（饱和度 × 明度）、色相条、透明度条、HEX 输入框、一排预设色，
+  全部双向绑同一个信号。`Element::color_picker_opts(color, ColorPickerOpts::default()…)`
+  可裁剪面板组成（`alpha` / `hex` / `presets` / `panel_width` / `trigger_text` / `open`）。
+  - **HSVA 存在控件内部，不是每帧从 RGB 反算**。RGB→HSV 不是单射：饱和度归零时色相消失、
+    明度归零时色相与饱和度一起消失。若每帧反算，把明度拖到底再拖回来色相会跳成红色——
+    用户明明只动了明度。外部改动才触发一次回算，且在退化处沿用旧值
+    （`Hsva::from_color_keeping`）。这条经两个方向的端到端测试各守一次：SV 拖拽走
+    `commit`（HSVA 直接落库），预设/HEX 走 `commit_color`（保留式反算），两套代码各自会坏。
+  - 面板的三层渐变（纯色相底 + 横向白色渐隐 + 纵向黑色渐入）与色相条的七色标彩虹都交给
+    `Paint::gradient` 一次提交，不逐像素算 HSV→RGB。
+  - 新增 `ColorPickerTheme` 覆盖层。棋盘格两色是它独有的槽：透明度要靠「底下透出什么」
+    表达，而调色板里没有一个 token 是为「表示无内容」而设的，借 `surface`/`surface_alt`
+    会让棋盘格在深色主题里跟面板底融成一片；但也不能钉死成一对浅灰——深色面板里一块纯白
+    棋盘格会成为整个面板最亮的东西。默认值因此按 `surface` 的明暗分两套，并用亮度差断言
+    锁住三条关系（两格分得出、至少一格与面板底分得开、不比面板底亮太多）。
+
 - **新增锚定浮层 `Element::popup(open, content)`**（核心层 `Node::overlay`）。取色器面板的
   地基，也可独立用于任何「浮在内容之上、点外面就收起」的临时界面。
   - 此前框架只有两种「浮起」：`Node::raised` 只在**同级兄弟**间提升绘制序，逃不出祖先的

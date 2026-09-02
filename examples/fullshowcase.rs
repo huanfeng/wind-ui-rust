@@ -878,6 +878,40 @@ fn main() {
             )),
     );
 
+    // 颜色选择器：面板走锚定浮层，会盖住卡片下方的内容——这正是它与普通子节点的分别。
+    let brand_color = signal(Color::hex(0x4C8BF5));
+    let pen_color = signal(Color::rgba(0xE0, 0x31, 0x31, 0xCC));
+    let cp_27 = Element::card(
+        "颜色选择器（锚定浮层面板：SV 方块 + 色相/透明度条 + HEX + 预设）",
+        Element::col()
+            .width_match()
+            .spacing(10)
+            .child(Element::field("主题色", Element::color_picker(brand_color)))
+            .child(Element::field(
+                "画笔色（工具栏形态：只留色块）",
+                Element::color_picker_opts(
+                    pen_color,
+                    ColorPickerOpts::default().trigger_text(false).presets(vec![
+                        Color::hex(0x000000),
+                        Color::hex(0xE03131),
+                        Color::hex(0x1971C2),
+                        Color::hex(0x2F9E44),
+                        Color::hex(0xF5A524),
+                        Color::hex(0x6741D9),
+                    ]),
+                ),
+            ))
+            .child(
+                Element::label_signal(
+                    brand_color.map(|c| format!("拖面板即时联动：主题色 = {}", c.to_hex_string())),
+                )
+                .font_size(12.0)
+                .fg_role(Role::TextMuted)
+                .width_match()
+                .height(20),
+            ),
+    );
+
     let cp_22 = Element::card(
         "列表",
         Element::list(
@@ -1290,6 +1324,7 @@ fn main() {
             .child(cp_12)
             .child(cp_16)
             .child(cp_21)
+            .child(cp_27)
             .child(cp_8),
     );
 

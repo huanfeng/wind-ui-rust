@@ -149,6 +149,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `accordion` | `Signal<Option<usize>>` | 选中面板，`None` = 全收起 |
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
 | `stepper` | `Signal<f64>` | 数值 |
+| `color_picker` | `Signal<Color>` | 颜色（含 alpha） |
 | `text_input` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
 | `label` / `button` / `link` / `badge` / `checkbox` / `radio` / `nav_row` / `icon_button` 的**文案参数** | `Signal<String>`（可选，也可给 `&str`） | 跟随状态变化的文案，见 §5「动态文案」 |
 | `list_signal` / `host_signal` / `reorder_list_signal` | `Signal<Vec<T>>` | 动态数据源（见 §6.5） |
@@ -628,7 +629,7 @@ Element::button("X").icon_content(icon);
 let pic = ImageContent::from_bytes(base).tint(Color::WHITE);
 Element::image_content(pic);
 ```
-> **禁用是核心级通用能力**：`.enabled(bool)` / `.enabled_signal(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)`（= `enabled(!v)`）可用于**任意控件或容器**。启用轴与可见轴形态一一对应（`visible` / `visible_signal` / `visible_when`），三形态可叠加、取与。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput）均已实现置灰。
+> **禁用是核心级通用能力**：`.enabled(bool)` / `.enabled_signal(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)`（= `enabled(!v)`）可用于**任意控件或容器**。启用轴与可见轴形态一一对应（`visible` / `visible_signal` / `visible_when`），三形态可叠加、取与。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput/ColorPicker）均已实现置灰。
 
 > **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
 
@@ -1310,7 +1311,7 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
 控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层：
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
 - `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
-- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
+- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
 
 其中 `form`（[表单脚手架](#表单脚手架)的行高、标签列宽、间距、标签字号字重、副标题字号）
 与 `card`（卡片圆角、内边距、标题字号）承载的是**尺寸**而非颜色。这些量刻意不进构造器签名：

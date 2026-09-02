@@ -4,6 +4,7 @@
 //! `Element`，`.child(...)` 接受任意 `Element`，构建时递归插入 arena。
 
 pub mod caret;
+pub mod color_picker;
 pub mod containers;
 pub mod dyn_list;
 pub mod image;
@@ -41,6 +42,10 @@ use crate::text::TextEngine;
 use crate::theme::{Intent, IntentColors};
 
 pub use caret::{CaretOpts, CaretState, CaretStyle};
+// 只导出外部真正用得上的：`ColorPickerOpts` 是构造器参数、`Hsva` 是对外颜色模型、
+// `default_presets` 供在默认色之上增删、`ColorTrigger` 有公开的 `hex_text()` 供 downcast。
+// 面板内那四个 widget 的构造器要 crate 私有的 `PickerState`，外部拿到类型名也无事可做。
+pub use color_picker::{default_presets, ColorPickerOpts, ColorTrigger, Hsva};
 pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput};
 pub use link::Link;
@@ -2416,6 +2421,155 @@ impl Element {
         }
         .visible_signal(open);
         self.child(content)
+    }
+
+    /// **颜色选择器**：一枚当前色的色块，点开是浮在内容之上的取色面板。
+    ///
+    /// 面板含 SV 方块（饱和度 × 明度）、色相条、透明度条、HEX 输入框与一排预设色，
+    /// 全部双向绑定到 `value`。点面板外或按 ESC 收起（走 [`Element::popup`] 的锚定
+    /// 浮层，见 [`Node::overlay`](crate::core::Node::overlay)）。
+    ///
+    /// 要裁剪面板组成（去掉透明度、换预设色、只留一枚方块当触发器）用
+    /// [`color_picker_opts`](Self::color_picker_opts)。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let brand = signal(Color::hex(0x4C8BF5));
+    /// let form = Element::col().child(Element::field("主题色", Element::color_picker(brand)));
+    /// ```
+    pub fn color_picker(value: Signal<Color>) -> Self {
+        Self::color_picker_opts(value, color_picker::ColorPickerOpts::default())
+    }
+
+    /// 同 [`color_picker`](Self::color_picker)，可配置面板组成。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let pen = signal(Color::hex(0xE03131));
+    /// // 工具栏里的画笔颜色：只要一枚方色块，不要透明度也不要 HEX 框。
+    /// let btn = Element::color_picker_opts(
+    ///     pen,
+    ///     ColorPickerOpts::default()
+    ///         .alpha(false)
+    ///         .hex(false)
+    ///         .trigger_text(false),
+    /// );
+    /// ```
+    pub fn color_picker_opts(value: Signal<Color>, opts: color_picker::ColorPickerOpts) -> Self {
+        use color_picker::{
+            AlphaBar, ColorPickerOpts, ColorTrigger, Hsva, HueBar, PickerState, PresetSwatch,
+            SvArea, BAR_HEIGHT, SV_HEIGHT, SWATCH_SIZE,
+        };
+        let ColorPickerOpts {
+            alpha,
+            hex,
+            presets,
+            panel_width,
+            trigger_text,
+            open,
+        } = opts;
+
+        let th = crate::theme::current();
+        let open = open.unwrap_or_else(|| crate::signal::signal(false));
+        let init = value.get();
+        let st = PickerState {
+            value,
+            hsva: crate::signal::signal(Hsva::from_color(init)),
+            echo: crate::signal::signal(init),
+            with_alpha: alpha,
+        };
+        // HEX 文本与它的回声成对存在：少了回声就分不清"用户在打字"和"我自己刚写的"，
+        // 两边会互相覆盖（见 `ColorTrigger::on_update`）。
+        let (hex_text, hex_echo) = if hex {
+            let s = init.to_hex_string();
+            (
+                Some(crate::signal::signal(s.clone())),
+                Some(crate::signal::signal(s)),
+            )
+        } else {
+            (None, None)
+        };
+
+        // 收 Element 而不是 Box<dyn Widget>：后者要给 Element 开一个绕过
+        // `widget()` 那条 debug_assert 的公开入口，为省两行重复代码不值当。
+        let bar = |el: Element| el.width_match().height(BAR_HEIGHT);
+        let mut panel = Element::col()
+            .width(panel_width)
+            .padding(12)
+            .spacing(10)
+            .bg_role(crate::style::Role::Surface)
+            .border_role(crate::style::Role::Border, 1)
+            .corner(th.metrics.corner_lg)
+            // 面板必须自带背景与投影：它浮在任意内容之上，透明的话下面的文字会透出来。
+            .shadow(crate::style::Shadow::new(
+                0.0,
+                6.0,
+                18.0,
+                Color::rgba(0, 0, 0, 0x2E),
+            ))
+            .child(
+                Element::leaf()
+                    .widget(SvArea::new(st))
+                    .width_match()
+                    .height(SV_HEIGHT),
+            )
+            .child(bar(Element::leaf().widget(HueBar::new(st))));
+        if alpha {
+            panel = panel.child(bar(Element::leaf().widget(AlphaBar::new(st))));
+        }
+        if let Some(t) = hex_text {
+            panel = panel.child(
+                Element::row()
+                    .width_match()
+                    .cross(Align::Center)
+                    .spacing(8)
+                    .child(
+                        Element::label("HEX")
+                            .font_size(12.0)
+                            .fg_role(crate::style::Role::TextMuted),
+                    )
+                    // 提示串跟着 alpha 走：开着透明度时 `Color::to_hex_string`
+                    // 产出的是 9 字符的 #RRGGBBAA，提示写短一截会误导。
+                    .child(
+                        Element::text_input(t, if alpha { "#RRGGBBAA" } else { "#RRGGBB" })
+                            .weight(1.0),
+                    ),
+            );
+        }
+        if !presets.is_empty() {
+            // 每行放得下几个由面板宽算，不写死：改 panel_width 时这排跟着走，
+            // 不会突然溢出面板或在右边留一条空白。
+            let inner = panel_width - 24;
+            let per_row = ((inner + 6) / (SWATCH_SIZE + 6)).max(1) as usize;
+            let mut grid = Element::col().width_match().spacing(6);
+            for chunk in presets.chunks(per_row) {
+                let mut row = Element::row().spacing(6);
+                for &c in chunk {
+                    row = row.child(
+                        Element::leaf()
+                            .widget(PresetSwatch::new(st, c))
+                            .size(SWATCH_SIZE, SWATCH_SIZE),
+                    );
+                }
+                grid = grid.child(row);
+            }
+            panel = panel.child(grid);
+        }
+
+        Element::leaf()
+            .widget(ColorTrigger::new(
+                st,
+                open,
+                hex_text,
+                hex_echo,
+                trigger_text,
+            ))
+            // 三份状态（颜色 / HSVA / HEX 文本）的对齐挂在触发器的 on_update 上：
+            // 触发器常驻，而面板只在展开时才存在——同步逻辑不能跟着面板一起消失。
+            .reactive()
+            .popup(open, panel)
     }
 
     /// 弹性空白：主轴方向占据剩余空间，把其后的兄弟元素推到另一端（如底栏「左按钮 … 右按钮」）。

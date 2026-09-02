@@ -1123,6 +1123,73 @@ impl CardTheme {
     }
 }
 
+/// 颜色选择器覆盖层。
+///
+/// 棋盘格两色是这里独有的槽：透明度要靠"底下透出什么"来表达，而调色板里没有一个
+/// 现成的 token 是为"表示无内容"而设的——借 `surface`/`surface_alt` 会让棋盘格在
+/// 深色主题里跟面板底融成一片，透明与不透明就看不出区别了。
+///
+/// 但也**不能钉死成一对浅灰**：深色面板（`surface` ≈ #1B2333）里铺一块纯白棋盘格，
+/// 会成为整个面板最亮的东西，喧宾夺主。故默认值按 `surface` 的明暗分两套，
+/// 亮度差保持一致（见 `checker_contrasts_with_the_panel_in_both_themes`）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorPickerTheme {
+    /// 触发器底色。
+    pub bg: Option<Color>,
+    /// 色块/条/面板的描边。
+    pub border: Option<Color>,
+    /// 拖拽手柄的亮环。
+    pub handle: Option<Color>,
+    /// 拖拽手柄的暗描边（浅色底上靠它显形）。
+    pub handle_shade: Option<Color>,
+    /// 棋盘格浅格。
+    pub checker_light: Option<Color>,
+    /// 棋盘格深格。
+    pub checker_dark: Option<Color>,
+    /// 色块与触发器的圆角。
+    pub corner: Option<f32>,
+}
+
+/// 面板底色是否偏暗。阈值与 [`Color::pick_fg`] 同源（感知亮度 153），
+/// 免得同一份主题在"该配什么前景"与"该配什么棋盘格"两处得出相反的判断。
+fn surface_is_dark(p: &Palette) -> bool {
+    let s = p.surface;
+    0.299 * s.r as f32 + 0.587 * s.g as f32 + 0.114 * s.b as f32 <= 153.0
+}
+
+impl ColorPickerTheme {
+    pub fn bg(&self, p: &Palette) -> Color {
+        self.bg.unwrap_or(p.surface)
+    }
+    pub fn border(&self, p: &Palette) -> Color {
+        self.border.unwrap_or(p.border)
+    }
+    pub fn handle(&self, _p: &Palette) -> Color {
+        self.handle.unwrap_or(Color::WHITE)
+    }
+    pub fn handle_shade(&self, _p: &Palette) -> Color {
+        self.handle_shade.unwrap_or(Color::rgba(0, 0, 0, 0x66))
+    }
+    pub fn checker_light(&self, p: &Palette) -> Color {
+        self.checker_light.unwrap_or(if surface_is_dark(p) {
+            Color::hex(0x757C87)
+        } else {
+            Color::hex(0xFFFFFF)
+        })
+    }
+    pub fn checker_dark(&self, p: &Palette) -> Color {
+        self.checker_dark.unwrap_or(if surface_is_dark(p) {
+            Color::hex(0x4A515B)
+        } else {
+            Color::hex(0xCBCED4)
+        })
+    }
+    pub fn corner(&self, _p: &Palette) -> f32 {
+        self.corner.unwrap_or(4.0)
+    }
+}
+
 /// 悬停提示浮层覆盖层（深底浅字）。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1230,6 +1297,7 @@ pub struct Theme {
     pub anim: AnimTheme,
     pub tooltip: TooltipTheme,
     pub toast: ToastTheme,
+    pub color_picker: ColorPickerTheme,
 }
 
 impl Theme {
@@ -1266,6 +1334,46 @@ pub fn set_current(theme: Rc<Theme>) {
 
 #[cfg(test)]
 mod tests {
+    /// 棋盘格必须在**两套主题**下都：① 两格分得出来；② 与面板底分得开（否则透明
+    /// 与不透明看着一样）；③ 不比面板底亮太多（深色面板里一块纯白会成为最扎眼的东西）。
+    ///
+    /// 用亮度差断言而非比对具体色值：换配色时该跟着变的是色值，不该变的是这三条关系。
+    /// 此前 checker 钉死为纯白 + 浅灰，深色主题下第 ③ 条不成立，而截图跑的是浅色主题、
+    /// 一路全绿——两套主题各核验一次的惯例正是为这种情形立的。
+    #[test]
+    fn checker_contrasts_with_the_panel_in_both_themes() {
+        use super::{Palette, Theme};
+        fn luma(c: crate::geometry::Color) -> f32 {
+            0.299 * c.r as f32 + 0.587 * c.g as f32 + 0.114 * c.b as f32
+        }
+        for (name, pal) in [("浅色", Palette::default()), ("深色", Palette::dark())] {
+            let cp = Theme::default().color_picker;
+            let (l, d, surface) = (
+                luma(cp.checker_light(&pal)),
+                luma(cp.checker_dark(&pal)),
+                luma(pal.surface),
+            );
+            assert!(
+                (15.0..=90.0).contains(&(l - d)),
+                "{name}：两格亮度差 {} 应落在 15..=90（太小看不出格子，太大成斑马纹）",
+                l - d
+            );
+            // 「至少一格」而非「浅格」：浅色主题下浅格本就等于面板底（白底白格），
+            // 棋盘格靠**深格**显形——这是 Photoshop/Figma 一路的标准做法。要求浅格
+            // 也与底色分开，等于逼着浅色主题去用一对灰格，反而更脏。
+            let apart = (l - surface).abs().max((d - surface).abs());
+            assert!(
+                apart >= 25.0,
+                "{name}：两格与面板底的最大亮度差只有 {apart}，透明与不透明会看着一样"
+            );
+            assert!(
+                l - surface <= 110.0,
+                "{name}：浅格比面板底亮 {}，会成为面板里最扎眼的东西",
+                l - surface
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
