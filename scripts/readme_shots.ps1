@@ -20,17 +20,17 @@ function Shot($name, $file, $extra) {
 }
 
 # hero：设置窗的「输入」页 —— 一屏里 segmented / stepper / dropdown / slider / switch / chip 都在。
-# 点的是左侧栏第二项「输入」（侧栏 x≈60，第二项 y≈158）。
-Shot "settings"     "settings-input"  @("--click", "60", "158")
+# 点的是左侧栏第二项「输入」（侧栏 x≈60，第二项 y≈152）。
+Shot "settings"     "settings-input"  @("--click", "60", "152")
 
-# 设置窗的模态对话框：点右上角「标点表格」按钮（x≈890, y≈84）。
-Shot "settings"     "settings-dialog" @("--click", "890", "84")
+# 设置窗的模态对话框：点右上角「标点表格」按钮（x≈890, y≈78）。
+Shot "settings"     "settings-dialog" @("--click", "890", "78")
 
 # 控件总览：默认停在「表单」页。
 Shot "fullshowcase" "fullshowcase"    @()
 
-# 主题：点顶部第三枚「海洋」按钮（x≈780, y≈79），截 TOML 自定义主题生效后的样子。
-Shot "theming"      "theming"         @("--click", "780", "79")
+# 主题：点顶部第三枚「海洋」按钮（x≈780, y≈73），截 TOML 自定义主题生效后的样子。
+Shot "theming"      "theming"         @("--click", "780", "73")
 
 # 其余三张都是打开即所见，无需交互。
 Shot "virtual_list" "virtual-list"    @()

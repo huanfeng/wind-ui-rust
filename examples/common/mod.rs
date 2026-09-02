@@ -19,7 +19,11 @@
 use windui::prelude::*;
 
 /// 标题栏高度（逻辑像素）。窗口按钮的命中区按它撑满，故改这里即可整体调整。
-pub const TITLEBAR_H: i32 = 44;
+///
+/// 38 而非 Windows 系统标题栏那个 32：这一条里还要放下 20px 的 logo，32 会让它上下
+/// 只剩 6px、挤得贴边。38 与下游 wind-dict 同值，按钮成 46×38——仍是横向舒展的扁矩形，
+/// 与系统的 46×32 同一个观感。**曾经是 44**，那让按钮接近正方形，一眼就不像 Windows。
+pub const TITLEBAR_H: i32 = 38;
 
 /// 示例窗口的外壳配置。
 ///
@@ -52,6 +56,12 @@ impl Shell {
 
     /// 在窗口按钮**左侧**插入自定义元素（明暗切换、页内动作等）。
     ///
+    /// 元素会被标题栏的 `cross(Align::Stretch)` **拉到整条满高**，与窗口按钮连成一排，
+    /// 中间不留缝——这正是全包式想要的样子。所以放进来的东西得经得起拉伸：`clickable()`
+    /// 容器（方角、hover 铺满）合适，`icon_button` 那类自带圆角底的**不合适**，会变成
+    /// 一根竖着的圆角条杵在方角按钮旁边。要保持自然高度，自己包一层
+    /// `Element::row().cross(Align::Center)`。现成的例子见 [`theme_toggle`]。
+    ///
     /// 注意它落在 `window_drag()` 区域内：可聚焦的控件（按钮等）会自行吃掉按下事件、
     /// 不触发拖窗；纯 `Label` 则会连同标题栏一起被拖走——需要点击的请用 `clickable()`
     /// 容器或正经控件包一层。
@@ -62,40 +72,66 @@ impl Shell {
 
     /// 只构建标题栏本身。需要把它塞进更复杂的层叠结构时用；
     /// 常规情况直接用 [`wrap`](Shell::wrap)。
+    ///
+    /// 窗口按钮走**全包式**（同 `frameless` / `light_titlebar` 两个示例，以及下游
+    /// wind-dict）：按钮吃满整条标题栏的高度，最右那枚关闭键与窗口右边齐平。两处
+    /// 都是布局说了算，不用改控件：
+    ///
+    /// - `cross(Align::Stretch)` 覆盖掉 `WindowButton::measure` 报的 `BTN_H = 32`，
+    ///   按钮高度变成 `TITLEBAR_H`。此前是 `Align::Center`，按钮只有 32 高、浮在
+    ///   44 高的条中间，hover 底色是一枚悬空的小方块。
+    /// - 内边距挂在**左侧品牌区**这个子容器上，不挂在整条 row 上。挂 row 上是四周
+    ///   一起缩，右侧按钮会被推离窗口边 14px，圆角处就空出一块底色。
+    ///
+    /// 关闭键的 hover 红底照旧按方角 `fill_rect` 画：窗口在 Win11 上显式声明了
+    /// `DWMWCP_ROUND`（见 `platform::win32`），合成期由 DWM 裁角，落到屏上自然是
+    /// 圆角。自己再画一遍圆角反而会与系统的半径对不齐。
     pub fn titlebar(self) -> Element {
         let mut bar = Element::row()
             .width_match()
             .height(TITLEBAR_H)
-            .cross(Align::Center)
-            .padding_xy(14, 0)
-            .spacing(10)
+            .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt)
             .window_drag()
-            .child(brand_logo(22))
-            // 三段式标题：产品名加粗、间隔点与副标题弱化，形成层级而不是一行同权重的字。
+            // 品牌区：logo + 三段式标题。自带内边距与间距，见上面那段。
+            // 里层重新 `cross(Center)`，免得 Stretch 把 logo 与文字拉变形。
             .child(
                 Element::row()
                     .cross(Align::Center)
-                    .spacing(5)
+                    .padding_xy(14, 0)
+                    .spacing(10)
+                    .child(brand_logo(20))
+                    // 三段式标题：产品名加粗、间隔点与副标题弱化，形成层级而不是一行同权重的字。
                     .child(
-                        Element::label("windui")
-                            .font_size(13.0)
-                            .font_weight(600)
-                            .fg_role(Role::Text),
-                    )
-                    .child(
-                        Element::label("·")
-                            .font_size(13.0)
-                            .fg_role(Role::TextDisabled),
-                    )
-                    .child(
-                        Element::label(self.subtitle)
-                            .font_size(13.0)
-                            .fg_role(Role::TextMuted),
+                        Element::row()
+                            .cross(Align::Center)
+                            .spacing(5)
+                            .child(
+                                Element::label("windui")
+                                    .font_size(13.0)
+                                    .font_weight(600)
+                                    .fg_role(Role::Text),
+                            )
+                            .child(
+                                Element::label("·")
+                                    .font_size(13.0)
+                                    .fg_role(Role::TextDisabled),
+                            )
+                            .child(
+                                Element::label(self.subtitle)
+                                    .font_size(13.0)
+                                    .fg_role(Role::TextMuted),
+                            ),
                     ),
             )
             .child(Element::leaf().weight(1.0));
 
+        // 自定义元素直接进 row，与窗口按钮一样吃满高度、彼此贴死，连成一排。
+        //
+        // 曾经包了一层 `cross(Center)` 再留 8px 右缝，那是为了迁就 `icon_button` 的
+        // 圆角底——结果是一枚浮在条中间的小圆角块紧挨着三枚方角满高按钮，两种视觉
+        // 语言并排。与其让标题栏迁就控件，不如让控件长成标题栏该有的样子，见
+        // [`theme_toggle`]；`trailing` 的文档里写明了这条约束。
         for e in self.trailing {
             bar = bar.child(e);
         }
@@ -176,10 +212,26 @@ pub fn section_title(title: &str) -> Element {
 ///
 /// 主题不是"再建一棵树"，而是 `ThemeHandle::set` 整树热切换：用 `*_role` 表达的颜色
 /// 自动跟随，写死的 `Color::hex` 不跟随——这正是示例统一走 `Role` 的理由。
+///
+/// **为什么是 `stack().clickable()` 而不是 `icon_button`**：它要和右边三枚窗口按钮
+/// 排成一列同类物，`icon_button` 三条都对不上——
+/// - 圆角：`IconButton` 的半径是 `if corner_radius > 0 { 它 } else { theme.corner_sm }`，
+///   即 **`.corner(0.0)` 拿不到方角**，只会回落到主题圆角。`Clickable` 直接用
+///   `style.corner_radius`，默认 0，正是要的方角。
+/// - 尺寸：`IconButton::measure` 报的是字号推出来的方块（下限 30×30），与 46×TITLEBAR_H
+///   对不上；这里直接钉死 46 宽、`height_match()` 吃满高。
+/// - 图标色：窗口按钮在 [`Shell::titlebar`] 里走 `Role::Text`，此处**曾是 `TextMuted`**，
+///   天生比邻居淡一档——并排看就是「这枚是不是灰掉了」。
+///
+/// 仍有一处对不齐：hover 底色。`Clickable` 用 `palette.text × 0.06`，而 `WindowButton`
+/// 用的是据标题栏底亮度选的写死值（亮底黑 `0x14`、暗底白 `0x20`）。方向一致，暗色主题下
+/// 前者约淡一半。要精确对齐得改库（把那段叠层逻辑变成可复用的东西），不在示例里绕。
 pub fn theme_toggle(th: ThemeHandle, dark: Signal<bool>) -> Element {
-    Element::icon_button("◐")
+    Element::stack()
+        .width(46)
+        .height_match()
+        .clickable()
         .tooltip("切换明暗主题")
-        .fg_role(Role::TextMuted)
         .on_click(move |_| {
             let next = !dark.get();
             dark.set(next);
@@ -189,4 +241,14 @@ pub fn theme_toggle(th: ThemeHandle, dark: Signal<bool>) -> Element {
                 Theme::default()
             });
         })
+        .child(
+            // `align` 是**自身**在父容器里的对齐（`Node::align` 的定义），不是容器摆
+            // 子元素的方式——挂在 stack 上等于说「这个 stack 在标题栏里居中」，对图标
+            // 毫无作用，实测字形贴在格子左上角（偏 dx=-16.5, dy=-10）。要居中就挂在
+            // 图标自己身上：Frame 里一个 `align` 同时管两轴。
+            Element::label("◐")
+                .font_size(14.0)
+                .fg_role(Role::Text)
+                .align(Align::Center),
+        )
 }

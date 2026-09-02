@@ -431,6 +431,16 @@ Element::stepper(value, min, max, step)           // value: Signal<f64>；min/ma
 //  中部是完整的文本输入框（可拖选/双击选词/Ctrl+A·C·X·V/右键菜单/输入法，与 text_input 同源）；
 //  ↑↓ 步进、Enter 提交并全选、Esc 撤销本轮编辑、失焦自动提交（越界钳回、按步长小数位规整）；
 //  非数字键入与粘贴一律拒绝。返回的是行容器 [−][输入框][+]，默认宽 120，.width()/.disabled() 照旧
+Element::color_picker(color)                      // color: Signal<Color>；色块触发器 + 锚定下拉取色面板
+Element::color_picker_opts(color, ColorPickerOpts::default()
+    .alpha(false)            // 去掉透明度条（输出恒不透明）
+    .hex(false)              // 去掉 HEX 输入框
+    .presets(vec![..])       // 换一组预设色（空 = 不显示该行）
+    .panel_width(232)        // 面板宽（预设每行放几个据此算）
+    .trigger_text(false)     // 触发器只留一枚方色块（工具栏用），不显示 HEX 与箭头
+    .open(open_signal))      // 自带展开信号，可从外部收起面板
+//  面板 = SV 方块（饱和度×明度）+ 色相条 + 透明度条 + HEX 框 + 预设色，全部双向绑同一个信号；
+//  点面板外或按 ESC 收起。HSVA 存在控件内部，故把明度拖到黑再拖回来色相不会丢（RGB 反算会丢）。
 Element::list(vec!["行1", "行2"], selected)       // selected: Signal<usize>
 Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选中为内缩圆角 pill（侧栏导航）
 Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
@@ -813,6 +823,10 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
 - `Element::window_drag()` 标记拖动区（自定义标题栏）：命中非交互区拖窗、命中可聚焦控件（按钮/输入）则不拖、交控件处理。
   判定**沿父链自内向外，先遇到谁听谁**：可聚焦节点算交互控件、`window_drag` 算拖动区。故拖动区里放 `.clickable()` 容器是安全的——容器内的文字、图标一并算交互区（这些子节点自己不可聚焦，只看落定节点的话会被判成拖窗，表现为"只有文字周围的空隙能点"）。反过来，可聚焦容器里再嵌一条 `window_drag` 也成立：内层更具体，拖动区赢。
 - `Element::window_button(WindowButtonKind::{Minimize,Maximize,Close})`：自绘标准图标 + hover/press（关闭键 hover 转红）；图标色取 `.fg()`（深色标题栏用 `.fg(WHITE)`）。点击调 `EventCtx::minimize()/toggle_maximize()/request_close()`——关闭键与系统 × 同走关闭决策链，`on_close_request` 一样拦得住（见 §8.7）。
+- **全包式（按钮吃满整条标题栏、关闭键落在窗口圆角上）** 是系统标题栏的样子，也是所有示例的做法。两个条件都由布局决定，不必改控件：
+  - 标题栏 row 写 `cross(Align::Stretch)`。控件 `measure` 报的是 32 高（近 Windows 默认），`Align::Center` 会让它照此高度浮在条中间，只有 Stretch 才用容器高度覆盖它。
+  - **内边距挂在左侧内容的子容器上，不要挂在标题栏 row 上**。挂 row 上是四周一起缩，最右那枚按钮被推离窗口边，圆角处露出一块标题栏底色。左侧内容记得在自己那层重新 `cross(Align::Center)`，否则 logo 与文字会被 Stretch 拉变形。
+  - 关闭键的 hover 红底照旧按**方角**画：Win11 上窗口显式声明了 `DWMWCP_ROUND`，合成期由 DWM 裁角。自己再画一遍圆角会与系统半径对不齐，且 `--screenshot` 读的是客户区、根本截不到圆角，验不出来。
 - **拖动区右键弹出窗口系统菜单**（还原 / 最小化 / 最大化 / 关闭），按窗口当前状态与能力自动置灰——已最大化时「最大化」灰、「还原」亮；`resizable(false)` 的对话框式窗口两者皆灰。**默认开启，零代码**；`App::system_menu(false)` / `Window::system_menu(false)` 关掉。
   项数恒为五（含分隔线）、只改可用性，与 Windows 系统菜单一致：项数固定，「第三行是最大化」这种肌肉记忆才成立。
   「关闭」走 `request_close()`，与自绘 × 同一条关闭决策链，`on_close_request` 一样拦得住——右键菜单不是绕过守卫的后门。
@@ -861,6 +875,35 @@ Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/M
 [`docs/gpu-cross-platform-design.md`](gpu-cross-platform-design.md)。
 
 ---
+
+### 锚定浮层（下拉面板）
+
+需要「浮在内容之上、点外面就收起」的临时界面（取色盘、日期选择、自定义下拉），用
+`Element::popup` 把面板挂到触发器上：
+
+```rust
+let open = signal(false);
+let panel = Element::col()
+    .padding(12)
+    .bg_role(Role::Surface)          // 面板必须自带背景，它压在任意内容之上
+    .corner(10.0)
+    .child(Element::label("浮层内容"));
+
+Element::button("展开")
+    .on_click(move |_| open.set(!open.get()))
+    .popup(open, panel)
+```
+
+框架为浮层节点做三件普通子节点做不到的事：**脱离父容器布局流**（不占位、不撑大父容器）、
+**在整棵树之后绘制且不受祖先 `clip_children` 裁剪**、**命中先于整棵树**。定位是「贴在触发器
+正下方，下方装不下就翻到上方」，与下拉菜单同一口径。
+
+轻量关闭由框架负责：在浮层**与触发器**之外按下、或按 ESC，都会把 `open` 置 false。
+点在触发器自身上时框架不插手——那一下归你的 `on_click` toggle，否则会「先被关掉、再被打开」，
+点了等于没点。
+
+与 `Element::dialog` 的分工：对话框是**模态**的（铺满全窗、压暗背景、要求先处理完）；
+浮层是**非模态**的，只借一小块地方，不拦其余交互。
 
 ## 6. 布局系统
 
