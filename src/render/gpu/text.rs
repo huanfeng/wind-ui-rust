@@ -106,6 +106,9 @@ pub(super) struct RunKey {
     scale: u32,
     /// `Align` 没有 `Hash`（它在 `spec.rs`，不属于本阶段的改动面），存判别值。
     align: u8,
+    /// 斜体与字重正交，是独立的一个轴：同字族同字号的正体与斜体是两套字形，
+    /// 不进键就会互相顶替——先进缓存的那套被后者复用，表现为斜体时灵时不灵。
+    italic: bool,
 }
 
 impl RunKey {
@@ -130,6 +133,7 @@ impl RunKey {
                 Align::End => 2,
                 Align::Stretch => 3,
             },
+            italic: ts.italic,
         }
     }
 }
@@ -1299,6 +1303,7 @@ mod tests {
             size: 14.0,
             weight: 400,
             line_height: Some(1.5),
+            italic: false,
         };
         let k = |ts: &TextStyle, align, mw, scale| RunKey::new("hi", ts, align, mw, scale);
         let b = k(&base, Align::Start, 100.0, 1.0);
@@ -1327,6 +1332,10 @@ mod tests {
             },
             TextStyle {
                 line_height: None,
+                ..base
+            },
+            TextStyle {
+                italic: true,
                 ..base
             },
         ] {
