@@ -54,7 +54,6 @@ pub use row_source::{RowRequest, RowSource, ROW_CACHE_SEGMENTS, ROW_CHUNK};
 pub use segmented::SegmentedControl;
 pub use select::{CheckMenu, CheckMenuItem, Dropdown, DropdownItem};
 pub use sortable_table::{SortKey, SortStyle};
-pub use stepper::Stepper;
 pub use text_content::TextContent;
 pub use virtual_list::TABLE_ROW_H;
 pub use window_buttons::{WindowButton, WindowButtonKind};
@@ -1769,8 +1768,20 @@ impl Element {
     }
 
     /// 数字步进（绑定 `Signal<f64>`，带范围与步长；小数位由步长推断）。
+    ///
+    /// 中部是一个完整的文本输入框：可拖选、双击选词、Ctrl+A/C/X/V、右键菜单、输入法，
+    /// 与 [`Element::text_input`] 同源。方向键上/下步进，Enter 提交并全选，
+    /// Escape 撤销本轮编辑，失焦自动提交（越界值钳回范围）。
+    ///
+    /// 返回的是一个**行容器**（`[−] 输入框 [+]`）。`.width(..)` / `.disabled(..)`
+    /// 一如既往作用在整体上；默认宽 120。
+    ///
+    /// ⚠ 宽度别低于 **90**：两侧按钮各占 30 是定值，剩下的才归中部输入框。给到 60 以下
+    /// 中部会算成 0 宽——数字看不见也点不中。这条只能靠调用方守：`min_width` 在
+    /// `Tree::measure` 里是"子节点测完之后再抬高容器自身"，抬出来的空间不会回流给子节点
+    /// 重新分配，拿它当护栏只会得到一个更宽但中间照样是空的框。
     pub fn stepper(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
-        Self::base(Layout::None).widget(stepper::Stepper::new(value, min, max, step))
+        stepper::build(value, min, max, step)
     }
 
     /// 单选列表（绑定 `Signal<usize>` 选中索引 + 行标签）。可滚动；

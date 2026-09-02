@@ -340,6 +340,8 @@ pub struct InputTheme {
     pub bg: Option<Color>,
     pub border: Option<Color>,
     pub border_focus: Option<Color>,
+    /// ⚠ **当前不生效**：`TextInput` 的正文色走节点 `Style` 的 `fg` / `fg_role`
+    /// （`.fg(..)` / `.fg_role(..)`），不读这里。既有状况，非本版引入。
     pub text: Option<Color>,
     pub placeholder: Option<Color>,
     /// 选区高亮（含 alpha）。
@@ -596,6 +598,10 @@ impl ProgressTheme {
 pub struct StepperTheme {
     pub bg: Option<Color>,
     pub border: Option<Color>,
+    /// ⚠ **当前不生效**。中部数值自 0.14 起由内嵌的 `TextInput` 绘制，正文色与
+    /// `Element::text_input` 同源——走节点 `Style` 的 `fg` / `fg_role`
+    /// （即 `.fg(..)` / `.fg_role(..)`），不读这里。`InputTheme::text` 同样如此。
+    /// 保留字段是为了不破坏既有 TOML 主题文件的解析。
     pub text: Option<Color>,
     /// +/- 按钮区前景。
     pub button: Option<Color>,

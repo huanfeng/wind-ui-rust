@@ -1,6 +1,6 @@
 //! 文本插入光标（caret）：静态外观、闪烁相位与平滑移动。
 //!
-//! 由 [`TextInput`](crate::ui::TextInput) 单/多行与 [`Stepper`](crate::ui::Stepper)
+//! 由 [`TextInput`](crate::ui::TextInput) 单/多行（数字步进 `Element::stepper` 内嵌的也是它）
 //! 编辑态共用，保证同一个应用里所有可编辑处的光标观感一致。
 //!
 //! 三件事：

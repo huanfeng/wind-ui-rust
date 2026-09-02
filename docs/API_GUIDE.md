@@ -393,6 +393,9 @@ Element::check_menu("列表显示", vec![             // 下拉式复选菜单�
 ]).summary(|on| format!("显示 ({})", on.len()))   // 收起态文案（默认恒为标题；用摘要建议配 .width）
 //  默认点击即关（同普通菜单）；.stay_open() 改为开关点了不关、可连点，点面板外才收起
 Element::stepper(value, min, max, step)           // value: Signal<f64>；min/max/step: f64
+//  中部是完整的文本输入框（可拖选/双击选词/Ctrl+A·C·X·V/右键菜单/输入法，与 text_input 同源）；
+//  ↑↓ 步进、Enter 提交并全选、Esc 撤销本轮编辑、失焦自动提交（越界钳回、按步长小数位规整）；
+//  非数字键入与粘贴一律拒绝。返回的是行容器 [−][输入框][+]，默认宽 120，.width()/.disabled() 照旧
 Element::list(vec!["行1", "行2"], selected)       // selected: Signal<usize>
 Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选中为内缩圆角 pill（侧栏导航）
 Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
@@ -484,7 +487,7 @@ Element::text_input(text, "占位符")               // text: Signal<String>
 
 **插入光标**：默认 `Blink` 风格——亮/灭各半周期硬切换（跟随系统插入符设置），2px 宽、两端圆角；
 打字/移动光标/点击定位后保持实心 0.5s，停手才开始闪。四种风格与外观都走主题，
-`TextInput` 与 `Stepper` 编辑态共用同一份配置：
+`text_input` 与 `stepper`（中部内嵌的正是同一个输入框）共用同一份配置：
 
 ```toml
 [input]

@@ -1834,18 +1834,30 @@ impl Tree {
     /// 当前**未**截断（`Some(false)`），视为原文已完整可见，不再弹出与其重复的
     /// 提示——避免"短文案也弹一模一样的浮层"。不具备该概念的控件（`None`）按
     /// 原语义正常返回，不受影响。
+    /// **沿命中节点向祖先回溯**（与 [`Self::cursor_at`] 同一心智）：取最近一个能给出
+    /// 提示的节点。没有这层回溯，凡是内部由多个节点拼成的**复合控件**——
+    /// `Element::stepper` 的 `[−][输入框][+]` 是最典型的一个——命中永远落在子节点上，
+    /// 挂在控件本身上的 `.tooltip(..)` 就再也读不到，链上去不报错也不生效。
     pub fn node_tooltip(&self, id: NodeId) -> Option<String> {
-        let n = self.get(id)?;
-        // 控件动态提示优先：自绘图表按指针所在的数据点给文案，静态文本给不了
-        // （见 [`Widget::tooltip`]）。返回 None 才回退到节点上设的静态文本。
-        if let Some(dynamic) = n.widget.tooltip() {
-            return Some(dynamic);
+        for nid in self.ancestor_chain(id) {
+            let Some(n) = self.get(nid) else { continue };
+            // 控件动态提示优先：自绘图表按指针所在的数据点给文案，静态文本给不了
+            // （见 [`Widget::tooltip`]）。返回 None 才回退到节点上设的静态文本。
+            if let Some(dynamic) = n.widget.tooltip() {
+                return Some(dynamic);
+            }
+            let Some(text) = n.tooltip.clone() else {
+                continue;
+            };
+            // 截断判定按**持有这条提示的那个节点**算，不是按命中的子节点算。
+            // 找到提示就到此为止：被自身判定压掉时不再往上找，否则一个没被截断的
+            // Label 会转而弹出祖先容器的提示，看着像"弹错了别人的说明"。
+            if n.widget.text_truncated() == Some(false) {
+                return None;
+            }
+            return Some(text);
         }
-        let text = n.tooltip.clone()?;
-        if n.widget.text_truncated() == Some(false) {
-            return None;
-        }
-        Some(text)
+        None
     }
 
     /// `pos`（逻辑坐标）是否落在交互控件上（可聚焦节点，如自定义标题栏的窗口按钮）。
@@ -4443,15 +4455,21 @@ mod tests {
         let plus = Point::new(b.right() - 5, cy);
         let minus = Point::new(b.x + 5, cy);
         let (mut h, mut cap) = (None, None);
+        // 必须成对收发：按下会捕获指针，不补 Up 的话后续事件全被锁在同一个按钮上
+        // ——± 现在是两个独立节点，不像旧的自绘版那样每次按下都按 x 重算左右区。
+        let mut click = |p: Point, tree: &mut Tree| {
+            tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut h, &mut cap);
+            tree.dispatch_pointer(ptr(PointerKind::Up, p), &mut h, &mut cap);
+        };
         // + → 3（达上限）
-        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        click(plus, &mut tree);
         assert_eq!(v.get(), 3.0);
         // 再 + 钳制在 3
-        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        click(plus, &mut tree);
         assert_eq!(v.get(), 3.0, "上限钳制");
         // − 三次到 0 并钳制
         for _ in 0..4 {
-            tree.dispatch_pointer(ptr(PointerKind::Down, minus), &mut h, &mut cap);
+            click(minus, &mut tree);
         }
         assert_eq!(v.get(), 0.0, "下限钳制");
     }
@@ -4475,6 +4493,403 @@ mod tests {
         let (mut h, mut cap) = (None, None);
         tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
         assert_eq!(v.get(), 6.0, "归一后 step=1，5→6");
+    }
+
+    // ── Stepper 中部是真正的 TextInput ────────────────────────────────────────
+    //
+    // 旧实现自绘那份文本只会逐字符增删 + 左右移光标：选不中、复制不了、粘不进去。
+    // 下面这组盯的就是「换成文本控件之后，那些能力确实到位了」，以及数值语义
+    //（范围钳制、格式化）没有因此走丢。
+
+    /// 建一棵只含 stepper 的树，返回 `(树, 中部数值框节点, value 信号)`。
+    fn stepper_tree(init: f64, min: f64, max: f64, step: f64) -> (Tree, NodeId, Signal<f64>) {
+        let v = signal(init);
+        let root = Element::col()
+            .width(120)
+            .height(40)
+            .child(Element::stepper(v, min, max, step).width(120));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(120, 40), &mut crate::text::NullTextEngine);
+        let row = tree.get(id).unwrap().children[0];
+        // 行的三个子节点：[− 按钮, 数值框, + 按钮]。
+        let field = tree.get(row).unwrap().children[1];
+        (tree, field, v)
+    }
+
+    /// 重排一次——`value` ↔ `text` 的同步挂在 `on_update` 上，只在布局前跑。
+    fn stepper_sync(tree: &mut Tree) {
+        tree.layout_root(Size::new(120, 40), &mut crate::text::NullTextEngine);
+    }
+
+    fn skey(key: Key, ctrl: bool) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+        }
+    }
+
+    /// 全选 + 复制，返回剪贴板内容——即"用户此刻在框里看到的那串字"。
+    fn stepper_copy(tree: &mut Tree, field: NodeId, clip: &Rc<RefCell<String>>) -> String {
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field)); // Ctrl+A
+        tree.dispatch_key(skey(Key::Other(0x43), true), Some(field)); // Ctrl+C
+        clip.borrow().clone()
+    }
+
+    #[test]
+    fn stepper_value_is_selectable_and_copyable() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, _v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        assert_eq!(
+            stepper_copy(&mut tree, field, &clip),
+            "5",
+            "全选+复制应把当前数值取出来（旧的自绘文本根本选不中）"
+        );
+    }
+
+    #[test]
+    fn stepper_typing_rewrites_value() {
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field)); // 全选
+        tree.dispatch_key(skey(Key::Char('7'), false), Some(field)); // 整体替换
+        stepper_sync(&mut tree);
+        assert_eq!(v.get(), 7.0, "键入的数字应回写到绑定信号");
+    }
+
+    /// 非数字**打不进也粘不进**——键入与粘贴共用同一把尺子。
+    #[test]
+    fn stepper_rejects_non_numeric_input() {
+        let clip = Rc::new(RefCell::new(String::from("abc")));
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+
+        tree.dispatch_key(skey(Key::Char('a'), false), Some(field));
+        stepper_sync(&mut tree);
+        assert_eq!(v.get(), 5.0, "字母键入不得改值");
+
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field)); // 全选
+        tree.dispatch_key(skey(Key::Other(0x56), true), Some(field)); // 粘贴 "abc"
+        stepper_sync(&mut tree);
+        assert_eq!(v.get(), 5.0, "非数字粘贴不得改值");
+        assert_eq!(
+            stepper_copy(&mut tree, field, &clip),
+            "5",
+            "被拒的输入不得留在框里（整串丢弃，不做'挑能进的字符'）"
+        );
+    }
+
+    #[test]
+    fn stepper_arrow_keys_step_and_clamp() {
+        let (mut tree, field, v) = stepper_tree(8.0, 1.0, 9.0, 1.0);
+        tree.dispatch_key(skey(Key::Up, false), Some(field));
+        assert_eq!(v.get(), 9.0);
+        tree.dispatch_key(skey(Key::Up, false), Some(field));
+        assert_eq!(v.get(), 9.0, "到上限后不再增");
+        tree.dispatch_key(skey(Key::Down, false), Some(field));
+        assert_eq!(v.get(), 8.0);
+    }
+
+    /// 越界的键入在**失焦提交**时钳回范围，并把文本规整成标准写法。
+    ///
+    /// 提交时机只有 paint 能感知（`focused` 参数），故这条必须真画一帧。
+    #[test]
+    fn stepper_commits_and_clamps_on_blur() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+        let mut paint_once = |tree: &Tree| {
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        };
+
+        tree.set_focused(Some(field), None);
+        paint_once(&tree);
+
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field)); // 全选
+        for c in ['9', '9'] {
+            tree.dispatch_key(skey(Key::Char(c), false), Some(field));
+        }
+        stepper_sync(&mut tree);
+        assert_eq!(v.get(), 9.0, "编辑途中就把值钳在范围内");
+
+        tree.set_focused(None, Some(field));
+        paint_once(&tree);
+        assert_eq!(
+            stepper_copy(&mut tree, field, &clip),
+            "9",
+            "失焦提交后框里应是钳制后的标准写法，而不是打进去的 99"
+        );
+    }
+
+    /// 外部写 `value`（别处的按钮、恢复默认…）要反映到框里。
+    #[test]
+    fn stepper_external_value_write_updates_text() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, v) = stepper_tree(5.0, 0.0, 3.0, 0.25);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        assert_eq!(
+            stepper_copy(&mut tree, field, &clip),
+            "3.00",
+            "越界初值应先钳进范围，并按步长推断的小数位显示"
+        );
+        v.set(1.5);
+        stepper_sync(&mut tree);
+        assert_eq!(stepper_copy(&mut tree, field, &clip), "1.50");
+    }
+
+    /// 点击落点要按**居中后**的文字算。
+    ///
+    /// 数值是居中绘制的，而命中测试走的是另一条路径——绘制那边加了居中偏移、命中这边
+    /// 忘了减，两边就整体错开半个空白宽度：点第一个数字会把光标放到第二个后面，
+    /// 拖选出来的也是错位的一段。而且屏幕上一切正常，只有真去点才暴露。
+    #[test]
+    fn stepper_click_maps_to_the_centered_text() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, _v) = stepper_tree(123.0, 0.0, 999.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        // 居中偏移是 paint 算出来的，命中依赖它，故先真画一帧。
+        {
+            let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        }
+        // 落点在文字左侧的空白里 → 光标应停在串首。
+        let b = tree.abs_bounds(field);
+        let p = Point::new(b.x + 20, b.y + b.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut h, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, p), &mut h, &mut cap);
+        tree.dispatch_key(
+            KeyEvent {
+                key: Key::End,
+                pressed: true,
+                shift: true,
+                ctrl: false,
+            },
+            Some(field),
+        );
+        tree.dispatch_key(skey(Key::Other(0x43), true), Some(field)); // Ctrl+C
+        assert_eq!(
+            &*clip.borrow(),
+            "123",
+            "点在数值左边再 Shift+End，应选中整串；只选到一部分说明命中没吃居中偏移"
+        );
+    }
+
+    /// ± 按钮写完，框里的数字**当场**就得是新的——不能等下一次 `on_update`。
+    ///
+    /// 长按的重复步进跑在 `paint` 里，那条路不置 `needs_relayout`，下一帧的
+    /// `layout_root` 整个会被跳过、`on_update` 自然也不跑。若按钮只写 `value` 而把
+    /// 文本留给 `on_update` 排，长按期间数字会一直定在原地，松手那次点击才跳到终值。
+    /// 故这里刻意**不调 `stepper_sync`**：中间隔一次重排，这条测试就测不出东西了。
+    #[test]
+    fn stepper_button_updates_text_without_waiting_for_relayout() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let rb = tree.abs_bounds(row);
+        let plus = Point::new(rb.right() - 5, rb.y + rb.h / 2);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, plus), &mut h, &mut cap);
+        assert_eq!(v.get(), 6.0);
+        assert_eq!(
+            stepper_copy(&mut tree, field, &clip),
+            "6",
+            "按钮写完文本应当场更新，不依赖后续重排"
+        );
+    }
+
+    /// Escape 撤销的是**本轮键入**，不是"聚焦以来发生的一切"。
+    ///
+    /// 键入会实时回写 `value`（绑定信号随打字更新），所以 Escape 必须能把值退回去；
+    /// 而 ± 按钮和方向键的步进是当场落地的动作，退回时不该被一起吃掉——
+    /// 聚焦 → 点两次 + → 打错一个字 → Escape，用户要的是撤销那个字。
+    #[test]
+    fn stepper_escape_undoes_typing_but_keeps_steps() {
+        let clip = Rc::new(RefCell::new(String::new()));
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        {
+            let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.set_focused(Some(field), None);
+            tree.paint(&mut canvas); // 聚焦这一帧记下基线 5
+        }
+        // 点两次 +（左右按钮分列行首行尾，成对收发指针）。
+        let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let rb = tree.abs_bounds(row);
+        let plus = Point::new(rb.right() - 5, rb.y + rb.h / 2);
+        let (mut h, mut cap) = (None, None);
+        for _ in 0..2 {
+            tree.dispatch_pointer(ptr(PointerKind::Down, plus), &mut h, &mut cap);
+            tree.dispatch_pointer(ptr(PointerKind::Up, plus), &mut h, &mut cap);
+        }
+        assert_eq!(v.get(), 7.0, "两次 + 应到 7");
+
+        // 再打错一个字：全选后键入 2。
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field));
+        tree.dispatch_key(skey(Key::Char('2'), false), Some(field));
+        stepper_sync(&mut tree);
+        assert_eq!(v.get(), 2.0, "键入实时回写");
+
+        tree.dispatch_key(skey(Key::Escape, false), Some(field));
+        assert_eq!(v.get(), 7.0, "Escape 只撤销键入，不该退回两次 + 之前的 5");
+        assert_eq!(stepper_copy(&mut tree, field, &clip), "7");
+    }
+
+    /// Enter 是一次提交，Escape 不该越过它退到更早的地方。
+    ///
+    /// 与上一条同源：`edit_origin` 的前移时机不能只有「获焦」和「步进」，
+    /// 「Enter 定了一次」同样是当场落地。
+    #[test]
+    fn stepper_escape_stops_at_the_last_enter() {
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        {
+            let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.set_focused(Some(field), None);
+            tree.paint(&mut canvas); // 基线 = 5
+        }
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field));
+        tree.dispatch_key(skey(Key::Char('3'), false), Some(field));
+        stepper_sync(&mut tree);
+        tree.dispatch_key(skey(Key::Enter, false), Some(field)); // 提交 3
+
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field));
+        tree.dispatch_key(skey(Key::Char('7'), false), Some(field));
+        stepper_sync(&mut tree);
+        tree.dispatch_key(skey(Key::Escape, false), Some(field));
+        assert_eq!(v.get(), 3.0, "应退回上次 Enter 提交的 3，而不是聚焦时的 5");
+    }
+
+    /// 没有未提交改动时，Enter 要放行冒泡——否则对话框的默认按钮会被数字框吃掉。
+    #[test]
+    fn stepper_enter_bubbles_when_nothing_to_commit() {
+        let (mut tree, field, _v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        let clean = tree.dispatch_key(skey(Key::Enter, false), Some(field));
+        assert!(
+            !clean.consumed,
+            "什么都没改就按回车，Enter 应冒泡出去（对话框「确定」还得能按）"
+        );
+        tree.dispatch_key(skey(Key::Other(0x41), true), Some(field));
+        tree.dispatch_key(skey(Key::Char('8'), false), Some(field));
+        let dirty = tree.dispatch_key(skey(Key::Enter, false), Some(field));
+        assert!(dirty.consumed, "有未提交改动时 Enter 是提交，应被消费");
+    }
+
+    /// **禁用期间**外部写 `value`，框里也得跟着变。
+    ///
+    /// 这条盯的是一个只在复合化之后才可能出现的回归：同步全挂在 `on_update` 上，而
+    /// `Tree::call_on_update` 开头就把禁用节点整个跳过了——于是置灰的数字框会一直
+    /// 停在禁用那一刻的旧数字，重新启用才跳到新值。旧的自绘实现每帧现读 `value`，
+    /// 没有这个问题。兜底做在 `NumberField::paint` 里，故这条必须真画一帧。
+    #[test]
+    fn stepper_disabled_still_follows_external_value() {
+        let v = signal(5.0f64);
+        let root = Element::col()
+            .width(120)
+            .height(40)
+            .child(Element::stepper(v, 1.0, 9.0, 1.0).width(120).disabled(true));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(120, 40), &mut crate::text::NullTextEngine);
+        let row = tree.get(id).unwrap().children[0];
+        let field = tree.get(row).unwrap().children[1];
+
+        let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+        let mut paint_once = |tree: &Tree| {
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        };
+        paint_once(&tree);
+        assert_eq!(tree.ime_text_of(field).as_deref(), Some("5"));
+
+        v.set(8.0);
+        tree.layout_root(Size::new(120, 40), &mut crate::text::NullTextEngine);
+        paint_once(&tree);
+        assert_eq!(
+            tree.ime_text_of(field).as_deref(),
+            Some("8"),
+            "置灰期间外部改值，框里仍须显示新值"
+        );
+    }
+
+    /// 只重绘、不重排的帧里，`value` 变化也得跟上。
+    ///
+    /// 典型场景是同一个 `Signal<f64>` 同时绑 `slider` 和 `stepper`：拖滑块全程是指针
+    /// `Move`，而 `Move` 刻意不置 `needs_relayout`（hover 高频），于是 `layout_root`
+    /// 不跑、`on_update` 也不跑。同步只挂在 `on_update` 上的话，数字会一路纹丝不动，
+    /// 直到松手才一次性跳到位。故这条**只 paint、不 layout**。
+    #[test]
+    fn stepper_follows_value_on_repaint_only_frames() {
+        let (tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        let mut pm = tiny_skia::Pixmap::new(120, 40).unwrap();
+        let mut paint_once = |tree: &Tree| {
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+        };
+        paint_once(&tree);
+        assert_eq!(tree.ime_text_of(field).as_deref(), Some("5"));
+
+        v.set(2.0);
+        paint_once(&tree); // 刻意不 layout_root：重排一跑，这条就测不出东西了
+        assert_eq!(
+            tree.ime_text_of(field).as_deref(),
+            Some("2"),
+            "没有重排的帧里也要跟上 value"
+        );
+    }
+
+    /// 挂在 stepper 上的 `.tooltip(..)` 要能从内部任一处悬停触发。
+    ///
+    /// 复合控件的命中永远落在子节点（± 按钮、数值框）上，而 `node_tooltip` 原先只看
+    /// 命中节点自身——于是 `.tooltip(..)` 链上去不报错也不生效。现已与 `cursor_at`
+    /// 对齐：沿祖先链回溯。
+    #[test]
+    fn stepper_tooltip_reaches_inner_nodes() {
+        let v = signal(5.0f64);
+        let root = Element::col().width(120).height(40).child(
+            Element::stepper(v, 1.0, 9.0, 1.0)
+                .width(120)
+                .tooltip("每次 ±1"),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(120, 40), &mut crate::text::NullTextEngine);
+        let row = tree.get(id).unwrap().children[0];
+        let rb = tree.abs_bounds(row);
+        // 悬停在 − 按钮上（命中的是子节点，不是挂提示的那个行容器）。
+        let hit = tree
+            .hit_test(Point::new(rb.x + 5, rb.y + rb.h / 2))
+            .expect("应命中 − 按钮");
+        assert_ne!(hit, row, "前置：命中的确实是子节点");
+        assert_eq!(tree.node_tooltip(hit).as_deref(), Some("每次 ±1"));
+    }
+
+    /// 整个 stepper 对 Tab 只占一个焦点位，且那一位是中部数值框。
+    #[test]
+    fn stepper_takes_a_single_tab_stop() {
+        let (tree, field, _v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        assert_eq!(
+            tree.focusable_order(),
+            vec![field],
+            "± 按钮不该各占一个焦点位，否则跨过一个数字框要按三次 Tab"
+        );
     }
 
     #[test]
