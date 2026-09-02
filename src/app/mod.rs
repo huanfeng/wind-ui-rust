@@ -1423,7 +1423,13 @@ impl UiHost {
     }
 
     fn resolve_close_inner(&mut self) -> bool {
-        // 优先关闭本窗口最顶层的可见对话框（不退出窗口）。
+        // 锚定浮层排在对话框之前：浮层多半是从对话框**内部**的控件展开的（设置对话框
+        // 里的取色盘），先关对话框会把还开着的浮层一起吞掉，ESC 就少了一级。
+        if self.tree.close_topmost_overlay() {
+            self.damage.needs_full = true;
+            return false;
+        }
+        // 其次关闭本窗口最顶层的可见对话框（不退出窗口）。
         if self.tree.close_topmost_modal() {
             // 对话框被关闭，需要重绘以隐藏遮罩。
             self.damage.needs_full = true;
@@ -2657,6 +2663,60 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ESC 的处理次序：先收锚定浮层，再关对话框，最后才轮到关窗口。
+    ///
+    /// 这条排序必须端到端地测。`Tree::close_topmost_overlay` 自己的单测证明不了它——
+    /// 次序是在 `UiHost::resolve_close_inner` 里定的，而那一层还串着 `close_handler`
+    /// 与 `hide_on_close`。取色器在设置对话框里展开是常见写法，次序若反了，一次 ESC
+    /// 会把对话框连同里面还开着的面板一起关掉，用户丢掉正在改的东西。
+    #[test]
+    fn escape_closes_the_overlay_before_the_dialog_that_hosts_it() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let show_dialog = crate::signal::signal(true);
+        let open = crate::signal::signal(true);
+        let app = App::new("t", 300, 300).content(
+            Element::stack().fill().child(Element::dialog(
+                show_dialog,
+                Element::col()
+                    .width(200)
+                    .bg_role(crate::style::Role::Surface)
+                    .padding(12)
+                    .child(
+                        Element::col()
+                            .width(160)
+                            .child(Element::button("展开"))
+                            .popup(
+                                open,
+                                Element::col()
+                                    .width(80)
+                                    .height(90)
+                                    .bg_role(crate::style::Role::Surface),
+                            ),
+                    ),
+            )),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        assert!(show_dialog.get() && open.get(), "本例前提：两者都开着");
+
+        let k = key_ev();
+        handler.on_key(k(Key::Escape));
+        assert!(!open.get(), "第一次 ESC 应先收起浮层");
+        assert!(show_dialog.get(), "第一次 ESC 不该连对话框一起关掉");
+        assert!(!handler.wants_close(), "更不该去关窗口");
+
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        handler.on_key(k(Key::Escape));
+        assert!(!show_dialog.get(), "第二次 ESC 才关对话框");
+        assert!(!handler.wants_close(), "对话框还在时不该关窗口");
+    }
 
     #[test]
     fn channel_returns_sendable_sender() {

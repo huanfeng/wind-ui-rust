@@ -719,6 +719,8 @@ pub struct Element {
     /// 注册为响应式节点：build 后自动调用 `Tree::register_reactive`，
     /// 框架在每次 layout 前向其 widget 调用 `on_update`。
     reactive: bool,
+    /// 锚定浮层的展开信号（见 [`Node::overlay`]）。由 [`Element::popup`] 设置。
+    overlay: Option<Signal<bool>>,
 }
 
 impl Element {
@@ -754,6 +756,7 @@ impl Element {
             en_cond: None,
             tooltip: None,
             reactive: false,
+            overlay: None,
         }
     }
 
@@ -2369,6 +2372,52 @@ impl Element {
         Element::dialog(show, panel)
     }
 
+    /// **锚定浮层**：把 `content` 挂成本元素的浮层子节点，展开时贴在本元素正下方
+    /// 浮在整个窗口内容之上。`open` 为展开信号。
+    ///
+    /// 与 [`dialog`](Self::dialog) 的分工：对话框是**模态**的，铺满全窗、压暗背景、
+    /// 要求先处理完再继续；浮层是**非模态**的，只借用一小块地方，点别处即收起。
+    /// 下拉面板、取色盘、日期选择这类「选完就走」的临时界面属于后者。
+    ///
+    /// 核心为它做三件普通子节点做不到的事（见 [`Node::overlay`]）：脱离父容器布局流、
+    /// 在整棵树之后绘制且不受祖先裁剪、命中先于整棵树。此外还负责**轻量关闭**——
+    /// 在浮层与本元素之外按下、或按 ESC，都会把 `open` 置 false。
+    ///
+    /// 展开/收起由调用方自己驱动（通常是本元素的 `on_click` 里 `open.set(!open.get())`）；
+    /// 点在**本元素自身**上时核心不插手，正是为了不跟这个 toggle 打架。
+    ///
+    /// # 两条容易踩的约定
+    ///
+    /// - **`content` 的可见性由 `open` 独占**：本方法会覆盖 `content` 上已有的
+    ///   `visible_signal` / `visible`。浮层的「展开」与「可见」是同一件事，留两个开关
+    ///   只会制造出「登记为浮层却看不见」和「看得见却关不掉」两种半开状态。
+    /// - **`content` 要给出确定宽度**（`.width(px)`）。浮层脱离了父容器的布局流，
+    ///   量它时可用宽是**整个窗口**；写 `.width_match()` 会得到一块窗口那么宽的面板，
+    ///   而不是「跟锚点一样宽」。要跟随锚点宽度，请自行把锚点的宽度传进来。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let open = signal(false);
+    /// let panel = Element::col()
+    ///     .padding(12)
+    ///     .bg_role(Role::Surface)
+    ///     .child(Element::label("浮层内容"));
+    /// let el = Element::button("展开")
+    ///     .on_click(move |_| open.set(!open.get()))
+    ///     .popup(open, panel);
+    /// ```
+    pub fn popup(self, open: Signal<bool>, content: Element) -> Self {
+        // 可见性直接绑 `open`：浮层的「展开」与「可见」是同一件事，分成两个开关只会
+        // 制造出「登记为浮层却看不见」和「看得见却关不掉」两种半开状态。
+        let content = Element {
+            overlay: Some(open),
+            ..content
+        }
+        .visible_signal(open);
+        self.child(content)
+    }
+
     /// 弹性空白：主轴方向占据剩余空间，把其后的兄弟元素推到另一端（如底栏「左按钮 … 右按钮」）。
     pub fn flex_spacer() -> Self {
         Element::stack().weight(1.0)
@@ -3974,6 +4023,7 @@ impl Element {
             prev_visible: Cell::new(true),
             offset: Point::new(0, 0),
             raised: false,
+            overlay: self.overlay,
         };
         let id = tree.insert(node);
         if is_reactive {
