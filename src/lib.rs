@@ -44,6 +44,9 @@ pub mod prelude {
     pub use crate::style::{Brush, Edges, Role, Shadow, Style};
     pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Len, TableTheme, Theme};
+    // `TabItem` / `TabStyle` 是 `Element::tabs_items` 的参数类型：构造器在 prelude 里，
+    // 参数类型却要写一行深路径 import，那条路就没人走。
+    pub use crate::ui::containers::{TabItem, TabStyle};
     pub use crate::ui::{
         CaretStyle, CheckMenuItem, CommitMode, DropdownItem, Element, ImageContent, ImageView,
         Link, Para, RichColor, RichDoc, RowRequest, RowSource, SelectionScope, SortKey, SortOrder,

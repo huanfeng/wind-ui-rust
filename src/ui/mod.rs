@@ -2200,6 +2200,48 @@ impl Element {
         Self::tabs_frame(items, selected, content, containers::TabStyle::Pill)
     }
 
+    /// 逐项定制的标签页：`pages` 为 (标签项, 页面) 列表，`style` 选下划线或胶囊。
+    ///
+    /// 与 [`tabs`](Self::tabs) 系列的区别只在于**标签项由调用方构造**，因而能用上
+    /// [`TabItem`](containers::TabItem) 上那些三个便捷构造器不暴露的能力——目前是
+    /// [`enabled`](containers::TabItem::enabled)（逐项禁用）与
+    /// [`icon_content`](containers::TabItem::icon_content)（前置图标），两者可叠加。
+    /// 不需要这些就用 `tabs` / `tabs_icons` / `tabs_pill`，它们更短。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # use windui::ui::containers::{TabItem, TabStyle};
+    /// # let (sel, has_examples) = (signal(0usize), signal(false));
+    /// # let (a, b) = (Element::col(), Element::col());
+    /// Element::tabs_items(
+    ///     sel,
+    ///     vec![
+    ///         (TabItem::new("释义".into()), a),
+    ///         // 本次查询没有例句：留在原位置灰，而不是把这一项摘掉
+    ///         (TabItem::new("例句".into()).enabled(has_examples), b),
+    ///     ],
+    ///     TabStyle::Underline,
+    /// );
+    /// ```
+    ///
+    /// 禁用项灰显、悬停不亮、点击与键盘都跳过它；方向键**跳过**而不是停在上面。
+    /// 选中项本身被禁用时不会自动改选——那是数据的问题，替调用方猜该跳到哪一项，
+    /// 猜错比不动更难查。
+    pub fn tabs_items(
+        selected: Signal<usize>,
+        pages: Vec<(containers::TabItem, Element)>,
+        style: containers::TabStyle,
+    ) -> Self {
+        let mut items = Vec::new();
+        let mut content = Element::stack().fill().weight(1.0);
+        for (i, (item, page)) in pages.into_iter().enumerate() {
+            items.push(item);
+            let sel2 = selected;
+            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+        }
+        Self::tabs_frame(items, selected, content, style)
+    }
+
     /// `tabs` / `tabs_icons` / `tabs_pill` 的共同骨架：整条标签条是**一个**
     /// [`containers::TabBar`] 自绘节点（滑动选中滑块要跨标签的布局信息，拆成多节点就
     /// 拿不到），下方是内容区。条高与（下划线风格的）贯穿基线均由 TabBar 自己按主题决定，

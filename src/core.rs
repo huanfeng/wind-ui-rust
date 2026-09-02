@@ -3122,6 +3122,57 @@ mod tests {
         assert_eq!(sel.get(), 0, "点击首个标签应把选中索引切到 0");
     }
 
+    /// `Element::tabs_items` 是 `TabItem::enabled` 唯一的公开可达路径——三个便捷
+    /// 构造器都在内部自己造项，收 `Vec<TabItem>` 的 `tabs_frame` 是私有的。
+    /// 本例走完整分发链路验证这条路真的把禁用态带到了标签条上。
+    ///
+    /// **两棵树对照**是必须的：只断言「禁用项点不动」的话，一条彻底断掉的路径
+    /// （比如 `tabs_items` 压根没把 items 传下去）也会照样通过。
+    #[test]
+    fn tabs_items_carries_per_item_enabled_through_dispatch() {
+        use crate::ui::containers::{TabItem, TabStyle};
+
+        fn click_first_tab(first_enabled: bool) -> Signal<usize> {
+            let sel = signal(1);
+            let root = Element::tabs_items(
+                sel,
+                vec![
+                    (
+                        TabItem::new("甲".into()).enabled(signal(first_enabled)),
+                        Element::label("page A"),
+                    ),
+                    (TabItem::new("乙".into()), Element::label("page B")),
+                ],
+                TabStyle::Underline,
+            );
+            let mut tree = Tree::new();
+            let id = root.build(&mut tree);
+            tree.root = Some(id);
+            let mut te = crate::text::NullTextEngine;
+            tree.layout_root(Size::new(400, 300), &mut te);
+
+            let bar = tree.get(id).unwrap().children[0];
+            let b = tree.abs_bounds(bar);
+            let p = Point::new(b.x + 2, b.y + b.h / 2);
+            let (mut hover, mut cap) = (None, None);
+            tree.dispatch_pointer(ptr(PointerKind::Move, p), &mut hover, &mut cap);
+            tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut hover, &mut cap);
+            tree.dispatch_pointer(ptr(PointerKind::Up, p), &mut hover, &mut cap);
+            sel
+        }
+
+        assert_eq!(
+            click_first_tab(true).get(),
+            0,
+            "首项可选时，点它应切到 0——否则说明 tabs_items 这条路本身就是断的"
+        );
+        assert_eq!(
+            click_first_tab(false).get(),
+            1,
+            "首项禁用时点击应无效，选中索引留在原处"
+        );
+    }
+
     /// 构建 [下层按钮 + 上层全覆盖容器]，返回 (tree, 按钮 id, 按钮中心点)。
     /// `opaque_bg`=true 时上层容器带背景（应吞命中），false 时为透明纯容器（应穿透）。
     fn overlay_tree(clicks: Signal<i32>, opaque_bg: bool) -> (Tree, NodeId, Point) {
