@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+- **`Element::tabs_items(selected, pages, style)`**：`TabItem::enabled`（v0.15.0 加的逐项
+  禁用）此前**没有公开可达路径**——`tabs` / `tabs_icons` / `tabs_pill` 都在内部自己造标签项，
+  而收 `Vec<TabItem>` 的 `tabs_frame` 是私有的，仓库里唯一用到 `.enabled(..)` 的地方是直接
+  `TabBar::new(..)` 的单元测试。这类缺口单测抓不到：测试在 crate 内部，`pub(crate)` 与 `pub`
+  对它一视同仁，只有从外部视角问「用户怎么写出这一行」才看得见。新构造器收
+  `Vec<(TabItem, Element)>` 与 `TabStyle`，同时覆盖下划线与胶囊两种风格，并把
+  `TabItem` / `TabStyle` 加进 `prelude`（构造器在 prelude 里、参数类型却要写深路径 import，
+  那条路就没人走）。补了一条经完整分发链路的契约测试，用两棵树对照——只断言「禁用项点不动」
+  的话，一条彻底断掉的路径也会照样通过。
+- **修复 `SpanStyle::italic` 的文档挂错**：`italic` 插进 `underline` 的文档注释与函数签名
+  之间，于是 `italic` 的 rustdoc 头一行写着「下划线。」，而 `underline` 变成无文档。
+- **`docs/API_GUIDE.md` 补齐 v0.15.0 的公开 API**：跨控件选择域与字符级选区、标签逐项禁用、
+  托盘提示运行期可改、斜体、窗口级快捷键、跟随系统亮暗、一个热键切换显隐、对话框可拖动与
+  `dialog_closable`、`padding_edges` / `align_xy`。
+
 - **修复 GPU 后端的斜体与正体共用同一张文字纹理**（`feature = "gpu"`）。`italic` 加进
   `TextStyle` 时同步了 DirectWrite 侧的三处缓存键，却漏了 GPU 后端的第四处——`RunKey`
   是整段文字的排版/光栅缓存键，不含 `italic` 就意味着同字族同字号的正体与斜体互相顶替，

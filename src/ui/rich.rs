@@ -142,7 +142,6 @@ impl SpanStyle {
         self.bg = Some(color.into());
         self
     }
-    /// 下划线。
     /// 斜体。
     ///
     /// 词典正文里斜体承载语义而非装饰：例句、语体标注（*informal*）、拉丁学名都靠它。
@@ -152,6 +151,7 @@ impl SpanStyle {
         self
     }
 
+    /// 下划线。
     pub fn underline(mut self) -> Self {
         self.underline = true;
         self

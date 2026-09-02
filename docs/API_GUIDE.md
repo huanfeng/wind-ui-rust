@@ -258,11 +258,46 @@ Element::divider()                   // 分隔线
 Element::tabs(selected, vec![("标签", page_element), ...])       // selected: Signal<usize>
 Element::tabs_icons(selected, vec![("标签", icon, page), ...])  // 带图标的标签（icon: ImageContent）
 Element::tabs_pill(selected, vec![("标签", page), ...])         // 胶囊风格标签页（签名同 tabs，仅视觉不同）
+Element::tabs_items(selected, vec![(TabItem::new("标签".into()), page), ...], TabStyle::Underline)
+                                     // 逐项定制的标签页：标签项由调用方造，能用上逐项禁用与前置图标
 Element::grid(cols, gap, items)      // 等宽网格：每行 cols 个、列按权重均分、末行补空对齐
 Element::dialog(show, content)       // 模态遮罩 + 居中内容（show: Signal<bool>）
+Element::dialog_closable(show, content, on_close)  // 同上，额外在面板右上角叠一个小关闭 ×
 Element::dialog_panel(show, "标题", width, on_close, body, footer)  // 带标题栏/关闭×/底栏的对话框面板
 Element::flex_spacer()               // 弹性空白：占满主轴剩余空间（把兄弟推到另一端，如底栏左/右分布）
 ```
+
+**标签逐项禁用**用 `tabs_items`：`tabs` / `tabs_icons` / `tabs_pill` 在内部自己造标签项，
+要给某一项绑可用态就得自己造 `TabItem`。
+
+```rust
+let has_examples = signal(false);          // 本次查询有没有例句
+Element::tabs_items(
+    sel,
+    vec![
+        (TabItem::new("释义".into()), meanings),
+        (TabItem::new("例句".into()).enabled(has_examples), examples),
+    ],
+    TabStyle::Underline,                   // 或 TabStyle::Pill
+)
+```
+
+- **禁用不是隐藏**。「本次没内容」的标签留在原位置灰，位置就是稳定的，用户「总是点第三个」
+  这条肌肉记忆才成立；把它摘掉则每次数据一变，后面所有标签整体左移一格，看着像换了一条
+  标签条。禁用项文字走 `text_disabled`、悬停不亮、点击与键盘都跳过它；方向键**跳过**它而
+  不是停在上面（停在上面时按键看着「没反应」，用户分不清是键坏了还是标签坏了）。
+- **收 `Signal<bool>` 而非布尔**（同 `TrayMenuItem::enabled`）：可用与否往往随数据变，而
+  标签条本身不变。收布尔就意味着「哪一项能点」一改就得重建整条——重建会丢掉悬停态、
+  并让选中滑块从头落定而不是滑过去。永久禁用传 `signal(false)`。
+- 选中项本身被禁用时**不会自动改选**。那是数据的问题，替调用方猜该跳到哪一项，猜错比不动
+  更难查。`icon_content(..)` 可与 `enabled(..)` 叠加，等价于「带图标 + 可禁用」的 `tabs_icons`。
+
+**对话框面板可拖动**，零代码：按住面板顶部约 52px（通常正是标题行）就能把它拖开去看它盖住
+的内容，落在这条带里的按钮/输入框照常响应点击。拖动写的是视觉位移而非布局，故**只对当次
+生效**——关掉再弹回到居中。刻意**不要求**面板整体留在窗口内（大对话框正要能拖开），只堵
+「拖动带整条出界」那一种，那时既抓不回来也拖不动。要一个随手关掉的兜底入口用
+`dialog_closable`：右上角一个淡色 ×，压在面板内容之上不占布局位——也正因为压在上面，
+**面板顶部右侧已有控件时不要用它**。
 
 ### 表单脚手架
 
@@ -464,6 +499,32 @@ Element::rich_signal(doc)      // 动态富文本：doc: Signal<RichDoc>，整�
 ```
 `rich` 是**单个自绘节点**，内部按 span 排版并做基线对齐、折叠段带高度动画。
 `on_span_click` / `copy_menu` 是 rich 专属修饰符（误用检测同 text_input）。
+
+选区是**字符级**的：单个碎片内部也能拖选，落点吸附到最近的字符边界（拖过字的一半才选中
+它，同浏览器）。双击选词、三击选段、Ctrl+A 仍取整词/整段范围；`chip` 不参与字符切分，
+落到就近的一端整个进或整个不进。
+
+**跨控件选择**用 `SelectionScope`：一个 `rich` 自己是一个独立的选择域，而一屏内容常被拆成
+好几个控件（词头要与星标按钮并排，而富文本里放不进按钮），选区跨不过去，用户只能一段一段
+地复制。把它们挂进同一个域即可一路拖到底：
+
+```rust
+let scope = SelectionScope::new();                 // Clone 即共享同一个域
+let page = Element::col()
+    .child(Element::row()
+        .child(Element::rich(headword).selection_scope(scope.clone()).weight(1.0))
+        .child(Element::icon_button("★").on_click(|_| {})))  // 富文本里放不进按钮，故拆成两个控件
+    .child(Element::rich(meanings).selection_scope(scope.clone()))
+    .child(Element::rich(examples).selection_scope(scope.clone()));
+```
+
+- 成员按**视觉序**（上、左）而非注册序参与选区——注册序取决于首次绘制的次序，而那个次序
+  在滚动、重建之后并不稳定；对垂直流式布局，视觉序就是阅读序。
+- 域内 **Ctrl+A 的意思是「这一屏」**，不是「我碰巧聚焦的那一段」：焦点落在哪一段是上一次
+  点击的副产物，用户按全选时并不在想它。复制同理，按视觉序拼接全域选中的文字。
+- 控件销毁后自动退出域（域只持弱引用），无需手工注销。
+- **没挂域的富文本一字不变**，仍是各管各的选区——对话框正文、说明段落用不着跨控件选择，
+  不该为此背上一份共享状态。
 
 ### 文本输入
 ```rust
@@ -678,6 +739,24 @@ App::new("…", w, h).tray(
 - 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
 - **`Tray` 三件套是平台无关的**（定义在 `windui::platform::tray`，两平台共用同一份类型与语义）。此前它在 win32 与 macOS 各有一份完整副本，跨平台性只是「两边方法名恰好一样」的巧合——`TrayCtx` 一个累积意图、一个持有 `NSWindow` 立即调 OS。现在两个后端只负责执行 `TrayAction`。
 - **回调可测**：`windui::testing::run_with_tray_ctx(item)` 借一个受控 `TrayCtx` 跑菜单项回调，返回它请求的 `Vec<TrayAction>`；`run_with_tray_ctx_fn(f)` 用于 `on_left_click` 这类直接持有的闭包。见 [9.2](#92-测试收-eventctx-的回调)。
+- **提示文字可在运行期改**：`Tray` 是构造器，`App::tray(..)` 之后就被消费掉了，而提示往往
+  要随应用状态变——「Ctrl+Alt+D 查询」这句话，用户改了热键之后就成了假话。用
+  `App::tray_handle()` 取句柄（`&mut self`，须在 `content` / `run` 之前取，同 `theme_handle`）：
+
+  ```rust
+  let mut app = App::new("查词", 480, 360).tray(Tray::new().tooltip("Ctrl+Alt+D 查询"));
+  let tray = app.tray_handle();                     // TrayHandle 是 Clone
+  let ui = Element::button("换热键").on_click(move |_| {
+      tray.set_tooltip("Ctrl+Alt+F 查询");           // 立即生效，无需重建托盘
+  });
+  app.content(ui).run();
+  ```
+
+  与 `ThemeHandle` / `HotkeyHandle` 同一条路子：句柄只**排队意图**，平台层在事件分发之后
+  落地（`Shell_NotifyIcon` 会跨线程发消息并泵入站消息，在借用里直接调即触发铁律 6）。
+  没装托盘时意图被**丢弃**而不是攒着——一个没有托盘的应用改托盘提示是调用方的错，攒起来
+  只会让它在某天真装了托盘时突然生效，那更难查。两平台均已实现（macOS 走状态栏按钮的
+  `toolTip`）。
 
 ### 全局热键与启动即隐藏
 
@@ -699,6 +778,19 @@ App::new("查词", 480, 360)
 - **注册可能失败且不报错**：热键是全局独占资源，组合被其他程序占用时系统会拒绝，该热键静默失效，其余热键与应用不受影响——为一个热键冲突让整个应用起不来是不可接受的。
 - 回调拿 `HotkeyCtx`，**只有 `show_window()` / `hide_window()`，拿不到窗口句柄**。这是刻意的：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（见 `AGENTS.md` 铁律 6）。窗口操作降级为「意图」由平台层在借用释放后执行。
 - 控件回调里用 `EventCtx::show_window()` / `hide_window()`（与 `request_close()` 不同：隐藏只改可见性，关闭会销毁窗口并结束消息循环）。
+- **一个热键切换显隐**（常驻工具的常见形态：露着就收起、藏着就唤起）读 `WindowState::visible`：
+
+  ```rust
+  .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| {
+      if windui::event::window_state().visible { ctx.hide_window() } else { ctx.show_window() }
+  })
+  ```
+
+  别自建一个「现在露着没有」的布尔：隐藏可能发生在框架内部（ESC 关窗、`hide_on_close()`、
+  托盘菜单），应用侧跟不住，自建标志迟早对不上，那时热键就变成「按一下没反应，再按一下才
+  对」。快照在热键派发**之前**刷新，故这里读到的一定是新鲜的——全局热键是唯一能在窗口隐藏、
+  毫无消息往来时抵达的输入，其余路径都以窗口可见为前提。读不到状态时按**可见**处理：
+  反方向的失败模式是去「显示」一个本就显示着的窗口，按下去毫无反应，更难查。
 - `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
@@ -812,10 +904,19 @@ Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/M
 ### 6.3 间距
 ```rust
 .padding(n) / .padding_xy(h, v)   // 内边距
+.padding_edges(Insets::new(l, t, r, b))  // 四边各自指定
 .margin(n)  / .margin_xy(h, v)    // 外边距
 .align(Align)                     // 自身在父交叉轴的对齐
+.align_xy(h, v)                   // 两轴分别对齐（仅 stack 有意义）
 ```
 `Align`：`Start / Center / End / Stretch`。
+
+- **`padding_edges` 存在的唯一理由是滚动条那一侧**：滚动条画在滚动容器的全矩形边缘，
+  而内容排在 padding 内——想让正文不被滚动条压住就得单独给右侧加一档。用对称 padding 凑
+  的话，左边会跟着白白缩进同样多。其余情形请用 `padding` / `padding_xy`，它们更短。
+- **`align_xy` 是给 `stack` 用的**：`align` 一个参数同时管两轴，`End` 因此只能是右下角，
+  表达不了「右上角」——对话框右上角那个关闭按钮就卡在这里。`.align_xy(Align::End,
+  Align::Start)` 即右上。线性容器（`col` / `row`）只有交叉轴一个自由度，用 `align` 即可。
 
 ### 6.4 滚动与触摸
 `Element::scroll()` 内的内容超出视口时可滚动。已内建：
@@ -1110,6 +1211,7 @@ Element::label("标题")
     .fg(Color::hex(0x1A1A2E))     // 文字色
     .font_size(22.0)
     .font_weight(600)             // 400=常规 500=中 600=半粗 700=粗
+    .italic()                     // 斜体；与字重正交，粗斜体是 .font_weight(700).italic()
     .font_family("Newsreader")    // 字体族名；未设=系统默认
     .bg(Color::WHITE)
     .border(Color::hex(0xDDDDDD), 1)
@@ -1123,6 +1225,12 @@ Element::label("标题")
 > （交叉轴对齐是另一回事：子节点未显式设 `align` 时取**其直接容器**的交叉轴对齐，这是容器对子项的排布，只有一层，不会穿透多层祖先。）
 >
 > `font_family` 指定的字体**未安装时不报错也不 panic**：Windows 的 DirectWrite 与 macOS 的 CoreText 均静默回退系统默认字体——字体是否存在取决于用户机器，调用方无从保证；需要确保效果应随程序分发字体。
+>
+> **斜体与字重是正交的两个轴**，不是同一个「字形变体」枚举的两档——字体里它们分开，
+> DirectWrite 的 weight 与 style 也是分开的参数；合成一个枚举就表达不了粗斜体，而那恰是
+> 正文里的常见组合（粗体词性 + 斜体例句）。富文本里对应 `SpanStyle::italic()`，且与
+> `underline` / `strike` 一样按「或」合并——命名样式开了斜体，内联样式不会把它关掉
+> （它们是开关不是取值）。
 >
 > **平台状态**：`font_family` 两平台均生效。`font_weight` **当前仅 Windows 生效**——macOS 的 CoreText 路径尚未接入字重（`src/text/coretext.rs` 构造 `CTFont` 时不传 traits），传入非 400 的值不报错，但没有视觉变化。
 
@@ -1247,6 +1355,31 @@ theme.set(Theme::dark());                              // 整体替换
 theme.update(|t| t.palette.accent = Color::hex(0x2E9E5B));  // 就地改一处（快照→改→写回）
 let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
 ```
+
+**跟随系统亮暗**要两件东西配合：`event::system_prefers_dark()` 答「此刻是什么」，
+`App::on_system_theme_changed(..)` 负责之后的跟随。
+
+```rust
+use windui::prelude::*;
+
+let mut app = App::new("查词", 480, 360)
+    .theme(if windui::event::system_prefers_dark() { Theme::dark() } else { Theme::default() });
+let theme = app.theme_handle();
+app.on_system_theme_changed(move |_ctx, is_dark| {          // 参数是切换之后是否为暗色
+        theme.set(if is_dark { Theme::dark() } else { Theme::default() });
+    })
+    .content(ui)
+    .run();
+```
+
+- **只在启动时读一次是不够的**：常驻类应用一次会话可能横跨日出日落，而进程一直不重启
+  ——用户在系统里切了暗色，得把应用重开才生效。
+- **只在主题这一项变化时触发**：字体、区域、鼠标速度在 Windows 上与它共用同一条系统消息，
+  平台层已经筛过（不筛的话，用户改任何一项系统设置都会让界面白重建一次）。
+- 读不到系统偏好时按**亮色**处理：那是 Windows 的出厂默认，且亮色界面在暗色系统上只是不
+  协调，反过来（暗色界面配亮色系统）更容易让人以为程序坏了。
+- 换主题要真的跟得上，控件颜色得写成**角色**（`bg_role(Role::Bg)` / `fg_role(Role::Text)`）
+  而非固定色——固定色不参与主题解析，换完还是老样子。
 
 三者都会请求重绘，下一帧整树跟随。
 
@@ -1470,6 +1603,31 @@ PageUp/PageDown 尚不在 `Key` 枚举里（要加得动两个平台的键码映
 > 鼠标没有任何办法把焦点移出这个输入框。惯例是只吞 Tab、放过 Shift+Tab。
 >
 > 未声明 `on_nav_key` 的控件行为完全不变——当前没有任何内置控件消费 Tab。
+
+**窗口级快捷键 `App::on_shortcut`**：上面两个出口都挂在具体控件上，而「Ctrl+L 回搜索框」
+「F5 刷新」这类快捷键在焦点落在**任何地方**时都该生效。没有这个入口，应用只能把同一段
+处理抄进每个可聚焦控件的 `on_nav_key`——漏一个，那个控件上的快捷键就哑了。
+
+```rust
+App::new("查词", 480, 360)
+    .on_shortcut(|ctx, ev| match ev.key {
+        Key::Char('l') | Key::Char('L') if ev.ctrl => { ctx.focus_main_input(); true }
+        Key::Escape if in_settings.get() => { in_settings.set(false); true }  // 退回上一页
+        _ => false,                       // 返回 false = 没处理，继续走默认行为
+    })
+    .content(ui)
+    .run();
+```
+
+- **兜底而非抢先**：键先到焦点控件，它要了就轮不到这里（同网页里焦点元素
+  `preventDefault()` 掉的机制）。这保证了输入框里打字不会被应用的快捷键截胡。
+- 但它排在 **Tab / Escape 之前**——应用得能覆盖那两个默认行为。上例的 Escape 就是典型：
+  设置页里它该退回上一页，而不是把整个窗口关掉。
+- 回调拿 `ShortcutCtx`，只有 `focus_main_input()` 与 `request_close()` 两个方法，**拿不到
+  窗口句柄**，理由同 `HotkeyCtx`：它只收集意图，由宿主在回调返回后落地。
+- 返回 `true` 的那一帧框架会自动请求重排与重绘。（早期版本只有 `focus_main_input` 那条路
+  自己置了标志，于是「Ctrl+L 正常、Esc 切页没反应，动一下鼠标才刷出来」——这个不对称是
+  最难查的一种。）
 
 ### 8.4 右键约定
 **右键默认不触发控件**（桌面习惯）。框架在分发层拦截非左键的 Down/Up；仅需右键的控件 override `Widget::wants_right_click() -> true`。新控件**默认即正确**。
