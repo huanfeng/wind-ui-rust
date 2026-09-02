@@ -4881,6 +4881,43 @@ mod tests {
         assert_eq!(tree.node_tooltip(hit).as_deref(), Some("每次 ±1"));
     }
 
+    /// 点 ± **不要**把焦点拽给数值框——调值和编辑是两件事。
+    ///
+    /// 光标是个很强的视觉信号：只想微调一下数字，框里却开始闪光标，既像是进了编辑态
+    /// 又容易被后续误触改坏。想编辑就直接点中间那格。
+    ///
+    /// 判据取 `dispatch_pointer` 的 `res.focus`：宿主每次按下都重新裁决焦点，没有节点
+    /// 认领就清空（`apply_dispatch_effects` 的 blur 分支），所以「不请求」就等于「不聚焦」。
+    #[test]
+    fn stepper_buttons_do_not_steal_focus() {
+        let (mut tree, field, v) = stepper_tree(5.0, 1.0, 9.0, 1.0);
+        let row = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let rb = tree.abs_bounds(row);
+        let (mut h, mut cap) = (None, None);
+        for p in [
+            Point::new(rb.right() - 5, rb.y + rb.h / 2), // +
+            Point::new(rb.x + 5, rb.y + rb.h / 2),       // −
+        ] {
+            let down = tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut h, &mut cap);
+            let up = tree.dispatch_pointer(ptr(PointerKind::Up, p), &mut h, &mut cap);
+            assert!(
+                down.focus.is_none() && up.focus.is_none(),
+                "点 ± 不得请求焦点"
+            );
+        }
+        assert_eq!(v.get(), 5.0, "前置：一加一减回到原值，说明两次都真的点中了");
+
+        // 对照：直接点中部那格才聚焦。
+        let fb = tree.abs_bounds(field);
+        let p = Point::new(fb.x + fb.w / 2, fb.y + fb.h / 2);
+        let down = tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut h, &mut cap);
+        assert_eq!(
+            down.focus,
+            Some(field),
+            "手动点数值框才该聚焦，否则连编辑都进不去了"
+        );
+    }
+
     /// 整个 stepper 对 Tab 只占一个焦点位，且那一位是中部数值框。
     #[test]
     fn stepper_takes_a_single_tab_stop() {

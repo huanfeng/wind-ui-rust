@@ -177,9 +177,6 @@ struct Shared {
     /// 中部输入框是否持有焦点——外框据此把边框画成 accent 色。
     /// 由 `NumberField::paint` 写、`StepperFrame::paint` 读。
     focused: Cell<bool>,
-    /// ± 按钮请求把焦点交给中部输入框。按钮自己不可聚焦，也无法替别的节点要焦点，
-    /// 只能由输入框在自己的 `on_update` 里替自己要（见 `Tree::pending_focus`）。
-    want_focus: Cell<bool>,
     /// `value` / `text` 上次同步时的版本号。**放在共享区而不是 `NumberField` 里，
     /// 是因为写这两个信号的不止一个人**——± 按钮也写。
     ///
@@ -410,14 +407,12 @@ impl Widget for StepperButton {
                 true
             }
             PointerKind::Down => {
-                // 焦点交给中部输入框：按完 + 之后方向键还能接着调，键盘与鼠标接得上。
-                self.shared.want_focus.set(true);
+                // **刻意不 `request_focus`**：调值和编辑是两件事，点 ± 只该改数字，
+                // 不该把光标拽过来开始闪。想编辑就直接点中间那格。
+                //
+                // 「不请求」就等于「不聚焦」——宿主每次按下都重新裁决焦点，没有节点
+                // 认领就清空（`apply_dispatch_effects` 的 blur 分支），本控件不必插手。
                 self.step();
-                // 升重排而不是普通脏区：`want_focus` 要靠 `on_update` 里的
-                // `ctx.request_focus()` 兑现，而 `pending_focus` 只在整窗帧的
-                // `refresh_focus` 里落地。已经顶到 min/max 时 `step()` 一个信号都不写、
-                // 本帧不会自行升级，这次焦点转交就悄悄丢了。
-                ctx.mark_layout_dirty();
                 ctx.capture();
                 self.pressed.set(true);
                 // 起点不在此处取：事件路径读到的帧时钟是陈旧的（见 PRESS_START_PENDING）。
@@ -448,9 +443,9 @@ impl Widget for StepperButton {
 
 /// [`TextInput`] 的透明包装：把每个 `Widget` 方法原样转发下去，只在四处插手。
 ///
-/// 用「同一个节点上包一层」而不是「直接放一个 TextInput 子节点」，是因为包装层需要两样
-/// 只有节点自己才有的东西：`paint` 的 `focused` 参数（外框要据此变色），以及 `on_update`
-/// 里替自己要焦点的资格。转发是逐方法的，命中/坐标/输入法全都还在同一个节点上，
+/// 用「同一个节点上包一层」而不是「直接放一个 TextInput 子节点」，是因为包装层需要一样
+/// 只有节点自己才有的东西：`paint` 的 `focused` 参数——外框要据此变色，而外框自己
+/// 永远拿不到焦点。转发是逐方法的，命中/坐标/输入法全都还在同一个节点上，
 /// 不存在坐标换算——`TextInput` 的一切内部假设照旧成立。
 struct NumberField {
     inner: TextInput,
@@ -639,12 +634,7 @@ impl Widget for NumberField {
 
     /// `value` ↔ `text` 同步。单向优先：`value` 变过就以它为准重排文本（外部写入、
     /// ± 按钮），否则才把用户打的字回写成 `value`。两边同时生效会互相追尾。
-    fn on_update(&mut self, ctx: &mut EventCtx) {
-        if self.shared.want_focus.replace(false) {
-            // 按钮点了：替自己要焦点（按钮自身不可聚焦，也没法指定别的节点）。
-            ctx.request_focus();
-        }
-
+    fn on_update(&mut self, _ctx: &mut EventCtx) {
         if self.value.version() != self.shared.seen_value.get() {
             let s = self.spec.format(self.value.get());
             if self.text.with(|t| *t != s) {
