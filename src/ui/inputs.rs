@@ -697,6 +697,14 @@ pub struct TextConfig {
     /// 前置图标字形（如放大镜 🔍）：在左侧留出图标区并绘制，文字/光标/命中相应右移。
     /// 单字形（Copy 友好）；搜索框等用。
     pub leading: Option<char>,
+    /// 无边框：不画自身的背景与边框。供**外框由容器统一绘制**的复合控件内嵌
+    /// （如 `Element::stepper` 的中部数值框）——两层框叠在一起会画出双线。
+    pub frameless: bool,
+    /// 单行水平对齐（`Start`/`Center`/`End`）。多行忽略（多行按视觉行左对齐）。
+    ///
+    /// 只在文本**放得下**时生效：放不下时对齐偏移恒为 0，交回水平滚动接管，
+    /// 否则居中会和"滚动跟随光标"打架，长文本编辑时左右横跳。
+    pub align: Align,
 }
 
 impl Default for TextConfig {
@@ -707,6 +715,8 @@ impl Default for TextConfig {
             password: false,
             wrap: true,
             leading: None,
+            frameless: false,
+            align: Align::Start,
         }
     }
 }
@@ -759,6 +769,11 @@ pub struct TextInput {
     hover_in_scrollbar: Cell<bool>,
     /// 最近一帧 paint 用的字号快照：供无 style 的命中路径换算前置图标左偏移。
     font_size_hint: Cell<f32>,
+    /// 最近一帧 paint 算出的单行对齐偏移（见 [`TextConfig::align`]）。
+    ///
+    /// 命中测试必须减掉同一个值，否则居中/右对齐时点哪儿光标都落在别处。它依赖
+    /// 本帧的测量结果，故只能由 paint 写、事件读——与 `font_size_hint` 同一形状。
+    align_off: Cell<i32>,
     /// 输入法组合态（拼音等未上屏）：为 true 时暂不绘制自绘光标条，避免与系统
     /// 组合浮层里跟随组合进度的光标重叠、显得"卡在组合开始前"。
     ///
@@ -775,6 +790,12 @@ pub struct TextInput {
     on_submit: Option<SubmitFn>,
     /// 本控件**未处理**的导航键的出口（见 [`crate::ui::Element::on_nav_key`]）。
     on_nav_key: Option<NavKeyFn>,
+    /// 输入准入过滤：对**改动之后的完整正文**表态，`false` 则整次改动被丢弃。
+    ///
+    /// 收整串而不是单个字符，是因为数字这类格式的合法性本就是全局的——`-` 只能打头、
+    /// `.` 只能有一个，逐字符判定说不清这些。同一把尺子同时管住键入与粘贴，
+    /// 不会出现"打不进去但能粘进去"。
+    filter: Option<FilterFn>,
     /// 「本控件被点了」的通知（见 [`crate::ui::Element::on_click`]）。
     ///
     /// 与 Button 的同名回调**语义不同**：那里 on_click 就是激活本身，这里只是旁路通知，
@@ -791,6 +812,8 @@ type SubmitFn = Box<dyn FnMut(&mut EventCtx)>;
 /// 收整个 `KeyEvent` 而不只是 `Key`：Tab 必须能区分 Shift——应用把 Tab 用作「接受补全」
 /// 时若连 Shift+Tab 一起吞掉，用户就没有任何键盘途径离开这个输入框了。
 type NavKeyFn = Box<dyn FnMut(&mut EventCtx, KeyEvent) -> bool>;
+/// 输入准入过滤：入参是**改动后的完整正文**，返回是否放行。见 `TextInput::filter`。
+type FilterFn = Box<dyn Fn(&str) -> bool>;
 
 impl TextInput {
     pub fn new(text: Signal<String>, placeholder: String) -> Self {
@@ -812,10 +835,12 @@ impl TextInput {
             follow_cursor: Cell::new(true),
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
+            align_off: Cell::new(0),
             composing: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             on_submit: None,
             on_nav_key: None,
+            filter: None,
             on_click: None,
         }
     }
@@ -833,6 +858,34 @@ impl TextInput {
     /// 设置导航键回调（供 Builder；下游用 [`crate::ui::Element::on_nav_key`]）。
     pub fn set_on_nav_key(&mut self, f: impl FnMut(&mut EventCtx, KeyEvent) -> bool + 'static) {
         self.on_nav_key = Some(Box::new(f));
+    }
+
+    /// 设置输入准入过滤（见 [`Self::filter`]）。入参是改动后的完整正文。
+    pub fn set_filter(&mut self, f: impl Fn(&str) -> bool + 'static) {
+        self.filter = Some(Box::new(f));
+    }
+
+    /// 「删除选区 + 在光标处插入 `ins`」之后的候选正文——过滤器的入参。
+    ///
+    /// 无选区时 `selection()` 返回 `None`，退化为在光标处纯插入。
+    fn candidate_text(&self, ins: &str) -> String {
+        let (s, e) = self.selection().unwrap_or((self.cursor, self.cursor));
+        self.text.with(|t| {
+            let (bs, be) = (char_to_byte(t, s), char_to_byte(t, e));
+            let mut out = String::with_capacity(t.len() + ins.len());
+            out.push_str(&t[..bs]);
+            out.push_str(ins);
+            out.push_str(&t[be..]);
+            out
+        })
+    }
+
+    /// 这次改动放不放行。未设过滤器时恒放行。
+    fn allows(&self, ins: &str) -> bool {
+        match &self.filter {
+            Some(f) => f(&self.candidate_text(ins)),
+            None => true,
+        }
     }
 
     /// 触发 `on_submit`；返回是否消费了这次 Enter。
@@ -1008,6 +1061,12 @@ impl TextInput {
         if c.is_control() {
             return;
         }
+        // 预检必须在 `delete_selection` **之前**：那一步已经改了正文，之后再算候选串
+        // 就是「删了选区的结果」，过滤器拒绝时选区已经回不来了。
+        let mut buf = [0u8; 4];
+        if !self.allows(c.encode_utf8(&mut buf)) {
+            return;
+        }
         self.delete_selection(ctx);
         self.clamp_cursor();
         let cursor = self.cursor;
@@ -1071,7 +1130,9 @@ impl TextInput {
         self.cursor = e.min(chars.len());
     }
     /// 全选。
-    fn select_all(&mut self) {
+    /// 全选正文（Ctrl+A 走的同一条路）。公开是给**内嵌 TextInput 的复合控件**用：
+    /// Stepper 用方向键改完值后全选，接着键入就是整体替换，与原生数字框一致。
+    pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.cursor = self.char_count();
     }
@@ -1219,7 +1280,10 @@ impl TextInput {
         }
         let b = ctx.bounds();
         let lead = self.lead_inset(self.font_size_hint.get());
-        let local_x = screen_x - (b.x + TEXT_PAD + lead) + self.scroll_x.get();
+        // 减掉 paint 那一帧实际用的对齐偏移：不减的话居中/右对齐时点击落点整体偏移，
+        // 点第一个字符会选到中间去。
+        let local_x =
+            screen_x - (b.x + TEXT_PAD + lead) + self.scroll_x.get() - self.align_off.get();
         // 垂直按多行内边距换算行号。单行只有一行、下方 clamp 恒为 0，故单行垂直
         // 居中（vpad=0）与此处用 TEXT_PAD 的不一致不影响命中；若将来单行支持多视觉
         // 行，需与 paint 的 first_line_y 同步。
@@ -1333,8 +1397,6 @@ impl TextInput {
     /// 在光标处粘贴（先删选区）。单行控件过滤所有控制字符；多行保留 '\n'
     /// （\r\n / \r 归一为 \n），仍过滤其他控制字符。
     fn paste(&mut self, ctx: &mut EventCtx, s: &str) {
-        self.delete_selection(ctx);
-        self.clamp_cursor();
         let clean: String = if self.is_multiline() {
             let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
             normalized
@@ -1347,6 +1409,14 @@ impl TextInput {
         if clean.is_empty() {
             return;
         }
+        // 与键入同一把尺子：整串一次性表态，不合格就整次丢弃（不做"逐字符挑能进的"，
+        // 那会把 `12abc34` 悄悄变成 `1234`，用户看不出自己粘错了东西）。
+        // 同样必须先于 `delete_selection`。
+        if !self.allows(&clean) {
+            return;
+        }
+        self.delete_selection(ctx);
+        self.clamp_cursor();
         let cursor = self.cursor;
         let added = clean.chars().count();
         self.text.update(|t| {
@@ -1493,15 +1563,17 @@ impl Widget for TextInput {
         } else {
             pal.text_disabled
         };
-        canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
-        let border = if focused {
-            inp.border_focus(pal)
-        } else {
-            inp.border(pal)
-        };
-        let t = crate::theme::current();
-        let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
-        canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
+        if !self.config.frameless {
+            canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
+            let border = if focused {
+                inp.border_focus(pal)
+            } else {
+                inp.border(pal)
+            };
+            let t = crate::theme::current();
+            let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
+            canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
+        }
 
         // 显示串：密码模式为掩码圆点、有输入法合成串时含合成串；
         // 测量/绘制/光标定位都基于它。
@@ -1595,7 +1667,27 @@ impl Widget for TextInput {
         } else {
             inner.y + (inner.h - line_h) / 2
         };
-        let base_x = inner.x - sx;
+        // 单行对齐偏移：只在整行放得下时才给，放不下就交回水平滚动（见 `TextConfig::align`）。
+        // 空串时按 placeholder 宽度算，否则占位符会在居中框里贴左边、上屏第一个字瞬间跳到中间。
+        let align_off = if multiline || self.config.align == Align::Start {
+            0
+        } else {
+            let content_w = if is_empty {
+                canvas.measure_text(&self.placeholder, ts).w
+            } else {
+                lay.lines
+                    .first()
+                    .map_or(0, |ln| ln.x.last().copied().unwrap_or(0))
+            };
+            let slack = inner.w - content_w;
+            match self.config.align {
+                Align::Center => (slack / 2).max(0),
+                Align::End => slack.max(0),
+                _ => 0,
+            }
+        };
+        self.align_off.set(align_off);
+        let base_x = inner.x - sx + align_off;
 
         canvas.save();
         canvas.clip_rect(inner);
@@ -1637,7 +1729,13 @@ impl Widget for TextInput {
 
         let chars: Vec<char> = disp.chars().collect();
         if is_empty {
-            let pr = Rect::new(inner.x, first_line_y, inner.w, line_h);
+            // 与正文同一 base_x：占位符也吃 align_off，居中框里的占位符才真居中。
+            //
+            // 宽度分两档：`rect.w` 就是排版引擎的折行宽度，多行必须给 `inner.w`，
+            // 否则长占位符不再折行、右边被 `clip_rect(inner)` 直接切掉；单行给
+            // `NO_WRAP_W`（同正文），免得长占位符自己折到第二行去。
+            let pw = if multiline { inner.w } else { NO_WRAP_W };
+            let pr = Rect::new(base_x, first_line_y, pw, line_h);
             canvas.draw_text(
                 &self.placeholder,
                 pr,
@@ -1751,13 +1849,21 @@ impl Widget for TextInput {
                 opts.style = CaretStyle::Solid;
                 opts.smooth_move = false;
             }
+            // `frameless` 时本控件没画底，`bg` 那个变量算的是"假如画了会是什么色"
+            // ——真正的底是外层容器画的，两者在自定义主题下并不同色。拿它去反色重绘，
+            // 光标处会糊上一小段不属于这里的颜色，故 frameless 直接不做反色。
+            let invert_over_glyph = !self.config.frameless;
             if let Some((caret, alpha)) =
                 // 竖直只内缩 1px：行盒本就含行距，再各缩 2px 会让光标明显短于字身，
                 // 视觉上"矮一截"。
                 self.caret
                         .paint(canvas, cxx, ly + 1, line_h - 2, inp.cursor(pal), &opts)
             {
-                if let Some(ln) = lay.lines.get(cl).filter(|ln| ln.end > ln.start) {
+                if let Some(ln) = lay
+                    .lines
+                    .get(cl)
+                    .filter(|ln| invert_over_glyph && ln.end > ln.start)
+                {
                     let s: String = chars[ln.start..ln.end].iter().collect();
                     canvas.save();
                     canvas.clip_rect(caret);
