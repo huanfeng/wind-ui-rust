@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+- **多行输入框让出 `Ctrl+Enter` 作为应用级「提交」通道**（行为变更）。`TextInput` 多行模式
+  此前对 Enter 一律插入换行、**不看修饰键**，于是多行表单没有任何键盘交卷的办法——挂
+  `on_submit` 收不到（那条臂排在多行守卫之后，永远走不到），挂到外层容器上更收不到
+  （`dispatch_key` 只派给焦点节点，不冒泡）。现在裸 Enter 仍是换行，`Ctrl+Enter` 交给
+  `on_submit`；未声明 `on_submit` 的多行框上它不被消费，于是能上达 `App::on_shortcut`。
+  - 同一条不变量下，**按钮类与下拉类控件不再吃带 `Ctrl` 的 Enter**：`Button`、`IconButton`、
+    `Clickable`、`TabBar`、`Dropdown`、`CheckMenu` 的激活键收窄为**裸** Enter / 空格
+    （下拉另有 ↓）。表单里焦点常停在某个按钮上（Tab 过去的、点过「粘贴」的），它们若
+    照吃不误，用户按 `Ctrl+Enter` 提交得到的会是「触发了焦点所在的取消按钮」——表单没交，
+    反倒关掉了。
+  - 影响面：此前靠 `Ctrl+Enter` / `Ctrl+Space` 触发按钮、靠 `Ctrl+↓` 展开下拉的写法会失效。
+    这两类都不是激活语义，属于旧行为漏放的修饰键组合。
+
 - **新增颜色选择器 `Element::color_picker(color)`**（`color: Signal<Color>`）。色块触发器 +
   点开的取色面板：SV 方块（饱和度 × 明度）、色相条、透明度条、HEX 输入框、一排预设色，
   全部双向绑同一个信号。`Element::color_picker_opts(color, ColorPickerOpts::default()…)`

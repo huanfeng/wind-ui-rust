@@ -2099,7 +2099,14 @@ impl Widget for TextInput {
                     // `dispatch_files`，那个是真冒泡）。所以未消费的按键是**就地消失**，
                     // 不会传给外层容器——想在外层挂 Widget 接 Enter 的写法编译通过、
                     // 逻辑正确、永远不触发。单行 Enter 的唯一出口是 `on_submit`。
-                    Key::Enter if self.is_multiline() => {
+                    //
+                    // **`!k.ctrl` 是承重的**：多行框里 Enter 是编辑器语义（换行），于是
+                    // 「多行表单怎么用键盘提交」在此前完全无解——挂了 `on_submit` 也永远
+                    // 收不到。Ctrl+Enter 从换行里让出来交给 `fire_submit`（下面那条臂），
+                    // 换行与提交这才各有各的键，与业界通例一致（Enter 换行 / Ctrl+Enter
+                    // 发送）。未声明 `on_submit` 的多行框上 Ctrl+Enter 变成不消费，
+                    // 于是能冒到 `App::on_shortcut`——那正是应用级「提交」该待的地方。
+                    Key::Enter if self.is_multiline() && !k.ctrl => {
                         self.insert_newline(ctx);
                         true
                     }
@@ -2114,8 +2121,9 @@ impl Widget for TextInput {
                         true
                     }
                     // 单行的 Enter / 上下键：本控件不处理，交给应用声明的出口。
-                    // 放在多行守卫之后，故多行模式永远走不到这里（Enter 换行、上下移行
-                    // 是编辑器的固有语义，不该被应用截走）。
+                    // 放在多行守卫之后，故多行模式的**裸** Enter 走不到这里（换行、
+                    // 上下移行是编辑器的固有语义，不该被应用截走）；多行的
+                    // **Ctrl+Enter** 则由上面那条臂让出来，与单行 Enter 汇到同一个出口。
                     Key::Enter => self.fire_submit(ctx),
                     // 上下键：单行本控件不用，交给应用。
                     //

@@ -4112,6 +4112,28 @@ mod tests {
         (tree, btn, Point::new(b.x + b.w / 2, b.y + b.h / 2))
     }
 
+    /// 按钮的激活键是**裸** Enter / 空格；带 Ctrl 的不激活，也不消费。
+    ///
+    /// 没有后半条时错在哪：Ctrl+Enter 是应用级的提交通道，而表单里焦点常常停在某个
+    /// 按钮上（Tab 过去的、点过「粘贴」的）。按钮若照吃不误，用户按 Ctrl+Enter 提交
+    /// 得到的是「触发了焦点所在的取消按钮」——表单没提交，反倒关掉了。
+    #[test]
+    fn button_activates_on_bare_enter_but_lets_ctrl_enter_pass() {
+        let clicks = signal(0);
+        let (mut tree, btn, _) = overlay_tree(clicks, false);
+        let key = |ctrl| KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            shift: false,
+            ctrl,
+        };
+        assert!(tree.dispatch_key(key(false), Some(btn)).consumed);
+        assert_eq!(clicks.get(), 1, "裸 Enter 应激活按钮");
+        let res = tree.dispatch_key(key(true), Some(btn));
+        assert!(!res.consumed, "Ctrl+Enter 不该被按钮消费");
+        assert_eq!(clicks.get(), 1, "Ctrl+Enter 不该触发 on_click");
+    }
+
     #[test]
     fn transparent_overlay_passes_pointer_through_to_lower_sibling() {
         // 透明纯容器（EmptyWidget、无背景）全覆盖在按钮之上：命中应穿透到下层按钮。
@@ -5089,6 +5111,31 @@ mod tests {
         tree.dispatch_key(k(Key::Enter), Some(input));
         tree.dispatch_key(k(Key::Char('c')), Some(input));
         assert_eq!(txt.get(), "ab\nc", "多行 Enter 应插入换行符");
+    }
+
+    /// 多行框里 **Ctrl+Enter 不换行、也不消费** —— 它是留给应用的提交通道。
+    ///
+    /// 没有这条时错在哪：多行框此前对 Enter 一律换行（不看修饰键），于是「多行表单
+    /// 怎么用键盘提交」无解——挂 `on_submit` 收不到，挂在外层的 Widget 也收不到
+    /// （`dispatch_key` 不冒泡）。放开之后 Ctrl+Enter 未被消费即可上达
+    /// `App::on_shortcut`，wind-setting 的加词界面正是靠它。
+    #[test]
+    fn multiline_ctrl_enter_is_left_for_the_app() {
+        let (mut tree, input, txt) = multiline_tree("ab");
+        let res = tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: true,
+            },
+            Some(input),
+        );
+        assert!(
+            !res.consumed,
+            "多行 Ctrl+Enter 不该被控件消费——消费掉就到不了 App::on_shortcut"
+        );
+        assert_eq!(txt.get(), "ab", "多行 Ctrl+Enter 不得插入换行");
     }
 
     #[test]

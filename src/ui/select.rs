@@ -426,7 +426,11 @@ impl Widget for Dropdown {
                 }
                 _ => false,
             },
-            Event::Key(k) if k.pressed => match k.key {
+            // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行 Enter
+            // 那条臂）。下拉常常是表单里的第一个可聚焦控件，模态一开焦点就落在它上面
+            // ——它若连带修饰键的 Enter 一起吃掉，那张表单就再也没有键盘交卷的办法了。
+            // 展开下拉的键是裸 Enter / 空格 / ↓。
+            Event::Key(k) if k.pressed && !k.ctrl => match k.key {
                 Key::Enter | Key::Space | Key::Down => {
                     self.open(ctx);
                     true
@@ -711,7 +715,11 @@ impl Widget for CheckMenu {
                 }
                 _ => false,
             },
-            Event::Key(k) if k.pressed => match k.key {
+            // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行 Enter
+            // 那条臂）。下拉常常是表单里的第一个可聚焦控件，模态一开焦点就落在它上面
+            // ——它若连带修饰键的 Enter 一起吃掉，那张表单就再也没有键盘交卷的办法了。
+            // 展开下拉的键是裸 Enter / 空格 / ↓。
+            Event::Key(k) if k.pressed && !k.ctrl => match k.key {
                 Key::Enter | Key::Space | Key::Down => {
                     self.open(ctx);
                     true

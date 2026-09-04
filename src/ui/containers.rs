@@ -541,7 +541,11 @@ impl Widget for Clickable {
                 _ => false,
             },
             Event::Key(k) => {
-                if k.pressed && (k.key == Key::Enter || k.key == Key::Space) {
+                // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行
+                // Enter 那条臂），焦点恰好停在某个按钮上时不该被它吃掉——否则「填完表
+                // 按 Ctrl+Enter 提交」会变成「触发焦点所在的取消/粘贴按钮」。按钮的
+                // 激活键是裸 Enter 与空格，加了修饰键本就不是激活语义。
+                if k.pressed && !k.ctrl && (k.key == Key::Enter || k.key == Key::Space) {
                     if let Some(cb) = self.on_click.as_mut() {
                         cb(ctx);
                     }
@@ -748,7 +752,11 @@ impl Widget for IconButton {
                 _ => false,
             },
             Event::Key(k) => {
-                if k.pressed && (k.key == Key::Enter || k.key == Key::Space) {
+                // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行
+                // Enter 那条臂），焦点恰好停在某个按钮上时不该被它吃掉——否则「填完表
+                // 按 Ctrl+Enter 提交」会变成「触发焦点所在的取消/粘贴按钮」。按钮的
+                // 激活键是裸 Enter 与空格，加了修饰键本就不是激活语义。
+                if k.pressed && !k.ctrl && (k.key == Key::Enter || k.key == Key::Space) {
                     if let Some(cb) = self.on_click.as_mut() {
                         cb(ctx);
                     }
@@ -1218,7 +1226,9 @@ impl Widget for TabBar {
                 }
                 _ => false,
             },
-            Event::Key(k) if k.pressed && !self.items.is_empty() => {
+            // `!k.ctrl` 同按钮：带修饰键的 Enter 留给应用做「提交」，标签条的激活键是
+            // 裸 Enter / 空格，切换键是 ←→/Home/End。
+            Event::Key(k) if k.pressed && !k.ctrl && !self.items.is_empty() => {
                 let n = self.items.len();
                 match self.key_target(k.key, self.selected(), n) {
                     Some(i) => {
