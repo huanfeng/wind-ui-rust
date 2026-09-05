@@ -18,6 +18,23 @@ pub mod win32;
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
 pub use win32::dragdrop::drag_files;
+
+/// 当前活跃窗口的原生句柄（Windows：HWND；其它平台暂无，返回 `None`）。
+///
+/// 给需要直接跟系统打交道的下游用：Shell 上下文菜单、属性对话框、缩略图提取这些
+/// API 都要一个父窗口。只在 UI 线程、事件分发期间或 `ctx.defer_blocking` 的闭包里
+/// 有效——那是消息循环写入它的时机；别的线程或时机拿到的是 0 / 上一次的值。
+#[cfg(windows)]
+pub fn native_window_handle() -> Option<isize> {
+    let h = win32::active_hwnd();
+    (h != 0).then_some(h)
+}
+
+/// 见 Windows 版：macOS 暂未暴露（NSView 指针的生命周期与 windui 的窗口模型还没对齐）。
+#[cfg(not(windows))]
+pub fn native_window_handle() -> Option<isize> {
+    None
+}
 #[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]

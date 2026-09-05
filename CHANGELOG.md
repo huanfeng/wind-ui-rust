@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+- **新增 `platform::native_window_handle()`**：当前活跃窗口的原生句柄（Windows 为 HWND，
+  其它平台暂返回 `None`）。Shell 上下文菜单、属性对话框、缩略图提取这类系统 API 都要一个
+  父窗口，此前句柄只在库内给文件对话框注入父窗用，下游拿不到。只在 UI 线程的事件分发期间
+  或 `ctx.defer_blocking` 闭包里有效。
+
 - **新增拖出到外部程序 `platform::drag_files(paths, allow_move) -> DragEffect`**。此前只有
   `on_drop_files` 这半边——能接别人拖进来的文件，自己的条目却拖不出去，文件管理器把文件
   拖到资源管理器、桌面、别的程序上这条最常用的路走不通。Windows 侧走 OLE `DoDragDrop` +
