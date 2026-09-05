@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+- **子窗可归属与模态：`Window::owned(true)` / `Window::modal(true)`**。此前 `ctx.open_window`
+  开出的都是独立顶层窗口——会被主窗盖住、在任务栏另占一格、主窗最小化它还留着，做对话框
+  只能继续挤在主窗里当浮层，拖不出窗口。归属窗口的 owner 就是发起开窗的那个窗口：始终浮在
+  它上方、随它最小化 / 隐藏、不占任务栏、它关掉时一并关掉（Windows 去掉最小化按钮）；
+  `centered(true)` 改为居中在 owner 上并钳进其所在显示器的工作区。模态隐含归属，打开期间
+  owner 不接受输入（点它只会把对话框拉到前面），关闭后焦点回到 owner——Windows 走
+  owner HWND + `EnableWindow`，且在 `DestroyWindow` **之前**恢复，否则销毁过程中系统会把
+  激活给别的应用；macOS 走 `addChildWindow:ordered:` + 阻断表（AppKit 没有"禁用窗口"，
+  `runModalForWindow:` 是嵌套 run loop 与帧模型不合），owner 关闭时连带关掉 child。
+  返回值走共享 `Signal`，没有"阻塞到关闭"的形式。macOS 侧只做了交叉编译检查、未经真机验证。
+
 - **新增 `platform::native_window_handle()`**：当前活跃窗口的原生句柄（Windows 为 HWND，
   其它平台暂返回 `None`）。Shell 上下文菜单、属性对话框、缩略图提取这类系统 API 都要一个
   父窗口，此前句柄只在库内给文件对话框注入父窗用，下游拿不到。只在 UI 线程的事件分发期间

@@ -120,6 +120,8 @@ impl Window {
                 height,
                 resizable: true,
                 centered: false,
+                owned: false,
+                modal: false,
                 frameless: false,
                 system_menu: true,
                 min_width: 0,
@@ -205,9 +207,56 @@ impl Window {
         self
     }
 
-    /// 窗口居中显示。
+    /// 窗口居中显示：设了 [`owned`](Self::owned) 就居中在发起窗口上，否则居中在屏幕上。
     pub fn centered(mut self, on: bool) -> Self {
         self.req.centered = on;
+        self
+    }
+
+    /// 归属于**发起它的那个窗口**（在哪个窗口的回调里 `open_window`，owner 就是哪个）。
+    ///
+    /// 归属窗口始终浮在 owner 上方、随 owner 最小化与隐藏、不单独占任务栏，owner 关掉时
+    /// 一并关掉；Windows 上还去掉最小化按钮（归属窗口没有单独最小化这回事）。对话框、
+    /// 工具面板都该设——不设的子窗是独立的顶层窗口，会被主窗盖住、在任务栏另占一格。
+    ///
+    /// 不模态：owner 照常可操作，适合"查找结果""属性"这类可以开着不管的窗口。
+    pub fn owned(mut self, on: bool) -> Self {
+        self.req.owned = on;
+        self
+    }
+
+    /// 模态对话框（隐含 [`owned`](Self::owned)）：打开期间发起窗口不接受任何输入
+    /// （点它只会让对话框闪一下），关闭后焦点回到发起窗口。
+    ///
+    /// **返回值走 `Signal`**：对话框与发起方共享 `Signal`，按钮回调写信号再
+    /// `ctx.request_close()`；发起方在信号上 `reactive` 或下一次事件里读。没有"阻塞到
+    /// 关闭再返回"的形式——那要求嵌套消息循环，与本库的帧模型不合。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let ok = signal(false);
+    /// Element::button("删除…").on_click(move |ctx| {
+    ///     ctx.open_window(
+    ///         Window::new("确认删除", 360, 140)
+    ///             .modal(true)
+    ///             .resizable(false)
+    ///             .centered(true)
+    ///             .content(move || {
+    ///                 Element::col().fill().padding(16).child(
+    ///                     Element::button("删除").on_click(move |ctx| {
+    ///                         ok.set(true);
+    ///                         ctx.request_close();
+    ///                     }),
+    ///                 )
+    ///             }),
+    ///     );
+    /// });
+    /// ```
+    pub fn modal(mut self, on: bool) -> Self {
+        self.req.modal = on;
+        if on {
+            self.req.owned = true;
+        }
         self
     }
 
@@ -481,6 +530,9 @@ impl App {
                 // 默认不登记单例键：单窗应用没有"第二个自己"可谈。多窗应用要让子窗
                 // 能把主窗拉回前台时用 [`App::single_window`]。
                 single: None,
+                // 主窗没有 owner 可归属。
+                owned: false,
+                modal: false,
                 icon: None,
             },
             render: None,
@@ -2386,6 +2438,8 @@ impl AppHandler for UiHost {
                     min_width: req.min_width,
                     min_height: req.min_height,
                     single: req.single,
+                    owned: req.owned || req.modal,
+                    modal: req.modal,
                     icon: req.icon,
                     // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
                     // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
@@ -3161,12 +3215,45 @@ mod tests {
         assert!(cfg_a.tray.is_none(), "子窗不得带托盘");
         assert!(cfg_a.hotkeys.is_empty(), "子窗不得带全局热键");
         assert_eq!(made[1].0.title, "关于");
+        // 没设归属 / 模态的子窗是独立顶层窗口。
+        assert!(!cfg_a.owned && !cfg_a.modal);
 
         // 取走即清空，下一轮不会重复建窗。
         assert!(
             h.take_new_windows(&|_| false).is_empty(),
             "请求应在取走时清空"
         );
+    }
+
+    /// `Window::modal` 隐含归属：平台据 `owned` 填 owner、据 `modal` 禁用 owner 的输入，
+    /// 两位都要传到，少一位就是"对话框开出来了但主窗还能点"。
+    #[test]
+    fn modal_window_implies_owned_in_platform_config() {
+        use crate::platform::AppHandler;
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("确认", 300, 120)
+                    .modal(true)
+                    .content(|| Element::col().fill()),
+            );
+            ctx.open_window(
+                Window::new("查找", 300, 120)
+                    .owned(true)
+                    .content(|| Element::col().fill()),
+            );
+        });
+        h.apply_app_effects(res);
+        let made: Vec<_> = h
+            .take_new_windows(&|_| false)
+            .into_iter()
+            .map(expect_create)
+            .collect();
+        assert!(made[0].0.owned && made[0].0.modal, "模态隐含归属");
+        assert!(made[1].0.owned && !made[1].0.modal, "归属不隐含模态");
     }
 
     /// 单例窗口（`Window::single`）：平台报"已开着"时，请求变成 `Focus` 且**内容不构建**。

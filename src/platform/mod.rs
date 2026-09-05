@@ -540,6 +540,11 @@ pub struct WindowConfig {
     ///
     /// 只对 `ctx.open_window` 开出的子窗有意义：主窗本就唯一，`App` 不提供这个设置。
     pub single: Option<String>,
+    /// 归属于发起它的窗口（见 `crate::event::WindowRequest::owned`）。同样只对子窗有意义：
+    /// 平台建窗时把发起窗口填作 owner（Windows）/ parent（macOS）。
+    pub owned: bool,
+    /// 模态（见 `crate::event::WindowRequest::modal`），隐含 `owned`。
+    pub modal: bool,
     /// 窗口/应用图标（`None` = 用系统默认，Windows 下即窗口类从 exe 资源取的那个）。
     ///
     /// 存的是**源**而非位图：平台层要按当前 DPI 决定光栅化到多少像素（Windows 150%
@@ -576,6 +581,8 @@ impl Default for WindowConfig {
             min_width: 0,
             min_height: 0,
             single: None,
+            owned: false,
+            modal: false,
             icon: None,
         }
     }

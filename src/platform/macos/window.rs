@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace, NSCursor,
     NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase,
     NSGraphicsContext, NSImage, NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowStyleMask,
-    NSWindowTitleVisibility,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -115,6 +115,12 @@ thread_local! {
     static CLOSED: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
     /// 应用已进入退出流程（`terminate` 已发出），见 [`ContentView::window_will_close`]。
     static TERMINATING: Cell<bool> = const { Cell::new(false) };
+    /// 模态阻断表：`(owner, 正压着它的模态对话框)`。对照 win32 的 `EnableWindow(owner, false)`
+    /// ——AppKit 没有"禁用一个窗口"的原语（`runModalForWindow:` 是嵌套 run loop，与本库
+    /// 的帧模型不合），故由 owner 的视图在事件入口查表自行拒收（见 `blocked_by_modal`）。
+    /// 对话框关闭时从表里除名（`windowWillClose:`）。
+    static MODAL_BLOCKS: RefCell<Vec<(Retained<NSWindow>, Retained<NSWindow>)>> =
+        const { RefCell::new(Vec::new()) };
     /// 主窗——`App::run` 建的那一个。
     ///
     /// 托盘点击与全局热键说的"唤出窗口"指的都是它；子窗（设置页之类）不是这些操作的
@@ -236,6 +242,25 @@ struct LiveWindow {
 /// 两个引用是否指向同一个 `NSWindow`（登记表按对象身份增删，不能用 `==`）。
 fn same_window(a: &NSWindow, b: &NSWindow) -> bool {
     std::ptr::eq(a as *const NSWindow, b as *const NSWindow)
+}
+
+/// 正压着 `owner` 的模态对话框（最后开的那个）。
+fn modal_child_of(owner: &NSWindow) -> Option<Retained<NSWindow>> {
+    MODAL_BLOCKS.with(|m| {
+        m.borrow()
+            .iter()
+            .rev()
+            .find(|(o, _)| same_window(o, owner))
+            .map(|(_, c)| c.clone())
+    })
+}
+
+/// 窗口关闭：它若是模态对话框，解除对 owner 的阻断；它若是 owner，连带的阻断也作废。
+fn modal_release(win: &NSWindow) {
+    MODAL_BLOCKS.with(|m| {
+        m.borrow_mut()
+            .retain(|(o, c)| !same_window(c, win) && !same_window(o, win))
+    });
 }
 
 /// 窗口建成时登记（连同所有权）。
@@ -815,6 +840,17 @@ define_class!(
                 debug_assert!(false, "windowWillClose: 取不到 window，窗口无法注销");
                 return;
             };
+            // 模态对话框关闭：owner 重新接收输入；owner 关闭：阻断作废。
+            modal_release(&win);
+            // owner 关闭时连带关掉归属窗口（对照 Windows 销毁 owner 时级联销毁 owned
+            // 窗口）：AppKit 只是把 child 从 owner 上摘下来，不会替我们关，留着就是一个
+            // 没了主人的对话框。先关它们再注销自己，"最后一个窗口"的判定才正确。
+            if let Some(children) = win.childWindows() {
+                for c in children.iter() {
+                    win.removeChildWindow(&c);
+                    c.close();
+                }
+            }
             if unregister_window(&win) {
                 // 置位**先于** terminate：它会同步回到本回调（见开头那道闸）。
                 TERMINATING.with(|t| t.set(true));
@@ -1429,7 +1465,23 @@ impl ContentView {
     }
 
     /// 鼠标按下/抬起/移动 → PointerEvent。
+    /// 本窗口是否正被模态对话框压着。是则把对话框拉到前面（对照 Windows 上点被禁用的
+    /// owner 时系统闪一下对话框的行为）并返回 true，调用方应丢弃这次输入。
+    fn blocked_by_modal(&self) -> bool {
+        let Some(me) = self.window() else {
+            return false;
+        };
+        let Some(child) = modal_child_of(&me) else {
+            return false;
+        };
+        child.makeKeyAndOrderFront(None);
+        true
+    }
+
     fn on_pointer(&self, ev: &NSEvent, kind: PointerKind, button: MouseButton) {
+        if self.blocked_by_modal() {
+            return;
+        }
         let pos = self.loc_phys(ev);
         let click_count = if matches!(kind, PointerKind::Down) {
             (ev.clickCount().max(1) as u8).min(3)
@@ -1476,6 +1528,9 @@ impl ContentView {
     /// **未经真机验证**。验法：Mac 触控板在长列表上两指快滑后抬手——预期列表继续滑行
     /// 并逐渐停下；滑行途中再把两指放上触控板，预期立即停住而不是叠加加速。
     fn on_wheel(&self, ev: &NSEvent) {
+        if self.blocked_by_modal() {
+            return;
+        }
         // 新手势起手（手指刚落到触控板上）：清掉上一段的亚像素残差，免得方向相反的
         // 旧残差把新手势的第一格吃掉。鼠标滚轮的 phase 恒为 None，走不到这里。
         let phase = ev.phase();
@@ -1512,6 +1567,9 @@ impl ContentView {
     /// 键盘按下：特殊键直发；普通文本交输入法（IME 提交后经 `insertText:` 回到 Key::Char），
     /// 使中文/emoji 可在文本框输入（对照 win32 的 WM_KEYDOWN + WM_CHAR + IME）。
     fn on_key(&self, ev: &NSEvent) {
+        if self.blocked_by_modal() {
+            return;
+        }
         // 合成进行中：全部交输入法（候选切换/确认/退格在 IME 内完成）。
         if self.ivars().borrow().preedit.is_active() {
             self.route_ime(ev);
@@ -1808,7 +1866,19 @@ impl ContentView {
                 NewWindow::Create(cfg, handler) => {
                     // 后端档位取应用级的那份而不是 `cfg.renderer`：子窗配置由应用层现构造，
                     // 不知道主窗当初选了什么（见 `APP_RENDERER`）。
-                    let win = create_window(mtm, &cfg, handler, APP_RENDERER.with(|r| r.get()));
+                    // 归属 / 模态窗口的 owner 就是发起开窗的这个窗口。
+                    let owner = if cfg.owned || cfg.modal {
+                        self.window()
+                    } else {
+                        None
+                    };
+                    let win = create_window(
+                        mtm,
+                        &cfg,
+                        handler,
+                        APP_RENDERER.with(|r| r.get()),
+                        owner.as_deref(),
+                    );
                     win.makeKeyAndOrderFront(None);
                 }
             }
@@ -2086,6 +2156,8 @@ fn create_window(
     // 只在 `gpu` feature 下用于选后端。签名对两档保持一致（调用方不必分 feature 分支），
     // 故仅在关掉那一档时抑制未使用告警——同 win32 `create_window` 的 `renderer` 参数。
     #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] renderer: Renderer,
+    // 归属窗口（`cfg.owned` / `cfg.modal`）：作为它的 child window 挂上去。主窗恒为 `None`。
+    owner: Option<&NSWindow>,
 ) -> Retained<NSWindow> {
     // 内容矩形为逻辑点尺寸（AppKit 在高 DPI 下自动按 backingScale 放大像素）。
     let content_rect = NSRect {
@@ -2179,8 +2251,29 @@ fn create_window(
     view.refresh_tracking_area();
     let _ = window.makeFirstResponder(Some(&view));
 
-    if cfg.centered {
-        window.center();
+    match owner {
+        // 有 owner：居中在 owner 上（对话框该出现在它所属的窗口中央），再挂为 child
+        // window——随 owner 移动 / 最小化、始终在其上方。模态另记进阻断表，owner 的
+        // 视图据此拒收输入。
+        Some(o) => {
+            if cfg.centered {
+                let of = o.frame();
+                let wf = window.frame();
+                window.setFrameOrigin(NSPoint {
+                    x: of.origin.x + (of.size.width - wf.size.width) / 2.0,
+                    y: of.origin.y + (of.size.height - wf.size.height) / 2.0,
+                });
+            }
+            o.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
+            if cfg.modal {
+                MODAL_BLOCKS.with(|m| m.borrow_mut().push((o.retain(), window.clone())));
+            }
+        }
+        None => {
+            if cfg.centered {
+                window.center();
+            }
+        }
     }
 
     // 动画帧驱动改为自调度的一次性定时器（见 ContentView::schedule_next_frame）：跟随显示器
@@ -2235,7 +2328,7 @@ pub(crate) fn run_windowed(
 
     // 后端档位登记为应用级：子窗建出来时要跟主窗走同一条渲染路径（见 `APP_RENDERER`）。
     APP_RENDERER.with(|r| r.set(cfg.renderer));
-    let window = create_window(mtm, &cfg, handler, cfg.renderer);
+    let window = create_window(mtm, &cfg, handler, cfg.renderer, None);
 
     // 跨线程唤醒：绑一个不指向任何窗口的句柄（见 MacWake）；后台线程 send 经 dispatch
     // 派回主线程标脏。绑定前积压的 wake 由 WakerShared 的 pending 兜底补发。

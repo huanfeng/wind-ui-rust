@@ -868,7 +868,13 @@ pub struct WindowRequest {
     pub width: i32,
     pub height: i32,
     pub resizable: bool,
+    /// 居中。设了 `owned` 就居中在发起窗口上，否则居中在屏幕上。
     pub centered: bool,
+    /// 归属于**发起它的那个窗口**（Windows 的 owner、macOS 的 child window）：始终浮在
+    /// 它上方、随它最小化 / 隐藏、不单独占任务栏、它关掉时一并关掉。对话框都该设。
+    pub owned: bool,
+    /// 模态（隐含 `owned`）：打开期间发起窗口不接受输入，关闭后焦点回到它。
+    pub modal: bool,
     pub frameless: bool,
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     pub system_menu: bool,

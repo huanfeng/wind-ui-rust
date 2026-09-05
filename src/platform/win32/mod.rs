@@ -24,9 +24,10 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetDC, GetDeviceCaps, InvalidateRect, ReleaseDC, ScreenToClient,
-    SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET,
-    DIB_RGB_COLORS, LOGFONTW, PAINTSTRUCT, VREFRESH,
+    BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromWindow,
+    ReleaseDC, ScreenToClient, SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    PAINTSTRUCT, VREFRESH,
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -40,11 +41,11 @@ use windows::Win32::UI::Input::Ime::{
     ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
-    TRACKMOUSEEVENT, VIRTUAL_KEY, VK_ADD, VK_APPS, VK_BACK, VK_CONTROL, VK_DELETE, VK_DIVIDE,
-    VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F12, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU,
-    VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_SUBTRACT,
-    VK_TAB, VK_UP,
+    EnableWindow, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetActiveWindow, SetCapture,
+    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_ADD, VK_APPS, VK_BACK, VK_CONTROL,
+    VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F12, VK_HOME, VK_INSERT, VK_LEFT,
+    VK_LWIN, VK_MENU, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
+    VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, HTOUCHINPUT,
@@ -665,6 +666,10 @@ struct WindowState {
     /// 图标源。留着是为了 DPI 变化时按新尺寸重画（见 `handle_dpi_changed`）——
     /// 固定位图源没这个必要，故那种情况下不重建。
     icon_src: Option<crate::icon::IconSource>,
+    /// 模态对话框：被本窗口禁用了输入的 owner。关窗时（销毁**之前**）恢复它并把激活态
+    /// 还回去——若等到 `WM_DESTROY` 再恢复，系统在销毁过程中早已把激活给了别的
+    /// 顶层窗口（owner 那时还是禁用的，轮不到它），可能是别的应用。
+    modal_owner: Option<HWND>,
 }
 
 impl Drop for WindowState {
@@ -762,6 +767,7 @@ impl WindowState {
             in_size_move: false,
             icons: [None, None],
             icon_src: None,
+            modal_owner: None,
         }
     }
 
@@ -873,6 +879,8 @@ unsafe fn create_window(
     // 只在 `d2d` feature 下用于选后端。签名对两档保持一致（调用方不必分 feature 分支），
     // 故仅在关掉那一档时抑制未使用告警——CI 的「Clippy（关闭默认 feature）」正查这个。
     #[cfg_attr(not(feature = "d2d"), allow(unused_variables))] renderer: Renderer,
+    // 归属窗口（`cfg.owned` / `cfg.modal`）：`None` 就是独立顶层窗口。主窗恒为 `None`。
+    owner: Option<HWND>,
 ) -> Option<HWND> {
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
@@ -895,13 +903,18 @@ unsafe fn create_window(
     let init_scale = sys_dpi as f32 / 96.0;
     let (phys_w, phys_h) = frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi);
 
-    let win_style = if cfg.resizable {
+    let mut win_style = if cfg.resizable {
         WS_OVERLAPPEDWINDOW
     } else {
         // 固定大小：保留标题栏、系统菜单、最小化按钮，去掉拉伸边框和最大化按钮
         WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 & !(WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0))
     };
+    if owner.is_some() {
+        // 归属窗口随 owner 一起最小化，自己没有"单独最小化"这回事，按钮也就不该有。
+        win_style = WINDOW_STYLE(win_style.0 & !WS_MINIMIZEBOX.0);
+    }
 
+    // 顶层窗口的 hWndParent 参数就是 owner：始终浮在它上方、随它最小化、不占任务栏。
     let hwnd = match CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         CLASS_NAME,
@@ -911,7 +924,7 @@ unsafe fn create_window(
         CW_USEDEFAULT,
         phys_w,
         phys_h,
-        None,
+        owner,
         None,
         Some(hinst),
         Some(state_ptr as *const c_void),
@@ -1004,17 +1017,48 @@ unsafe fn create_window(
         }
     }
 
-    // 居中窗口
+    // 居中窗口：有 owner 就居中在 owner 上（对话框该出现在它所属的窗口中央，而不是
+    // 主屏中央——主窗在副屏时尤其明显），再钳进 owner 所在显示器的工作区；否则居中屏幕。
     if cfg.centered {
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
         let win_w = rc.right - rc.left;
         let win_h = rc.bottom - rc.top;
-        let x = (screen_w - win_w) / 2;
-        let y = (screen_h - win_h) / 2;
+        let (x, y) = match owner {
+            Some(o) => {
+                let mut orc = RECT::default();
+                let _ = GetWindowRect(o, &mut orc);
+                let mut x = orc.left + (orc.right - orc.left - win_w) / 2;
+                let mut y = orc.top + (orc.bottom - orc.top - win_h) / 2;
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                let mon = MonitorFromWindow(o, MONITOR_DEFAULTTONEAREST);
+                if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                    let w = mi.rcWork;
+                    x = x.min(w.right - win_w).max(w.left);
+                    y = y.min(w.bottom - win_h).max(w.top);
+                }
+                (x, y)
+            }
+            None => (
+                (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2,
+                (GetSystemMetrics(SM_CYSCREEN) - win_h) / 2,
+            ),
+        };
         let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+    }
+
+    // 模态：禁用 owner 的输入直到本窗口关闭（见 `release_modal_owner`）。系统对被禁用
+    // 的 owner 自带行为：点它会激活并闪一下最前面那个归属窗口，不用我们写。
+    if cfg.modal {
+        if let Some(o) = owner {
+            let _ = EnableWindow(o, false);
+            if let Some(s) = state_from(hwnd) {
+                s.modal_owner = Some(o);
+            }
+        }
     }
 
     // 注册触摸窗口：触摸以 WM_TOUCH 原始点递送（禁用系统手势；消费后无重复鼠标提升）。
@@ -1084,6 +1128,27 @@ unsafe fn show_window(hwnd: HWND) {
     let _ = UpdateWindow(hwnd);
 }
 
+/// 模态对话框关闭：把 owner 的输入还回去并激活它。幂等（取走即清）。
+///
+/// 必须在 `DestroyWindow` **之前**：销毁过程中系统会先把激活态交给下一个可用的顶层
+/// 窗口，owner 若还禁用着就轮不到它，焦点会跳到别的应用去。
+unsafe fn release_modal_owner(hwnd: HWND) {
+    let owner = state_from(hwnd).and_then(|s| s.modal_owner.take());
+    if let Some(o) = owner {
+        if IsWindow(Some(o)).as_bool() {
+            let _ = EnableWindow(o, true);
+            let _ = SetActiveWindow(o);
+        }
+    }
+}
+
+/// 应用发起的关窗（`WM_CLOSE` 放行、`ctx.request_close()`）统一走这里：先还 owner，
+/// 再销毁。直接 `DestroyWindow` 的路径见 `WM_DESTROY` 里的兜底。
+unsafe fn destroy_window(hwnd: HWND) {
+    release_modal_owner(hwnd);
+    let _ = DestroyWindow(hwnd);
+}
+
 unsafe fn run_windowed(
     mut cfg: WindowConfig,
     handler: Box<dyn AppHandler>,
@@ -1096,7 +1161,7 @@ unsafe fn run_windowed(
     let hinst = HINSTANCE(hmodule.0);
     register_window_class(hinst);
 
-    let hwnd = create_window(hinst, &cfg, handler, cfg.renderer).expect("主窗口创建失败");
+    let hwnd = create_window(hinst, &cfg, handler, cfg.renderer, None).expect("主窗口创建失败");
 
     // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
     // 某个窗口，故都挂到这个 message-only 窗口上（见 `AppHost`）。
@@ -1373,7 +1438,7 @@ unsafe extern "system" fn wnd_proc(
                 .map(|s| s.handler.wants_close())
                 .unwrap_or(false)
             {
-                let _ = DestroyWindow(hwnd);
+                destroy_window(hwnd);
             }
             LRESULT(0)
         }
@@ -1623,7 +1688,7 @@ unsafe extern "system" fn wnd_proc(
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             if allow {
-                let _ = DestroyWindow(hwnd);
+                destroy_window(hwnd);
             } else {
                 // 取消关闭时排一次待处理窗口操作：hide_on_close 正是在 on_close_request
                 // 里返回 false 并留下 WindowOp::Hide。不排的话点关闭按钮会既不关也不隐，
@@ -1640,6 +1705,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 兜底：不经 `destroy_window` 的销毁（owner 关闭时系统级联销毁归属窗口）
+            // 也要把 owner 的输入还回去；正常关窗路径这里已是空操作。
+            release_modal_owner(hwnd);
             // 最后一个窗口关闭才结束消息循环：多窗口下关掉设置子窗不该把整个应用带走。
             //
             // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。
@@ -1765,7 +1833,7 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
         .map(|s| s.handler.wants_close())
         .unwrap_or(false)
     {
-        let _ = DestroyWindow(hwnd);
+        destroy_window(hwnd);
     }
 }
 
@@ -1994,7 +2062,9 @@ unsafe fn open_pending_windows(hwnd: HWND) {
             }
             // 子窗建不起来只是少一个窗口，不该带走整个应用——`create_window` 已打印原因。
             NewWindow::Create(cfg, handler) => {
-                if let Some(child) = create_window(hinst, &cfg, handler, renderer) {
+                // 归属 / 模态窗口的 owner 就是发起开窗的这个窗口。
+                let owner = (cfg.owned || cfg.modal).then_some(hwnd);
+                if let Some(child) = create_window(hinst, &cfg, handler, renderer, owner) {
                     show_window(child);
                 }
             }
@@ -2430,7 +2500,7 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     // 原生文件对话框请求：此时 OS 捕获已在上面同步完毕，才轮到这个阻塞调用。
     apply_dialog_request(hwnd);
     if close {
-        let _ = DestroyWindow(hwnd);
+        destroy_window(hwnd);
     }
 }
 
@@ -2855,7 +2925,7 @@ unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
     apply_window_op(hwnd);
     apply_dialog_request(hwnd);
     if close {
-        let _ = DestroyWindow(hwnd);
+        destroy_window(hwnd);
     }
 }
 

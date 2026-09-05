@@ -14,6 +14,9 @@
 //!   子窗与主窗共享同一个 `ThemeHandle`，不是各拿一份快照定格。
 //! - **跨窗共享状态**：设置窗里改「显示名称」，主窗的问候语同步变。`Signal` 是 `Copy`
 //!   句柄，传进子窗即可，不需要任何额外的跨窗口通信机制。
+//! - **模态对话框**：点「清空名称…」弹出一个 `.modal(true)` 的归属窗口：它居中在主窗上、
+//!   浮在主窗上方、不占任务栏；开着期间主窗点不动（点它只会把对话框拉到前面）；按「清空」
+//!   或「取消」关掉后焦点回到主窗，结果经共享的 `Signal` 传回。
 //!
 //! 子窗只有对自己有意义的配置（标题/尺寸/可缩放/居中/无边框/最小尺寸/背景）。托盘、
 //! 全局热键、单实例、渲染后端都是**应用级**的，由 `App` 那次配置决定，子窗自动跟随。
@@ -82,6 +85,18 @@ fn main() {
                             );
                         })),
                 )
+                .child(
+                    // 模态对话框：归属主窗、居中在主窗上，开着期间主窗不接受输入。
+                    Element::button("清空名称…（模态）").on_click(move |ctx| {
+                        ctx.open_window(
+                            Window::new("确认", 360, 150)
+                                .modal(true)
+                                .resizable(false)
+                                .centered(true)
+                                .content(move || confirm_page(name)),
+                        );
+                    }),
+                )
                 .child(theme_button(th_main, dark))
                 .child(Element::flex_spacer())
                 .child(Element::label("关掉最后一个窗口才会退出进程").fg_role(Role::TextMuted)),
@@ -131,6 +146,35 @@ fn note_page() -> Element {
         .child(Element::text_input(text, "随手记点什么…"))
         .child(Element::flex_spacer())
         .child(Element::label("再点按钮会开出新的一个").fg_role(Role::TextMuted))
+}
+
+/// 模态确认框的内容。结果不"返回"：按钮回调直接写共享的 `name` 信号再关窗，主窗
+/// 显示的那行随之变——对话框与发起方之间只有 `Signal`，没有阻塞等待。
+fn confirm_page(name: Signal<String>) -> Element {
+    Element::col()
+        .fill()
+        .padding(20)
+        .spacing(12)
+        .child(Element::label(
+            "把「显示名称」清空？主窗此刻点不动，Esc 也能关掉本框。",
+        ))
+        .child(Element::flex_spacer())
+        .child(
+            Element::row()
+                .width_match()
+                .spacing(8)
+                .child(Element::flex_spacer())
+                .child(
+                    Element::button("取消")
+                        .outline()
+                        .neutral()
+                        .on_click(|ctx| ctx.request_close()),
+                )
+                .child(Element::button("清空").danger().on_click(move |ctx| {
+                    name.set(String::new());
+                    ctx.request_close();
+                })),
+        )
 }
 
 /// 关于子窗内容：固定大小、不可缩放。
