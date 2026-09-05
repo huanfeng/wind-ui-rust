@@ -940,6 +940,7 @@ mod tests {
                 pos: at,
                 button: MouseButton::Left,
                 click_count: 2,
+                mods: crate::event::Mods::default(),
             },
             &mut h,
             &mut cap,

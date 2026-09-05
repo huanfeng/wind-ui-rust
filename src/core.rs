@@ -5175,6 +5175,7 @@ mod tests {
             pos: center,
             button: MouseButton::Left,
             click_count: 3,
+            mods: crate::event::Mods::default(),
         };
         tree.dispatch_pointer(down, &mut h, &mut cap);
         // 全选后输入替换全部内容。
@@ -6142,6 +6143,7 @@ mod tests {
             pos: center,
             button: MouseButton::Right,
             click_count: 1,
+            mods: crate::event::Mods::default(),
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键应请求上下文菜单");
@@ -6180,6 +6182,7 @@ mod tests {
             pos: Point::new(100, 100),
             button: MouseButton::Right,
             click_count: 1,
+            mods: crate::event::Mods::default(),
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键容器应请求上下文菜单");
@@ -6211,6 +6214,7 @@ mod tests {
             pos: Point::new(100, 100),
             button: MouseButton::Right,
             click_count: 1,
+            mods: crate::event::Mods::default(),
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键容器应请求上下文菜单");
@@ -6245,6 +6249,7 @@ mod tests {
             pos,
             button: MouseButton::Right,
             click_count: 1,
+            mods: crate::event::Mods::default(),
         };
         let res = tree.dispatch_pointer(down, &mut h, &mut cap);
         let menu = res.menu.expect("右键应请求上下文菜单");
@@ -6266,6 +6271,7 @@ mod tests {
             pos: center,
             button: MouseButton::Left,
             click_count: 2,
+            mods: crate::event::Mods::default(),
         };
         tree.dispatch_pointer(down, &mut h, &mut cap);
         let key = KeyEvent {

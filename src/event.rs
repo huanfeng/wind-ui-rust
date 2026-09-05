@@ -357,6 +357,9 @@ pub struct PointerEvent {
     /// 连续点击计数（由平台层填充）：1=单击，2=双击，3=三击。
     /// 仅 `Down` 有意义；其余动作恒为 1。控件据此实现双击选词/三击选行。
     pub click_count: u8,
+    /// 事件发生时按着的修饰键。列表控件靠它做 Ctrl+点击切换选中、Shift+点击范围选中
+    /// ——桌面软件最基本的选择手势，此前平台层收得到却没送上来。
+    pub mods: Mods,
 }
 
 impl PointerEvent {
@@ -367,6 +370,15 @@ impl PointerEvent {
             pos,
             button,
             click_count: 1,
+            mods: Mods::default(),
+        }
+    }
+
+    /// 带修饰键的单击（测试 Ctrl+点击、Shift+点击用）。
+    pub fn single_with(kind: PointerKind, pos: Point, button: MouseButton, mods: Mods) -> Self {
+        Self {
+            mods,
+            ..Self::single(kind, pos, button)
         }
     }
 }

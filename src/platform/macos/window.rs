@@ -1436,11 +1436,21 @@ impl ContentView {
         } else {
             1
         };
+        let flags = ev.modifierFlags();
+        let mods = crate::event::Mods {
+            // 与键盘事件同口径：Command 与 Control 都算 ctrl，另用 meta 区分 Command。
+            ctrl: flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
+                || flags.contains(objc2_app_kit::NSEventModifierFlags::Control),
+            alt: flags.contains(objc2_app_kit::NSEventModifierFlags::Option),
+            shift: flags.contains(objc2_app_kit::NSEventModifierFlags::Shift),
+            meta: flags.contains(objc2_app_kit::NSEventModifierFlags::Command),
+        };
         self.dispatch_pointer(PointerEvent {
             kind,
             pos,
             button,
             click_count,
+            mods,
         });
     }
 

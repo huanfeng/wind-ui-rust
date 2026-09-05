@@ -3573,6 +3573,7 @@ mod tests {
             pos,
             button: MouseButton::Left,
             click_count: count,
+            mods: crate::event::Mods::default(),
         }
     }
 

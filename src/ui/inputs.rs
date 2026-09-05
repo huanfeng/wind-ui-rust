@@ -2323,6 +2323,7 @@ mod tests {
         use crate::event::{PointerEvent, PointerKind};
         let ev = PointerEvent {
             click_count: count,
+            mods: crate::event::Mods::default(),
             ..PointerEvent::single(
                 PointerKind::Down,
                 crate::geometry::Point::new(20, 14),

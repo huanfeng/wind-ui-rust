@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+- **`PointerEvent` 带上修饰键 `mods: Mods`**（破坏性：结构体字面量须补该字段，`single()`
+  构造器不受影响，另有 `single_with(.., mods)` 供测试）。列表控件的 Ctrl+点击切换选中、
+  Shift+点击范围选中是桌面软件最基本的选择手势，此前平台层收得到修饰键状态却没送上来，
+  文件管理器只能退而用键盘与右键做标记。Windows 读 `GetKeyState`，macOS 读
+  `NSEvent.modifierFlags`，口径与键盘事件一致（macOS 的 Command 同时置 `ctrl` 与 `meta`）。
+
 - **新增可拖动分栏 `Element::split(axis, first, second, ratio)`**（`ratio: Signal<f32>` 为第一栏
   占比；`split_opts` 可改分隔条厚度与比例上下限）。分隔条拖动时改写信号并请求重排，
   两栏经新增的 `Element::weight_when(f)` 读同一个信号——**拖动只重排、不重建子树**。

@@ -2084,6 +2084,7 @@ mod tests {
             pos: at,
             button: MouseButton::Left,
             click_count: 2,
+            mods: crate::event::Mods::default(),
         };
         // 单击（Down cc=1 + Up）不激活。
         tree.dispatch_pointer(
