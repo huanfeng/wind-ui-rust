@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+- **新增拖出到外部程序 `platform::drag_files(paths, allow_move) -> DragEffect`**。此前只有
+  `on_drop_files` 这半边——能接别人拖进来的文件，自己的条目却拖不出去，文件管理器把文件
+  拖到资源管理器、桌面、别的程序上这条最常用的路走不通。Windows 侧走 OLE `DoDragDrop` +
+  `CF_HDROP`：自实现 `IDataObject`（只供 HDROP 一种格式）与 `IDropSource`（Esc 取消、松开
+  落下），接收方看到的与从资源管理器拖出的一模一样，复制 / 移动由接收方自己完成。
+  它自带消息泵、阻塞到松开为止，**须经 `ctx.defer_blocking` 排到事件分发返回之后**再调，
+  在回调栈里直接调就是窗口状态的 `&mut` 别名。macOS 侧暂为占位（返回 `DragEffect::None`），
+  API 形状一致，下游不必按平台分支。
+
 - **`PointerEvent` 带上修饰键 `mods: Mods`**（破坏性：结构体字面量须补该字段，`single()`
   构造器不受影响，另有 `single_with(.., mods)` 供测试）。列表控件的 Ctrl+点击切换选中、
   Shift+点击范围选中是桌面软件最基本的选择手势，此前平台层收得到修饰键状态却没送上来，

@@ -6,6 +6,7 @@
 pub mod clipboard;
 #[cfg(feature = "d2d")]
 pub(super) mod d2d;
+pub mod dragdrop;
 pub mod hotkey;
 pub mod tray;
 

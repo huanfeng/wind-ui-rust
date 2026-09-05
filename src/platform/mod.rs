@@ -17,6 +17,8 @@ pub mod win32;
 #[cfg(windows)]
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
+pub use win32::dragdrop::drag_files;
+#[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]
 pub(crate) use win32::run;
@@ -27,6 +29,8 @@ pub(crate) use win32::system_prefers_dark;
 pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::clipboard::MacClipboard as Clipboard;
+#[cfg(target_os = "macos")]
+pub use macos::drag_files;
 #[cfg(target_os = "macos")]
 pub use macos::open_url;
 #[cfg(target_os = "macos")]
@@ -907,6 +911,20 @@ pub enum NewWindow {
     /// 内容闭包**没有被运行**。平台按键去登记表里找那个窗口；找不到就什么都不做
     /// （窗口在判定与执行之间关掉了，属于正常竞态，不是错误）。
     Focus(String),
+}
+
+// ── 拖出到外部程序 ───────────────────────────────────────────────────────────
+
+/// [`drag_files`] 的结果：接收方对拖出的文件执行了什么。
+///
+/// 接收方（资源管理器等）对文件列表**自己完成**复制 / 移动，本方不必再动文件；
+/// 返回值只用于事后刷新或统计。`None` = 没落到任何地方、按了 Esc、或平台不支持。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragEffect {
+    None,
+    Copy,
+    Move,
+    Link,
 }
 
 // ── 文件 / 目录选择对话框 ────────────────────────────────────────────────────

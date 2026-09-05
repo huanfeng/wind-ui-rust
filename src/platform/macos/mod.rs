@@ -141,6 +141,16 @@ pub(crate) fn system_prefers_dark() -> bool {
         .is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
 }
 
+/// 拖出到外部程序。macOS 侧（`NSDraggingSession`）尚未接入：暂时什么都不做、
+/// 返回 [`DragEffect::None`](crate::platform::DragEffect::None)，让调用方按"没落到任何
+/// 地方"处理，API 形状与 win32 一致，下游不必按平台分支。
+pub fn drag_files(
+    _paths: &[impl AsRef<std::path::Path>],
+    _allow_move: bool,
+) -> crate::platform::DragEffect {
+    crate::platform::DragEffect::None
+}
+
 /// 用系统默认程序打开 URL/路径（链接点击）。对照 win32 `ShellExecuteW`。
 pub fn open_url(url: &str) {
     use objc2_app_kit::NSWorkspace;
