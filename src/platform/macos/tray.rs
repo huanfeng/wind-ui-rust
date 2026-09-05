@@ -82,6 +82,9 @@ pub(crate) fn apply_tray_ops() {
                 crate::platform::tray::TrayOp::SetTooltip(s) => {
                     button.setToolTip(Some(&NSString::from_str(&s)));
                 }
+                crate::platform::tray::TrayOp::Notify { title, body } => {
+                    deliver_notification(&title, &body);
+                }
             }
         }
     });
