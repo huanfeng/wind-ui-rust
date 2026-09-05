@@ -1627,7 +1627,14 @@ cargo run --release --example palette -- --screenshot out.png --type para --key 
 ```
 
 `on_nav_key` 送到的键是 `Key::Up` / `Key::Down`（仅单行）与 `Key::Tab`（两种模式都送）。
-PageUp/PageDown 尚不在 `Key` 枚举里（要加得动两个平台的键码映射）。
+
+**键与修饰键**：`Key` 有具名的 Tab / Enter / Escape / 方向 / Home / End / PageUp / PageDown /
+Insert / Delete / Backspace / Space、`F(1..=12)`、小键盘 `NumpadAdd` 等运算键与 `ContextMenu`
+菜单键；可打印字符是 `Key::Char(c)`。**带 Ctrl / Alt / Meta 的字母键**不是 `Char`，而是
+`Key::Other(大写 ASCII 码)`（`Ctrl+A` → `Other(0x41)`），两平台一致——写键位表时按这条匹配。
+`KeyEvent` 带四个修饰标志 `shift` / `ctrl` / `alt` / `meta`；macOS 上 Command 同时置 `ctrl`
+与 `meta`，Option 置 `alt`。`ev.mods()` 给出与全局热键同形的 `Mods`，按 `(Key, Mods)` 查表
+最省事。测试里构造事件用 `KeyEvent::pressed(key)`，四个修饰都是 false。
 
 **Tab 是兜底而非抢先。** 键先到焦点控件，只有回调返回 `false` 时宿主才拿它做焦点导航
 ——同网页里 input `preventDefault()` 掉 Tab 的机制，也与本库 Escape 关窗兜底同形。

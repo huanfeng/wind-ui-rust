@@ -330,6 +330,9 @@ pub enum CursorShape {
     /// 没有它时只能退而用 [`Hand`](Self::Hand)——手型说的是「这里能点」，而分隔条
     /// 要说的是「这里能左右拖」，两者指向不同的操作，用户据此预期的动作也不同。
     SizeWE,
+    /// 上下调整（↕）。横向分栏的分隔条、可拖高的行边界。与 [`SizeWE`](Self::SizeWE)
+    /// 对称：分栏容器两个方向都有，光标形状也得两个方向都有。
+    SizeNS,
 }
 
 /// 指针动作。
@@ -388,6 +391,25 @@ pub enum Key {
     PageUp,
     /// 下翻页。见 [`Key::PageUp`]。
     PageDown,
+    /// Insert 键。文件管理器用它「标记并下移」，编辑器用它切换插入/覆盖。
+    Insert,
+    /// 功能键 F1–F12（`F(1)`..=`F(12)`）。
+    ///
+    /// 此前只能经 [`Key::Other`] 里的 Windows 虚拟键码表达（macOS 侧为此对齐了一张
+    /// VK 表），应用要写 `Key::Other(0x74)` 才是 F5——既不可读，也把平台键码泄漏进
+    /// 应用代码。具名以后两平台的映射表各自翻译，应用只认 `F(5)`。
+    F(u8),
+    /// 小键盘 `+`。与主键盘 `Key::Char('+')` 区分：TC 系文件管理器把小键盘的
+    /// `+ - *` 专用于选择/反选，而主键盘的同名字符仍是可输入文本。
+    NumpadAdd,
+    /// 小键盘 `-`。见 [`Key::NumpadAdd`]。
+    NumpadSubtract,
+    /// 小键盘 `*`。见 [`Key::NumpadAdd`]。
+    NumpadMultiply,
+    /// 小键盘 `/`。见 [`Key::NumpadAdd`]。
+    NumpadDivide,
+    /// 键盘上的「菜单」键（Windows 的 Apps 键）：弹出当前项的上下文菜单。
+    ContextMenu,
     Char(char),
     Other(u32),
 }
@@ -398,8 +420,42 @@ pub struct KeyEvent {
     pub pressed: bool,
     /// Shift 是否按下（用于 Shift+Tab 反向导航、Shift+方向扩展选区）。
     pub shift: bool,
-    /// Ctrl 是否按下（用于 Ctrl+A/C/V/X 等）。
+    /// Ctrl 是否按下（用于 Ctrl+A/C/V/X 等）。macOS 上 Command 也落到这里——
+    /// 平台惯用的「主修饰键」统一成一个标志，应用写一次 `Ctrl+C` 两平台都对。
     pub ctrl: bool,
+    /// Alt（macOS：Option）是否按下。
+    ///
+    /// 没有它时 `Alt+F1`、`Alt+Enter` 这类桌面软件的常规快捷键无从表达：平台层收得到
+    /// 修饰键状态，却在这里被丢掉，应用侧看到的 `Alt+Enter` 与裸 `Enter` 一模一样。
+    pub alt: bool,
+    /// Meta（Windows：Win 键；macOS：Command）是否按下。
+    ///
+    /// macOS 上 Command 同时置 [`ctrl`](Self::ctrl) 与本标志：前者服务「跨平台写一次」，
+    /// 后者留给确需区分 Command 与 Control 的应用（如把 Ctrl+方向留给行首行尾）。
+    pub meta: bool,
+}
+
+impl KeyEvent {
+    /// 按下某键、无任何修饰。测试与合成事件用；四个修饰键都要写一遍的字面量太长。
+    pub const fn pressed(key: Key) -> Self {
+        Self {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        }
+    }
+    /// 修饰键组合，与全局热键的 [`Mods`] 同形，便于键位表按 `(Key, Mods)` 查找。
+    pub const fn mods(&self) -> Mods {
+        Mods {
+            ctrl: self.ctrl,
+            alt: self.alt,
+            shift: self.shift,
+            meta: self.meta,
+        }
+    }
 }
 
 /// 统一事件。

@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+- **`KeyEvent` 补上 `alt` / `meta` 两个修饰键**（破坏性：结构体字面量须补两个字段，或改用
+  新增的 `KeyEvent::pressed(key)`）。平台层此前收得到 Alt/Win/Option/Command 的状态，却在
+  这里丢掉，应用侧看到的 `Alt+Enter` 与裸 `Enter` 一模一样——文件管理器一类键盘优先的
+  应用，`Alt+F1` 切驱动器、`Alt+Enter` 看属性这批常规快捷键无从表达。macOS 上 Command
+  仍同时落到 `ctrl`（「跨平台写一次」不变），另置 `meta` 供确需区分 Command 与 Control
+  的应用。`KeyEvent::mods()` 给出与全局热键同形的 `Mods`，键位表可按 `(Key, Mods)` 查找。
+  - Windows 侧接上 `WM_SYSKEYDOWN`：Alt 组合键走的是这条系统键消息而非 `WM_KEYDOWN`，
+    此前根本到不了应用。分发后仍交默认处理，Alt+F4 关窗、Alt+Space 系统菜单照旧；随后的
+    `WM_SYSCHAR` 被吞掉（Alt+字母不是文本，默认处理只会为找不到菜单助记符而蜂鸣），
+    只放行 Alt+Space。
+  - macOS 侧 Option+字母不再送进输入法（那会变成 ¬ Ω 一类符号），改与 Command 同走
+    `Key::Other(大写 ASCII)` 快捷键通路，`alt` 置位、`ctrl` 不置位。
+- **`Key` 新增具名键 `F(1..=12)` / `Insert` / `NumpadAdd` / `NumpadSubtract` /
+  `NumpadMultiply` / `NumpadDivide` / `ContextMenu`**。此前 F 键只能写 `Key::Other(0x74)`
+  （Windows 虚拟键码，macOS 侧为此对齐了一张 VK 表）——既不可读，也把平台键码泄漏进
+  应用代码；macOS 上无修饰键的 F 键更是直接进了输入法、应用收不到。两平台的输入映射与
+  全局热键反向映射各自补齐，互逆测试一并扩到新键。老代码里 `Other(0x70)` 写的 F1 仍能
+  注册热键，不受影响。`--key` 截图参数同步认 `F5` / `alt+F1` / `insert` / `numpad+` 等。
+- **`CursorShape::SizeNS`**（↕）：横向分栏的分隔条要它，与 `SizeWE` 对称。
+
 - **多行输入框让出 `Ctrl+Enter` 作为应用级「提交」通道**（行为变更）。`TextInput` 多行模式
   此前对 Enter 一律插入换行、**不看修饰键**，于是多行表单没有任何键盘交卷的办法——挂
   `on_submit` 收不到（那条臂排在多行守卫之后，永远走不到），挂到外层容器上更收不到

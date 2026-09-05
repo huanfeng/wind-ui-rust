@@ -601,6 +601,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(root),
         );
@@ -677,6 +679,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(header0),
         );

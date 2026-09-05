@@ -1514,6 +1514,8 @@ impl ContentView {
         // 使 Cmd+C/V/X/A 原生可用。
         let modk = flags.contains(objc2_app_kit::NSEventModifierFlags::Command)
             || flags.contains(objc2_app_kit::NSEventModifierFlags::Control);
+        let alt = flags.contains(objc2_app_kit::NSEventModifierFlags::Option);
+        let meta = flags.contains(objc2_app_kit::NSEventModifierFlags::Command);
 
         let special = map_special(key_code);
         if let Some(k) = special {
@@ -1522,13 +1524,17 @@ impl ContentView {
                 pressed: true,
                 shift,
                 ctrl: modk,
+                alt,
+                meta,
             });
             // 非空格特殊键到此为止；空格还需交输入法产出 Key::Char(' ')（文本框插入空格）。
             if k != Key::Space {
                 return;
             }
         }
-        if modk {
+        // Option+字母同样是快捷键而非文本：输入法会把它变成一个符号，应用要的却是
+        // `Alt+X`。与 Command 走同一条 `Other(大写 ASCII)` 通路，只是 ctrl 不置位。
+        if modk || alt {
             // 快捷键：用 Key::Other(大写 ASCII 码) + ctrl（与 win32 VK 码对齐：'A'=0x41…）。不进输入法。
             if special.is_none() {
                 if let Some(s) = ev.charactersIgnoringModifiers() {
@@ -1538,7 +1544,9 @@ impl ContentView {
                             key: Key::Other(up as u32),
                             pressed: true,
                             shift,
-                            ctrl: true,
+                            ctrl: modk,
+                            alt,
+                            meta,
                         });
                     }
                 }
@@ -1572,6 +1580,8 @@ impl ContentView {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             });
         }
     }
@@ -1827,6 +1837,7 @@ impl ContentView {
             crate::event::CursorShape::Hand => NSCursor::pointingHandCursor(),
             crate::event::CursorShape::Text => NSCursor::IBeamCursor(),
             crate::event::CursorShape::SizeWE => NSCursor::resizeLeftRightCursor(),
+            crate::event::CursorShape::SizeNS => NSCursor::resizeUpDownCursor(),
             crate::event::CursorShape::Arrow => NSCursor::arrowCursor(),
         };
         cursor.set();
@@ -1840,21 +1851,39 @@ impl ContentView {
 /// 这种两处各自看着都对的错位。
 pub(super) fn map_special(key_code: u16) -> Option<Key> {
     Some(match key_code {
-        0x30 => Key::Tab,       // 48
-        0x24 => Key::Enter,     // 36 Return
-        0x4C => Key::Enter,     // 76 KeypadEnter
-        0x35 => Key::Escape,    // 53
-        0x31 => Key::Space,     // 49
-        0x33 => Key::Backspace, // 51 Delete(退格)
-        0x75 => Key::Delete,    // 117 ForwardDelete
-        0x7B => Key::Left,      // 123
-        0x7C => Key::Right,     // 124
-        0x7D => Key::Down,      // 125
-        0x7E => Key::Up,        // 126
-        0x73 => Key::Home,      // 115
-        0x77 => Key::End,       // 119
-        0x74 => Key::PageUp,    // 116
-        0x79 => Key::PageDown,  // 121
+        0x30 => Key::Tab,            // 48
+        0x24 => Key::Enter,          // 36 Return
+        0x4C => Key::Enter,          // 76 KeypadEnter
+        0x35 => Key::Escape,         // 53
+        0x31 => Key::Space,          // 49
+        0x33 => Key::Backspace,      // 51 Delete(退格)
+        0x75 => Key::Delete,         // 117 ForwardDelete
+        0x7B => Key::Left,           // 123
+        0x7C => Key::Right,          // 124
+        0x7D => Key::Down,           // 125
+        0x7E => Key::Up,             // 126
+        0x73 => Key::Home,           // 115
+        0x77 => Key::End,            // 119
+        0x74 => Key::PageUp,         // 116
+        0x79 => Key::PageDown,       // 121
+        0x72 => Key::Insert,         // 114 Help（PC 键盘的 Insert 落在这个键码上）
+        0x7A => Key::F(1),           // 122
+        0x78 => Key::F(2),           // 120
+        0x63 => Key::F(3),           // 99
+        0x76 => Key::F(4),           // 118
+        0x60 => Key::F(5),           // 96
+        0x61 => Key::F(6),           // 97
+        0x62 => Key::F(7),           // 98
+        0x64 => Key::F(8),           // 100
+        0x65 => Key::F(9),           // 101
+        0x6D => Key::F(10),          // 109
+        0x67 => Key::F(11),          // 103
+        0x6F => Key::F(12),          // 111
+        0x45 => Key::NumpadAdd,      // 69 KeypadPlus
+        0x4E => Key::NumpadSubtract, // 78 KeypadMinus
+        0x43 => Key::NumpadMultiply, // 67 KeypadMultiply
+        0x4B => Key::NumpadDivide,   // 75 KeypadDivide
+        0x6E => Key::ContextMenu,    // 110 PC 键盘的 Menu 键
         _ => return None,
     })
 }

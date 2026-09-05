@@ -1146,6 +1146,8 @@ impl TextInput {
             pressed: true,
             shift: false,
             ctrl: true,
+            alt: false,
+            meta: false,
         };
         vec![
             MenuItem::key("剪切", ctrl(0x58), has_sel && !pw), // VK_X

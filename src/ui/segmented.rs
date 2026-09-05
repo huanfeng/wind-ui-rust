@@ -356,6 +356,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(right, focus);
         assert_eq!(sel.get(), 1, "右键应移到下一段");
@@ -366,6 +368,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(left, focus);
         assert_eq!(sel.get(), 1, "左键应移回上一段");

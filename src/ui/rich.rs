@@ -2470,6 +2470,8 @@ impl Widget for RichText {
                     pressed: true,
                     shift,
                     ctrl: true,
+                    alt: false,
+                    meta: false,
                 };
                 let mut items = Vec::new();
                 if self.has_any_sel() {
@@ -3009,6 +3011,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: true,
+                alt: false,
+                meta: false,
             },
             Some(node),
         );
@@ -3032,6 +3036,8 @@ mod tests {
             pressed: true,
             shift,
             ctrl: true,
+            alt: false,
+            meta: false,
         }
     }
 
@@ -3749,6 +3755,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(node),
         );

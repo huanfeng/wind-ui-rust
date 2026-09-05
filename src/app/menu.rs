@@ -1687,6 +1687,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         handler.on_key(k(Key::Tab));
         assert!(handler.focus.current.is_some(), "Tab 应把焦点落到下拉框");

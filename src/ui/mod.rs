@@ -4436,6 +4436,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(handle_id),
         );
@@ -4482,6 +4484,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
 
         tree.dispatch_pointer(
@@ -5889,6 +5893,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         let res = tree.dispatch_key(k(Key::Space), Some(btn));
         assert_eq!(
@@ -6318,6 +6324,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -6369,6 +6377,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -6408,6 +6418,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
 
         assert!(tree.dispatch_key(k(Key::Down), Some(input)).consumed);
@@ -6455,6 +6467,8 @@ b",
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::PageDown), Some(input));
         tree.dispatch_key(k(Key::Up), Some(input));
@@ -6500,6 +6514,8 @@ b",
             pressed: true,
             shift,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
 
         assert!(
@@ -6545,6 +6561,8 @@ b",
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
 
         tree.dispatch_key(k(Key::Enter), Some(input));

@@ -4126,6 +4126,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         };
         assert!(tree.dispatch_key(key(false), Some(btn)).consumed);
         assert_eq!(clicks.get(), 1, "裸 Enter 应激活按钮");
@@ -4929,6 +4931,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(key(Key::Char('a')), Some(input));
         tree.dispatch_key(key(Key::Char('中')), Some(input));
@@ -4960,6 +4964,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Char('X'), false), Some(input));
@@ -4974,6 +4980,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Home), Some(input)); // 光标到行首
         tree.dispatch_key(k(Key::Delete), Some(input)); // 删首字符
@@ -4989,6 +4997,8 @@ mod tests {
             pressed: true,
             shift: true,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(shift_left, Some(input));
         let bs = KeyEvent {
@@ -4996,6 +5006,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(bs, Some(input));
         assert_eq!(txt.get(), "ab", "Shift 选区后退格应删除选区");
@@ -5021,6 +5033,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C 复制
@@ -5050,6 +5064,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A 全选
         tree.dispatch_key(k(Key::Other(0x43), true), Some(input)); // Ctrl+C
@@ -5078,6 +5094,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(key, Some(input));
         assert_eq!(txt.get(), "Z", "三击全选后输入应替换全部");
@@ -5107,6 +5125,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Enter), Some(input));
         tree.dispatch_key(k(Key::Char('c')), Some(input));
@@ -5128,6 +5148,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: true,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -5147,6 +5169,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -5165,6 +5189,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: true,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -5191,6 +5217,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -5216,6 +5244,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(input),
         );
@@ -5543,6 +5573,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         }
     }
 
@@ -5686,6 +5718,8 @@ mod tests {
                 pressed: true,
                 shift: true,
                 ctrl: false,
+                alt: false,
+                meta: false,
             },
             Some(field),
         );
@@ -6109,6 +6143,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // 全选
         let b = tree.abs_bounds(input);
@@ -6148,6 +6184,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         tree.dispatch_key(key, Some(input));
         assert_eq!(txt.get(), "Z world", "双击应选中首词并被输入替换");

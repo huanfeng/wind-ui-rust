@@ -300,6 +300,8 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
                         pressed: true,
                         shift: false,
                         ctrl: false,
+                        alt: false,
+                        meta: false,
                     });
                 }
             }

@@ -16,8 +16,9 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, MOD_WIN, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR,
-    VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    MOD_SHIFT, MOD_WIN, VK_ADD, VK_APPS, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+    VK_HOME, VK_INSERT, VK_LEFT, VK_MULTIPLY, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE,
+    VK_SUBTRACT, VK_TAB, VK_UP,
 };
 
 use crate::event::{Hotkey, HotkeyCtx, HotkeyOp, Key, WindowOp};
@@ -169,8 +170,8 @@ fn mods_of(hk: Hotkey) -> HOT_KEY_MODIFIERS {
 ///
 /// `Key::Other(vk)` **直接放行**：本仓库已把它定义为跨平台对齐的虚拟键码
 /// （win32 由 `to_key` 产出原始 VK；macOS 亦按 win32 VK 码对齐，见 `macos/window.rs`）。
-/// 它是 F1–F12、PageUp/PageDown、Insert 等键位的**唯一表达途径**——`Key` 枚举没有
-/// 这些变体，堵死 `Other` 等于让 `Ctrl+Alt+F1` 这类常见全局热键无法注册。
+/// F1–F12、Insert、小键盘运算键如今有具名变体，但老代码用 `Other(0x70)` 写的 F1 仍要
+/// 能注册，故继续放行。
 fn vk_of(key: Key) -> Option<u32> {
     let vk = match key {
         Key::Char(c) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase() as u32,
@@ -188,6 +189,14 @@ fn vk_of(key: Key) -> Option<u32> {
         Key::PageUp => VK_PRIOR.0 as u32,
         Key::PageDown => VK_NEXT.0 as u32,
         Key::Delete => VK_DELETE.0 as u32,
+        Key::Insert => VK_INSERT.0 as u32,
+        Key::F(n) if (1..=12).contains(&n) => VK_F1.0 as u32 + u32::from(n) - 1,
+        Key::F(_) => return None,
+        Key::NumpadAdd => VK_ADD.0 as u32,
+        Key::NumpadSubtract => VK_SUBTRACT.0 as u32,
+        Key::NumpadMultiply => VK_MULTIPLY.0 as u32,
+        Key::NumpadDivide => VK_DIVIDE.0 as u32,
+        Key::ContextMenu => VK_APPS.0 as u32,
         // 虚拟键码是 8 位的；越界值必是调用方搞错了，与其注册出个诡异热键不如拒绝。
         Key::Other(vk) if vk <= 0xFF => vk,
         Key::Other(_) => return None,
@@ -279,6 +288,15 @@ mod tests {
             Key::PageUp,
             Key::PageDown,
             Key::Delete,
+            Key::Insert,
+            Key::F(1),
+            Key::F(5),
+            Key::F(12),
+            Key::NumpadAdd,
+            Key::NumpadSubtract,
+            Key::NumpadMultiply,
+            Key::NumpadDivide,
+            Key::ContextMenu,
             // 刻意不含 Backspace：`vk_of` 对它返回 None（作全局热键无实际用途），
             // 而输入路径照常识别 VK_BACK。两张表在这一项上有意不对称。
         ] {

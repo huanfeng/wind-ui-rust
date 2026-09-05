@@ -755,7 +755,7 @@ impl App {
                         match parse_key_spec(spec) {
                             Some(ev) => self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(ev)),
                             None => eprintln!(
-                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/PageUp/PageDown/Backspace/Delete/Space，可加 ctrl+ / shift+ 前缀），已跳过"
+                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/PageUp/PageDown/Insert/Backspace/Delete/Space/F1–F12/Menu/Numpad+-*/，可加 ctrl+ / shift+ / alt+ / meta+ 前缀），已跳过"
                             ),
                         }
                     }
@@ -1902,7 +1902,7 @@ impl UiHost {
 /// 只认**具名键**：字符输入走 `--type`，那条路不必逐个列举字符，也天然支持中文。
 fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
     use crate::event::{Key, KeyEvent};
-    let (mut ctrl, mut shift) = (false, false);
+    let (mut ctrl, mut shift, mut alt, mut meta) = (false, false, false, false);
     let mut rest = spec;
     loop {
         let lower = rest.to_ascii_lowercase();
@@ -1911,6 +1911,12 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
             rest = &rest[rest.len() - r.len()..];
         } else if let Some(r) = lower.strip_prefix("shift+") {
             shift = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("alt+") {
+            alt = true;
+            rest = &rest[rest.len() - r.len()..];
+        } else if let Some(r) = lower.strip_prefix("meta+") {
+            meta = true;
             rest = &rest[rest.len() - r.len()..];
         } else {
             break;
@@ -1931,11 +1937,24 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
         "pageup" | "pgup" => Key::PageUp,
         "pagedown" | "pgdn" => Key::PageDown,
         "space" => Key::Space,
+        "insert" | "ins" => Key::Insert,
+        "menu" | "apps" => Key::ContextMenu,
+        "numpad+" => Key::NumpadAdd,
+        "numpad-" => Key::NumpadSubtract,
+        "numpad*" => Key::NumpadMultiply,
+        "numpad/" => Key::NumpadDivide,
+        // F1–F12：`--key F5`、`--key alt+f1`
+        s if s.len() >= 2
+            && s.starts_with('f')
+            && s[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+        {
+            Key::F(s[1..].parse().unwrap_or(1))
+        }
         // 单个字符也放行（`--key ctrl+a` 全选）：Ctrl 组合在本库走 `Key::Other(vk)`，
         // 与 TextInput 对 Ctrl+A/C/V/X 的处理对齐。
         s if s.chars().count() == 1 => {
             let c = s.chars().next()?;
-            if ctrl && c.is_ascii_alphabetic() {
+            if (ctrl || alt || meta) && c.is_ascii_alphabetic() {
                 Key::Other(c.to_ascii_uppercase() as u32)
             } else {
                 Key::Char(rest.chars().next()?)
@@ -1948,6 +1967,8 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
         pressed: true,
         shift,
         ctrl,
+        alt,
+        meta,
     })
 }
 
@@ -2656,6 +2677,8 @@ mod test_support {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         }
     }
 }
@@ -4138,7 +4161,23 @@ mod tests {
         assert_eq!(p("PageUp").map(|e| e.key), Some(Key::PageUp));
         assert_eq!(p("pgdn").map(|e| e.key), Some(Key::PageDown), "别名 pgdn");
 
+        // 功能键与 Alt/Meta 前缀：文件管理器一类应用的主力快捷键。
+        assert_eq!(p("F5").map(|e| e.key), Some(Key::F(5)));
+        let af1 = p("alt+F1").expect("alt+F1 应可解析");
+        assert_eq!(af1.key, Key::F(1));
+        assert!(af1.alt && !af1.ctrl && !af1.meta);
+        let ae = p("Alt+Enter").expect("Alt+Enter 应可解析");
+        assert_eq!(ae.key, Key::Enter);
+        assert!(ae.alt);
+        assert_eq!(p("insert").map(|e| e.key), Some(Key::Insert));
+        assert_eq!(p("numpad+").map(|e| e.key), Some(Key::NumpadAdd));
+        // Alt+字母与 Ctrl+字母一样走 Other(大写 ASCII)：平台层就是这么发的。
+        let ax = p("alt+x").expect("alt+x 应可解析");
+        assert_eq!(ax.key, Key::Other(u32::from(b'X')));
+        assert!(ax.alt && !ax.ctrl);
+
         assert!(p("F13").is_none(), "未支持的键应回 None 而不是猜一个");
+        assert!(p("F0").is_none());
         assert!(p("").is_none());
     }
 
@@ -4172,6 +4211,8 @@ mod tests {
                 pressed: true,
                 shift: false,
                 ctrl: false,
+                alt: false,
+                meta: false,
             });
         }
         assert_eq!(
@@ -4637,6 +4678,8 @@ mod tests {
             pressed: true,
             shift: false,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         host.on_key(key(Key::End)); // 跳到最后一项（关闭）
         host.on_key(key(Key::Enter));

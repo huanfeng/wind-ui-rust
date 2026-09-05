@@ -150,6 +150,8 @@ impl UiHost {
             pressed: true,
             shift: false,
             ctrl: true,
+            alt: false,
+            meta: false,
         };
         let res = self.tree.dispatch_key(ev, Some(id));
         // 副作用照常上交，不丢：合成的是一次真按键，控件请求的重绘/脏区/窗口操作都算。
@@ -698,6 +700,8 @@ mod tests {
             pressed: true,
             shift: true,
             ctrl: false,
+            alt: false,
+            meta: false,
         };
         handler.on_key(shift_tab);
         assert_eq!(

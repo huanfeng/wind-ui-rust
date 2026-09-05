@@ -40,8 +40,9 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE,
-    TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    TRACKMOUSEEVENT, VK_ADD, VK_APPS, VK_BACK, VK_CONTROL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END,
+    VK_ESCAPE, VK_F1, VK_F12, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN, VK_MENU, VK_MULTIPLY, VK_NEXT,
+    VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Input::Touch::{
     CloseTouchInputHandle, GetTouchInputInfo, RegisterTouchWindow, HTOUCHINPUT,
@@ -59,18 +60,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT,
     GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
     HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    IDC_SIZEWE, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-    SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
-    SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
-    WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE,
+    QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN,
+    SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE,
+    SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+    WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
+    WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
+    WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1519,6 +1521,24 @@ unsafe extern "system" fn wnd_proc(
             handle_key(hwnd, wparam);
             LRESULT(0)
         }
+        // Alt 组合键（以及 Alt 按下期间的 F10）不走 WM_KEYDOWN 而走这条系统键消息。
+        // 不接它，应用永远收不到 `Alt+Enter`/`Alt+F1`。分发后仍交默认处理：Alt+F4 关窗、
+        // Alt+Space 系统菜单这些窗口级语义由系统兑现，与应用是否消费无关——
+        // `on_key` 只报「要不要重绘」，本就不区分消费与否。
+        WM_SYSKEYDOWN => {
+            handle_key(hwnd, wparam);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        // Alt+字母随后还会来一条 WM_SYSCHAR。它不是文本（没人想把 Alt+A 打进输入框），
+        // 默认处理又会把它当菜单助记符去匹配——本库窗口没有菜单栏，匹配不上只剩一声蜂鸣。
+        // 唯一要放行的是 Alt+Space：那是系统菜单的入口，属于窗口而非应用。
+        WM_SYSCHAR => {
+            if wparam.0 as u32 == u32::from(b' ') {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            } else {
+                LRESULT(0)
+            }
+        }
         WM_CHAR => {
             handle_char(hwnd, wparam);
             LRESULT(0)
@@ -1693,6 +1713,7 @@ unsafe fn apply_cursor(shape: CursorShape) {
         CursorShape::Hand => IDC_HAND,
         CursorShape::Text => IDC_IBEAM,
         CursorShape::SizeWE => IDC_SIZEWE,
+        CursorShape::SizeNS => IDC_SIZENS,
         CursorShape::Arrow => IDC_ARROW,
     };
     if let Ok(cur) = LoadCursorW(None, id) {
@@ -2724,6 +2745,20 @@ pub(crate) fn map_vk(vk: u16) -> Key {
         Key::PageUp
     } else if vk == VK_NEXT.0 {
         Key::PageDown
+    } else if vk == VK_INSERT.0 {
+        Key::Insert
+    } else if (VK_F1.0..=VK_F12.0).contains(&vk) {
+        Key::F((vk - VK_F1.0 + 1) as u8)
+    } else if vk == VK_ADD.0 {
+        Key::NumpadAdd
+    } else if vk == VK_SUBTRACT.0 {
+        Key::NumpadSubtract
+    } else if vk == VK_MULTIPLY.0 {
+        Key::NumpadMultiply
+    } else if vk == VK_DIVIDE.0 {
+        Key::NumpadDivide
+    } else if vk == VK_APPS.0 {
+        Key::ContextMenu
     } else {
         Key::Other(vk as u32)
     }
@@ -2734,11 +2769,16 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
     let vk = wparam.0 as u16;
     let shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
     let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+    let alt = (GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
+    let meta = (GetKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0
+        || (GetKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0;
     let ev = KeyEvent {
         key: map_vk(vk),
         pressed: true,
         shift,
         ctrl,
+        alt,
+        meta,
     };
     dispatch_key_event(hwnd, ev);
 }
@@ -2784,6 +2824,8 @@ unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
         pressed: true,
         shift: false,
         ctrl: false,
+        alt: false,
+        meta: false,
     };
     dispatch_key_event(hwnd, ev);
 }
