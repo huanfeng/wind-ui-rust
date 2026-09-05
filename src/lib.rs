@@ -48,6 +48,7 @@ pub mod prelude {
     // `Element::color_picker_opts` 的：构造器在 prelude 里，参数类型却要写一行深路径
     // import，那条路就没人走。`Hsva` 则是取色器对外的颜色模型，业务侧做色相运算时用得上。
     pub use crate::ui::containers::{TabItem, TabStyle};
+    pub use crate::ui::split::SplitOpts;
     pub use crate::ui::{
         default_presets, CaretStyle, CheckMenuItem, ColorPickerOpts, CommitMode, DropdownItem,
         Element, Hsva, ImageContent, ImageView, Link, Para, RichColor, RichDoc, RowRequest,

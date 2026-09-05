@@ -387,6 +387,12 @@ pub struct Node {
     /// 运行期可见条件（如 Tab 页绑定选中项、Dialog 绑定显示标志）。
     /// 与 `visible` 取与：返回 false 则该帧不参与测量/布局/绘制/命中。
     pub vis_cond: Option<Box<dyn Fn() -> bool>>,
+    /// 运行期线性权重（None=用 `width`/`height` 里的静态 `Dimension`）。
+    ///
+    /// 父为线性容器时，每次测量把主轴维度换成 `Dimension::Weight(f())`。与 `vis_cond`
+    /// 同一契约：纯函数、帧内值不变。为可拖动分栏而设——权重原本在构建期烘进
+    /// `Dimension`，改一次就得重建整棵子树，拖动分隔条每帧重建两个文件面板不可接受。
+    pub weight_fn: Option<Box<dyn Fn() -> f32>>,
     /// 静态启用标志（`Element::enabled(bool)` / `disabled(bool)`）。是 `visible`
     /// 在启用轴上的对应物——常量禁用不必为此占用一个信号槽。
     pub enabled_static: bool,
@@ -1018,6 +1024,21 @@ impl Tree {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// 线性子节点的 (宽, 高, margin)，主轴维度已套用运行期权重（见 [`Node::weight_fn`]）。
+    fn linear_dims(&self, c: NodeId, horizontal: bool) -> (Dimension, Dimension, Insets) {
+        let n = self.get(c).unwrap();
+        let (mut cw, mut ch) = (n.width, n.height);
+        if let Some(f) = &n.weight_fn {
+            let w = Dimension::Weight(f().max(0.0));
+            if horizontal {
+                cw = w;
+            } else {
+                ch = w;
+            }
+        }
+        (cw, ch, n.margin)
+    }
+
     fn measure_linear(
         &mut self,
         id: NodeId,
@@ -1049,10 +1070,7 @@ impl Tree {
         // 第一遍：非权重子节点。权重子的主轴 margin 在此预扣，使第二遍
         // 的 remaining 恰好等于可供 portion 瓜分的空间（避免超分）。
         for &c in &children {
-            let (cw, ch, cm) = {
-                let n = self.get(c).unwrap();
-                (n.width, n.height, n.margin)
-            };
+            let (cw, ch, cm) = self.linear_dims(c, horizontal);
             let main_dim = if horizontal { cw } else { ch };
             let cross_dim = if horizontal { ch } else { cw };
             let (cm_main, cm_cross) = main_cross_insets(horizontal, cm);
@@ -1089,10 +1107,7 @@ impl Tree {
             let mut allocated = 0;
             let last = weighted.len().saturating_sub(1);
             for (i, &c) in weighted.iter().enumerate() {
-                let (cw, ch, cm) = {
-                    let n = self.get(c).unwrap();
-                    (n.width, n.height, n.margin)
-                };
+                let (cw, ch, cm) = self.linear_dims(c, horizontal);
                 let w = if horizontal { cw.weight() } else { ch.weight() };
                 // 末位补余，消除整数截断误差，实现像素精确分配。
                 let portion = if i == last {
@@ -3823,6 +3838,80 @@ mod tests {
             b1.x + b1.w + 10 <= 200,
             "右边界 {} 超出 200",
             b1.x + b1.w + 10
+        );
+    }
+
+    /// 运行期权重：改信号即改分配，无需重建子树——可拖动分栏的根基。
+    #[test]
+    fn weight_fn_reallocates_when_signal_changes() {
+        let ratio = crate::signal::signal(0.25f32);
+        let row = Element::row()
+            .width(400)
+            .height(10)
+            .child(Element::leaf().weight_when(move || ratio.get()))
+            .child(Element::leaf().weight_when(move || 1.0 - ratio.get()));
+        let mut tree = Tree::new();
+        let id = row.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, 10), &mut te);
+        let kids = tree.get(id).unwrap().children.clone();
+        assert_eq!(tree.abs_bounds(kids[0]).w, 100);
+        assert_eq!(tree.abs_bounds(kids[1]).w, 300);
+
+        ratio.set(0.5);
+        tree.layout_root(Size::new(400, 10), &mut te);
+        assert_eq!(tree.abs_bounds(kids[0]).w, 200, "改信号后重排即生效");
+        assert_eq!(tree.abs_bounds(kids[1]).w, 200);
+    }
+
+    /// 分隔条：按下捕获、拖动改比例、松开释放；比例被钳在上下限内。
+    #[test]
+    fn split_handle_drag_updates_ratio() {
+        let ratio = crate::signal::signal(0.5f32);
+        let split = Element::split(Axis::Horizontal, Element::leaf(), Element::leaf(), ratio)
+            .width(406)
+            .height(100);
+        let mut tree = Tree::new();
+        let id = split.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(406, 100), &mut te);
+        let kids = tree.get(id).unwrap().children.clone();
+        let handle = kids[1];
+        let hb = tree.abs_bounds(handle);
+        assert_eq!((hb.x, hb.w), (200, 6), "分隔条落在两栏之间、厚 6px");
+
+        let (mut h, mut cap) = (None, None);
+        let x = hb.x + 3;
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(x, 50), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        assert_eq!(cap, Some(handle), "按下应捕获分隔条");
+        // 拖到 x=103：分隔条中心 103 → 第一栏 100px / 可分配 400px = 0.25
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, Point::new(103, 50), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        assert!((ratio.get() - 0.25).abs() < 1e-3, "ratio = {}", ratio.get());
+        tree.layout_root(Size::new(406, 100), &mut te);
+        assert_eq!(tree.abs_bounds(kids[0]).w, 100);
+        assert_eq!(tree.abs_bounds(kids[2]).w, 300);
+
+        // 拖出下限：钳在 0.1
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Move, Point::new(-50, 50), MouseButton::Left),
+            &mut h,
+            &mut cap,
+        );
+        assert!((ratio.get() - 0.1).abs() < 1e-3);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, Point::new(-50, 50), MouseButton::Left),
+            &mut h,
+            &mut cap,
         );
     }
 

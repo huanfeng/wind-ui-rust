@@ -1244,6 +1244,26 @@ Element::col()
 
 ---
 
+### 6.9 可拖动分栏
+
+```rust
+let ratio = signal(0.5f32);                       // 第一栏占比；应用可持久化、可从外部改
+Element::split(Axis::Horizontal, left_pane, right_pane, ratio).fill()
+// 分隔条厚度与比例上下限：
+Element::split_opts(Axis::Vertical, top, bottom, ratio, SplitOpts { thickness: 8, min: 0.2, max: 0.8 })
+```
+
+两栏经 `weight_when(move || ratio.get())` / `1.0 - ratio.get()` 读同一个信号，分隔条
+（`SplitHandle`，光标 ↔ / ↕）拖动时改写它并请求重排——**拖动只重排、不重建子树**，
+两侧放文件面板这种重量级内容也不会每帧重建。嵌套即多栏。分隔条颜色走 `Theme::split`
+（静态细线回退 `palette.divider`，激活时回退 `palette.accent`）。
+
+底下的通用能力是 `Element::weight_when(f)`：线性容器子节点的**运行期权重**，与
+`visible_when` 同一契约（纯函数、帧内值不变）。写入信号的一方要记得
+`ctx.mark_layout_dirty()`——信号本身只保证重绘。
+
+---
+
 ## 7. 样式与主题
 
 两条路径，**按层级选择**：

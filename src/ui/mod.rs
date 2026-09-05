@@ -20,6 +20,7 @@ pub mod row_source;
 pub mod segmented;
 pub mod select;
 pub mod sortable_table;
+pub mod split;
 pub mod stepper;
 pub mod text_content;
 pub mod virtual_list;
@@ -713,6 +714,8 @@ pub struct Element {
     visible: bool,
     vis_signal: Option<Signal<bool>>,
     vis_cond: Option<Box<dyn Fn() -> bool>>,
+    /// 运行期权重，见 [`Element::weight_when`]。
+    weight_fn: Option<Box<dyn Fn() -> f32>>,
     clip_children: bool,
     click: Option<ClickFn>,
     on_drop: Option<DropFn>,
@@ -753,6 +756,7 @@ impl Element {
             visible: true,
             vis_signal: None,
             vis_cond: None,
+            weight_fn: None,
             clip_children: false,
             click: None,
             on_drop: None,
@@ -2167,6 +2171,41 @@ impl Element {
             .width_match()
             .height(1)
             .bg_role(crate::style::Role::Divider)
+    }
+
+    /// 可拖动分栏：`first` 与 `second` 沿 `axis` 排布，中间一条分隔条，拖动它改写
+    /// `ratio`（第一栏占比，0..1）。两栏经 [`weight_when`](Self::weight_when) 读同一个
+    /// 信号，故拖动只触发重排、不重建子树。比例存在信号里，应用可持久化（记住上次的
+    /// 分栏位置）或从外部改（快捷键「均分」写 0.5）。默认分隔条 6px、比例钳在 0.1..=0.9，
+    /// 要改用 [`split_opts`](Self::split_opts)。
+    ///
+    /// 返回的是那个线性容器本身，尺寸请自行 `fill()` / `weight(..)`。
+    pub fn split(axis: Axis, first: Element, second: Element, ratio: Signal<f32>) -> Self {
+        Self::split_opts(axis, first, second, ratio, split::SplitOpts::default())
+    }
+
+    /// 带参数的 [`split`](Self::split)。
+    pub fn split_opts(
+        axis: Axis,
+        first: Element,
+        second: Element,
+        ratio: Signal<f32>,
+        opts: split::SplitOpts,
+    ) -> Self {
+        let container = match axis {
+            Axis::Horizontal => Element::row(),
+            Axis::Vertical => Element::col(),
+        };
+        let handle = Element::leaf().widget(split::SplitHandle::new(axis, ratio, opts));
+        let handle = match axis {
+            Axis::Horizontal => handle.width(opts.thickness).height_match(),
+            Axis::Vertical => handle.height(opts.thickness).width_match(),
+        };
+        container
+            .cross(Align::Stretch)
+            .child(first.weight_when(move || ratio.get()))
+            .child(handle)
+            .child(second.weight_when(move || 1.0 - ratio.get()))
     }
 
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
@@ -3891,6 +3930,15 @@ impl Element {
         self
     }
 
+    /// 运行期权重：每次测量调用闭包取当前权重，改信号即改分配，**不必重建子树**。
+    /// 只对线性容器（`row`/`col`）的直接子节点有意义；契约同 [`visible_when`](Self::visible_when)
+    /// ——纯函数、帧内值不变。写入信号的一方要记得 `ctx.mark_layout_dirty()`，
+    /// 信号本身只保证重绘。可拖动分栏 [`Element::split`] 就建在它上面。
+    pub fn weight_when(mut self, f: impl Fn() -> f32 + 'static) -> Self {
+        self.weight_fn = Some(Box::new(f));
+        self
+    }
+
     // ---- 间距 ----
     pub fn padding(mut self, p: i32) -> Self {
         self.padding = Insets::all(p);
@@ -4164,6 +4212,7 @@ impl Element {
             visible: self.visible,
             vis_signal: self.vis_signal,
             vis_cond: self.vis_cond,
+            weight_fn: self.weight_fn,
             enabled_static: self.enabled_static,
             enabled: self.enabled,
             en_cond: self.en_cond,

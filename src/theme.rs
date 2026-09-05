@@ -592,6 +592,25 @@ impl ProgressTheme {
     }
 }
 
+/// 分栏分隔条覆盖层（[`Element::split`](crate::ui::Element::split)）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitTheme {
+    /// 静态时居中那条 1px 细线。
+    pub handle: Option<Color>,
+    /// 悬停 / 拖动时整条分隔条的填充。
+    pub handle_active: Option<Color>,
+}
+
+impl SplitTheme {
+    pub fn handle(&self, p: &Palette) -> Color {
+        self.handle.unwrap_or(p.divider)
+    }
+    pub fn handle_active(&self, p: &Palette) -> Color {
+        self.handle_active.unwrap_or(p.accent)
+    }
+}
+
 /// 数字步进覆盖层。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1283,6 +1302,7 @@ pub struct Theme {
     pub menu: MenuTheme,
     pub tab: TabTheme,
     pub progress: ProgressTheme,
+    pub split: SplitTheme,
     pub stepper: StepperTheme,
     pub list: ListTheme,
     pub link: LinkTheme,

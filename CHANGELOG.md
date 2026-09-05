@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+- **新增可拖动分栏 `Element::split(axis, first, second, ratio)`**（`ratio: Signal<f32>` 为第一栏
+  占比；`split_opts` 可改分隔条厚度与比例上下限）。分隔条拖动时改写信号并请求重排，
+  两栏经新增的 `Element::weight_when(f)` 读同一个信号——**拖动只重排、不重建子树**。
+  权重此前在构建期烘进 `Dimension`，改一次就得重建整棵子树，拖动分隔条每帧重建两个
+  文件面板不可接受；`weight_when` 把它变成与 `visible_when` 同契约的运行期求值。
+  新增 `SplitTheme`（`Theme::split`），showcase「布局」页有嵌套三栏的演示卡。
+
 - **`KeyEvent` 补上 `alt` / `meta` 两个修饰键**（破坏性：结构体字面量须补两个字段，或改用
   新增的 `KeyEvent::pressed(key)`）。平台层此前收得到 Alt/Win/Option/Command 的状态，却在
   这里丢掉，应用侧看到的 `Alt+Enter` 与裸 `Enter` 一模一样——文件管理器一类键盘优先的

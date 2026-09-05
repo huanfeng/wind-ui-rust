@@ -1341,10 +1341,53 @@ fn main() {
             .child(cp_23),
     );
 
+    let cp_split = {
+        let ratio = signal(0.4f32);
+        let pane = |title: &str, tint: u32| {
+            Element::col()
+                .fill()
+                .padding(10)
+                .bg(Color::hex(tint))
+                .child(Element::label(title.to_string()).width_match())
+        };
+        Element::card(
+            "可拖动分栏 split（拖中间的分隔条，比例存在 Signal<f32> 里）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(
+                    Element::split(
+                        Axis::Horizontal,
+                        pane("左栏 · 占比跟随信号", 0xEAF2FB),
+                        Element::split(
+                            Axis::Vertical,
+                            pane("右上", 0xFBF1E6),
+                            pane("右下", 0xEDF7EC),
+                            signal(0.5f32),
+                        ),
+                        ratio,
+                    )
+                    .width_match()
+                    .height(160),
+                )
+                .child(
+                    Element::row()
+                        .width_match()
+                        .spacing(8)
+                        .child(Element::button("均分").small().on_click(move |ctx| {
+                            ratio.set(0.5);
+                            ctx.mark_dirty_all();
+                        }))
+                        .child(Element::label("比例钳在 0.1..=0.9；嵌套即多栏")),
+                ),
+        )
+    };
+
     let layouts = Element::scroll().fill().child(
         Element::col()
             .width_match()
             .spacing(14)
+            .child(cp_split)
             .child(cp_9)
             .child(cp_15)
             .child(cp_17)
