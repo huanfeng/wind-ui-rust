@@ -213,6 +213,8 @@ fn mac_keycode_of(key: Key) -> Option<u32> {
         Key::Other(vk) => return mac_keycode_from_vk(vk),
         // Backspace 作全局热键无实际用途（与 win32 侧一致）。
         Key::Backspace => return None,
+        // 修饰键本身不能当热键主键（与 win32 侧一致）。
+        Key::Alt => return None,
     })
 }
 

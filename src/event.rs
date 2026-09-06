@@ -1,7 +1,7 @@
 //! 输入事件类型。平台层产生物理像素坐标，但 `UiHost::on_pointer` 在分发前
 //! 已 ÷scale 转为**逻辑坐标**——控件 `on_event` 收到的 pos 是逻辑坐标。
 
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -422,6 +422,11 @@ pub enum Key {
     NumpadDivide,
     /// 键盘上的「菜单」键（Windows 的 Apps 键）：弹出当前项的上下文菜单。
     ContextMenu,
+    /// Alt 键**本身**（macOS 的 Option）。只有它会带着 `pressed: false` 上来：
+    /// 单击 Alt（按下、期间没碰别的键、松开）是桌面惯例里激活菜单栏的手势，判定
+    /// 必须看到松开那一下。宿主在分发前截下它，控件永远收不到——控件要的是
+    /// [`KeyEvent::alt`] 那个修饰标志，不是这个键。
+    Alt,
     Char(char),
     Other(u32),
 }
@@ -602,6 +607,21 @@ pub struct MenuItem {
     /// 与 `enabled` 的优先级：禁用胜出（变灰）——不可点的项不该还在喊"危险"。
     /// 与悬停/勾选的优先级：intent 胜出——危险项被指向时更该保持红，而不是变成中性的强调色。
     pub intent: Option<crate::theme::Intent>,
+    /// 助记字母（不分大小写）：菜单展开时按这个字母即激活本项（有子菜单则展开）。
+    /// 标签里首个匹配的字符画下划线；标签里没有这个字母（中文标签常见）就只响应按键、
+    /// 不画线——习惯写法是 `"复制(C)"` 配 `.mnemonic('C')`，括号里的字母自然被画上线。
+    pub mnemonic: Option<char>,
+}
+
+/// 把标签按助记字母切成 `(前缀, 该字符, 后缀)`：首个不分大小写匹配的字符处。
+/// 标签里没有这个字母（中文标签只在括号里带字母时会有）返回 `None`——只响应按键、不画线。
+pub fn mnemonic_split(label: &str, m: char) -> Option<(&str, &str, &str)> {
+    let lower: Vec<char> = m.to_lowercase().collect();
+    let (i, c) = label
+        .char_indices()
+        .find(|(_, c)| c.to_lowercase().eq(lower.iter().copied()))?;
+    let end = i + c.len_utf8();
+    Some((&label[..i], &label[i..end], &label[end..]))
 }
 
 /// 空动作（分隔线/子菜单父项占位，永不执行）。
@@ -629,6 +649,7 @@ impl MenuItem {
             on_trailing_click: None,
             stay_open: false,
             intent: None,
+            mnemonic: None,
         }
     }
     /// 便捷构造：标签 + 合成按键。
@@ -734,6 +755,19 @@ impl MenuItem {
         self.enabled = enabled;
         self
     }
+    /// 设置助记字母（见 [`MenuItem::mnemonic`] 字段）。
+    pub fn mnemonic(mut self, c: char) -> Self {
+        self.mnemonic = Some(c);
+        self
+    }
+    /// 本项是否响应助记字母 `c`（不分大小写；分隔线、禁用项不响应）。
+    pub fn matches_mnemonic(&self, c: char) -> bool {
+        !self.separator
+            && self.enabled
+            && self
+                .mnemonic
+                .is_some_and(|m| m.to_lowercase().eq(c.to_lowercase()))
+    }
 
     /// 改名为 [`MenuItem::icon`]。
     #[deprecated(
@@ -826,6 +860,53 @@ pub struct MenuRequest {
     /// 面板宽度与位置**不随重建变化**——项文本变化会让面板忽宽忽窄，而指针正停在
     /// 上面准备点下一项。宽度以首次弹出的测量结果为准。
     pub rebuild: Option<std::rc::Rc<dyn Fn() -> Vec<MenuItem>>>,
+    /// 发起本菜单的菜单栏（[`EventCtx::show_menu_bar`](crate::core::EventCtx::show_menu_bar)
+    /// 才填）：宿主据此在展开期间做栏级联动——指针滑到相邻标题即切换、←→ 在根级跨菜单、
+    /// 点标题收起。普通右键菜单与下拉留 `None`。
+    pub bar: Option<MenuBarLink>,
+}
+
+/// 菜单栏交给宿主的联动信息：各标题的位置与项生成器。
+///
+/// 菜单栏控件自己只画标题、收第一下点击；展开之后指针与键盘都归宿主浮层独占，
+/// 控件再也收不到事件。"滑到相邻标题自动切换"这种原生手感只能由宿主做——它得知道
+/// 其它标题在哪、点开是什么，这份信息就是为此打包的。
+///
+/// `open` 是控件与宿主之间的**共享单元格**：宿主切换 / 关闭时写"当前展开（或键盘
+/// 激活）的标题下标"，控件绘制时读它画按下态。不用 `Signal`：它不属于任何窗口的信号
+/// 作用域，控件销毁即随之回收。
+#[derive(Clone)]
+pub struct MenuBarLink {
+    pub slots: Vec<MenuBarSlot>,
+    /// 本次要展开的标题下标。
+    pub current: usize,
+    /// 由键盘打开（F10 / Alt / ←→ 切换）：首项先高亮，让键盘用户看得见起点。
+    /// 鼠标点开则不预选——桌面惯例。
+    pub keyboard: bool,
+    pub open: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+}
+
+/// 菜单栏里的一个标题：窗口坐标下的矩形、助记字母、项生成器。
+#[derive(Clone)]
+pub struct MenuBarSlot {
+    pub rect: Rect,
+    pub mnemonic: Option<char>,
+    /// 每次展开现建：项的启用 / 勾选态因此总反映当前状态。
+    pub build: std::rc::Rc<dyn Fn() -> Vec<MenuItem>>,
+}
+
+impl MenuBarLink {
+    /// 命中点落在哪个标题上。
+    pub fn slot_at(&self, p: Point) -> Option<usize> {
+        self.slots.iter().position(|s| s.rect.contains(p))
+    }
+    /// 响应助记字母 `c` 的标题下标（不分大小写）。
+    pub fn slot_of_mnemonic(&self, c: char) -> Option<usize> {
+        self.slots.iter().position(|s| {
+            s.mnemonic
+                .is_some_and(|m| m.to_lowercase().eq(c.to_lowercase()))
+        })
+    }
 }
 
 /// 子窗口内容的不透明载体。

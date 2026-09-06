@@ -128,7 +128,7 @@ fn main() {
 | 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行）/ `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` / `color_picker`（取色面板） |
 | 反馈 | `progress`（确定/不确定）/ `tooltip`（悬停提示）/ `toast`（居中轻提示）/ `badge`（胶囊徽章） |
 | 容器 | `scroll`（滚轮/触摸+裁剪+滚动条）/ `tabs` / `tabs_pill` / `divider` / `dialog`（模态）/ `dialog_panel`（带标题栏）/ `visible_when`（条件可见） |
-| 导航 | `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴） |
+| 导航 | `menu_bar`（原生手感菜单栏：滑动切换、←→ 跨菜单、F10 / Alt 激活、助记键）/ `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴） |
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
 | 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |

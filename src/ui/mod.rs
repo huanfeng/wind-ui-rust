@@ -11,6 +11,7 @@ pub mod image;
 pub mod inputs;
 pub mod link;
 pub mod list;
+pub mod menubar;
 pub mod nav;
 pub mod pager;
 pub mod progress;
@@ -51,6 +52,7 @@ pub use image::{ImageContent, ImageView};
 pub use inputs::{CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput};
 pub use link::Link;
 pub use list::ListRow;
+pub use menubar::{MenuBar, MenuBarEntry};
 pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use pager::page_count;
 pub use progress::ProgressBar;
@@ -1724,6 +1726,30 @@ impl Element {
     /// ```
     pub fn check_menu(title: impl Into<String>, items: Vec<select::CheckMenuItem>) -> Self {
         Self::base(Layout::None).widget(select::CheckMenu::new(title, items))
+    }
+
+    /// 菜单栏：一排标题，点开即浮层菜单，手感同原生菜单栏——展开期间滑到相邻标题
+    /// 自动切换、←→ 跨菜单、点标题收起、F10 / 单击 Alt 键盘激活、Alt+助记字母直接
+    /// 展开、菜单内按助记字母激活项。项每次展开现建（见 [`MenuBarEntry`]）。
+    ///
+    /// 默认横向撑满（`width_match`），背景由调用方定（通常 `bg_role(Role::Surface)`）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Element::menu_bar(vec![
+    ///     MenuBarEntry::new("文件(F)", || vec![
+    ///         MenuItem::run("打开(O)…", |_ctx| {}, false).shortcut("Ctrl+O").mnemonic('O'),
+    ///         MenuItem::separator(),
+    ///         MenuItem::run("退出(X)", |ctx| ctx.request_close(), false).mnemonic('X'),
+    ///     ]).mnemonic('F'),
+    ///     MenuBarEntry::new("帮助(H)", || vec![MenuItem::run("关于(A)", |_ctx| {}, false).mnemonic('A')])
+    ///         .mnemonic('H'),
+    /// ]).bg_role(Role::Surface);
+    /// ```
+    pub fn menu_bar(entries: Vec<MenuBarEntry>) -> Self {
+        Self::base(Layout::None)
+            .widget(MenuBar::new(entries))
+            .width_match()
     }
 
     /// 复选菜单粘滞：开关项点击后菜单保持展开、可连点多个，点面板外才收起。

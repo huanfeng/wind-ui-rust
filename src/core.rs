@@ -190,6 +190,13 @@ pub trait Widget {
     fn modal_signal(&self) -> Option<Signal<bool>> {
         None
     }
+    /// 本控件若是菜单栏，交出联动信息（各标题的窗口矩形与项生成器；仅 `MenuBar` 实现）。
+    ///
+    /// 宿主靠它响应 F10 / 单击 Alt / Alt+助记键——这些键按下时没有任何菜单展开、
+    /// 焦点也不在菜单栏上，宿主只能扫树找到它。见 [`Tree::menu_bar_link`]。
+    fn menu_bar_link(&self) -> Option<crate::event::MenuBarLink> {
+        None
+    }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
     fn take_click(&mut self, _f: ClickFn) {}
     /// 显隐切换时重置交互态（hover/press → 静止，并令下次绘制的补间瞬时落定不动画）。
@@ -1880,6 +1887,29 @@ impl EventCtx<'_> {
             min_width,
             anchor_top: None,
             rebuild: None,
+            bar: None,
+        });
+        self.out.repaint = true;
+    }
+    /// 菜单栏专用：展开 `link.current` 那个标题的菜单，面板左上角贴标题左下角，并把
+    /// 联动信息交给宿主（展开期间滑到相邻标题即切换、←→ 跨菜单、点标题收起）。
+    /// 该标题的项生成器返回空则不弹。
+    pub fn show_menu_bar(&mut self, link: crate::event::MenuBarLink) {
+        let Some(slot) = link.slots.get(link.current) else {
+            return;
+        };
+        let items = (slot.build)();
+        if items.is_empty() {
+            return;
+        }
+        let r = slot.rect;
+        self.out.menu = Some(MenuRequest {
+            pos: Point::new(r.x, r.y + r.h),
+            items,
+            min_width: 0,
+            anchor_top: Some(r.y),
+            rebuild: Some(slot.build.clone()),
+            bar: Some(link),
         });
         self.out.repaint = true;
     }
@@ -1895,6 +1925,7 @@ impl EventCtx<'_> {
             min_width: bounds.w,
             anchor_top: Some(bounds.y),
             rebuild: None,
+            bar: None,
         });
         self.out.repaint = true;
     }
@@ -1916,6 +1947,7 @@ impl EventCtx<'_> {
             min_width: bounds.w,
             anchor_top: Some(bounds.y),
             rebuild: Some(rebuild),
+            bar: None,
         });
         self.out.repaint = true;
     }
@@ -2168,6 +2200,17 @@ impl Tree {
     }
 
     /// 节点绝对窗口矩形（累加各级父节点偏移）。
+    /// 树里第一个**可见**菜单栏的联动信息（见 [`Widget::menu_bar_link`]）。
+    ///
+    /// 线性扫一遍槽位：只在 F10 / Alt 这类低频按键时调用，不值得为它维护一份登记表——
+    /// 登记表还得跟着节点增删同步，而"扫一遍"没有可以失步的状态。
+    pub fn menu_bar_link(&self) -> Option<crate::event::MenuBarLink> {
+        self.slots
+            .iter()
+            .filter_map(|s| s.node.as_ref())
+            .filter(|n| n.effective_visible())
+            .find_map(|n| n.widget.menu_bar_link())
+    }
     pub fn abs_bounds(&self, id: NodeId) -> Rect {
         let mut r = match self.get(id) {
             Some(n) => {
@@ -2886,6 +2929,7 @@ impl Tree {
                                 // 同一个构建器交宿主当重建器：粘滞项（复选）点击后菜单不关，
                                 // 靠重跑它把勾选态刷新过来，否则勾了也不变、看着像没生效。
                                 rebuild: Some(cb),
+                                bar: None,
                             });
                             res.consumed = true;
                         }

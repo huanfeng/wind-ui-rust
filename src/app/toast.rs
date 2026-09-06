@@ -199,6 +199,7 @@ impl UiHost {
                             min_width: 0,
                             anchor_top: None,
                             rebuild: None,
+                            bar: None,
                         },
                         target,
                     );

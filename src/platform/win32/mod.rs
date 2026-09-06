@@ -71,10 +71,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
     WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO,
     WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE,
+    WM_NCCREATE, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
     WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
@@ -1596,6 +1596,18 @@ unsafe extern "system" fn wnd_proc(
             handle_key(hwnd, wparam);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        // Alt 的抬起（单击 Alt 激活菜单栏靠它判定）。Alt 与别的键组合过时，抬起来的是
+        // WM_KEYUP 而不是 WM_SYSKEYUP，两条都得接。认下它就**不交默认处理**：默认处理会
+        // 进入系统的"键盘菜单模式"（没有原生菜单栏时是看不见的系统菜单），把下一次按键
+        // 吞掉当助记符——此前单击 Alt 之后第一个键"没反应"就是这么来的。其它键的抬起
+        // 照旧交默认处理。
+        WM_KEYUP | WM_SYSKEYUP => {
+            if handle_key_up(hwnd, wparam) {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
         // Alt+字母随后还会来一条 WM_SYSCHAR。它不是文本（没人想把 Alt+A 打进输入框），
         // 默认处理又会把它当菜单助记符去匹配——本库窗口没有菜单栏，匹配不上只剩一声蜂鸣。
         // 唯一要放行的是 Alt+Space：那是系统菜单的入口，属于窗口而非应用。
@@ -2839,9 +2851,31 @@ pub(crate) fn map_vk(vk: u16) -> Key {
         Key::NumpadDivide
     } else if vk == VK_APPS.0 {
         Key::ContextMenu
+    } else if vk == VK_MENU.0 {
+        Key::Alt
     } else {
         Key::Other(vk as u32)
     }
+}
+
+/// Alt 松开：这是唯一上报 `pressed: false` 的键（理由见 [`Key::Alt`]）。
+///
+/// 只认 `VK_MENU`，其它键的抬起一概不报——控件都按"键事件即按下"写的，突然收到
+/// 抬起事件，没检查 `pressed` 的那些会把一次按键当两次。
+unsafe fn handle_key_up(hwnd: HWND, wparam: WPARAM) -> bool {
+    if wparam.0 as u16 != VK_MENU.0 {
+        return false;
+    }
+    let ev = KeyEvent {
+        key: Key::Alt,
+        pressed: false,
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
+    dispatch_key_event(hwnd, ev);
+    true
 }
 
 /// 把 VK 码翻译为框架键并分发。

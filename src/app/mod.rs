@@ -805,9 +805,20 @@ impl App {
                 "--key" => {
                     if let Some(spec) = args.get(i + 1) {
                         match parse_key_spec(spec) {
-                            Some(ev) => self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(ev)),
+                            Some(ev) => {
+                                self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(ev));
+                                // `--key alt` 是"单击 Alt"：判定看的是松开那一下（见 `Key::Alt`）。
+                                if ev.key == crate::event::Key::Alt {
+                                    self.cfg.screenshot_keys.push(platform::ScreenshotKey::Key(
+                                        crate::event::KeyEvent {
+                                            pressed: false,
+                                            ..ev
+                                        },
+                                    ));
+                                }
+                            }
                             None => eprintln!(
-                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/PageUp/PageDown/Insert/Backspace/Delete/Space/F1–F12/Menu/Numpad+-*/，可加 ctrl+ / shift+ / alt+ / meta+ 前缀），已跳过"
+                                "[windui] 无法识别的 --key {spec}（可用 Enter/Escape/Tab/Up/Down/Left/Right/Home/End/PageUp/PageDown/Insert/Backspace/Delete/Space/F1–F12/Menu/Alt/Numpad+-*/，可加 ctrl+ / shift+ / alt+ / meta+ 前缀），已跳过"
                             ),
                         }
                     }
@@ -1696,6 +1707,7 @@ impl UiHost {
             anchor_top: None,
             // 无粘滞项（四项点完即走），故不需要重建器。
             rebuild: None,
+            bar: None,
         });
         res.consumed = true;
         // 请求重绘。平台层只在 `on_pointer` 返回 true 时才 `InvalidateRect`——不置它，
@@ -1991,6 +2003,8 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
         "space" => Key::Space,
         "insert" | "ins" => Key::Insert,
         "menu" | "apps" => Key::ContextMenu,
+        // 单击 Alt（激活菜单栏）：回放时展开成按下 + 松开两条，见 `screenshot_from_args`。
+        "alt" => Key::Alt,
         "numpad+" => Key::NumpadAdd,
         "numpad-" => Key::NumpadSubtract,
         "numpad*" => Key::NumpadMultiply,
@@ -2163,6 +2177,10 @@ impl AppHandler for UiHost {
         if self.menu.is_open() {
             return self.handle_menu_pointer(ev);
         }
+        // 菜单栏的键盘激活态被任何按下打断（点到栏标题上的那一下照常交给栏控件展开）。
+        if ev.kind == PointerKind::Down {
+            self.note_pointer_down();
+        }
         // toast 浮层在控件树之上：命中则独占该事件。
         if self.toast.is_active() && self.handle_toast_pointer(ev) {
             return true;
@@ -2302,10 +2320,20 @@ impl AppHandler for UiHost {
     fn on_key(&mut self, ev: crate::event::KeyEvent) -> bool {
         self.enter();
         self.sync_clock();
-        // 菜单激活时由浮层独占键盘：↑↓ 选项、←→ 进出子菜单、回车/空格执行、
+        // Alt 键本身在任何分发之前截下、永不下发（单击 Alt 激活菜单栏的判定见
+        // `handle_alt_key`）；别的键一按就打断"单击"判定。
+        if ev.key == Key::Alt {
+            return self.handle_alt_key(ev);
+        }
+        self.note_key_press(ev);
+        // 菜单激活时由浮层独占键盘：↑↓ 选项、←→ 进出子菜单 / 跨菜单、回车/空格执行、
         // Escape 关闭，其余吞掉（避免打到被遮住的控件上）。
         if self.menu.is_open() {
             return self.handle_menu_key(ev);
+        }
+        // 菜单栏键盘激活态（F10 / 单击 Alt 之后）：←→ 换标题、↓ 展开、Esc 退出。
+        if self.menu.is_armed() {
+            return self.handle_armed_key(ev);
         }
         // 一律先交给焦点控件；宿主的 Tab 焦点导航与 Escape 关窗都是**兜底**，只在焦点
         // 控件没要这个键时才轮到。
@@ -2362,6 +2390,11 @@ impl AppHandler for UiHost {
                 // 可以忽略。
                 self.damage.needs_relayout = true;
                 self.damage.needs_full = true;
+                return true;
+            }
+            // 菜单栏热键（F10 激活、Alt+助记字母直接展开）排在应用快捷键之后：
+            // 加速键表优先于菜单助记符，与 Windows 一致。
+            if self.menu_bar_hotkey(ev) {
                 return true;
             }
             match ev.key {

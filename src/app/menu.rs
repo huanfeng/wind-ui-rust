@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use crate::core::NodeId;
-use crate::event::{Key, MenuAction, MenuItem, PointerEvent, PointerKind};
+use crate::event::{Key, KeyEvent, MenuAction, MenuBarLink, MenuItem, PointerEvent, PointerKind};
 use crate::geometry::{Point, Rect};
 use crate::render::{Canvas, Paint};
 use crate::text::{TextEngine, TextStyle};
@@ -69,6 +69,11 @@ fn normalize_separators(items: &mut Vec<MenuItem>) {
     if items.last().is_some_and(|i| i.separator) {
         items.pop();
     }
+}
+
+/// 字母 / 数字的虚拟键码（两平台约定：带修饰键的字母走 `Key::Other(大写 ASCII)`）。
+fn is_alnum_vk(vk: u32) -> bool {
+    matches!(vk, 0x30..=0x39 | 0x41..=0x5A)
 }
 
 /// 该项能否被键盘高亮停留：分隔线与禁用项跳过。子菜单父项**可以**停留
@@ -189,6 +194,9 @@ pub(super) struct ContextMenu {
     pub(super) target: NodeId,
     /// 项重建器（见 [`crate::event::MenuRequest::rebuild`]）：粘滞项点击后原地刷新。
     pub(super) rebuild: Option<Rc<dyn Fn() -> Vec<MenuItem>>>,
+    /// 发起本菜单的菜单栏（见 [`MenuBarLink`]）：展开期间滑到相邻标题即切换、
+    /// ←→ 在根级跨菜单、点标题收起。右键菜单与下拉为 `None`。
+    pub(super) bar: Option<MenuBarLink>,
 }
 
 impl ContextMenu {
@@ -261,6 +269,12 @@ pub(super) struct MenuHost {
     pub(super) active: Option<ContextMenu>,
     /// 菜单滚动条拖拽状态（None=无）。
     scrollbar_drag: Option<MenuScrollbarDrag>,
+    /// 键盘激活的菜单栏（F10 / 单击 Alt）：某个标题高亮、**尚无面板展开**，←→ 换标题、
+    /// ↓ / Enter 展开、Esc 退出——Windows 的菜单栏就是这两段式。与 `active` 互斥：
+    /// 展开即清掉它。`current` 即高亮的标题。
+    pub(super) armed: Option<MenuBarLink>,
+    /// 单击 Alt 的判定：按下之后没碰别的键。松开时它还是 true 才算"单击"。
+    alt_pending: bool,
 }
 
 impl MenuHost {
@@ -278,6 +292,11 @@ impl MenuHost {
     /// 当前是否有浮层菜单展开。
     pub(super) fn is_open(&self) -> bool {
         self.active.is_some()
+    }
+
+    /// 菜单栏是否处于键盘激活态（标题高亮、无面板）。
+    pub(super) fn is_armed(&self) -> bool {
+        self.armed.is_some()
     }
 
     /// 逻辑坐标是否落在任一级面板内（平台层用于把弹层区域判为客户区）。
@@ -346,6 +365,10 @@ impl UiHost {
     /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻；
     /// 越窗下缘时：若 `anchor_top` 有值（下拉控件顶部 y），优先向上翻转（菜单底对齐控件顶），
     /// 保证控件自身不被遮挡；否则退化为向上钳制。
+    ///
+    /// `tall`：菜单栏的菜单不受 [`MENU_MAX_H`] 约束，可视高度只受窗口下缘限制——
+    /// 应用菜单动辄二十项，原生菜单栏也是整列铺开而非滚动。下拉与右键菜单仍走上限。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_level(
         &mut self,
         items: Vec<MenuItem>,
@@ -354,6 +377,7 @@ impl UiHost {
         min_width: i32,
         flip_right: Option<i32>,
         anchor_top: Option<i32>,
+        tall: bool,
     ) -> MenuLevel {
         // 空组留下的孤立/相邻分隔线在此收口（见 `normalize_separators`）。所有层——根层
         // 与各级子菜单——都经过这里，故规范化对整棵菜单生效。
@@ -362,14 +386,19 @@ impl UiHost {
         let (w, has_icons) = self.level_width(&items, min_width);
         let body: i32 = items.iter().map(menu_item_height).sum();
         let content_h = body + 2 * MENU_VPAD;
-        // 面板可视高度：不超过 MENU_MAX_H，也不超过窗口高的 3/4。
         let ws = self.logical_size;
-        let max_h = MENU_MAX_H.min(if ws.h > 0 { ws.h * 3 / 4 } else { MENU_MAX_H });
+        // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
+        let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
+        // 面板可视高度：常规不超过 MENU_MAX_H，也不超过窗口高的 3/4；菜单栏的菜单只受
+        // 锚点到窗口下缘的空间限制（放不下才滚动）。
+        let max_h = if tall && ws.h > 0 {
+            (ws.h - ay - em).max(MENU_ITEM_H * 2)
+        } else {
+            MENU_MAX_H.min(if ws.h > 0 { ws.h * 3 / 4 } else { MENU_MAX_H })
+        };
         let h = content_h.min(max_h);
         let mut x = ax;
         let mut y = ay;
-        // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
-        let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
         if ws.w > 0 && x + w > ws.w - em {
             x = match flip_right {
                 Some(parent_left) => (parent_left - w).max(em),
@@ -426,19 +455,31 @@ impl UiHost {
     }
 
     /// 打开上下文菜单（根级）。
+    ///
+    /// 带菜单栏联动的请求：把"当前展开的标题"写进共享单元格（栏据此画按下态），键盘
+    /// 打开的先高亮首个可选项；并清掉键盘激活态——展开与激活互斥。
     pub(super) fn open_menu(&mut self, req: crate::event::MenuRequest, target: NodeId) {
-        let level = self.build_level(
+        let mut level = self.build_level(
             req.items,
             req.pos.x,
             req.pos.y,
             req.min_width,
             None,
             req.anchor_top,
+            req.bar.is_some(),
         );
+        if let Some(bar) = &req.bar {
+            bar.open.set(Some(bar.current));
+            if bar.keyboard {
+                level.hover = level.items.iter().position(menu_item_selectable);
+            }
+        }
+        self.menu_bar_disarm();
         self.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
             rebuild: req.rebuild,
+            bar: req.bar,
         });
     }
 
@@ -449,8 +490,199 @@ impl UiHost {
     /// 脏区（如打开菜单时清 hover 触发的边框补间仍在跑），就会走局部重绘，只擦那一小块，
     /// 面板像素留在屏上。关闭浮层必经此处，勿直接写 `self.menu.active = None`。
     pub(super) fn close_menu(&mut self) {
-        self.menu.active = None;
+        if let Some(m) = self.menu.active.take() {
+            if let Some(bar) = m.bar {
+                bar.open.set(None);
+            }
+        }
         self.damage.needs_full = true;
+    }
+
+    // ---------------------------------------------------------------------
+    // 菜单栏联动
+    // ---------------------------------------------------------------------
+
+    /// 从菜单栏直接展开第 `idx` 个标题（宿主侧入口：键盘激活态的 ↓ / Enter、
+    /// Alt+助记键、展开期间的 ←→ 与滑到相邻标题）。该标题无项则不展开，返回 false。
+    ///
+    /// 与 `EventCtx::show_menu_bar` 是同一件事的两个入口：那条经控件回调走
+    /// `DispatchResult`，这条在宿主里直接建面板——宿主拿不到 `EventCtx`。
+    pub(super) fn menu_bar_open(
+        &mut self,
+        mut link: MenuBarLink,
+        idx: usize,
+        keyboard: bool,
+    ) -> bool {
+        let Some(slot) = link.slots.get(idx) else {
+            return false;
+        };
+        let items = (slot.build)();
+        if items.is_empty() {
+            return false;
+        }
+        let (r, build) = (slot.rect, slot.build.clone());
+        link.current = idx;
+        link.keyboard = keyboard;
+        // 已有浮层（跨菜单切换）时先关，走 close_menu 把旧栏的单元格清掉、置整窗。
+        if self.menu.is_open() {
+            self.close_menu();
+        }
+        let Some(target) = self.focus.current.or(self.tree.root) else {
+            return false;
+        };
+        self.open_menu(
+            crate::event::MenuRequest {
+                pos: Point::new(r.x, r.y + r.h),
+                items,
+                min_width: 0,
+                anchor_top: Some(r.y),
+                rebuild: Some(build),
+                bar: Some(link),
+            },
+            target,
+        );
+        self.damage.needs_full = true;
+        true
+    }
+
+    /// 展开期间切到相邻标题：`delta` 为 ±1，到头循环。没有菜单栏联动时无操作。
+    fn menu_bar_step(&mut self, delta: isize, keyboard: bool) -> bool {
+        let Some(link) = self.menu.active.as_ref().and_then(|m| m.bar.clone()) else {
+            return false;
+        };
+        let n = link.slots.len();
+        if n == 0 {
+            return false;
+        }
+        let next = (link.current as isize + delta).rem_euclid(n as isize) as usize;
+        self.menu_bar_open(link, next, keyboard)
+    }
+
+    /// 键盘激活菜单栏：第 `idx` 个标题高亮，不展开面板。
+    pub(super) fn menu_bar_arm(&mut self, mut link: MenuBarLink, idx: usize) {
+        if link.slots.is_empty() {
+            return;
+        }
+        link.current = idx.min(link.slots.len() - 1);
+        link.open.set(Some(link.current));
+        self.menu.armed = Some(link);
+        self.damage.needs_full = true;
+    }
+
+    /// 退出键盘激活态（标题高亮熄灭）。
+    pub(super) fn menu_bar_disarm(&mut self) {
+        if let Some(link) = self.menu.armed.take() {
+            link.open.set(None);
+            self.damage.needs_full = true;
+        }
+    }
+
+    /// Alt 键本身（按下 / 松开），在任何分发之前截下。
+    ///
+    /// 单击 Alt（按下、期间没碰别的键、松开）在三种状态下各有含义：无菜单 → 激活菜单栏
+    /// 首个标题；已激活 → 退出；面板展开 → 收起。返回是否需要重绘。
+    pub(super) fn handle_alt_key(&mut self, ev: KeyEvent) -> bool {
+        if ev.pressed {
+            self.menu.alt_pending = true;
+            return false;
+        }
+        if !std::mem::take(&mut self.menu.alt_pending) {
+            return false;
+        }
+        if self.menu.is_open() {
+            self.close_menu();
+            return true;
+        }
+        if self.menu.is_armed() {
+            self.menu_bar_disarm();
+            return true;
+        }
+        match self.tree.menu_bar_link() {
+            Some(link) => {
+                self.menu_bar_arm(link, 0);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 任何别的键按下都打断"单击 Alt"的判定（Alt+X 组合不是单击）。
+    pub(super) fn note_key_press(&mut self, ev: KeyEvent) {
+        if ev.pressed && ev.key != Key::Alt {
+            self.menu.alt_pending = false;
+        }
+    }
+
+    /// 指针按下：打断"单击 Alt"判定，退出菜单栏键盘激活态。
+    pub(super) fn note_pointer_down(&mut self) {
+        self.menu.alt_pending = false;
+        self.menu_bar_disarm();
+    }
+
+    /// 键盘激活态下的按键：←→ 换标题、↓ / Enter / 空格展开、助记字母直接展开对应菜单、
+    /// Esc / F10 退出；其余键退出并吞掉——激活态是模态的，放行会打到不该收的控件上。
+    pub(super) fn handle_armed_key(&mut self, ev: KeyEvent) -> bool {
+        let Some(link) = self.menu.armed.clone() else {
+            return false;
+        };
+        if !ev.pressed {
+            return false;
+        }
+        let n = link.slots.len();
+        match ev.key {
+            Key::Left | Key::Right if n > 0 => {
+                let delta = if ev.key == Key::Left { n - 1 } else { 1 };
+                let idx = (link.current + delta) % n;
+                self.menu_bar_arm(link, idx);
+            }
+            Key::Down | Key::Enter | Key::Space => {
+                let idx = link.current;
+                if !self.menu_bar_open(link, idx, true) {
+                    self.menu_bar_disarm();
+                }
+            }
+            Key::Char(c) => match link.slot_of_mnemonic(c) {
+                Some(idx) => {
+                    if !self.menu_bar_open(link, idx, true) {
+                        self.menu_bar_disarm();
+                    }
+                }
+                None => self.menu_bar_disarm(),
+            },
+            // 字母键先来一条 VK 事件、随后才是 Char：VK 那条不算数，等 Char。
+            Key::Other(vk) if is_alnum_vk(vk) => {}
+            _ => self.menu_bar_disarm(),
+        }
+        true
+    }
+
+    /// 无菜单展开、也未激活时的菜单栏热键：F10 激活首个标题，Alt+助记字母直接展开
+    /// 对应菜单。放在控件分发与应用快捷键**之后**（它们没要这个键才轮到），与
+    /// Windows 的次序一致：加速键表优先于菜单助记符。
+    pub(super) fn menu_bar_hotkey(&mut self, ev: KeyEvent) -> bool {
+        if !ev.pressed || ev.ctrl || ev.meta {
+            return false;
+        }
+        match ev.key {
+            Key::F(10) if !ev.shift && !ev.alt => match self.tree.menu_bar_link() {
+                Some(link) => {
+                    self.menu_bar_arm(link, 0);
+                    true
+                }
+                None => false,
+            },
+            Key::Other(vk) if ev.alt && !ev.shift && is_alnum_vk(vk) => {
+                let c = vk as u8 as char;
+                let Some(link) = self.tree.menu_bar_link() else {
+                    return false;
+                };
+                match link.slot_of_mnemonic(c) {
+                    Some(idx) => self.menu_bar_open(link, idx, true),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
     }
 
     /// 清各级悬停高亮。返回是否有变化（有则请求重绘）。
@@ -546,9 +778,31 @@ impl UiHost {
                     }
                     return true;
                 }
+                // 菜单栏联动：滑到相邻标题上即切到那个菜单（无需再点）。
+                if let Some(link) = self.menu.active.as_ref().and_then(|m| m.bar.clone()) {
+                    if let Some(j) = link.slot_at(ev.pos) {
+                        if j != link.current {
+                            self.menu_bar_open(link, j, false);
+                        }
+                        return true;
+                    }
+                }
                 self.menu_hover_update(ev.pos)
             }
             PointerKind::Down => {
+                // 菜单栏联动：点当前展开的标题收起；点别的标题切过去（指针没经过 Move
+                // 就落下的情形，如触摸）。都吞掉配对的 Up，不让它落回栏控件再开一次。
+                if let Some(link) = self.menu.active.as_ref().and_then(|m| m.bar.clone()) {
+                    if let Some(j) = link.slot_at(ev.pos) {
+                        self.swallow_up = true;
+                        if j == link.current {
+                            self.close_menu();
+                        } else {
+                            self.menu_bar_open(link, j, false);
+                        }
+                        return true;
+                    }
+                }
                 // 滚动条命中检测：面板右侧 10px 区域内且该面板有滚动内容。
                 if let Some(k) = self.menu.active.as_ref().and_then(|m| m.level_at(ev.pos)) {
                     let level = &self.menu.active.as_ref().unwrap().levels[k];
@@ -703,10 +957,11 @@ impl UiHost {
         let items = it.submenu.clone();
         let (top, _) = lvl.item_rows()[i];
         let (ax, ay, parent_left) = (lvl.rect.right(), top - MENU_VPAD, lvl.rect.x);
+        let tall = m.bar.is_some();
         if let Some(m) = self.menu.active.as_mut() {
             m.levels.truncate(k + 1);
         }
-        let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2), None);
+        let mut child = self.build_level(items, ax - 2, ay, 0, Some(parent_left + 2), None, tall);
         child.spawn = Some(i);
         self.menu.active.as_mut().unwrap().levels.push(child);
         true
@@ -873,16 +1128,78 @@ impl UiHost {
             Key::Up => self.menu_move_hover(false),
             Key::Home => self.menu_jump_hover(true),
             Key::End => self.menu_jump_hover(false),
-            Key::Right => self.menu_enter_submenu(),
-            Key::Left => self.menu_leave_level(),
+            // →：高亮项有子菜单就进去；否则（菜单栏展开的）切到右边那个菜单。
+            Key::Right => {
+                if self.menu_hover_has_submenu() {
+                    self.menu_enter_submenu()
+                } else {
+                    self.menu_bar_step(1, true);
+                    true
+                }
+            }
+            // ←：在子菜单里退一级；已在根级则（菜单栏展开的）切到左边那个菜单。
+            Key::Left => {
+                let at_root = self
+                    .menu
+                    .active
+                    .as_ref()
+                    .is_some_and(|m| m.levels.len() == 1);
+                if at_root {
+                    self.menu_bar_step(-1, true);
+                    true
+                } else {
+                    self.menu_leave_level()
+                }
+            }
             Key::Enter | Key::Space => self.menu_activate_hover(),
             // Tab 不在菜单里导航焦点：先收起浮层，让焦点回到发起控件。
             Key::Tab => {
                 self.close_menu();
                 true
             }
+            // 助记字母：最深一级里匹配的项直接激活（有子菜单则展开）。
+            Key::Char(c) if !ev.ctrl && !ev.alt && !ev.meta => {
+                self.menu_activate_mnemonic(c);
+                true
+            }
+            // Alt+字母：切到菜单栏里带该助记字母的菜单（Alt+F 打开的菜单里再按 Alt+H
+            // 直接跳到帮助）。
+            Key::Other(vk) if ev.alt && !ev.ctrl && !ev.meta && is_alnum_vk(vk) => {
+                let c = vk as u8 as char;
+                if let Some(link) = self.menu.active.as_ref().and_then(|m| m.bar.clone()) {
+                    if let Some(idx) = link.slot_of_mnemonic(c) {
+                        self.menu_bar_open(link, idx, true);
+                    }
+                }
+                true
+            }
             _ => true,
         }
+    }
+
+    /// 最深一级的高亮项是否有可展开的子菜单。
+    fn menu_hover_has_submenu(&self) -> bool {
+        let Some(k) = self.menu_top_level() else {
+            return false;
+        };
+        let lvl = &self.menu.active.as_ref().unwrap().levels[k];
+        lvl.hover
+            .and_then(|i| lvl.items.get(i))
+            .is_some_and(|it| !it.submenu.is_empty() && it.enabled)
+    }
+
+    /// 按助记字母激活最深一级里的项：有子菜单则展开并高亮其首项，否则执行。
+    /// 没有匹配的项什么都不做（Windows 会响一声，这里静默）。
+    fn menu_activate_mnemonic(&mut self, c: char) {
+        let Some(k) = self.menu_top_level() else {
+            return;
+        };
+        let lvl = &self.menu.active.as_ref().unwrap().levels[k];
+        let Some(i) = lvl.items.iter().position(|it| it.matches_mnemonic(c)) else {
+            return;
+        };
+        self.menu_set_hover(k, i);
+        self.menu_activate_hover();
     }
 }
 
@@ -1043,6 +1360,18 @@ impl MenuHost {
                         crate::spec::Align::Start,
                         &TextStyle::new(MENU_FONT),
                     );
+                }
+                // 助记字母下划线：标签里首个匹配字符的正下方一条细线。
+                if let Some((pre, ch, _)) = it
+                    .mnemonic
+                    .and_then(|m| crate::event::mnemonic_split(&it.label, m))
+                {
+                    let ts = TextStyle::new(MENU_FONT);
+                    let x0 = label_x + canvas.measure_text(pre, &ts).w;
+                    let cw = canvas.measure_text(ch, &ts).w;
+                    let line_h = if it.subtitle.is_some() { h / 2 } else { h };
+                    let y = top + (line_h + MENU_FONT as i32) / 2 + 1;
+                    canvas.fill_rect(x0 as f32, y as f32, cw as f32, 1.0, &Paint::fill(color));
                 }
                 // 尾随：子菜单箭头 › / 快捷键 / 勾选（收窄到 content_right，避免与徽章/图标重叠）。
                 let tr = Rect::new(r.x, top, (content_right - r.x).max(0), h);
@@ -1213,11 +1542,12 @@ mod tests {
             .badge("New", crate::theme::Intent::Danger)
             .trailing_icon("🗑", move |_ctx| trash.set(true));
 
-        let level = app.build_level(vec![item], 20, 20, 0, None, None);
+        let level = app.build_level(vec![item], 20, 20, 0, None, None, false);
         app.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
             rebuild: None,
+            bar: None,
         });
 
         let rect = app.menu.active.as_ref().unwrap().levels[0].rect;
@@ -1266,12 +1596,13 @@ mod tests {
             ]
         });
 
-        let level = app.build_level(rebuild(), 20, 20, 0, None, None);
+        let level = app.build_level(rebuild(), 20, 20, 0, None, None, false);
         let rect = level.rect;
         app.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
             rebuild: Some(rebuild),
+            bar: None,
         });
         macro_rules! click {
             ($i:expr) => {
@@ -1338,12 +1669,13 @@ mod tests {
             false,
         );
 
-        let level = app.build_level(vec![item], 20, 20, 0, None, None);
+        let level = app.build_level(vec![item], 20, 20, 0, None, None, false);
         let rect = level.rect;
         app.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
             rebuild: None,
+            bar: None,
         });
         app.handle_menu_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1382,12 +1714,13 @@ mod tests {
             vec![MenuItem::run(label, move |_ctx| wide.set(!wide.get()), wide.get()).stay_open()]
         });
 
-        let level = app.build_level(rebuild(), 20, 20, 0, None, None);
+        let level = app.build_level(rebuild(), 20, 20, 0, None, None, false);
         let before = level.rect;
         app.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
             rebuild: Some(rebuild),
+            bar: None,
         });
         app.handle_menu_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1522,6 +1855,7 @@ mod tests {
             ],
             target,
             rebuild: Some(Rc::new(build)),
+            bar: None,
         };
 
         menu.refresh_items();
@@ -1752,6 +2086,333 @@ mod tests {
         handler.on_key(k(Key::Escape));
         assert!(handler.menu.active.is_none(), "Escape 应关闭菜单");
         assert_eq!(sel.get(), 1, "Escape 不应改变选中值");
+    }
+
+    // -----------------------------------------------------------------
+    // 菜单栏
+    // -----------------------------------------------------------------
+
+    /// 两个标题的菜单栏 + 已暖过布局的宿主。返回「新建」被执行的次数。
+    fn menubar_handler() -> (UiHost, Rc<std::cell::Cell<u32>>) {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::ui::MenuBarEntry;
+        use tiny_skia::Pixmap;
+        let hits = Rc::new(std::cell::Cell::new(0u32));
+        let h = hits.clone();
+        let file = move || {
+            let h = h.clone();
+            vec![
+                MenuItem::run("新建(N)", move |_ctx| h.set(h.get() + 1), false).mnemonic('N'),
+                MenuItem::separator(),
+                MenuItem::run("退出(X)", |_ctx| {}, false).mnemonic('X'),
+            ]
+        };
+        let edit = || {
+            vec![
+                MenuItem::run("复制(C)", |_ctx| {}, false).mnemonic('C'),
+                MenuItem::submenu("更多(M)", vec![MenuItem::run("子项", |_ctx| {}, false)])
+                    .mnemonic('M'),
+            ]
+        };
+        let app = App::new("t", 400, 300).content(
+            Element::col().width(400).height(300).child(
+                Element::menu_bar(vec![
+                    MenuBarEntry::new("文件(F)", file).mnemonic('F'),
+                    MenuBarEntry::new("编辑(E)", edit).mnemonic('E'),
+                ])
+                .height(28),
+            ),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        handler.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(400, 300),
+        );
+        (handler, hits)
+    }
+
+    fn bar_center(h: &UiHost, i: usize) -> Point {
+        let r = h
+            .tree
+            .menu_bar_link()
+            .expect("栏已绘制，应有联动信息")
+            .slots[i]
+            .rect;
+        Point::new(r.x + r.w / 2, r.y + r.h / 2)
+    }
+
+    fn bar_current(h: &UiHost) -> Option<usize> {
+        h.menu
+            .active
+            .as_ref()
+            .and_then(|m| m.bar.as_ref())
+            .map(|b| b.current)
+    }
+
+    fn bar_open_cell(h: &UiHost) -> Option<usize> {
+        h.tree.menu_bar_link().unwrap().open.get()
+    }
+
+    fn root_labels(h: &UiHost) -> Vec<String> {
+        h.menu.active.as_ref().unwrap().levels[0]
+            .items
+            .iter()
+            .map(|i| i.label.clone())
+            .collect()
+    }
+
+    fn pointer(h: &mut UiHost, kind: PointerKind, p: Point) -> bool {
+        use crate::event::MouseButton;
+        use crate::platform::AppHandler;
+        h.on_pointer(PointerEvent::single(kind, p, MouseButton::Left))
+    }
+
+    fn alt_key(pressed: bool) -> KeyEvent {
+        KeyEvent {
+            key: Key::Alt,
+            pressed,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    fn alt_letter(c: u8) -> KeyEvent {
+        KeyEvent {
+            key: Key::Other(u32::from(c.to_ascii_uppercase())),
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: true,
+            meta: false,
+        }
+    }
+
+    /// 原生菜单栏的核心手感：按下标题即展开；展开期间指针**滑到**相邻标题就切过去，
+    /// 不必再点；点当前展开的标题收起。栏据共享单元格画按下态，全程与宿主一致。
+    #[test]
+    fn menu_bar_opens_on_press_and_switches_by_hovering_neighbor_title() {
+        let (mut h, _) = menubar_handler();
+        let (t0, t1) = (bar_center(&h, 0), bar_center(&h, 1));
+
+        pointer(&mut h, PointerKind::Down, t0);
+        assert!(h.menu.is_open(), "按下标题应展开");
+        assert_eq!(bar_current(&h), Some(0));
+        assert_eq!(bar_open_cell(&h), Some(0), "栏应知道 0 号标题展开了");
+        assert_eq!(
+            root_labels(&h),
+            ["新建(N)", "", "退出(X)"],
+            "应是「文件」菜单的项（分隔线标签为空）"
+        );
+        let panel = h.menu.active.as_ref().unwrap().levels[0].rect;
+        assert!(panel.y >= t0.y, "面板应挂在标题下方");
+
+        // 配对的 Up 不该关掉刚展开的菜单。
+        pointer(&mut h, PointerKind::Up, t0);
+        assert!(h.menu.is_open());
+
+        // 滑到相邻标题：切到「编辑」，面板挪到它下面。
+        let repaint = pointer(&mut h, PointerKind::Move, t1);
+        assert!(repaint);
+        assert_eq!(bar_current(&h), Some(1), "滑到相邻标题应切换菜单");
+        assert_eq!(bar_open_cell(&h), Some(1));
+        assert_eq!(root_labels(&h)[0], "复制(C)");
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels[0].hover,
+            None,
+            "鼠标切换不预选项"
+        );
+
+        // 点当前展开的标题：收起，栏单元格清空，配对 Up 被吞。
+        pointer(&mut h, PointerKind::Down, t1);
+        assert!(!h.menu.is_open(), "点当前展开的标题应收起");
+        assert_eq!(bar_open_cell(&h), None);
+        assert!(h.swallow_up, "关闭那下的 Up 须吞掉，否则栏控件会再开一次");
+    }
+
+    /// 键盘：根级 → 切到右边菜单（高亮项有子菜单时才进子菜单）、← 切到左边；
+    /// 键盘切换后首个可选项先高亮。到头循环。
+    #[test]
+    fn menu_bar_arrows_switch_menus_at_root_level() {
+        use crate::platform::AppHandler;
+        let (mut h, _) = menubar_handler();
+        let k = key_ev();
+        let t0 = bar_center(&h, 0);
+        pointer(&mut h, PointerKind::Down, t0);
+        assert_eq!(bar_current(&h), Some(0));
+
+        h.on_key(k(Key::Right));
+        assert_eq!(bar_current(&h), Some(1), "根级按 → 应切到右边的菜单");
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels[0].hover,
+            Some(0),
+            "键盘切换后首项应高亮"
+        );
+        h.on_key(k(Key::Right));
+        assert_eq!(bar_current(&h), Some(0), "最右再 → 循环到最左");
+        h.on_key(k(Key::Left));
+        assert_eq!(bar_current(&h), Some(1), "最左按 ← 循环到最右");
+
+        // 高亮项有子菜单：→ 进子菜单而不是换菜单；子菜单里 ← 退一级而不是换菜单。
+        h.on_key(k(Key::Down)); // 高亮 更多(M)
+        assert_eq!(h.menu.active.as_ref().unwrap().levels[0].hover, Some(1));
+        h.on_key(k(Key::Right));
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels.len(),
+            2,
+            "→ 应展开子菜单"
+        );
+        assert_eq!(bar_current(&h), Some(1), "进子菜单不换菜单");
+        h.on_key(k(Key::Left));
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels.len(),
+            1,
+            "子菜单里 ← 退一级"
+        );
+        assert_eq!(bar_current(&h), Some(1), "退一级不换菜单");
+    }
+
+    /// F10 进入键盘激活态（标题高亮、无面板），←→ 换标题，↓ 展开且首项高亮，
+    /// Esc 关掉面板；再 Esc 不再有状态。点任意处也退出激活态。
+    #[test]
+    fn f10_arms_menu_bar_and_down_opens_highlighted_title() {
+        use crate::platform::AppHandler;
+        let (mut h, _) = menubar_handler();
+        let k = key_ev();
+
+        assert!(h.on_key(k(Key::F(10))), "激活态是可见变化，应请求重绘");
+        assert!(h.menu.is_armed());
+        assert!(!h.menu.is_open(), "F10 只高亮标题，不展开面板");
+        assert_eq!(bar_open_cell(&h), Some(0));
+
+        h.on_key(k(Key::Right));
+        assert_eq!(bar_open_cell(&h), Some(1), "激活态下 → 换标题");
+        h.on_key(k(Key::Left));
+        assert_eq!(bar_open_cell(&h), Some(0));
+
+        h.on_key(k(Key::Down));
+        assert!(h.menu.is_open(), "↓ 展开高亮的标题");
+        assert!(!h.menu.is_armed(), "展开与激活态互斥");
+        assert_eq!(bar_current(&h), Some(0));
+        assert_eq!(h.menu.active.as_ref().unwrap().levels[0].hover, Some(0));
+
+        h.on_key(k(Key::Escape));
+        assert!(!h.menu.is_open());
+        assert_eq!(bar_open_cell(&h), None, "关掉后栏的按下态应熄灭");
+
+        // 激活态被点击打断。
+        h.on_key(k(Key::F(10)));
+        assert!(h.menu.is_armed());
+        pointer(&mut h, PointerKind::Down, Point::new(200, 200));
+        assert!(!h.menu.is_armed(), "点任意处退出激活态");
+        assert_eq!(bar_open_cell(&h), None);
+
+        // 激活态下 Esc / F10 退出。
+        h.on_key(k(Key::F(10)));
+        h.on_key(k(Key::Escape));
+        assert!(!h.menu.is_armed());
+        h.on_key(k(Key::F(10)));
+        h.on_key(k(Key::F(10)));
+        assert!(!h.menu.is_armed(), "再按 F10 退出激活态");
+    }
+
+    /// 单击 Alt（按下、没碰别的键、松开）切换激活态；Alt+X 这种组合不算单击。
+    /// 面板展开时单击 Alt 收起面板。
+    #[test]
+    fn alt_tap_toggles_armed_state_but_alt_combo_does_not() {
+        use crate::platform::AppHandler;
+        let (mut h, _) = menubar_handler();
+
+        h.on_key(alt_key(true));
+        assert!(!h.menu.is_armed(), "按下时还不知道是不是单击");
+        assert!(h.on_key(alt_key(false)));
+        assert!(h.menu.is_armed(), "单击 Alt 应激活菜单栏");
+        assert_eq!(bar_open_cell(&h), Some(0));
+
+        h.on_key(alt_key(true));
+        h.on_key(alt_key(false));
+        assert!(!h.menu.is_armed(), "再单击一次退出");
+
+        // Alt+X（X 没有助记）：不是单击，什么都不发生。
+        h.on_key(alt_key(true));
+        h.on_key(alt_letter(b'x'));
+        h.on_key(alt_key(false));
+        assert!(!h.menu.is_armed(), "Alt+X 不算单击 Alt");
+        assert!(!h.menu.is_open());
+
+        // 面板展开时单击 Alt 收起。
+        let t0 = bar_center(&h, 0);
+        pointer(&mut h, PointerKind::Down, t0);
+        assert!(h.menu.is_open());
+        h.on_key(alt_key(true));
+        h.on_key(alt_key(false));
+        assert!(!h.menu.is_open(), "展开时单击 Alt 应收起面板");
+        assert!(!h.menu.is_armed());
+    }
+
+    /// Alt+助记字母直接展开对应菜单（首项高亮）；菜单里按助记字母激活项——普通项执行
+    /// 并关闭，子菜单父项展开。展开期间 Alt+另一个助记字母切到那个菜单。
+    #[test]
+    fn mnemonics_open_menus_and_activate_items() {
+        use crate::platform::AppHandler;
+        let (mut h, hits) = menubar_handler();
+        let k = key_ev();
+
+        assert!(h.on_key(alt_letter(b'f')));
+        assert!(h.menu.is_open(), "Alt+F 应直接展开「文件」");
+        assert_eq!(bar_current(&h), Some(0));
+        assert_eq!(h.menu.active.as_ref().unwrap().levels[0].hover, Some(0));
+
+        // 展开期间 Alt+E 切到「编辑」。
+        h.on_key(alt_letter(b'e'));
+        assert_eq!(bar_current(&h), Some(1), "展开期间 Alt+E 切到「编辑」");
+
+        // 菜单里按 m：「更多(M)」是子菜单父项 → 展开它。
+        h.on_key(k(Key::Char('m')));
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels.len(),
+            2,
+            "助记字母应展开子菜单"
+        );
+
+        // 回到「文件」，按 n 执行「新建」并关闭。
+        h.on_key(alt_letter(b'f'));
+        assert_eq!(bar_current(&h), Some(0));
+        h.on_key(k(Key::Char('N')));
+        assert_eq!(hits.get(), 1, "助记字母（不分大小写）应执行该项");
+        assert!(!h.menu.is_open(), "执行后关闭");
+
+        // 没有匹配的字母：什么都不做，菜单留着。
+        h.on_key(alt_letter(b'f'));
+        h.on_key(k(Key::Char('z')));
+        assert!(h.menu.is_open());
+        assert_eq!(hits.get(), 1);
+
+        // 激活态下按助记字母也直接展开。
+        h.on_key(k(Key::Escape));
+        h.on_key(k(Key::F(10)));
+        h.on_key(k(Key::Char('e')));
+        assert!(h.menu.is_open());
+        assert_eq!(bar_current(&h), Some(1), "激活态下按 E 展开「编辑」");
+    }
+
+    /// 没有菜单栏的窗口：F10 / 单击 Alt / Alt+字母都不该有反应（也不该 panic）。
+    #[test]
+    fn menu_bar_hotkeys_are_inert_without_a_menu_bar() {
+        use crate::platform::AppHandler;
+        let (mut h, _) = dropdown_handler();
+        let k = key_ev();
+        assert!(!h.on_key(k(Key::F(10))));
+        assert!(!h.menu.is_armed());
+        h.on_key(alt_key(true));
+        assert!(!h.on_key(alt_key(false)));
+        assert!(!h.menu.is_armed());
+        h.on_key(alt_letter(b'f'));
+        assert!(!h.menu.is_open());
     }
 
     /// 回归：捕获丢失（Alt+Tab / Cmd+Tab / 原生模态框接管）必须收掉菜单滚动条拖拽。

@@ -29,8 +29,8 @@ pub mod ui;
 pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::event::{
-        window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuItem, Mods, Preedit,
-        ToastKind, WindowState,
+        window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, Key, MenuBarLink, MenuItem, Mods,
+        Preedit, ToastKind, WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
@@ -51,8 +51,9 @@ pub mod prelude {
     pub use crate::ui::split::SplitOpts;
     pub use crate::ui::{
         default_presets, CaretStyle, CheckMenuItem, ColorPickerOpts, CommitMode, DropdownItem,
-        Element, Hsva, ImageContent, ImageView, Link, Para, RichColor, RichDoc, RowRequest,
-        RowSource, SelectionScope, SortKey, SortOrder, SortStyle, SpanStyle, TextContent, Truncate,
-        WindowButton, WindowButtonKind, ROW_CACHE_SEGMENTS, ROW_CHUNK, TABLE_ROW_H,
+        Element, Hsva, ImageContent, ImageView, Link, MenuBarEntry, Para, RichColor, RichDoc,
+        RowRequest, RowSource, SelectionScope, SortKey, SortOrder, SortStyle, SpanStyle,
+        TextContent, Truncate, WindowButton, WindowButtonKind, ROW_CACHE_SEGMENTS, ROW_CHUNK,
+        TABLE_ROW_H,
     };
 }

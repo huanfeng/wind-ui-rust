@@ -202,6 +202,8 @@ fn vk_of(key: Key) -> Option<u32> {
         Key::Other(_) => return None,
         // Backspace 作全局热键无实际用途。
         Key::Backspace => return None,
+        // 修饰键本身不能当热键主键。
+        Key::Alt => return None,
     };
     Some(vk)
 }
