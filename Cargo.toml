@@ -47,6 +47,9 @@ resvg = { version = "0.48", optional = true, default-features = false }
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
+# 日志门面：库只发不收，后端由应用装（不装就是空操作）。平台层的消息入口、宿主的浮层
+# 开合、拖放路由都有记录，下游排"点了没反应"的问题靠它对时间线。
+log = "0.4"
 # ---- GPU 后端（feature = "gpu"，默认关）----
 # wgpu：跨平台 GPU 抽象（macOS→Metal / Linux→Vulkan,GL / Windows→DX12）。版本锁在单一大版本，
 # 其 API 迭代快，升级时只需改 src/render/gpu/（面积受控）。

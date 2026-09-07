@@ -476,6 +476,16 @@ impl UiHost {
                 level.hover = level.items.iter().position(menu_item_selectable);
             }
         }
+        log::trace!(
+            "菜单展开：{} 项 @{:?}{}",
+            level.items.len(),
+            req.pos,
+            if req.bar.is_some() {
+                "（菜单栏）"
+            } else {
+                ""
+            }
+        );
         self.menu_bar_disarm();
         self.menu.active = Some(ContextMenu {
             levels: vec![level],
@@ -579,6 +589,7 @@ impl UiHost {
         if link.slots.is_empty() {
             return;
         }
+        log::debug!("菜单栏键盘激活，标题 {idx}");
         link.current = idx.min(link.slots.len() - 1);
         link.open.set(Some(link.current));
         self.menu.armed = Some(link);
@@ -633,6 +644,20 @@ impl UiHost {
     pub(super) fn note_pointer_down(&mut self) {
         self.menu.alt_pending = false;
         self.menu_bar_disarm();
+    }
+
+    /// 收起所有菜单类浮层（面板、菜单栏激活态、单击 Alt 判定）。返回是否有东西被收掉。
+    /// 非客户区按下与窗口失活走这里（见 `AppHandler::on_dismiss_overlays`）。
+    pub(super) fn dismiss_overlays(&mut self) -> bool {
+        self.menu.alt_pending = false;
+        let had_menu = self.menu.is_open();
+        let had_armed = self.menu.is_armed();
+        if had_menu {
+            log::debug!("菜单因窗口失活 / 非客户区按下而收起");
+            self.close_menu();
+        }
+        self.menu_bar_disarm();
+        had_menu || had_armed
     }
 
     /// 键盘激活态下的按键：←→ 换标题、↓ / Enter / 空格展开、助记字母直接展开对应菜单、

@@ -73,10 +73,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
+    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1640,6 +1640,13 @@ unsafe extern "system" fn wnd_proc(
             handle_activate(hwnd, wparam);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        // 非客户区按下（标题栏、边框、系统按钮）：这类消息不进 `on_pointer`，系统拿去
+        // 拖窗 / 缩放，客户区里开着的菜单没人收——先让宿主收浮层，再交默认处理。
+        // 无边框窗口的右键已在上面单独接走。
+        WM_NCLBUTTONDOWN | WM_NCMBUTTONDOWN | WM_NCRBUTTONDOWN => {
+            handle_dismiss_overlays(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_DPICHANGED => {
             handle_dpi_changed(hwnd, wparam, lparam);
             LRESULT(0)
@@ -1835,6 +1842,12 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
         }
     }
     DragFinish(hdrop);
+    log::debug!(
+        "WM_DROPFILES：{} 项，落点 ({}, {})",
+        paths.len(),
+        pt.x,
+        pt.y
+    );
     if paths.is_empty() {
         return;
     }
@@ -2781,6 +2794,20 @@ unsafe fn handle_ime_position(hwnd: HWND) {
 ///
 /// 严格两段式（铁律 6）：`InvalidateRect` 会同步派发 WM_PAINT，持着 `state` 借用调它
 /// 就是重入。
+/// 非客户区按下：让宿主收起菜单类浮层（见 `AppHandler::on_dismiss_overlays`）。
+unsafe fn handle_dismiss_overlays(hwnd: HWND) {
+    let repaint = {
+        let Some(state) = state_from(hwnd) else {
+            return;
+        };
+        let _guard = super::EventDispatchGuard::enter();
+        state.handler.on_dismiss_overlays()
+    };
+    if repaint {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
 unsafe fn handle_activate(hwnd: HWND, wparam: WPARAM) {
     // 低 16 位：WA_INACTIVE(0) / WA_ACTIVE(1) / WA_CLICKACTIVE(2)。
     let active = (wparam.0 & 0xFFFF) != WA_INACTIVE as usize;
@@ -2902,6 +2929,7 @@ unsafe fn handle_key(hwnd: HWND, wparam: WPARAM) {
         alt,
         meta,
     };
+    log::trace!("key {:?} ctrl={ctrl} alt={alt} shift={shift}", ev.key);
     dispatch_key_event(hwnd, ev);
 }
 

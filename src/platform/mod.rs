@@ -716,6 +716,16 @@ pub trait AppHandler {
         None
     }
 
+    /// 用户在**客户区之外**按下（标题栏、边框、系统按钮）：收起菜单这类浮层。返回是否
+    /// 需要重绘。
+    ///
+    /// 客户区的指针事件走 `on_pointer`，点外收起菜单在那条路上；非客户区的按下压根不
+    /// 进 `on_pointer`（win32 是 `WM_NCLBUTTONDOWN`，系统拿去拖窗），菜单就一直开着。
+    /// 窗口失活也走同一收尾（宿主在 `on_window_activated(false)` 里自己调）。
+    fn on_dismiss_overlays(&mut self) -> bool {
+        false
+    }
+
     /// 窗口激活态变化（前台/后台）。返回是否需要重绘。
     ///
     /// 宿主据此把光标转为静态：失活窗口的插入符在两个系统上本就不闪，而且后台窗口

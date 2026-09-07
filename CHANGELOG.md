@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+- **点标题栏 / 窗口失活时收起菜单**（`AppHandler::on_dismiss_overlays`）。非客户区的
+  按下（标题栏、边框、系统按钮）压根不进 `on_pointer`，系统拿去拖窗，客户区里开着的
+  菜单就一直挂着；Alt+Tab 切走亦然。Windows 在 `WM_NCLBUTTONDOWN` 等三条消息与失活时
+  让宿主收浮层，macOS 经 `windowDidResignKey:` 的失活通知走同一条路。失活同时作废
+  "单击 Alt"的判定——Alt+Tab 那次按下不算单击，否则切回来松开 Alt 会把菜单栏激活。
+
+- **接入 `log` 门面**。库只发不收（应用不装后端就是空操作）：平台层的按键（trace）、
+  `WM_DROPFILES`（debug）、拖放没落到任何 `on_drop_files` 控件（warn）、菜单开合与菜单栏
+  激活（trace / debug）。下游排"点了没反应"的问题靠它对时间线，WindFM 的文件日志即由此
+  收集。
+
 - **右键菜单 / 菜单栏点在浮层外的那一下穿透给下面的控件**（`MenuRequest::click_through`，
   破坏性：字面量构造须补该字段）。此前点外只负责收起菜单：右键菜单开着时点另一行，
   得再点一次那一行才选中；Windows 的做法是收起的同时那一下就落到下面——右键别处则直接

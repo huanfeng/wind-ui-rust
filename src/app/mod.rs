@@ -2279,9 +2279,18 @@ impl AppHandler for UiHost {
         self.last_present
     }
 
+    fn on_dismiss_overlays(&mut self) -> bool {
+        self.enter();
+        self.dismiss_overlays()
+    }
+
     fn on_window_activated(&mut self, active: bool) -> bool {
+        // 失活先收浮层：Alt+Tab 切走、点到别的窗口，菜单不该还开着——与 Windows 一致。
+        // 单击 Alt 的判定也一并作废：Alt+Tab 的那次按下不算"单击"，否则切回来松开 Alt
+        // 会把菜单栏激活。
+        let dismissed = !active && self.dismiss_overlays();
         if self.window_active == active {
-            return false;
+            return dismissed;
         }
         self.window_active = active;
         // 重绘一帧把光标切到（或切回）该有的状态：失活时它停在最后一帧的相位上，
@@ -2589,7 +2598,13 @@ impl AppHandler for UiHost {
             (pos.x as f32 / s).round() as i32,
             (pos.y as f32 / s).round() as i32,
         );
+        let n = paths.len();
         let res = self.tree.dispatch_files(p, paths);
+        if res.consumed {
+            log::debug!("拖放 {n} 项落到 {p:?}，已交给控件");
+        } else {
+            log::warn!("拖放 {n} 项落到 {p:?}，那里没有任何 on_drop_files 控件，已丢弃");
+        }
         if res.close {
             self.apply_close_intent();
         }
