@@ -2605,19 +2605,13 @@ impl AppHandler for UiHost {
         } else {
             log::warn!("拖放 {n} 项落到 {p:?}，那里没有任何 on_drop_files 控件，已丢弃");
         }
-        if res.close {
-            self.apply_close_intent();
-        }
-        if let Some(url) = res.open_url {
-            platform::open_url(&url);
-        }
-        if let Some(req) = res.toast {
-            self.show_toast(req);
-        }
-        if res.dialog.is_some() {
-            self.pending_dialog = res.dialog;
-        }
-        res.repaint
+        // 副作用与指针 / 键盘路径同一套消费。此前这里手写只接了 toast / dialog / close，
+        // `open_windows`（还有 focus / menu / window_op）静默丢掉——拖入文件后弹确认
+        // 对话框的应用表现为"拖进来没反应"，日志里回调明明跑到了。
+        let (repaint, damage, _) = self.apply_dispatch_effects(res, FocusSource::Pointer, None);
+        self.apply_damage(damage);
+        self.damage.needs_relayout = true;
+        repaint
     }
 
     fn window_drag_at(&self, pos: Point) -> bool {
@@ -3284,6 +3278,43 @@ mod tests {
             h.take_new_windows(&|_| false).is_empty(),
             "请求应在取走时清空"
         );
+    }
+
+    /// 拖入文件的回调里 `ctx.open_window`（WindFM 拖入后弹"复制到"确认框）：开窗请求要和
+    /// 指针 / 键盘路径一样送到平台。`on_drop_files` 曾手写消费分发结果，只接了 toast /
+    /// dialog / close，开窗请求静默丢掉——日志里回调跑到了，窗口就是不出来。
+    #[test]
+    fn drop_files_callback_can_open_window() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let opened = Rc::new(std::cell::Cell::new(0));
+        let o2 = opened.clone();
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill().on_drop_files(move |ctx, paths| {
+                o2.set(paths.len());
+                ctx.open_window(
+                    Window::new("复制", 300, 120)
+                        .modal(true)
+                        .content(|| Element::col().fill()),
+                );
+            }))
+            .into_handler_for_test();
+        // 命中要有布局：先出一帧
+        let mut pm = Pixmap::new(200, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 200));
+        h.on_drop_files(
+            Point::new(20, 20),
+            vec![std::path::PathBuf::from("a.txt"), "b.txt".into()],
+        );
+        assert_eq!(opened.get(), 2, "回调应收到全部路径");
+        let made: Vec<_> = h
+            .take_new_windows(&|_| false)
+            .into_iter()
+            .map(expect_create)
+            .collect();
+        assert_eq!(made.len(), 1, "拖入回调里的开窗请求必须送到平台");
+        assert_eq!(made[0].0.title, "复制");
     }
 
     /// `Window::modal` 隐含归属：平台据 `owned` 填 owner、据 `modal` 禁用 owner 的输入，

@@ -1861,6 +1861,9 @@ unsafe fn handle_drop_files(hwnd: HWND, wparam: WPARAM) {
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
+    // 与指针路径同一套收尾：窗口操作（含开窗请求）→ 对话框 → 关窗。此前漏了第一步，
+    // 拖入回调里 `ctx.open_window` 的请求一直排着队，要等用户下一次点键盘鼠标才建窗。
+    apply_window_op(hwnd);
     apply_dialog_request(hwnd);
     if state_from(hwnd)
         .map(|s| s.handler.wants_close())

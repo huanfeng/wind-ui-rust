@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+- **修复：拖入文件的回调里 `ctx.open_window` 不建窗**。宿主 `on_drop_files` 曾手写消费
+  分发结果，只接了 toast / dialog / close，开窗请求（以及 focus / menu / window_op）静默
+  丢掉；Windows 的 `WM_DROPFILES` 收尾也没走 `apply_window_op`。现在与指针 / 键盘路径
+  同一套 `apply_dispatch_effects` + 同一套平台收尾。症状是"拖进来没反应"而日志里回调
+  跑到了。
+
 - **点标题栏 / 窗口失活时收起菜单**（`AppHandler::on_dismiss_overlays`）。非客户区的
   按下（标题栏、边框、系统按钮）压根不进 `on_pointer`，系统拿去拖窗，客户区里开着的
   菜单就一直挂着；Alt+Tab 切走亦然。Windows 在 `WM_NCLBUTTONDOWN` 等三条消息与失活时
