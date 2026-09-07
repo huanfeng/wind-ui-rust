@@ -1888,6 +1888,7 @@ impl EventCtx<'_> {
             anchor_top: None,
             rebuild: None,
             bar: None,
+            click_through: true,
         });
         self.out.repaint = true;
     }
@@ -1910,6 +1911,7 @@ impl EventCtx<'_> {
             anchor_top: Some(r.y),
             rebuild: Some(slot.build.clone()),
             bar: Some(link),
+            click_through: true,
         });
         self.out.repaint = true;
     }
@@ -1926,6 +1928,7 @@ impl EventCtx<'_> {
             anchor_top: Some(bounds.y),
             rebuild: None,
             bar: None,
+            click_through: false,
         });
         self.out.repaint = true;
     }
@@ -1948,6 +1951,7 @@ impl EventCtx<'_> {
             anchor_top: Some(bounds.y),
             rebuild: Some(rebuild),
             bar: None,
+            click_through: false,
         });
         self.out.repaint = true;
     }
@@ -2930,6 +2934,7 @@ impl Tree {
                                 // 靠重跑它把勾选态刷新过来，否则勾了也不变、看着像没生效。
                                 rebuild: Some(cb),
                                 bar: None,
+                                click_through: true,
                             });
                             res.consumed = true;
                         }

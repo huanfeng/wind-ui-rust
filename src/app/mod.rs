@@ -1708,6 +1708,7 @@ impl UiHost {
             // 无粘滞项（四项点完即走），故不需要重建器。
             rebuild: None,
             bar: None,
+            click_through: true,
         });
         res.consumed = true;
         // 请求重绘。平台层只在 `on_pointer` 返回 true 时才 `InvalidateRect`——不置它，
@@ -2174,8 +2175,18 @@ impl AppHandler for UiHost {
             self.clear_fling();
         }
         // 菜单激活时独占指针：命中项/点外关闭，不下发到控件树。
+        //
+        // 例外是穿透菜单（右键菜单、菜单栏）点在浮层外的那一下：收起菜单，**同一下**继续
+        // 往下分发——Windows 的右键菜单开着时点另一行，菜单收起且那一行被选中，不用点
+        // 两次；右键点别处则直接换成那里的菜单。下拉不穿透（见 `MenuRequest::click_through`）。
+        let mut closed_by_click_through = false;
         if self.menu.is_open() {
-            return self.handle_menu_pointer(ev);
+            if self.menu_click_passes_through(ev) {
+                self.close_menu();
+                closed_by_click_through = true;
+            } else {
+                return self.handle_menu_pointer(ev);
+            }
         }
         // 菜单栏的键盘激活态被任何按下打断（点到栏标题上的那一下照常交给栏控件展开）。
         if ev.kind == PointerKind::Down {
@@ -2249,7 +2260,9 @@ impl AppHandler for UiHost {
         if !matches!(ev.kind, PointerKind::Move) {
             self.damage.needs_relayout = true;
         }
-        repaint
+        // 穿透收起的那一下：浮层没了必须出一帧，哪怕下面的控件对这次按下毫无反应——
+        // 平台只在返回 true 时才失效窗口，否则面板像素留在屏上直到下一次事件。
+        repaint || closed_by_click_through
     }
 
     fn request_full_frame(&mut self) {

@@ -197,6 +197,8 @@ pub(super) struct ContextMenu {
     /// 发起本菜单的菜单栏（见 [`MenuBarLink`]）：展开期间滑到相邻标题即切换、
     /// ←→ 在根级跨菜单、点标题收起。右键菜单与下拉为 `None`。
     pub(super) bar: Option<MenuBarLink>,
+    /// 点在浮层外的那一下是否穿透给下面的控件（见 [`crate::event::MenuRequest::click_through`]）。
+    pub(super) click_through: bool,
 }
 
 impl ContextMenu {
@@ -480,7 +482,20 @@ impl UiHost {
             target,
             rebuild: req.rebuild,
             bar: req.bar,
+            click_through: req.click_through,
         });
+    }
+
+    /// 这一下指针事件是否该"收起菜单并穿透"：穿透菜单、按下、落在所有面板之外、也不在
+    /// 菜单栏的标题上（标题那一下是"切换 / 收起"，由 `handle_menu_pointer` 处理）。
+    pub(super) fn menu_click_passes_through(&self, ev: PointerEvent) -> bool {
+        let Some(m) = self.menu.active.as_ref() else {
+            return false;
+        };
+        ev.kind == PointerKind::Down
+            && m.click_through
+            && !self.menu.hit_any_panel(ev.pos)
+            && !m.bar.as_ref().is_some_and(|b| b.slot_at(ev.pos).is_some())
     }
 
     /// 关闭浮层菜单，并标记下一帧整窗重绘。
@@ -538,6 +553,7 @@ impl UiHost {
                 anchor_top: Some(r.y),
                 rebuild: Some(build),
                 bar: Some(link),
+                click_through: true,
             },
             target,
         );
@@ -1548,6 +1564,7 @@ mod tests {
             target,
             rebuild: None,
             bar: None,
+            click_through: false,
         });
 
         let rect = app.menu.active.as_ref().unwrap().levels[0].rect;
@@ -1603,6 +1620,7 @@ mod tests {
             target,
             rebuild: Some(rebuild),
             bar: None,
+            click_through: false,
         });
         macro_rules! click {
             ($i:expr) => {
@@ -1676,6 +1694,7 @@ mod tests {
             target,
             rebuild: None,
             bar: None,
+            click_through: false,
         });
         app.handle_menu_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1721,6 +1740,7 @@ mod tests {
             target,
             rebuild: Some(rebuild),
             bar: None,
+            click_through: false,
         });
         app.handle_menu_pointer(PointerEvent::single(
             PointerKind::Down,
@@ -1856,6 +1876,7 @@ mod tests {
             target,
             rebuild: Some(Rc::new(build)),
             bar: None,
+            click_through: false,
         };
 
         menu.refresh_items();
@@ -2398,6 +2419,156 @@ mod tests {
         h.on_key(k(Key::Char('e')));
         assert!(h.menu.is_open());
         assert_eq!(bar_current(&h), Some(1), "激活态下按 E 展开「编辑」");
+    }
+
+    /// 右键菜单开着时点浮层外的控件：菜单收起，**同一下**点击照常落到那个控件上
+    /// （Windows 的做法——点另一行就选中另一行，不用点两次）。
+    #[test]
+    fn context_menu_click_outside_closes_and_passes_the_click_through() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let clicks = Rc::new(std::cell::Cell::new(0u32));
+        let c = clicks.clone();
+        let app = App::new("t", 300, 300).content(
+            Element::col()
+                .width(300)
+                .height(300)
+                .on_context_menu(|| vec![MenuItem::run("项", |_ctx| {}, false)])
+                .child(
+                    Element::button("按钮")
+                        .width(120)
+                        .height(32)
+                        .on_click(move |_ctx| c.set(c.get() + 1)),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        h.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(300, 300),
+        );
+        let btn = Point::new(40, 16);
+
+        // 在空白处右键弹出上下文菜单。
+        let far = Point::new(200, 200);
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            far,
+            MouseButton::Right,
+        ));
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            far,
+            MouseButton::Right,
+        ));
+        assert!(h.menu.is_open(), "右键应弹出菜单");
+        assert!(!h.menu.hit_any_panel(btn), "前置：按钮不在菜单面板下");
+
+        // 左键点按钮：菜单收起，这一下就把按钮点了。
+        let repaint = h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            btn,
+            MouseButton::Left,
+        ));
+        assert!(repaint, "收起浮层必须出一帧");
+        assert!(!h.menu.is_open(), "点浮层外应收起菜单");
+        assert!(!h.swallow_up, "穿透时配对的 Up 不该被吞");
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            btn,
+            MouseButton::Left,
+        ));
+        assert_eq!(clicks.get(), 1, "收起菜单的那一下应同时点中按钮");
+
+        // 右键点别处：旧菜单收起、新菜单在新位置弹出——不是"先关再点"。
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            far,
+            MouseButton::Right,
+        ));
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            far,
+            MouseButton::Right,
+        ));
+        assert!(h.menu.is_open());
+        // x 取靠左的值：面板越出窗口右缘会被钳回来，断言位置就不成立了。
+        let other = Point::new(60, 250);
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            other,
+            MouseButton::Right,
+        ));
+        assert!(h.menu.is_open(), "右键别处应直接换成那里的菜单");
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels[0].rect.x,
+            other.x,
+            "新菜单应锚在新的点击处"
+        );
+    }
+
+    /// 下拉不穿透：展开后点别处只是放弃选择，那一下不该点中别的控件（Up 也吞掉）。
+    #[test]
+    fn dropdown_click_outside_only_dismisses() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let clicks = Rc::new(std::cell::Cell::new(0u32));
+        let c = clicks.clone();
+        let sel = crate::signal::signal(0usize);
+        // 按钮放在下拉右边：下拉面板向下展开，放在下面会被面板盖住。
+        let app = App::new("t", 300, 300).content(
+            Element::row()
+                .width(300)
+                .height(300)
+                .child(Element::dropdown(vec!["甲", "乙"], sel).width(120))
+                .child(
+                    Element::button("按钮")
+                        .width(120)
+                        .height(32)
+                        .on_click(move |_ctx| c.set(c.get() + 1)),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        h.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(300, 300),
+        );
+        let dd = Point::new(40, 12);
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            dd,
+            MouseButton::Left,
+        ));
+        h.on_pointer(PointerEvent::single(PointerKind::Up, dd, MouseButton::Left));
+        assert!(h.menu.is_open(), "前置：下拉已展开");
+        let btn_rect = {
+            let root = h.tree.root.unwrap();
+            let b = h.tree.get(root).unwrap().children[1];
+            h.tree.abs_bounds(b)
+        };
+        let btn = Point::new(btn_rect.x + btn_rect.w / 2, btn_rect.y + btn_rect.h / 2);
+        assert!(!h.menu.hit_any_panel(btn), "前置：点击点须在面板外");
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            btn,
+            MouseButton::Left,
+        ));
+        assert!(!h.menu.is_open(), "点外收起");
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            btn,
+            MouseButton::Left,
+        ));
+        assert_eq!(clicks.get(), 0, "下拉收起的那一下不该点中别的控件");
     }
 
     /// 没有菜单栏的窗口：F10 / 单击 Alt / Alt+字母都不该有反应（也不该 panic）。

@@ -200,6 +200,7 @@ impl UiHost {
                             anchor_top: None,
                             rebuild: None,
                             bar: None,
+                            click_through: true,
                         },
                         target,
                     );
