@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-09
+
 - **修复：阴影的位图缓存吃掉上百 MB**（Direct2D 后端）。每个阴影原本烘焙一张与元素
   **等大**的位图：150% DPI 下一张长卡片（977×2312）就要 8.84MB；缓存又按条数（128）
   封顶而非字节，一页几十张尺寸各异的卡片各占一张，切页时逐页累加。下游设置页实测
@@ -2026,7 +2028,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.12.0...v0.13.0
