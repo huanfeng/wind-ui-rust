@@ -269,6 +269,12 @@ impl SwitchSize {
     }
 }
 
+/// 开关翻转**之后**的副作用钩子：回调收到已生效的新值，不需要自己再 `set`。
+///
+/// 与 [`CheckBox`] 的 `on_toggle`（取代默认翻转）方向相反，与
+/// [`crate::ui::CheckMenuItem::on_change`] 同构——`ctx` 恒在首位，新值跟在后面。
+pub type SwitchChangeFn = Box<dyn Fn(&mut EventCtx, bool)>;
+
 pub struct Switch {
     state: Signal<bool>,
     /// 滑块位置补间（0=关、1=开）；同时驱动轨道色 off↔on 渐变。retarget-in-paint。
@@ -276,6 +282,8 @@ pub struct Switch {
     /// 显隐翻转经 `reset_interaction` 复位；复显时首帧靠 `primed` 瞬时落定位置，不回放动画。
     primed: Cell<bool>,
     size: SwitchSize,
+    /// 见 [`SwitchChangeFn`]。`RefCell` 只为在 `&self` 的 `toggle` 里取用，不改内容。
+    on_change: RefCell<Option<SwitchChangeFn>>,
 }
 
 impl Switch {
@@ -286,14 +294,30 @@ impl Switch {
             pos: Cell::new(Transition::new(init)),
             primed: Cell::new(false),
             size: SwitchSize::Normal,
+            on_change: RefCell::new(None),
         }
+    }
+    /// 设置翻转后的副作用钩子（供 Builder 的 `.on_switch_change()` 调用）。
+    pub fn set_on_change(&mut self, f: SwitchChangeFn) {
+        *self.on_change.borrow_mut() = Some(f);
     }
     /// 设置尺寸变体（供 Builder 的 `.small()` 调用）。
     pub fn set_size(&mut self, size: SwitchSize) {
         self.size = size;
     }
     fn toggle(&self, ctx: &mut EventCtx) {
-        self.state.set(!self.state.get());
+        let now = !self.state.get();
+        self.state.set(now);
+        // 钩子在 `set` **之后**跑，且拿的是已生效的新值：回调里常见的动作是去改**别的**
+        // 信号（互斥开关：开了这个就关掉那个），先 set 再通知才不会让它读到旧值。
+        //
+        // 借用在调用前结束——回调可能间接走回本 widget（同一帧里另一个开关的联动），
+        // 持着 `borrow()` 调用就会在那条路上 panic。
+        let cb = self.on_change.borrow_mut().take();
+        if let Some(f) = cb {
+            f(ctx, now);
+            *self.on_change.borrow_mut() = Some(f);
+        }
         ctx.mark_dirty();
     }
 }

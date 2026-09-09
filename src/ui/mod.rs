@@ -1475,6 +1475,23 @@ impl Element {
         self
     }
 
+    /// 开关翻转后的副作用钩子。仅 `Element::switch(..)` 可用。
+    ///
+    /// 回调收到**已生效的新值**，不必自己再 `set`。典型用途是互斥开关：开了这个就把
+    /// 那个关掉（两个开关各挂一个反向的钩子，两边都可点，不会互相锁死）。
+    #[track_caller]
+    pub fn on_switch_change(mut self, f: impl Fn(&mut EventCtx, bool) + 'static) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<Switch>())
+        {
+            Some(s) => s.set_on_change(Box::new(f)),
+            None => debug_assert!(false, "on_switch_change() 只能用于 Element::switch(..)"),
+        }
+        self
+    }
+
     /// 在旋钮右侧显示当前值百分比（如 "65%"）。仅 `Element::slider(..)` 可用。
     #[track_caller]
     pub fn show_value(self, on: bool) -> Self {
