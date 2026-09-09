@@ -103,10 +103,17 @@ pub(super) struct D2DBackend {
     bake_ctx: ID2D1DeviceContext,
     /// 阴影 GPU 模糊效果（lazy，建在 bake_ctx 上）：烘焙时复用，仅 cache-miss 跑一次。
     shadow_effect: Option<ID2D1Effect>,
-    /// 烘焙后的阴影位图缓存：键 (w,h,radius,blur,color)，值为含模糊外扩 margin 的成品位图。
+    /// 烘焙后的阴影位图缓存：键见 [`ShadowKey`]，值为含模糊外扩 margin 的成品位图
+    /// （走 9-slice 的那批是与元素尺寸无关的代理图）。
     /// 命中后主 ctx 每帧仅 `DrawImage` 合成、**不再跑模糊**（重对象算一次的复用纪律，根治每帧
     /// 重模糊累积驱动内存）。device-**dependent**：设备丢失重建时随 `*self=fresh` 清空。
     shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
+    /// [`shadow_cache`](Self::shadow_cache) 已占的估算字节（像素数 × 4）。
+    ///
+    /// 按**字节**而非条数封顶：条数挡不住「一百张大图」。9-slice 之前，一张长卡片的
+    /// 阴影成品是与卡片等大的位图（150% DPI 下 977×2312 就要 8.8MB），128 条的旧上限
+    /// 允许它涨到 GB 级——设置页切几个 Tab 就吃掉上百 MB 正是这么来的。
+    shadow_bytes: u64,
     /// 本后端所用共享设备链的代际。设备丢失重建时用于守卫 `invalidate_shared_device`
     /// （多窗下只失效自己那一代，不误清他窗已重建的新设备）。
     device_gen: u64,
@@ -125,8 +132,62 @@ const MAX_RECREATE_FAILS: u32 = 3;
 /// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
 type LayoutKey = (String, String, u32, u16, Option<u32>, u32, u32);
 
-/// 烘焙阴影缓存键：(宽 px, 高 px, 圆角 px, 模糊 bits, 颜色 rgba)，前三项量化逻辑像素整数。
+/// 烘焙阴影缓存键：(圆角 px, 模糊 bits, 颜色 rgba, 宽 px, 高 px)。
+///
+/// **尺寸两项通常是 0**：走 9-slice 的阴影只烘一张与元素尺寸无关的代理图（见
+/// [`shadow_slices`]），于是「同圆角 + 同模糊 + 同色」的阴影全窗共用一条缓存——
+/// 一页几十张卡片从前是几十张全尺寸位图，现在是一张几十 KB 的小图。
+/// 只有窄到放不下两个圆角的元素才退回整张烘焙，那时才把真实尺寸写进键里区分。
 type ShadowKey = (u32, u32, u32, u32, u32);
+
+/// 阴影缓存字节上限（超出即整体清空重建）。
+///
+/// 9-slice 后一张卡片阴影只有几十 KB，大头是大 blur 的代理图：`blur=40` 在 150% DPI
+/// 下 σ=60、外扩 180，代理图仍有 2MB 上下，200% DPI 再翻一倍。取 16MB 是为了让常见
+/// 的那几种（卡片 / 对话框 / 浮层 / 面板）**全部同时装得下**——上限一旦低于稳态需求，
+/// 每帧都会清空重建，抖动比多占几 MB 难受得多。相比改造前实测的 200MB+，这仍是零头。
+const SHADOW_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 9-slice 代理图两端固定段之外，中间留出的均匀带宽度（像素）。
+///
+/// 取 3 而不是 1：中段绘制时只取正中那 1 像素，左右各留 1 像素缓冲，这样即便
+/// `DrawBitmap` 的双线性采样在源矩形边界上溢出半个像素，取到的也仍是均匀带内的
+/// 同一个值，不会把圆角边缘的渐变拉进中段而露出接缝。
+const SHADOW_CORE: u32 = 3;
+
+/// 一端「不可拉伸的花纹」有多宽：模糊外扩 + 圆角 + **再一个模糊半径**。
+///
+/// 第三项是这套切片能否成立的关键，也是它第一次写错的地方：高斯模糊把 3σ 邻域内的
+/// 形状都卷进来，所以圆角的影响并不止于圆角本身，而是再向内渗透一个 3σ。少算这一段，
+/// 代理图中心取到的就不是「无限长直边模糊后的稳定值」，而是一个被两侧圆角晕暗的值
+/// ——铺开后整条中段偏淡，`shadow_matches_software_in_intensity` 会以通道差 65
+/// （阈值 16）当场拦下。
+fn shadow_edge(margin: u32, rr: u32) -> u32 {
+    2 * margin + rr
+}
+
+/// 9-slice 一维切分：把代理图的一条边映射到目标的一条边，返回三段
+/// `(src_off, src_len, dst_off, dst_len)`。
+///
+/// 代理图该方向的总长恒为 `2 * edge + SHADOW_CORE`，`edge` 见 [`shadow_edge`]。
+/// 两端按 1:1 原样搬（角块不能拉伸，一拉圆角就变形），中间那段把均匀带拉伸到目标
+/// 所缺的长度。
+///
+/// 中段源取 `edge + 1` 处的 1 像素而非整个均匀带：理由见 [`SHADOW_CORE`]。
+fn shadow_slices(edge: u32, dst_total: u32) -> [(u32, u32, u32, u32); 3] {
+    // 目标短于两端花纹时中段为 0，调用方跳过（`sliceable` 已挡掉这种尺寸，此处兜底）。
+    let mid = dst_total.saturating_sub(2 * edge);
+    [
+        (0, edge, 0, edge),
+        (edge + 1, 1, edge, mid),
+        (
+            edge + SHADOW_CORE,
+            edge,
+            dst_total.saturating_sub(edge),
+            edge,
+        ),
+    ]
+}
 
 /// 渐变画刷缓存键。坐标/颜色量化为整数（×1000 / u8）以便 Hash+Eq。
 /// 端点已是逻辑像素（由归一化 × 图元包围盒换算），故同尺寸控件可命中复用。
@@ -317,6 +378,7 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         bake_ctx,
         shadow_effect: None,
         shadow_cache: HashMap::new(),
+        shadow_bytes: 0,
         device_gen: shared.generation,
         lost: false,
         recreate_fails: 0,
@@ -442,6 +504,7 @@ impl WinRenderBackend for D2DBackend {
                 bake_ctx: &self.bake_ctx,
                 shadow_effect: &mut self.shadow_effect,
                 shadow_cache: &mut self.shadow_cache,
+                shadow_bytes: &mut self.shadow_bytes,
             };
             handler.render(&mut target, size);
             // 复位变换，避免 SetTransform 的 scale 残留到下一帧的 Clear/绑定。
@@ -484,6 +547,7 @@ struct D2DTarget<'a> {
     bake_ctx: &'a ID2D1DeviceContext,
     shadow_effect: &'a mut Option<ID2D1Effect>,
     shadow_cache: &'a mut HashMap<ShadowKey, ID2D1Bitmap1>,
+    shadow_bytes: &'a mut u64,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -509,6 +573,7 @@ impl RenderTarget for D2DTarget<'_> {
             bake_ctx: self.bake_ctx,
             shadow_effect: self.shadow_effect,
             shadow_cache: self.shadow_cache,
+            shadow_bytes: self.shadow_bytes,
             saves: Vec::new(),
             pushed_clips: 0,
             pushed_layers: 0,
@@ -537,8 +602,10 @@ struct D2DCanvas<'a> {
     bake_ctx: &'a ID2D1DeviceContext,
     /// 阴影模糊效果（借入，可变 Option，建在 bake_ctx 上）：lazy 建一次后复用。
     shadow_effect: &'a mut Option<ID2D1Effect>,
-    /// 烘焙后的阴影成品位图缓存（借入，可变）：按 (w,h,radius,blur,color) 复用，命中免重模糊。
+    /// 烘焙后的阴影成品位图缓存（借入，可变）：按 [`ShadowKey`] 复用，命中免重模糊。
     shadow_cache: &'a mut HashMap<ShadowKey, ID2D1Bitmap1>,
+    /// 阴影缓存已占字节（借入，可变）：见 `D2DBackend::shadow_bytes`。
+    shadow_bytes: &'a mut u64,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
     saves: Vec<u32>,
     /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
@@ -1162,19 +1229,43 @@ impl Canvas for D2DCanvas<'_> {
             | ((color.g as u32) << 16)
             | ((color.b as u32) << 8)
             | color.a as u32;
-        let key: ShadowKey = (wpx, hpx, r.round() as u32, sigma.to_bits(), rgba);
+        // 成品位图的总尺寸（掩膜 + 四周模糊外扩）。
+        let (dst_w, dst_h) = (wpx + 2 * margin, hpx + 2 * margin);
+        // 一端「花纹」的宽度（模糊外扩 + 圆角 + 模糊渗透），两端之间才是可拉伸的均匀带。
+        let rr = r.round() as u32;
+        let edge = shadow_edge(margin, rr);
+        // 9-slice 前提：两端花纹加中间的均匀带要塞得进目标。窄到放不下的（细分隔条、
+        // 小圆点）退回整张烘焙——它们本来就小，省不出什么，反倒是切片会把圆角挤变形。
+        let sliceable = dst_w >= 2 * edge + SHADOW_CORE && dst_h >= 2 * edge + SHADOW_CORE;
+        // 代理掩膜：两端花纹（不含各自的外扩，那是烘焙时加的）+ 中间均匀带，
+        // 与元素实际尺寸无关。烘焙后位图边长恰为 `2 * edge + SHADOW_CORE`，
+        // 与 `shadow_slices` 的假设对齐。
+        let proxy = 2 * (margin + rr) + SHADOW_CORE;
+        let (mask_w, mask_h) = if sliceable {
+            (proxy, proxy)
+        } else {
+            (wpx, hpx)
+        };
+        let key: ShadowKey = if sliceable {
+            (rr, sigma.to_bits(), rgba, 0, 0)
+        } else {
+            (rr, sigma.to_bits(), rgba, wpx, hpx)
+        };
         // 取/烘焙成品（模糊一次、缓存复用）。烘焙失败则跳过本阴影。
         let baked = match self.shadow_cache.get(&key) {
             Some(b) => b.clone(),
             None => {
-                let Some(b) = self.bake_shadow(wpx, hpx, r, sigma, margin, color) else {
+                let Some(b) = self.bake_shadow(mask_w, mask_h, r, sigma, margin, color) else {
                     return;
                 };
-                // 防无界增长（不同尺寸/颜色有限）：超阈值整体清空重建。
-                if self.shadow_cache.len() > 128 {
+                // 防无界增长：按字节封顶，超阈值整体清空重建（见 `shadow_bytes`）。
+                let bytes = (mask_w + 2 * margin) as u64 * (mask_h + 2 * margin) as u64 * 4;
+                if *self.shadow_bytes + bytes > SHADOW_CACHE_MAX_BYTES {
                     self.shadow_cache.clear();
+                    *self.shadow_bytes = 0;
                 }
                 self.shadow_cache.insert(key, b.clone());
+                *self.shadow_bytes += bytes;
                 b
             }
         };
@@ -1183,21 +1274,51 @@ impl Canvas for D2DCanvas<'_> {
         // 成品是物理像素，而 dest 走**逻辑坐标**（ctx 的 SetTransform 会再乘回 scale）——
         // 故此处一律 ÷s，换算后物理尺寸与位图 1:1，不触发重采样。
         let m = margin as f32 / s;
-        let dest = rect_f(
-            x - m,
-            y - m,
-            (wpx + 2 * margin) as f32 / s,
-            (hpx + 2 * margin) as f32 / s,
-        );
-        unsafe {
-            self.ctx.DrawBitmap(
-                &baked,
-                Some(&dest),
-                1.0,
-                D2D1_INTERPOLATION_MODE_LINEAR,
-                None,
-                None,
-            );
+        let (ox, oy) = (x - m, y - m);
+        if !sliceable {
+            let dest = rect_f(ox, oy, dst_w as f32 / s, dst_h as f32 / s);
+            unsafe {
+                self.ctx.DrawBitmap(
+                    &baked,
+                    Some(&dest),
+                    1.0,
+                    D2D1_INTERPOLATION_MODE_LINEAR,
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
+        // 9-slice：四角原样搬、四边单向拉伸、中心整块拉伸。九块的目标边界两两共用同一个
+        // 浮点值，故即使 (ox,oy) 落在半像素上，块与块之间也不会裂出缝。
+        let cols = shadow_slices(edge, dst_w);
+        let rows = shadow_slices(edge, dst_h);
+        for &(sy, sh, dy, dh) in &rows {
+            if dh == 0 {
+                continue;
+            }
+            for &(sx, sw, dx, dw) in &cols {
+                if dw == 0 {
+                    continue;
+                }
+                let src = rect_f(sx as f32, sy as f32, sw as f32, sh as f32);
+                let dest = rect_f(
+                    ox + dx as f32 / s,
+                    oy + dy as f32 / s,
+                    dw as f32 / s,
+                    dh as f32 / s,
+                );
+                unsafe {
+                    self.ctx.DrawBitmap(
+                        &baked,
+                        Some(&dest),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        Some(&src),
+                        None,
+                    );
+                }
+            }
         }
     }
 
@@ -1654,6 +1775,7 @@ pub(crate) mod offscreen {
         image_cache: HashMap<u64, ID2D1Bitmap1>,
         shadow_effect: Option<ID2D1Effect>,
         shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
+        shadow_bytes: u64,
     }
 
     impl OffscreenBackend {
@@ -1718,6 +1840,7 @@ pub(crate) mod offscreen {
                 image_cache: HashMap::new(),
                 shadow_effect: None,
                 shadow_cache: HashMap::new(),
+                shadow_bytes: 0,
             })
         }
 
@@ -1753,6 +1876,7 @@ pub(crate) mod offscreen {
                         bake_ctx: &self.bake_ctx,
                         shadow_effect: &mut self.shadow_effect,
                         shadow_cache: &mut self.shadow_cache,
+                        shadow_bytes: &mut self.shadow_bytes,
                     };
                     render(&mut target, size);
                 }
@@ -2266,5 +2390,68 @@ mod tests {
             maxd <= 16,
             "投影软硬最大通道差 {maxd} 过大，衰减曲线已肉眼可辨"
         );
+    }
+
+    /// 9-slice 的一维切分：两端 1:1、中间拉伸，且源的三段恰好铺满代理图那条边。
+    ///
+    /// 最后一段的源终点必须正好落在 `2 * edge + SHADOW_CORE` 上——多一像素就采到
+    /// 图外（D2D 会 clamp，表现为边缘一条重影），少一像素就把角块削掉一列。
+    #[test]
+    fn shadow_slices_map_edges_one_to_one_and_stretch_the_middle() {
+        let edge = 44;
+        let seg = shadow_slices(edge, 260);
+        assert_eq!(seg[0], (0, 44, 0, 44), "左段须原样搬");
+        assert_eq!(
+            seg[1],
+            (45, 1, 44, 260 - 88),
+            "中段取正中 1px，拉伸到目标所缺"
+        );
+        assert_eq!(seg[2], (47, 44, 216, 44), "右段须原样搬到目标右端");
+        assert_eq!(
+            seg[2].0 + seg[2].1,
+            2 * edge + SHADOW_CORE,
+            "源三段的终点须正好是代理图边长"
+        );
+    }
+
+    /// 代理图与元素尺寸无关：同参数、不同宽度的两次投影，角落必须逐像素相同。
+    ///
+    /// 这是 9-slice 最容易坏的地方——角块一旦跟着目标一起拉伸，圆角就会随元素变宽而
+    /// 变扁，而整体观感仍"像个阴影"，肉眼扫一眼看不出来。
+    #[test]
+    fn shadow_corners_do_not_change_with_element_width() {
+        let shot = |w: f32| {
+            render(300, 160, 1.0, move |c| {
+                c.draw_shadow(40.0, 40.0, w, 60.0, 8.0, 6.0, Color::rgba(0, 0, 0, 120))
+            })
+        };
+        let (narrow, wide) = (shot(80.0), shot(200.0));
+        for y in 20..70 {
+            for x in 20..70 {
+                assert_eq!(
+                    px(&narrow, x, y),
+                    px(&wide, x, y),
+                    "左上角 ({x},{y}) 随元素宽度变了：角块被拉伸了"
+                );
+            }
+        }
+    }
+
+    /// 拉伸段内不得有接缝：中段是同一像素铺开的，一条水平线上必须恒定。
+    ///
+    /// 接缝的成因是中段源取到了圆角渗透区，或块与块的目标边界算错半个像素；
+    /// 两者都表现为均匀带上突然深一道或浅一道。
+    #[test]
+    fn stretched_middle_has_no_seam() {
+        let pm = render(300, 160, 1.0, |c| {
+            c.draw_shadow(40.0, 40.0, 200.0, 60.0, 8.0, 6.0, Color::rgba(0, 0, 0, 120))
+        });
+        // 阴影矩形上方的模糊带里取一行（margin=18，故 22..40 是上边模糊带）。
+        let y = 37;
+        let baseline = px(&pm, 140, y);
+        assert_ne!(baseline, [255, 255, 255, 255], "正控：该行应落在模糊带内");
+        for x in 100..180 {
+            assert_eq!(px(&pm, x, y), baseline, "中段 x={x} 与基准不同：出现接缝");
+        }
     }
 }
