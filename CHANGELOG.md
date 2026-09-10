@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-10
+
+- **修复：CheckBox / RadioButton 的长标签折行后压住下一个元素。** 这两个控件的
+  `measure` 恒按**单行**量文字（`text.measure(.., None)`，`avail` 参数被整个忽略），
+  而 `paint` 却在受限的 `text_rect`（容器宽扣掉方框与间距）里绘制、超宽自然折行。
+  于是布局只分到一行的高度、实际画了两行，控件直接叠在下一个兄弟节点上。
+
+  没有任何报错，只在「窄容器 + 长标签」时显形，因此下游极难归因——同一页里 `Label`
+  一直是按 `avail.w` 折行量的，说明文字排得好好的，只有勾选行在压人（下游卸载向导里
+  带完整用户数据路径的那个勾选，压住了下面解释「还会删哪些文件」的说明）。
+
+  改为与 `Label` 同一口径：按可用宽度扣掉方框与间距后折行测量。两条退化路径保持原样
+  ——`avail.w` 为 0（宽度未知，Wrap 语义下常见）或窄到放不下方框时，仍按单行量，不会
+  把文字挤成每行一个字。
+
 ## [0.16.0] - 2026-09-09
 
 - **修复：阴影的位图缓存吃掉上百 MB**（Direct2D 后端）。每个阴影原本烘焙一张与元素
@@ -2029,6 +2044,7 @@
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
 [Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...HEAD
+[0.16.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.13.0...v0.14.0
