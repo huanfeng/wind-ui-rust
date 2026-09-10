@@ -343,9 +343,19 @@ fn nsimage_from_rgba(w: i32, h: i32, rgba: &[u8]) -> Option<Retained<NSImage>> {
         )?;
         CGBitmapContextCreateImage(Some(&ctx))?
     };
+    // `NSImage` 的 `size` 是**点**而非像素——直接拿位图的像素尺寸当点尺寸，等于
+    // 让状态栏图标按位图分辨率决定显示大小：调用方传一张 32×32 的图（为了在
+    // Windows 任务栏/托盘上清晰而选的分辨率），在这里就会以 32pt 显示，比菜单栏其余
+    // 图标（系统惯例约 18pt 高）大出将近一倍。
+    //
+    // 状态栏图标的显示大小应该固定，与调用方给的位图分辨率无关——分辨率只决定
+    // Retina 屏上够不够清晰。保持宽高比，以**高**对齐到这个固定点数。
+    const MENU_BAR_ICON_POINT_HEIGHT: f64 = 18.0;
+    let point_h = MENU_BAR_ICON_POINT_HEIGHT;
+    let point_w = point_h * (w as f64 / h as f64);
     let size = NSSize {
-        width: w as f64,
-        height: h as f64,
+        width: point_w,
+        height: point_h,
     };
     let nsimage = NSImage::initWithCGImage_size(NSImage::alloc(), &image, size);
     // 彩色图标（非模板），避免被渲染成单色。
