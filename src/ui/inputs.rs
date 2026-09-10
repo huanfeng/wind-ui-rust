@@ -21,6 +21,24 @@ use crate::ui::caret::{CaretOpts, CaretState, CaretStyle};
 use crate::ui::containers::VScrollbar;
 use crate::ui::TextContent;
 
+/// 「方框 + 标签」这类控件（CheckBox / RadioButton）量文字时该用的换行宽度。
+///
+/// **必须与 `paint` 里的 `text_rect` 同口径**（容器宽扣掉方框与间距）。两处口径不一致
+/// 是个会静默出错的组合：`measure` 传 `None` 按单行量、`paint` 却在受限矩形里换行，
+/// 于是布局只分到一行的高度、实际画了两行，控件直接压在下一个元素身上——没有任何
+/// 报错，只有窄容器 + 长标签时才显形。`Label` 一直是按可用宽度量的，所以同一页里
+/// 说明文字排得好好的，只有勾选行在压人。
+///
+/// `avail.w` 为 0（宽度未知/不受约束）或窄到放不下方框时返回 `None`，退回单行测量 ——
+/// 与加入本函数之前的行为一致。
+///
+/// 已知限制同 `Label`：换行准确仅保证于宽度确定的容器（`width` / `width_match` /
+/// `weight`）；纯 Wrap 宽度下 `paint` 会在收敛后的窄宽重新换行，行数可能与 measure 不符。
+fn label_wrap_width(avail: Size, box_size: i32, gap: i32) -> Option<f32> {
+    let text_w = avail.w - box_size - gap;
+    (text_w > 0).then_some(text_w as f32)
+}
+
 const BOX_SIZE: i32 = 18;
 const BOX_SIZE_SMALL: i32 = 14;
 const GAP: i32 = 8;
@@ -95,7 +113,7 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
-    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+    fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let (bsz, gap) = match self.size {
             CheckBoxSize::Normal => (BOX_SIZE, GAP),
             CheckBoxSize::Small => (BOX_SIZE_SMALL, GAP_SMALL),
@@ -104,7 +122,7 @@ impl Widget for CheckBox {
         let t = text.measure(
             self.label.resolve().as_ref(),
             &crate::text::TextStyle::of(style).with_size(fsize),
-            None,
+            label_wrap_width(avail, bsz, gap),
         );
         Size::new(bsz + gap + t.w, bsz.max(t.h))
     }
@@ -439,11 +457,11 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
-    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+    fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let t = text.measure(
             self.label.resolve().as_ref(),
             &crate::text::TextStyle::of(style),
-            None,
+            label_wrap_width(avail, BOX_SIZE, GAP),
         );
         Size::new(BOX_SIZE + GAP + t.w, BOX_SIZE.max(t.h))
     }
@@ -3023,5 +3041,81 @@ mod anim_tests {
         paint_at(&sw, 0);
         assert_eq!(sw.pos.get().value(), 0.0, "复显应瞬时落定到新状态");
         assert!(!sw.pos.get().is_active(), "复显不应进入动画过渡");
+    }
+}
+
+#[cfg(test)]
+mod label_wrap_tests {
+    use super::{CheckBox, RadioButton, BOX_SIZE, GAP};
+    use crate::core::Widget;
+    use crate::geometry::Size;
+    use crate::signal::signal;
+    use crate::style::Style;
+    use crate::text::LineAwareTextEngine;
+
+    /// 长得放不下的标签必须**按可用宽度折行来量**。
+    ///
+    /// 此前 `measure` 恒传 `None`（单行），而 `paint` 在受限的 `text_rect` 里换行——
+    /// 布局只分到一行高度、实际画了两行，勾选行于是压在下一个元素身上。没有任何报错，
+    /// 只在「窄容器 + 长标签」时显形（实测在卸载向导：带完整用户数据路径的那个勾选，
+    /// 压住了下面解释「还会删哪些文件」的说明文字）。
+    #[test]
+    fn long_label_is_measured_wrapped_not_single_line() {
+        let mut te = LineAwareTextEngine;
+        let style = Style::default();
+        let long = r"删除用户词库和配置数据（C:\Users\Someone\AppData\Roaming\DemoApp）";
+
+        let checked = signal(false);
+        let cb = CheckBox::new(long, checked);
+        let narrow = cb.measure(Size::new(300, 1000), &style, &mut te);
+        let wide = cb.measure(Size::new(4000, 1000), &style, &mut te);
+
+        assert!(
+            narrow.h > wide.h,
+            "窄容器下应折行变高（窄 {} vs 宽 {}）",
+            narrow.h,
+            wide.h
+        );
+        assert!(
+            narrow.w <= 300,
+            "折行后测量宽度不该再超出可用宽度（得到 {}）",
+            narrow.w
+        );
+
+        // RadioButton 与 CheckBox 同构（方框 + 标签、paint 用同样的受限 text_rect），
+        // 只修一个等于留一半。
+        let group = signal(0usize);
+        let rb = RadioButton::new(long, group, 0);
+        let rb_narrow = rb.measure(Size::new(300, 1000), &style, &mut te);
+        let rb_wide = rb.measure(Size::new(4000, 1000), &style, &mut te);
+        assert!(
+            rb_narrow.h > rb_wide.h,
+            "单选按钮同样应折行变高（窄 {} vs 宽 {}）",
+            rb_narrow.h,
+            rb_wide.h
+        );
+    }
+
+    /// 两条退化路径必须与加入折行之前完全一致：宽度未知（`avail.w == 0`，Wrap 语义下
+    /// 常见）、以及窄到连方框都放不下。两者都退回单行测量，而不是把文字挤成每行一个字。
+    #[test]
+    fn unknown_or_tiny_width_falls_back_to_single_line() {
+        let mut te = LineAwareTextEngine;
+        let style = Style::default();
+        let checked = signal(false);
+        let cb = CheckBox::new("一段长到足以折行的标签文字，用来观察退化路径", checked);
+
+        let single = cb.measure(Size::new(4000, 1000), &style, &mut te).h;
+        assert_eq!(
+            cb.measure(Size::new(0, 1000), &style, &mut te).h,
+            single,
+            "宽度未知时应按单行量"
+        );
+        assert_eq!(
+            cb.measure(Size::new(BOX_SIZE + GAP, 1000), &style, &mut te)
+                .h,
+            single,
+            "窄到放不下文字时应按单行量，而不是折成极窄的多行"
+        );
     }
 }
