@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, DefinedClass, MainThreadOnly, Message};
 
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace, NSCursor,
@@ -2264,7 +2264,10 @@ fn create_window(
                     y: of.origin.y + (of.size.height - wf.size.height) / 2.0,
                 });
             }
-            o.addChildWindow_ordered(&window, NSWindowOrderingMode::Above);
+            // SAFETY: objc2 把 addChildWindow: 标为 unsafe —— 子窗口的所有权由 AppKit 接管,
+            // 调用方必须保证 child 在 owner 之前不被释放。这里 window 已由 register_window
+            // 登记进活动窗口表(连同所有权), owner 也是活着的 NSWindow, 两者都不会提前析构。
+            unsafe { o.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
             if cfg.modal {
                 MODAL_BLOCKS.with(|m| m.borrow_mut().push((o.retain(), window.clone())));
             }
