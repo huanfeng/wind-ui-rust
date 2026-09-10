@@ -24,16 +24,18 @@ use windows::core::{implement, IUnknown, Interface, Ref, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, FALSE};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteFactory2,
-    IDWriteFactory3, IDWriteFontCollection1, IDWriteFontSetBuilder1, IDWriteGdiInterop,
-    IDWriteInlineObject, IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat,
-    IDWriteTextLayout, IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_COLOR_F,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
-    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN,
-    DWRITE_GLYPH_RUN_DESCRIPTION, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
-    DWRITE_MATRIX, DWRITE_MEASURING_MODE, DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS,
-    DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
+    IDWriteFactory3, IDWriteFontCollection, IDWriteFontCollection1, IDWriteFontSetBuilder1,
+    IDWriteGdiInterop, IDWriteInlineObject, IDWriteLocalizedStrings, IDWritePixelSnapping_Impl,
+    IDWriteRenderingParams, IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer,
+    IDWriteTextRenderer_Impl, DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION,
+    DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
+    DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
 };
-use windows::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectW, DIBSECTION, OBJ_BITMAP};
+use windows::Win32::Graphics::Gdi::{
+    GetCurrentObject, GetObjectW, DEFAULT_CHARSET, DIBSECTION, LOGFONTW, OBJ_BITMAP,
+};
 
 use super::{LineMetrics, TextEngine, TextStyle};
 use crate::geometry::{Color, Rect, Size};
@@ -250,6 +252,32 @@ fn composite_glyph_over_translucent(
     .unwrap_or(dst)
 }
 
+/// 从 DirectWrite 的多语言名字表里取一个可用的名字：优先简体中文，否则取第一条。
+///
+/// 取不到名字才返回 `None`——名字表为空只可能是字体本身坏了。挑 `zh-cn` 是为了和
+/// 选字体的界面对上：那边用 GDI 枚举，拿的是当前 locale 的显示名（中文系统上是
+/// 「微软雅黑」而非 `Microsoft YaHei`），两边不同名会让缓存白白多一份。
+fn localized_string(names: &IDWriteLocalizedStrings) -> Option<String> {
+    unsafe {
+        let mut index = 0u32;
+        let mut exists = FALSE;
+        let locale = wide_nul("zh-cn");
+        if names
+            .FindLocaleName(PCWSTR(locale.as_ptr()), &mut index, &mut exists)
+            .is_err()
+            || !exists.as_bool()
+        {
+            index = 0;
+        }
+        // +1 给 NUL：GetStringLength 不含结尾，GetString 要写得下。
+        let len = names.GetStringLength(index).ok()? as usize + 1;
+        let mut buf = vec![0u16; len];
+        names.GetString(index, &mut buf).ok()?;
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..end]))
+    }
+}
+
 /// DirectWrite 文字引擎。
 ///
 /// 约束：内部 COM 对象（`IDWrite*`）非 `Send`/`Sync`，必须在创建它的
@@ -275,6 +303,37 @@ pub struct DWriteEngine {
     bitmap_h: i32,
     /// 私用区回退字体（可选）：设置后，文本里的私用区码位改用它渲染。
     private_use: Option<PrivateUseFont>,
+    /// 字体名解析缓存：配置里写的名字 → DirectWrite 家族名 + 字体自带字重/斜体。
+    /// 见 [`DWriteEngine::resolve_family`]，解析要走 GDI 字体映射，不能每次绘字都做。
+    family_cache: HashMap<String, ResolvedFamily>,
+}
+
+/// 一个字体名解析成 DirectWrite 认得的形态。
+///
+/// ## 为什么需要这一层
+///
+/// 选字体的界面用 GDI `EnumFontFamiliesExW` 列名字，渲染这边用 DirectWrite
+/// `CreateTextFormat(家族名, …)` 精确查找——**两边的「家族」不是一回事**：
+///
+/// - GDI 的一个族最多装四款（常规/粗/斜/粗斜），超出的字重必须**另起一个族名**，
+///   于是「思源宋体 SemiBold」「霞鹜文楷 Medium」在 GDI 里各是一个独立 face name；
+/// - DirectWrite 用的是排版家族名，那里只有「思源宋体」，压根不存在带后缀的那个族。
+///
+/// 结果是列表里选得到、渲染时找不到，DirectWrite 静默回退默认字体——用户看到的就是
+/// 「设了没反应」，且**只对带字重后缀的条目发生**（论坛 #144 的全部三种现象都由此而来：
+/// 无后缀的能用、带后缀的一概不能用、个别字体两边名字对不上则整族不能用）。
+///
+/// 解析把 GDI 名交给 GDI 字体映射，反查出真正的 DirectWrite 字体，取回它的家族名与
+/// **字体自带的字重**。所以选「思源宋体 SemiBold」不只是能显示了，字重也真的是
+/// SemiBold——用户想要的「能选字重」由此一并落地，不必再加一个配置项。
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedFamily {
+    /// DirectWrite 家族名，交给 `CreateTextFormat`。
+    family: String,
+    /// 字体条目自带的字重。仅在调用方**没有显式要求字重**时采用，见 `format`。
+    weight: u16,
+    /// 字体条目自带的斜体。与 `weight` 同理。
+    italic: bool,
 }
 
 impl DWriteEngine {
@@ -310,6 +369,74 @@ impl DWriteEngine {
                 // 取启动时注册的回退字体（见 `register_private_use_font`）。此刻缓存尚空，
                 // 故无需失效处理；运行期改字体走 `set_private_use_font`，它自己清缓存。
                 private_use: PRIVATE_USE_FONT.with(|f| f.borrow().clone()),
+                family_cache: HashMap::new(),
+            }
+        }
+    }
+
+    /// 把配置里写的字体名解析成 DirectWrite 认得的家族名（+ 字体自带字重/斜体）。
+    /// 语义与代价见 [`ResolvedFamily`]；结果按名字缓存，同一个名字只解析一次。
+    fn resolve_family(&mut self, name: &str) -> ResolvedFamily {
+        if let Some(r) = self.family_cache.get(name) {
+            return r.clone();
+        }
+        let resolved = self.resolve_family_uncached(name);
+        self.family_cache.insert(name.to_string(), resolved.clone());
+        resolved
+    }
+
+    fn resolve_family_uncached(&self, name: &str) -> ResolvedFamily {
+        // 解析不出来就原样交给 DirectWrite——行为与加这层之前完全一致，不会更差。
+        let as_is = ResolvedFamily {
+            family: name.to_string(),
+            weight: crate::text::WEIGHT_NORMAL,
+            italic: false,
+        };
+        unsafe {
+            // 1. DirectWrite 自己就认这个家族名：原样用。绝大多数字体走这条，不碰 GDI。
+            let mut coll: Option<IDWriteFontCollection> = None;
+            if self
+                .factory
+                .GetSystemFontCollection(&mut coll, false)
+                .is_ok()
+            {
+                if let Some(coll) = coll {
+                    let name_w = wide_nul(name);
+                    let mut index = 0u32;
+                    let mut exists = FALSE;
+                    if coll
+                        .FindFamilyName(PCWSTR(name_w.as_ptr()), &mut index, &mut exists)
+                        .is_ok()
+                        && exists.as_bool()
+                    {
+                        return as_is;
+                    }
+                }
+            }
+            // 2. 不认：当作 GDI face name 反查。名字本就是 GDI 枚举出来的，这一步能中。
+            let mut lf = LOGFONTW {
+                // FW_DONTCARE：让 GDI 挑该 face 的原生字重，而不是硬按常规去匹配——
+                // 「思源宋体 SemiBold」的原生字重正是我们要取回的那个值。
+                lfWeight: 0,
+                lfCharSet: DEFAULT_CHARSET,
+                ..Default::default()
+            };
+            // lfFaceName 是 32 个 u16 的定长数组且必须留 NUL：超长名字截断，不溢出。
+            let name_w: Vec<u16> = name.encode_utf16().take(lf.lfFaceName.len() - 1).collect();
+            lf.lfFaceName[..name_w.len()].copy_from_slice(&name_w);
+            let Ok(font) = self.gdi_interop.CreateFontFromLOGFONT(&lf) else {
+                return as_is;
+            };
+            let Ok(names) = font.GetFontFamily().and_then(|f| f.GetFamilyNames()) else {
+                return as_is;
+            };
+            let Some(family) = localized_string(&names) else {
+                return as_is;
+            };
+            ResolvedFamily {
+                family,
+                weight: font.GetWeight().0 as u16,
+                italic: font.GetStyle() != DWRITE_FONT_STYLE_NORMAL,
             }
         }
     }
@@ -348,14 +475,24 @@ impl DWriteEngine {
 
     /// 构造（并缓存）文字格式。`psize` 是**物理**字号，与 measure/draw 同源。
     fn format(&mut self, ts: &TextStyle, psize: f32) -> Option<IDWriteTextFormat> {
-        let fam = ts.family.unwrap_or(DEFAULT_FAMILY).to_string();
-        let weight = ts.weight;
+        // 家族名先过一层解析：界面用 GDI 名列字体，这里要的是 DirectWrite 家族名，
+        // 两者对不上时字体会静默失效。理由见 [`ResolvedFamily`]。
+        let resolved = self.resolve_family(ts.family.unwrap_or(DEFAULT_FAMILY));
+        let fam = resolved.family;
+        // 调用方显式要的字重优先；没要求（常规）时才采用字体条目自带的字重——否则
+        // 主题里写死的粗体标题会被「用户选了个 Light 字体」悄悄改细。斜体同理。
+        let weight = if ts.weight == crate::text::WEIGHT_NORMAL {
+            resolved.weight
+        } else {
+            ts.weight
+        };
+        let italic = ts.italic || resolved.italic;
         // 行距进缓存键：同字族同字号但行距不同，是两套格式。漏掉它会让先构造的那套
         // 被后者复用，表现为行高时灵时不灵——取决于谁先进缓存。
         let lh_key = ts.line_height.map(f32::to_bits);
         // 斜体进缓存键。漏掉它，同字族同字号的正体与斜体会互相顶替——先构造的那套
         // 被后者复用，表现为斜体时灵时不灵，取决于谁先进缓存。同 `lh_key` 的教训。
-        let key = (fam.clone(), psize.to_bits(), weight, ts.italic, lh_key);
+        let key = (fam.clone(), psize.to_bits(), weight, italic, lh_key);
         if let Some(f) = self.formats.get(&key) {
             return Some(f.clone());
         }
@@ -372,7 +509,7 @@ impl DWriteEngine {
                     PCWSTR(fam_w.as_ptr()),
                     None,
                     dw_weight,
-                    if ts.italic {
+                    if italic {
                         DWRITE_FONT_STYLE_ITALIC
                     } else {
                         DWRITE_FONT_STYLE_NORMAL
@@ -1478,5 +1615,65 @@ mod scale_contract_tests {
         // 下限钳制：0 会让物理字号退化，引擎按 0.1 兜底。
         eng.set_scale(0.0);
         assert!(eng.scale() > 0.0, "scale 不得为 0");
+    }
+}
+
+/// 字体名解析（GDI 名 → DirectWrite 家族名 + 自带字重）的测试。需要真实 DirectWrite
+/// 与系统字体，故随 Windows 测试跑。
+///
+/// 用 Segoe UI 做样本：它是 Windows 自带且字重款数超过 GDI 一族的四款上限，因而
+/// 「Segoe UI Semibold」必然是一个**独立的 GDI 族名、却不是 DirectWrite 家族名**
+/// ——正是论坛 #144 那类字体的形态，本机不装第三方字体也能复现。
+#[cfg(test)]
+mod family_resolve_tests {
+    use super::DWriteEngine;
+    use crate::text::WEIGHT_NORMAL;
+
+    #[test]
+    fn dwrite_family_is_kept_as_is() {
+        let mut e = DWriteEngine::new();
+        let r = e.resolve_family("Segoe UI");
+        assert_eq!(r.family, "Segoe UI", "DirectWrite 认得的家族名应原样保留");
+        assert_eq!(
+            r.weight, WEIGHT_NORMAL,
+            "家族名不带字重信息，字重应保持常规不动"
+        );
+        assert!(!r.italic);
+    }
+
+    #[test]
+    fn gdi_face_name_maps_to_family_and_weight() {
+        let mut e = DWriteEngine::new();
+        let r = e.resolve_family("Segoe UI Semibold");
+        assert_eq!(
+            r.family, "Segoe UI",
+            "带字重后缀的 GDI 名应解析回 DirectWrite 家族名，否则渲染时静默落回默认字体"
+        );
+        assert!(
+            r.weight > WEIGHT_NORMAL,
+            "字重应取自字体条目本身（Semibold），实得 {}",
+            r.weight
+        );
+    }
+
+    #[test]
+    fn unknown_name_does_not_panic() {
+        let mut e = DWriteEngine::new();
+        // GDI 字体映射对认不出的名字会替换成别的字体，取回什么名字都行——
+        // 这里守的是「不 panic、不返回空名字」，空名字会让 CreateTextFormat 失败。
+        assert!(!e.resolve_family("绝无此字体 ZZZ").family.is_empty());
+    }
+
+    #[test]
+    fn resolution_is_cached() {
+        let mut e = DWriteEngine::new();
+        let first = e.resolve_family("Segoe UI Semibold");
+        assert_eq!(
+            e.family_cache.len(),
+            1,
+            "解析结果应进缓存，不能每次绘字都走 GDI"
+        );
+        assert_eq!(first, e.resolve_family("Segoe UI Semibold"));
+        assert_eq!(e.family_cache.len(), 1);
     }
 }
