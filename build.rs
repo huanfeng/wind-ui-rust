@@ -28,6 +28,8 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/windui.rc");
     println!("cargo:rerun-if-changed=assets/windui.ico");
 
+    emit_gpu_cfg();
+
     // host 非 Windows 时 embed-resource 根本没被拉进来（见 Cargo.toml 的
     // `target.'cfg(windows)'.build-dependencies`），故用 host cfg 门控整段。
     #[cfg(windows)]
@@ -56,5 +58,29 @@ fn embed_icon() {
         embed_resource::compile_for_examples(rc, embed_resource::NONE).manifest_optional()
     {
         println!("cargo:warning=示例图标资源嵌入跳过：{e}");
+    }
+}
+
+/// 发出 `cfg(gpu_backend)`——GPU 后端（`src/render/gpu/`）与 macOS 的 `CAMetalLayer` 接线
+/// 统一用它门控，而不是直接写 `feature = "gpu"`。
+///
+/// 为什么要这层别名：目标是「macOS 恒编入 GPU 后端，其余平台按 feature 决定」，而
+/// **Cargo 没有按 target 生效的默认 feature**——`default` 是全局的，把 `gpu` 写进去
+/// Windows 也会跟着编一棵 wgpu 依赖树。依赖侧的解法是分 target 段声明（macOS 非
+/// optional、其余 optional 挂 feature，见 Cargo.toml），源码侧就需要一个能同时表达两者
+/// 的条件——即本函数发出的这个 cfg。
+///
+/// 判据与 Cargo.toml 的依赖声明**必须一一对应**：两边任一边改了而另一边没改，症状是
+/// 「引用了没引入的 crate」或「引入了没人用的 crate」，前者编译不过、后者只是多编。
+fn emit_gpu_cfg() {
+    // 未声明的 cfg 在新版 rustc 下会报 `unexpected_cfgs` 警告，而本项目 CI 以
+    // `-D warnings` 跑 clippy——不声明这一行，整个门禁会因为一个自定义 cfg 全红。
+    println!("cargo::rustc-check-cfg=cfg(gpu_backend)");
+    let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    // `CARGO_FEATURE_GPU` 是 Cargo 为开启的 feature 注入的环境变量（名字规则：大写、
+    // 连字符转下划线）。
+    let feature = std::env::var_os("CARGO_FEATURE_GPU").is_some();
+    if macos || feature {
+        println!("cargo::rustc-cfg=gpu_backend");
     }
 }

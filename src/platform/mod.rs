@@ -639,10 +639,7 @@ impl Renderer {
     /// 两者都关掉的平台没有可尝试的 GPU 后端，只有 `requires_gpu` 仍需判断
     /// （`Renderer::Gpu` 在那里无从满足，须报错）。
     #[cfg_attr(
-        not(any(
-            all(windows, feature = "d2d"),
-            all(target_os = "macos", feature = "gpu")
-        )),
+        not(any(all(windows, feature = "d2d"), all(target_os = "macos", gpu_backend))),
         allow(dead_code)
     )]
     pub(crate) fn wants_gpu(self) -> bool {

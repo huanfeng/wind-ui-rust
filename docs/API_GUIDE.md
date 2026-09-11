@@ -889,9 +889,9 @@ App::new("…", w, h).renderer(Renderer::Auto).content(ui).run();
 ```
 
 两平台各有一条可 opt-in 的 GPU 路径，`Renderer` 的三档语义相同（下表），差别只在后端实现：
-Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/Metal**（feature `gpu`，
-默认**关**——依赖树大、编译时间与体积代价明显，故按需开启；不开时 `Renderer::Gpu` 报错终止）。
-默认渲染器是 `Renderer::Software`，即不显式调 `.renderer(..)` 时两平台都走软光栅。
+Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/Metal**（默认**编入**，
+无需任何 feature 开关）。默认渲染器是 `Renderer::Software`，即不显式调 `.renderer(..)` 时
+两平台都走软光栅——**「后端编进来了」与「默认用它」是两件事**。
 
 | 变体 | 行为 | 用途 |
 |---|---|---|
@@ -908,10 +908,20 @@ Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/M
   对比示例：`cargo run --release --example settings -- --screenshot a.png --renderer software` 与 `--renderer gpu`。
 
 上面 Direct2D 那几条（ClearType、RDP 回退、仅不透明窗口）是 **Windows 专属**的实现细节。
+
 **macOS 侧**：内容视图挂一张 `CAMetalLayer`，wgpu 从该 layer 建 surface，图元走 SDF 渲染器、
-文字仍由 Core Text 光栅后交 GPU 合成（与软后端同一套字体与度量）。开启方式
-`cargo run --features gpu -- --renderer gpu`。实现细节与分阶段状态见
-[`docs/gpu-cross-platform-design.md`](gpu-cross-platform-design.md)。
+文字仍由 Core Text 光栅后交 GPU 合成（与软后端同一套字体与度量）。开启方式就是
+`.renderer(Renderer::Auto)`，或 `--renderer gpu`——**不需要 `--features gpu`**，那个 feature
+只对非 macOS 目标有意义（Windows 上用来跑 GPU 后端的离屏测试）。
+
+- 依赖代价写在明处：macOS 目标无条件编入 wgpu 依赖树（编译 +1~2 分钟、二进制 +2~4MB），
+  `--no-default-features` 也关不掉——那个开关管的是 svg/d2d。之所以这样，是 **Cargo 没有
+  按 target 生效的默认 feature**：写进 `default` 会让 Windows 也跟着编一棵 wgpu 树。
+- **运行期设备丢失会自动降级**：外接显示器热插拔、GPU 驱动复位、eGPU 拔出之后，窗口先
+  尝试重建设备（最多 3 次），仍不行就把**这个窗口**切回软渲染继续出帧，stderr 留一行。
+  窗口内容不会停住，进程不会崩——与 Windows 的 D2D 降级同语义。
+
+实现细节与分阶段状态见 [`docs/gpu-cross-platform-design.md`](gpu-cross-platform-design.md)。
 
 ---
 
@@ -2268,7 +2278,7 @@ Windows 与 macOS 均已支持——控件树、布局、事件、动画、主�
 | 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
-| GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（feature `gpu`，默认**关**；不开该 feature 时 `Renderer::Gpu` 报错终止） |
+| GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（默认**编入**，无需 feature；运行期默认档仍是 `Software`） |
 
 **命名一致性**
 

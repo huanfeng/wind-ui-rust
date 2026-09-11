@@ -59,7 +59,7 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **Clean focus ring** — the focus ring shows only during keyboard Tab navigation, never on mouse-only interaction.
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
 - **Touch / trackpad** — pan scrolling + fling inertia + edge bounce.
-- **Optional GPU acceleration (Windows)** — large windows can opt into the Direct2D backend (`App::accelerated(true)`): geometry, gradients, shadows and glyph rasterization run on the GPU, while text still goes through DirectWrite (system font cache, ClearType). Software rendering is the default; RDP sessions, machines without a GPU and off-screen screenshots fall back automatically and never panic.
+- **Optional GPU acceleration (both platforms)** — large windows can opt in with `App::renderer(Renderer::Auto)`: Direct2D on Windows, wgpu/Metal on macOS (compiled in by default, no feature flag needed). Geometry, gradients and shadows run on the GPU while text is still rasterized by the platform stack (DirectWrite / Core Text), so fonts and metrics are unchanged. Software rendering stays the default; RDP sessions, machines without a GPU and off-screen screenshots fall back automatically, and a device loss at runtime is recovered by rebuilding — or, failing that, by switching that window back to software rendering. It never panics.
 - **Automatic screenshots** — `--screenshot` renders one frame off-screen to PNG (`--scale 1.5` for high-DPI), ideal for automated regression.
 
 ## Preview
@@ -145,7 +145,7 @@ no manual dirty marking. See [`docs/API_GUIDE.md`](docs/API_GUIDE.md) §3.2.
 
 ```bash
 cargo run --release --example fullshowcase                  # run the comprehensive demo window
-cargo run --release --example ime -- --accelerated          # enable the Direct2D GPU backend (Windows)
+cargo run --release --example ime -- --renderer gpu         # enable the GPU backend (Win: D2D / macOS: Metal)
 cargo run --example fullshowcase -- --screenshot out.png    # render off-screen to PNG
 cargo test                                                  # run unit tests
 cargo clippy --all-targets                                  # lint

@@ -414,10 +414,7 @@ impl Image {
     /// 单调递增的 id 从根上消除这一类，代价只是每张图多 8 字节。
     ///
     /// 消费者是 d2d / gpu 后端；其余平台+feature 组合下无人使用，显式放行 dead_code。
-    #[cfg_attr(
-        not(any(all(windows, feature = "d2d"), feature = "gpu")),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(any(all(windows, feature = "d2d"), gpu_backend)), allow(dead_code))]
     pub(crate) fn cache_id(&self) -> u64 {
         self.id
     }

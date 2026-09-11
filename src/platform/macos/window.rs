@@ -41,7 +41,7 @@ use objc2_foundation::{
     NSTimer, NSUInteger,
 };
 
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 use tiny_skia::Pixmap;
@@ -50,7 +50,7 @@ use super::{AppHandler, NewWindow, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedit, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{to_skia_color, Renderer};
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
 
 /// sRGB 色彩空间（取不到时退回 DeviceRGB）。
@@ -406,14 +406,14 @@ struct ViewState {
     ///
     /// **声明顺序即析构顺序，这两个字段的先后是必须的**：`WindowGpu` 里的 `wgpu::Surface`
     /// 存着下面那张 layer 的裸指针，layer 先释放就是悬垂。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     gpu: Option<WindowGpu>,
     /// 挂在视图 backing layer 下的那张 `CAMetalLayer` 子层（见 [`attach_gpu`]）。
     ///
     /// 这份 `Retained` 是 surface 那个裸指针的**存活担保**：视图的 layer 树里也有它一份，
     /// 但那份由 AppKit 管、我们说了不算，而本字段的生命周期是明确的——它随 `ViewState`
     /// 一起死，且死在 `gpu` 之后。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     metal_layer: Option<Retained<CAMetalLayer>>,
 }
 
@@ -457,7 +457,7 @@ define_class!(
         ///
         /// 不这么做的话，AppKit 会为视图额外分配一整张窗口大小的 CPU backing store 供
         /// `drawRect:` 用——而我们的像素全在 Metal 子层里，那张缓冲一个字节都不会被写。
-        #[cfg(feature = "gpu")]
+        #[cfg(gpu_backend)]
         #[unsafe(method(wantsUpdateLayer))]
         fn wants_update_layer(&self) -> bool {
             self.ivars().borrow().metal_layer.is_some()
@@ -466,7 +466,7 @@ define_class!(
         /// GPU 路径的出帧点，与下面的 `drawRect:` 等价（含帧内意图的排空，理由见那边）。
         /// `setNeedsDisplay(true)` 在两条路径下分别落到这里和 `drawRect:`，故上层的所有
         /// 标脏调用不必区分后端。
-        #[cfg(feature = "gpu")]
+        #[cfg(gpu_backend)]
         #[unsafe(method(updateLayer))]
         fn update_layer(&self) {
             self.do_draw();
@@ -809,7 +809,7 @@ define_class!(
         // 等 vsync（wgpu 因此先查 `occlusionState`，不可见就直接判 `Occluded`），而窗口
         // 刚 `makeKeyAndOrderFront` 时系统还没把它标成 visible——首帧正好撞上这一档被丢掉。
         // 丢了就再也没人标脏，窗口永远空白（真机上就是这么表现的）。变可见时补一次即可。
-        #[cfg(feature = "gpu")]
+        #[cfg(gpu_backend)]
         #[unsafe(method(windowDidChangeOcclusionState:))]
         fn window_did_change_occlusion_state(&self, _notification: &NSNotification) {
             self.setNeedsDisplay(true);
@@ -969,9 +969,9 @@ impl ContentView {
             partial_invalidate: None,
             interval_timers: Vec::new(),
             color_space,
-            #[cfg(feature = "gpu")]
+            #[cfg(gpu_backend)]
             gpu: None,
-            #[cfg(feature = "gpu")]
+            #[cfg(gpu_backend)]
             metal_layer: None,
         };
         let this = Self::alloc(mtm).set_ivars(RefCell::new(state));
@@ -1112,7 +1112,7 @@ impl ContentView {
 
         // GPU 路径：像素直接进 `CAMetalLayer` 的 surface，下面 pixmap→CGImage→拷屏那一整套
         // 全不走（连后备缓冲都不分配）。两条路径在窗口创建时二选一，运行期不切换。
-        #[cfg(feature = "gpu")]
+        #[cfg(gpu_backend)]
         if self.ivars().borrow().gpu.is_some() {
             self.draw_gpu(bounds.size, pw, ph, scale);
             self.schedule_next_frame();
@@ -1223,7 +1223,7 @@ impl ContentView {
     ///
     /// 取不到帧不是错误（窗口被遮挡、drawable 一时用尽都会撞上），三档各有各的反应，
     /// 见 [`FrameError`]。只有"重配过还是不行"才提示一次。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     fn draw_gpu(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) {
         // 两段式（同本文件其余各处）：借用内只跟宿主与 GPU 打交道，可能重入本视图回调的
         // AppKit 调用（这里是补排一次重绘）留到借用释放之后。
@@ -1234,7 +1234,7 @@ impl ContentView {
     }
 
     /// [`Self::draw_gpu`] 的借用段。返回 `true` 表示这一帧没画成、需要再排一次重绘。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     fn draw_gpu_frame(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) -> bool {
         let mut borrow = self.ivars().borrow_mut();
         let st = &mut *borrow;
@@ -2007,11 +2007,11 @@ impl crate::sync::RawWakeSignal for MacWake {
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 static GPU_LOST_NOTICE: std::sync::Once = std::sync::Once::new();
 
 /// 进程内只提示一次。每帧刷屏没人会看，一次刚好够把判断送到眼前（同 `render/gpu/canvas.rs`）。
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 fn notice_once(once: &std::sync::Once, msg: &str) {
     once.call_once(|| eprintln!("{msg}"));
 }
@@ -2024,7 +2024,7 @@ fn notice_once(once: &std::sync::Once, msg: &str) {
 /// | 未设置 | 听 [`Renderer`]：`Auto`/`Gpu` 尝试，`Software` 不试 |
 /// | `0` 或空 | 一律不试。此时 `Renderer::Gpu` **报错终止**——它的用途就是"拿不到 GPU 要告诉我" |
 /// | 其他值 | 一律尝试（`Software` 也当 `Auto`），排障用 |
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 fn wants_gpu(renderer: Renderer) -> bool {
     match std::env::var("WINDUI_GPU") {
         Err(_) => renderer.wants_gpu(),
@@ -2040,7 +2040,7 @@ fn wants_gpu(renderer: Renderer) -> bool {
 ///
 /// 失败处理与 win32 的 D2D 接线同语义：`Renderer::Auto` 静默回退软路径（stderr 一行），
 /// `Renderer::Gpu` 报错终止（静默换一条路会让基于它做的验证失去意义）。
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
     if !wants_gpu(renderer) {
         assert!(
@@ -2131,7 +2131,7 @@ fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
 ///
 /// CALayer 的几何属性默认带 0.25s 隐式动画：不关的话拖动窗口边框时 Metal 层会一路"追"着
 /// 视图慢半拍，看起来像整个界面在弹。
-#[cfg(feature = "gpu")]
+#[cfg(gpu_backend)]
 fn set_layer_frame(layer: &CAMetalLayer, size: NSSize) {
     CATransaction::begin();
     CATransaction::setDisableActions(true);
@@ -2155,7 +2155,7 @@ fn create_window(
     handler: Box<dyn AppHandler>,
     // 只在 `gpu` feature 下用于选后端。签名对两档保持一致（调用方不必分 feature 分支），
     // 故仅在关掉那一档时抑制未使用告警——同 win32 `create_window` 的 `renderer` 参数。
-    #[cfg_attr(not(feature = "gpu"), allow(unused_variables))] renderer: Renderer,
+    #[cfg_attr(not(gpu_backend), allow(unused_variables))] renderer: Renderer,
     // 归属窗口（`cfg.owned` / `cfg.modal`）：作为它的 child window 挂上去。主窗恒为 `None`。
     owner: Option<&NSWindow>,
 ) -> Retained<NSWindow> {
@@ -2240,7 +2240,7 @@ fn create_window(
     // GPU 后端选择：`renderer` 想要 GPU（或 `WINDUI_GPU` 强制）时，把内容视图的呈现换成
     // CAMetalLayer。放在 `setContentView` 之后——layer 要挂进窗口的图层树，且此刻
     // `backingScaleFactor` 才是这个窗口真实的那个。离屏截图走 `run_offscreen`，不到此处。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     attach_gpu(&view, &window, renderer);
     window.setAcceptsMouseMovedEvents(true);
     // 登记进活动窗口表（连同所有权）：`windowWillClose:` 据此判断自己是不是最后一个。
@@ -2381,7 +2381,7 @@ pub(crate) fn run_windowed(
     // 实话：`NSApplication::terminate:` 正常情况下直接结束进程，这一行执行不到（`drop(_tray)`
     // 同理，它一直就在这儿）。保留它是因为"事件循环结束就释放设备"这条契约得有个落点——
     // 将来若改用可被 `stop:` 打断的 run loop，缺了它就是设备泄漏，而那种泄漏很难被注意到。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     crate::render::gpu::release_shared_gpu();
 }
 

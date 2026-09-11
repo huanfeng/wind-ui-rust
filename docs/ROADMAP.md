@@ -118,7 +118,7 @@
 | 脏矩形局部重绘 + 增量布局 | ✅ 已交付（v0.4.0） | — | 交互失效系统：结构签名判定局部 vs 整窗，hover/拖动/点击/打字走 ~1ms 局部重绘 |
 | 多 UiHost + 单消息循环（多窗口） | ✅ 已交付（Windows） | — | 每窗一个 `UiHost`，win32 消息循环按活动窗口表驱动、最后一个窗口关闭才退出；托盘/热键/跨线程唤醒移到 message-only 的 `AppHost` |
 | Signals 响应式数据流 | ✅ 已交付（v0.4.0） | — | 落地为 `Signal<T>` 状态原语（取代 `Rc<Cell>`/`Rc<RefCell>`，`set` 自动局部脏区）；非替换控件模型，恰为"可选层"形态 |
-| GPU / 软硬混合光栅 | ✅ 已交付（v0.4.0，opt-in） | — | Direct2D 后端，`App::renderer` 三档选择（Auto/Software/Gpu）、默认仍软；文字坚持 DirectWrite，不引 WGPU 字形图集 |
+| GPU / 软硬混合光栅 | ✅ 已交付（Win v0.4.0 / macOS v0.14.0，opt-in） | — | Windows 走 Direct2D、macOS 走 wgpu/Metal（默认编入，无需 feature），`App::renderer` 三档选择（Auto/Software/Gpu）、**运行期默认仍软**；文字两平台都坚持系统排版栈（DirectWrite / Core Text），GPU 只做合成 |
 
 ## 现状勘误（重要）
 

@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+- **macOS 的 GPU 后端默认编入，不再藏在 `gpu` feature 后面**（破坏性：macOS 目标无条件
+  多编一棵 wgpu 依赖树，编译 +1~2 分钟、二进制 +2~4MB，`--no-default-features` 也关不掉）。
+  运行期**默认档不变**，仍是 `Renderer::Software`——改的是"编不编进来"，不是"用不用它"。
+
+  起因是口径而非能力：macOS 没有第二条硬件加速路径（Windows 有 D2D），把唯一那条藏在一个
+  默认关的 feature 后面，等于默认没有硬件加速、而下游还得先读 Cargo.toml 才知道有这回事；
+  README 里"可选 GPU 加速"那条也一直只写着 Windows。
+
+  实现上绕了一个 Cargo 的坑：**没有按 target 生效的默认 feature**，`default` 是全局的，把
+  `gpu` 写进去 Windows 会跟着编一棵 wgpu 树。故依赖分 target 段声明（macOS 非 optional、
+  其余 optional 挂 `gpu` feature），源码侧的门控从 `feature = "gpu"` 换成 build.rs 发的
+  `cfg(gpu_backend)`（判据：`target_os = "macos"` 或开了那个 feature）。`gpu` feature 保留，
+  但此后只对非 macOS 目标有意义——Windows 上用它跑 GPU 后端的离屏测试（DX12/WARP）。
+
 ## [0.16.1] - 2026-09-10
 
 - **修复：CheckBox / RadioButton 的长标签折行后压住下一个元素。** 这两个控件的

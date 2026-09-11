@@ -364,7 +364,7 @@ mod tests {
     ///
     /// 判据取**幂等**：连做两个局部帧，脏区像素必须一模一样。叠加语义下第二帧一定更深,
     /// 而替换语义下第二帧与第一帧逐字节相同。
-    #[cfg(feature = "gpu")]
+    #[cfg(gpu_backend)]
     #[test]
     fn gpu_partial_frame_replaces_the_dirty_rect_rather_than_blending_over_it() {
         use crate::geometry::Color;

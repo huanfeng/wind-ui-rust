@@ -19,12 +19,19 @@ exclude = [".github/", ".remember/", "/scripts", "/temp", "/artifacts"]
 default = ["svg", "d2d"]
 svg = ["dep:resvg"]
 d2d = []
-# 跨平台 GPU 渲染后端（wgpu）。默认关：依赖树大、编译时间与体积代价明显。
-# 详见 docs/gpu-cross-platform-design.md。
+# 跨平台 GPU 渲染后端（wgpu）。
 #
-# `dep:objc2-quartz-core` 声明在 macOS 的 target 段里：target 段的可选依赖照样能挂 feature，
-# 只是在别的目标上开了也不会引入任何东西——于是 Windows 侧开 `gpu` 不会多编一行 ObjC 绑定。
-gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster", "dep:objc2-quartz-core"]
+# **macOS 上无需开启，它恒可用**：那里 GPU 后端是唯一的硬件加速路径（Windows 有 D2D），
+# 依赖声明在 macOS 的 target 段里、非 optional，门控由 build.rs 发的 `cfg(gpu_backend)`
+# 接管。之所以不写成「macOS 的默认 feature」，是因为 **Cargo 没有按 target 生效的默认
+# feature**：`default` 是全局的，把 gpu 放进去 Windows 也会跟着编一遍 wgpu 依赖树。
+#
+# 本 feature 因此只对**非 macOS**目标有意义：Windows 上开它是为了跑 GPU 后端的离屏测试
+# （DX12/WARP），Linux 平台层将来落地时也走这里。默认关——那两处的默认渲染路径分别是
+# D2D 与软光栅，多编一棵 wgpu 依赖树只是纯代价。
+#
+# 详见 docs/gpu-cross-platform-design.md。
+gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
@@ -50,15 +57,20 @@ toml = "1.1"
 # 日志门面：库只发不收，后端由应用装（不装就是空操作）。平台层的消息入口、宿主的浮层
 # 开合、拖放路由都有记录，下游排"点了没反应"的问题靠它对时间线。
 log = "0.4"
-# ---- GPU 后端（feature = "gpu"，默认关）----
+# ---- GPU 后端（wgpu）：非 macOS 目标，随 `gpu` feature 引入 ----
+# macOS 那份声明在下面的 target 段里且**非 optional**（那里恒编入，理由见 [features] 的
+# `gpu` 注释）。同一个依赖在两个 target 段各声明一次是 Cargo 支持的写法，两边版本必须
+# 一致——否则同一棵树里会出现两份 wgpu。
+#
 # wgpu：跨平台 GPU 抽象（macOS→Metal / Linux→Vulkan,GL / Windows→DX12）。版本锁在单一大版本，
 # 其 API 迭代快，升级时只需改 src/render/gpu/（面积受控）。
+[target.'cfg(not(target_os = "macos"))'.dependencies]
 wgpu = { version = "30", optional = true }
-# 实例缓冲的 Rust 结构体 ↔ 字节切片转换。P0 骨架尚未用到（离屏 readback 是纯字节拷贝），
-# 与 wgpu 一并锁在这里是因为 P1 图元批处理必用，且它已在依赖树里（tiny-skia 间接依赖）。
+# 实例缓冲的 Rust 结构体 ↔ 字节切片转换。
 bytemuck = { version = "1", optional = true, features = ["derive"] }
 # wgpu 的 adapter/device 请求与 buffer map 是 async，本项目无运行时，用它就地阻塞。
 pollster = { version = "1", optional = true }
+
 
 # ---- Windows 平台后端（Win32 + GDI + DirectWrite）----
 [target.'cfg(windows)'.dependencies]
@@ -197,10 +209,20 @@ objc2-core-graphics = { version = "0.3", features = [
     "CGDataProvider",
     "CGPath",
 ] }
+# ---- GPU 后端（wgpu）：macOS 恒编入，不挂 feature ----
+# macOS 没有第二条硬件加速路径（Windows 有 D2D），把它藏在一个默认关的 feature 后面，
+# 等于默认没有硬件加速、而下游还得先去读 Cargo.toml 才知道有这回事。恒编入之后，
+# 开不开由运行期的 `App::renderer` 决定（默认仍是 `Renderer::Software`）。
+#
+# 代价写在明处：macOS 下游无条件多编一棵 wgpu 依赖树（编译 +1~2 分钟、二进制 +2~4MB），
+# `--no-default-features` 也关不掉它——那个开关管的是 svg/d2d。
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
 # QuartzCore/CoreAnimation：GPU 后端把 `CAMetalLayer` 挂到内容视图上，wgpu 从该 layer 建
-# surface（见 platform/macos/window.rs）。只随 `gpu` feature 引入，且只要 CALayer/CAMetalLayer
-# 两个类型——不开 `objc2-metal`，Metal 设备与像素格式全由 wgpu 在 layer 上设置，本项目不碰。
-objc2-quartz-core = { version = "0.3", optional = true, default-features = false, features = [
+# surface（见 platform/macos/window.rs）。只要 CALayer/CAMetalLayer 两个类型——不开
+# `objc2-metal`，Metal 设备与像素格式全由 wgpu 在 layer 上设置，本项目不碰。
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
     "std",
     "CALayer",
     "CAMetalLayer",
