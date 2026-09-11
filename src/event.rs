@@ -286,6 +286,43 @@ pub enum HotkeyOp {
     SetEnabled(bool),
 }
 
+thread_local! {
+    /// 托盘 / 全局热键回调排队的开窗请求。平台层在**回调返回、借用释放之后**取走并建窗。
+    ///
+    /// **为什么不装在 `HotkeyCtx` / `TrayCtx` 里**：`WindowRequest` 带闭包，既不是
+    /// `Clone` 也不是 `PartialEq`/`Debug`，而 `HotkeyCtx` 是 `Copy`、`Vec<TrayAction>`
+    /// 的相等比较更是下游写测试的正式入口（见 `testing::run_with_tray_ctx` 的文档示例）。
+    /// 把请求塞进那两个类型会连带砸掉这些约定，于是请求走这条旁路、意图那边只留一个
+    /// 位置标记（[`crate::platform::TrayAction::OpenWindow`]）。
+    ///
+    /// 线程局部而非穿构造器，与托盘运行期队列同理：开窗是**应用级**的动作，常驻模式下
+    /// 更可能一个窗口都没有，挂不到任何窗口的宿主上。
+    static PENDING_CALLBACK_WINDOWS: std::cell::RefCell<Vec<WindowRequest>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 排入一个来自托盘 / 热键回调的开窗请求。
+pub(crate) fn push_callback_window(req: WindowRequest) {
+    PENDING_CALLBACK_WINDOWS.with(|q| q.borrow_mut().push(req));
+}
+
+/// 取走**最早**排队的那个开窗请求（按调用顺序消费）。
+pub(crate) fn take_callback_window() -> Option<WindowRequest> {
+    PENDING_CALLBACK_WINDOWS.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    })
+}
+
+/// 取走全部排队的开窗请求（热键路径：没有意图队列给它们定位置，一次全取）。
+pub(crate) fn take_callback_windows() -> Vec<WindowRequest> {
+    PENDING_CALLBACK_WINDOWS.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
 /// 全局热键回调的上下文。
 ///
 /// **刻意只能声明意图，拿不到窗口句柄。** 回调在平台层持有窗口状态借用期间执行，
@@ -305,6 +342,26 @@ impl HotkeyCtx {
     /// 请求隐藏窗口。
     pub fn hide_window(&mut self) {
         self.op = Some(WindowOp::Hide);
+    }
+    /// 请求**新建**一个窗口，语义同
+    /// [`EventCtx::open_window`](crate::core::EventCtx::open_window)。
+    ///
+    /// 零窗口常驻模式（[`App::run_resident`](crate::app::App::run_resident)）下这是热键
+    /// 唯一能唤出界面的途径——那时没有窗口可 `show_window`，进程只有托盘与热键。
+    ///
+    /// 请求不占 [`show_window`](Self::show_window) 那个位置（两者不是同一件事，可并用），
+    /// 由平台层在回调返回后建窗。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::resident("查词")
+    ///     .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| {
+    ///         ctx.open_window(Window::new("查词", 480, 320).content(|| Element::col().fill()));
+    ///     })
+    ///     .run_resident();
+    /// ```
+    pub fn open_window(&mut self, req: WindowRequest) {
+        push_callback_window(req);
     }
     /// 取出回调声明的意图（供平台层在**释放窗口状态借用之后**执行）。
     ///

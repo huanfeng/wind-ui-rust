@@ -809,6 +809,44 @@ App::new("查词", 480, 360)
 
 完整示例见 `examples/hotkey.rs`。
 
+### 零窗口常驻（托盘服务）
+
+上面那套（`start_hidden` + `hide_on_close`）仍然留着**一个隐藏的主窗**。窗口只要显示过一次，
+软件光栅为它按**物理**像素留的约 2.5 份全屏 RGBA 缓冲就一直挂着——用户看不见的窗口，内存照付。
+真正的「常驻服务」形态用 `App::resident` + `run_resident()`：进程里**没有窗口**，界面由托盘或
+热键回调按需建出，关掉即销毁，渲染资源随之归还。
+
+```rust
+fn main_window() -> WindowRequest {                    // 窗口配置提成函数，托盘与热键共用
+    Window::new("清风词典", 480, 360)
+        .single("main")                                // 已开着就激活它，不再开第二个
+        .content(|| Element::col().fill())
+}
+
+App::resident("清风词典")                              // 不收窗口尺寸：它不建窗口
+    .tray(Tray::new().tooltip("清风词典").menu(vec![
+        TrayMenuItem::item("打开窗口", |ctx| ctx.open_window(main_window())),
+        TrayMenuItem::item("退出", |ctx| ctx.quit()),   // 零窗口时唯一的出口
+    ]))
+    .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.open_window(main_window()))
+    .run_resident();
+```
+
+- `TrayCtx::open_window` / `HotkeyCtx::open_window` 与控件里的 `EventCtx::open_window` 收同一个
+  `WindowRequest`、走同一条延后建窗管线：回调**只排队意图**，平台在借用释放后才真正建窗（铁律 6）。
+- 常驻模式下 `show_window()` / `hide_window()` 无效（没有主窗可显隐），`content()` / `bg()` /
+  `on_show()` 这些面向主窗的配置同样不生效——窗口的这些行为写在各自的 `Window` 上。
+- **退出只有托盘的 `ctx.quit()` 一条路**。故 debug 期若既无托盘也无热键就 panic：那样的进程既没有
+  入口也没有出口。
+- 空闲仍是零 CPU：零窗口时消息循环纯阻塞在 `GetMessage`，不参与帧配速。
+- **仅 Windows**。macOS 尚未实现，调用会打印一行错误并退出，不会悄悄退化成开一个窗口。
+
+实测（100% 缩放，`PrivateMemorySize64`）：常驻示例零窗口 **1.8 MB**，开一个 460×260 窗口
+4.8 MB，关掉后回到 **2.7 MB**；作为对照，`examples/hotkey.rs`（420×300，`hide_on_close`）
+唤起过一次再关闭仍是 **4.8 MB**——那份缓冲不会还回来。
+
+完整示例见 `examples/resident.rs`。
+
 ### 无标题栏窗口（自定义标题栏）
 ```rust
 let title_bar = Element::row().width_match().height(36).cross(Align::Stretch)

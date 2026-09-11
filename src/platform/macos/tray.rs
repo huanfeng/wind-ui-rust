@@ -186,12 +186,32 @@ impl TrayTarget {
                 }
                 TrayAction::Hide => window.orderOut(None),
                 TrayAction::Quit => {
+                    // 截断旁路队列，与 win32 的 `quit_app` 对齐：`break` 只截断**意图**
+                    // 队列，而开窗请求的配置在核心层的另一条队列上（`OpenWindow` 只是
+                    // 位置标记）。两条队列的截断点必须一致。
+                    //
+                    // **今天这一行是纯预防**：下面那个 `OpenWindow` 臂还只打提示，
+                    // `terminate` 之后进程也就走了，漏掉它不会有任何症状。现在就加，是
+                    // 因为等那个 TODO 落地成真正的建窗之后，`ctx.quit(); ctx.open_window(..)`
+                    // 会在退出途中闪一个窗口出来——那时它看起来是个新 bug，发现的人要
+                    // 把这整条推理重走一遍，而不是照着这行注释直接读懂。
+                    let _ = crate::event::take_callback_windows();
                     if let Some(mtm) = MainThreadMarker::new() {
                         NSApplication::sharedApplication(mtm).terminate(None);
                     }
                     break;
                 }
                 TrayAction::Notify { title, body } => deliver_notification(&title, &body),
+                // TODO(macOS): 落地托盘回调的开窗请求。
+                //
+                // 配置已经排在核心层的旁路队列里（`app::take_callback_window`），缺的只是
+                // 这一步：取走它、按 `NewWindow` 建出 NSWindow 并前置，与 win32 的
+                // `materialize_window` 对称。请求留在队列里不取也不会出错——只是这一项
+                // 点了没反应，故这里打一行提示，免得表现为"菜单坏了"。
+                TrayAction::OpenWindow => {
+                    eprintln!("[windui] TrayCtx::open_window 在 macOS 上尚未实现，本次请求被忽略");
+                    let _ = crate::event::take_callback_window();
+                }
             }
         }
     }

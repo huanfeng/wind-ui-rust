@@ -323,7 +323,22 @@ pub struct FontDesc { family: String, size: f32, weight: u16, italic: bool }
 | `WM_MOUSEMOVE`/`WM_LBUTTONDOWN`/`UP`/`DBLCLK` | 解析坐标 → 派发 Motion；维护 hover/capture |
 | `WM_MOUSEWHEEL` | `ScreenToClient` 换算 → 派发 Scroll |
 | `WM_KEYDOWN`/`WM_CHAR` | Tab/Shift+Tab 焦点导航；其余给焦点节点 |
-| `WM_DESTROY` | `PostQuitMessage(0)` |
+| `WM_DESTROY` | 注销窗口登记表；**最后一个窗口**销毁时 `PostQuitMessage(0)`（常驻模式除外） |
+
+### App 级宿主与零窗口常驻
+托盘、全局热键、跨线程唤醒都是**应用**的资源而非某个窗口的，故挂在一个独立的不可见窗口
+（`AppHost`）上，它刻意不进窗口登记表——活到消息循环结束为止。由此可以做到**零窗口常驻**
+（`App::run_resident`）：不建主窗直接进消息循环，界面由托盘/热键回调按需建出，关掉即销毁，
+后备缓冲随 `WindowState` 的 drop 归还。两处随之条件化：
+
+- `WM_DESTROY` 的退出判定 —— 常驻模式下零窗口是常态，退出改由托盘 `ctx.quit()` 发起；
+- `AppHost` 的窗口形态 —— 有主窗时是 message-only；常驻模式下改为**隐藏的顶层工具窗**，
+  因为 `TrackPopupMenu` 之前必须 `SetForegroundWindow`（否则菜单点别处不消失），
+  而 `HWND_MESSAGE` 下的窗口不参与前台激活。
+
+托盘/热键回调的 `open_window` 不能用发起窗口的宿主转换请求（那时可能一个窗口都没有），
+故请求经核心层的旁路队列交给**应用级**的开窗工厂（`app::WindowFactory`）还原成「配置 + 宿主」，
+与窗口内 `ctx.open_window` 共用同一个 `build_new_window`。
 
 ### DPI
 启动设 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`；`GetDpiForWindow` 取 scale；`WM_DPICHANGED` 动态切换。

@@ -49,6 +49,24 @@ pub(crate) fn run(
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
+    // TODO(macOS): 零窗口常驻模式（`App::run_resident`）尚未实现。
+    //
+    // 缺的是平台落地，核心层（`TrayCtx::open_window` / `HotkeyCtx::open_window` 与
+    // 应用级开窗工厂）已经就位。要补的三件事与 win32 侧对称：
+    //   1. `window::run_windowed` 支持不建主窗直接进 `NSApp::run`（托盘与热键本就挂在
+    //      应用上，NSStatusItem 不需要窗口）；
+    //   2. 最后一个 NSWindow 关闭时不终止应用（`applicationShouldTerminateAfterLastWindowClosed`
+    //      要回 false），并确认 `TrayAction::Quit` 的 `NSApp::terminate` 在零窗口下仍有效；
+    //   3. `tray.rs` 的 `run_actions` 落地 `TrayAction::OpenWindow`（见那里的 TODO）。
+    //
+    // 在此之前**明确拒绝而不是退化成开一个窗口**：那样跑起来像是成功了，用户要等到
+    // 发现桌面上多了个空窗才知道模式没生效。
+    if cfg.resident {
+        eprintln!(
+            "[windui] 常驻模式（App::run_resident）目前仅支持 Windows，macOS 尚未实现，进程退出"
+        );
+        return;
+    }
     // 单实例仲裁（应用若已在 main 里 claim_instance 过，这里直接放行）：二次实例把 argv
     // 转发给首实例后直接返回、不建窗口。
     //

@@ -404,12 +404,20 @@ extern "C" fn hotkey_handler(
 
 impl HotkeyState {
     /// 派发一次热键触发，返回回调声明的窗口操作意图。
+    ///
+    /// TODO(macOS): 回调若调了 `HotkeyCtx::open_window`，请求会留在核心层的旁路队列里
+    /// 无人消费（win32 侧在这一步之后调 `open_callback_windows` 建窗）。队列因此会越积
+    /// 越长，故这里先取空并提示，免得某天真实现了以后突然把历史请求一股脑开出来。
     #[must_use]
     fn dispatch(&mut self, id: usize) -> Option<WindowOp> {
         let slot = self.slots.get_mut(id)?;
         let mut ctx = HotkeyCtx::default();
         (slot.callback)(&mut ctx);
-        ctx.take_op()
+        let op = ctx.take_op();
+        if !crate::event::take_callback_windows().is_empty() {
+            eprintln!("[windui] HotkeyCtx::open_window 在 macOS 上尚未实现，本次请求被忽略");
+        }
+        op
     }
 }
 

@@ -76,7 +76,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
     WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
     WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -208,7 +209,11 @@ struct AppHost {
     /// 托盘点击、热键触发所指向的窗口——主窗口，即 `App::run` 建的那个。
     ///
     /// 「唤出窗口」「最小化到托盘」说的都是它；子窗（设置页之类）不是这些操作的对象。
-    main: HWND,
+    ///
+    /// 常驻模式（`App::run_resident`）下为 `None`：那时压根没有主窗，显隐意图无处可施
+    /// （用 `TrayCtx::open_window` 按需建窗才是那个模式下的唤起方式）。做成 `Option`
+    /// 而不是拿空句柄糊弄，是要让每个使用点都被编译器逼着回答"没有主窗时该怎样"。
+    main: Option<HWND>,
     /// 主窗当初选定的渲染后端。子窗沿用它——应用层构造子窗配置时不知道这件事，
     /// 而"主窗跑 GPU、子窗悄悄退回软件"是没人想要的结果。
     renderer: Renderer,
@@ -219,6 +224,20 @@ const APP_HOST_CLASS: PCWSTR = w!("WindUiAppHostClass");
 thread_local! {
     /// App 级消息宿主窗口句柄（0=未创建）。
     static APP_HOST_HWND: Cell<isize> = const { Cell::new(0) };
+    /// 常驻（零窗口）模式：窗口全部销毁后**不**结束消息循环。见 `WindowConfig::resident`。
+    ///
+    /// 与 `AppHost::main.is_none()` 是两件事，故单独一位：主窗有没有是"启动时建没建"，
+    /// 而这一位问的是"窗口空了要不要退出"。放 thread_local 而不是 `AppHost` 里，是因为
+    /// 读它的地方（`WM_DESTROY`）正处在最不该多借一次宿主状态的时刻。
+    static RESIDENT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 最后一个窗口销毁后是否该结束消息循环。
+///
+/// 单独成函数是为了能直接单测：两种错法都不会在编译期暴露，而在真机上一个表现为
+/// "关掉窗口进程还赖着"、另一个表现为"常驻服务开了个窗口，关掉它整个托盘就没了"。
+fn should_quit_on_last_window(resident: bool, was_last: bool) -> bool {
+    was_last && !resident
 }
 
 /// App 级消息宿主的窗口句柄。托盘/热键注册与跨线程唤醒都投向它。
@@ -243,11 +262,18 @@ unsafe fn app_host() -> Option<&'static mut AppHost> {
     }
 }
 
-/// 建 App 级消息宿主：一个 message-only 窗口，承载托盘/热键/唤醒。
+/// 建 App 级消息宿主：一个不可见窗口，承载托盘/热键/唤醒。
 ///
 /// 它**不进** [`LiveWindows`]：那张表回答的是"还有没有可见窗口"，而本窗口从不显示，
 /// 把它算进去应用就永远退不掉了。
-unsafe fn create_app_host(hinst: HINSTANCE, main: HWND, renderer: Renderer) {
+///
+/// **有主窗时是 message-only，常驻模式下是隐藏的顶层工具窗**。差别只为一件事：
+/// `TrackPopupMenu` 前必须 `SetForegroundWindow`（否则菜单点别处不消失），而
+/// `HWND_MESSAGE` 下的窗口不参与前台激活，那一步注定失败。有主窗时菜单挂在主窗名下，
+/// 没有主窗就只剩本窗口可挂——于是它必须是个能被前置的顶层窗口。
+/// `WS_EX_TOOLWINDOW` + 从不 `ShowWindow` 保证它不进任务栏、不进 Alt-Tab，
+/// 也不分配任何后备缓冲（不走 `WindowState`，没有 pixmap）。
+unsafe fn create_app_host(hinst: HINSTANCE, main: Option<HWND>, renderer: Renderer) {
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(app_host_proc),
@@ -263,16 +289,24 @@ unsafe fn create_app_host(hinst: HINSTANCE, main: HWND, renderer: Renderer) {
         renderer,
     });
     let host_ptr = Box::into_raw(host);
+    let (ex_style, style, parent) = match main {
+        Some(_) => (
+            WINDOW_EX_STYLE::default(),
+            WINDOW_STYLE::default(),
+            Some(HWND_MESSAGE),
+        ),
+        None => (WS_EX_TOOLWINDOW, WS_POPUP, None),
+    };
     match CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        ex_style,
         APP_HOST_CLASS,
         PCWSTR::null(),
-        WINDOW_STYLE::default(),
+        style,
         0,
         0,
         0,
         0,
-        Some(HWND_MESSAGE),
+        parent,
         None,
         Some(hinst),
         Some(host_ptr as *const c_void),
@@ -329,27 +363,53 @@ unsafe extern "system" fn app_host_proc(
         // 的状态里，只有那个宿主自己知道。多叫醒几个窗口的代价是几次被脏区挡掉的重绘，
         // 漏叫一个的代价是那条通道的数据永远不上屏。
         WM_APP_WAKE => {
-            for h in live_windows() {
+            let windows = live_windows();
+            // 判据是「有没有窗口**出得了帧**」，不是「有没有窗口」：通道由持消费权的宿主
+            // 在帧里排空，而下面那个 `InvalidateRect` 投给隐藏或最小化的窗口根本不产生
+            // `WM_PAINT`（与 `run_message_loop` 的 `pending` 过滤同一条理由）。实测：常驻
+            // 服务开出窗口后最小化，`TICK` 照跑而 `CHANNEL` 8 秒一条不来。
+            //
+            // 只对常驻模式放开这条后备，是为了不动普通应用的既有语义：普通应用最小化唯一
+            // 窗口时通道同样停摆，但那是**暂停**——还原后由宿主完整排空，`on_message` 里的
+            // toast / 焦点都还在。改成走应用级路径反而会把那些副作用悄悄吃掉。常驻服务则
+            // 相反：它的窗口本就是临时的，"等用户还原"可能永远等不到。
+            let frameable = windows
+                .iter()
+                .any(|&h| IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool());
+            if !frameable && RESIDENT.with(|r| r.get()) {
+                let repaint = crate::app::drain_app_channels();
+                // 回调里可能 `ctx.open_window`、改托盘提示、启停热键——常驻服务
+                // "后台任务完成后弹出结果窗口 / 更新托盘提示"正是这条路。
+                apply_app_effects(repaint);
+            }
+            for h in windows {
                 let _ = InvalidateRect(Some(h), None, false);
             }
             LRESULT(0)
         }
-        // 系统设置变更。**只认主题那一项**——字体、区域、鼠标速度、电源计划都走同一条
-        // 消息，不筛就会在用户改任何系统设置时白重建一次界面。
+        // 系统设置变更。**只认主题那一项**，理由同 `wnd_proc` 里的同名臂。
+        //
+        // 这条臂只在**常驻模式**下成立：那时本窗口是顶层工具窗，是这条广播唯一到得了
+        // 的窗口，而应用级的 `on_system_theme_changed` 也正存在 `AppServices` 里
+        // （见 `App::launch`）。有主窗时本窗口是 message-only 收不到广播，回调也不在
+        // 这里——两边都不会重复触发。
+        //
+        // **不能像 `wnd_proc` 那样 `state_from(hwnd)`**：本窗口的 `GWLP_USERDATA` 挂的是
+        // `*mut AppHost`，按 `*mut WindowState` 解引用是类型混淆。此前那条臂就写在这里、
+        // 正是这么写的，只因 message-only 窗口收不到广播才一直没被执行到。
         WM_SETTINGCHANGE => {
             let is_theme = lparam.0 != 0 && {
                 let name = windows::core::PCWSTR(lparam.0 as *const u16);
                 name.to_string().is_ok_and(|s| s == "ImmersiveColorSet")
             };
             if is_theme {
-                // 先读完再借宿主：`system_prefers_dark` 会调 OS，而「OS 调用不留在
-                // 借用里」是这一层的统一纪律（铁律 6）。
                 let dark = system_prefers_dark();
-                let repaint =
-                    state_from(hwnd).is_some_and(|s| s.handler.on_system_theme_changed(dark));
-                if repaint {
-                    let _ = InvalidateRect(Some(hwnd), None, false);
-                }
+                // 回调多半在里面 `theme.set(..)`，而主题句柄是全窗共享的：已开的窗口
+                // 只需各刷一帧就会用新主题重画，不必逐个通知。
+                // 已开着的窗口靠 `apply_app_effects` 里那次统一失效跟上新主题——
+                // 主题句柄是全窗共享的，各刷一帧即可，不必逐个通知。
+                let repaint = crate::app::dispatch_system_theme_changed(dark);
+                apply_app_effects(repaint);
             }
             LRESULT(0)
         }
@@ -365,10 +425,11 @@ unsafe extern "system" fn app_host_proc(
             // （指针、按键、绘制）都以窗口可见为前提，顺带保证了 thread_local 里那份
             // 快照是新鲜的。不刷新的话，回调读到的 `visible` 可能是窗口被藏起来之前
             // 留下的陈值——而「切换显隐」这个最常见的热键语义恰恰只看这一位。
-            let main = app_host()
-                .map(|h| h.main)
-                .unwrap_or(HWND(std::ptr::null_mut()));
-            if !main.0.is_null() {
+            //
+            // 常驻模式下没有主窗，这一步连同显隐意图一起跳过：那时热键要唤出界面得靠
+            // `HotkeyCtx::open_window`，窗口是现建的，没有"上一次的可见性"可谈。
+            let main = app_host().and_then(|h| h.main);
+            if let Some(main) = main {
                 push_window_state(main);
             }
             let (op, main) = match app_host() {
@@ -376,18 +437,53 @@ unsafe extern "system" fn app_host_proc(
                     h.hotkeys.as_mut().and_then(|hs| hs.dispatch(wparam.0)),
                     h.main,
                 ),
-                None => (None, HWND(std::ptr::null_mut())),
+                None => (None, None),
             };
-            if !main.0.is_null() {
+            if let Some(main) = main {
                 run_window_op(main, op);
             }
+            // 回调排下的意图在此统一落地：借用早已释放（`dispatch` 的借用随上面那条语句
+            // 结束），这里才能建窗——建窗会同步派发 WM_NCCREATE/WM_PAINT 重入窗口过程
+            // （铁律 6）。
+            //
+            // 走完整的应用级收尾而不是只建窗：热键回调里同样可以 `set_tooltip` /
+            // `set_enabled`，只接开窗那一条会变成**半灵半不灵**——窗口开出来了、热键
+            // 却没停用，用户会认定"热键坏了"而完全查错方向。
+            apply_app_effects(false);
             LRESULT(0)
         }
         tray::WM_TRAYICON => {
             on_tray_message(lparam);
             LRESULT(0)
         }
+        // 外部关闭请求。常驻模式下本窗口是顶层窗，于是成了任务管理器「结束任务」、
+        // `EndTask`、注销 / 关机流程投递 `WM_CLOSE` 的目标——而它们投的就是这条消息。
+        //
+        // 交给 `DefWindowProcW` 的后果是**默认销毁本窗口**：托盘图标与全局热键随
+        // `AppHost` 一起没掉（`WM_DESTROY` 里 drop 会发 `NIM_DELETE`、注销热键），而零
+        // 窗口的消息循环没有任何退出理由，仍阻塞在 `GetMessageW`。用户看到的是
+        // 「结束任务点了没反应，图标没了程序还在」，只能去"详细信息"页强杀。
+        //
+        // 本窗口不是用户界面，关它的意思就是关整个应用，故与托盘「退出」同一条路径
+        // （`quit_app`）：销毁全部窗口 + 确保消息循环收到退出消息。本窗口自身留给循环
+        // 退出后的 `destroy_app_host()` 销毁——那个顺序才保证托盘图标最后被清干净。
+        WM_CLOSE => {
+            quit_app();
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            // 句柄先清空。受益的是**不经 `app_host()` 的那条读法**：`on_tray_message`
+            // 在常驻模式下没有主窗可当菜单锚点，会回退到 `app_host_hwnd()` 的裸句柄，
+            // 直接送进 `SetForegroundWindow` / `TrackPopupMenu`——本窗口若已销毁，那就是
+            // 拿悬垂句柄调 OS。
+            //
+            // 经 `app_host()` 的读法（如 `readd_tray`）本就安全，不靠这一行：窗口销毁后
+            // `GetWindowLongPtrW` 对失效句柄返回 0，`app_host()` 于是给出 `None`，调用方
+            // 当场早退。别把这一行的功劳记到那条路上——记错了，后来人就会以为它可以删。
+            //
+            // 正常退出路径由 `destroy_app_host` 清，但外部直接销毁本窗口的路径（见上面
+            // 的 `WM_CLOSE`）够不着那里，故这里也清一次（幂等）。
+            APP_HOST_HWND.with(|c| c.set(0));
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppHost;
             if !ptr.is_null() {
                 // 先清零再 drop，同 WindowState：托盘菜单的模态循环里本窗口若被销毁，
@@ -413,7 +509,94 @@ unsafe extern "system" fn app_host_proc(
             readd_tray();
             LRESULT(0)
         }
+        // 应用级周期回调（常驻模式的 `App::on_interval`）。定时器 id 从 1 起，与
+        // `AppServices::intervals` 的下标差一——同 `create_window` 给主窗注册那套编号，
+        // 只是挂在本窗口上（常驻模式没有主窗可挂）。
+        //
+        // 排在托盘重试那条臂之后：那条带 id 守卫，先匹配先赢，两者的 id 空间不重叠。
+        WM_TIMER => {
+            let repaint = crate::app::dispatch_app_interval(wparam.0.wrapping_sub(1));
+            // 回调排下的意图在此落地（"定时检查到新版本就弹个窗"、"把进度写进托盘
+            // 提示"），借用已随上一句结束。
+            apply_app_effects(repaint);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 应用级回调跑完之后的收尾：把**不需要窗口**的那些意图落地。
+///
+/// 与窗口路径的三步收尾（`apply_window_op` → `apply_dialog_request` → `wants_close`）对位，
+/// 但只保留不依赖 `WindowState` 的那几样——窗口操作、对话框、关窗都要有窗口才谈得上，
+/// 而这里可能一个窗口都没有。`open_url` 与 `defer_blocking` 不在这里：它们随
+/// `DispatchResult` 直接由 `app::run_app_callback` 就地落地。
+///
+/// **调用方须已释放所有借用**：建窗与 `Shell_NotifyIconW` 都会重入消息处理（铁律 6）。
+///
+/// 没有这一步时，`TrayHandle::set_tooltip` 与 `HotkeyHandle::set_enabled` 在零窗口期间
+/// 只排队不执行——常驻服务"每分钟把同步进度写进托盘提示"会一直停在启动那一份，
+/// 直到用户开出一个窗口才补执行。
+///
+/// `repaint` 是回调自报的重绘请求；跨窗脏标记则在这里**取走**（见下）。
+unsafe fn apply_app_effects(repaint: bool) {
+    apply_tray_ops();
+    apply_app_hotkey_ops();
+    open_callback_windows();
+    // 跨窗脏标记必须取走，不能只看 `repaint`：`ThemeHandle::set`（主题回调里最常见的
+    // 那一句）与任何一次写信号都会立起它，而窗口路径是由 `broadcast_signal_dirty` 消费的
+    // ——应用级路径够不着那里。不取走的后果今天只是"残留到下一次任意窗口的
+    // `apply_window_op`，多刷一次整窗"，但它是个**泄漏的全局状态位**：谁日后给它加了
+    // 别的语义，这里就是第一个踩点。
+    //
+    // 不复用 `broadcast_signal_dirty`：那个的语义是"除发起方外"，而这里没有发起窗口；
+    // 它还会在标记为假时提前返回，从而吞掉 `repaint` 这一路。
+    let dirty = crate::signal::take_cross_window_dirty();
+    if repaint || dirty {
+        for h in live_windows() {
+            let _ = InvalidateRect(Some(h), None, false);
+        }
+    }
+}
+
+/// 落地**应用级**的运行期热键意图（改绑 / 启停）。
+///
+/// 与 `apply_hotkey_ops(hwnd)` 是同一条队列的两个取口（见 `app::take_app_hotkey_ops`），
+/// 区别只在从哪儿取：那个从窗口宿主取，这个直接从应用级设施取，于是零窗口时也成立。
+unsafe fn apply_app_hotkey_ops() {
+    let ops = crate::app::take_app_hotkey_ops();
+    if ops.is_empty() {
+        return;
+    }
+    if let Some(hk) = app_host().and_then(|h| h.hotkeys.as_mut()) {
+        for (id, op) in ops {
+            hk.apply(id, op);
+        }
+    }
+}
+
+/// 关掉整个应用：销毁全部窗口，并保证消息循环一定收到退出消息。
+///
+/// 托盘「退出」与 App 级宿主的 `WM_CLOSE`（任务管理器结束任务 / 注销 / 关机）共用这一条
+/// ——两个入口说的是同一件事，语义分叉只会让其中一条某天悄悄失效。
+///
+/// **调用方须已释放所有借用**：`DestroyWindow` 会同步派发 `WM_DESTROY`（铁律 6）。
+unsafe fn quit_app() {
+    // 连同**旁路队列**一起截断。`TrayAction::Quit` 会 `break` 掉其后的意图，但开窗请求
+    // 的配置存在核心层的队列里、不在意图队列上（见 `TrayAction::OpenWindow` 的位置标记
+    // 设计）——回调若写成 `ctx.quit(); ctx.open_window(..)`，那个 `OpenWindow` 标记确实
+    // 不会被执行，可配置还留在队列里，随后的应用级收尾就会把它建出来：退出途中闪一个
+    // 窗口出来。截断点必须两条队列对齐，否则"Quit 之后的意图一律丢弃"就只兑现了一半。
+    let _ = crate::event::take_callback_windows();
+    let windows = live_windows();
+    for h in &windows {
+        let _ = DestroyWindow(*h);
+    }
+    // 谁来发退出消息，两种情形正好互补：有窗口且非常驻时，最后一个窗口的 `WM_DESTROY`
+    // 已经发过（见 `should_quit_on_last_window`）；常驻模式下那里刻意不发，而零窗口时
+    // 上面的循环根本是空转、一条 `WM_DESTROY` 都不产生。这两种都得自己补。
+    if windows.is_empty() || RESIDENT.with(|r| r.get()) {
+        PostQuitMessage(0);
     }
 }
 
@@ -1267,12 +1450,28 @@ unsafe fn run_windowed(
     let hinst = HINSTANCE(hmodule.0);
     register_window_class(hinst);
 
-    let hwnd = create_window(hinst, &cfg, handler, cfg.renderer, None).expect("主窗口创建失败");
+    // 常驻模式：不建主窗，直接进消息循环。窗口日后由托盘/热键回调按需建出，
+    // 关掉即销毁——渲染资源随 `WindowState` 的 drop 归还，这正是本模式的全部意义。
+    RESIDENT.with(|r| r.set(cfg.resident));
+    let hwnd = if cfg.resident {
+        None
+    } else {
+        Some(create_window(hinst, &cfg, handler, cfg.renderer, None).expect("主窗口创建失败"))
+    };
 
     // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
-    // 某个窗口，故都挂到这个 message-only 窗口上（见 `AppHost`）。
+    // 某个窗口，故都挂到这个不可见窗口上（见 `AppHost`）。
+    //
+    // 渲染后端常驻模式下取自 `cfg`：正常路径是"子窗沿用主窗那次的选择"，而这里没有
+    // 主窗可沿用，配置本身就是唯一的来源。
     create_app_host(hinst, hwnd, cfg.renderer);
     let host_hwnd = app_host_hwnd();
+    if cfg.resident && host_hwnd.0.is_null() {
+        // 常驻模式下宿主窗口是唯一的落点：建不起来就既没有托盘也没有热键，进程会成为
+        // 一个谁也看不见、谁也关不掉的僵尸。正常模式还有主窗兜底，故只在这里退出。
+        eprintln!("[windui] 常驻模式启动失败：App 级消息宿主未能创建，进程退出");
+        return;
+    }
 
     // 全局热键（若配置）：注册到 App 级宿主，状态存入 AppHost（drop 时自动注销）。
     // 注册失败不阻止启动——热键是全局独占资源，被占用是常态而非异常。
@@ -1292,6 +1491,14 @@ unsafe fn run_windowed(
         }
     }
 
+    // 应用级周期回调（`App::on_interval`）：常驻模式下没有主窗可挂定时器，改挂本宿主。
+    // 非常驻时这张表是空的——那些回调已经交给主窗的 `UiHost`，由 `create_window` 注册。
+    // id 从 1 起，与 `create_window` 给主窗编号的方式一致。
+    for (i, d) in crate::app::app_interval_durations().iter().enumerate() {
+        let ms = (d.as_millis() as u32).max(1);
+        SetTimer(Some(host_hwnd), i + 1, ms, None);
+    }
+
     // 跨线程唤醒：投向 App 级宿主而非某个窗口——绑在窗口上的话，那个窗口一关，后台
     // 线程的唤醒就静默丢失，通道数据再也不上屏。此前积压的 wake 会在绑定时立即补发。
     if let Some(w) = &waker {
@@ -1301,14 +1508,19 @@ unsafe fn run_windowed(
     }
 
     // 单实例首实例：建 message-only 窗口接收二次实例 argv（UI 线程切页 + 激活主窗口）。
+    // 常驻模式传 0：没有主窗可激活，那一步在 `single_instance::win::activate` 里自行跳过，
+    // argv 转发与回调照常——二次实例该做什么由应用自己在回调里决定。
     if let Some(si) = single {
-        crate::single_instance::install_listener(&si.app_id, hwnd.0 as isize, si.on_second);
+        let main = hwnd.map(|h| h.0 as isize).unwrap_or(0);
+        crate::single_instance::install_listener(&si.app_id, main, si.on_second);
     }
 
     // 启动即隐藏：常驻托盘类应用不该在启动时闪一下窗口。此处**不调用 ShowWindow**，
     // 窗口保持初始的不可见态，等托盘点击或全局热键送来 WindowOp::Show。
-    if !cfg.start_hidden {
-        show_window(hwnd);
+    if let Some(hwnd) = hwnd {
+        if !cfg.start_hidden {
+            show_window(hwnd);
+        }
     }
 
     run_message_loop();
@@ -1738,6 +1950,50 @@ unsafe extern "system" fn wnd_proc(
             handle_activate(hwnd, wparam);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        // 系统设置变更。**只认主题那一项**——字体、区域、鼠标速度、电源计划都走同一条
+        // 消息，不筛就会在用户改任何系统设置时白重建一次界面。
+        //
+        // 收在**每个窗口**而不是 App 级宿主上：这条消息是广播给顶层窗口的，而宿主在
+        // 有主窗时是 message-only 窗口——广播根本到不了它（此前挂在那里，于是
+        // `App::on_system_theme_changed` 一次都没触发过）。每个窗口通知自己的宿主，
+        // 应用级那份回调随主窗的宿主一起被叫到。
+        WM_SETTINGCHANGE => {
+            let is_theme = lparam.0 != 0 && {
+                let name = windows::core::PCWSTR(lparam.0 as *const u16);
+                name.to_string().is_ok_and(|s| s == "ImmersiveColorSet")
+            };
+            if is_theme {
+                // 先读完再借宿主：`system_prefers_dark` 会调 OS，而「OS 调用不留在
+                // 借用里」是这一层的统一纪律（铁律 6）。
+                let dark = system_prefers_dark();
+                let repaint = {
+                    // 与其余跑用户回调的站点一致：守卫拦"在回调里直接调
+                    // `PickDialog::pick_*`"（debug 期 assert），那个误用会让 OS 鼠标捕获
+                    // 错乱到指针彻底失灵。正确写法是 `ctx.defer_blocking`，由下面的
+                    // `apply_dialog_request` 在分发返回之后执行。
+                    let _guard = super::EventDispatchGuard::enter();
+                    state_from(hwnd).is_some_and(|s| s.handler.on_system_theme_changed(dark))
+                };
+                if repaint {
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+                // 与指针 / 拖放 / 定时器路径同一套收尾：窗口操作（含开窗请求）→ 对话框
+                // → 关窗。凡是跑了用户回调的站点都要跟这三步，漏了第一步的症状是回调里
+                // `ctx.open_window` 的请求一直排着队，要等用户下一次动鼠标才建窗。
+                //
+                // 这条臂此前从没真正跑通过（旧位置在 App 级宿主上，那里收不到广播，且
+                // 指针类型是错的），所以收尾的缺失一直被掩盖着，搬过来才第一次成为活路径。
+                apply_window_op(hwnd);
+                apply_dialog_request(hwnd);
+                if state_from(hwnd)
+                    .map(|s| s.handler.wants_close())
+                    .unwrap_or(false)
+                {
+                    destroy_window(hwnd);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         // 非客户区按下（标题栏、边框、系统按钮）：这类消息不进 `on_pointer`，系统拿去
         // 拖窗 / 缩放，客户区里开着的菜单没人收——先让宿主收浮层，再交默认处理。
         // 无边框窗口的右键已在上面单独接走。
@@ -1835,10 +2091,13 @@ unsafe extern "system" fn wnd_proc(
             release_modal_owner(hwnd);
             // 最后一个窗口关闭才结束消息循环：多窗口下关掉设置子窗不该把整个应用带走。
             //
+            // 常驻模式下连"最后一个"也不退出：零窗口正是那个模式的常态，退出只能由
+            // 托盘的「退出」发起（见 `run_tray_actions` 的 `Quit`）。
+            //
             // 先发退出消息让消息循环立即响应，再释放资源（避免阻塞退出感知）。
             // TrayState::drop 会调 Shell_NotifyIconW(NIM_DELETE)，需在进程退出前执行，
             // 因此不能 leak，仍须显式 drop——但顺序调整后用户感知到的关闭延迟消失。
-            if unregister_window(hwnd) {
+            if should_quit_on_last_window(RESIDENT.with(|r| r.get()), unregister_window(hwnd)) {
                 PostQuitMessage(0);
             }
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
@@ -2222,6 +2481,58 @@ unsafe fn open_pending_windows(hwnd: HWND) {
     }
 }
 
+/// 建出一个**托盘 / 全局热键回调**排队的窗口（`TrayCtx::open_window` / `HotkeyCtx::open_window`）。
+///
+/// 与 [`open_pending_windows`] 是两条并行的路：那条的请求挂在发起窗口的宿主上，这条的
+/// 发起者不属于任何窗口——常驻模式下更是连一个窗口都没有，故请求走应用级的工厂
+/// （`app::take_callback_window`）还原成「配置 + 宿主」。
+///
+/// **调用方须已释放所有 `AppHost` / `WindowState` 借用**：建窗会同步派发
+/// WM_NCCREATE/WM_SIZE/WM_PAINT 重入窗口过程（铁律 6）。
+///
+/// 新窗口一律是独立顶层窗口（owner 为 `None`）：托盘与热键在所有窗口之外，没有一个
+/// 能当 owner 的"发起窗口"；真要归属关系，那是窗口内 `ctx.open_window` 的事。
+unsafe fn open_callback_window() {
+    let Some(item) = crate::app::take_callback_window(&|key| find_single_window(key).is_some())
+    else {
+        return;
+    };
+    materialize_window(item);
+}
+
+/// 建出**全部**排队的回调开窗请求（热键路径一次取完，见 `HotkeyCtx::open_window`）。
+unsafe fn open_callback_windows() {
+    for item in crate::app::take_callback_windows(&|key| find_single_window(key).is_some()) {
+        materialize_window(item);
+    }
+}
+
+/// 把一条已还原的开窗结果落到 OS 上（新建或激活既有单例窗口）。
+unsafe fn materialize_window(item: NewWindow) {
+    match item {
+        // 单例已开着：激活它，本次不建。找不到说明它在判定与执行之间被关掉了——
+        // 正常竞态，什么都不做即可（同 `open_pending_windows`）。
+        NewWindow::Focus(key) => {
+            if let Some(existing) = find_single_window(&key) {
+                show_and_activate(existing);
+            }
+        }
+        NewWindow::Create(cfg, handler) => {
+            let Ok(hmodule) = GetModuleHandleW(None) else {
+                return;
+            };
+            let hinst = HINSTANCE(hmodule.0);
+            // 后端沿用应用那次的选择；宿主没了（理论上不会，托盘消息正由它派发）就用默认。
+            let renderer = app_host().map(|h| h.renderer).unwrap_or_default();
+            if let Some(child) = create_window(hinst, &cfg, handler, renderer, None) {
+                // 托盘/热键开的窗口是用户此刻要用的东西，建完直接前置——否则它会开在
+                // 当前前台窗口的背后，用户按了热键却什么也没看见。
+                show_and_activate(child);
+            }
+        }
+    }
+}
+
 /// 消费运行期热键操作队列（改绑/启停），落地到 `HotkeyState`。
 ///
 /// 队列在窗口的 handler 上（`HotkeyHandle` 排进去的），而 `HotkeyState` 在 App 级宿主上，
@@ -2323,10 +2634,16 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
 /// 动作分类由自由函数 `tray::classify` 完成，不碰 state——右键路径因此全程只在
 /// 「建菜单」「跑选中项」两处取借用。
 unsafe fn on_tray_message(lparam: LPARAM) {
-    // 菜单要弹在主窗口名下：`TrackPopupMenu` 先 `SetForegroundWindow` 才能让菜单在
-    // 点击别处时正常消失，而 message-only 窗口不可见、前置它没有意义。
-    let Some(main) = app_host().map(|h| h.main) else {
-        return;
+    // 菜单要弹在一个能被前置的窗口名下：`TrackPopupMenu` 先 `SetForegroundWindow` 才能
+    // 让菜单在点击别处时正常消失。有主窗就用主窗；常驻模式下没有主窗，改用 App 级宿主
+    // ——它在那个模式下正是为此建成隐藏的顶层窗口而非 message-only（见 `create_app_host`）。
+    let main = app_host().and_then(|h| h.main);
+    let anchor = match main.or_else(|| {
+        let h = app_host_hwnd();
+        (!h.0.is_null()).then_some(h)
+    }) {
+        Some(h) => h,
+        None => return,
     };
     match tray::classify(lparam) {
         tray::TrayEvent::Click(kind) => {
@@ -2347,7 +2664,7 @@ unsafe fn on_tray_message(lparam: LPARAM) {
                 return;
             };
             // 弹菜单：**无借用**。菜单存续期间窗口过程会被反复重入。
-            let id = tray::track_menu(main, menu);
+            let id = tray::track_menu(anchor, menu);
             if id == 0 {
                 return; // 用户取消
             }
@@ -2365,19 +2682,40 @@ unsafe fn on_tray_message(lparam: LPARAM) {
         }
         tray::TrayEvent::Other => {}
     }
+    // 托盘回调与热键回调同属"不属于任何窗口"的入口，收尾也必须同一套：菜单项里
+    // `set_tooltip` / `set_enabled` 的意图在零窗口时只有这里能落地
+    // （`apply_tray_ops` 的另一个调用点在 `apply_window_op` 内，那是窗口路径）。
+    //
+    // 放在 match 之外、两条分支的公共出口：点击路径与菜单路径都要走到。此刻所有借用
+    // 都已释放（每条分支内部自己保证），`Quit` 之后再跑一次也是安全的——宿主要到消息
+    // 循环退出后才由 `destroy_app_host` 销毁，`TrayState` 此刻仍在世。
+    apply_app_effects(false);
 }
 
 /// 按声明顺序执行托盘回调的意图队列。**调用方须已释放 `WindowState` 借用**——
 /// Show/Hide/Quit 都会同步重入 `wnd_proc`。
 ///
 /// 逐条执行且每条之间不持有借用，故「先 notify 再 show_window」这类组合成立。
-unsafe fn run_tray_actions(hwnd: HWND, actions: Vec<tray::TrayAction>) {
+///
+/// `main` 为 `None` 即常驻模式（没有主窗）：显隐意图无处可施，静默跳过——那个模式下
+/// 唤起界面的方式是 `TrayCtx::open_window`，回调写 `show_window()` 本就是配错了。
+unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
     for action in actions {
         match action {
             // 显隐复用窗口操作通道：托盘与热键、事件路径的显隐语义必须一致
             // （例如 Show 需处理「窗口当前是最小化」的情形）。
-            tray::TrayAction::Show => run_window_op(hwnd, Some(WindowOp::Show)),
-            tray::TrayAction::Hide => run_window_op(hwnd, Some(WindowOp::Hide)),
+            tray::TrayAction::Show => {
+                if let Some(hwnd) = main {
+                    run_window_op(hwnd, Some(WindowOp::Show));
+                }
+            }
+            tray::TrayAction::Hide => {
+                if let Some(hwnd) = main {
+                    run_window_op(hwnd, Some(WindowOp::Hide));
+                }
+            }
+            // 位置标记：取队首那个配置建窗（见 `TrayAction::OpenWindow`）。
+            tray::TrayAction::OpenWindow => open_callback_window(),
             // 不走 WindowOp：托盘「退出」是应用的唯一真实出口，**刻意绕过
             // `hide_on_close`**（否则开了关闭转隐藏的应用将永远退不掉）。
             //
@@ -2391,9 +2729,10 @@ unsafe fn run_tray_actions(hwnd: HWND, actions: Vec<tray::TrayAction>) {
             // `state_from` 取到另一个窗口的 state」这一理论缺口。macOS 侧
             // `NSApp::terminate` 本就不返回，两平台由此在构造上一致。
             tray::TrayAction::Quit => {
-                for h in live_windows() {
-                    let _ = DestroyWindow(h);
-                }
+                // 常驻模式下 `WM_DESTROY` 不再发退出消息（零窗口是那个模式的常态），
+                // 零窗口时上面更是一条 `WM_DESTROY` 都不产生——`quit_app` 负责补上。
+                // 与宿主的 `WM_CLOSE` 共用它：托盘「退出」和「结束任务」必须同义。
+                quit_app();
                 break;
             }
             // 先取出投递目标释放借用，再调 Shell_NotifyIconW（它会跨线程发消息）。
@@ -3139,7 +3478,30 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
 
 #[cfg(test)]
 mod live_windows_tests {
-    use super::{swap_rb_inplace, swap_rb_rect, LiveWindows, Rect};
+    use super::{should_quit_on_last_window, swap_rb_inplace, swap_rb_rect, LiveWindows, Rect};
+
+    /// 常规模式：最后一个窗口关掉才退出，之前不退。
+    #[test]
+    fn windowed_app_quits_with_its_last_window() {
+        assert!(!should_quit_on_last_window(false, false), "还有窗口活着");
+        assert!(
+            should_quit_on_last_window(false, true),
+            "最后一个关掉该退出"
+        );
+    }
+
+    /// 常驻模式：零窗口是常态，关光了也不退——退出只能由托盘的「退出」发起。
+    ///
+    /// 错成 true 的症状是「常驻服务开了个窗口，关掉它整个托盘就没了」，而那正是
+    /// 本模式要根除的那个 `hide_on_close` 变通做法的翻版。
+    #[test]
+    fn resident_app_survives_its_last_window() {
+        assert!(
+            !should_quit_on_last_window(true, true),
+            "常驻模式零窗口不退出"
+        );
+        assert!(!should_quit_on_last_window(true, false));
+    }
 
     /// 单窗口：关掉它就是关掉最后一个，消息循环该退出。
     #[test]

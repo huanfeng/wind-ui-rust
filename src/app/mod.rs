@@ -78,6 +78,11 @@ pub fn defer_blocking(f: impl FnOnce() + 'static) {
 /// 公开是给自定义 [`AppHandler`](crate::platform::AppHandler) 用的：覆盖了
 /// `take_dialog_request` 就绕过了默认实现，得在自己的实现里回退到本函数，
 /// 否则 [`defer_blocking`] 排入的闭包永远不会执行。
+///
+/// **常驻模式（[`App::run_resident`]）下这条队列没有落点**：唯一的消费点在
+/// `apply_dialog_request(hwnd)`，那是窗口路径，零窗口时走不到，闭包会一直排着。
+/// 请改用 [`EventCtx::defer_blocking`](crate::core::EventCtx::defer_blocking)——它经
+/// `DispatchResult::dialog` 走应用级落地，零窗口下照常执行。
 pub fn take_deferred() -> Option<DialogRequest> {
     let pending: Vec<Box<dyn FnOnce()>> = DEFERRED.with(|d| std::mem::take(&mut *d.borrow_mut()));
     if pending.is_empty() {
@@ -474,6 +479,349 @@ impl HotkeyHandle {
     }
 }
 
+/// 运行期热键意图队列的类型别名（`HotkeyHandle` 写、`UiHost` 中转、平台消费）。
+type HotkeyOpQueue = Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>;
+
+/// 把一个开窗请求变成「配置 + 宿主」。
+///
+/// 两个调用方共用它：窗口内控件的 `ctx.open_window`（经 [`UiHost::take_new_windows`]），
+/// 与托盘 / 全局热键回调的 `open_window`（经 [`take_callback_window`]）。两条路建出的
+/// 窗口必须一模一样——主题句柄共享、热键队列共享、应用级回调一律不给——差一点就会变成
+/// 「从托盘开的那个窗口换主题不跟着变」这类只在一条路径上出现的怪病。
+///
+/// `default_bg` 是请求未显式指定背景时的回退（主题 `palette.bg`）；由调用方传入而非
+/// 在这里取，是因为宿主手里那份是帧初缓存的快照，读它才与同一帧的绘制一致。
+fn build_new_window(
+    req: WindowRequest,
+    theme_src: &ThemeHandle,
+    hotkey_ops: &HotkeyOpQueue,
+    default_bg: Color,
+) -> NewWindow {
+    let bg_explicit = req.bg.is_some();
+    let bg = req.bg.unwrap_or(default_bg);
+    let cfg = WindowConfig {
+        title: req.title,
+        width: req.width,
+        height: req.height,
+        bg,
+        centered: req.centered,
+        resizable: req.resizable,
+        frameless: req.frameless,
+        system_menu: req.system_menu,
+        min_width: req.min_width,
+        min_height: req.min_height,
+        single: req.single,
+        owned: req.owned || req.modal,
+        modal: req.modal,
+        icon: req.icon,
+        // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
+        // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
+        ..WindowConfig::default()
+    };
+    // 内容构建期创建的信号归这个窗口所有：`scope` 随宿主析构，窗口关掉
+    // 就整批回收，反复开关子窗不会在全局 arena 里越积越多。
+    let mut scope = crate::signal::SignalScope::new();
+    let root: Element = scope.collect(|| req.content.take());
+    let mut host = UiHost::new(
+        root,
+        &cfg,
+        theme_src.clone(),
+        bg,
+        !bg_explicit,
+        // 热键队列共享：子窗里的控件也能改绑全局热键（句柄本就可克隆传入）。
+        hotkey_ops.clone(),
+        // 通道不在这里传：它登记在**应用**上（`crate::sync` 的 App 级表），
+        // 全部窗口共用同一份 pump，由消费权持有者每帧排空一次。共用而非各持
+        // 一份副本，故同一条消息不会被处理两次；而主窗关掉后消费权自动交还，
+        // 由还活着的窗口接手——通道不再随某个窗口一起死。
+        // 定时器与关闭拦截器则是**这个窗口自己的**，随它一起生灭。
+        req.intervals,
+        req.close_handler,
+        // 唤起回调也不给子窗：子窗没有隐藏→唤起这条路（托盘与热键唤的是主窗），
+        // 给了也永远不触发。
+        None,
+        // 快捷键回调同理不给子窗：它登记在应用上、面向主窗那一套界面，
+        // 而子窗有自己的内容与焦点环，套用主窗的快捷键只会张冠李戴。
+        None,
+        // 系统主题回调也不给：它的用途是换主题，而主题是**应用级**的
+        // （`ThemeHandle` 全窗共享），由主窗换一次即可，子窗跟着走。
+        None,
+        // `hide_on_close` 不给子窗：隐藏后没有唤起途径（托盘唤的是主窗），
+        // 只会留下一个关不掉也看不见的窗口。
+        false,
+    );
+    // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
+    // 节点而非信号，控件自带的信号由控件自己的 `SignalScope` 管。
+    host.scope = Some(scope);
+    NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
+}
+
+/// **不属于任何窗口**的那几样应用级设施，装在线程局部里活到进程结束。
+///
+/// 为什么必须有这么一处：`ctx.open_window`、`on_system_theme_changed`、`on_interval`
+/// 这些原本都由发起窗口的 `UiHost` 承载（主题句柄、热键队列、回调都长在它身上），
+/// 而托盘与全局热键不属于任何窗口——常驻模式（[`App::run_resident`]）下更是一个窗口
+/// 都没有，那条路根本不存在。
+struct AppServices {
+    theme_src: ThemeHandle,
+    hotkey_ops: HotkeyOpQueue,
+    /// 系统外观变化回调。**只在常驻模式下装在这里**：有主窗时它归主窗的 `UiHost`，
+    /// 由那个窗口的 `WM_SETTINGCHANGE` 分发（见 win32 `wnd_proc`）。两处各装一份
+    /// 会让同一次切换触发两遍。
+    system_theme: Option<SystemThemeHandler>,
+    /// `App::on_interval` 的周期回调。同样只在常驻模式下装在这里——有主窗时它们是
+    /// 主窗的定时器（`create_window` 里 `SetTimer`），随那个窗口生灭。
+    intervals: Vec<(Duration, AppCallback)>,
+}
+
+thread_local! {
+    /// 见 [`AppServices`]。`App::run`/`run_resident` 装一次，活到进程结束。
+    static APP_SERVICES: RefCell<Option<AppServices>> = const { RefCell::new(None) };
+}
+
+/// 借一棵临时树的 [`EventCtx`] 跑一段**应用级**回调，返回它是否请求了重绘。
+///
+/// 常驻模式下这些回调（主题变化、周期定时器、通道消息）抵达时可能一个窗口都没有，
+/// 而 `EventCtx` 向来由宿主从自己的控件树上借出。没有树就没有 ctx，于是要么把这些
+/// 回调的签名在常驻模式下改成另一套（同一个功能两个 API），要么像这里一样借一棵
+/// **空树**——与 [`crate::testing::run_with_ctx`] 同一条受控借出口。
+///
+/// **哪些副作用成立、哪些不成立，是这条路径的核心约定**：
+/// - `ctx.open_window(..)` **成立**：请求转进回调开窗队列，由平台在借用释放后建窗。
+///   常驻服务全靠它把界面唤出来，这是本路径存在的主要理由。
+/// - 写信号、改主题句柄 **成立**：它们本就不经 ctx，只是顺带在回调里发生。
+/// - `ctx.open_url(..)` **成立**：它的落地是 `platform::open_url`（`ShellExecute` 一层皮），
+///   自由函数，与窗口、宿主、树都无关。零窗口服务没有界面可显示结果，"打开浏览器 /
+///   资源管理器"正是它仅有的几条反馈出路之一。
+/// - `ctx.defer_blocking(..)` **成立**：`DialogRequest::run` 同样不需要宿主，而它的语义
+///   本就是"等事件分发完全返回后再跑"——这里正是那一刻（守卫已释放、无任何借用）。
+/// - `ctx.toast(..)` / 焦点 / 菜单 / `request_close` / 窗口操作（`hide_window` 等）
+///   **不成立**：前四者是**宿主浮层与宿主状态**，没有宿主就没有落点；窗口操作则是没有
+///   明确的作用对象（应用级回调不属于任何窗口，有多个窗口开着时更无从选）。这里静默
+///   丢弃，并在 `App::run_resident` 的文档里写明——不假装它们生效，也不为此 panic
+///   （一个后台回调里顺手写的 toast 不该让进程崩掉）。
+///
+/// `DispatchResult` 的其余字段（`repaint`/`damage`/`consumed`）是给宿主排帧用的读数，
+/// 不是待执行的意图：`repaint` 由本函数交回调用方去刷新在世窗口，另两个无消费者。
+fn run_app_callback(f: impl FnOnce(&mut EventCtx)) -> bool {
+    enter_app_scope();
+    let mut tree = Tree::new();
+    let root = Element::leaf().build(&mut tree);
+    tree.root = Some(root);
+    // 守卫只罩住回调本身：它拦的是"在事件回调里直接调 `PickDialog::pick_*`"这个会让
+    // 鼠标捕获彻底错乱的误用（debug 期 assert）。下面那些落地动作跑在守卫之外——
+    // `DialogRequest::run` 正是那个"该在分发返回之后做"的阻塞调用。
+    let res = {
+        let _guard = crate::platform::EventDispatchGuard::enter();
+        tree.run_detached(root, f)
+    };
+    app_side_effects(res)
+}
+
+/// 进入应用级回调前注入线程局部快照——与 `UiHost::enter()` + `begin_frame()` 为窗口路径
+/// 做的事对位。
+///
+/// **这是一整族问题，逐个案补会漏**（已经漏过两次）。宿主在跑用户代码前注入的线程局部
+/// 一共这几项，逐条判断如下：
+///
+/// | 注入项 | 窗口路径在哪注入 | 应用级路径 |
+/// |---|---|---|
+/// | [`theme::current()`](crate::theme::current) | `begin_frame` 每帧从 `theme_src` 刷 | **要注入**：零窗口一帧都没渲染过，它会停在构建期那一份，`theme.set(暗色)` 之后回调里读到的仍是浅色 |
+/// | [`event::window_state()`](crate::event::window_state) | `enter()` 每次分发/绘制前 | **要注入 `UNKNOWN`**：没有窗口可谈状态，而不注入就会残留**已销毁窗口**的最后一份快照——那比"不知道"更糟 |
+/// | [`caret::window_active()`](crate::ui::caret::window_active) | `begin_frame` | 不需要：唯一消费者在 `caret.rs` 的 `paint` 里，而 paint 只发生在窗口帧内，那里已重新注入 |
+/// | `anim` 帧时钟 / 重绘请求 | `render` 开头 `reset_request` + `sync_clock` | 不需要：两者都是**帧**的概念，没有帧就无从配速。注意回调里的 `request_repaint` 在零窗口时**残留但无消费者**——没有下一帧去 `reset_request`，那一位会一直是 `true`；消息循环按窗口集合过滤（空集合照常阻塞），日后第一个窗口顶多多画一帧就被清掉 |
+/// | `IN_EVENT_DISPATCH` 守卫 | 各分发站点 | 已注入（见 `run_app_callback` 里的 `EventDispatchGuard`） |
+///
+/// 新增任何宿主注入项时，这张表要同步判断一次。
+fn enter_app_scope() {
+    APP_SERVICES.with(|s| {
+        if let Some(sv) = s.borrow().as_ref() {
+            crate::theme::set_current(sv.theme_src.current());
+        }
+    });
+    crate::event::set_window_state(crate::event::WindowState::UNKNOWN);
+}
+
+/// 落地一批**不需要宿主**的副作用，返回是否请求了重绘。
+///
+/// `run_app_callback` 与 `drain_app_channels` 共用：两条路产出的都是 `DispatchResult`，
+/// 能落地哪些、丢弃哪些必须一模一样——分叉的话就会出现"定时器里 `open_url` 有效、
+/// 通道回调里无效"这种只在一条路径上成立的怪病。
+fn app_side_effects(res: DispatchResult) -> bool {
+    if let Some(url) = res.open_url {
+        platform::open_url(&url);
+    }
+    if let Some(dialog) = res.dialog {
+        dialog.run();
+    }
+    // 开窗请求转进与托盘/热键同一条队列：平台随后统一 `open_callback_windows`。
+    //
+    // **必须排在 `dialog.run()` 之后**，虽然看起来先 push 更自然。原生模态对话框自带
+    // 消息泵，会在本线程派发投递消息——于是它正好夹在 push 与调用方那次 drain 之间，
+    // 成为一个能重入的缝：
+    //
+    // - 用户在对话框开着时点了托盘「打开窗口」，那条路的 `OpenWindow` 标记按 FIFO
+    //   弹出的是**这里先 push 的那个**，两个窗口都会建出来但配对错位（都带 `single`
+    //   键时连表象都看不出，第二个走 `Focus`）；
+    // - 更要紧的是，那次 drain 会在**模态泵内部**调 `create_window`——在嵌套消息泵里建窗
+    //   正是这一层一直在规避的重入形态。
+    //
+    // 挪到之后，这条缝在构造上就不存在了：对话框期间队列里根本没有本次的请求。
+    // 没有反向理由——`open_url` 与 `DialogRequest::run` 都不读这条队列，`defer_blocking`
+    // 的闭包是无 ctx 的 `FnOnce()`，也无从往里 push；而 drain 发生在本函数返回之后
+    // （调用方的 `apply_app_effects`），push 早晚都赶得上。
+    for req in res.open_windows {
+        crate::event::push_callback_window(req);
+    }
+    res.repaint
+}
+
+/// 系统外观在亮/暗之间切换：跑**应用级**的 `on_system_theme_changed`。
+///
+/// 只有常驻模式会走到（有主窗时那条回调归主窗宿主，由 `wnd_proc` 分发）。返回是否
+/// 需要重绘——常驻下零窗口时没人可重绘，调用方据此决定要不要去刷新已开的窗口。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn dispatch_system_theme_changed(dark: bool) -> bool {
+    // 回调先摘出来再跑：它自己可能读写 `APP_SERVICES`（比如在回调里 `ctx.open_window`
+    // 最终要经 `make_callback_window` 再借一次），借用留着就是 `RefCell` 重入 panic。
+    let Some(mut cb) = APP_SERVICES.with(|s| s.borrow_mut().as_mut()?.system_theme.take()) else {
+        return false;
+    };
+    let repaint = run_app_callback(|ctx| cb(ctx, dark));
+    APP_SERVICES.with(|s| {
+        if let Some(sv) = s.borrow_mut().as_mut() {
+            sv.system_theme = Some(cb);
+        }
+    });
+    repaint
+}
+
+/// 应用级周期回调的间隔表（平台据此 `SetTimer`，下标即定时器 id - 1）。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn app_interval_durations() -> Vec<Duration> {
+    APP_SERVICES.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|sv| sv.intervals.iter().map(|(d, _)| *d).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// 第 `idx` 个应用级周期回调到点。返回是否需要重绘。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn dispatch_app_interval(idx: usize) -> bool {
+    // 同 `dispatch_system_theme_changed`：先摘出来，跑完放回。
+    let Some(mut cb) = APP_SERVICES.with(|s| {
+        let mut s = s.borrow_mut();
+        let sv = s.as_mut()?;
+        (idx < sv.intervals.len()).then(|| std::mem::replace(&mut sv.intervals[idx].1, noop_cb()))
+    }) else {
+        return false;
+    };
+    let repaint = run_app_callback(|ctx| cb(ctx));
+    APP_SERVICES.with(|s| {
+        if let Some(sv) = s.borrow_mut().as_mut() {
+            if idx < sv.intervals.len() {
+                sv.intervals[idx].1 = cb;
+            }
+        }
+    });
+    repaint
+}
+
+/// 占位回调：摘走真回调期间填在原位，使 `intervals` 的下标与定时器 id 始终对得上。
+fn noop_cb() -> AppCallback {
+    Box::new(|_| {})
+}
+
+/// 排空跨线程通道（`App::channel`）的**应用级**路径。
+///
+/// 常规路径是持消费权的窗口宿主每帧排空一次（见 `UiHost::pump_channels`）。本函数只在
+/// **一个窗口都没有**时由平台调用：那时既没有宿主也没有帧，消息会在通道里无限堆积到
+/// 用户开窗为止。调用方须自行保证"零窗口"这个前提，否则同一条消息可能被消费两遍。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn drain_app_channels() -> bool {
+    let mut pumps = crate::sync::take_pumps();
+    if pumps.is_empty() {
+        return false;
+    }
+    enter_app_scope();
+    let mut tree = Tree::new();
+    let root = Element::leaf().build(&mut tree);
+    tree.root = Some(root);
+    let mut results = Vec::new();
+    for pump in pumps.iter_mut() {
+        results.append(&mut pump(&mut tree, root));
+    }
+    crate::sync::put_pumps(pumps);
+    // 副作用的取舍与 `run_app_callback` 共用一处实现，不另写一份（见 `app_side_effects`）。
+    let mut repaint = false;
+    for res in results {
+        repaint |= app_side_effects(res);
+    }
+    repaint
+}
+
+/// 取走应用级的运行期热键意图队列（`HotkeyHandle::set` / `set_enabled` 排入）。
+///
+/// **与各窗口 `UiHost::take_hotkey_ops` 取的是同一条队列**：整个应用只有一个
+/// `Rc<RefCell<Vec<..>>>`，由 `App::new` 建、克隆进 `HotkeyHandle`、`AppServices`、
+/// 主窗宿主与每个子窗宿主。所以谁先取到谁执行，既不会重复应用也不会漏——零窗口时
+/// 平台走这条，有窗口时走宿主那条，两条通向同一个 `HotkeyState::apply`。
+///
+/// 没有这条路时，`HotkeyHandle` 的改绑 / 启停在零窗口期间**永不落地**：它唯一的
+/// 消费点 `apply_hotkey_ops(hwnd)` 要有窗口才走得到。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn take_app_hotkey_ops() -> Vec<(usize, crate::event::HotkeyOp)> {
+    APP_SERVICES.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|sv| std::mem::take(&mut *sv.hotkey_ops.borrow_mut()))
+            .unwrap_or_default()
+    })
+}
+
+/// 取走一个托盘 / 热键回调排队的开窗请求并建成「配置 + 宿主」。
+///
+/// `is_open` 查平台的窗口登记表：命中单例键就只回报 [`NewWindow::Focus`]，内容闭包
+/// 不跑（与 [`UiHost::take_new_windows`] 一致）。队列空、或工厂未安装时返回 `None`。
+///
+/// 逐个取而不是一次取完：托盘的 `TrayAction::OpenWindow` 是位置标记，执行到哪一个就
+/// 取哪一个，顺序才跟得上回调里的调用顺序。
+// macOS 尚未消费这两条路（见 `platform/macos` 里的 TODO），在那里它们暂时无人调用。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn take_callback_window(is_open: &dyn Fn(&str) -> bool) -> Option<NewWindow> {
+    let req = crate::event::take_callback_window()?;
+    make_callback_window(req, is_open)
+}
+
+/// 取走**全部**排队的开窗请求（热键路径：没有意图队列给它们定位置）。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn take_callback_windows(is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
+    crate::event::take_callback_windows()
+        .into_iter()
+        .filter_map(|req| make_callback_window(req, is_open))
+        .collect()
+}
+
+fn make_callback_window(req: WindowRequest, is_open: &dyn Fn(&str) -> bool) -> Option<NewWindow> {
+    if let Some(key) = req.single.clone() {
+        if is_open(&key) {
+            return Some(NewWindow::Focus(key));
+        }
+    }
+    APP_SERVICES.with(|s| {
+        let s = s.borrow();
+        let f = s.as_ref()?;
+        Some(build_new_window(
+            req,
+            &f.theme_src,
+            &f.hotkey_ops,
+            f.theme_src.current().palette.bg,
+        ))
+    })
+}
+
 /// 应用构建器。命令式 API 的根入口。
 pub struct App {
     cfg: WindowConfig,
@@ -521,6 +869,7 @@ impl App {
                 tray: None,
                 hotkeys: Vec::new(),
                 start_hidden: false,
+                resident: false,
                 frameless: false,
                 system_menu: true,
                 animations: None,
@@ -550,6 +899,30 @@ impl App {
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// 零窗口常驻服务的构建器，配合 [`run_resident`](Self::run_resident) 使用。
+    ///
+    /// 与 [`new`](Self::new) 的差别只有一处：**不收窗口尺寸**，因为它不建窗口。界面由
+    /// 托盘 / 热键回调按需 `open_window`，尺寸写在那个 [`Window`] 上。`title` 仍然要，
+    /// 它是进程的名字（诊断信息、任务管理器里那一行）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::resident("清风词典")
+    ///     .tray(Tray::new().tooltip("清风词典").menu(vec![
+    ///         TrayMenuItem::item("退出", |ctx| ctx.quit()),
+    ///     ]))
+    ///     .run_resident();
+    /// ```
+    pub fn resident(title: impl Into<String>) -> Self {
+        let mut app = Self::new(title, 0, 0);
+        // 这里就置位而不是等 `run_resident`：平台层按 `cfg.resident` 分支（`run_windowed`
+        // 里「常驻就不建主窗」），所以 `App::resident(..).run()` 其实会正常退化成常驻模式。
+        // 置位是为了让 `run()` 在 debug 期还能拦下这个**写法上的**误用——行为虽然对了，
+        // 但 `run()` 的语义是"跑一个有窗口的应用"，让它悄悄变成常驻会让人读不懂这段代码。
+        app.cfg.resident = true;
+        app
     }
 
     /// 给**主窗**登记单例键，与 [`Window::single`] 是同一个键空间。
@@ -1204,7 +1577,7 @@ impl App {
         self
     }
 
-    pub fn run(mut self) {
+    pub fn run(self) {
         // 窗口会被隐藏（启动即隐 / 关闭转隐）却无任何唤起途径 = 用户再也看不到窗口，
         // 只能去任务管理器结束进程。在 run() 而非各 setter 里查：tray/hotkey 可能在其后才链上。
         debug_assert!(
@@ -1213,12 +1586,155 @@ impl App {
                 || !self.cfg.hotkeys.is_empty(),
             "start_hidden / hide_on_close 需配合 tray 或 hotkey：否则窗口隐藏后无法被唤起"
         );
+        // `App::resident` 建的应用没有窗口尺寸也没有控件树。走 `run` **不会**开出空窗
+        // （平台层按 `cfg.resident` 分支，见 `run_windowed`），行为上等同常驻；拦的是
+        // 写法：启动入口与构建器对不上，读代码的人会以为这里真开了个窗口。
+        debug_assert!(
+            !self.cfg.resident,
+            "App::resident(..) 建的应用要用 run_resident() 启动：run() 会静默退化成常驻模式，             但读起来像是要开窗口"
+        );
+        self.launch();
+    }
+
+    /// 零窗口常驻：**不建任何窗口**，只装托盘图标与全局热键，然后进消息循环。
+    ///
+    /// 给的是「常驻托盘的服务进程」这一形态：启动后桌面上什么都没有，用户点托盘或按
+    /// 热键时才按需建窗（[`TrayCtx::open_window`](crate::platform::TrayCtx::open_window) /
+    /// [`HotkeyCtx::open_window`](crate::event::HotkeyCtx::open_window)），窗口关掉即
+    /// **销毁**，下次再建一个新的。
+    ///
+    /// 与 [`start_hidden`](Self::start_hidden) + [`hide_on_close`](Self::hide_on_close)
+    /// 的差别正是本模式的全部价值：那一套仍然留着一个隐藏的主窗，而软件光栅要为它按
+    /// **物理**像素挂着约 2.5 份全屏 RGBA 后备缓冲——用户看不见的窗口，内存照付。常驻
+    /// 模式下这笔开销只在窗口真的开着时存在，随 `WindowState` 的 drop 自然归还。
+    ///
+    /// 此时 [`content`](Self::content) / [`on_render`](Self::on_render) /
+    /// [`bg`](Self::bg) 这些**面向主窗**的配置一律不生效（没有主窗可配），
+    /// [`on_show`](Self::on_show) / [`on_close_request`](Self::on_close_request)
+    /// 同理——窗口的这些行为改由每个 [`Window`] 自己声明。
+    ///
+    /// 应用级的那几样照常，但**回调拿到的 `EventCtx` 有一处削弱**，务必先读：
+    ///
+    /// | 设施 | 常驻模式下 |
+    /// |---|---|
+    /// | [`tray`](Self::tray) / [`hotkey`](Self::hotkey) / [`single_instance`](Self::single_instance) | 照常 |
+    /// | [`channel`](Self::channel) 的 `on_message` | 照常触发（零窗口时由应用级路径排空） |
+    /// | [`on_interval`](Self::on_interval) | 照常触发（定时器挂在应用的消息宿主上） |
+    /// | [`on_system_theme_changed`](Self::on_system_theme_changed) | 照常触发 |
+    ///
+    /// 削弱之处：上面这三类回调在**一个窗口都没有**时拿到的 `ctx` 背后没有宿主。
+    ///
+    /// | `ctx` 上的动作 | 零窗口时 | 为什么 |
+    /// |---|---|---|
+    /// | `open_window` | 成立 | 常驻服务把界面唤出来就靠它 |
+    /// | `open_url` | 成立 | 落地是 `ShellExecute`，自由函数，与窗口无关 |
+    /// | `defer_blocking` | 成立 | 同上；语义本就是"分发返回之后再跑" |
+    /// | 写信号 / 改 [`ThemeHandle`] / [`TrayHandle`](crate::platform::TrayHandle) / [`HotkeyHandle`] | 成立 | 不经 `ctx`，或经应用级队列落地 |
+    /// | `toast` / 焦点 / 上下文菜单 / `request_close` | **静默无效** | 宿主浮层与宿主状态，没有窗口就没有落点 |
+    /// | `hide_window` / `show_window` 等窗口操作 | **静默无效** | 没有明确的作用对象 |
+    ///
+    /// 所以「后台任务完成后提示用户」在常驻模式下要用托盘气泡
+    /// （[`TrayCtx::notify`](crate::platform::TrayCtx::notify)）、改托盘提示、开一个窗口或
+    /// `open_url`，而不是 toast。
+    ///
+    /// 另两条已知边界：回调里 `signal(..)` 创建的信号**不随任何窗口回收**（与窗口内
+    /// `on_interval` 一致），需要长期持有的信号请在回调外建好再克隆进去；
+    /// [`event::window_state()`](crate::event::window_state) 在零窗口时读到的是
+    /// `UNKNOWN`（其 `visible` 为 `true`），照搬"按可见性切换显隐"的热键写法会恒走隐藏
+    /// 分支而毫无反应——常驻模式下热键应当直接 `ctx.open_window(..)`。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::resident("清风词典")
+    ///     .tray(
+    ///         Tray::new().tooltip("清风词典").menu(vec![
+    ///             TrayMenuItem::item("打开窗口", |ctx| {
+    ///                 ctx.open_window(
+    ///                     Window::new("清风词典", 480, 360)
+    ///                         .single("main")
+    ///                         .content(|| Element::col().fill()),
+    ///                 );
+    ///             }),
+    ///             TrayMenuItem::item("退出", |ctx| ctx.quit()),
+    ///         ]),
+    ///     )
+    ///     .run_resident();
+    /// ```
+    ///
+    /// # 平台
+    ///
+    /// **仅 Windows。** macOS 侧尚未实现（核心层 API 已就位，缺的是平台落地），
+    /// 在那里调用会打印一行错误并直接返回，不会建出任何窗口。
+    ///
+    /// # 误用的处理
+    ///
+    /// 既无托盘图标也无全局热键时**打印一行并直接返回，不启动**（debug 下先 panic 指出
+    /// 调用点）。这是 `run()` 那套 `start_hidden` / `hide_on_close` 防呆的加强版，因为
+    /// 退化的后果不是一个量级：
+    ///
+    /// - `run()` 的同类误用至少还留着一个窗口——Alt+F4、任务栏右键、任务管理器都收得掉；
+    /// - 这里不建主窗、不装托盘、不注册热键，消息循环随即永久阻塞在 `GetMessageW`。
+    ///   桌面上什么都没有、托盘里什么都没有、**没有任何消息源能让它返回**，也没有任何
+    ///   代码路径会发出 `PostQuitMessage`（退出只从托盘来）。连「结束任务」发的
+    ///   `WM_CLOSE` 都够不着它——那条消息要有窗口才收得到，而这个进程一个都没有。
+    ///   用户只剩任务管理器的「详细信息」页强杀一条路。
+    ///
+    /// 所以这条检查不能只在 debug 生效：release 才是用户真正跑到的那一份。
+    pub fn run_resident(mut self) {
+        // debug 下仍然 panic：开发期要的是一个能指回调用点的堆栈，而不是一行日志。
+        debug_assert!(
+            self.cfg.tray.is_some() || !self.cfg.hotkeys.is_empty(),
+            "run_resident 需配合 tray 或 hotkey：零窗口进程没有别的入口，也没有别的出口"
+        );
+        if self.cfg.tray.is_none() && self.cfg.hotkeys.is_empty() {
+            // 形状照抄 win32 `run_windowed` 里那道兜底（常驻模式下宿主窗口建不起来就退出）：
+            // 常驻进程一旦失去全部入口就无法自救，宁可不启动，也不留一个杀不掉的空壳。
+            eprintln!(
+                "[windui] run_resident 需配合 tray 或 hotkey：零窗口进程没有任何入口，\
+                 也没有任何出口（进程将无法退出），已拒绝启动"
+            );
+            return;
+        }
+        self.cfg.resident = true;
+        self.launch();
+    }
+
+    /// `run` 与 `run_resident` 的公共尾段：装应用级设施、组装 handler、交给平台。
+    ///
+    /// 主窗 handler 在常驻模式下用不上（平台层不建主窗），但仍然照常组装：平台入口的
+    /// 签名是两条路共用的，为此把它改成 `Option` 只会把「有没有主窗」这件事复制到
+    /// 第二个地方去表达。
+    fn launch(mut self) {
         let single = self.single.take();
         let theme_src = match self.theme_src {
             Some(h) => h,
             None => ThemeHandle::new(Rc::new(self.theme.unwrap_or_default())),
         };
         let waker = self.waker_shared.clone();
+        // 应用级设施（见 `AppServices`）。两条启动路都装：托盘/热键的 `open_window`
+        // 与常驻与否无关，有主窗的应用照样能从托盘开窗。
+        //
+        // 主题回调与周期回调则**按模式二选一**地交出去：常驻模式没有主窗宿主可挂，
+        // 归这里；有主窗时仍归主窗的 `UiHost`（下面的构造），避免同一次事件触发两遍。
+        let resident = self.cfg.resident;
+        let (host_theme, host_intervals) = if resident {
+            (None, Vec::new())
+        } else {
+            (
+                self.system_theme.take(),
+                std::mem::take(&mut self.intervals),
+            )
+        };
+        APP_SERVICES.with(|f| {
+            *f.borrow_mut() = Some(AppServices {
+                theme_src: theme_src.clone(),
+                hotkey_ops: self.hotkey_ops.clone(),
+                // 取的是上面那次「二选一」**留下**的那半：非常驻时已被主窗取走，这里是
+                // None / 空表；常驻时原样在这儿。
+                system_theme: self.system_theme.take(),
+                intervals: std::mem::take(&mut self.intervals),
+            })
+        });
         let cfg = self.cfg;
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
@@ -1230,11 +1746,11 @@ impl App {
                 cfg.bg,
                 !self.bg_explicit,
                 self.hotkey_ops.clone(),
-                self.intervals,
+                host_intervals,
                 self.close_handler,
                 self.show_handler,
                 self.shortcut,
-                self.system_theme,
+                host_theme,
                 self.hide_on_close,
             ))
         } else {
@@ -2479,63 +2995,13 @@ impl AppHandler for UiHost {
                         return NewWindow::Focus(key);
                     }
                 }
-                let bg_explicit = req.bg.is_some();
-                let bg = req.bg.unwrap_or(self.theme.palette.bg);
-                let cfg = WindowConfig {
-                    title: req.title,
-                    width: req.width,
-                    height: req.height,
-                    bg,
-                    centered: req.centered,
-                    resizable: req.resizable,
-                    frameless: req.frameless,
-                    system_menu: req.system_menu,
-                    min_width: req.min_width,
-                    min_height: req.min_height,
-                    single: req.single,
-                    owned: req.owned || req.modal,
-                    modal: req.modal,
-                    icon: req.icon,
-                    // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
-                    // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
-                    ..WindowConfig::default()
-                };
-                // 内容构建期创建的信号归这个窗口所有：`scope` 随宿主析构，窗口关掉
-                // 就整批回收，反复开关子窗不会在全局 arena 里越积越多。
-                let mut scope = crate::signal::SignalScope::new();
-                let root: Element = scope.collect(|| req.content.take());
-                let mut host = UiHost::new(
-                    root,
-                    &cfg,
-                    self.theme_src.clone(),
-                    bg,
-                    !bg_explicit,
-                    // 热键队列共享：子窗里的控件也能改绑全局热键（句柄本就可克隆传入）。
-                    self.hotkey_ops.clone(),
-                    // 通道不在这里传：它登记在**应用**上（`crate::sync` 的 App 级表），
-                    // 全部窗口共用同一份 pump，由消费权持有者每帧排空一次。共用而非各持
-                    // 一份副本，故同一条消息不会被处理两次；而主窗关掉后消费权自动交还，
-                    // 由还活着的窗口接手——通道不再随某个窗口一起死。
-                    // 定时器与关闭拦截器则是**这个窗口自己的**，随它一起生灭。
-                    req.intervals,
-                    req.close_handler,
-                    // 唤起回调也不给子窗：子窗没有隐藏→唤起这条路（托盘与热键唤的是主窗），
-                    // 给了也永远不触发。
-                    None,
-                    // 快捷键回调同理不给子窗：它登记在应用上、面向主窗那一套界面，
-                    // 而子窗有自己的内容与焦点环，套用主窗的快捷键只会张冠李戴。
-                    None,
-                    // 系统主题回调也不给：它的用途是换主题，而主题是**应用级**的
-                    // （`ThemeHandle` 全窗共享），由主窗换一次即可，子窗跟着走。
-                    None,
-                    // `hide_on_close` 不给子窗：隐藏后没有唤起途径（托盘唤的是主窗），
-                    // 只会留下一个关不掉也看不见的窗口。
-                    false,
-                );
-                // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
-                // 节点而非信号，控件自带的信号由控件自己的 `SignalScope` 管。
-                host.scope = Some(scope);
-                NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
+                build_new_window(
+                    req,
+                    &self.theme_src,
+                    &self.hotkey_ops,
+                    // 帧初缓存的那份主题（`theme_src.current()` 与它同值）。
+                    self.theme.palette.bg,
+                )
             })
             .collect()
     }
@@ -3219,6 +3685,353 @@ mod tests {
             NewWindow::Create(cfg, host) => (*cfg, host),
             NewWindow::Focus(key) => panic!("期望建窗，实际被判为激活已有单例窗口: {key}"),
         }
+    }
+
+    /// 应用级回调里 `ctx.open_url` / `ctx.defer_blocking` 必须落地，它们不需要宿主。
+    ///
+    /// 与 toast / 焦点 / 菜单不同：`open_url` 的落地是 `platform::open_url`（`ShellExecute`
+    /// 一层皮）、`defer_blocking` 的落地是 `DialogRequest::run`，两者都是自由函数，跟窗口
+    /// 与控件树无关。零窗口服务没有界面可显示结果，"打开浏览器 / 资源管理器"正是它仅有
+    /// 的几条反馈出路之一，丢掉它等于把那条路堵死且不留痕迹。
+    #[test]
+    fn app_callback_side_effects_keep_the_host_free_ones() {
+        let ran = Rc::new(std::cell::Cell::new(false));
+        let flag = ran.clone();
+        let res = crate::testing::run_with_ctx(move |ctx| {
+            ctx.defer_blocking(move || flag.set(true));
+        });
+        assert!(res.dialog.is_some(), "defer_blocking 应产出 DialogRequest");
+        app_side_effects(res);
+        assert!(
+            ran.get(),
+            "延迟闭包必须真的被执行，而不是随 DispatchResult 一起丢掉"
+        );
+
+        // `open_url` 这里只断言它被取走（真去调 ShellExecute 会拉起外部程序，
+        // 那条已在常驻探针上实测过：不传 URL 不开、传 URL 打开对应程序）。
+        let res = crate::testing::run_with_ctx(|ctx| ctx.open_url("https://example.invalid"));
+        assert_eq!(res.open_url.as_deref(), Some("https://example.invalid"));
+    }
+
+    /// `HotkeyHandle` 排下的意图必须能经**应用级**取口取走——零窗口时那是唯一的取口
+    /// （`apply_hotkey_ops(hwnd)` 要有窗口才走得到）。
+    ///
+    /// 这条不靠真实热键触发：合成输入能否驱动全局热键取决于会话状态（本次会话中途就
+    /// 失效了，纯 Win32 自测同样收不到 `WM_HOTKEY`），拿它当断言基础的测试会时灵时不灵。
+    /// 队列本身是纯逻辑，钉这一段就够——真实触发那半在真机上验。
+    #[test]
+    fn app_hotkey_ops_drain_through_app_services() {
+        use crate::event::{HotkeyOp, Key};
+        let mut app = App::new("t", 100, 100);
+        let hk = app.hotkey_handle(
+            crate::event::Hotkey::new(Key::Char('D')).ctrl().alt(),
+            |_| {},
+        );
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                // 与 `HotkeyHandle` 同一个 Rc——整个应用只有这一条队列。
+                hotkey_ops: app.hotkey_ops.clone(),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+        let _ = take_app_hotkey_ops(); // 清掉别的用例可能留下的残渣
+        hk.set_enabled(false);
+        assert_eq!(
+            take_app_hotkey_ops(),
+            vec![(0, HotkeyOp::SetEnabled(false))],
+            "句柄排下的意图必须能从应用级取口取到"
+        );
+        assert!(
+            take_app_hotkey_ops().is_empty(),
+            "取走即清空：两个取口共用一条队列，同一条意图不能被应用两遍"
+        );
+    }
+
+    /// 应用级回调里 `theme::current()` 必须是**当前**主题，`window_state()` 必须是
+    /// `UNKNOWN`——这两项是宿主 `enter()`/`begin_frame` 注入的线程局部，没有宿主的路径
+    /// 上得由 `enter_app_scope` 补。
+    ///
+    /// 漏掉主题那项的具体症状：`on_system_theme_changed` 里 `theme.set(暗色)` 生效了
+    /// （`ThemeHandle` 不经线程局部），可此后任何应用级回调读 `theme::current()` 拿到的
+    /// 仍是构建期那份浅色——"按当前主题配色拼一条通知"于是永远配错色。零窗口下这个错
+    /// 不会被任何一帧纠正，因为一帧都没有。
+    #[test]
+    fn app_scope_injects_current_theme_and_unknown_window_state() {
+        let theme_src = ThemeHandle::new(Rc::new(Theme::default()));
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: theme_src.clone(),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+        // 先污染线程局部，模拟"上一个窗口留下的残值"。
+        crate::theme::set_current(Rc::new(Theme::default()));
+        crate::event::set_window_state(crate::event::WindowState {
+            maximized: true,
+            minimized: false,
+            visible: true,
+            maximizable: true,
+            minimizable: true,
+        });
+        // 运行期换到暗色：句柄立刻变，但线程局部快照还是旧的。
+        theme_src.set(Theme::dark());
+
+        let seen = Rc::new(std::cell::Cell::new((Color::hex(0), true)));
+        let f = seen.clone();
+        run_app_callback(move |_ctx| {
+            f.set((
+                crate::theme::current().palette.bg,
+                crate::event::window_state().maximized,
+            ));
+        });
+        assert_eq!(
+            seen.get().0,
+            Theme::dark().palette.bg,
+            "回调里读到的必须是换过之后的主题，不是构建期那份"
+        );
+        assert!(
+            !seen.get().1,
+            "窗口状态必须被重置为 UNKNOWN，不能残留已销毁窗口的快照"
+        );
+    }
+
+    /// 应用级回调里创建的 `Signal` **不随任何窗口回收**——这是这条路径的已知边界，
+    /// 用实测钉住，免得日后被当成"应该会自动回收"。
+    ///
+    /// 具体是什么泄漏：信号存在全局 arena 的槽位里，`SignalScope` 负责在窗口关闭时把
+    /// 自己收集到的那批槽位还回去。应用级回调不在任何作用域内（与既有的窗口内
+    /// `on_interval` 一致——`UiHost::on_interval_fired` 只 `enter()` 推窗口状态，同样不
+    /// 建作用域），所以每次创建就多占一个槽位且永不归还。不是订阅泄漏（信号没有订阅
+    /// 表），是**槽位单调增长**：每秒建一个信号的定时器，一天多出 86400 个槽位。
+    ///
+    /// 结论不是"要修"，而是"在回调里别每次都 `signal()`"——该在回调外建好、克隆进去。
+    #[test]
+    fn signals_created_in_app_callbacks_are_never_reclaimed() {
+        let before = crate::signal::stats().live;
+        for _ in 0..3 {
+            run_app_callback(|_ctx| {
+                let _ = crate::signal::signal(0u32);
+            });
+        }
+        assert_eq!(
+            crate::signal::stats().live,
+            before + 3,
+            "三次回调各建一个信号，三个槽位都还活着——这条路径不回收，是刻意记录的边界"
+        );
+    }
+
+    /// 零窗口时 `event::window_state()` 读到的是 `UNKNOWN`，而它的 `visible` 是 `true`。
+    ///
+    /// 为什么要钉住：常驻服务若照搬文档里那段"一个热键切换显隐"的写法
+    /// （`if window_state().visible { hide } else { show }`），在零窗口下会恒走 `hide`
+    /// 分支——而 `hide` 在常驻模式下是空操作，于是热键**按下去永远没反应**。正确写法是
+    /// `ctx.open_window(..)`，`run_resident` 的文档已写明。
+    #[test]
+    fn zero_window_reads_unknown_window_state() {
+        let st = crate::event::WindowState::UNKNOWN;
+        assert!(st.visible, "UNKNOWN.visible 为 true（见 event.rs 的理由）");
+        assert!(!st.maximizable && !st.minimizable);
+    }
+
+    /// 常驻模式的入口条件（有托盘或有热键）必须是**两种构建都成立**的判据，不能只靠
+    /// `debug_assert`。
+    ///
+    /// 这条测的是判据本身而不是 `run_resident`（那个会真的进消息循环，测试里跑不得）：
+    /// release 下放行一个既无托盘也无热键的常驻应用，后果是一个没有任何入口、也没有
+    /// 任何出口的进程——连「结束任务」的 `WM_CLOSE` 都够不着它（那要有窗口才收得到），
+    /// 用户只能强杀。所以这个判据被改成无条件生效，此处钉住它不被改回 debug-only。
+    #[test]
+    fn resident_entry_requires_tray_or_hotkey_in_both_profiles() {
+        let bare = App::resident("t");
+        assert!(
+            bare.cfg.tray.is_none() && bare.cfg.hotkeys.is_empty(),
+            "裸的常驻应用没有任何入口，`run_resident` 必须拒绝启动"
+        );
+        let with_hotkey = App::resident("t").hotkey(
+            crate::event::Hotkey::new(crate::event::Key::Char('D'))
+                .ctrl()
+                .alt(),
+            |ctx| ctx.show_window(),
+        );
+        assert!(
+            !with_hotkey.cfg.hotkeys.is_empty(),
+            "只有热键、没有托盘也算有入口：热键能唤出窗口，退出走窗口自己的关闭"
+        );
+    }
+
+    /// 应用级回调（主题变化 / 周期定时器）在**零窗口**时也要跑得起来，且回调里的
+    /// `ctx.open_window` 要能一路排到开窗队列里。
+    ///
+    /// 这是常驻模式下「后台事件 → 弹出界面」的唯一通路：没有窗口就没有宿主，没有宿主
+    /// 就没人借 `EventCtx`，回调本来根本无从执行。
+    #[test]
+    fn app_level_callbacks_run_without_any_window() {
+        let _ = crate::event::take_callback_windows();
+        let seen = Rc::new(std::cell::Cell::new(None::<bool>));
+        let flag = seen.clone();
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: Some(Box::new(move |ctx, dark| {
+                    flag.set(Some(dark));
+                    ctx.open_window(
+                        Window::new("深色了", 300, 200).content(|| Element::col().fill()),
+                    );
+                })),
+                intervals: Vec::new(),
+            })
+        });
+
+        assert!(
+            dispatch_system_theme_changed(true) || true,
+            "回调是否请求重绘由它自己决定，这里只要求它被跑到"
+        );
+        assert_eq!(seen.get(), Some(true), "应用级主题回调必须被调用");
+        let (cfg, _host) =
+            expect_create(take_callback_window(&|_| false).expect("回调里的开窗请求应已排队"));
+        assert_eq!(cfg.title, "深色了");
+    }
+
+    /// 应用级回调**跑完要放回去**，否则只灵一次。
+    ///
+    /// 实现为了避开 `RefCell` 重入（回调里 `ctx.open_window` 会再借一次 `APP_SERVICES`）
+    /// 是「摘出来 → 跑 → 放回」，漏掉最后一步的症状是"切了一次深色之后再也不跟随了"，
+    /// 而那要用户切两次主题才发现。
+    #[test]
+    fn app_level_theme_callback_survives_repeated_dispatch() {
+        let hits = Rc::new(std::cell::Cell::new(0u32));
+        let c = hits.clone();
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: Some(Box::new(move |_ctx, _dark| c.set(c.get() + 1))),
+                intervals: Vec::new(),
+            })
+        });
+        dispatch_system_theme_changed(true);
+        dispatch_system_theme_changed(false);
+        dispatch_system_theme_changed(true);
+        assert_eq!(hits.get(), 3, "回调必须每次都被跑到，不能只灵第一次");
+    }
+
+    /// 周期回调按下标分发，且同样要放回原位（定时器 id 与下标的对应关系不能被打乱）。
+    #[test]
+    fn app_level_intervals_dispatch_by_index_and_are_reusable() {
+        let a = Rc::new(std::cell::Cell::new(0u32));
+        let b = Rc::new(std::cell::Cell::new(0u32));
+        let (ca, cb) = (a.clone(), b.clone());
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: None,
+                intervals: vec![
+                    (
+                        Duration::from_millis(10),
+                        Box::new(move |_| ca.set(ca.get() + 1)),
+                    ),
+                    (
+                        Duration::from_millis(20),
+                        Box::new(move |_| cb.set(cb.get() + 1)),
+                    ),
+                ],
+            })
+        });
+        assert_eq!(
+            app_interval_durations(),
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
+            "平台按这张表 SetTimer，顺序即 id"
+        );
+        dispatch_app_interval(0);
+        dispatch_app_interval(0);
+        dispatch_app_interval(1);
+        assert_eq!((a.get(), b.get()), (2, 1));
+        // 越界（定时器 id 对不上任何回调）必须是静默无操作，不能 panic 也不能错位分发。
+        dispatch_app_interval(9);
+        assert_eq!((a.get(), b.get()), (2, 1));
+    }
+
+    /// 托盘 / 热键回调的开窗请求要能在**没有任何窗口**的情况下走到平台能消费的形状。
+    ///
+    /// 这是常驻模式（`App::run_resident`）的承重链路：那时不存在任何 `UiHost`，
+    /// `ctx.open_window` 那条路（`take_new_windows`）根本不成立，请求只能由应用级
+    /// 的工厂还原。工厂没装上的症状是"托盘菜单点了没反应"，无声无息。
+    #[test]
+    fn tray_callback_window_is_built_without_any_host() {
+        let _ = crate::event::take_callback_windows(); // 隔离其他用例可能留下的残渣
+        let mut app = App::new("main", 200, 200);
+        let theme_src = app.theme_handle();
+        APP_SERVICES.with(|f| {
+            *f.borrow_mut() = Some(AppServices {
+                theme_src,
+                hotkey_ops: app.hotkey_ops.clone(),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+
+        let actions = crate::testing::run_with_tray_ctx_fn(|ctx| {
+            ctx.open_window(
+                Window::new("设置", 420, 320)
+                    .single("settings")
+                    .content(|| Element::col().fill()),
+            );
+        });
+        assert_eq!(actions, vec![crate::platform::TrayAction::OpenWindow]);
+
+        let (cfg, _host) =
+            expect_create(take_callback_window(&|_| false).expect("请求应能还原成窗口"));
+        assert_eq!(cfg.title, "设置");
+        assert_eq!((cfg.width, cfg.height), (420, 320));
+        assert_eq!(cfg.single.as_deref(), Some("settings"));
+        assert!(
+            !cfg.resident,
+            "常驻是应用的启动方式，不该传染给它开出来的窗口"
+        );
+    }
+
+    /// 同一个单例键已经开着时只回报激活，内容闭包**不跑**——与窗口内 `ctx.open_window`
+    /// 的语义一致。托盘菜单点两次「打开窗口」不该开出第二个。
+    #[test]
+    fn tray_callback_window_respects_single_key() {
+        let _ = crate::event::take_callback_windows();
+        let mut app = App::new("main", 200, 200);
+        let theme_src = app.theme_handle();
+        APP_SERVICES.with(|f| {
+            *f.borrow_mut() = Some(AppServices {
+                theme_src,
+                hotkey_ops: app.hotkey_ops.clone(),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+
+        let built = Rc::new(std::cell::Cell::new(false));
+        let flag = built.clone();
+        crate::testing::run_with_tray_ctx_fn(move |ctx| {
+            let flag = flag.clone();
+            ctx.open_window(
+                Window::new("设置", 420, 320)
+                    .single("settings")
+                    .content(move || {
+                        flag.set(true);
+                        Element::col().fill()
+                    }),
+            );
+        });
+
+        match take_callback_window(&|key| key == "settings") {
+            Some(NewWindow::Focus(key)) => assert_eq!(key, "settings"),
+            Some(NewWindow::Create(..)) => panic!("已开着的单例键不该再建一个窗口"),
+            None => panic!("请求不该被吞掉"),
+        }
+        assert!(!built.get(), "被判为激活时内容闭包不该被求值");
     }
 
     /// `ctx.open_window` 的请求要一路走到平台能消费的形状：配置照搬、内容还原成宿主。

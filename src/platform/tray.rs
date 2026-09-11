@@ -126,6 +126,17 @@ pub enum TrayAction {
     Quit,
     /// 弹出系统气泡通知。
     Notify { title: String, body: String },
+    /// 新建一个窗口（[`TrayCtx::open_window`]）。
+    ///
+    /// **不带载荷**：窗口配置（[`WindowRequest`](crate::event::WindowRequest)）带闭包，
+    /// 塞进来就得放弃本枚举的 `Debug`/`Clone`/`PartialEq`——而 `Vec<TrayAction>` 的相等
+    /// 比较正是下游给托盘回调写测试的正式入口（见 [`crate::testing::run_with_tray_ctx`]）。
+    /// 故配置走核心层的旁路队列，这里只留**位置标记**：平台层执行到本变体时取走队首那
+    /// 一个，于是「先弹气泡再开窗」这类顺序仍然成立。
+    ///
+    /// 推论：把一份 `Vec<TrayAction>` 执行两遍，第二遍的 `OpenWindow` 会落空（队列已空）
+    /// 而不是开出第二个窗口。意图队列本就只该被执行一次，这里不做额外防护。
+    OpenWindow,
 }
 
 /// 托盘回调上下文：显隐窗口 / 退出 / 气泡通知。
@@ -158,6 +169,31 @@ impl TrayCtx {
     /// 退出应用。
     pub fn quit(&mut self) {
         self.actions.push(TrayAction::Quit);
+    }
+    /// 新建一个窗口，语义同
+    /// [`EventCtx::open_window`](crate::core::EventCtx::open_window)。
+    ///
+    /// 零窗口常驻模式（[`App::run_resident`](crate::app::App::run_resident)）下，托盘菜单
+    /// 的「打开窗口」是界面唯一的入口——那时没有窗口可 [`show_window`](Self::show_window)，
+    /// 窗口关掉即销毁，下次再点这一项重新建一个。
+    ///
+    /// 与其他意图一样**只排队不执行**（理由见类型文档）：窗口在回调返回、平台层释放
+    /// 借用之后才真正创建。想让重复点击复用同一个窗口就给它
+    /// [`Window::single`](crate::app::Window::single) 一个键。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// TrayMenuItem::item("打开窗口", |ctx| {
+    ///     ctx.open_window(
+    ///         Window::new("主界面", 480, 320)
+    ///             .single("main")
+    ///             .content(|| Element::col().fill()),
+    ///     );
+    /// });
+    /// ```
+    pub fn open_window(&mut self, req: crate::event::WindowRequest) {
+        crate::event::push_callback_window(req);
+        self.actions.push(TrayAction::OpenWindow);
     }
     /// 弹出气泡通知（标题 + 正文）。macOS 上未打包为 .app 时可能不展示。
     pub fn notify(&mut self, title: &str, body: &str) {
@@ -384,5 +420,37 @@ mod tests {
     #[test]
     fn absent_callback_yields_no_actions() {
         assert!(invoke(None).is_empty());
+    }
+
+    /// 开窗意图：标记进意图队列**占住位置**，配置进核心层的旁路队列。
+    ///
+    /// 两条队列必须同步——标记多了会让平台层去取一个不存在的配置（静默不开窗），
+    /// 配置多了则会有一个请求永远没人取（下一次开窗开出上一次那个）。
+    #[test]
+    fn open_window_marks_its_place_and_queues_the_request() {
+        let _ = crate::event::take_callback_windows(); // 清掉别的用例可能留下的残渣
+        let mut cb: TrayFn = Box::new(|ctx| {
+            ctx.notify("标题", "正文");
+            ctx.open_window(
+                crate::app::Window::new("设置", 400, 300).content(crate::ui::Element::col),
+            );
+        });
+        assert_eq!(
+            invoke(Some(&mut cb)),
+            vec![
+                TrayAction::Notify {
+                    title: "标题".into(),
+                    body: "正文".into()
+                },
+                TrayAction::OpenWindow,
+            ],
+            "开窗要排在气泡之后，顺序与调用一致"
+        );
+        let req = crate::event::take_callback_window().expect("配置应已在旁路队列里");
+        assert_eq!(req.title, "设置");
+        assert!(
+            crate::event::take_callback_window().is_none(),
+            "一次 open_window 只该排一个请求"
+        );
     }
 }

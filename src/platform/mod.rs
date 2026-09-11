@@ -524,6 +524,14 @@ pub struct WindowConfig {
     /// 无托盘图标也无热键时启用此项，用户将**永远看不到窗口**——故 `App::start_hidden`
     /// 在 debug 期对该组合 panic 提示误用。
     pub start_hidden: bool,
+    /// 零窗口常驻：**不建主窗**直接进消息循环，窗口全关也不退出（见 `App::run_resident`）。
+    ///
+    /// 与 `start_hidden` 是两码事：那个仍然建了窗口、只是不显示，按物理像素分配的
+    /// 后备缓冲一直挂着；这个连窗口都没有，界面按需建、关掉即销毁，渲染资源随
+    /// `WindowState` 的 drop 归还。
+    ///
+    /// 只对主窗那次 `run` 有意义（子窗的配置里恒为 false）。
+    pub resident: bool,
     /// 无标题栏窗口（自定义标题栏）：客户区铺满整窗，保留系统级吸附/阴影/缩放。
     pub frameless: bool,
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
@@ -574,6 +582,7 @@ impl Default for WindowConfig {
             tray: None,
             hotkeys: Vec::new(),
             start_hidden: false,
+            resident: false,
             frameless: false,
             system_menu: true,
             animations: None,
