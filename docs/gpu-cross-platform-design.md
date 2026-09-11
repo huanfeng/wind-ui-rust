@@ -1,7 +1,10 @@
 # 跨平台 GPU 渲染后端设计（macOS / Linux）
 
-> 状态：**P0~P3 已落地**（2026-08-18，`src/render/gpu/`，feature `gpu`），macOS 窗口
-> 可用 GPU 呈现，Canvas 图元集全部实现；P4 收尾同日完成（CI/文档/基准）；P5 按需。
+> 状态：**P0~P5 全部落地**。P0~P3（2026-08-18，`src/render/gpu/`）macOS 窗口可用 GPU 呈现、
+> Canvas 图元集全部实现；P4 同日收尾（CI/文档/基准）；P5（2026-08-22）帧末一次提交、
+> damage→scissor 局部重绘、glyph atlas 三条做完，GPU 档自此全面反超软件路径。
+> **2026-09-11**：macOS 目标改为默认编入（不再需要 `gpu` feature，门控走 build.rs 的
+> `cfg(gpu_backend)`），补上运行期设备丢失的重建/降级，并复核了"帧率封顶"那条遗留项。
 > 对照文档：`docs/DESIGN.md`（总体架构）、`docs/MACOS_PORTING.md`（macOS 平台层）、
 > `src/platform/win32/d2d.rs`（Windows GPU 后端先例）。
 
@@ -277,6 +280,37 @@ Windows 上 `gpu` feature 与 `d2d` 共存时 D2D 优先（成熟度）。运行
 | **P3 图片/层** | `tex.rs` 图片纹理缓存 + fit/圆角/opacity；`layer.rs` 离屏层栈；SVG | about.rs（toast/卡片）、图片控件、子树 opacity 动画正确 | 中 |
 | **P4 收尾** | `offscreen.rs` 截图测试入 CI；性能画像与基准数据；缓存上限与统计；文档（DESIGN/ROADMAP/MACOS_PORTING 更新）；决定 macOS 默认档 | 全 example 双后端跑通；量化报告；`cargo publish` 干跑（feature 组合矩阵） | 中 |
 | **P5 优化（按需）** | glyph atlas（P2 数据说话）；damage→scissor 局部重绘；Linux GlyphSource | 按各自量化目标 | 大，可延后 |
+
+### P5 之后的状态（2026-09-11 复核）
+
+| 项 | 状态 |
+| --- | --- |
+| macOS 默认档 | **默认编入**（依赖分 target 段声明 + build.rs 发 `cfg(gpu_backend)`）；运行期默认仍 `Renderer::Software` |
+| 运行期设备丢失 | **已落地**：重建共享设备与 surface（最多 3 次）→ 仍失败则该窗口切回软渲染。策略在 `LossRecovery`（带单测），真机用注入式故障走通全链路 |
+| 图片缓存键 | **已修**：`Image::cache_id()` 改单调 id（此前取 `Rc` 指针，释放后地址复用会画成另一张图） |
+| 连续动画帧率 | **不复现**（见下） |
+| Linux 平台层 | 未开始（缺口在平台层，不在渲染器，见 §4.7） |
+
+#### 「GPU 连续动画封顶 55.2fps」复核：测量口径问题，非缺陷
+
+P4 基准曾记下 GPU 连续动画 55.2fps 而软件 60.2fps，成因未查。2026-09-11 在同一台验证机
+（M4 @2x）上用**帧回调间隔直方图**重测，结论是稳态帧率两档完全相同：
+
+| 档 | 平均帧间隔 | 帧率 | 分布（720 帧） |
+| --- | --- | --- | --- |
+| GPU（Metal） | 16.77ms | 59.6fps | 16.5ms 档 717 帧，另有 1 帧 15.0ms、2 帧 23.5ms |
+| 软件 | 16.77ms | 59.6fps | 16.5ms 档 717 帧，另有 1 帧 14.0ms、2 帧 23.5ms |
+
+**回到 P5 收尾那一版（`c5bcd0d`）重测，结果一样**——即当时也不是 55.2。差异只出现在
+**启动段**：GPU 档首次运行「exec → 第一帧」要 3568ms（Metal 管线/着色器编译，系统会缓存），
+第二次起 246/252ms，与软件档的 236~259ms 持平。把这一段算进固定时长的平均帧率，正好能
+压出 55 这个量级的数字。
+
+方法上的两条教训：
+- **平均帧率把两种完全不同的形状压成同一个数字**（"每帧都略慢" vs "周期性丢一个 vsync"）。
+  直方图才分得开——这里 99.6% 的帧落在同一档，说明既不掉帧也不慢帧。
+- 两档数字相同时要先怀疑**自己**：`WINDUI_GPU=1` 建不起来会静默回退软件，那样"两档一致"
+  就是个假象。判据是 `WINDUI_PROF=1` 的 `[windui] gpu: Apple M4 [Metal/IntegratedGpu]` 那行。
 
 依赖关系：P0→P1→P2→P3→P4 串行；P5 各项独立。每阶段独立可合并、
 可发布（feature 默认关，主线不受影响）。
