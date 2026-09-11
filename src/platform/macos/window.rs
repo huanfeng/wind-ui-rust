@@ -51,7 +51,9 @@ use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedi
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{to_skia_color, Renderer};
 #[cfg(gpu_backend)]
-use crate::render::gpu::{FrameError, SharedGpu, WindowGpu};
+use crate::render::gpu::{
+    invalidate_shared_gpu, FrameError, LossAction, LossRecovery, SharedGpu, WindowGpu,
+};
 
 /// sRGB 色彩空间（取不到时退回 DeviceRGB）。
 ///
@@ -415,6 +417,9 @@ struct ViewState {
     /// 一起死，且死在 `gpu` 之后。
     #[cfg(gpu_backend)]
     metal_layer: Option<Retained<CAMetalLayer>>,
+    /// 设备丢失的连续失败计数，决定「再重建一次」还是「切回软渲染」。
+    #[cfg(gpu_backend)]
+    gpu_recovery: LossRecovery,
 }
 
 impl ViewState {
@@ -973,6 +978,8 @@ impl ContentView {
             gpu: None,
             #[cfg(gpu_backend)]
             metal_layer: None,
+            #[cfg(gpu_backend)]
+            gpu_recovery: LossRecovery::default(),
         };
         let this = Self::alloc(mtm).set_ivars(RefCell::new(state));
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -1226,16 +1233,103 @@ impl ContentView {
     #[cfg(gpu_backend)]
     fn draw_gpu(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) {
         // 两段式（同本文件其余各处）：借用内只跟宿主与 GPU 打交道，可能重入本视图回调的
-        // AppKit 调用（这里是补排一次重绘）留到借用释放之后。
-        let retry = self.draw_gpu_frame(size_pt, pw, ph, scale);
-        if retry {
-            self.setNeedsDisplay(true);
+        // AppKit 调用（补排重绘、动图层树）留到借用释放之后。设备丢失的善后尤其如此
+        // ——重建要碰 `CAMetalLayer`、降级要改视图的 layer 支持，两者都会同步回调进来。
+        match self.draw_gpu_frame(size_pt, pw, ph, scale) {
+            GpuFrameOutcome::Done => {}
+            GpuFrameOutcome::Retry => self.setNeedsDisplay(true),
+            GpuFrameOutcome::Recreate => self.recreate_gpu(),
+            GpuFrameOutcome::Degrade => self.degrade_to_software(),
         }
     }
 
-    /// [`Self::draw_gpu`] 的借用段。返回 `true` 表示这一帧没画成、需要再排一次重绘。
+    /// 设备丢失后重建本窗的 GPU 目标：现有 `CAMetalLayer` 上重新建一条 surface。
+    ///
+    /// **共享设备也可能是坏的那一环**，故先作废自己手上那一代（`invalidate_shared_gpu`
+    /// 带代际守卫，多窗口同时发现丢失时只有第一个真正作废，其余取到新的那一份），再
+    /// `SharedGpu::get` 让它按需重建。反过来只重建 surface 的话，设备本身已经没了时
+    /// 每次都会立刻再丢一帧，三次之后白白降级。
+    ///
+    /// 重建失败不在这里降级——计数由 [`LossRecovery`] 统一管，下一帧的 `Lost` 会把它
+    /// 推到上限。失败时只是这一帧不出，已排的重绘会再来一次。
     #[cfg(gpu_backend)]
-    fn draw_gpu_frame(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) -> bool {
+    fn recreate_gpu(&self) {
+        let (layer, generation) = {
+            let st = self.ivars().borrow();
+            let Some(layer) = st.metal_layer.clone() else {
+                return;
+            };
+            (layer, st.gpu.as_ref().map(|g| g.gpu_generation()))
+        };
+        // 旧目标必须先析构：它持着 surface，而 surface 存着 layer 的裸指针，也占着设备侧
+        // 的 swapchain。留着它去建第二条 surface 等于让同一张 layer 挂两份。
+        {
+            let mut st = self.ivars().borrow_mut();
+            st.gpu = None;
+        }
+        if let Some(gen) = generation {
+            invalidate_shared_gpu(gen);
+        }
+        let Some(gpu) = SharedGpu::get() else {
+            return;
+        };
+        let scale = self
+            .window()
+            .map_or(1.0, |w| w.backingScaleFactor())
+            .max(0.1);
+        let bounds = self.bounds();
+        let size = (
+            (bounds.size.width * scale).round().max(1.0) as u32,
+            (bounds.size.height * scale).round().max(1.0) as u32,
+        );
+        let Some(win_gpu) = build_window_gpu(&gpu, &layer, size) else {
+            return;
+        };
+        {
+            let mut st = self.ivars().borrow_mut();
+            st.gpu = Some(win_gpu);
+        }
+        // 后备纹理是新建的（内容未定义），下一帧必须是整窗——`WindowGpu` 的 `seeded`
+        // 标志本就这么要求，这里补一次整窗失效把它喂上。
+        self.setNeedsDisplay(true);
+    }
+
+    /// 放弃硬件加速，把这个窗口切回软渲染（tiny-skia + CGImage 拷屏）。
+    ///
+    /// 这是设备永久不可用时的**兜底出口**，不是错误路径的终点：窗口内容必须继续更新，
+    /// 用户顶多察觉到 CPU 占用高了些。与 win32 那边「后端报失效 → `WindowState` 换成
+    /// `SkiaBackend`」是同一条语义，只是 macOS 的两条路径不是两个后端对象，而是同一个
+    /// 视图的两条出帧回调（`updateLayer` / `drawRect:`），故切换要动视图的 layer 支持。
+    ///
+    /// 顺序是要害：**先摘 Metal 层、再关掉 layer 支持**。反过来（先 `setWantsLayer(false)`）
+    /// 会让 AppKit 连同 backing layer 一起把子层丢掉，而那张子层正被还没析构的 surface
+    /// 用裸指针指着。
+    #[cfg(gpu_backend)]
+    fn degrade_to_software(&self) {
+        // 先让持 surface 的目标死掉，再动图层树（`metal_layer` 是那个裸指针的存活担保）。
+        let layer = {
+            let mut st = self.ivars().borrow_mut();
+            st.gpu = None;
+            st.metal_layer.take()
+        };
+        if let Some(layer) = layer {
+            layer.removeFromSuperlayer();
+        }
+        // 回到 `drawRect:` 那条路：`wantsUpdateLayer` 现在返回 false（`metal_layer` 已空），
+        // 但光靠它不够——视图仍是 layer-backed 的，AppKit 会继续走 `updateLayer`，而软路径
+        // 要的是 `drawRect:` 才有的绘图上下文（`NSGraphicsContext::currentContext`）。拿不到
+        // 上下文时软路径会一声不响地 return，表现就是「降级了，但窗口再也不更新」。
+        self.setWantsLayer(false);
+        notice_once(
+            &GPU_DEGRADE_NOTICE,
+            "windui: GPU 设备重建连续失败，本窗口已切回软渲染（内容继续更新，CPU 占用会升高）",
+        );
+        self.setNeedsDisplay(true);
+    }
+
+    /// [`Self::draw_gpu`] 的借用段。返回这一帧之后该做什么，见 [`GpuFrameOutcome`]。
+    #[cfg(gpu_backend)]
+    fn draw_gpu_frame(&self, size_pt: NSSize, pw: i32, ph: i32, scale: f32) -> GpuFrameOutcome {
         let mut borrow = self.ivars().borrow_mut();
         let st = &mut *borrow;
         if let Some(layer) = &st.metal_layer {
@@ -1257,7 +1351,7 @@ impl ContentView {
         let bg = st.handler.bg().unwrap_or(st.bg);
         // 分字段借用：`gpu` 与 `handler` 是 `ViewState` 的两个字段，可同时可变借出。
         let Some(gpu) = st.gpu.as_mut() else {
-            return false;
+            return GpuFrameOutcome::Done;
         };
         gpu.resize((pw.max(1) as u32, ph.max(1) as u32));
         match gpu.begin_frame(bg) {
@@ -1269,19 +1363,29 @@ impl ContentView {
                     // 析构时才提交的，present 早于它就会 present 一张空底。
                 }
                 frame.present();
-                false
+                // 画成了：把丢失计数清零。零星的丢失（睡眠唤醒、切换显卡各来一次）之间
+                // 隔着成千上万帧正常渲染，不清零的话它们会一路累加，最终在某个毫不相干
+                // 的时刻把窗口踢回软渲染。
+                st.gpu_recovery.on_frame_ok();
+                GpuFrameOutcome::Done
             }
             // 一时取不到 drawable：补排一次。不补的话这次标脏就白丢了——事件驱动的宿主
             // 没有"下一帧"兜底，界面会停在旧内容上直到用户再动一下。
-            Err(FrameError::Skipped) => true,
+            Err(FrameError::Skipped) => GpuFrameOutcome::Retry,
             // 窗口不可见：重排只会空转，等 `windowDidChangeOcclusionState:` 唤回。
-            Err(FrameError::Occluded) => false,
+            Err(FrameError::Occluded) => GpuFrameOutcome::Done,
+            // 重配过仍取不到：surface 或设备坏了。先试着整条重建，连续失败到上限才放弃
+            // 硬件加速——「第一帧卡住就永久降级」与「坏了却无限重试、窗口一直空白」是
+            // 这里要同时避开的两个失败模式，策略本身在 `LossRecovery` 里带单测。
             Err(FrameError::Lost) => {
                 notice_once(
                     &GPU_LOST_NOTICE,
-                    "windui: GPU surface 已丢失且重配无效，窗口内容不再更新（请以软渲染重启）",
+                    "windui: GPU surface 丢失，正在重建设备（连续失败将切回软渲染）",
                 );
-                false
+                match st.gpu_recovery.on_lost() {
+                    LossAction::Recreate => GpuFrameOutcome::Recreate,
+                    LossAction::Degrade => GpuFrameOutcome::Degrade,
+                }
             }
         }
     }
@@ -2010,6 +2114,25 @@ impl crate::sync::RawWakeSignal for MacWake {
 #[cfg(gpu_backend)]
 static GPU_LOST_NOTICE: std::sync::Once = std::sync::Once::new();
 
+#[cfg(gpu_backend)]
+static GPU_DEGRADE_NOTICE: std::sync::Once = std::sync::Once::new();
+
+/// 一帧 GPU 绘制之后该做什么。这些动作**都要在借用释放之后**才能做（它们会同步回调进
+/// 本视图），故借用段只负责判定、不负责执行——与本文件其余各处「先算意图、后执行」的
+/// 两段式一致。
+#[cfg(gpu_backend)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuFrameOutcome {
+    /// 这一帧已了结（画成了、或窗口不可见不必再排）。
+    Done,
+    /// 没画成但下一帧多半就好：再排一次重绘。
+    Retry,
+    /// 设备丢失：重建 GPU 目标后再来。
+    Recreate,
+    /// 重建已连续失败到上限：切回软渲染。
+    Degrade,
+}
+
 /// 进程内只提示一次。每帧刷屏没人会看，一次刚好够把判断送到眼前（同 `render/gpu/canvas.rs`）。
 #[cfg(gpu_backend)]
 fn notice_once(once: &std::sync::Once, msg: &str) {
@@ -2075,24 +2198,7 @@ fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
     layer.setOpaque(true);
     set_layer_frame(&layer, bounds.size);
 
-    // 安全：`SurfaceTargetUnsafe::CoreAnimationLayer` 只存裸指针，要求 layer 活得比 surface 久。
-    // 这一条由 `ViewState` 的字段顺序保证：`gpu`（持 surface）声明在 `metal_layer`（持这份
-    // `Retained`）之前，故析构时 surface 先没、layer 后没；两者又同属一个 `ViewState`，
-    // 中途不可能只掉一个。视图的图层树里也持着这张 layer（下面 `addSublayer` 之后），是第二道保险。
-    let surface = unsafe {
-        gpu.instance()
-            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
-                Retained::as_ptr(&layer) as *mut c_void,
-            ))
-    };
-    let win_gpu = match surface {
-        Ok(s) => WindowGpu::new(gpu, s, size),
-        Err(e) => {
-            eprintln!("[windui] wgpu surface 创建失败: {e}");
-            None
-        }
-    };
-    let Some(win_gpu) = win_gpu else {
+    let Some(win_gpu) = build_window_gpu(&gpu, &layer, size) else {
         assert!(
             !renderer.requires_gpu(),
             "Renderer::Gpu 要求 GPU 渲染，但 CAMetalLayer surface 建不起来。\
@@ -2124,6 +2230,44 @@ fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
     view.setWantsLayer(true);
     if let Some(root) = view.layer() {
         root.addSublayer(&layer);
+    }
+}
+
+/// 在一张 `CAMetalLayer` 上建出这个窗口的 GPU 呈现目标。
+///
+/// 抽出来是因为有**两个**调用点：窗口创建时的 [`attach_gpu`]，与设备丢失后的
+/// [`ContentView::recreate_gpu`]。两边必须逐字一致——尤其是下面那条安全性论证，它依赖的
+/// 是 `ViewState` 的字段顺序，而重建路径同样要满足它。
+///
+/// # 安全性
+///
+/// `SurfaceTargetUnsafe::CoreAnimationLayer` 只存裸指针，要求 layer 活得比 surface 久。
+/// 这一条由 `ViewState` 的字段顺序保证：`gpu`（持 surface）声明在 `metal_layer`（持那份
+/// `Retained`）之前，故析构时 surface 先没、layer 后没；两者又同属一个 `ViewState`，
+/// 中途不可能只掉一个。视图的图层树里也持着这张 layer，是第二道保险。
+///
+/// 重建路径另有一条要守：新 surface 建成**之前**必须先把旧目标析构掉（见调用点），
+/// 否则同一张 layer 上会同时挂两条 surface。
+#[cfg(gpu_backend)]
+fn build_window_gpu(
+    gpu: &std::sync::Arc<SharedGpu>,
+    // 取 `&Retained` 而不是 `&CAMetalLayer`：`Retained::as_ptr` 要的就是这个，且这样一来
+    // 「调用方手里必须有一份所有权凭据」成了签名上的要求——裸引用给不出那份存活担保。
+    layer: &Retained<CAMetalLayer>,
+    size: (u32, u32),
+) -> Option<WindowGpu> {
+    let surface = unsafe {
+        gpu.instance()
+            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(
+                Retained::as_ptr(layer) as *mut c_void,
+            ))
+    };
+    match surface {
+        Ok(s) => WindowGpu::new(gpu.clone(), s, size),
+        Err(e) => {
+            eprintln!("[windui] wgpu surface 创建失败: {e}");
+            None
+        }
     }
 }
 

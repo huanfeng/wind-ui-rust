@@ -66,6 +66,6 @@ mod tex;
 mod text;
 
 pub use canvas::{WgpuCanvas, WgpuTarget};
-pub use device::{release_shared_gpu, SharedGpu};
+pub use device::{invalidate_shared_gpu, release_shared_gpu, SharedGpu};
 pub use offscreen::OffscreenGpu;
-pub use surface::{Frame, FrameError, WindowGpu};
+pub use surface::{Frame, FrameError, LossAction, LossRecovery, WindowGpu};

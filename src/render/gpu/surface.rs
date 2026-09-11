@@ -41,6 +41,61 @@ pub enum FrameError {
     Lost,
 }
 
+/// 连续重建失败上限：超过即放弃 GPU、降级软渲染。
+///
+/// 取 3 的理由与 d2d 的 `MAX_RECREATE_FAILS` 相同：设备丢失后驱动侧的复位不是瞬时的，
+/// 头一两帧重建失败属正常（外接显示器热插拔、GPU 驱动更新、eGPU 拔出都是这个形状）；
+/// 但若真的永久不可用，再多试几次也只是让用户多盯几帧空白窗口。
+const MAX_RECREATE_FAILS: u32 = 3;
+
+/// 拿到 [`FrameError::Lost`] 之后该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossAction {
+    /// 重建这个窗口的 GPU 目标（必要时连同共享设备）再试。
+    Recreate,
+    /// 重建已连续失败到上限：放弃 GPU，把这个窗口切回软渲染。
+    ///
+    /// **不是终止**——窗口内容必须继续更新。放弃的是硬件加速这条路径，不是这个窗口。
+    Degrade,
+}
+
+/// 设备丢失的恢复计数器。
+///
+/// 单独拎成一个不含任何 GPU 对象的小结构，是为了让「试几次、何时放弃」这条策略**能在
+/// 没有窗口的地方被测到**：它的两条实际形状（丢失后恢复则计数归零、连续失败到上限才
+/// 降级）在真机上极难复现——要等一次真实的设备丢失——而一旦写错，表现是「偶发地永远
+/// 空白」或「刚好卡住的第一帧就放弃了硬件加速」，两者都没人会在日常使用中报上来。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LossRecovery {
+    fails: u32,
+}
+
+impl LossRecovery {
+    /// 又丢了一帧：累计一次失败，并给出这次该重建还是该降级。
+    pub fn on_lost(&mut self) -> LossAction {
+        self.fails += 1;
+        if self.fails >= MAX_RECREATE_FAILS {
+            LossAction::Degrade
+        } else {
+            LossAction::Recreate
+        }
+    }
+
+    /// 画成了一帧：计数归零。
+    ///
+    /// **必须在每一帧成功后调用，而不只是在重建成功后**：设备丢失完全可能零星发生
+    /// （睡眠唤醒、切换显卡各来一次，中间隔着几小时正常渲染）。不归零的话，这些互不
+    /// 相干的丢失会一路累加，最终在某个与前一次毫无关系的时刻把窗口踢回软渲染。
+    pub fn on_frame_ok(&mut self) {
+        self.fails = 0;
+    }
+
+    /// 已连续失败的次数（诊断用）。
+    pub fn fails(&self) -> u32 {
+        self.fails
+    }
+}
+
 /// 一个窗口的 GPU 呈现目标：surface + 配置 + 跨帧复用的图元管线。
 ///
 /// 多窗口各持一个，设备（[`SharedGpu`]）是进程单例、大家共用——这与 d2d 后端「共享 device、
@@ -143,6 +198,14 @@ impl WindowGpu {
             back: None,
             can_back,
         })
+    }
+
+    /// 本目标所用共享设备的代际，见 [`SharedGpu::generation`]。
+    ///
+    /// 平台层在设备丢失时拿它去 `invalidate_shared_gpu`——作废的必须是「我画不出来的那
+    /// 一代」，而不是别的窗口刚重建好的新设备。
+    pub fn gpu_generation(&self) -> u64 {
+        self.gpu.generation()
     }
 
     /// 当前配置的物理像素尺寸。
@@ -438,5 +501,47 @@ mod tests {
         use wgpu::TextureFormat as F;
         assert_eq!(pick_format(&[F::Bgra8UnormSrgb, F::Rgba8UnormSrgb]), None);
         assert_eq!(pick_format(&[]), None);
+    }
+
+    /// 头几次丢失要求重建，到上限才降级——「第一帧就放弃硬件加速」是要防的失败模式。
+    #[test]
+    fn recovery_degrades_only_after_repeated_failures() {
+        let mut r = LossRecovery::default();
+        for i in 1..MAX_RECREATE_FAILS {
+            assert_eq!(
+                r.on_lost(),
+                LossAction::Recreate,
+                "第 {i} 次丢失应重建而非降级"
+            );
+        }
+        assert_eq!(r.on_lost(), LossAction::Degrade);
+        assert_eq!(r.fails(), MAX_RECREATE_FAILS);
+    }
+
+    /// 画成一帧就把计数归零：零星的、互不相干的丢失不该累加成降级。
+    #[test]
+    fn recovery_resets_on_successful_frame() {
+        let mut r = LossRecovery::default();
+        // 丢一次、恢复；重复的次数远超上限——不归零的话这里必然降级。
+        for _ in 0..MAX_RECREATE_FAILS * 3 {
+            assert_eq!(r.on_lost(), LossAction::Recreate);
+            r.on_frame_ok();
+            assert_eq!(r.fails(), 0);
+        }
+        // 计数干净，故接下来仍要走满 MAX_RECREATE_FAILS 次才降级。
+        for _ in 1..MAX_RECREATE_FAILS {
+            assert_eq!(r.on_lost(), LossAction::Recreate);
+        }
+        assert_eq!(r.on_lost(), LossAction::Degrade);
+    }
+
+    /// 降级之后继续丢失仍报降级（不会因为计数越界而绕回重建）。
+    #[test]
+    fn recovery_stays_degraded_without_reset() {
+        let mut r = LossRecovery::default();
+        for _ in 0..MAX_RECREATE_FAILS + 5 {
+            let _ = r.on_lost();
+        }
+        assert_eq!(r.on_lost(), LossAction::Degrade);
     }
 }

@@ -19,6 +19,25 @@
   `cfg(gpu_backend)`（判据：`target_os = "macos"` 或开了那个 feature）。`gpu` feature 保留，
   但此后只对非 macOS 目标有意义——Windows 上用它跑 GPU 后端的离屏测试（DX12/WARP）。
 
+- **GPU 设备丢失不再让窗口停住**（macOS）。此前 `FrameError::Lost` 只在 stderr 提示一行
+  「请以软渲染重启」，窗口内容就此冻结——外接显示器热插拔、GPU 驱动复位、eGPU 拔出都是
+  这个形状。现在照 Windows 的 D2D 降级同一套语义：先重建设备与 surface（最多 3 次），仍
+  不行就把**这个窗口**切回软渲染继续出帧。
+
+  三处不按直觉走的地方：① 重建必须连**共享设备**一起换代（只重建 surface 的话，设备本身
+  已经没了时每帧立刻再丢、白白走完三次就降级），故 `SharedGpu` 加了代际与
+  `invalidate_shared_gpu(generation)`，多窗口同时发现丢失时只有第一个真正作废、其余取到
+  新的那一份；② 计数必须**每帧成功就归零**，否则相隔几小时的两次零星丢失会累加成降级；
+  ③ 降级时的顺序是先摘 `CAMetalLayer` 再 `setWantsLayer(false)`——反过来 AppKit 会连同
+  backing layer 把子层丢掉，而那张子层正被尚未析构的 surface 用裸指针指着；且光靠
+  `wantsUpdateLayer` 返回 false 不够，视图仍是 layer-backed 时 AppKit 继续走 `updateLayer`，
+  而软路径要的是 `drawRect:` 才有的绘图上下文，拿不到就静默 return——症状会是「降级了，
+  但窗口再也不更新」。
+
+  「试几次才放弃」这条策略抽成不含任何 GPU 对象的 `LossRecovery`，因此能在没有窗口的地方
+  被测到（真机上要复现一次真实的设备丢失几乎不可能）；端到端则用注入式故障在真机上走完
+  了整条链路：40 帧正常 → 注入丢失 → 重建 ×2 → 降级 → 软路径持续出帧。
+
 ## [0.16.1] - 2026-09-10
 
 - **修复：CheckBox / RadioButton 的长标签折行后压住下一个元素。** 这两个控件的
