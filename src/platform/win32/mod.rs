@@ -58,14 +58,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetCaretBlinkTime, GetClientRect, GetMessageExtraInfo, GetMessageTime, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
-    IsZoomed, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, CREATESTRUCTW,
-    CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
-    HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND,
-    IDC_IBEAM, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG, MSGFLT_ALLOW, MWMO_INPUTAVAILABLE,
-    NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
-    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW,
+    IDC_HAND, IDC_IBEAM, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG, MSGFLT_ALLOW,
+    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK,
+    SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
@@ -277,7 +277,16 @@ unsafe fn create_app_host(hinst: HINSTANCE, main: HWND, renderer: Renderer) {
         Some(hinst),
         Some(host_ptr as *const c_void),
     ) {
-        Ok(h) => APP_HOST_HWND.with(|c| c.set(h.0 as isize)),
+        Ok(h) => {
+            // 本窗口若是顶层窗，它就是 shell 重启广播的落点；提权运行时要显式放行，
+            // 否则 UIPI 拦掉（理由同主窗那处）。message-only 形态下这句无害——那种
+            // 窗口本就收不到广播，靠的是主窗转发。
+            let taskbar_created = tray::taskbar_created_msg();
+            if taskbar_created != 0 {
+                allow_taskbar_created(h, taskbar_created);
+            }
+            APP_HOST_HWND.with(|c| c.set(h.0 as isize));
+        }
         Err(e) => {
             // 建不起来就回收状态：没有宿主窗口，托盘与热键随后都不会安装（见
             // `run_windowed`），应用退化成"只有窗口"仍可正常跑。
@@ -388,7 +397,89 @@ unsafe extern "system" fn app_host_proc(
             }
             LRESULT(0)
         }
+        // Shell 重启（explorer.exe 崩溃或被手动结束）：托盘区连同我们登记的图标一起
+        // 没了，进程却还活着——不重新登记，用户就再也看不到、点不到它。
+        //
+        // 本窗口是 `HWND_MESSAGE` 下的 message-only 窗口时收不到广播（广播只送顶层
+        // 窗），那种情形下接住它的是主窗的 `wnd_proc`；本窗口若被建成顶层工具窗，则
+        // 由这条臂接。两条路转到同一个 `readd_tray`。
+        m if tray::is_taskbar_created(m, tray::taskbar_created_msg()) => {
+            readd_tray();
+            LRESULT(0)
+        }
+        // 重新登记的退避重试（见 `readd_tray`）。
+        WM_TIMER if wparam.0 == TRAY_READD_TIMER => {
+            let _ = KillTimer(Some(hwnd), TRAY_READD_TIMER);
+            readd_tray();
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 放行 shell 重启广播，让 UIPI 不再拦它（提权进程才有的问题，非提权是空操作）。
+///
+/// 失败要说话：静默失败的后果是**原 bug 原样复现**——图标没了、进程还在、没有线索。
+/// 这一行是那种情形下唯一能把人指向 UIPI 的东西。
+unsafe fn allow_taskbar_created(hwnd: HWND, msg: u32) {
+    if let Err(e) = ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, None) {
+        eprintln!("[windui] 放行 TaskbarCreated 失败，提权运行时托盘图标可能无法自动恢复: {e:?}");
+    }
+}
+
+/// 重新登记托盘图标的重试定时器 id（挂在 App 级宿主上）。
+///
+/// 与窗口的 `on_interval` 定时器（id 从 1 起）不冲突：那些挂在各自的**窗口**上，
+/// 本 id 只用于宿主窗。取一个显眼的大值，免得日后有人给宿主加定时器时撞上。
+const TRAY_READD_TIMER: usize = 0x7A11;
+
+// 已排队的重试次数（`readd` 成功即清零）。
+//
+// 放线程局部而不放 `AppHost`：托盘是 UI 线程的单例，且这样重试计数不必跟着宿主状态的
+// 借用规则走——`readd_tray` 正需要在**释放借用之后**读写它。
+thread_local! {
+    static TRAY_READD_RETRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// 重新登记托盘图标（shell 重启后）。没装托盘时是空操作。
+///
+/// **先取素材释放借用，再碰 OS**（铁律 6）：`Shell_NotifyIconW` 跨线程与 shell 通信，
+/// 期间本线程泵入站消息，可能重入窗口过程再借一次 `AppHost`。
+///
+/// **失败要重试，这不是防御性编程**：`TaskbarCreated` 是新 shell **刚起来时**广播的，
+/// 那一刻 explorer 的托盘窗口往往还不能响应 `Shell_NotifyIconW` 的跨线程调用，返回
+/// FALSE 是常态。一次不成就放弃的话，恢复会在最可能发生的时机静默失效，用户看到的
+/// 与原 bug 一模一样。故失败后挂定时器退避重试（1s / 2s / 5s）。
+///
+/// **不在这里 `Sleep`**：这是窗口过程，睡下去整个 UI 线程就停了。
+unsafe fn readd_tray() {
+    let target = app_host()
+        .and_then(|h| h.tray.as_ref())
+        .map(|ts| ts.readd_target());
+    let Some((h, uid, hicon, tip)) = target else {
+        return;
+    };
+    if tray::readd(h, uid, hicon, &tip) {
+        TRAY_READD_RETRIES.with(|c| c.set(0));
+        return;
+    }
+    let n = TRAY_READD_RETRIES.with(|c| {
+        let n = c.get();
+        c.set(n + 1);
+        n
+    });
+    // 退避间隔；用完仍失败就认输并留一行——除此之外用户拿不到任何线索。
+    match [1000u32, 2000, 5000].get(n as usize) {
+        Some(ms) => {
+            let host = app_host_hwnd();
+            if !host.0.is_null() {
+                SetTimer(Some(host), TRAY_READD_TIMER, *ms, None);
+            }
+        }
+        None => {
+            TRAY_READD_RETRIES.with(|c| c.set(0));
+            eprintln!("[windui] shell 重启后托盘图标重新登记失败，已放弃重试");
+        }
     }
 }
 
@@ -1074,6 +1165,13 @@ unsafe fn create_window(
     for msg in [WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA] {
         let _ = ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, None);
     }
+    // 同理放行 shell 重启广播：它由中完整性的 explorer.exe 发出，我们若以管理员身份
+    // 运行，UIPI 会默默拦下——表现为「平时好好的，只有提权跑的时候图标恢复不了」，
+    // 是那种只在部分用户机器上复现、极难查的形态。非提权进程调这个是空操作。
+    let taskbar_created = tray::taskbar_created_msg();
+    if taskbar_created != 0 {
+        allow_taskbar_created(hwnd, taskbar_created);
+    }
 
     // 注册周期定时器（on_interval）：timer id 从 1 起，靠 WM_TIMER 派发。
     if let Some(s) = state_from(hwnd) {
@@ -1754,6 +1852,22 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // Shell 重启后重新登记托盘图标（详见 `app_host_proc` 的同名臂）。
+        //
+        // **托盘挂在 App 级宿主上，为什么这条臂要写在主窗这里**：`TaskbarCreated` 是
+        // `HWND_BROADCAST` 广播，只送达**顶层**窗口；而有主窗时那个宿主是
+        // `HWND_MESSAGE` 下的 message-only 窗口，收不到任何广播。真正接得住这条消息的
+        // 只有主窗——哪怕它当时是隐藏的（广播不看可见性，只看是不是顶层）。
+        // 漏掉这里，托盘类应用里最常见的那一种（有主窗 + 启动即隐藏，wind-dict 正是）
+        // 就永远恢复不了图标。
+        //
+        // 本窗口过程为**所有**窗口共用，故多窗口时这条臂会被走到多次（每个顶层窗口
+        // 各一次）。不去重是刻意的：`tray::readd` 以 `NIM_MODIFY` 探路，第二次起就是
+        // 一次就地更新，既不闪也无副作用；为它加一层时间窗去重，反而要引入新的状态。
+        m if tray::is_taskbar_created(m, tray::taskbar_created_msg()) => {
+            readd_tray();
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -2135,7 +2249,14 @@ unsafe fn apply_tray_ops() {
     };
     for op in ops {
         match op {
-            crate::platform::tray::TrayOp::SetTooltip(s) => tray::set_tooltip(h, uid, &s),
+            crate::platform::tray::TrayOp::SetTooltip(s) => {
+                tray::set_tooltip(h, uid, &s);
+                // 同步进 `TrayState`，供 shell 重启时按现值重放（见 `TrayState::tooltip`）。
+                // **在 OS 调用之后才借宿主**：`set_tooltip` 期间本线程泵消息，借用不能跨过去。
+                if let Some(ts) = app_host().and_then(|host| host.tray.as_mut()) {
+                    ts.remember_tooltip(s);
+                }
+            }
         }
     }
 }
