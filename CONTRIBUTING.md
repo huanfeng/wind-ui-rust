@@ -34,14 +34,25 @@ cargo fmt --check                 # 格式须规范（CI 必选，前置门禁�
 cargo build --all-targets
 cargo test
 cargo clippy --all-targets        # 须零警告
+# 下面两档 CI 同样会跑，且**只在那里编译**——本地默认档一行都碰不到
+cargo clippy --no-default-features --all-targets   # svg/d2d 关闭时的门控
+cargo clippy --all-targets --features gpu          # 非 macOS 的 GPU 后端（离屏测试）
+cargo test --features gpu --lib
 ```
+
+> 后两档别省：它们漏过两次真实缺陷——0.11.0 的 `--no-default-features` 门控疏漏，以及给
+> `TextStyle` 加 `italic` 时漏同步 GPU 后端的文字缓存键（斜体与正体共用同一张纹理）。
+> 两次的改动本身都在别的模块，本地默认门禁全绿。
+> macOS 上 GPU 后端是**默认编入**的，那里 `cargo test` 就已经覆盖它。
 
 - **格式**：本项目采用 `cargo fmt` 默认风格，并在 CI 强制校验（`cargo fmt --check`）。提交前请先 `cargo fmt`；改动请聚焦本次内容，勿大面积重排无关代码。
 - 涉及视觉的改动，建议附 `--screenshot` 截图（见 `docs/DEVELOPMENT.md`）。
 
 ### 可选：启用本地 Git Hooks 自动把关
 
-仓库在 [`.githooks/`](.githooks) 提供了钩子（`pre-commit` 跑 `cargo fmt --check`；`pre-push` 跑 clippy + 测试），启用一次即可在提交/推送前自动拦住会让 CI 变红的问题：
+仓库在 [`.githooks/`](.githooks) 提供了钩子（`pre-commit` 跑 `cargo fmt --check`；`pre-push` 跑
+上面那三档 feature 的 clippy + 测试），启用一次即可在提交/推送前自动拦住会让 CI 变红的问题
+（首次推送要把 wgpu 依赖树编一遍，之后走增量）：
 
 ```bash
 git config core.hooksPath .githooks

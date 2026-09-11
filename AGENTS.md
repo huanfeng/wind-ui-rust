@@ -38,7 +38,13 @@ windui = 轻量 Windows 桌面 GUI 框架（Win32 窗口 + GDI 呈现 + tiny-ski
 cargo build                              # 编译库
 cargo build --examples                   # 编译所有示例（改公共 API 后必跑）
 cargo clippy --all-targets               # lint（零警告才算过）
-cargo test                               # 单元测试（当前 62 个，须全绿）
+cargo test                               # 单元测试（须全绿）
+
+# 非默认档：CI 跑，本地默认档编译不到。改 src/render/gpu/、src/platform/、或任何会被
+# 后端缓存键引用的类型（TextStyle、Image…）时必跑——漏过两次真实缺陷，见 CONTRIBUTING。
+cargo clippy --no-default-features --all-targets
+cargo clippy --all-targets --features gpu
+cargo test --features gpu --lib
 
 cargo run --release --example fullshowcase           # 运行综合示例窗口
 cargo run --example <name> -- --screenshot out.png   # 离屏渲染存 PNG
@@ -148,7 +154,8 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 
 1. 宽泛需求先探索再动手；2+ 独立任务并行。
 2. 实现。
-3. `cargo build` + `cargo clippy --all-targets` 零警告。
+3. `cargo build` + `cargo clippy --all-targets` 零警告；碰了渲染后端/平台层就补跑 §1 的
+   非默认两档（macOS 上 GPU 后端默认编入，`cargo test` 已覆盖；Windows 上要 `--features gpu`）。
 4. `--screenshot` 截图核对渲染（视觉改动必做）。
 5. **独立 `code-reviewer` 审查**（不自审），按严重度修复。
 6. `git commit`（见 §7）。

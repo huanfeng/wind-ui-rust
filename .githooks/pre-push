@@ -1,20 +1,35 @@
 #!/bin/sh
-# 推送前门禁：完整对齐 CI（clippy 零警告 + 测试）。
-# 拦住会让 CI check job 变红的问题，避免把红色 CI 推到 main。
+# 推送前门禁：完整对齐 CI 的 check job（clippy 零警告 + 测试 × 三档 feature 组合）。
+# 拦住会让 CI 变红的问题，避免把红色 CI 推到 main。
 # 启用方式：git config core.hooksPath .githooks
+#
+# 为什么非默认的两档也要跑：它们**只在 CI 上编译**，本地默认门禁一行都碰不到。
+# 真实教训两次——
+#   * `--no-default-features`：0.11.0 发布版才发现 svg/d2d 关闭时的门控疏漏；
+#   * `--features gpu`：给 TextStyle 加 `italic` 时同步了 DirectWrite 侧的三处缓存键，
+#     漏掉 GPU 后端的第四处，斜体与正体因此共用同一张文字纹理（提交 32cd096）。
+# 两次都是"改动本身在别的模块、门控那档压根没编译"，故这里**不做变更感知**：按改了
+# 哪些文件来决定跑不跑，恰好会放过这两种形状。代价是首次推送要把 wgpu 依赖树编一遍
+# （之后走增量），换的是这两档不再只能等 CI 告诉你。
 
-echo "[pre-push] cargo clippy --all-targets -- -D warnings ..."
-if ! cargo clippy --all-targets -- -D warnings; then
-    echo ""
-    echo "❌ clippy 有警告/错误（CI 以 -D warnings 视警告为错误）。请修复后再推送。"
-    exit 1
-fi
+run() {
+    echo "[pre-push] $*"
+    if ! "$@"; then
+        echo ""
+        echo "❌ 失败：$*"
+        echo "   （CI 会跑同一条命令，先在本地修好再推）"
+        exit 1
+    fi
+}
 
-echo "[pre-push] cargo test ..."
-if ! cargo test; then
-    echo ""
-    echo "❌ 测试未通过。请修复后再推送。"
-    exit 1
-fi
+run cargo clippy --all-targets -- -D warnings || exit 1
+run cargo test || exit 1
+run cargo clippy --no-default-features --all-targets -- -D warnings || exit 1
+run cargo clippy --all-targets --features gpu -- -D warnings || exit 1
+# gpu 档只跑 `--lib`（CI 上是全量）。差的是 doctest，而 doctest 与本 feature 无关——上面
+# 默认档那一步已经把它们全跑过一遍。在 gpu 档重跑的代价却很实在：每条 doctest 单独链接
+# 一次完整的 wgpu 依赖树，开发机上会撞 `LINK : fatal error LNK1102: 内存不足`，门禁于是
+# 红在与改动毫无关系的地方。假红比漏跑更伤——它教人 `--no-verify`。
+run cargo test --features gpu --lib || exit 1
 
-echo "[pre-push] ✓ clippy + 测试全部通过"
+echo "[pre-push] ✓ 三档 feature 的 clippy + 测试全部通过"
