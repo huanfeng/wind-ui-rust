@@ -2136,6 +2136,9 @@ unsafe fn apply_tray_ops() {
     for op in ops {
         match op {
             crate::platform::tray::TrayOp::SetTooltip(s) => tray::set_tooltip(h, uid, &s),
+            crate::platform::tray::TrayOp::Notify { title, body } => {
+                tray::notify(h, uid, &title, &body)
+            }
         }
     }
 }

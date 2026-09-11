@@ -31,6 +31,8 @@ use std::rc::Rc;
 pub enum TrayOp {
     /// 换鼠标悬停提示。
     SetTooltip(String),
+    /// 弹出系统通知。与托盘回调的 `TrayAction::Notify` 走同一平台实现。
+    Notify { title: String, body: String },
 }
 
 thread_local! {
@@ -96,6 +98,15 @@ impl TrayHandle {
         self.queue.borrow_mut().push(TrayOp::SetTooltip(s.into()));
         // 排完队要**踢一帧**，否则这条意图要等到下一次有人动鼠标才被消费。改提示
         // 多半发生在设置页里，而那之后用户可能直接去托盘上悬停——中间一个事件都没有。
+        crate::anim::request_repaint();
+    }
+
+    /// 从应用状态变化路径弹出系统通知，而不要求先发生一次托盘交互。
+    pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
+        self.queue.borrow_mut().push(TrayOp::Notify {
+            title: title.into(),
+            body: body.into(),
+        });
         crate::anim::request_repaint();
     }
 
@@ -377,6 +388,19 @@ mod tests {
                 },
                 TrayAction::Show,
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_handle_queues_notification_intent() {
+        let handle = TrayHandle::detached();
+        handle.notify("标题", "正文");
+        assert_eq!(
+            handle.pending_ops(),
+            vec![TrayOp::Notify {
+                title: "标题".into(),
+                body: "正文".into(),
+            }]
         );
     }
 
