@@ -59,6 +59,8 @@ pub struct MenuBar {
     hover: Option<usize>,
     /// 与宿主共享的"当前展开 / 键盘激活的标题"（见 [`MenuBarLink::open`]）。
     open: Rc<Cell<Option<usize>>>,
+    /// 与宿主共享的"助记字母下划线是否显示"（见 [`MenuBarLink::mnemonics`]）。
+    mnemonics: Rc<Cell<bool>>,
 }
 
 impl MenuBar {
@@ -68,6 +70,7 @@ impl MenuBar {
             rects: RefCell::new(Vec::new()),
             hover: None,
             open: Rc::new(Cell::new(None)),
+            mnemonics: Rc::new(Cell::new(false)),
         }
     }
 
@@ -95,6 +98,7 @@ impl MenuBar {
             current: 0,
             keyboard: false,
             open: self.open.clone(),
+            mnemonics: self.mnemonics.clone(),
         })
     }
 }
@@ -123,6 +127,7 @@ impl Widget for MenuBar {
         let (pal, mt) = (&th.palette, &th.menu);
         let ts = TextStyle::of(style);
         let open = self.open.get();
+        let mnemonics = self.mnemonics.get();
         let mut rects = Vec::with_capacity(self.entries.len());
         let mut x = bounds.x;
         for (i, e) in self.entries.iter().enumerate() {
@@ -155,7 +160,13 @@ impl Widget for MenuBar {
                 mt.text(pal)
             };
             canvas.draw_text(&e.title, r, color, Align::Center, &ts);
-            // 助记字母下划线（标题居中绘制：先算出文字起点）。
+            // 助记字母下划线（标题居中绘制：先算出文字起点）。只在键盘触达过菜单栏后
+            // 才画：一排常驻的下划线会把标题栏搅得很花，而鼠标用户永远用不上它们。
+            if !mnemonics {
+                rects.push(r);
+                x += w;
+                continue;
+            }
             if let Some((pre, ch, _)) = e.mnemonic.and_then(|m| mnemonic_split(&e.title, m)) {
                 let tw = canvas.measure_text(&e.title, &ts).w;
                 let x0 = r.x + (r.w - tw) / 2 + canvas.measure_text(pre, &ts).w;
@@ -209,6 +220,10 @@ impl Widget for MenuBar {
 
     fn menu_bar_link(&self) -> Option<MenuBarLink> {
         self.link()
+    }
+
+    fn preserves_focus(&self) -> bool {
+        true // 打开菜单不该让别处失焦，见 `Widget::preserves_focus`
     }
 }
 

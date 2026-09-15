@@ -2324,9 +2324,11 @@ impl UiHost {
             }
         } else if let Some(pos) = blur_at {
             // 点在当前焦点控件之外 → 清空焦点（网页 blur 语义：焦点归属由宿主每次按下
-            // 重新裁决，而不是"没人认领就维持原样"）。
+            // 重新裁决，而不是"没人认领就维持原样"）。菜单栏例外，见
+            // [`Widget::preserves_focus`]：那一下若也清焦点，点开过菜单之后整个窗口
+            // 的快捷键就都没了。
             if let Some(f) = self.focus.current {
-                if !self.tree.hit_inside(pos, f) {
+                if !self.tree.hit_inside(pos, f) && !self.tree.hit_preserves_focus(pos) {
                     self.tree.set_focused(None, Some(f));
                     self.focus.current = None;
                     self.focus.visible = false;

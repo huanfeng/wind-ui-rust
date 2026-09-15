@@ -946,6 +946,10 @@ pub struct MenuBarLink {
     /// 鼠标点开则不预选——桌面惯例。
     pub keyboard: bool,
     pub open: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+    /// 同为共享单元格：**助记字母的下划线是否显示**。宿主在键盘触达菜单栏时置位
+    /// （按下 Alt、F10、Alt+助记键），鼠标按下与窗口失活时复位——与 Windows 一致：
+    /// 纯鼠标操作的界面上不该常年挂着一排下划线。
+    pub mnemonics: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 /// 菜单栏里的一个标题：窗口坐标下的矩形、助记字母、项生成器。

@@ -174,6 +174,16 @@ pub trait Widget {
     fn focusable(&self) -> bool {
         false
     }
+    /// 按下本控件既不夺取焦点、也**不清掉别处的焦点**（默认 false，即通行的 blur 语义）。
+    ///
+    /// 为菜单栏而设，原生菜单栏正是如此：打开菜单时编辑框里的光标还在闪，关掉菜单
+    /// 接着打字。没有这条豁免时错在哪：按下菜单栏是一次"点在焦点控件之外"，宿主按
+    /// blur 语义把焦点清成 `None`，而 [`Tree::dispatch_key`] 的目标是 `Option<NodeId>`
+    /// ——没有焦点时整个按键事件被丢弃。于是**点开过一次菜单，此后所有快捷键全部失灵**，
+    /// 且看不出原因（界面毫无变化）。
+    fn preserves_focus(&self) -> bool {
+        false
+    }
     /// 本节点是否为**模态层根**（仅对话框遮罩）：可见时把 Tab 焦点环圈在其子树内，
     /// 使键盘无法走到被遮罩盖住、鼠标点都点不到的控件上（见 [`Tree::focusable_order`]）。
     ///
@@ -2196,6 +2206,17 @@ impl Tree {
     ///
     /// 判据取命中节点的祖先链而非"本次有没有控件 `request_focus`"：焦点控件的
     /// 内部子节点、以及按下被上层容器先消费的情况，都不该被误判成点了空白。
+    /// 命中点所在的祖先链上是否有 [`Widget::preserves_focus`] 的控件（菜单栏）。
+    /// 宿主据此跳过一次失焦裁决。
+    pub fn hit_preserves_focus(&self, pos: Point) -> bool {
+        let Some(hit) = self.hit_test(pos) else {
+            return false;
+        };
+        self.ancestor_chain(hit)
+            .into_iter()
+            .any(|id| self.get(id).is_some_and(|n| n.widget.preserves_focus()))
+    }
+
     pub fn hit_inside(&self, pos: Point, id: NodeId) -> bool {
         let Some(hit) = self.hit_test(pos) else {
             return false;
