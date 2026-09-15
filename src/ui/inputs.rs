@@ -841,6 +841,10 @@ pub struct TextInput {
     /// `.` 只能有一个，逐字符判定说不清这些。同一把尺子同时管住键入与粘贴，
     /// 不会出现"打不进去但能粘进去"。
     filter: Option<FilterFn>,
+    /// 预置选区（[`crate::ui::Element::select_range`]）。存下来而不是只在建树时写一次
+    /// 光标：节点隐藏 / 禁用时框架会调 `reset_interaction` 清掉选区，复显时要按它再
+    /// 兑现一次——同一个重命名框第二次打开也得是"只选主名"。
+    preset_selection: Option<(usize, usize)>,
     /// 「本控件被点了」的通知（见 [`crate::ui::Element::on_click`]）。
     ///
     /// 与 Button 的同名回调**语义不同**：那里 on_click 就是激活本身，这里只是旁路通知，
@@ -887,6 +891,7 @@ impl TextInput {
             on_nav_key: None,
             filter: None,
             on_click: None,
+            preset_selection: None,
         }
     }
 
@@ -896,8 +901,14 @@ impl TextInput {
     }
 
     /// 预置选区 `[start, end)`（字符索引，越界钳到正文长度；`start == end` 只放光标）。
+    /// 记为预设并立即兑现；此后每次 `reset_interaction`（隐藏 / 禁用）再兑现一次。
     /// 供 Builder；下游用 [`crate::ui::Element::select_range`]。
     pub fn set_selection(&mut self, start: usize, end: usize) {
+        self.preset_selection = Some((start, end));
+        self.apply_selection(start, end);
+    }
+
+    fn apply_selection(&mut self, start: usize, end: usize) {
         let n = self.char_count();
         let s = start.min(n);
         let e = end.min(n);
@@ -2310,9 +2321,15 @@ impl Widget for TextInput {
     }
     fn reset_interaction(&mut self) {
         // 复用同一对话框切换编辑目标时（隐藏→再显示），清掉上一条残留的选区/拖选状态，
-        // 光标落到（新填充文本的）文末，避免带着旧选区进入下一次编辑。
-        self.anchor = None;
-        self.cursor = self.char_count();
+        // 光标落到（新填充文本的）文末，避免带着旧选区进入下一次编辑；有预置选区的
+        // 按预置再兑现一次（钳到新正文长度）。
+        match self.preset_selection {
+            Some((s, e)) => self.apply_selection(s, e),
+            None => {
+                self.anchor = None;
+                self.cursor = self.char_count();
+            }
+        }
         self.dragging = false;
         self.goal_x.set(None);
         self.follow_cursor.set(true);
@@ -2338,6 +2355,23 @@ mod tests {
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();
         word_run(&chars, idx)
+    }
+
+    #[test]
+    fn reset_interaction_rearms_preset_selection() {
+        use crate::core::Widget;
+        // 重命名框第二次打开：隐藏时框架调 reset_interaction，预置选区要重新兑现，
+        // 而不是像无预置那样清掉。正文变短时钳到新长度。
+        let text = signal(String::from("README.md"));
+        let mut ti = TextInput::new(text, String::new());
+        ti.set_selection(0, 6);
+        ti.anchor = None;
+        ti.cursor = 9;
+        ti.reset_interaction();
+        assert_eq!(ti.selection(), Some((0, 6)));
+        text.set("ab.c".into());
+        ti.reset_interaction();
+        assert_eq!(ti.selection(), Some((0, 4)), "钳到新正文长度");
     }
 
     #[test]

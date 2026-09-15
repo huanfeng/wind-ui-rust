@@ -368,8 +368,10 @@ impl UiHost {
     /// 越窗下缘时：若 `anchor_top` 有值（下拉控件顶部 y），优先向上翻转（菜单底对齐控件顶），
     /// 保证控件自身不被遮挡；否则退化为向上钳制。
     ///
-    /// `tall`：菜单栏的菜单不受 [`MENU_MAX_H`] 约束，可视高度只受窗口下缘限制——
-    /// 应用菜单动辄二十项，原生菜单栏也是整列铺开而非滚动。下拉与右键菜单仍走上限。
+    /// 可视高度只在**放不下**时才滚动：`tall`（菜单栏的菜单）按锚点到窗口下缘算；
+    /// 下拉（`anchor_top` 有值）按锚点上下两侧空间较大者算——面板只能落在控件一侧，
+    /// 否则会盖住控件自己；右键菜单按整窗高算。仅无窗口尺寸（离屏 / 测试）时退回
+    /// [`MENU_MAX_H`]。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_level(
         &mut self,
@@ -391,16 +393,25 @@ impl UiHost {
         let ws = self.logical_size;
         // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
         let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
-        // 面板可视高度：只在**放不下**时才滚动。菜单栏的菜单受锚点到窗口下缘的空间限制；
-        // 右键 / 下拉菜单受整个窗口高度限制（放不下会翻转或贴边，见下面的 y 调整）——
-        // 原生菜单也是整列铺开，二十来项就得滚的菜单操作起来很不便。无窗口尺寸
-        // （离屏 / 测试）时退回 MENU_MAX_H。
+        // 面板可视高度：只在**放不下**时才滚动——原生菜单也是整列铺开，二十来项就得
+        // 滚的菜单操作起来很不便。菜单栏的菜单受锚点到窗口下缘限制；下拉只能占控件
+        // 上方或下方之一（取较大者），否则面板会把控件自己盖住；右键菜单受整窗高限制
+        // （放不下会翻转或贴边，见下面的 y 调整）。无窗口尺寸（离屏 / 测试）时退回
+        // MENU_MAX_H。最低两项高，但再矮也不超过窗口本身（恢复窗口 / 换 DPI 的中间帧
+        // 逻辑尺寸会短暂很小，不钳会画到窗口外）。
         let max_h = if ws.h <= 0 {
             MENU_MAX_H
         } else if tall {
             (ws.h - ay - em).max(MENU_ITEM_H * 2)
+        } else if let Some(top) = anchor_top {
+            (ws.h - ay - em).max(top - em).max(MENU_ITEM_H * 2)
         } else {
             (ws.h - 2 * em).max(MENU_ITEM_H * 2)
+        };
+        let max_h = if ws.h > 0 {
+            max_h.min((ws.h - 2 * em).max(1))
+        } else {
+            max_h
         };
         let h = content_h.min(max_h);
         let mut x = ax;
@@ -1468,6 +1479,50 @@ mod tests {
     use crate::app::test_support::{dropdown_handler, key_ev};
     use crate::app::App;
     use crate::ui::Element;
+
+    /// 回归：下拉菜单放不下时不能把控件自己盖住。非 `tall` 上限改成整窗高之后，
+    /// 长列表的面板高≈窗高，"向上翻转"必然失败而退到贴边钳制，面板铺满整窗。
+    /// 现在下拉的上限取锚点上下两侧较大者，面板必落在控件一侧。
+    #[test]
+    fn dropdown_panel_never_covers_its_own_control() {
+        use crate::event::MenuItem;
+        let (mut host, _sel) = dropdown_handler();
+        // dropdown_handler 的窗口是 300x200；控件顶 80、锚点（控件底）100，40 项远放不下
+        let items: Vec<MenuItem> = (0..40)
+            .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+            .collect();
+        let level = host.build_level(items, 10, 100, 120, None, Some(80), false);
+        let r = level.rect;
+        assert!(
+            r.bottom() <= 80 || r.y >= 100,
+            "面板 {:?} 与控件 80..100 相交",
+            r
+        );
+        assert!(
+            r.y >= 0 && r.bottom() <= 200,
+            "面板 {:?} 溢出 300x200 的窗口",
+            r
+        );
+        assert!(level.content_h > r.h, "放不下时应滚动而不是撑满整窗");
+    }
+
+    /// 极矮窗口：非 `tall` 菜单的 60 px 下限不能让面板伸到窗口外。
+    #[test]
+    fn menu_never_taller_than_a_tiny_window() {
+        use crate::event::MenuItem;
+        let (mut host, _sel) = dropdown_handler();
+        host.logical_size = crate::geometry::Size::new(300, 50);
+        let items: Vec<MenuItem> = (0..10)
+            .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+            .collect();
+        let level = host.build_level(items, 10, 20, 120, None, None, false);
+        let r = level.rect;
+        assert!(
+            r.y >= 0 && r.bottom() <= 50,
+            "面板 {:?} 溢出 50 高的窗口",
+            r
+        );
+    }
 
     /// 回归：滚动条的命中区纵向必须与轨道一致。此前判据只写了 `x >= right - 16`，
     /// 完全不约束 y，而滑块只画在 `y+4` 起、高 `h-8` 的轨道内——点面板右缘最顶或

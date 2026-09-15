@@ -95,7 +95,12 @@ impl Widget for SplitHandle {
         };
         // 静态画 1px 细线居中；激活加粗到 2px 并换强调色——可命中区仍是整条 `thickness`
         // 宽，但视觉上不把整条染成一块粗条：它与界面里其他分隔线同一量级才不突兀。
-        let t = if active { 2 } else { 1 };
+        // 跟槽宽取 min：`SplitOpts.thickness` 是公开字段，下游给 1 或 0 时不能画到界外
+        let slot = match self.axis {
+            Axis::Horizontal => bounds.w,
+            Axis::Vertical => bounds.h,
+        };
+        let t = (if active { 2 } else { 1 }).min(slot.max(0));
         let (x, y, w, h) = match self.axis {
             Axis::Horizontal => (bounds.x + (bounds.w - t) / 2, bounds.y, t, bounds.h),
             Axis::Vertical => (bounds.x, bounds.y + (bounds.h - t) / 2, bounds.w, t),

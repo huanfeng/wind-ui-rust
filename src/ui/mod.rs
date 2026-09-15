@@ -1574,18 +1574,28 @@ impl Element {
     /// **预置选区** `[start, end)`（字符索引）：重命名框只选主名、不选扩展名——
     /// 资源管理器 / TC 的 F2 语义，改名时直接覆盖打字而扩展名原样保留。
     ///
-    /// 与 [`autofocus`](Self::autofocus) 搭配（`autofocus_select_all` 会在聚焦那一帧
-    /// 合成 Ctrl+A 覆盖掉它）。越界钳到正文长度；`start == end` 只放光标。
+    /// 与 [`autofocus`](Self::autofocus) 搭配；与 `autofocus_select_all` 互斥（后者会在
+    /// 聚焦那一帧合成 Ctrl+A 覆盖掉它，debug 构建下断言）。越界钳到正文长度；
+    /// `start == end` 只放光标。节点隐藏后再显示时按同一区间重新兑现（区间随文本
+    /// 变化的场景——重命名框每次主名长度不同——每次打开重建输入框即可）。
     /// 仅 `Element::text_input(..)` 可用。
     ///
     /// ```
     /// # use windui::prelude::*;
     /// let name = signal("report.final.txt".to_string());
-    /// let stem = name.with(|s| s.rfind('.').map(|i| s[..i].chars().count()).unwrap_or(s.chars().count()));
+    /// // 主名 = 最后一个点之前；点在开头（`.gitignore`）或没有点时整名全选
+    /// let stem = name.with(|s| match s.rfind('.') {
+    ///     Some(i) if i > 0 => s[..i].chars().count(),
+    ///     _ => s.chars().count(),
+    /// });
     /// let ui = Element::text_input(name, "").autofocus().select_range(0, stem);
     /// ```
     #[track_caller]
     pub fn select_range(self, start: usize, end: usize) -> Self {
+        debug_assert!(
+            self.autofocus != Some(crate::core::Autofocus::FocusSelectAll),
+            "select_range() 与 autofocus_select_all() 互斥：后者会合成 Ctrl+A 覆盖预置选区"
+        );
         self.config_text_input_widget(|ti| ti.set_selection(start, end), "select_range()")
     }
 
