@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-15
+
 - **`Element::text_input(..).select_range(start, end)` 预置选区**：重命名框只选主名不选
   扩展名（资源管理器 / TC 的 F2 语义）。此前只有 `autofocus_select_all` 一档，应用层拿不到
   `TextInput` 的光标 / 锚点，"改名不动扩展名"无从实现。与 `autofocus()` 搭配、与
@@ -56,6 +58,59 @@
   0.11.0 的门控疏漏、以及 `italic` 漏进 GPU 文字缓存键（`32cd096`）都是这么溜过去的。
   不做"按改了哪些文件决定跑不跑"的变更感知：那两次的改动本身都在别的模块，变更感知恰好
   会放过它们。
+
+- **零窗口常驻模式 `App::resident(..)` + `run_resident()`**：不建主窗直接进消息循环，
+  托盘与全局热键挂在 `AppHost` 上照常存活，窗口由 `TrayCtx` / `HotkeyCtx` 的 `open_window`
+  按需创建、关闭即销毁，渲染资源随 `WindowState` 的 drop 归还。此前常驻托盘应用只能靠
+  `hide_on_close` 把窗口留着不销毁，那块按物理像素分配的 pixmap 于是一直挂着——根因不是
+  缺少释放机制，而是最后一个窗口 `WM_DESTROY` 时无条件 `PostQuitMessage`，窗口根本关不掉。
+  实测零窗口 1.80MB、开窗 4.42MB、关窗回落到 2.25MB（对照组 `hide_on_close` 停在 4.62MB
+  一分不还），空闲 CPU 低于时钟滴答精度。
+
+  常驻模式下 `AppHost` 从 message-only 改为隐藏的顶层工具窗：`TrackPopupMenu` 之前必须
+  `SetForegroundWindow`，而 `HWND_MESSAGE` 下的窗口不参与前台激活，托盘菜单会点了别处
+  不消失。代价是它开始收到广播消息，故新增 `WM_CLOSE` 臂——任务管理器「结束任务」投的
+  就是它，不接会留下「托盘图标消失、进程却还在」且杀不掉的僵尸。
+
+  零窗口下没有宿主可用，应用级设施因此各自需要落点：跨线程通道就地排空、`on_interval`
+  的定时器挂到宿主窗、托盘与热键句柄的意图队列在应用级派发点统一 drain、主题与窗口状态
+  由 `enter_app_scope` 注入。开窗请求走线程局部旁路队列而非放进 `TrayAction`：
+  `WindowRequest` 带闭包，塞进去会砸掉 `Vec<TrayAction>` 的 `PartialEq`，而那是
+  `testing::run_with_tray_ctx` 承诺给下游的测试入口。
+
+  顺带修掉一处既有 UB：`WM_SETTINGCHANGE` 此前挂在 `app_host_proc` 里并对宿主窗口调
+  `state_from`，把 `*mut AppHost` 当 `*mut WindowState` 解引用。它至今是死代码
+  （message-only 窗口收不到广播），但宿主改成顶层窗后就会真的执行，已移到 `wnd_proc`。
+  macOS 侧只做 TODO 降级：`run` 对 resident 明确拒绝而非退化成开窗，这些改动未在 macOS
+  目标上编译过。
+
+- **修复：shell 重启后托盘图标永久消失**（Windows）。图标是登记在 shell 的托盘窗口里的，
+  不是内核资源，随旧 `explorer.exe` 一起蒸发；进程还活着，却再没有任何可见入口。Win32
+  不做自动恢复：新 shell 会广播 `TaskbarCreated`，每个托盘程序必须自己接住并重新登记。
+
+  广播只送达顶层窗口，而托盘挂着的 App 级宿主在有主窗时是 `HWND_MESSAGE` 下的
+  message-only 窗口，根本收不到它——所以主窗的 `wnd_proc` 也接一条，两处转到同一个
+  `readd_tray`。只在宿主上接的话，托盘类应用里最常见的那一种（有主窗 + 启动即隐藏）
+  恰恰修不好。
+
+  重新登记走「`NIM_MODIFY` 探路、失败才 `NIM_ADD`」：广播每个顶层窗口各收一次，必须
+  幂等。不能先删后加——那在第二次广播时删掉的是一个正在正常工作的图标，之后能否加回来
+  全押在 `NIM_ADD` 上，而它恰恰是这条路上最会失败的一步：`TaskbarCreated` 是新 shell
+  刚起来时广播的，那一刻 explorer 往往还不能响应跨线程调用，返回 FALSE 是常态。故失败
+  后挂定时器退避重试 1s/2s/5s，用完仍失败才认输并留一行日志。
+
+  另有两处配套：提权运行时 UIPI 会拦下 explorer（中完整性）发来的广播，两处窗口创建时
+  显式放行，否则表现为「只有管理员身份跑的时候恢复不了」这种极难查的形态；`TrayState`
+  单独缓存当前 tooltip，`set_tooltip` 原先只改 shell 里那份，恢复时会退回启动初值——对
+  把当前热键写进提示的应用，那就是显示一个早已改掉的快捷键。实机验证（`examples/tray`，
+  重启 explorer 后查 `Shell_NotifyIconGetRect`）：未修复版图标登记为 False，修复版连续
+  两次重启均恢复。
+
+- **修复：macOS 状态栏图标随位图分辨率一起放大**。`NSImage` 的 `size` 是**点**而非像素，
+  此前直接拿调用方传入的位图像素尺寸当点尺寸，等于让状态栏图标按位图分辨率决定显示
+  大小——下游为了在 Windows 托盘上清晰而传的 32×32，在这里就以 32pt 显示，比菜单栏其余
+  图标（系统惯例约 18pt 高）大出将近一倍。改为固定按 18pt 高显示、按比例算宽，位图
+  分辨率此后只影响 Retina 屏下够不够清晰，不再决定显示大小。
 
 ## [0.16.1] - 2026-09-10
 
@@ -2095,7 +2150,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.14.0...v0.15.0
