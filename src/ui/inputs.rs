@@ -2202,7 +2202,14 @@ impl Widget for TextInput {
                     Key::Up | Key::Down if !self.is_multiline() => self.fire_nav_key(ctx, *k),
                     // 翻页键两种模式都转发：本控件不做翻页（多行的上下移行只按视觉行走），
                     // 交给应用翻候选页 / 翻文档。
-                    Key::Tab | Key::PageUp | Key::PageDown => self.fire_nav_key(ctx, *k),
+                    //
+                    // Escape 同样转发，且同 Tab 默认不消费：输入框自己不用它，而"取消"
+                    // 这件事只有应用知道该怎么做——收起就地编辑框、关掉补全浮层、
+                    // 放弃这次输入。没有这条时应用**根本收不到 Escape**（它既不在本控件
+                    // 的处理表里，也不算被消费），只能眼看着它径直走到宿主的关窗兜底。
+                    Key::Tab | Key::PageUp | Key::PageDown | Key::Escape => {
+                        self.fire_nav_key(ctx, *k)
+                    }
                     Key::Left => {
                         if !k.shift {
                             if let Some((s, _)) = self.selection() {
@@ -2355,6 +2362,41 @@ mod tests {
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();
         word_run(&chars, idx)
+    }
+
+    /// Escape 要能到达 `on_nav_key`：就地编辑框靠它取消。
+    ///
+    /// 没有这条转发时错在哪：Escape 既不在 TextInput 的处理表里、也不算被消费，
+    /// 于是径直走到宿主的关窗兜底——应用侧写了取消回调却永远不触发，表现为
+    /// 「按 Esc 退不出编辑框」，而代码看着完全正确。
+    #[test]
+    fn escape_reaches_on_nav_key() {
+        use crate::core::Widget;
+        use crate::event::{Event, Key, KeyEvent};
+        let text = signal(String::from("abc"));
+        let mut ti = TextInput::new(text, String::new());
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let s2 = seen.clone();
+        ti.set_on_nav_key(move |_ctx, ev| {
+            if ev.key == Key::Escape {
+                s2.set(s2.get() + 1);
+                return true;
+            }
+            false
+        });
+        let ev = Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        let consumed = crate::testing::run_with_ctx(|ctx| {
+            ti.on_event(ctx, &ev);
+        });
+        let _ = consumed;
+        assert_eq!(seen.get(), 1, "Escape 应转发给 on_nav_key");
     }
 
     #[test]
