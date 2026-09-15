@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+- **win32 开始分发鼠标中键**（`WM_MBUTTONDOWN` / `WM_MBUTTONUP`）。此前这两条消息根本
+  没接，`MouseButton::Middle` 永远到不了控件——而「中键关掉这一项」是浏览器与文件管理器
+  的标准手势，下游照着写完全无效且查不出原因。连续点击计数一并接上。
+
+- **新增 `Element::autofocus_take()` / `autofocus_take_select_all()`**：出现即夺取焦点，
+  即使别处已有焦点。既有的 `autofocus` 家族对已有焦点主动让位（"没人要焦点时给个归宿"
+  的兜底语义），但**就地编辑**的语义相反：输入框是被用户按键唤出来的，唤出它的那个控件
+  此刻正持有焦点，让位就成了「光标在框里闪，字却打进了别处」。
+
 - **打开菜单栏不再清掉别处的焦点**（新增 `Widget::preserves_focus`，菜单栏返回 true）。
   此前按下菜单栏是一次"点在焦点控件之外"，宿主按 blur 语义把焦点清成 `None`，而
   `Tree::dispatch_key` 的目标是 `Option<NodeId>`——没有焦点时整个按键事件被丢弃。表现是

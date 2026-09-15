@@ -1050,6 +1050,23 @@ impl Element {
         self
     }
 
+    /// 聚焦，**即使别处已有焦点也夺过来**（见 [`Autofocus::Take`](crate::core::Autofocus::Take)）。
+    ///
+    /// 给**就地编辑**用：列表里原地改名、地址栏原地改路径——输入框是被用户按键唤出来的，
+    /// 出现的唯一理由就是接收接下来的输入。用 [`autofocus`](Self::autofocus) 的话它会对
+    /// 已有焦点让位，键入继续落到唤出它的那个控件上，表现为「光标在框里闪，字却打进了
+    /// 别处」。配合 [`select_range`](Self::select_range) 可只选主名。
+    pub fn autofocus_take(mut self) -> Self {
+        self.autofocus = Some(crate::core::Autofocus::Take);
+        self
+    }
+
+    /// [`autofocus_take`](Self::autofocus_take) + 全选已有内容（地址栏语义）。
+    pub fn autofocus_take_select_all(mut self) -> Self {
+        self.autofocus = Some(crate::core::Autofocus::TakeSelectAll);
+        self
+    }
+
     /// 标记为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
     /// 命中沿父链生效——标记标题栏容器即其内非交互空白处都可拖；落在子按钮/输入等
     /// 可聚焦控件上不拖（交控件处理）。仅在 `App::frameless()` 窗口有意义。
@@ -1593,8 +1610,9 @@ impl Element {
     #[track_caller]
     pub fn select_range(self, start: usize, end: usize) -> Self {
         debug_assert!(
-            self.autofocus != Some(crate::core::Autofocus::FocusSelectAll),
-            "select_range() 与 autofocus_select_all() 互斥：后者会合成 Ctrl+A 覆盖预置选区"
+            !self.autofocus.is_some_and(|a| a.selects_all()),
+            "select_range() 与 autofocus_select_all() / autofocus_take_select_all() 互斥：\
+             后者会合成 Ctrl+A 覆盖预置选区"
         );
         self.config_text_input_widget(|ti| ti.set_selection(start, end), "select_range()")
     }

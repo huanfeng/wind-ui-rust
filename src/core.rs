@@ -355,6 +355,27 @@ pub enum Autofocus {
     /// （见 `TextInput::context_menu_items`）。故对不处理 Ctrl+A 的控件是无害空操作，
     /// 与 [`Focus`](Self::Focus) 等价。
     FocusSelectAll,
+    /// 聚焦，**即使别处已有焦点也夺过来**。
+    ///
+    /// [`Focus`](Self::Focus) 与 [`FocusSelectAll`](Self::FocusSelectAll) 在「这一帧
+    /// 焦点已有归属」时主动让位——它们的定位是"没人要焦点时给个归宿"的兜底，抢走
+    /// 用户刚点中的控件是不对的。但**就地编辑**（列表里原地改名、地址栏原地改路径）
+    /// 的语义相反：这个输入框是被用户的按键唤出来的，它出现的唯一理由就是接收接下来
+    /// 的输入。让位的话，键入会继续落到唤出它的那个控件上——看得见光标却打不进字。
+    Take,
+    /// [`Take`](Self::Take) + 全选已有内容（地址栏语义）。
+    TakeSelectAll,
+}
+
+impl Autofocus {
+    /// 是否夺取已有焦点（见 [`Take`](Self::Take)）。
+    pub fn takes_focus(self) -> bool {
+        matches!(self, Autofocus::Take | Autofocus::TakeSelectAll)
+    }
+    /// 兑现后是否全选正文。
+    pub fn selects_all(self) -> bool {
+        matches!(self, Autofocus::FocusSelectAll | Autofocus::TakeSelectAll)
+    }
 }
 
 /// 树节点。几何为物理像素，`bounds` 相对父节点。

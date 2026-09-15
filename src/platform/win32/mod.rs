@@ -72,12 +72,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
     WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
-    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_THICKFRAME,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE,
+    WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1879,6 +1879,16 @@ unsafe extern "system" fn wnd_proc(
             handle_pointer(hwnd, PointerKind::Down, MouseButton::Right, lparam);
             LRESULT(0)
         }
+        // 中键：浏览器与文件管理器用它「关掉这一项」，是标准手势而非小众功能。
+        // 此前这两条消息根本没接，`MouseButton::Middle` 因此永远到不了控件。
+        WM_MBUTTONDOWN => {
+            handle_pointer(hwnd, PointerKind::Down, MouseButton::Middle, lparam);
+            LRESULT(0)
+        }
+        WM_MBUTTONUP => {
+            handle_pointer(hwnd, PointerKind::Up, MouseButton::Middle, lparam);
+            LRESULT(0)
+        }
         WM_RBUTTONUP => {
             handle_pointer(hwnd, PointerKind::Up, MouseButton::Right, lparam);
             LRESULT(0)
@@ -2864,7 +2874,6 @@ unsafe fn handle_pointer_at(hwnd: HWND, kind: PointerKind, button: MouseButton, 
         let btn = match button {
             MouseButton::Left => 1,
             MouseButton::Right => 2,
-            // Middle 当前不可达：无 WM_MBUTTONDOWN 分发；保留映射以备后续接入。
             MouseButton::Middle => 3,
         };
         let now = GetMessageTime() as u32;

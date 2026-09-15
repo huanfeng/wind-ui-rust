@@ -3,7 +3,7 @@
 //! 「焦点该在谁身上」是一个独立于绘制与浮层的裁决：布局稳定后刷新可聚焦集合、
 //! 模态作用域变化的那一帧移交、结构变更后把失效焦点归一化掉。
 
-use crate::core::{Autofocus, NodeId};
+use crate::core::NodeId;
 
 use super::UiHost;
 
@@ -121,10 +121,13 @@ impl UiHost {
         // 它会再抢回来，成了"焦点粘死在输入框上"。
         self.focus.autofocus_done = true;
         // 不抢已有焦点：这一帧焦点已有归属（如模态移交）时让位。
-        if self.focus.current.is_some() {
+        // `Autofocus::Take*` 例外——就地编辑框正是被按键唤出来接收输入的，让位就成了
+        // "看得见光标却打不进字"，键入会继续落到唤出它的那个控件上。
+        let old = self.focus.current;
+        if old.is_some() && !mode.takes_focus() {
             return;
         }
-        self.tree.set_focused(Some(id), None);
+        self.tree.set_focused(Some(id), old);
         self.focus.current = Some(id);
         // 目标滚出视口时滚过来。本帧已过 relayout，故请求下一帧重排让新 scroll_y 落地；
         // 未发生滚动则不请求，避免每次启动都白搭一帧。
@@ -134,7 +137,7 @@ impl UiHost {
         }
         // 焦点环**不点亮**：程序性移交沿用 `:focus-visible` 判据（看用户最近一次交互
         // 用的什么设备），理由同 `sync_modal_focus` 末尾那段。
-        if mode == Autofocus::FocusSelectAll {
+        if mode.selects_all() {
             self.select_all_in(id);
         }
     }
@@ -615,6 +618,58 @@ mod tests {
             "x.md",
             "预置选区应在首帧之后仍然有效，打字只替换主名"
         );
+    }
+
+    /// `autofocus_take()`：**即使别处已有焦点也夺过来**。
+    ///
+    /// 没有它时错在哪：`autofocus` 家族对已有焦点主动让位（那是"没人要焦点时给个归宿"
+    /// 的兜底语义）。但就地编辑框是被按键唤出来的，唤出它的那个控件此刻**正持有焦点**，
+    /// 于是让位 → 输入框看得见光标却一个字也打不进去，键入继续落到原控件上。
+    #[test]
+    fn autofocus_take_steals_focus_from_the_control_that_summoned_it() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let show = crate::signal::signal(false);
+        let text = crate::signal::signal(String::new());
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .child(Element::button("先点我").height(30))
+                .child(
+                    // 与就地编辑同一形状：靠信号整块出现的输入框
+                    Element::host_signal(show.map(|on| if *on { vec![1u8] } else { vec![] }), {
+                        move |_| Element::text_input(text, "").height(30).autofocus_take()
+                    }),
+                ),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let mut frame =
+            |h: &mut UiHost| h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        frame(&mut handler);
+
+        // 前置：先让按钮拿到焦点（模拟"用户正在面板上操作"）
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        let at = crate::geometry::Point::new(40, 25);
+        handler.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            at,
+            MouseButton::Left,
+        ));
+        handler.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+        let button = handler.focus.current.expect("前置：按钮应已聚焦");
+
+        // 唤出输入框：它必须把焦点抢过来，否则打字会落回按钮
+        show.set(true);
+        frame(&mut handler);
+        let now = handler.focus.current.expect("输入框应已聚焦");
+        assert_ne!(now, button, "autofocus_take 应从按钮手里夺走焦点");
+
+        let k = crate::app::test_support::key_ev();
+        handler.on_key(k(Key::Char('x')));
+        assert_eq!(text.get(), "x", "键入应落进输入框");
     }
 
     /// 被模态遮住时不兑现：否则键盘能打到遮罩后面看不见的输入框里。
