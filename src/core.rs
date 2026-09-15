@@ -508,6 +508,13 @@ pub struct Node {
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
+    /// 本节点的 autofocus 已兑现过。
+    ///
+    /// 记在节点上而不是只有宿主那个全局标志：[`Autofocus::Take`] 的语义是"**每次出现**
+    /// 都夺取焦点"，而全局标志一经置位就再不复位（只有窗口隐藏→唤起会 rearm），
+    /// 于是**窗口生命周期内第二个**要求自动聚焦的控件永远拿不到焦点——就地编辑框
+    /// 因此第二次唤出就打不进字。节点销毁时这个标志随之消失，天然不会错认复用的 id。
+    pub autofocus_done: bool,
 }
 
 struct Slot {
@@ -3123,10 +3130,37 @@ impl Tree {
     /// 取交集而不是全树扫描：`order` 已经过滤掉了不可见、被禁用、被模态遮住的节点
     /// （见 [`Tree::focusable_order`]）。少了这一层，对话框弹着的那一帧就会把焦点
     /// 兑现给遮罩后面的输入框——键盘从此能打到用户看不见的地方。
+    /// 焦点环里第一个**尚未兑现**的 autofocus 节点。
+    ///
+    /// [`Autofocus::Take`] 类优先：它们是被用户动作唤出来的（就地编辑框），比"给个
+    /// 归宿"式的兜底更该拿到焦点，而焦点环顺序是按布局排的、与这份轻重无关。
     pub fn first_autofocus(&self, order: &[NodeId]) -> Option<(NodeId, Autofocus)> {
+        let pending = |id: &NodeId| {
+            self.get(*id)
+                .filter(|n| !n.autofocus_done)
+                .and_then(|n| n.autofocus)
+                .map(|a| (*id, a))
+        };
         order
             .iter()
-            .find_map(|&id| self.get(id).and_then(|n| n.autofocus).map(|a| (id, a)))
+            .find_map(|id| pending(id).filter(|(_, a)| a.takes_focus()))
+            .or_else(|| order.iter().find_map(pending))
+    }
+
+    /// 标记某节点的 autofocus 已兑现。
+    pub fn mark_autofocus_done(&mut self, id: NodeId) {
+        if let Some(n) = self.get_mut(id) {
+            n.autofocus_done = true;
+        }
+    }
+
+    /// 清掉所有节点的"已兑现"标记（窗口重新唤起时与宿主的全局标志一起复位）。
+    pub fn clear_autofocus_done(&mut self) {
+        for slot in self.slots.iter_mut() {
+            if let Some(n) = slot.node.as_mut() {
+                n.autofocus_done = false;
+            }
+        }
     }
 
     pub fn set_focused(&mut self, id: Option<NodeId>, old: Option<NodeId>) {

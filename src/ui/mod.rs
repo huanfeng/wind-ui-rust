@@ -4309,6 +4309,7 @@ impl Element {
             context_menu: self.context_menu,
             window_drag: self.window_drag,
             autofocus: self.autofocus,
+            autofocus_done: false,
             focusable: self.focusable,
             tooltip: self.tooltip,
             focused: false,

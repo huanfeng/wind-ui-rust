@@ -620,6 +620,47 @@ mod tests {
         );
     }
 
+    /// 回归：`autofocus_take` 的"每次出现都夺取"不能被那个**全局**一次性标志挡住。
+    ///
+    /// 没有按节点标志时错在哪：`focus.autofocus_done` 一经置位就再不复位（只有窗口
+    /// 隐藏→唤起才 rearm），于是窗口生命周期内**第二个**要求自动聚焦的控件永远拿不到
+    /// 焦点。就地编辑框因此第一次 F2 好使、第二次起光标在框里闪却打不进字——最难查的
+    /// 那种：同一段代码时灵时不灵。
+    ///
+    /// 这里直接钉住 `first_autofocus` 的两条判据（跳过已兑现的、夺取档优先），
+    /// 端到端那一半在下游真机上验。
+    #[test]
+    fn first_autofocus_skips_fulfilled_nodes_and_prefers_take() {
+        use crate::core::{Autofocus, Tree};
+        let mut tree = Tree::new();
+        let root = Element::col()
+            .child(Element::text_input(crate::signal::signal(String::new()), "a").autofocus())
+            .child(Element::text_input(crate::signal::signal(String::new()), "b").autofocus_take())
+            .build(&mut tree);
+        tree.root = Some(root);
+        let order = tree.focusable_order();
+        assert_eq!(order.len(), 2, "两个输入框都该在焦点环里");
+
+        // 夺取档优先，哪怕它排在后面
+        let (id, mode) = tree.first_autofocus(&order).expect("应有待兑现的");
+        assert_eq!(id, order[1]);
+        assert_eq!(mode, Autofocus::Take);
+
+        // 兑现之后不再返回它，轮到前面那个兜底档
+        tree.mark_autofocus_done(id);
+        let (id2, mode2) = tree.first_autofocus(&order).expect("还剩一个");
+        assert_eq!(id2, order[0]);
+        assert_eq!(mode2, Autofocus::Focus);
+
+        // 两个都兑现完就没有了——不会每帧把焦点粘回去
+        tree.mark_autofocus_done(id2);
+        assert!(tree.first_autofocus(&order).is_none());
+
+        // 窗口重新唤起时一起复位
+        tree.clear_autofocus_done();
+        assert!(tree.first_autofocus(&order).is_some());
+    }
+
     /// `autofocus_take()`：**即使别处已有焦点也夺过来**。
     ///
     /// 没有它时错在哪：`autofocus` 家族对已有焦点主动让位（那是"没人要焦点时给个归宿"
