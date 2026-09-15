@@ -391,12 +391,16 @@ impl UiHost {
         let ws = self.logical_size;
         // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
         let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
-        // 面板可视高度：常规不超过 MENU_MAX_H，也不超过窗口高的 3/4；菜单栏的菜单只受
-        // 锚点到窗口下缘的空间限制（放不下才滚动）。
-        let max_h = if tall && ws.h > 0 {
+        // 面板可视高度：只在**放不下**时才滚动。菜单栏的菜单受锚点到窗口下缘的空间限制；
+        // 右键 / 下拉菜单受整个窗口高度限制（放不下会翻转或贴边，见下面的 y 调整）——
+        // 原生菜单也是整列铺开，二十来项就得滚的菜单操作起来很不便。无窗口尺寸
+        // （离屏 / 测试）时退回 MENU_MAX_H。
+        let max_h = if ws.h <= 0 {
+            MENU_MAX_H
+        } else if tall {
             (ws.h - ay - em).max(MENU_ITEM_H * 2)
         } else {
-            MENU_MAX_H.min(if ws.h > 0 { ws.h * 3 / 4 } else { MENU_MAX_H })
+            (ws.h - 2 * em).max(MENU_ITEM_H * 2)
         };
         let h = content_h.min(max_h);
         let mut x = ax;

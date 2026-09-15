@@ -93,14 +93,12 @@ impl Widget for SplitHandle {
         } else {
             th.split.handle(&th.palette)
         };
-        // 静态时画 1px 细线居中；激活时把整条分隔条染色，让"能拖"的反馈看得见。
-        let (x, y, w, h) = if active {
-            (bounds.x, bounds.y, bounds.w, bounds.h)
-        } else {
-            match self.axis {
-                Axis::Horizontal => (bounds.x + bounds.w / 2, bounds.y, 1, bounds.h),
-                Axis::Vertical => (bounds.x, bounds.y + bounds.h / 2, bounds.w, 1),
-            }
+        // 静态画 1px 细线居中；激活加粗到 2px 并换强调色——可命中区仍是整条 `thickness`
+        // 宽，但视觉上不把整条染成一块粗条：它与界面里其他分隔线同一量级才不突兀。
+        let t = if active { 2 } else { 1 };
+        let (x, y, w, h) = match self.axis {
+            Axis::Horizontal => (bounds.x + (bounds.w - t) / 2, bounds.y, t, bounds.h),
+            Axis::Vertical => (bounds.x, bounds.y + (bounds.h - t) / 2, bounds.w, t),
         };
         canvas.fill_rect(x as f32, y as f32, w as f32, h as f32, &Paint::fill(color));
     }
