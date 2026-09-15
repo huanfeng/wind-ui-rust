@@ -2685,7 +2685,10 @@ impl UiHost {
         // 本就走全窗重绘，取走后随本帧 paint 上屏即可。
         self.flush_pending_toasts();
         // 布局后结构稳定：刷新 Tab 顺序、模态移交、归一化失效焦点。
-        self.refresh_focus();
+        // 重排块已经刷过就不重复（那一路同样在 layout 之后）。
+        if !laid_out {
+            self.refresh_focus();
+        }
         // 过期 toast 先清除（需要 &mut self，必须在借用 self.engine 生成 canvas 之前完成）。
         self.retain_live_toasts(now_ms);
     }
@@ -2823,6 +2826,16 @@ impl AppHandler for UiHost {
         self.logical_size = logical;
 
         let laid_out = self.relayout_if_needed(logical);
+        // 本帧重排过就刷新焦点——**不能只在全窗帧做**。结构变了而布局签名恰好没变
+        // （就地编辑框收起又弹出、同尺寸的控件互换）会走局部重绘路径，那条路上若不刷，
+        // `honor_autofocus` 就没有兑现的机会：新出现的输入框永远拿不到焦点，
+        // 表现是「第一次好使，之后光标在框里闪却打不进字」。
+        //
+        // 放在 `decide_repaint` 之前：焦点变化自己也会置脏区（焦点环要重画），
+        // 本帧就能一起决策，不必拖到下一帧。
+        if laid_out {
+            self.refresh_focus();
+        }
         // 响应式相位（本帧 layout 内）可能发出 toast（如 toast_sink 监听 feedback 信号）。
         // 须在重绘决策前上屏：show_toast 置 needs_full 并使 overlay 成立，令新 toast 被绘制，
         // 否则会走局部重绘的 early-return 而漏画。

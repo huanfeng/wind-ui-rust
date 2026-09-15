@@ -70,6 +70,8 @@ impl UiHost {
     /// 只在**隐藏→可见的跃迁**上调用（平台层判定），故已经可见时再按热键不会重置界面。
     pub(super) fn rearm_autofocus(&mut self) {
         self.focus.autofocus_done = false;
+        // 节点上的"已兑现"也一并复位，否则重新唤起时 `first_autofocus` 仍跳过它们
+        self.tree.clear_autofocus_done();
         // 还得把焦点**让出来**，只清标志不够。
         //
         // 窗口隐藏不清焦点（`focus.current` 原样留着上次那个控件），而
@@ -109,17 +111,26 @@ impl UiHost {
     /// （它的目标是 `Option<NodeId>`，没有"派给根节点"的兜底）。`start_hidden()` 的
     /// 常驻工具因此在热键唤起后第一次按键完全无响应——不是打错了地方，是消失了。
     fn honor_autofocus(&mut self) {
-        if self.focus.autofocus_done {
-            return;
-        }
         // 还没进焦点环（藏在未选中的 Tab 页里、被模态遮住、暂时禁用）→ 不算兑现过，
         // 下一帧继续等。故"对话框弹着的那一帧"不会把焦点送到遮罩后面去。
         let Some((id, mode)) = self.tree.first_autofocus(&self.focus.order) else {
             return;
         };
+        // 兜底档（Focus / FocusSelectAll）守着宿主那个全局一次性标志：兑现过之后焦点
+        // 就归用户了，不会每帧粘回去。
+        //
+        // 夺取档（Take*）只看**节点自己**的标志：它的语义是"每次出现都夺取"，而全局
+        // 标志一经置位就再不复位，跟着它走的话窗口里第二个就地编辑框永远拿不到焦点
+        // ——表现正是「第一次 F2 好使，第二次起光标在框里闪却打不进字」。
+        if !mode.takes_focus() {
+            if self.focus.autofocus_done {
+                return;
+            }
+            self.focus.autofocus_done = true;
+        }
         // 出现即算兑现，无论下面这一步是否真的动了焦点——否则用户点走焦点之后
         // 它会再抢回来，成了"焦点粘死在输入框上"。
-        self.focus.autofocus_done = true;
+        self.tree.mark_autofocus_done(id);
         // 不抢已有焦点：这一帧焦点已有归属（如模态移交）时让位。
         // `Autofocus::Take*` 例外——就地编辑框正是被按键唤出来接收输入的，让位就成了
         // "看得见光标却打不进字"，键入会继续落到唤出它的那个控件上。
