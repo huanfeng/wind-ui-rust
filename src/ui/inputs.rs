@@ -895,6 +895,17 @@ impl TextInput {
         &mut self.config
     }
 
+    /// 预置选区 `[start, end)`（字符索引，越界钳到正文长度；`start == end` 只放光标）。
+    /// 供 Builder；下游用 [`crate::ui::Element::select_range`]。
+    pub fn set_selection(&mut self, start: usize, end: usize) {
+        let n = self.char_count();
+        let s = start.min(n);
+        let e = end.min(n);
+        self.cursor = e;
+        self.anchor = if s == e { None } else { Some(s) };
+        self.follow_cursor.set(true);
+    }
+
     /// 设置单行 Enter 回调（供 Builder；下游用 [`crate::ui::Element::on_submit`]）。
     pub fn set_on_submit(&mut self, f: impl FnMut(&mut EventCtx) + 'static) {
         self.on_submit = Some(Box::new(f));

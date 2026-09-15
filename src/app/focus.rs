@@ -587,6 +587,36 @@ mod tests {
         );
     }
 
+    /// `select_range(0, 主名长度)` + `autofocus()`：重命名框只选主名，打字替换主名、
+    /// 扩展名原样保留（资源管理器 / TC 的 F2 语义）。
+    #[test]
+    fn select_range_replaces_only_stem_on_typing() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let text = crate::signal::signal("README.md".to_string());
+        let app = App::new("t", 300, 200).content(
+            Element::col().padding(10).child(
+                Element::text_input(text, "")
+                    .height(30)
+                    .autofocus()
+                    .select_range(0, 6),
+            ),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        assert!(handler.focus.current.is_some(), "应已聚焦");
+        let k = crate::app::test_support::key_ev();
+        handler.on_key(k(Key::Char('x')));
+        assert_eq!(
+            text.get(),
+            "x.md",
+            "预置选区应在首帧之后仍然有效，打字只替换主名"
+        );
+    }
+
     /// 被模态遮住时不兑现：否则键盘能打到遮罩后面看不见的输入框里。
     ///
     /// 没有这条过滤时错在哪：`autofocus` 若全树扫描而不与 `focusable_order` 取交集，

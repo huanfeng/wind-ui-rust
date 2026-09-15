@@ -1571,6 +1571,24 @@ impl Element {
         self.config_text_input_widget(|ti| ti.set_on_submit(f), "on_submit()")
     }
 
+    /// **预置选区** `[start, end)`（字符索引）：重命名框只选主名、不选扩展名——
+    /// 资源管理器 / TC 的 F2 语义，改名时直接覆盖打字而扩展名原样保留。
+    ///
+    /// 与 [`autofocus`](Self::autofocus) 搭配（`autofocus_select_all` 会在聚焦那一帧
+    /// 合成 Ctrl+A 覆盖掉它）。越界钳到正文长度；`start == end` 只放光标。
+    /// 仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let name = signal("report.final.txt".to_string());
+    /// let stem = name.with(|s| s.rfind('.').map(|i| s[..i].chars().count()).unwrap_or(s.chars().count()));
+    /// let ui = Element::text_input(name, "").autofocus().select_range(0, stem);
+    /// ```
+    #[track_caller]
+    pub fn select_range(self, start: usize, end: usize) -> Self {
+        self.config_text_input_widget(|ti| ti.set_selection(start, end), "select_range()")
+    }
+
     /// **本控件未处理的导航键的出口**：候选列表游标用（↑↓ 在候选间移动，配合
     /// [`on_submit`](Self::on_submit) 的 Enter 确认当前项）。
     ///
