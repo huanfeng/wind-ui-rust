@@ -172,6 +172,45 @@ unsafe fn find_single_window(key: &str) -> Option<HWND> {
         .map(|v| HWND(v as *mut _))
 }
 
+/// 带这个单例键的窗口当前是否开着（[`crate::event::window_open`] 的落地）。
+///
+/// 读的是窗口登记表而非 `state_from` 那份裸指针状态，故**任何时机都可调**，包括热键
+/// 回调正被派发、平台层持有某个 `WindowState` 借用的时候——两者不是同一份数据
+/// （同 `open_pending_windows` 里那条注释）。
+pub(crate) fn single_window_open(key: &str) -> bool {
+    LIVE_WINDOWS.with(|w| w.borrow().find_single(key).is_some())
+}
+
+/// 关掉带这个单例键的窗口（托盘 / 热键回调的 `close_window` 意图）。
+///
+/// **投递 `WM_CLOSE` 而不是直接 `DestroyWindow`**：前者走的是窗口自己的关闭决策链
+/// （`Window::on_close_request` 会被问到），与用户点关闭按钮同义；后者绕过一切拦截，
+/// 那是「退出应用」才该有的强度（见 `quit_app`）。
+///
+/// 用 `PostMessageW` 而非 `SendMessageW`：本函数的调用点在意图落地段，同步送进去会当场
+/// 重入窗口过程（铁律 6），而投递让关闭发生在消息循环的下一轮、所有借用都已释放之后。
+///
+/// 投递也正是「同一个键既关又开」不成立的根源，故那个错法在这里当场报出来：本次关窗
+/// 要等下一轮才生效，而紧随其后的开窗是**即时**的，那一刻旧窗口仍在 `LIVE_WINDOWS` 里，
+/// 于是 `Window::single` 的去重命中、开窗退化成「激活那个正在关闭的窗口」，随后它被关掉
+/// ——用户看到的是「按了一下，窗口没了」，现场没有任何东西指向起因。
+///
+/// 检查放在这里而不是某一条路径上，是为了**两条路都覆盖**：热键的关窗请求走旁路队列由
+/// `apply_app_effects` 落地，托盘的则按声明顺序在 `run_tray_actions` 里落地，只有它们的
+/// 共同落点才拦得住两边。
+unsafe fn close_single_window(key: &str) {
+    if crate::event::key_collides(key, &crate::event::pending_window_singles()) {
+        eprintln!(
+            "[windui] 同一个回调里对单例键 {key} 既 close_window 又 open_window：关窗是投递、\
+             开窗是即时，本次开窗会命中那个尚未关掉的窗口而退化成激活它，随后它被关掉——\
+             净结果是一个窗口都没有。请分两次回调，或改用不同的键。"
+        );
+    }
+    if let Some(hwnd) = find_single_window(key) {
+        let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+}
+
 /// 注销一个已销毁的窗口，返回它是否是最后一个（调用方据此 `PostQuitMessage`）。
 unsafe fn unregister_window(hwnd: HWND) -> bool {
     LIVE_WINDOWS.with(|w| w.borrow_mut().remove(hwnd.0 as isize))
@@ -542,6 +581,11 @@ unsafe extern "system" fn app_host_proc(
 unsafe fn apply_app_effects(repaint: bool) {
     apply_tray_ops();
     apply_app_hotkey_ops();
+    // 关窗排在开窗之前：两者作用于**不同的键**时这个次序才有意义（关掉设置窗、开出主窗）。
+    // 同一个键既关又开是不支持的，理由与诊断都在 `close_single_window` 上。
+    for key in crate::event::take_callback_closes() {
+        close_single_window(&key);
+    }
     open_callback_windows();
     // 跨窗脏标记必须取走，不能只看 `repaint`：`ThemeHandle::set`（主题回调里最常见的
     // 那一句）与任何一次写信号都会立起它，而窗口路径是由 `broadcast_signal_dirty` 消费的
@@ -588,6 +632,9 @@ unsafe fn quit_app() {
     // 不会被执行，可配置还留在队列里，随后的应用级收尾就会把它建出来：退出途中闪一个
     // 窗口出来。截断点必须两条队列对齐，否则"Quit 之后的意图一律丢弃"就只兑现了一半。
     let _ = crate::event::take_callback_windows();
+    // 关窗请求同样截断。留着不会开出窗口，但会在退出途中对**正在销毁**的窗口投一条
+    // `WM_CLOSE`，那是拿随时可能失效的句柄调 OS——与上面那条是同一个理由。
+    let _ = crate::event::take_callback_closes();
     let windows = live_windows();
     for h in &windows {
         let _ = DestroyWindow(*h);
@@ -1521,6 +1568,15 @@ unsafe fn run_windowed(
         if !cfg.start_hidden {
             show_window(hwnd);
         }
+    }
+
+    // 常驻模式的「启动即开窗」（`App::start_window`）：请求已由 `launch` 排在旁路队列上，
+    // 这里取走建出来。必须在进循环**之前**——队列的其余消费点都挂在托盘 / 热键消息上，
+    // 而那两样要等用户动手才来，请求会一直躺着，表现为"双击图标没反应"。
+    //
+    // 非常驻时这条是空转：那条路的窗口是上面那个主窗，队列里什么都没有。
+    if cfg.resident {
+        open_callback_windows();
     }
 
     run_message_loop();
@@ -2726,6 +2782,8 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
             }
             // 位置标记：取队首那个配置建窗（见 `TrayAction::OpenWindow`）。
             tray::TrayAction::OpenWindow => open_callback_window(),
+            // 键就在意图里，不必查旁路队列（见 `TrayAction::CloseWindow`）。
+            tray::TrayAction::CloseWindow(key) => close_single_window(&key),
             // 不走 WindowOp：托盘「退出」是应用的唯一真实出口，**刻意绕过
             // `hide_on_close`**（否则开了关闭转隐藏的应用将永远退不掉）。
             //

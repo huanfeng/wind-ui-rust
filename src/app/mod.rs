@@ -137,6 +137,7 @@ impl Window {
                 content: crate::event::WindowContent::new(|| NoContent),
                 close_handler: None,
                 intervals: Vec::new(),
+                shortcut: None,
                 single: None,
                 icon: None,
             },
@@ -203,6 +204,38 @@ impl Window {
     /// 仍会一直跑。可多次调用。
     pub fn on_interval(mut self, every: Duration, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.req.intervals.push((every, Box::new(f)));
+        self
+    }
+
+    /// 本窗口的快捷键回调，语义同 [`App::on_shortcut`]（同样**排在框架的 Tab / Escape
+    /// 兜底之前**，返回 `true` 把这一键吃掉），但作用在这个窗口上。
+    ///
+    /// 快捷键是**每个窗口自己的**，与 [`on_close_request`](Self::on_close_request) 同理：
+    /// 它作用在一棵具体的控件树与它的焦点环上，主窗那一份套到子窗只会张冠李戴
+    /// （`ctx.focus_main_input()` 找的是**本窗**声明了 `autofocus` 的那个控件）。
+    ///
+    /// **常驻模式（[`App::run_resident`]）下这是唯一的一份**：那时没有主窗，
+    /// `App::on_shortcut` 无处可挂，界面上全部的 Ctrl+X 都得由建出界面的这个 `Window`
+    /// 声明。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Window::new("查词", 480, 320)
+    ///     .on_shortcut(|ctx, ev| match ev.key {
+    ///         // Ctrl+L：回到主输入框。
+    ///         Key::Char('L') if ev.ctrl && ev.pressed => {
+    ///             ctx.focus_main_input();
+    ///             true
+    ///         }
+    ///         _ => false,
+    ///     })
+    ///     .content(|| Element::col().fill());
+    /// ```
+    pub fn on_shortcut(
+        mut self,
+        f: impl FnMut(&mut crate::event::ShortcutCtx, crate::event::KeyEvent) -> bool + 'static,
+    ) -> Self {
+        self.req.shortcut = Some(Box::new(f));
         self
     }
 
@@ -333,8 +366,11 @@ type CloseHandler = Box<dyn FnMut(&mut EventCtx) -> bool>;
 type ShowHandler = Box<dyn FnMut(&mut EventCtx)>;
 /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。返回 `true` = 已处理，宿主不再走
 /// Tab / Escape 兜底。
-type ShortcutHandler =
-    Box<dyn FnMut(&mut crate::event::ShortcutCtx, crate::event::KeyEvent) -> bool>;
+///
+/// 与 [`Window::on_shortcut`] 收的是**同一种**闭包，故这里只是公开别名的一个本地名字，
+/// 不是第二份定义——两处各写一遍 `Box<dyn FnMut(..)>` 的话，日后谁改了签名另一处仍然
+/// 编得过（它们本就互不引用），错法要到调用点才暴露。
+type ShortcutHandler = crate::event::WindowShortcutHandler;
 /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。参数为「是否暗色」。
 type SystemThemeHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
 
@@ -540,9 +576,13 @@ fn build_new_window(
         // 唤起回调也不给子窗：子窗没有隐藏→唤起这条路（托盘与热键唤的是主窗），
         // 给了也永远不触发。
         None,
-        // 快捷键回调同理不给子窗：它登记在应用上、面向主窗那一套界面，
-        // 而子窗有自己的内容与焦点环，套用主窗的快捷键只会张冠李戴。
-        None,
+        // 快捷键取**这个窗口自己声明**的那一份（`Window::on_shortcut`）。
+        //
+        // 应用那一份（`App::on_shortcut`）仍然不给：它面向主窗那一套界面与焦点环，
+        // 套到别的窗口上只会张冠李戴（`focus_main_input` 找的是本窗的 autofocus 控件）。
+        // 常驻模式下更是没有主窗，`App::on_shortcut` 根本无处可挂——界面上全部的快捷键
+        // 都经这里进来。
+        req.shortcut,
         // 系统主题回调也不给：它的用途是换主题，而主题是**应用级**的
         // （`ThemeHandle` 全窗共享），由主窗换一次即可，子窗跟着走。
         None,
@@ -822,6 +862,40 @@ fn make_callback_window(req: WindowRequest, is_open: &dyn Fn(&str) -> bool) -> O
     })
 }
 
+/// 把应用那份配置里**只与截图有关**的字段并到目标窗口的配置上。
+///
+/// 常驻应用截图时窗口配置来自 [`App::screenshot_window`] 的那个 [`Window`]，而截屏参数
+/// （路径、`--scale`、合成的点击与按键、`--renderer`）解析在 `App` 上——两半必须合成一份，
+/// 平台层的离屏分支只认一个 `WindowConfig`。
+///
+/// 逐字段列而不是 `..app_cfg`：那样会把托盘、热键、单实例、`resident` 一起带进来，而这
+/// 份配置是交给**离屏渲染**的，带上它们只会让人以为那条路也在装托盘。
+fn merge_screenshot_cfg(mut win: WindowConfig, app: &WindowConfig) -> WindowConfig {
+    win.screenshot = app.screenshot.clone();
+    win.screenshot_scale = app.screenshot_scale;
+    win.screenshot_rclick = app.screenshot_rclick;
+    win.screenshot_clicks = app.screenshot_clicks.clone();
+    win.screenshot_hover = app.screenshot_hover;
+    win.screenshot_drag = app.screenshot_drag;
+    win.screenshot_keys = app.screenshot_keys.clone();
+    // 无条件覆盖成立的前提是 **`Window` 没有 renderer 修饰符**（后端是应用级的，子窗
+    // 沿用主窗那次选择）。日后若给 `Window` 加上了，这一行就得改成「仅当应用侧非默认才
+    // 覆盖」——否则应用那份默认的 `Auto` 会静默压过窗口自己写的选择，而截图比对正是
+    // 为了区分软硬渲染才带上 `--renderer` 的。
+    win.renderer = app.renderer;
+    win.animations = app.animations;
+    // `--size` 压过窗口自己的尺寸，并一并放开下限——语义与非常驻路径上那条完全一致
+    // （见 `screenshot_args`）。判据是"应用那份尺寸非零"：常驻应用的 `App::resident`
+    // 给的是 0×0，只有 `--size` 会把它写成正数。
+    if app.width > 0 && app.height > 0 {
+        win.width = app.width;
+        win.height = app.height;
+        win.min_width = 0;
+        win.min_height = 0;
+    }
+    win
+}
+
 /// 应用构建器。命令式 API 的根入口。
 pub struct App {
     cfg: WindowConfig,
@@ -837,6 +911,10 @@ pub struct App {
     show_handler: Option<ShowHandler>,
     /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
     shortcut: Option<ShortcutHandler>,
+    /// 常驻应用的截图目标窗口（见 [`App::screenshot_window`]）。
+    screenshot_window: Option<crate::event::WindowRequest>,
+    /// 常驻应用启动时就建出来的窗口（见 [`App::start_window`]）。
+    start_window: Option<crate::event::WindowRequest>,
     /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。
     system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
@@ -894,6 +972,8 @@ impl App {
             close_handler: None,
             show_handler: None,
             shortcut: None,
+            screenshot_window: None,
+            start_window: None,
             system_theme: None,
             hide_on_close: false,
             bg_explicit: false,
@@ -1075,6 +1155,79 @@ impl App {
     /// 截屏模式：渲染一帧存 PNG 后退出。常用于自动化验证。
     pub fn screenshot(mut self, path: impl Into<PathBuf>) -> Self {
         self.cfg.screenshot = Some(path.into());
+        self
+    }
+
+    /// **常驻应用**（[`resident`](Self::resident) / [`run_resident`](Self::run_resident)）
+    /// 的截图目标：截屏模式下渲染这个窗口，而不是那个并不存在的主窗。
+    ///
+    /// 没有它时常驻应用**截不出任何东西**：截屏走的是主窗那份配置与控件树
+    /// （`platform::run` 在建窗之前就分叉去离屏渲染了），而常驻模式两样都没有——尺寸是
+    /// `0×0`、内容是个空 handler，出来的是一张空图。而离屏截图恰恰是这类应用最依赖的
+    /// 验证手段：它平时藏在托盘里，界面是热键唤出来的，自动化里没有"主窗"可截。
+    ///
+    /// 传的就是托盘 / 热键回调里 `open_window` 用的那一份 [`Window`]，请让它们出自
+    /// **同一个工厂函数**——两处各写一份的话，截图验的就不再是用户看到的那个界面，
+    /// 而这种偏差恰恰是截图验证最不该有的。
+    ///
+    /// 与截屏参数的关系：[`screenshot_from_args`](Self::screenshot_from_args) 解析出的
+    /// 路径、`--scale`、合成的点击与按键照常生效；`--size` 给了就压过这个窗口自己的
+    /// 尺寸（并放开 `min_size`，语义同非常驻路径），没给就用它声明的尺寸。
+    ///
+    /// 非常驻应用忽略本项（那时主窗才是截图对象）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// fn main_window() -> WindowRequest {
+    ///     Window::new("查词", 920, 620)
+    ///         .single("main")
+    ///         .content(|| Element::col().fill())
+    /// }
+    /// App::resident("查词")
+    ///     .tray(Tray::new().menu(vec![
+    ///         TrayMenuItem::item("查询", |ctx| ctx.open_window(main_window())),
+    ///         TrayMenuItem::item("退出", |ctx| ctx.quit()),
+    ///     ]))
+    ///     .screenshot_window(main_window())
+    ///     .screenshot_from_args()
+    ///     .run_resident();
+    /// ```
+    pub fn screenshot_window(mut self, req: crate::event::WindowRequest) -> Self {
+        self.screenshot_window = Some(req);
+        self
+    }
+
+    /// **常驻应用**启动时就建出来的窗口：进消息循环之前建一次，此后与托盘 / 热键开的
+    /// 窗口毫无分别（关掉即销毁，再开是新的一个）。
+    ///
+    /// 它补的是常驻模式与 `run()` 之间那个真实的缺口：常驻是「启动后桌面上什么都没有」，
+    /// 而这类工具**并非任何时候都该如此**——开机自启时不弹窗口是体贴，用户刚刚**双击了
+    /// 图标**却什么也不出现则是故障。判据在应用手里（通常是命令行开关），故这里给的是
+    /// 一个按需调用的构建项，而不是又一个模式。
+    ///
+    /// 与 [`start_hidden`](Self::start_hidden) 正好相反：那个是"有主窗但先不显示"，
+    /// 这个是"本没有窗口，先开一个"——常驻模式下前者无对象可藏。
+    ///
+    /// 请与托盘 / 热键回调用**同一个工厂函数**造这份 [`Window`]，理由同
+    /// [`screenshot_window`](Self::screenshot_window)：那是同一个界面，不该有两份写法。
+    /// 给它一个 [`Window::single`] 键，用户随后点托盘就会激活这一个，而不是再开一个。
+    ///
+    /// 非常驻应用忽略本项（那时主窗就是启动时的那个窗口）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # fn main_window() -> WindowRequest { Window::new("查词", 480, 320).single("main").content(|| Element::col().fill()) }
+    /// # let tray = Tray::new();
+    /// # let launched_for_tray = false;
+    /// let mut app = App::resident("查词").tray(tray);
+    /// // 开机自启收进托盘，手动双击照常显示窗口。
+    /// if !launched_for_tray {
+    ///     app = app.start_window(main_window());
+    /// }
+    /// app.run_resident();
+    /// ```
+    pub fn start_window(mut self, req: crate::event::WindowRequest) -> Self {
+        self.start_window = Some(req);
         self
     }
 
@@ -1735,7 +1888,65 @@ impl App {
                 intervals: std::mem::take(&mut self.intervals),
             })
         });
+        // 启动即开窗（见 `App::start_window`）：排进托盘 / 热键那条旁路队列，平台层在进
+        // 消息循环之前取走建出来。走同一条队列而不是给平台再加一条路——那个窗口与热键
+        // 开出来的本就该是同一个东西，两条路迟早会长出两种行为。
+        //
+        // 非常驻应用给了本项属于配错：那条路的启动窗口就是主窗。静默忽略会让人等一个
+        // 永不出现的第二个窗口，故说一声。
+        if self.start_window.is_some() {
+            debug_assert!(
+                self.cfg.resident,
+                "App::start_window 只对常驻应用有意义：run() 那条路的启动窗口就是主窗"
+            );
+            if !self.cfg.resident {
+                eprintln!(
+                    "[windui] App::start_window 只对常驻应用有意义，已忽略——非常驻时启动\
+                     窗口就是 App::new 那个主窗"
+                );
+            }
+        }
+        if self.cfg.resident && self.cfg.screenshot.is_none() {
+            if let Some(req) = self.start_window.take() {
+                crate::event::push_callback_window(req);
+            }
+        }
         let cfg = self.cfg;
+        // 常驻应用的截图：拿 `screenshot_window` 那个窗口顶替并不存在的主窗，其余照旧
+        // 走 `platform::run` 里那条离屏分支（见 `App::screenshot_window`）。
+        //
+        // 没给 `screenshot_window` 就退而用 `start_window`：那本就是这个应用要给用户看的
+        // 那个界面，拿它截图至少截得到东西。两个都没给才是真的无从下手——那时**必须说
+        // 一声**，否则表现是「截图成功，打开一看是空白」，而那正是本特性要修的症状。
+        if cfg.resident && cfg.screenshot.is_some() {
+            match self
+                .screenshot_window
+                .take()
+                .or_else(|| self.start_window.take())
+            {
+                Some(req) => {
+                    let bg = theme_src.current().palette.bg;
+                    let NewWindow::Create(win_cfg, win_handler) =
+                        build_new_window(req, &theme_src, &self.hotkey_ops, bg)
+                    else {
+                        // `build_new_window` 只产出 `Create`：单例去重是 `make_callback_window`
+                        // 的事，而截图这条路根本没有窗口登记表可查。
+                        unreachable!("build_new_window 只会产出 NewWindow::Create")
+                    };
+                    platform::run(
+                        merge_screenshot_cfg(*win_cfg, &cfg),
+                        win_handler,
+                        waker,
+                        single,
+                    );
+                    return;
+                }
+                None => eprintln!(
+                    "[windui] 常驻应用截图需要先指明对象（App::screenshot_window 或 \
+                     App::start_window）：没有主窗可截，这次只会得到一张空图"
+                ),
+            }
+        }
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
@@ -3316,6 +3527,149 @@ mod tests {
         handler.on_key(k(Key::Escape));
         assert!(!show_dialog.get(), "第二次 ESC 才关对话框");
         assert!(!handler.wants_close(), "对话框还在时不该关窗口");
+    }
+
+    /// 托盘 / 热键建出来的窗口必须收得到**它自己声明**的快捷键。
+    ///
+    /// 常驻模式（`run_resident`）下界面全由这条路建出来，而 `App::on_shortcut` 那一份
+    /// 明确不给子窗——这条断言若失守，那种应用的表现是「界面正常，所有 Ctrl+X 全部无声
+    /// 失灵」，与菜单栏清焦点那次（`9aade6e`）是同一种查不出起因的故障形状。
+    #[test]
+    fn window_shortcut_reaches_a_window_built_from_a_callback() {
+        use crate::app::test_support::key_ev;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let hit = crate::signal::signal(false);
+        let req = Window::new("子窗", 200, 160)
+            .on_shortcut(move |_ctx, ev| {
+                if ev.key == Key::Escape && ev.pressed {
+                    hit.set(true);
+                    return true;
+                }
+                false
+            })
+            .content(|| Element::col().fill());
+        let theme = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let NewWindow::Create(cfg, mut handler) =
+            build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
+        else {
+            panic!("build_new_window 只会产出 Create");
+        };
+        assert_eq!(cfg.title, "子窗", "本例前提：配置确实来自那个 Window");
+
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 160).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(200, 160));
+
+        let k = key_ev();
+        assert!(
+            handler.on_key(k(Key::Escape)),
+            "回调返回 true 即已消费这一键"
+        );
+        assert!(hit.get(), "窗口自己声明的快捷键该被调用");
+        assert!(
+            !handler.wants_close(),
+            "被吃掉的 Escape 不该再落到框架的关窗兜底上——设置页按 Esc 是返回，不是关窗"
+        );
+    }
+
+    /// 单例去重是在**开窗那一刻**按窗口登记表判的——这正是「同一个回调里对同一个键既关
+    /// 又开」不成立的机制：关窗只是投递 `WM_CLOSE`，那一刻窗口还在表里，于是本次开窗
+    /// 退化成 `Focus`（激活那个正在关闭的窗口），随后它被关掉，净结果一个窗口都没有。
+    ///
+    /// 钉住它是因为那个结论**看起来**可以靠调换关窗与开窗的次序解决，而实际上不能
+    /// （两条路都改不了投递与即时的时间差）。日后若真要支持重开，改的是登记表那一侧
+    /// （关窗时就把键摘掉），到时这条测试会失败并把人领到这段说明。
+    #[test]
+    fn a_single_key_still_in_the_registry_degrades_to_focus() {
+        let req = || {
+            Window::new("主界面", 200, 160)
+                .single("main")
+                .content(|| Element::col().fill())
+        };
+        let got = make_callback_window(req(), &|k| k == "main");
+        assert!(
+            matches!(got, Some(NewWindow::Focus(ref k)) if k == "main"),
+            "登记表里还有这个键时只激活、不新建"
+        );
+
+        // 表里没有才会真的建窗。这条要求应用级设施在位（子窗的主题与热键队列取自那里）。
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+        let got = make_callback_window(req(), &|_| false);
+        assert!(
+            matches!(got, Some(NewWindow::Create(..))),
+            "键不在表里时应当真的建一个新窗口"
+        );
+        APP_SERVICES.with(|s| *s.borrow_mut() = None);
+    }
+
+    /// 常驻应用截图时，窗口那份配置与 `App` 上解析出的截屏参数要合成一份。
+    ///
+    /// `--size` 压过窗口自己的尺寸**并放开 `min_size`**：要截的正是下限处的布局，
+    /// 还受钳制就永远截不到那张图（语义与非常驻路径一致，见 `screenshot_args`）。
+    #[test]
+    fn screenshot_cfg_merges_window_shape_with_app_screenshot_args() {
+        // `WindowConfig` 不是 `Clone`（带图标、托盘这些拥有型字段），故现造两份。
+        let mk_win = || WindowConfig {
+            title: "主界面".into(),
+            width: 920,
+            height: 620,
+            min_width: 720,
+            min_height: 480,
+            frameless: true,
+            renderer: Renderer::Software,
+            ..WindowConfig::default()
+        };
+        let app = WindowConfig {
+            // `App::resident` 给的是 0×0——没给 `--size` 时就该保持窗口自己的尺寸。
+            width: 0,
+            height: 0,
+            screenshot: Some(PathBuf::from("out.png")),
+            screenshot_scale: 2.0,
+            screenshot_clicks: vec![(28, 596)],
+            renderer: Renderer::Gpu,
+            ..WindowConfig::default()
+        };
+
+        let got = merge_screenshot_cfg(mk_win(), &app);
+        assert_eq!(got.width, 920, "没给 --size 时用窗口自己的尺寸");
+        assert_eq!(got.min_width, 720, "下限也该原样留着");
+        assert!(got.frameless, "窗口自身的形状不该被截屏参数冲掉");
+        assert_eq!(
+            got.screenshot.as_deref(),
+            Some(std::path::Path::new("out.png"))
+        );
+        assert_eq!(got.screenshot_scale, 2.0);
+        assert_eq!(got.screenshot_clicks, vec![(28, 596)]);
+        assert_eq!(got.renderer, Renderer::Gpu, "--renderer 该压过窗口那份");
+
+        let sized = merge_screenshot_cfg(
+            mk_win(),
+            &WindowConfig {
+                width: 400,
+                height: 300,
+                ..app
+            },
+        );
+        assert_eq!(
+            (sized.width, sized.height),
+            (400, 300),
+            "--size 压过窗口尺寸"
+        );
+        assert_eq!(
+            (sized.min_width, sized.min_height),
+            (0, 0),
+            "--size 要一并放开下限，否则截不到最小尺寸下的布局"
+        );
     }
 
     #[test]

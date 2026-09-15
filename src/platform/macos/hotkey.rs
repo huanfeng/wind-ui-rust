@@ -417,6 +417,10 @@ impl HotkeyState {
         if !crate::event::take_callback_windows().is_empty() {
             eprintln!("[windui] HotkeyCtx::open_window 在 macOS 上尚未实现，本次请求被忽略");
         }
+        // 关窗请求同样取空并提示，理由同上——它与开窗是一对，只取一半会让队列照样积。
+        if !crate::event::take_callback_closes().is_empty() {
+            eprintln!("[windui] HotkeyCtx::close_window 在 macOS 上尚未实现，本次请求被忽略");
+        }
         op
     }
 }

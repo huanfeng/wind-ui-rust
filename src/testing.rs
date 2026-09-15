@@ -124,6 +124,29 @@ pub fn run_with_hotkey_ctx(f: impl FnOnce(&mut HotkeyCtx)) -> Option<WindowOp> {
     ctx.take_op()
 }
 
+/// 借一个 [`HotkeyCtx`] 跑 `f`，返回它请求关掉的那些单例键
+/// （[`HotkeyCtx::close_window`]，按调用顺序）。
+///
+/// 单开一个入口而不是让 [`run_with_hotkey_ctx`] 多返回一半：关窗请求不走 `HotkeyCtx`
+/// 的那个 `Option<WindowOp>` 字段（`HotkeyCtx` 是 `Copy`，`String` 放不进去），而是排在
+/// 核心层的旁路队列上——两者本就是两条路，返回值合并只会让读的人以为它们是一回事。
+///
+/// 常驻托盘应用的热键通常写成「开着就收起、否则唤出」，这个入口测的正是收起那一侧。
+///
+/// ```
+/// use windui::prelude::*;
+///
+/// let closed = windui::testing::run_with_hotkey_ctx_closes(|ctx| ctx.close_window("main"));
+/// assert_eq!(closed, vec!["main".to_string()]);
+/// ```
+pub fn run_with_hotkey_ctx_closes(f: impl FnOnce(&mut HotkeyCtx)) -> Vec<String> {
+    // 先清干净：队列是线程局部的，同线程里前一次调用留下的请求会混进本次结果。
+    let _ = crate::event::take_callback_closes();
+    let mut ctx = HotkeyCtx::default();
+    f(&mut ctx);
+    crate::event::take_callback_closes()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core::Tree;

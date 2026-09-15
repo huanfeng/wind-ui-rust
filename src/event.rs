@@ -130,6 +130,38 @@ pub(crate) fn set_window_state(st: WindowState) {
     WINDOW_STATE.with(|s| s.set(st));
 }
 
+/// 带指定单例键（[`Window::single`](crate::app::Window::single)）的窗口当前是否开着。
+///
+/// **常驻模式（[`App::run_resident`](crate::app::App::run_resident)）下热键要做「按一下
+/// 出来、再按一下收回」就得靠它**：那个模式没有主窗，[`window_state()`] 恒为
+/// [`WindowState::UNKNOWN`]（其 `visible` 为 `true`），照搬按可见性分支的写法会恒走隐藏
+/// 一侧而毫无反应。窗口在那里是**开着或不存在**两态，可见性根本不是那个问题的答案。
+///
+/// 与 `window_state()` 的另一处分别：本函数读的是平台的**窗口登记表**，不是线程局部
+/// 快照，故在任何时机都成立——热键回调抵达时进程可能一帧都没渲染过。
+///
+/// ```no_run
+/// # use windui::prelude::*;
+/// # let make = || Window::new("查词", 480, 320).single("main").content(|| Element::col().fill());
+/// App::resident("查词")
+///     .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), move |ctx| {
+///         if window_open("main") {
+///             ctx.close_window("main");
+///         } else {
+///             ctx.open_window(make());
+///         }
+///     })
+///     .run_resident();
+/// ```
+///
+/// # 平台
+///
+/// **仅 Windows。** macOS 的窗口登记表尚未接上常驻模式，那里恒返回 `false`
+/// ——与 `run_resident` 在该平台的现状一致（它在那里直接返回，不建任何窗口）。
+pub fn window_open(key: &str) -> bool {
+    crate::platform::single_window_open(key)
+}
+
 /// 系统是否偏好**暗色**外观。
 ///
 /// Windows 上读的是「设置 → 个性化 → 颜色 → 选择应用模式」那一项。读不到时按**亮色**
@@ -323,6 +355,57 @@ pub(crate) fn take_callback_windows() -> Vec<WindowRequest> {
     PENDING_CALLBACK_WINDOWS.with(|q| std::mem::take(&mut *q.borrow_mut()))
 }
 
+thread_local! {
+    /// 全局热键回调排队的**关窗**请求（单例键），与开窗队列并列。
+    ///
+    /// 为什么热键这条走队列而托盘那条把键带在 [`TrayAction::CloseWindow`]
+    /// （[`crate::platform::TrayAction`]）里：[`HotkeyCtx`] 是 `Copy`，一个 `String` 放不
+    /// 进去；`TrayAction` 则本就是带载荷的枚举，`String` 不碍它的 `Debug`/`Clone`/`PartialEq`
+    /// ——那正是 `OpenWindow` 当初只能留位置标记的理由（`WindowRequest` 带闭包），关窗
+    /// 没有这个问题，故把键直接写在意图里，读起来与测起来都更实在。
+    static PENDING_CALLBACK_CLOSES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// 排入一个来自全局热键回调的关窗请求（按单例键）。
+pub(crate) fn push_callback_close(key: String) {
+    PENDING_CALLBACK_CLOSES.with(|q| q.borrow_mut().push(key));
+}
+
+/// 取走全部排队的关窗请求。平台层在开窗之前落地它们。
+///
+/// **同一个回调里对同一个键既关又开是不支持的**，别照着「先关后开」的字面去写「换一个
+/// 尺寸重开」：关窗是**投递** `WM_CLOSE`（下一轮消息循环才处理），而开窗是当场执行的，
+/// 那一刻旧窗口仍在窗口登记表里，于是 `Window::single` 的去重判定命中、本次开窗退化成
+/// 「激活那个正在关闭的窗口」，随后它被关掉——净结果是**一个窗口都没有**。
+///
+/// 要重开请分两次回调（关掉之后，下一次热键 / 托盘点击再开），或用不同的单例键。
+/// win32 的 `apply_app_effects` 在两条队列撞上同一个键时会打一行提示——这个错法的表现
+/// （"按了一下，窗口没了"）与起因隔得太远，不说一声查不出来。
+pub(crate) fn take_callback_closes() -> Vec<String> {
+    PENDING_CALLBACK_CLOSES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// 偷看当前排队的开窗请求各自的单例键（**不取走**，无键者留 `None`）。
+///
+/// 只为上面那条诊断而存在：平台层要在关窗之前知道「这一批开窗请求里有没有同一个键」，
+/// 而真正取走队列的是 `open_callback_windows` 那条路，两者不能抢。
+///
+/// **返回拥有的值而不是借用**是承重的：调用点紧接着就要走到 `take_callback_windows`
+/// 的 `borrow_mut`，借用若跨过那一步就是当场 `BorrowMutError`。把 clone 收在函数体里，
+/// 这个约束就不依赖调用者的自觉。
+pub(crate) fn pending_window_singles() -> Vec<Option<String>> {
+    PENDING_CALLBACK_WINDOWS.with(|q| q.borrow().iter().map(|r| r.single.clone()).collect())
+}
+
+/// 这个待关闭的键，是否与某个**待建窗口**的单例键撞上了（即那条不支持的写法）。
+///
+/// 抽成不碰任何全局状态的纯函数，是为了能把「不该喊的时候别喊」测出来：异键组合是唯一
+/// 真正受支持的组合，而一个见谁都喊的提示三天后就会被当噪音忽略，那时它等于不存在。
+pub(crate) fn key_collides(key: &str, pending: &[Option<String>]) -> bool {
+    pending.iter().any(|p| p.as_deref() == Some(key))
+}
+
 /// 全局热键回调的上下文。
 ///
 /// **刻意只能声明意图，拿不到窗口句柄。** 回调在平台层持有窗口状态借用期间执行，
@@ -362,6 +445,30 @@ impl HotkeyCtx {
     /// ```
     pub fn open_window(&mut self, req: WindowRequest) {
         push_callback_window(req);
+    }
+    /// 请求关闭带指定单例键（[`Window::single`](crate::app::Window::single)）的窗口。
+    /// 没有这样一个窗口时什么也不做。
+    ///
+    /// 这是 [`open_window`](Self::open_window) 的对侧，**常驻模式下热键的「再按一下
+    /// 收回去」只能这么写**：那时没有主窗，[`hide_window`](Self::hide_window) 无处可施
+    /// （显隐意图的作用对象是主窗），而窗口本就关掉即销毁——收回去与关掉是同一件事，
+    /// 内存也随之归还。配合 [`window_open`] 判分支。
+    ///
+    /// 走的是**完整的关闭决策链**（`Window::on_close_request` 会被问到），与用户按标题栏
+    /// 的关闭按钮同义：热键收起窗口不该绕过应用自己的「有未保存内容」拦截。
+    ///
+    /// 与其他意图一样只排队不执行：真正的关闭发生在回调返回、平台层释放借用之后。关窗
+    /// 统一排在开窗之前落地，但**同一个回调里对同一个键既关又开是不支持的**——关窗是
+    /// 投递、开窗是即时，那样写的净结果是一个窗口都没有（平台层会打一行提示）。要重开
+    /// 请分两次回调，或用不同的键。
+    ///
+    /// 另一条同源的边界：窗口「正在关闭」期间它仍在窗口登记表里，故 `on_close_request`
+    /// 执行期间 [`window_open`] 对这个键**仍返回 `true`**。平时无碍——`WM_CLOSE` 与
+    /// `WM_HOTKEY` 同队列 FIFO，下一次热键必然排在那条关闭之后；但 `on_close_request`
+    /// 里若弹了原生模态对话框（自带嵌套消息泵），这个先后就不再成立，那时热键读到的
+    /// 是「还开着」。
+    pub fn close_window(&mut self, key: impl Into<String>) {
+        push_callback_close(key.into());
     }
     /// 取出回调声明的意图（供平台层在**释放窗口状态借用之后**执行）。
     ///
@@ -1039,6 +1146,12 @@ pub struct WindowRequest {
     pub close_handler: Option<WindowCloseHandler>,
     /// 本窗口的周期回调（`Window::on_interval`）。随窗口关闭一并停止。
     pub intervals: Vec<(std::time::Duration, WindowIntervalFn)>,
+    /// 窗口级快捷键回调（`Window::on_shortcut`）。返回 true = 已处理。
+    ///
+    /// 必须是**每个窗口自己的**，理由同 `close_handler`：快捷键作用在一棵具体的控件树与
+    /// 它的焦点环上。`App::on_shortcut` 那一份只归主窗，常驻模式下更是没有主窗可归——
+    /// 界面全由 `Window` 建出来，快捷键也就只能由 `Window` 自己声明。
+    pub shortcut: Option<WindowShortcutHandler>,
     /// 单例键（`Window::single`）。`None` = 每次请求都开一个新窗口。
     ///
     /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并把那个窗口激活到前台。
@@ -1057,6 +1170,12 @@ pub type WindowCloseHandler = Box<dyn FnMut(&mut crate::core::EventCtx) -> bool>
 
 /// 窗口周期回调，与 `App::on_interval` 同形。
 pub type WindowIntervalFn = Box<dyn FnMut(&mut crate::core::EventCtx)>;
+
+/// 窗口级快捷键回调：返回 `true` = 已处理，宿主不再走 Tab / Escape 兜底。
+///
+/// 与 `App::on_shortcut` 收的是同一种闭包——那个作用在主窗，这个作用在
+/// [`WindowRequest`] 对应的窗口上（见 [`Window::on_shortcut`](crate::app::Window::on_shortcut)）。
+pub type WindowShortcutHandler = Box<dyn FnMut(&mut ShortcutCtx, KeyEvent) -> bool>;
 
 /// 轻提示语义类型：决定提示图标（及默认强调色）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1101,6 +1220,63 @@ pub struct ToastRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 关窗请求按调用顺序排队、取走即清空。
+    ///
+    /// 「取走即清空」不是顺带的性质：队列是线程局部的，若取不干净，下一次热键会把上一次
+    /// 那条关窗请求再执行一遍——表现是「刚开出来的窗口自己关掉了」。
+    #[test]
+    fn close_requests_queue_in_order_and_drain_once() {
+        let _ = take_callback_closes();
+        let mut ctx = HotkeyCtx::default();
+        ctx.close_window("main");
+        ctx.close_window("settings");
+        assert_eq!(take_callback_closes(), vec!["main", "settings"]);
+        assert!(take_callback_closes().is_empty(), "取走一次就该空了");
+    }
+
+    /// 撞键检测的**三个方向都要钉**，而后两个比第一个重要：一个见谁都喊的提示，三天后
+    /// 就会被当噪音忽略掉，那时它等于不存在。
+    #[test]
+    fn collision_warns_only_on_the_same_key() {
+        let pending = vec![Some("main".to_string()), None, Some("settings".to_string())];
+        assert!(
+            key_collides("main", &pending),
+            "同键：这正是不支持的那个写法"
+        );
+        assert!(
+            !key_collides("about", &pending),
+            "异键是唯一真正受支持的组合，不该报"
+        );
+        assert!(
+            !key_collides("main", &[None, None]),
+            "没有单例键的开窗请求与任何关窗都撞不上"
+        );
+        assert!(!key_collides("main", &[]), "没有待建窗口时更不该报");
+    }
+
+    /// 关窗与开窗是两条独立的队列，取一条不会动到另一条。
+    ///
+    /// **异键组合（关 a、开 b）是唯一真正被支持的组合**，而「关窗排在开窗之前」这个次序
+    /// 存在的全部理由就在它身上；两条队列若互相干扰，那个次序就无从谈起。
+    #[test]
+    fn close_and_open_queues_do_not_disturb_each_other() {
+        let _ = take_callback_closes();
+        let _ = take_callback_windows();
+
+        let mut ctx = HotkeyCtx::default();
+        ctx.close_window("a");
+        ctx.open_window(
+            crate::app::Window::new("b 窗", 100, 80)
+                .single("b")
+                .content(crate::ui::Element::col),
+        );
+
+        assert_eq!(take_callback_closes(), vec!["a"], "关窗队列只该有 a");
+        let opens = take_callback_windows();
+        assert_eq!(opens.len(), 1, "开窗请求不该被关窗那条取走");
+        assert_eq!(opens[0].single.as_deref(), Some("b"));
+    }
+
     #[test]
     fn kind_default_durations() {
         assert_eq!(ToastKind::Error.default_duration_ms(), 5000);

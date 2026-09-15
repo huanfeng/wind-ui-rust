@@ -340,6 +340,18 @@ pub struct FontDesc { family: String, size: f32, weight: u16, italic: bool }
 故请求经核心层的旁路队列交给**应用级**的开窗工厂（`app::WindowFactory`）还原成「配置 + 宿主」，
 与窗口内 `ctx.open_window` 共用同一个 `build_new_window`。
 
+**关窗**（`close_window(key)`，常驻模式下「收起」的表达）是第二条旁路：热键那条与开窗并列
+排队、统一在开窗之前落地，托盘那条则把键带在 `TrayAction::CloseWindow` 里按声明顺序执行
+（载荷形状的分别：`WindowRequest` 带闭包会砸掉 `TrayAction` 的 `PartialEq`，`String` 不会）。
+落地是投递 `WM_CLOSE` 而非 `DestroyWindow`——走窗口自己的关闭决策链，且投递而非同步发送才
+不会当场重入窗口过程（铁律 6）。
+
+由此推出一条**必须知道的边界**：同一个回调里对同一个键既关又开不成立。关窗是投递、开窗是
+即时，那一刻旧窗口仍在窗口登记表里，于是开窗命中 `Window::single` 的去重、退化成激活那个
+正在关闭的窗口，随后它被关掉——净结果一个窗口都没有。`close_single_window` 在两条路的共同
+落点上检测并打提示；真要支持重开，改的是登记表那一侧（关窗时就把键摘掉），代价是
+`on_close_request` 拒绝关闭时那个窗口会丢掉自己的单例身份。
+
 ### DPI
 启动设 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`；`GetDpiForWindow` 取 scale；`WM_DPICHANGED` 动态切换。
 

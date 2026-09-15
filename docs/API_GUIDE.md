@@ -817,25 +817,56 @@ App::new("查词", 480, 360)
 热键回调按需建出，关掉即销毁，渲染资源随之归还。
 
 ```rust
-fn main_window() -> WindowRequest {                    // 窗口配置提成函数，托盘与热键共用
+fn main_window() -> WindowRequest {                    // 窗口配置提成函数，四处共用
     Window::new("清风词典", 480, 360)
         .single("main")                                // 已开着就激活它，不再开第二个
+        .on_shortcut(|ctx, ev| match ev.key {          // 快捷键挂窗口：这里没有主窗可挂
+            Key::Char('L') if ev.ctrl && ev.pressed => { ctx.focus_main_input(); true }
+            _ => false,
+        })
         .content(|| Element::col().fill())
 }
 
-App::resident("清风词典")                              // 不收窗口尺寸：它不建窗口
+let mut app = App::resident("清风词典")                // 不收窗口尺寸：它不建窗口
     .tray(Tray::new().tooltip("清风词典").menu(vec![
         TrayMenuItem::item("打开窗口", |ctx| ctx.open_window(main_window())),
         TrayMenuItem::item("退出", |ctx| ctx.quit()),   // 零窗口时唯一的出口
     ]))
-    .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| ctx.open_window(main_window()))
-    .run_resident();
+    // 热键**切换**：开着就收起（= 关掉，资源随之归还），否则唤出
+    .hotkey(Hotkey::new(Key::Char('D')).ctrl().alt(), |ctx| {
+        if window_open("main") { ctx.close_window("main"); } else { ctx.open_window(main_window()); }
+    })
+    .screenshot_window(main_window())                  // 离屏截图的对象：否则只有空图
+    .screenshot_from_args();
+if !launched_for_tray {                                // 开机自启不弹窗，双击图标才开
+    app = app.start_window(main_window());
+}
+app.run_resident();
 ```
 
 - `TrayCtx::open_window` / `HotkeyCtx::open_window` 与控件里的 `EventCtx::open_window` 收同一个
   `WindowRequest`、走同一条延后建窗管线：回调**只排队意图**，平台在借用释放后才真正建窗（铁律 6）。
 - 常驻模式下 `show_window()` / `hide_window()` 无效（没有主窗可显隐），`content()` / `bg()` /
-  `on_show()` 这些面向主窗的配置同样不生效——窗口的这些行为写在各自的 `Window` 上。
+  `on_show()` / `on_shortcut()` 这些面向主窗的配置同样不生效——窗口的这些行为写在各自的
+  `Window` 上（快捷键就是 `Window::on_shortcut`，**那是这个模式下唯一的一份**；挂错地方的
+  表现是「界面正常，所有 Ctrl+X 静默失灵」）。
+- **显隐的替代是「开 / 关」**：`window_open(key)` 查那个单例窗口开着没有（读平台的窗口
+  登记表，任何时机都成立），`ctx.close_window(key)` 把它关掉（投 `WM_CLOSE`，走完整关闭
+  决策链）。别用 `window_state().visible` 判分支——零窗口时它恒为 `UNKNOWN` 的 `true`，
+  照搬会恒走收起那一侧、按下去毫无反应。
+  > ⚠️ **同一个回调里对同一个键既关又开不成立**：关窗是投递、开窗是即时，那一刻旧窗口还
+  > 在登记表里，于是开窗命中 `Window::single` 的去重、退化成激活那个正在关闭的窗口，随后
+  > 它被关掉——净结果一个窗口都没有。要重开请分两次回调，或用不同的键（撞上时会打一行提示）。
+  > **边界**：`close_window` 只在 `TrayCtx` / `HotkeyCtx` 上，`EventCtx`（控件回调）没有
+  > 对侧——窗口里一个「收起到托盘」的按钮只能 `ctx.request_close()` 关掉**自己**，关不了
+  > 别的单例窗。常驻模式下这两者恰好同义（关掉自己就是收起），但跨窗口关别人目前无路可走。
+- **`App::start_window(req)`**：常驻是「启动后桌面上什么都没有」，而那只对**开机自启**成立
+  ——用户刚双击了图标却什么都不出现是故障。判据在应用手里（通常是命令行开关），故它是一个
+  按需调用的构建项：请求走托盘/热键那条同样的队列，平台在进消息循环之前建出来。
+- **`App::screenshot_window(req)`**：截屏取的是主窗的配置与控件树，而常驻应用两样都没有，
+  不指明只会得到一张**空图**。传的就是托盘/热键 `open_window` 用的那一份 `Window`——请出自
+  同一个工厂函数，否则截图验的不是用户看到的那个界面。没给它但给了 `start_window` 时退而
+  用后者；两个都没有会打一行提示，而不是默默交出空图。
 - **退出只有托盘的 `ctx.quit()` 一条路**。故 debug 期若既无托盘也无热键就 panic：那样的进程既没有
   入口也没有出口。
 - 空闲仍是零 CPU：零窗口时消息循环纯阻塞在 `GetMessage`，不参与帧配速。
@@ -1740,6 +1771,10 @@ App::new("查词", 480, 360)
 
 - **兜底而非抢先**：键先到焦点控件，它要了就轮不到这里（同网页里焦点元素
   `preventDefault()` 掉的机制）。这保证了输入框里打字不会被应用的快捷键截胡。
+- **子窗与常驻应用用 `Window::on_shortcut`**（语义完全相同，作用在那个窗口上）。`App` 那
+  一份只归主窗，也**不会**下发给 `ctx.open_window` 建出的窗口：快捷键作用在一棵具体的控件
+  树与它的焦点环上，套过去只会张冠李戴（`focus_main_input()` 找的是本窗声明 `autofocus`
+  的那个控件）。零窗口常驻（§8.8）下没有主窗，`Window::on_shortcut` 是唯一的一份。
 - 但它排在 **Tab / Escape 之前**——应用得能覆盖那两个默认行为。上例的 Escape 就是典型：
   设置页里它该退回上一页，而不是把整个窗口关掉。
 - 回调拿 `ShortcutCtx`，只有 `focus_main_input()` 与 `request_close()` 两个方法，**拿不到
@@ -2312,10 +2347,10 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::spec` | `Align / Axis / Dimension` |
 | `windui::style::Style` | 内联视觉属性 |
 | `windui::theme` | `Theme / Palette / Metrics` + `current()/set_current()` |
-| `windui::event` | `Event / PointerEvent / KeyEvent / Key / MenuItem` |
+| `windui::event` | `Event / PointerEvent / KeyEvent / Key / MenuItem`；`window_state()`（窗口快照）、`window_open(key)`（某个单例窗口开着没有，常驻模式判显隐用它） |
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
 | `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画） |
-| `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.2） |
+| `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.2）、`run_with_tray_ctx*()`、`run_with_hotkey_ctx()` / `run_with_hotkey_ctx_closes()`（热键回调请求的显隐意图 / 关窗键） |
 
 更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口等）。

@@ -137,6 +137,14 @@ pub enum TrayAction {
     /// 推论：把一份 `Vec<TrayAction>` 执行两遍，第二遍的 `OpenWindow` 会落空（队列已空）
     /// 而不是开出第二个窗口。意图队列本就只该被执行一次，这里不做额外防护。
     OpenWindow,
+    /// 关掉带这个单例键（[`Window::single`](crate::app::Window::single)）的窗口
+    /// （[`TrayCtx::close_window`]）。没有这样一个窗口时什么也不做。
+    ///
+    /// **这个带载荷而 [`OpenWindow`](Self::OpenWindow) 不带**：那边的载荷是带闭包的
+    /// `WindowRequest`，塞进来会砸掉本枚举的 `Debug`/`Clone`/`PartialEq`；一个 `String`
+    /// 不会，于是键直接写在意图里——下游给托盘回调写测试时读到的是
+    /// `CloseWindow("main")`，比一个还要再去查旁路队列的位置标记实在得多。
+    CloseWindow(String),
 }
 
 /// 托盘回调上下文：显隐窗口 / 退出 / 气泡通知。
@@ -194,6 +202,25 @@ impl TrayCtx {
     pub fn open_window(&mut self, req: crate::event::WindowRequest) {
         crate::event::push_callback_window(req);
         self.actions.push(TrayAction::OpenWindow);
+    }
+    /// 关掉带指定单例键（[`Window::single`](crate::app::Window::single)）的窗口。
+    /// 没有这样一个窗口时什么也不做。
+    ///
+    /// 常驻模式下这是 [`hide_window`](Self::hide_window) 的替代：那时没有主窗可隐藏，
+    /// 而窗口关掉即销毁——「收起来」与「关掉」在那个模式里本就是同一件事，渲染资源
+    /// 也随之归还。配合 [`window_open`](crate::event::window_open) 判分支，即可让托盘
+    /// 单击在「唤出」与「收起」之间切换。
+    ///
+    /// 走完整的关闭决策链（`Window::on_close_request` 会被问到），与用户点标题栏关闭
+    /// 按钮同义。
+    ///
+    /// **次序按声明来**，与本类型其余意图一致（热键那条路不同：它的关窗请求统一排在开窗
+    /// 之前）。但两条路有一条共同的禁忌：**同一个回调里对同一个键既关又开是不支持的**
+    /// ——关窗是投递 `WM_CLOSE`、开窗是即时，那样写时开窗会命中那个尚未关掉的窗口、退化
+    /// 成激活它，随后它被关掉，净结果是一个窗口都没有（平台层会打一行提示）。要重开请
+    /// 分两次回调，或用不同的键。
+    pub fn close_window(&mut self, key: impl Into<String>) {
+        self.actions.push(TrayAction::CloseWindow(key.into()));
     }
     /// 弹出气泡通知（标题 + 正文）。macOS 上未打包为 .app 时可能不展示。
     pub fn notify(&mut self, title: &str, body: &str) {
@@ -365,6 +392,29 @@ mod tests {
         impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
         let _ = <Tray as AmbiguousIfSend<_>>::tag;
     };
+
+    /// 关窗意图把键带在自己身上，不经旁路队列——这正是它与 `OpenWindow` 的分别，
+    /// 也是下游能对着 `Vec<TrayAction>` 断言「点了这一项会收起主界面」的前提。
+    ///
+    /// 常驻模式下托盘的「收起」只能这么表达：那时没有主窗，`hide_window` 无处可施。
+    #[test]
+    fn close_window_carries_its_key_in_the_action() {
+        let got = crate::testing::run_with_tray_ctx_fn(|ctx| {
+            ctx.notify("已同步", "3 个词条");
+            ctx.close_window("main");
+        });
+        assert_eq!(
+            got,
+            vec![
+                TrayAction::Notify {
+                    title: "已同步".into(),
+                    body: "3 个词条".into()
+                },
+                TrayAction::CloseWindow("main".into()),
+            ],
+            "意图按调用顺序累积，且关窗那条自带键"
+        );
+    }
 
     /// 勾选态是**弹出时现读**而非构建时快照：构建完菜单项后翻转信号，
     /// 下一次弹出就该显示新状态（这正是 `check` 收信号而非 `bool` 的全部理由）。

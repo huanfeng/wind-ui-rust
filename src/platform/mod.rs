@@ -40,6 +40,8 @@ pub use win32::open_url;
 #[cfg(windows)]
 pub(crate) use win32::run;
 #[cfg(windows)]
+pub(crate) use win32::single_window_open;
+#[cfg(windows)]
 pub(crate) use win32::system_prefers_dark;
 
 #[cfg(target_os = "macos")]
@@ -54,6 +56,17 @@ pub use macos::open_url;
 pub(crate) use macos::run;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::system_prefers_dark;
+
+/// 见 Windows 版（`win32::single_window_open`）：macOS 的窗口登记表还没接上常驻模式，
+/// 这里恒为 `false`。
+///
+/// 不按"错得显眼"取 `true`：调用方拿它判的是「窗口开着就关掉、否则开一个」，恒真会让
+/// 那条路永远只去关一个不存在的窗口——界面再也唤不出来；恒假最坏是重复开窗请求，而那条
+/// 路上还有 `Window::single` 兜着（已开着就激活既有的那个）。
+#[cfg(target_os = "macos")]
+pub(crate) fn single_window_open(_key: &str) -> bool {
+    false
+}
 
 #[cfg(not(any(windows, target_os = "macos")))]
 compile_error!("windui 目前仅支持 Windows 与 macOS 平台");

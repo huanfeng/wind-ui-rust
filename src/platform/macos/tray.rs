@@ -212,6 +212,14 @@ impl TrayTarget {
                     eprintln!("[windui] TrayCtx::open_window 在 macOS 上尚未实现，本次请求被忽略");
                     let _ = crate::event::take_callback_window();
                 }
+                // TODO(macOS): 与上一条同批落地——按单例键找到那个 NSWindow，走
+                // `windowShouldClose:` 的关闭决策链关掉它（对称于 win32 投 `WM_CLOSE`）。
+                // 在此之前这里没有可关的对象：按键开窗那条路本身还没实现。
+                TrayAction::CloseWindow(key) => {
+                    eprintln!(
+                        "[windui] TrayCtx::close_window 在 macOS 上尚未实现，已忽略（键：{key}）"
+                    );
+                }
             }
         }
     }
