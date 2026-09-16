@@ -1132,7 +1132,14 @@ impl Tree {
                 main_dim
             };
             let main_child = child_spec(main_eff, main_avail, main_unbounded);
-            let cross_child = child_spec(cross_dim, cross_avail, cross_unbounded);
+            // 交叉轴上先扣掉子节点自己的 margin 再发约束：不扣的话 `Match` 会量到整条
+            // 交叉轴，arrange 再按 margin.left 右移，净效果是**朝末端溢出一个 margin**
+            // （表现为卡片盖住旁边的分隔线）。主轴一直是预扣的，这里是补上交叉轴那一半。
+            let cross_child = child_spec(
+                cross_dim,
+                (cross_avail - cm_cross).max(0),
+                cross_unbounded,
+            );
             let (cwspec, chspec) = if horizontal {
                 (main_child, cross_child)
             } else {
@@ -1162,9 +1169,11 @@ impl Tree {
                 };
                 allocated += portion;
                 let main_child = MeasureSpec::exactly(portion);
+                let (_, cm_cross) = main_cross_insets(horizontal, cm);
+                // 同上：交叉轴约束须先扣 margin（见第一遍里的注释）。
                 let cross_child = child_spec(
                     if horizontal { ch } else { cw },
-                    cross_avail,
+                    (cross_avail - cm_cross).max(0),
                     cross_unbounded,
                 );
                 let (cwspec, chspec) = if horizontal {
@@ -1173,7 +1182,6 @@ impl Tree {
                     (cross_child, main_child)
                 };
                 let s = self.measure(c, cwspec, chspec, text);
-                let (_, cm_cross) = main_cross_insets(horizontal, cm);
                 let (s_main, s_cross) = main_cross(horizontal, s);
                 used_main += s_main; // margin 已预扣，此处只加 portion
                 max_cross = max_cross.max(s_cross + cm_cross);
@@ -3936,6 +3944,45 @@ mod tests {
             CursorShape::Hand,
             "悬停在 clickable 卡片内的子控件上应显示手型"
         );
+    }
+
+    #[test]
+    fn cross_axis_match_with_margin_dont_overflow() {
+        // 交叉轴的对称情形：col 里的 `width_match` 子节点带左右 margin。
+        // 曾经交叉轴不预扣 margin——子量到整条 200，arrange 再右移 4，
+        // 右沿落到 204，把紧邻的分隔线压在身下（面板卡片就是这么盖住分栏拖柄的）。
+        let tree = layout(
+            Element::col()
+                .width(200)
+                .height(60)
+                .child(Element::leaf().width_match().height(20).margin_xy(4, 0)),
+            200,
+            60,
+        );
+        let root = tree.root.unwrap();
+        let kid = tree.get(root).unwrap().children[0];
+        let b = tree.get(kid).unwrap().bounds;
+        assert_eq!(b.x, 4, "左沿=margin");
+        assert_eq!(b.w, 192, "宽应为 200-4-4");
+        assert_eq!(b.x + b.w, 196, "右沿须留出右 margin，不得溢到 204");
+    }
+
+    #[test]
+    fn cross_axis_match_with_margin_dont_overflow_under_weight() {
+        // 同上，但父容器的这个子是**权重子**（第二遍分配那条路径）。
+        let tree = layout(
+            Element::col()
+                .width(200)
+                .height(60)
+                .child(Element::leaf().width_match().margin_xy(4, 0).weight(1.0)),
+            200,
+            60,
+        );
+        let root = tree.root.unwrap();
+        let kid = tree.get(root).unwrap().children[0];
+        let b = tree.get(kid).unwrap().bounds;
+        assert_eq!(b.x, 4, "左沿=margin");
+        assert_eq!(b.w, 192, "权重子的交叉轴同样要扣 margin");
     }
 
     #[test]

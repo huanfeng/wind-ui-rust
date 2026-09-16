@@ -4056,6 +4056,14 @@ impl Element {
         self.margin = Insets::symmetric(h, v);
         self
     }
+    /// 四边**分别**给外边距，是 [`padding_edges`](Self::padding_edges) 的外侧对应物。
+    ///
+    /// 用在一边紧贴分隔线、另一边要留气口的场合：`margin_xy` 只能两边同给，
+    /// 凑出一侧的留白会让另一侧跟着白白缩进同样多。
+    pub fn margin_edges(mut self, m: Insets) -> Self {
+        self.margin = m;
+        self
+    }
 
     // ---- 对齐/布局参数 ----
     pub fn align(mut self, a: Align) -> Self {

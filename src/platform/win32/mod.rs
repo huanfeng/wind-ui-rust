@@ -1039,8 +1039,12 @@ struct ClickTracker {
 }
 
 impl ClickTracker {
-    /// 按 Down 事件更新连续点击计数：与上次同按键、在系统双击时限与漂移阈值内则递增
-    /// （封顶到 3 支持三击），否则重置为 1。返回本次点击的计数。
+    /// 按 Down 事件更新连续点击计数：与上次同按键、在系统双击时限与漂移阈值内则递增，
+    /// 否则重置为 1。返回本次点击的计数。
+    ///
+    /// 到 3 之后**回到 1** 而不是钉在 3 上。钉住会让"同一位置连着快点"永远报 >=2：
+    /// 文件列表里双击进了目录，紧接着在同一坐标单击一下新内容，就会被当成双击再进一层。
+    /// Win32 原生的 `WM_LBUTTONDBLCLK` 也是发完就重新起算，这里只是把它推广到三击。
     fn bump(
         &mut self,
         button: i32,
@@ -1056,8 +1060,8 @@ impl ClickTracker {
             && now_ms.wrapping_sub(self.time_ms) <= dbl_ms
             && (x - self.x).abs() <= dx
             && (y - self.y).abs() <= dy;
-        let count = if continued {
-            (self.count + 1).min(3)
+        let count = if continued && self.count < 3 {
+            self.count + 1
         } else {
             1
         };
@@ -3809,7 +3813,12 @@ mod tests {
         assert_eq!(t.bump(1, 10, 10, 1000, DBL, DX, DY), 1, "首击=单击");
         assert_eq!(t.bump(1, 11, 11, 1100, DBL, DX, DY), 2, "时限内同位=双击");
         assert_eq!(t.bump(1, 12, 12, 1200, DBL, DX, DY), 3, "继续=三击");
-        assert_eq!(t.bump(1, 12, 12, 1300, DBL, DX, DY), 3, "封顶于三击");
+        assert_eq!(
+            t.bump(1, 12, 12, 1300, DBL, DX, DY),
+            1,
+            "三击之后重新起算，不得钉在 3：钉住会让同位快点永远报 >=2，             文件列表双击进目录后再单击一下就又进一层"
+        );
+        assert_eq!(t.bump(1, 12, 12, 1400, DBL, DX, DY), 2, "新一轮的第二下=双击");
         // 超出时限：重置。
         assert_eq!(t.bump(1, 12, 12, 2000, DBL, DX, DY), 1, "超时重置为单击");
     }
