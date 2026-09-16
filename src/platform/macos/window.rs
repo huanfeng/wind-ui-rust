@@ -1587,8 +1587,16 @@ impl ContentView {
             return;
         }
         let pos = self.loc_phys(ev);
+        // 折进 1 / 2 的循环，与 win32 的 `ClickTracker` 同口径：AppKit 的 clickCount
+        // 会一直数上去（3、4、5…），照搬会让"双击进目录、紧接着再双击往下钻"的第三、
+        // 四下读成 3 和 4，一次都匹配不上双击。三击由 `event::TripleClick` 在控件侧认。
         let click_count = if matches!(kind, PointerKind::Down) {
-            (ev.clickCount().max(1) as u8).min(3)
+            let n = ev.clickCount().max(1) as u32;
+            if n % 2 == 0 {
+                2
+            } else {
+                1
+            }
         } else {
             1
         };

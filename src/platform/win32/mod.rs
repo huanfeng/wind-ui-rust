@@ -1042,9 +1042,11 @@ impl ClickTracker {
     /// 按 Down 事件更新连续点击计数：与上次同按键、在系统双击时限与漂移阈值内则递增，
     /// 否则重置为 1。返回本次点击的计数。
     ///
-    /// 到 3 之后**回到 1** 而不是钉在 3 上。钉住会让"同一位置连着快点"永远报 >=2：
-    /// 文件列表里双击进了目录，紧接着在同一坐标单击一下新内容，就会被当成双击再进一层。
-    /// Win32 原生的 `WM_LBUTTONDBLCLK` 也是发完就重新起算，这里只是把它推广到三击。
+    /// **到 2 即重新起算**（1,2,1,2,…），与 Win32 原生的 `WM_LBUTTONDBLCLK` 一致。
+    /// 曾经数到 3：钉在 3 上会让同位连点永远报 >=2（单击也进目录）；改成循环到 3 之后
+    /// 又让"双击进目录、紧接着再双击往下钻"的第三、四下读成 3 和 1，一次都匹配不上。
+    /// 第三下到底是三击的尾巴还是新一轮双击的头，消息层面分不出来——平台按 Win32 的
+    /// 成例判成后者，要三击的文本控件用 `event::TripleClick` 自己认。
     fn bump(
         &mut self,
         button: i32,
@@ -1060,7 +1062,7 @@ impl ClickTracker {
             && now_ms.wrapping_sub(self.time_ms) <= dbl_ms
             && (x - self.x).abs() <= dx
             && (y - self.y).abs() <= dy;
-        let count = if continued && self.count < 3 {
+        let count = if continued && self.count < 2 {
             self.count + 1
         } else {
             1
@@ -3808,19 +3810,17 @@ mod tests {
     const DY: i32 = 4;
 
     #[test]
-    fn double_then_triple_then_reset() {
+    fn 双击之后重新起算_连续双击每一对都成立() {
         let mut t = ClickTracker::default();
         assert_eq!(t.bump(1, 10, 10, 1000, DBL, DX, DY), 1, "首击=单击");
         assert_eq!(t.bump(1, 11, 11, 1100, DBL, DX, DY), 2, "时限内同位=双击");
-        assert_eq!(t.bump(1, 12, 12, 1200, DBL, DX, DY), 3, "继续=三击");
-        assert_eq!(
-            t.bump(1, 12, 12, 1300, DBL, DX, DY),
-            1,
-            "三击之后重新起算，不得钉在 3：钉住会让同位快点永远报 >=2，             文件列表双击进目录后再单击一下就又进一层"
-        );
-        assert_eq!(t.bump(1, 12, 12, 1400, DBL, DX, DY), 2, "新一轮的第二下=双击");
+        // 连着往下钻目录：第三、四下必须重新构成一对双击，否则第二次双击落空。
+        assert_eq!(t.bump(1, 12, 12, 1200, DBL, DX, DY), 1, "双击后重新起算");
+        assert_eq!(t.bump(1, 12, 12, 1300, DBL, DX, DY), 2, "第二次双击照样成立");
+        assert_eq!(t.bump(1, 12, 12, 1400, DBL, DX, DY), 1);
+        assert_eq!(t.bump(1, 12, 12, 1500, DBL, DX, DY), 2, "第三次双击照样成立");
         // 超出时限：重置。
-        assert_eq!(t.bump(1, 12, 12, 2000, DBL, DX, DY), 1, "超时重置为单击");
+        assert_eq!(t.bump(1, 12, 12, 2200, DBL, DX, DY), 1, "超时重置为单击");
     }
 
     #[test]

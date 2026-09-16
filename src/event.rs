@@ -523,8 +523,13 @@ pub struct PointerEvent {
     pub kind: PointerKind,
     pub pos: Point,
     pub button: MouseButton,
-    /// 连续点击计数（由平台层填充）：1=单击，2=双击，3=三击。
-    /// 仅 `Down` 有意义；其余动作恒为 1。控件据此实现双击选词/三击选行。
+    /// 连续点击计数（由平台层填充）：1=单击，2=双击。仅 `Down` 有意义，其余动作恒为 1。
+    ///
+    /// **到 2 即重新起算**，与 Win32（`WM_LBUTTONDBLCLK` 发完就重算）和 Qt 一致：
+    /// 一串快点得到 1,2,1,2,… 而不是 1,2,3,3,…。不这样的话"双击进目录、紧接着再双击
+    /// 往下钻"里的第三、四下会被读成 3 和 1，一次都匹配不上双击，连续钻目录就断了。
+    ///
+    /// 代价是平台层不再报三击。需要三击选段的文本控件用 [`TripleClick`] 自己认。
     pub click_count: u8,
     /// 事件发生时按着的修饰键。列表控件靠它做 Ctrl+点击切换选中、Shift+点击范围选中
     /// ——桌面软件最基本的选择手势，此前平台层收得到却没送上来。
@@ -549,6 +554,51 @@ impl PointerEvent {
             mods,
             ..Self::single(kind, pos, button)
         }
+    }
+}
+
+/// 三击判定器：给需要"三击选段/选行"的文本控件用。
+///
+/// 平台层的 [`PointerEvent::click_count`] 到 2 就重新起算，所以一次真正的三击到达时
+/// 是 `1, 2, 1`——第三下伪装成新一轮的首击。这个结构把它认回来：记下最近那次双击的
+/// 时刻与位置，若紧接着来的首击仍在双击时限与漂移阈值内，就判为三击。
+///
+/// 为什么这份策略归控件而不归平台：第三下究竟是"三击的最后一下"还是"新一轮双击的
+/// 第一下"，在消息层面无法区分。文本里前者几乎总是对的，列表里后者几乎总是对的
+/// （双击进目录后接着双击往下钻）。让各自的控件按自己的语境决定，比在平台层押一边强。
+#[derive(Default, Clone, Copy, Debug)]
+pub struct TripleClick {
+    last_dbl: Option<(std::time::Instant, Point)>,
+}
+
+/// 三击的时限：与 Windows 双击时限的默认值同量级。
+const TRIPLE_MS: u128 = 500;
+/// 三击的漂移阈值（逻辑像素，每侧）。
+const TRIPLE_DRIFT: i32 = 4;
+
+impl TripleClick {
+    /// 喂一次 `Down`，返回**有效**连击数：1 / 2 / 3。
+    ///
+    /// 平台已经给出 >= 3 的（或测试直接合成的）原样放行，不再二次判定。
+    pub fn feed(&mut self, p: &PointerEvent) -> u8 {
+        if p.click_count >= 3 {
+            self.last_dbl = None;
+            return p.click_count;
+        }
+        if p.click_count == 2 {
+            self.last_dbl = Some((std::time::Instant::now(), p.pos));
+            return 2;
+        }
+        // 首击：紧跟在一次就近的双击之后，即视为三击。
+        if let Some((t, at)) = self.last_dbl.take() {
+            if t.elapsed().as_millis() <= TRIPLE_MS
+                && (p.pos.x - at.x).abs() <= TRIPLE_DRIFT
+                && (p.pos.y - at.y).abs() <= TRIPLE_DRIFT
+            {
+                return 3;
+            }
+        }
+        1
     }
 }
 
@@ -1287,5 +1337,47 @@ mod tests {
         assert_eq!(ToastKind::Error.default_duration_ms(), 5000);
         assert_eq!(ToastKind::Success.default_duration_ms(), 3000);
         assert_eq!(ToastKind::Info.default_duration_ms(), 3000);
+    }
+}
+
+#[cfg(test)]
+mod triple_click_tests {
+    use super::*;
+
+    fn down(count: u8, x: i32, y: i32) -> PointerEvent {
+        PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(x, y),
+            button: MouseButton::Left,
+            click_count: count,
+            mods: Mods::default(),
+        }
+    }
+
+    #[test]
+    fn 平台的_1_2_1_认回三击() {
+        let mut t = TripleClick::default();
+        assert_eq!(t.feed(&down(1, 10, 10)), 1);
+        assert_eq!(t.feed(&down(2, 10, 10)), 2, "双击原样放行");
+        assert_eq!(
+            t.feed(&down(1, 11, 10)), 
+            3,
+            "平台把三击的最后一下报成新一轮首击，这里认回来"
+        );
+        assert_eq!(t.feed(&down(1, 11, 10)), 1, "认过一次就不再重复认");
+    }
+
+    #[test]
+    fn 离得远的首击不算三击() {
+        let mut t = TripleClick::default();
+        t.feed(&down(2, 10, 10));
+        assert_eq!(t.feed(&down(1, 200, 10)), 1, "漂移超阈值：是另一处的新单击");
+    }
+
+    #[test]
+    fn 平台已给三击的原样放行() {
+        // 合成事件与非 win32 平台可能直接给 >= 3，不该被二次判定改写。
+        let mut t = TripleClick::default();
+        assert_eq!(t.feed(&down(3, 10, 10)), 3);
     }
 }

@@ -1455,6 +1455,8 @@ pub struct RichText {
     hover_header: Cell<Option<usize>>,
     /// 按下时锁定的折叠头下标。
     pressed_header: Cell<Option<usize>>,
+    /// 三击选行的判定（平台层只数到 2，见 [`crate::event::TripleClick`]）。
+    triple: Cell<crate::event::TripleClick>,
     /// 键盘焦点指向的折叠头下标（↑↓ 移动、Enter/Space 翻转；使用时按 headers 长度钳制）。
     focus_header: Cell<usize>,
     /// 悬停中的可点击 span 碎片下标（frags 序；视觉提亮 + 手型光标）。
@@ -1515,6 +1517,7 @@ impl RichText {
             last_content: Cell::new(Rect::new(0, 0, 0, 0)),
             hover_header: Cell::new(None),
             pressed_header: Cell::new(None),
+            triple: Cell::new(crate::event::TripleClick::default()),
             focus_header: Cell::new(0),
             hover_span: Cell::new(None),
             pressed_span: Cell::new(None),
@@ -2506,12 +2509,18 @@ impl Widget for RichText {
                 }
                 // 正文区：双击选词 / 三击选行（不进入拖选态——Up 各分支均不命中，
                 // 选区得以保留；交互控件的连点仍走上面的单击路径，行为不变）。
-                if p.click_count >= 2 {
+                //
+                // 三击由本控件自己认：平台层的计数到 2 就重新起算（那是列表"双击进目录
+                // 后接着双击"所必须的），一次真三击到达时是 1,2,1。
+                let mut tri = self.triple.get();
+                let clicks = tri.feed(p);
+                self.triple.set(tri);
+                if clicks >= 2 {
                     let Some(i) = self.frag_near(p.pos) else {
                         return false;
                     };
                     ctx.request_focus();
-                    let (ra, rb) = if p.click_count >= 3 {
+                    let (ra, rb) = if clicks >= 3 {
                         self.para_range_at(i)
                     } else {
                         self.word_range_at(i)

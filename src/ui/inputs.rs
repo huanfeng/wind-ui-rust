@@ -806,6 +806,8 @@ pub struct TextInput {
     /// 插入光标的闪烁相位与平滑移动状态（见 [`crate::ui::caret`]）。
     caret: CaretState,
     dragging: bool,
+    /// 三击选段的判定（平台层只数到 2，见 [`crate::event::TripleClick`]）。
+    triple: crate::event::TripleClick,
     scrollbar: VScrollbar,
     /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
     /// 滚轮滚动不设置，避免 paint 每帧重置 scroll_y。
@@ -880,6 +882,7 @@ impl TextInput {
             caret_local: Cell::new(None),
             caret: CaretState::new(),
             dragging: false,
+            triple: crate::event::TripleClick::default(),
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
             hover_in_scrollbar: Cell::new(false),
@@ -2010,7 +2013,9 @@ impl Widget for TextInput {
                         self.fire_click(ctx);
                     }
                     // 双击选词 / 三击选段。不进入拖选。
-                    match p.click_count {
+                    // 三击由本控件自己认：平台层的计数到 2 就重新起算（那是列表
+                    // "双击进目录后接着双击"所必须的），一次真三击到达时是 1,2,1。
+                    match self.triple.feed(p) {
                         2 => {
                             let idx = self.pos_to_index(ctx, p.pos.x, p.pos.y);
                             self.select_word(idx);
