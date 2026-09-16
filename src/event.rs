@@ -394,6 +394,9 @@ pub(crate) fn take_callback_closes() -> Vec<String> {
 /// **返回拥有的值而不是借用**是承重的：调用点紧接着就要走到 `take_callback_windows`
 /// 的 `borrow_mut`，借用若跨过那一步就是当场 `BorrowMutError`。把 clone 收在函数体里，
 /// 这个约束就不依赖调用者的自觉。
+// 只有 win32 的 `close_single_window` 用它做诊断；macOS 那条路尚未实现（见
+// `platform/macos/tray.rs` 的 TODO），在那里它确实没有调用者。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn pending_window_singles() -> Vec<Option<String>> {
     PENDING_CALLBACK_WINDOWS.with(|q| q.borrow().iter().map(|r| r.single.clone()).collect())
 }
@@ -402,6 +405,8 @@ pub(crate) fn pending_window_singles() -> Vec<Option<String>> {
 ///
 /// 抽成不碰任何全局状态的纯函数，是为了能把「不该喊的时候别喊」测出来：异键组合是唯一
 /// 真正受支持的组合，而一个见谁都喊的提示三天后就会被当噪音忽略，那时它等于不存在。
+// 同上：调用点在 win32。单测两个平台都跑得到，故这里不是"没人用"，只是"那个平台没人用"。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn key_collides(key: &str, pending: &[Option<String>]) -> bool {
     pending.iter().any(|p| p.as_deref() == Some(key))
 }
