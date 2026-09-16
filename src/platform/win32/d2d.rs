@@ -2049,6 +2049,35 @@ mod tests {
         assert_eq!(px(&pm, 2, 2), [255, 255, 255, 255], "矩形外应保持背景白");
     }
 
+    /// `cull_rect` 必须报出客户区，**不能是 `None`**。
+    ///
+    /// 回归：这个方法原先根本没实现，吃的是 trait 默认的 `None`。而绘制遍历把 `None`
+    /// 读作"拿不到范围，那就整个画"，于是内容远高于视口的节点（文件列表 measure 报
+    /// 60 万 px 高）每帧绘制全部内容——下游实测帧耗时 828 ms、内存多占 44 MB。
+    /// Windows 上默认走这条后端，所以这是日常路径而非边角。
+    #[test]
+    fn cull_rect_reports_the_client_area_not_none() {
+        // scale=1：60x60 物理 = 60x60 逻辑，各放一像素余量
+        let mut seen = None;
+        render(60, 60, 1.0, |c| seen = c.cull_rect());
+        let cull = seen.expect("D2D 必须报出可见范围，否则调用方会整个画");
+        assert!(
+            cull.x <= 0 && cull.y <= 0 && cull.right() >= 60 && cull.bottom() >= 60,
+            "应覆盖整个客户区: {cull:?}"
+        );
+        assert!(cull.h < 10_000, "范围要有界，否则等于没裁剪: {cull:?}");
+
+        // scale=2：120x120 物理 = 60x60 逻辑。报的是**逻辑**坐标，不能混用物理值，
+        // 否则高 DPI 下会把裁剪框算成两倍大，等于没裁。
+        let mut seen2 = None;
+        render(120, 120, 2.0, |c| seen2 = c.cull_rect());
+        let cull2 = seen2.expect("高 DPI 下同样要报");
+        assert!(
+            cull2.right() >= 60 && cull2.right() < 80,
+            "应是逻辑坐标 60 左右，不是物理的 120: {cull2:?}"
+        );
+    }
+
     /// DPI 变换：`make_canvas` 的 `SetTransform(scale)` 把逻辑坐标放大到物理像素。
     /// 漏掉会让内容缩在左上角——软硬两路同源的坑，用像素位置钉住。
     #[test]

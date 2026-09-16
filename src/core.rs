@@ -5601,6 +5601,64 @@ mod tests {
         }
     }
 
+    /// **整窗帧**里内容远高于视口的节点也要剪枝——这是"长列表"的日常形态。
+    ///
+    /// 与下面那条局部帧的用例形态不同，抓的东西也不同：那条测的是"小脏区里少画点"，
+    /// 而这条测的是"整窗帧里，一个高 60 万 px 的列表只画视口那一屏"。后端若在整窗帧
+    /// 返回 `cull_rect() == None`（D2D 一度根本没实现，吃的是 trait 默认值），
+    /// 绘制遍历就会把全部三万行都画一遍——下游实测帧耗时 828 ms、内存多占 44 MB，
+    /// 而画面与只画一屏**完全一样**，所以肉眼和像素断言都发现不了，只能靠图元计数。
+    #[test]
+    fn full_frame_culling_skips_rows_far_below_the_viewport() {
+        const VIEW_H: i32 = 400;
+        const ROW_H: i32 = 20;
+        const ROWS: i32 = 3000; // 内容高 60000 px，是视口的 150 倍
+        let mut root = Element::col().width(240).height(ROWS * ROW_H);
+        for i in 0..ROWS {
+            root = root.child(
+                Element::row()
+                    .width_match()
+                    .height(ROW_H)
+                    .child(Element::label(format!("行 {i}")).weight(1.0)),
+            );
+        }
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        // 视口只有 400 高，内容 60000——布局按内容高排，绘制该只碰视口那一屏
+        tree.layout_root(Size::new(240, ROWS * ROW_H), &mut te);
+
+        let count = |cull: Option<Rect>| -> usize {
+            let mut pm = tiny_skia::Pixmap::new(240, VIEW_H as u32).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut inner = crate::render::SkiaCanvas::with_text_offset(
+                &mut pm,
+                &mut eng,
+                1.0,
+                Point::new(0, 0),
+            );
+            let mut c = CountingCanvas {
+                inner: &mut inner,
+                cull,
+                texts: 0,
+                strokes: 0,
+                fills: 0,
+            };
+            tree.paint(&mut c);
+            c.texts
+        };
+
+        let all = count(None); // 后端报不出范围时的老行为
+        let viewport = count(Some(Rect::new(0, 0, 240, VIEW_H)));
+        assert_eq!(all, ROWS as usize, "不剪枝就是每行都画");
+        assert!(
+            viewport <= (VIEW_H / ROW_H) as usize + 4,
+            "整窗帧也该只画视口那一屏（约 {} 行），实际画了 {viewport} 行",
+            VIEW_H / ROW_H
+        );
+    }
+
     /// 局部帧的节点剪枝：**画面必须逐像素等同于不剪枝**，同时确实省掉了图元提交。
     ///
     /// 剪枝掉的图元本来就会被光栅器按子 pixmap 边界丢弃，所以两次绘制的像素必然相同；

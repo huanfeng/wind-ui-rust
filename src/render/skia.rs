@@ -817,6 +817,36 @@ mod tests {
         (p.red(), p.green(), p.blue())
     }
 
+    /// `cull_rect` 报出本画布覆盖的世界范围，**不能是 `None`**。
+    ///
+    /// 三个后端（软件 / D2D / GPU）在这一点上必须同口径：调用方把 `None` 读作
+    /// "拿不到范围，那就整个画"，而内容远高于视口的节点会因此每帧整表绘制
+    /// （见 `core` 里的 `full_frame_culling_skips_rows_far_below_the_viewport`）。
+    /// 软件后端一直是对的，补这条是为了它别在将来被改坏——另两个都是这么坏掉的。
+    #[test]
+    fn cull_rect_reports_the_covered_world_rect() {
+        let mut pm = Pixmap::new(120, 80).unwrap();
+        // 全窗：整块 pixmap，逻辑坐标（scale=1）
+        {
+            let c = SkiaCanvas::new(&mut pm);
+            let cull = c.cull_rect().expect("软件后端必须报出可见范围");
+            assert!(
+                cull.x <= 0 && cull.y <= 0 && cull.right() >= 120 && cull.bottom() >= 80,
+                "应覆盖整块 pixmap: {cull:?}"
+            );
+            assert!(cull.h < 10_000, "范围要有界: {cull:?}");
+        }
+        // 局部帧：子 pixmap + 世界偏移，报的是那块脏区在世界里的位置
+        let mut sub = Pixmap::new(40, 24).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let c = SkiaCanvas::with_text_offset(&mut sub, &mut eng, 1.0, Point::new(8, 40));
+        let cull = c.cull_rect().expect("局部帧同样要报");
+        assert!(
+            cull.x <= 8 && cull.y <= 40 && cull.right() >= 48 && cull.bottom() >= 64,
+            "应覆盖世界坐标下的脏区 (8,40)+40x24: {cull:?}"
+        );
+    }
+
     /// V 形折线的拐点必须实心：`draw_polyline` 要把夹角外侧那块楔形盖住。
     ///
     /// 这条守的是"高 DPI 下对勾裂开"那个缺陷。同一个 V，用两次 `draw_line` 画会在
