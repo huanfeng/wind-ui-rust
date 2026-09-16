@@ -494,6 +494,7 @@ impl WinRenderBackend for D2DBackend {
         // target 在 EndDraw 前 drop，释放对 ctx 的借用（EndDraw/Present 仍需 ctx/swapchain）。
         {
             let mut target = D2DTarget {
+                size,
                 ctx: &self.context,
                 solid: &self.solid,
                 grad_cache: &mut self.grad_cache,
@@ -548,6 +549,8 @@ struct D2DTarget<'a> {
     shadow_effect: &'a mut Option<ID2D1Effect>,
     shadow_cache: &'a mut HashMap<ShadowKey, ID2D1Bitmap1>,
     shadow_bytes: &'a mut u64,
+    /// 本帧客户区的物理像素尺寸，供 `Canvas::cull_rect` 报出可见范围。
+    size: Size,
 }
 
 impl RenderTarget for D2DTarget<'_> {
@@ -578,6 +581,7 @@ impl RenderTarget for D2DTarget<'_> {
             pushed_clips: 0,
             pushed_layers: 0,
             scale,
+            size: self.size,
         })
     }
     // as_pixmap 用 trait 默认 None：GPU 无 pixmap，调用方走全窗重绘。
@@ -617,6 +621,8 @@ struct D2DCanvas<'a> {
     /// 当前帧 DPI 缩放因子（物理像素 / 逻辑像素）。由 make_canvas 传入，
     /// 供 Canvas::dpi_scale() 返回，使控件层能将 Len::Px 换算为逻辑值。
     scale: f32,
+    /// 本帧客户区的物理像素尺寸，供 [`Canvas::cull_rect`] 报出可见范围。
+    size: Size,
 }
 
 impl D2DCanvas<'_> {
@@ -1126,6 +1132,21 @@ impl Drop for D2DCanvas<'_> {
 }
 
 impl Canvas for D2DCanvas<'_> {
+    /// 本帧能落笔的世界范围：D2D 这条路每帧都是整窗重绘（`as_pixmap` 返回 `None`，
+    /// 宿主据此不走局部路径），故可见范围就是客户区。
+    ///
+    /// **不能沿用 trait 默认的 `None`**：调用方把 `None` 读作"拿不到范围，那就整个画"，
+    /// 而内容远高于视口的节点——三万行的文件列表，measure 报 60 万 px 高——会因此每帧
+    /// 绘制全部行。实测帧耗时 828 ms，而报出可见范围后回到 7 ms。
+    ///
+    /// 物理→逻辑向外取整并各放一像素：契约要求返回可见范围的**超集**，报小了会丢内容。
+    fn cull_rect(&self) -> Option<crate::geometry::Rect> {
+        let s = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let w = (self.size.w as f32 / s).ceil() as i32;
+        let h = (self.size.h as f32 / s).ceil() as i32;
+        Some(crate::geometry::Rect::new(0, 0, w, h).inflate(1))
+    }
+
     fn dpi_scale(&self) -> f32 {
         self.scale
     }
@@ -1866,6 +1887,7 @@ pub(crate) mod offscreen {
                 self.ctx.Clear(Some(&d2d_color(bg)));
                 {
                     let mut target = D2DTarget {
+                        size,
                         ctx: &self.ctx,
                         solid: &self.solid,
                         grad_cache: &mut self.grad_cache,

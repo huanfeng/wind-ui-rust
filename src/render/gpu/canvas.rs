@@ -525,15 +525,20 @@ impl Canvas for WgpuCanvas<'_> {
         self.scale
     }
 
-    /// 本帧真正会落笔的世界范围（逻辑坐标）。全窗帧 `None`（不剔除），局部帧即脏区。
+    /// 本帧真正会落笔的世界范围（逻辑坐标）：局部帧是脏区，整窗帧是**整个目标**。
     ///
     /// scissor 省的是**片元**，这里省的是 CPU：绘制遍历据此跳过框外节点的自绘，那些
     /// 图元虽然最终也会被 scissor 丢掉，但构造与排版的开销已经付掉了。光标闪烁这类
     /// 只脏几十像素的动画里这是大头——120 个控件的界面每帧照样提交上百次描边与文字。
     ///
+    /// **整窗帧不能返回 `None`**：调用方把 `None` 理解成"拿不到范围，那就整个画"，
+    /// 而一个内容远高于视口的节点（三万行的文件列表，measure 报 60 万 px 高）会因此
+    /// 每帧绘制全部行——实测帧耗时从 6 ms 涨到 1065 ms，显存与实例缓冲跟着膨胀几十 MB。
+    /// 整窗帧的可见范围就是目标本身，据实报出来即可（软件后端一直是这么做的）。
+    ///
     /// 物理→逻辑向外取整：契约要求返回可见范围的**超集**，报小了会真的丢内容。
     fn cull_rect(&self) -> Option<Rect> {
-        let [x, y, w, h] = self.scissor?;
+        let [x, y, w, h] = self.scissor.unwrap_or([0, 0, self.size.0, self.size.1]);
         let s = if self.scale > 0.0 { self.scale } else { 1.0 };
         let x0 = (x as f32 / s).floor() as i32;
         let y0 = (y as f32 / s).floor() as i32;
@@ -2779,12 +2784,27 @@ mod tests {
             let c = t.make_canvas(&mut eng, 2.0);
             assert_eq!(c.cull_rect(), Some(Rect::new(9, 14, 14, 11)));
         }
-        // 整窗帧不剔除。
+        // 整窗帧报的是**整个目标**，不是 None。
+        //
+        // 回归：此前这里返回 `None`，而调用方（`Tree` 的绘制遍历）把 `None` 读作
+        // "拿不到范围，那就整个画"。于是内容远高于视口的节点——三万行的文件列表，
+        // measure 报 60 万 px 高——每帧绘制全部行，帧耗时实测从 6 ms 涨到 1065 ms，
+        // 实例缓冲与显存跟着膨胀几十 MB 且不回缩。整窗帧的可见范围就是目标本身。
         {
             let mut t = off.target();
             t.begin_damage(None, WHITE);
             let c = t.make_canvas(&mut eng, 2.0);
-            assert_eq!(c.cull_rect(), None, "整窗帧不得剔除任何节点");
+            let cull = c.cull_rect().expect("整窗帧也要报出可见范围");
+            // 64x64 物理 / scale 2 = 32x32 逻辑，再各放一像素余量
+            assert!(
+                cull.x <= 0 && cull.y <= 0 && cull.right() >= 32 && cull.bottom() >= 32,
+                "应覆盖整个目标: {cull:?}"
+            );
+            // 且**不是**无穷大：高出视口很多的节点要能被剔除掉
+            assert!(
+                cull.h < 10_000,
+                "整窗帧的可见范围应当有界，否则等于不剔除: {cull:?}"
+            );
         }
     }
 
