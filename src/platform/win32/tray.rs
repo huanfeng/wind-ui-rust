@@ -286,8 +286,11 @@ pub(crate) fn notify(hwnd: HWND, uid: u32, title: &str, body: &str) {
     unsafe {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_INFO;
-        copy_wide(&mut nid.szInfoTitle, title);
-        copy_wide(&mut nid.szInfo, body);
+        // `NOTIFYICONDATAW` is packed by the Windows ABI. `addr_of_mut!`
+        // avoids creating an unaligned reference before making the temporary
+        // slice used by the bounded UTF-16 copy.
+        copy_wide_packed(std::ptr::addr_of_mut!(nid.szInfoTitle).cast(), 64, title);
+        copy_wide_packed(std::ptr::addr_of_mut!(nid.szInfo).cast(), 256, body);
         nid.dwInfoFlags = NIIF_INFO;
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -302,7 +305,7 @@ pub(crate) fn set_tooltip(hwnd: HWND, uid: u32, tip: &str) {
     unsafe {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_TIP;
-        copy_wide(&mut nid.szTip, tip);
+        copy_wide_packed(std::ptr::addr_of_mut!(nid.szTip).cast(), 128, tip);
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
@@ -354,7 +357,9 @@ fn add_nid(hwnd: HWND, uid: u32, hicon: HICON, tip: &str) -> NOTIFYICONDATAW {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = hicon;
-    copy_wide(&mut nid.szTip, tip);
+    // SAFETY: `nid` is a live local NOTIFYICONDATAW and the field size is the
+    // Windows ABI-defined 128-element tooltip buffer.
+    unsafe { copy_wide_packed(std::ptr::addr_of_mut!(nid.szTip).cast(), 128, tip) };
     nid
 }
 
@@ -375,6 +380,17 @@ fn copy_wide(dst: &mut [u16], s: &str) {
         }
     }
     dst[n - 1] = 0;
+}
+
+/// Write a packed Win32 UTF-16 field without ever borrowing it by reference.
+///
+/// # Safety
+/// `dst` must point to `len` writable `u16` elements within the packed
+/// `NOTIFYICONDATAW` value supplied by the caller.
+unsafe fn copy_wide_packed(dst: *mut u16, len: usize, s: &str) {
+    // SAFETY: callers pass the address and ABI-defined element count of a
+    // writable NOTIFYICONDATAW character array.
+    copy_wide(unsafe { std::slice::from_raw_parts_mut(dst, len) }, s);
 }
 
 /// &str → 以 NUL 结尾的 UTF-16。
