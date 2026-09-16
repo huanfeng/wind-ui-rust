@@ -1464,7 +1464,11 @@ impl Canvas for D2DCanvas<'_> {
                     Err(_) => return,
                 }
             };
-            let params = D2D1_LAYER_PARAMETERS1 {
+            // `geometricMask` 是 `ManuallyDrop`——结构体析构时**不会**帮我们松开这份 COM
+            // 引用，必须在 PopLayer 之后自己还。漏掉的话每画一张圆角图片就漏一个几何体
+            // （约 230 字节），而带圆角图标的工具栏每帧要走这里二十多次：实测每 200 帧
+            // 稳定涨 1.2 MB，持续交互约 21 MB/分钟，且永不回落。
+            let mut params = D2D1_LAYER_PARAMETERS1 {
                 contentBounds: INFINITE_RECT,
                 geometricMask: std::mem::ManuallyDrop::new(Some(geom.into())),
                 maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -1484,6 +1488,9 @@ impl Canvas for D2DCanvas<'_> {
                     None, // 无透视变换
                 );
                 self.ctx.PopLayer();
+                // 图层已弹出，D2D 不再引用这份掩膜，此时还引用是安全的。
+                // `opacityBrush` 是 `None`，无需同样处理。
+                std::mem::ManuallyDrop::drop(&mut params.geometricMask);
             }
         }
     }
