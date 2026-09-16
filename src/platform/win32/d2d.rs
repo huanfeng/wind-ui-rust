@@ -98,6 +98,8 @@ pub(super) struct D2DBackend {
     /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
     /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
     image_cache: HashMap<u64, ID2D1Bitmap1>,
+    /// `image_cache` 已占字节（见 [`IMAGE_CACHE_MAX_BYTES`]）。
+    image_bytes: u64,
     /// 离屏烘焙用的第二个设备上下文：主帧 BeginDraw 期间主 ctx 禁止 SetTarget，故用独立 ctx
     /// 把「模糊后的阴影」一次性渲到离屏位图缓存。device-dependent，设备丢失随 `*self=fresh` 重建。
     bake_ctx: ID2D1DeviceContext,
@@ -147,6 +149,13 @@ type ShadowKey = (u32, u32, u32, u32, u32);
 /// 的那几种（卡片 / 对话框 / 浮层 / 面板）**全部同时装得下**——上限一旦低于稳态需求，
 /// 每帧都会清空重建，抖动比多占几 MB 难受得多。相比改造前实测的 200MB+，这仍是零头。
 const SHADOW_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 图片位图缓存的字节预算。
+///
+/// 只按**条数**封顶是不够的：这个缓存同时装着 16×16 的文件图标和整屏的图片预览，
+/// 两者差着五个数量级。64 条 16×16 是 64 KB，64 条 4000×3000 却是 3 GB——
+/// 浏览一遍图片目录就能把显存撑爆，而条数计数器还显示得好好的。
+const IMAGE_CACHE_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 /// 9-slice 代理图两端固定段之外，中间留出的均匀带宽度（像素）。
 ///
@@ -375,6 +384,7 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
         image_cache: HashMap::new(),
+        image_bytes: 0,
         bake_ctx,
         shadow_effect: None,
         shadow_cache: HashMap::new(),
@@ -502,6 +512,7 @@ impl WinRenderBackend for D2DBackend {
                 format_cache: &mut self.format_cache,
                 layout_cache: &mut self.layout_cache,
                 image_cache: &mut self.image_cache,
+                image_bytes: &mut self.image_bytes,
                 bake_ctx: &self.bake_ctx,
                 shadow_effect: &mut self.shadow_effect,
                 shadow_cache: &mut self.shadow_cache,
@@ -545,6 +556,7 @@ struct D2DTarget<'a> {
     format_cache: &'a mut HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
+    image_bytes: &'a mut u64,
     bake_ctx: &'a ID2D1DeviceContext,
     shadow_effect: &'a mut Option<ID2D1Effect>,
     shadow_cache: &'a mut HashMap<ShadowKey, ID2D1Bitmap1>,
@@ -573,6 +585,7 @@ impl RenderTarget for D2DTarget<'_> {
             format_cache: self.format_cache,
             layout_cache: self.layout_cache,
             image_cache: self.image_cache,
+            image_bytes: self.image_bytes,
             bake_ctx: self.bake_ctx,
             shadow_effect: self.shadow_effect,
             shadow_cache: self.shadow_cache,
@@ -602,6 +615,8 @@ struct D2DCanvas<'a> {
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
     image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
+    /// `image_cache` 已占字节（借入，可变）：见 [`IMAGE_CACHE_MAX_BYTES`]。
+    image_bytes: &'a mut u64,
     /// 离屏烘焙阴影用的第二个设备上下文（借入）。
     bake_ctx: &'a ID2D1DeviceContext,
     /// 阴影模糊效果（借入，可变 Option，建在 bake_ctx 上）：lazy 建一次后复用。
@@ -703,11 +718,16 @@ impl D2DCanvas<'_> {
                 .CreateBitmap(size, Some(pm.data().as_ptr() as *const _), w * 4, &props)
         }
         .ok()?;
-        // 防无界增长（如大量一次性图片）：超阈值整体清空重建。
-        if self.image_cache.len() > 64 {
+        // 防无界增长：条数与**字节**双封顶，超任一阈值整体清空重建。
+        // 只看条数会漏掉"少数几张巨图"那一侧——一张 4000×3000 就是 48 MB，
+        // 而计数器才走到 1（见 `IMAGE_CACHE_MAX_BYTES`）。
+        let bytes = u64::from(w) * u64::from(h) * 4;
+        if self.image_cache.len() > 64 || *self.image_bytes + bytes > IMAGE_CACHE_MAX_BYTES {
             self.image_cache.clear();
+            *self.image_bytes = 0;
         }
         self.image_cache.insert(id, bitmap.clone());
+        *self.image_bytes += bytes;
         Some(bitmap)
     }
 
@@ -1794,12 +1814,19 @@ pub(crate) mod offscreen {
         format_cache: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
         layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
         image_cache: HashMap<u64, ID2D1Bitmap1>,
+        image_bytes: u64,
         shadow_effect: Option<ID2D1Effect>,
         shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
         shadow_bytes: u64,
     }
 
     impl OffscreenBackend {
+        /// 缓存里现有多少张位图。**仅供测试**：验字节预算是否触发了清空重建。
+        #[cfg(test)]
+        pub(crate) fn cached_images(&self) -> usize {
+            self.image_cache.len()
+        }
+
         /// 建一个 `w×h` 的离屏后端。无可用 D2D 运行时返回 `None`（绝不 panic）。
         pub(crate) fn new(w: u32, h: u32) -> Option<Self> {
             if w == 0 || h == 0 {
@@ -1859,6 +1886,7 @@ pub(crate) mod offscreen {
                 format_cache: HashMap::new(),
                 layout_cache: HashMap::new(),
                 image_cache: HashMap::new(),
+                image_bytes: 0,
                 shadow_effect: None,
                 shadow_cache: HashMap::new(),
                 shadow_bytes: 0,
@@ -1895,6 +1923,7 @@ pub(crate) mod offscreen {
                         format_cache: &mut self.format_cache,
                         layout_cache: &mut self.layout_cache,
                         image_cache: &mut self.image_cache,
+                        image_bytes: &mut self.image_bytes,
                         bake_ctx: &self.bake_ctx,
                         shadow_effect: &mut self.shadow_effect,
                         shadow_cache: &mut self.shadow_cache,
@@ -2047,6 +2076,50 @@ mod tests {
         });
         assert_eq!(px(&pm, 20, 20), [255, 0, 0, 255], "矩形内应是红，不是蓝");
         assert_eq!(px(&pm, 2, 2), [255, 255, 255, 255], "矩形外应保持背景白");
+    }
+
+    /// 图片缓存按**字节**封顶，而不只是条数。
+    ///
+    /// 没有这条时错在哪：这个缓存同时装 16×16 的文件图标与整屏的图片预览，两者差着
+    /// 五个数量级。只看条数的话，64 条 4000×3000 就是 3 GB 显存，而计数器才走到 64。
+    /// 用两张大图把预算撑过去，断言缓存被清空重建（条数回到 1），而不是一路涨上去。
+    #[test]
+    fn image_cache_is_capped_by_bytes_not_only_by_count() {
+        use crate::render::image::Image;
+        // 每张 2048×2048 RGBA = 16 MB，预算 48 MB，放到第四张必然触发清空。
+        // 走 PNG 这条公开构造：这里要验的是缓存策略，不是解码。
+        let big = |seed: u8| {
+            let mut pm = Pixmap::new(2048, 2048).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(seed, 0, 0, 255));
+            Image::from_png_bytes(&pm.encode_png().unwrap()).unwrap()
+        };
+        let imgs: Vec<Image> = (1..=4).map(big).collect();
+        let mut backend =
+            OffscreenBackend::new(64, 64).expect("D2D 离屏渲染不可用：硬件与 WARP 都没建起来");
+        let mut counts = Vec::new();
+        for img in &imgs {
+            backend
+                .draw(1.0, Color::rgb(255, 255, 255), |c| {
+                    c.draw_image(
+                        img,
+                        Rect::new(0, 0, 8, 8),
+                        crate::render::image::Fit::Fill,
+                        0.0,
+                        1.0,
+                    );
+                })
+                .expect("离屏帧读回失败");
+            counts.push(backend.cached_images());
+        }
+        assert_eq!(
+            counts.last(),
+            Some(&1),
+            "超出字节预算后应清空重建，实际条数变化: {counts:?}"
+        );
+        assert!(
+            counts.iter().any(|&n| n > 1),
+            "预算内该正常累积，否则这条测的就不是预算: {counts:?}"
+        );
     }
 
     /// `cull_rect` 必须报出客户区，**不能是 `None`**。
