@@ -836,11 +836,30 @@ pub(crate) fn take_callback_window(is_open: &dyn Fn(&str) -> bool) -> Option<New
 }
 
 /// 取走**全部**排队的开窗请求（热键路径：没有意图队列给它们定位置）。
+///
+/// **批内也要去重**，与 [`UiHost::take_new_windows`] 那份对齐：`is_open` 查的是平台的
+/// 窗口登记表，而本批第一个窗口要等真正建出来才登记（`register_window`），此刻还不在表
+/// 里。于是同一批里的两个同键请求都会被判成"没开着"、各自建出一个窗口——两个窗口同键、
+/// 各持一棵树、抢同一批 `Signal`，且**不报任何错**。
+///
+/// 这条路是可达的：`App::channel` 的 pump 一次排空全部消息，排空后才统一落地开窗请求，
+/// 故「用户双击图标没反应、再双击一次」这类两条消息就会落进同一批。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn take_callback_windows(is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
+    let mut batch: std::collections::HashSet<String> = std::collections::HashSet::new();
     crate::event::take_callback_windows()
         .into_iter()
-        .filter_map(|req| make_callback_window(req, is_open))
+        .filter_map(|req| {
+            // 本批已经决定要建的同键窗口，对后来者而言等同于"已经开着"。
+            let claimed = req
+                .single
+                .as_ref()
+                .is_some_and(|k| is_open(k) || !batch.insert(k.clone()));
+            if claimed {
+                return req.single.map(NewWindow::Focus);
+            }
+            make_callback_window(req, is_open)
+        })
         .collect()
 }
 
@@ -3621,6 +3640,41 @@ mod tests {
         assert!(
             matches!(got, Some(NewWindow::Create(..))),
             "键不在表里时应当真的建一个新窗口"
+        );
+        APP_SERVICES.with(|s| *s.borrow_mut() = None);
+    }
+
+    /// 同一批里的两个同键请求，第二个必须退化成 `Focus` 而不是再建一个窗口。
+    ///
+    /// 这条以往只在窗口路径（`UiHost::take_new_windows`）上成立，回调路径漏了：`is_open`
+    /// 查的是平台的窗口登记表，而本批第一个窗口要等真正建出来才登记，此刻还不在表里。
+    /// 失败形态是**两个同键窗口各持一棵树、抢同一批 `Signal`，且不报任何错**——常驻应用
+    /// 里「双击图标没反应、再双击一次」就会把两条消息送进同一批。
+    #[test]
+    fn two_requests_with_the_same_key_in_one_batch_build_only_one_window() {
+        let _ = crate::event::take_callback_windows();
+        APP_SERVICES.with(|s| {
+            *s.borrow_mut() = Some(AppServices {
+                theme_src: ThemeHandle::new(Rc::new(Theme::default())),
+                hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+                system_theme: None,
+                intervals: Vec::new(),
+            })
+        });
+        for _ in 0..2 {
+            crate::event::push_callback_window(
+                Window::new("主界面", 200, 160)
+                    .single("main")
+                    .content(Element::col),
+            );
+        }
+
+        let got = take_callback_windows(&|_| false);
+        assert_eq!(got.len(), 2, "两条请求都该有结果");
+        assert!(matches!(got[0], NewWindow::Create(..)), "第一条真的建窗");
+        assert!(
+            matches!(got[1], NewWindow::Focus(ref k) if k == "main"),
+            "第二条只激活第一条那个，不再建一个同键窗口"
         );
         APP_SERVICES.with(|s| *s.borrow_mut() = None);
     }
