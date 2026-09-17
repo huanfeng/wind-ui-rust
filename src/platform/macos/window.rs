@@ -1921,6 +1921,13 @@ impl ContentView {
         for (id, hop) in hotkey_ops {
             super::hotkey::apply(id, hop);
         }
+        // 标题同点消费：`after_event` 在事件路径与两条出帧路径（drawRect: / updateLayer）
+        // 都被调用，正是 `take_window_title` 契约要求的时机。借用已释放——`setTitle:`
+        // 会同步走一遍 AppKit，不能持着 `ViewState` 调。
+        let title = self.ivars().borrow_mut().handler.take_window_title();
+        if let (Some(title), Some(win)) = (title, self.window()) {
+            win.setTitle(&objc2_foundation::NSString::from_str(&title));
+        }
         if let Some(op) = op {
             if let Some(win) = self.window() {
                 // 与托盘、热键共用同一份实现（见 `apply_window_op`）：此前这里各写一份

@@ -944,6 +944,8 @@ pub struct App {
     bg_explicit: bool,
     /// 运行期热键操作队列（`hotkey_handle` 句柄写入、UiHost 中转、平台消费）。
     hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
+    /// 窗口标题的**来源**（见 [`App::title`]）。`None` = 标题定格在建窗那一份。
+    title_src: Option<crate::ui::TextContent>,
 }
 
 impl App {
@@ -997,6 +999,7 @@ impl App {
             hide_on_close: false,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
+            title_src: None,
         }
     }
 
@@ -1162,6 +1165,59 @@ impl App {
     /// 只是被丢弃（见 `TrayHandle::set_tooltip`）。
     pub fn tray_handle(&mut self) -> crate::platform::TrayHandle {
         crate::platform::TrayHandle::new()
+    }
+
+    /// 窗口标题，收 [`TextContent`](crate::ui::TextContent)：于是它能绑信号、也能是
+    /// 一条待翻译消息，**两种都随值变化自动重发给系统**。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// let app = App::new("占位", 400, 300).title(t!("app.title"));   // 换语言即改标题
+    /// let doc = signal(String::from("未命名"));
+    /// let app2 = App::new("占位", 400, 300).title(doc);              // 写信号即改标题
+    /// ```
+    ///
+    /// 与 [`App::new`] 的第一个参数并存：那个是**建窗时**的标题（平台在窗口出现前就要
+    /// 一个字符串），本修饰符是**此后**的来源。只写 `App::new` 的应用行为完全不变。
+    ///
+    /// 子窗口（[`Window::new`](crate::app::Window)）暂不支持：它的标题在
+    /// `WindowRequest` 里是 `String`，换语言后需应用自己重开或重设。
+    pub fn title(mut self, title: impl Into<crate::ui::TextContent>) -> Self {
+        let t = title.into();
+        // 建窗那一刻也用它：否则窗口会先闪一下 `App::new` 给的占位标题。
+        self.cfg.title = t.resolve().into_owned();
+        self.title_src = Some(t);
+        self
+    }
+
+    /// 装载多语言译文目录（见 [`Locales`](crate::i18n::Locales)）。
+    ///
+    /// 不调用它也能跑：框架自带文案（`windui.*`）有内置的中英两份兜底，应用自己的 key
+    /// 则全部 miss。默认语言是 `zh-CN`——**不跟随系统**，要跟随得在 `Locales` 上显式写
+    /// [`Initial::System`](crate::i18n::Initial::System)。理由见该枚举的文档。
+    ///
+    /// ```ignore
+    /// // ignore：`include_str!` 的路径相对源文件解析，doctest 里取不到。
+    /// // 这套 API 的编译核验在 `examples/i18n.rs`。
+    /// # use windui::prelude::*;
+    /// let app = App::new("Demo", 400, 300).locales(
+    ///     Locales::builder()
+    ///         .embed(include_str!("../i18n/zh-CN.toml"))
+    ///         .load_dir("i18n")
+    ///         .build(),
+    /// );
+    /// ```
+    pub fn locales(self, locales: crate::i18n::Locales) -> Self {
+        crate::i18n::install(locales);
+        self
+    }
+
+    /// 运行期语言句柄：克隆进控件回调，`set("en")` 即热切换，下一帧整树跟随。
+    ///
+    /// 与 [`Self::theme_handle`] 并列，但**取它不要求先调 [`Self::locales`]**——语言状态
+    /// 在线程局部里，句柄自己不持有任何东西（见 [`LocaleHandle`](crate::i18n::LocaleHandle)）。
+    pub fn locale_handle(&mut self) -> crate::i18n::LocaleHandle {
+        crate::i18n::LocaleHandle::new()
     }
 
     pub fn theme_handle(&mut self) -> ThemeHandle {
@@ -1969,7 +2025,7 @@ impl App {
         let handler: Box<dyn AppHandler> = if let Some(f) = self.render {
             Box::new(ClosureHandler { f })
         } else if let Some(root) = self.content {
-            Box::new(UiHost::new(
+            let mut host = UiHost::new(
                 root,
                 &cfg,
                 theme_src,
@@ -1982,7 +2038,12 @@ impl App {
                 self.shortcut,
                 host_theme,
                 self.hide_on_close,
-            ))
+            );
+            // 建好再塞而不是加到 `UiHost::new` 的参数表里：那张表已有 12 个位置参数，
+            // 而**子窗口**那条构造路径（`build_new_window`）并不支持标题来源，多一个
+            // 恒为 `None` 的参数只会让两处都更难读。
+            host.title_src = self.title_src;
+            Box::new(host)
         } else {
             Box::new(ClosureHandler {
                 f: Box::new(|_, _| {}),
@@ -1997,7 +2058,7 @@ impl App {
             Some(h) => h,
             None => ThemeHandle::new(Rc::new(self.theme.unwrap_or_default())),
         };
-        UiHost::new(
+        let mut host = UiHost::new(
             self.content.unwrap(),
             &self.cfg,
             theme_src,
@@ -2010,7 +2071,9 @@ impl App {
             self.shortcut,
             self.system_theme,
             self.hide_on_close,
-        )
+        );
+        host.title_src = self.title_src;
+        host
     }
 
     fn shared_waker(&mut self) -> crate::sync::Waker {
@@ -2137,6 +2200,11 @@ struct UiHost {
     bg_follows_theme: bool,
     /// 运行期热键操作队列（HotkeyHandle 写入；平台经 `take_hotkey_ops` 消费）。
     hotkey_ops: Rc<RefCell<Vec<(usize, crate::event::HotkeyOp)>>>,
+    /// 窗口标题的来源（见 [`App::title`]）。`None` = 标题定格在建窗那一份，
+    /// `take_window_title` 恒返回 `None`，平台一次多余的调用都不会发生。
+    title_src: Option<crate::ui::TextContent>,
+    /// 上次推送给系统的标题。拉取式比对的另一半，见 `take_window_title`。
+    title_last: String,
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
@@ -2380,6 +2448,9 @@ impl UiHost {
             bg,
             bg_follows_theme,
             hotkey_ops,
+            title_src: None,
+            // 以建窗标题为起点：平台已经拿这一份建了窗，首次轮询不该把同样的字再推一遍。
+            title_last: cfg.title.clone(),
             swallow_up: false,
             host_id: crate::sync::next_host_id(),
             interval_cbs,
@@ -3361,6 +3432,19 @@ impl AppHandler for UiHost {
         self.pending_window_op.take()
     }
 
+    /// 现算标题并与上次推送的比对（契约见 [`AppHandler::take_window_title`]）。
+    ///
+    /// 比对是必须的：平台每次事件与每帧都问，而 `SetWindowTextW` 不是免费的——它会同步
+    /// 重绘非客户区。不比对就是每帧一次无谓的标题栏重画。
+    fn take_window_title(&mut self) -> Option<String> {
+        let now = self.title_src.as_ref()?.resolve().into_owned();
+        if now == self.title_last {
+            return None;
+        }
+        self.title_last = now.clone();
+        Some(now)
+    }
+
     fn on_window_state(&mut self, st: crate::event::WindowState) {
         self.window_state = st;
         // 立即注入而不是只等下一个入口：平台可能在 `WM_SIZE` 里推完就同步走到绘制，
@@ -4078,6 +4162,125 @@ mod tests {
         assert!(
             crate::signal::take_cross_window_dirty(),
             "换主题必须请求跨窗刷新，否则其他窗口停在旧配色"
+        );
+    }
+
+    /// 换语言与换主题走同一条失效契约：都必须请求跨窗刷新。
+    ///
+    /// 理由与换主题逐字相同（见上一条）：译文目录为所有窗口共享，而 `request_repaint`
+    /// 只唤起当前窗口。少这一笔，设置窗里点了"English"，主窗还停在中文——除非应用碰巧
+    /// 同时写了个信号。
+    #[test]
+    fn locale_switch_requests_cross_window_refresh() {
+        let mut app = App::new("t", 100, 100);
+        let lang = app.locale_handle();
+        let _h = app.content(Element::col().fill()).into_handler_for_test();
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[t]\na = \"甲\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[t]\na = \"A\"\n")
+                .build(),
+        );
+        // 清掉建树期间可能积累的标记，隔离本次断言。
+        let _ = crate::signal::take_cross_window_dirty();
+
+        assert!(lang.set("en"));
+        assert!(
+            crate::signal::take_cross_window_dirty(),
+            "换语言必须请求跨窗刷新，否则其他窗口停在旧语言"
+        );
+    }
+
+    /// 窗口标题跟随语言，且**只在真的变了时**才推给系统。
+    ///
+    /// 三条断言各挡一类错：
+    /// 1. 建窗后立刻问一次必须是 `None`——平台已经拿 `cfg.title` 建过窗，再推一遍是
+    ///    白白让标题栏重绘一次（每帧都问，这一次就是每帧一次）。
+    /// 2. 换语言后必须给出新标题——这正是 `App::title` 存在的理由。
+    /// 3. 紧接着再问必须是 `None`——比对逻辑真的生效了，而不是每次都返回 `Some`。
+    #[test]
+    fn window_title_follows_the_language() {
+        use crate::platform::AppHandler;
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[app]\ntitle = \"演示\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[app]\ntitle = \"Demo\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let lang = crate::i18n::LocaleHandle::new();
+        let mut host = App::new("占位", 100, 100)
+            .title(crate::t!("app.title"))
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        assert_eq!(
+            host.take_window_title(),
+            None,
+            "建窗时标题已是译文，首次轮询不该再推一遍"
+        );
+
+        assert!(lang.set("en"));
+        assert_eq!(host.take_window_title().as_deref(), Some("Demo"));
+        assert_eq!(host.take_window_title(), None, "没再变化就不该重复推送");
+    }
+
+    /// 只写 `App::new` 的应用行为不变：没有标题来源就永远不推。
+    ///
+    /// 这条守的是兼容性——`take_window_title` 是每帧都调的新通路，它对既有应用必须
+    /// 完全无声。
+    #[test]
+    fn window_title_is_never_pushed_without_a_source() {
+        use crate::platform::AppHandler;
+        let mut host = App::new("固定标题", 100, 100)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        assert_eq!(host.take_window_title(), None);
+        assert!(crate::i18n::LocaleHandle::new().set("en"));
+        assert_eq!(
+            host.take_window_title(),
+            None,
+            "没有标题来源，换语言也不该推"
+        );
+    }
+
+    /// 换语言后**整窗重排**：文本宽度变了会顶动同一行里的后续控件。
+    ///
+    /// 这条盯的是"只重画改字的那个控件"这一类错。判据故意取**兄弟节点的位置**而不是
+    /// 标签自己的宽度：后者在只重画单个控件的实现下也会变，唯有兄弟被顶走才证明重排
+    /// 真的发生了。
+    ///
+    /// 验收靠故意破坏：把 `i18n::invalidate` 里的 `request_repaint` 去掉，或让
+    /// `TextContent::Msg` 在构建期定格（改成 `Static`），这条必须红。
+    #[test]
+    fn switching_language_moves_the_sibling_control() {
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[t]\nlabel = \"短\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[t]\nlabel = \"a considerably longer label\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let lang = crate::i18n::LocaleHandle::new();
+        let mut host = App::new("t", 400, 200)
+            .content(
+                Element::row()
+                    .child(Element::label(crate::t!("t.label")))
+                    .child(Element::button("X")),
+            )
+            .into_handler_for_test();
+        layout_once(&mut host, 400, 200);
+        let root = host.tree.root.expect("根节点");
+        let button = host.tree.get(root).expect("根").children[1];
+        let before = host.tree.abs_bounds(button).x;
+
+        assert!(lang.set("en"));
+        layout_once(&mut host, 400, 200);
+        let after = host.tree.abs_bounds(button).x;
+
+        assert!(
+            after > before,
+            "换成更长的译文后，同一行里的按钮应被顶右（{before} → {after}）"
         );
     }
 

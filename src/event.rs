@@ -205,6 +205,10 @@ impl ShortcutCtx {
 
 /// 标准窗口系统菜单四项：还原 / 最小化 / 最大化 /（分隔）/ 关闭。
 ///
+/// 文案取自框架自带译文的 `windui.window.*`，随
+/// [`LocaleHandle::set`](crate::i18n::LocaleHandle::set) 走；下游想改字（而不是改语言）
+/// 就用同名 key 覆盖，见 [`Locales`](crate::i18n::Locales)。
+///
 /// 禁用态按 [`window_state()`] 当场决定，故**必须在菜单弹出的那一刻调用**（`on_context_menu`
 /// 的构建器里正合适），不能在构建界面时预先算好一份存起来——那份会停在窗口刚建出来的状态上。
 ///
@@ -233,7 +237,9 @@ pub fn system_menu_items() -> Vec<MenuItem> {
     let item = |label: &str, enabled: bool, f: fn(&mut crate::core::EventCtx)| {
         MenuItem::run(label, f, false).enabled(enabled)
     };
-    let close = item("关闭", true, |ctx| ctx.request_close());
+    let close = item(&crate::tr!("windui.window.close"), true, |ctx| {
+        ctx.request_close()
+    });
     let close = if cfg!(target_os = "windows") {
         close.shortcut("Alt+F4")
     } else {
@@ -242,11 +248,19 @@ pub fn system_menu_items() -> Vec<MenuItem> {
     vec![
         // 「还原」只在最大化时可用。最小化态在这里不可达（窗口最小化时标题栏点不到），
         // 但 `ctx.restore()` 两种都能还原，故无需分支。
-        item("还原", st.maximized, |ctx| ctx.restore()),
-        item("最小化", st.minimizable, |ctx| ctx.minimize()),
-        item("最大化", st.maximizable && !st.maximized, |ctx| {
-            ctx.maximize()
+        item(&crate::tr!("windui.window.restore"), st.maximized, |ctx| {
+            ctx.restore()
         }),
+        item(
+            &crate::tr!("windui.window.minimize"),
+            st.minimizable,
+            |ctx| ctx.minimize(),
+        ),
+        item(
+            &crate::tr!("windui.window.maximize"),
+            st.maximizable && !st.maximized,
+            |ctx| ctx.maximize(),
+        ),
         MenuItem::separator(),
         close,
     ]
@@ -1368,7 +1382,7 @@ mod triple_click_tests {
         assert_eq!(t.feed(&down(1, 10, 10)), 1);
         assert_eq!(t.feed(&down(2, 10, 10)), 2, "双击原样放行");
         assert_eq!(
-            t.feed(&down(1, 11, 10)), 
+            t.feed(&down(1, 11, 10)),
             3,
             "平台把三击的最后一下报成新一轮首击，这里认回来"
         );
