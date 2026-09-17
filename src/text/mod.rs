@@ -536,3 +536,46 @@ mod text_block_contract {
         assert_eq!(ink(&pm, 68, 80), 0, "居中时容器下部应留白");
     }
 }
+
+/// 硬换行（`\n`）的测量契约。
+///
+/// `Element::tooltip` 放开多行之后，浮层高度是拿 `measure` 的结果算的——它把 `\n`
+/// 算漏一行，浮层就会矮一截、末行被切掉。真实引擎（DirectWrite/CoreText）在无窗口
+/// 环境跑不起来，故以近似其换行语义的 [`LineAwareTextEngine`] 守这条契约；两个真实
+/// 引擎各自的排版由平台验证覆盖（DWrite 交给 `CreateTextLayout`，CoreText 见
+/// `coretext::is_single_line`）。
+#[cfg(test)]
+mod hard_break_contract {
+    use super::*;
+
+    fn measure(text: &str, max_width: Option<f32>) -> Size {
+        LineAwareTextEngine.measure(text, &TextStyle::new(10.0), max_width)
+    }
+
+    /// 行数按 `\n` 增长，宽度取最宽的那一行（不是各行之和）。
+    #[test]
+    fn newline_adds_a_line_and_width_is_the_widest() {
+        let one = measure("一二三", None);
+        let two = measure("一二三\n四五", None);
+        assert_eq!(two.h, one.h * 2, "两行应是一行高度的两倍");
+        assert_eq!(two.w, one.w, "宽度取最宽行，不累加");
+    }
+
+    /// 硬换行与自动换行**叠加**：每个硬换行段各自再按 max_width 折行。
+    #[test]
+    fn hard_and_soft_breaks_stack() {
+        // 字宽 = 10 * 0.6 = 6px；max_width 12px ⇒ 每行最多 2 字。
+        // "一二三四"（24px）折 2 行，"五"（6px）占 1 行，合计 3 行。
+        let sz = measure("一二三四\n五", Some(12.0));
+        let line_h = measure("五", None).h;
+        assert_eq!(sz.h, line_h * 3, "折行数应按段分别计算后相加");
+    }
+
+    /// 空行也占一行高：末尾换行符不该被悄悄吃掉，否则浮层比实际内容矮。
+    #[test]
+    fn empty_segments_still_occupy_a_line() {
+        let one = measure("甲", None);
+        assert_eq!(measure("甲\n", None).h, one.h * 2, "尾随换行也占一行");
+        assert_eq!(measure("甲\n\n乙", None).h, one.h * 3, "中间空行同样占位");
+    }
+}

@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+- **`Element::tooltip` 收多行文本**：`\n` 是硬换行，与超宽自动换行叠加生效。此前那句
+  `debug_assert!(!text.contains('\n'))` 拦的不是能力缺口，是"没测过"——两个平台引擎本来
+  就各自处理硬换行（DirectWrite 整段交给 `CreateTextLayout`，CoreText 见 `is_single_line`），
+  且 measure 与 draw 同源，浮层高度一直跟得上行数。现补齐测量契约（`text::hard_break_contract`）
+  再把护栏撤掉。
+
+  连带清掉 `Element::clamp_lines` 的一条特例：被 `max_lines` 限行的说明文本，含换行时
+  **整个跳过 tooltip**。而截断之后悬浮看全文正是它唯一的兜底，于是最需要兜的那一类反而
+  没有。那条特例当初只为躲 `debug_assert`，现在没有理由留着。
+
+- **浮层越界翻转补上"上下都放不下"这一支**（`app::tooltip::place`）。原先是
+  `(pos.y - h - 4).max(0)`：单行浮层比谁都矮、翻到指针上方总是放得下，那个 `.max(0)`
+  永远不会真的生效。放开多行之后它成了常态——浮层被顶到 `y = 0` 并**盖住指针**，也就是
+  盖住用户正悬停的那个控件。现在两边都容不下整个浮层时贴向空间更大的一侧，并把定位
+  抽成纯函数 `place` 以便测试（`paint` 要 `Canvas` 与 `Theme`，判据留在里面只能靠肉眼守）。
+
 ## [0.18.0] - 2026-09-16
 
 - **`TextInput` 把 Escape 转发给 `on_nav_key`**。此前 Escape 既不在它的处理表里、也不算

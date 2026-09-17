@@ -1377,13 +1377,17 @@ impl Element {
     }
     /// 悬停提示：指针在本元素上停留片刻后，于指针附近弹出说明浮层。
     /// **适用于任意控件/容器**（像 `enabled`，挂在节点上）；命中取最深节点的提示。
-    /// 超过 `TOOLTIP_MAX_W`（`app.rs`）自动按宽度换行为多行；调用方仍传一整句
-    /// 不含显式换行的文本（含 `\n` 在 debug 下提示，排版结果未做专门测试）。
-    #[track_caller]
+    ///
+    /// 超过 `TOOLTIP_MAX_W`（`app.rs`）按宽度自动换行；文本里的 `\n` 是**硬换行**，
+    /// 与自动换行叠加生效。两个平台引擎各自处理它（DirectWrite 交给
+    /// `CreateTextLayout`，CoreText 见 `text::coretext::is_single_line`），测量与绘制
+    /// 同源，故浮层高度跟得上行数。
+    ///
+    /// ⚠️ 行数**不设上限**：浮层高到放不下时只能贴边（见 `app::tooltip`），一屏铺满
+    /// 的提示没人看得完。要列很多条时由调用方截断（列前几条 + "等 N 项"），
+    /// 别把整份清单塞进来。
     pub fn tooltip(mut self, text: impl Into<String>) -> Self {
-        let text = text.into();
-        debug_assert!(!text.contains('\n'), "tooltip 仅支持单行文本");
-        self.tooltip = Some(text);
+        self.tooltip = Some(text.into());
         self
     }
 
@@ -2863,17 +2867,14 @@ impl Element {
     /// 未真正截断时 `Tree::node_tooltip` 会按 `Label::text_truncated()` 自动不弹，
     /// 故短文本不会平白多出一个与可见文字相同的提示。
     ///
-    /// 含换行的文本**跳过 tooltip**（仍然限行）：`Element::tooltip` 只支持单行、多行会
-    /// `debug_assert` 拦下，而这里的 tooltip 是库替调用方加的，不该由它引爆——调用方
-    /// 显式调 `.tooltip()` 传多行才是该被拦住的误用。
+    /// 含换行的文本一样挂 tooltip：`Element::tooltip` 收多行之后，这里不再需要绕开它。
+    /// 此前那条特例是为躲 `debug_assert` 而设的，代价是**多行说明被限行截断后连兜底
+    /// 都没有**——恰恰是最需要看全文的那一类。
     fn clamp_lines(el: Element, max_lines: Option<usize>, full_text: &str) -> Self {
         let Some(n) = max_lines else { return el };
-        let el = el.max_lines(n).truncate(crate::ui::Truncate::End);
-        if full_text.contains('\n') {
-            el
-        } else {
-            el.tooltip(full_text)
-        }
+        el.max_lines(n)
+            .truncate(crate::ui::Truncate::End)
+            .tooltip(full_text)
     }
 
     /// **卡片**：标题 + 分隔线 + 内容，铺在 `Surface` 底色上的圆角容器。
@@ -5531,12 +5532,16 @@ mod tests {
         assert_eq!(ml, Some(1));
         assert_eq!(tip.as_deref(), Some("智能符号"));
 
-        // 含换行的说明：仍限行，但不挂 tooltip——`Element::tooltip` 只收单行，
-        // 库替调用方加的提示不该把 debug_assert 引爆在人家头上。
+        // 含换行的说明：限行之外**也挂 tooltip**。多行说明被限成一行后，全文只剩
+        // 悬浮这一条路——早先为躲 debug_assert 跳过它，等于把最该兜的那类兜没了。
         let mut multi = Element::setting_row_desc("标题", "第一行\n第二行", Element::leaf());
         let (ml, _, tip) = label_at(&mut multi, &[0, 1]);
         assert_eq!(ml, Some(1), "多行文本同样限行");
-        assert_eq!(tip, None, "含换行时跳过 tooltip");
+        assert_eq!(
+            tip.as_deref(),
+            Some("第一行\n第二行"),
+            "含换行的说明截断后也须能悬浮看全文"
+        );
 
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
