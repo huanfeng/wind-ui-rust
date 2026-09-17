@@ -3094,9 +3094,14 @@ impl AppHandler for UiHost {
             // tooltip 浮层画在控件自身范围之外（指针旁），普通 Label 又没有 hover
             // 视觉、不会主动上报 repaint——若不在此强制请求一次重绘，移出后旧提示
             // 残留不消失、移入后也要等到别的事件凑巧触发重绘才会出现（不稳定）。
-            let node_has_tooltip = |id: Option<NodeId>| {
-                id.is_some_and(|h| self.tree.get(h).is_some_and(|n| n.tooltip.is_some()))
-            };
+            //
+            // ★ 判据必须走 `node_tooltip`（与 `TooltipState::will_show`、与浮层自己的
+            //   `paint` 同源），不能只看节点上的静态 `n.tooltip`：那样会漏掉控件的**动态**
+            //   提示（`Widget::tooltip()`），于是带动态提示的控件正好落进上面这段注释描述
+            //   的坑里——时而弹得出、时而要等别的事件凑巧重绘，表现为"悬停有时没反应"。
+            //   一处判据只留一个出处，三处各写一份迟早再分家一次。
+            let node_has_tooltip =
+                |id: Option<NodeId>| id.is_some_and(|h| self.tree.node_tooltip(h).is_some());
             if node_has_tooltip(old_hover) || node_has_tooltip(hover) {
                 res.repaint = true;
             }
