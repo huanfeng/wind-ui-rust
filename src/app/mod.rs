@@ -4593,10 +4593,11 @@ mod tests {
             })
         });
 
-        assert!(
-            dispatch_system_theme_changed(true) || true,
-            "回调是否请求重绘由它自己决定，这里只要求它被跑到"
-        );
+        // 返回值（回调有没有请求重绘）由回调自己决定，这里不作要求；「被跑到」由下一行
+        // 的 `seen` 断言。此前写作 `assert!(f(..) || true, ..)`，那是个**恒真**的断言——
+        // 什么都没验，还让 `cargo clippy --all-targets` 直接编译失败
+        // （`overly_complex_bool_expr` 是 deny 级）。
+        let _ = dispatch_system_theme_changed(true);
         assert_eq!(seen.get(), Some(true), "应用级主题回调必须被调用");
         let (cfg, _host) =
             expect_create(take_callback_window(&|_| false).expect("回调里的开窗请求应已排队"));
