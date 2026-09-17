@@ -50,6 +50,33 @@
   分发后与出帧后各问一次，宿主现算并与上次推送的比对，变了才发。没写标题来源的应用一次
   多余的系统调用都不会发生。子窗各有一份宿主，故各跟各的。
 
+- **托盘菜单与菜单栏标题跟随换语言（破坏性）**：`TrayMenuItem::item` / `check` 与
+  `MenuBarEntry::new` 从 `impl Into<String>` 改收 `impl Into<TextContent>`。托盘菜单在每次弹出时才构建（win32
+  `build_menu`、macOS `pop_menu`），菜单栏是自绘的、标题每帧现取——两者本来就有重新解析的
+  时机，缺的只是"标签别在构建时定格成 String"。顺带它们也能绑 `Signal<String>` 了（动态
+  托盘项文案此前无法表达）。仍需应用自己改的只剩托盘提示 `TrayHandle::set_tooltip`。
+
+  **破坏面**：`&str` / `String` / `&String` / `Cow<str>` / `Signal<String>` 都照常收；
+  收不了的是 `char`、`Box<str>`，以及下游自己的转发泛型
+  （`fn my_item<S: Into<String>>(s: S) { TrayMenuItem::item(s, ..) }` 会编不过，且报错指向
+  trait bound 而不是这次改动）。补一个 `.to_string()` 即可。
+
+  另有一处**不报错的行为变化**：`impl From<Message> for String` 早就存在，所以
+  `TrayMenuItem::item(t!("tray.quit"), ..)` 此前就能编译，只是在**构建那一刻**定格。
+  已经这么写的代码不会有任何编译信号，但行为从"定格"变成了"跟随"——这正是本次想要的，
+  但它是一次对已编译代码的语义变更。
+
+- **`i18n::lint::check_usage`**：扫一个目录下的 `.rs`，报出用了 `t!("a.b")` 却没有任何语言
+  提供译文的 key，带文件名与行号。扫描器是个小状态机而不是 `contains("t!(")`——后者会把
+  `assert!` / `format!` / `print!` 的名字尾巴、文档注释里的示例、字符串字面量里的 `t!("…")`
+  统统当成调用。只查"用了没翻译"一个方向：反方向（译文没人用）因动态 key 必然误报，
+  而误报的 lint 很快会被加例外、然后被整个关掉。
+
+  库自己另有一条同源测试（`framework_keys_written_in_the_source_all_have_translations`）
+  盯住 `windui.*` 写错字：`tr!("windui.menu.cutt")` 只会在界面上安静地显示
+  `⟪windui.menu.cutt⟫`，没有任何编译期信号。它与那张手写 key 清单是一对——清单查"译文里
+  有没有"，这条查"写出来的对不对"。
+
 - **`Locales::languages_missing_framework_strings`**：库内置的 `windui.*` 只有中英两份，
   应用加了第三种语言却没补那批 key 时，右键菜单会按回退链落到英文——日文界面里冒出一份
   Cut / Copy / Paste。这不是故障（回退链正按设计工作），但唯一的症状是"截图看着怪"。

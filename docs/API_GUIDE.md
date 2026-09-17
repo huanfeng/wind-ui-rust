@@ -2420,8 +2420,15 @@ Element::label(t!("file.selected", count = n))   // 计数变了自动刷，换�
 载体，宿主每帧比对、变了才重发给系统——于是 `t!` 和 `Signal<String>` 两种都自动跟随。
 `App::new` 的第一个参数仍是建窗那一刻的标题（平台在窗口出现前就要一个字符串）。
 
-子窗口用 `Window::title(..)`，机制完全相同（子窗各有一份宿主，各跟各的）。托盘提示走
-既有的 `TrayHandle::set_tooltip`。
+子窗口用 `Window::title(..)`，机制完全相同（子窗各有一份宿主，各跟各的）。
+
+**托盘菜单与菜单栏标题**不用操心：托盘菜单在每次弹出时才构建（两个平台都是），菜单栏是
+自绘的、标题每帧现取，所以 `TrayMenuItem::item(t!("tray.quit"), ..)` 与
+`MenuBarEntry::new(t!("menu.file"), ..)` 都自动跟随。两者的**下拉项**由各自的生成器在展开
+时产出，那里用 `tr!` 即可。
+
+仍需应用自己处理的只剩**托盘提示**（`TrayHandle::set_tooltip`）：它是设在图标上的长期
+字符串，不随菜单重建。
 
 ### 12.7 加第三种语言时，`windui.*` 要跟着补
 
@@ -2453,6 +2460,24 @@ fn translations_stay_in_sync() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 ```
+
+另一半是反方向：代码里 `t!("a.b")` 用了、译文里却没有这条。`i18n::lint::check_usage`
+扫一个目录下的 `.rs`，把用到却没有任何语言提供译文的 key 连同**文件名和行号**报出来：
+
+```rust
+#[test]
+fn every_key_used_is_translated() {
+    // 用 CARGO_MANIFEST_DIR 而不是相对路径 "src"：后者依赖当前工作目录，换个 runner
+    // 就可能扫了个空目录——而"扫了个寂寞"这件事本身不会让测试变红。
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    let problems = windui::i18n::lint::check_usage(dir, &locales());
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+```
+
+它只查**字面** key（`t!(key_var)` 静态看不动，跳过），也只查这一个方向——"译文里有、代码
+没用"故意不查：动态 key 会让那个方向必然误报，而误报的 lint 很快就会被加一堆例外、
+然后被整个关掉。扫描器会跳过注释与字符串字面量，所以文档示例里的 `t!("…")` 不算数。
 
 缺译文的表现也是分档的：debug 下显示 `⟪key⟫` 并 warn 一次，release 下显示 key 本身——
 **都不是空串**，空串在界面上看着像"这里本来就没字"，能瞒过整轮自测。
