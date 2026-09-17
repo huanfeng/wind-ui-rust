@@ -1196,6 +1196,11 @@ impl WindowContent {
 /// 平台在事件分发**完全返回**后才真正建窗。
 pub struct WindowRequest {
     pub title: String,
+    /// 标题的**来源**（`Window::title`）。`None` = 标题定格在 `title` 那一份。
+    ///
+    /// 与 `title` 并存而不是取代它：平台在窗口出现**之前**就要一个字符串，而
+    /// [`TextContent`](crate::ui::TextContent) 要到那之后才由宿主每帧现算。
+    pub title_src: Option<crate::ui::TextContent>,
     pub width: i32,
     pub height: i32,
     pub resizable: bool,

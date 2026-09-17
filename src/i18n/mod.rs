@@ -306,6 +306,34 @@ impl Locales {
         LocalesBuilder::default()
     }
 
+    /// 哪些语言**自己没有** `windui.*` 文案（框架自带的菜单文案会落到回退语言）。
+    ///
+    /// 这是"日文界面里冒出一份 Cut / Copy / Paste"的成因：回退链正按设计工作，只是框架
+    /// 自带译文只有中英两份。库在 debug 下会为每一条喊一声 `log::warn!`；公开成方法是为了
+    /// 让应用能在自己的测试里钉死这件事：
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let locales = Locales::builder()
+    ///     .embed("[meta]\nlocale = \"ja\"\n[app]\nhi = \"こんにちは\"\n")
+    ///     .build();
+    /// assert_eq!(locales.languages_missing_framework_strings(), vec!["ja".to_string()]);
+    /// ```
+    ///
+    /// 补的办法是在该语言的译文里写上那批 key（清单见仓库 `i18n/zh-CN.toml`）。
+    pub fn languages_missing_framework_strings(&self) -> Vec<String> {
+        self.langs
+            .iter()
+            .filter(|(_, d)| {
+                !d.embedded
+                    .iter()
+                    .chain(d.external.iter())
+                    .any(|t| t.keys().any(|k| k.starts_with("windui.")))
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// 已加载的语言（按 id 升序）。
     pub fn available(&self) -> Vec<LocaleInfo> {
         self.langs
@@ -446,6 +474,28 @@ impl Locales {
         }
     }
 
+    /// 对**自己没有 `windui.*` 文案**的语言喊一声（仅 debug）。
+    ///
+    /// 这是一类只在界面上显形、不报任何错的问题：应用加了日文译文，框架自带的只有中英两份，
+    /// 于是右键菜单按回退链落到英文——日文界面里冒出一份 Cut / Copy / Paste。它**不是**
+    /// 故障（回退链正按设计工作），但多半也不是作者想要的，而唯一的症状是"截图看着怪"。
+    ///
+    /// 只在 debug 下喊：这是给开发者的提示，不是给用户的。补的办法是在该语言的译文里
+    /// 写上 `windui.*` 这批 key（它们的清单见 `i18n/zh-CN.toml`）。
+    fn warn_languages_without_framework_strings(&self) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        for id in self.languages_missing_framework_strings() {
+            log::warn!(
+                "i18n: 语言 `{id}` 没有 `windui.*` 文案，框架自带的菜单（剪切/复制/…）\
+                 会落到回退语言 `{}`。要让它们也是 `{id}`，在该语言的译文里补上这批 key\
+                 （清单见仓库 i18n/zh-CN.toml）。",
+                self.fallback
+            );
+        }
+    }
+
     fn add_layer(&mut self, f: LangFile, id_hint: Option<String>, embedded: bool) {
         let id = match f.meta.locale.clone().or(id_hint) {
             Some(id) if !id.is_empty() => id,
@@ -562,6 +612,7 @@ impl LocalesBuilder {
         for dir in dirs {
             l.scan_dir(&dir);
         }
+        l.warn_languages_without_framework_strings();
         l
     }
 }

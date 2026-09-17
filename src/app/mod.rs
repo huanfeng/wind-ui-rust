@@ -134,6 +134,7 @@ impl Window {
                 bg: None,
                 // 占位。取不走：`content` 是唯一产出 `WindowRequest` 的方法，
                 // 没调它就拿不到能交给 `open_window` 的值——类型上已经封死。
+                title_src: None,
                 content: crate::event::WindowContent::new(|| NoContent),
                 close_handler: None,
                 intervals: Vec::new(),
@@ -142,6 +143,30 @@ impl Window {
                 icon: None,
             },
         }
+    }
+
+    /// 窗口标题，收 [`TextContent`](crate::ui::TextContent)：能绑信号、也能是一条待翻译
+    /// 消息（[`t!`](crate::t)），两种都随值变化自动重发给系统。与 [`App::title`] 同一套
+    /// 拉取式机制，子窗各有自己的宿主，故各自跟随。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let _ =
+    /// Window::new("占位", 420, 320).title(t!("app.settings_title")).content(|| Element::col())
+    /// # ;
+    /// ```
+    ///
+    /// 与 [`Window::new`] 的第一个参数并存：那个是**建窗时**的标题（平台在窗口出现前就
+    /// 要一个字符串），本修饰符是此后的来源。建窗那一刻也会用它算一次，故不会先闪一下
+    /// 占位标题。
+    ///
+    /// **单例窗（[`Window::single`]）的既有窗口不受后续请求影响**——那是单例的既定语义
+    /// （见该方法），与标题来源无关：已经开着的那个窗口照常按**它自己**那份来源跟随语言。
+    pub fn title(mut self, title: impl Into<crate::ui::TextContent>) -> Self {
+        let t = title.into();
+        self.req.title = t.resolve().into_owned();
+        self.req.title_src = Some(t);
+        self
     }
 
     /// 把本窗口设为**单例**：同一个 `key` 同时只存在一个窗口。
@@ -593,6 +618,9 @@ fn build_new_window(
     // `UiHost::new` 内部的 `root.build(&mut tree)` 也在作用域外——那里创建的是
     // 节点而非信号，控件自带的信号由控件自己的 `SignalScope` 管。
     host.scope = Some(scope);
+    // 标题来源交给这个子窗自己的宿主：此后它每帧现算、变了才推给系统，与主窗同一条路
+    // （见 `AppHandler::take_window_title`）。子窗各有一份宿主，故各跟各的。
+    host.title_src = req.title_src;
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
 
@@ -1180,8 +1208,7 @@ impl App {
     /// 与 [`App::new`] 的第一个参数并存：那个是**建窗时**的标题（平台在窗口出现前就要
     /// 一个字符串），本修饰符是**此后**的来源。只写 `App::new` 的应用行为完全不变。
     ///
-    /// 子窗口（[`Window::new`](crate::app::Window)）暂不支持：它的标题在
-    /// `WindowRequest` 里是 `String`，换语言后需应用自己重开或重设。
+    /// 子窗口用 [`Window::title`](crate::app::Window::title)，机制完全相同。
     pub fn title(mut self, title: impl Into<crate::ui::TextContent>) -> Self {
         let t = title.into();
         // 建窗那一刻也用它：否则窗口会先闪一下 `App::new` 给的占位标题。
@@ -4223,6 +4250,54 @@ mod tests {
         assert!(lang.set("en"));
         assert_eq!(host.take_window_title().as_deref(), Some("Demo"));
         assert_eq!(host.take_window_title(), None, "没再变化就不该重复推送");
+    }
+
+    /// 子窗口的标题也跟随语言（`Window::title`）。
+    ///
+    /// 子窗各有一份自己的宿主，所以这条不是"主窗那套顺带生效"，而是标题来源要真的
+    /// 一路送到子窗宿主上：`Window::title` → `WindowRequest::title_src` →
+    /// `build_new_window` → 那个 `UiHost`。中间任一环漏接的症状都是"子窗标题不跟随"，
+    /// 而子窗要真窗口才看得见，自测最容易漏。
+    #[test]
+    fn child_window_title_follows_the_language() {
+        use crate::platform::AppHandler;
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[app]\nsettings = \"设置\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[app]\nsettings = \"Settings\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let lang = crate::i18n::LocaleHandle::new();
+        let mut h = App::new("main", 200, 200)
+            .content(Element::col().fill())
+            .into_handler_for_test();
+
+        let root = h.tree.root.expect("根节点");
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("占位", 420, 320)
+                    .title(crate::t!("app.settings"))
+                    .content(|| Element::col().fill()),
+            );
+        });
+        h.apply_app_effects(res);
+        let (cfg, mut child) = expect_create(
+            h.take_new_windows(&|_| false)
+                .into_iter()
+                .next()
+                .expect("应有一个待建子窗"),
+        );
+
+        assert_eq!(
+            cfg.title, "设置",
+            "建窗那一刻就该是译文，不能先闪一下 `Window::new` 给的占位标题"
+        );
+        assert_eq!(child.take_window_title(), None, "首次轮询不该重推同一份");
+
+        assert!(lang.set("en"));
+        assert_eq!(child.take_window_title().as_deref(), Some("Settings"));
+        assert_eq!(child.take_window_title(), None, "没再变化就不该重复推送");
     }
 
     /// 只写 `App::new` 的应用行为不变：没有标题来源就永远不推。
