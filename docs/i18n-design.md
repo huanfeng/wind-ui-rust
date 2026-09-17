@@ -185,7 +185,9 @@ pub(crate) fn system_locales() -> Vec<String>;   // BCP-47，按用户偏好顺�
 两个时机缺一不可——语言可以在点击回调里换（事件路径），也可以在 `on_interval` 里换
 （帧路径）。托盘 tooltip 已有 `TrayHandle::set_tooltip`，无需新增。
 
-**仍未覆盖**：子窗口（`Window::new`）的标题在 `WindowRequest` 里是 `String`，不跟随换语言。
+子窗口随后也接上了（`Window::title` → `WindowRequest::title_src` → 子窗自己的 `UiHost`）。
+子窗各有一份宿主，所以这不是"主窗那套顺带生效"，而是来源要真的一路送到子窗宿主上——
+中间任一环漏接的症状都是"子窗标题不跟随"，而子窗要真窗口才看得见。
 
 ---
 
@@ -435,6 +437,7 @@ i18n/           // crate 自带译文（zh-CN.toml / en.toml），include_str! �
 | 测量缓存膨胀 | 多语言切换后旧串条目滞留 | **不处理**：引擎侧 4096 条上限自行清空（§3.2） |
 | 长译文溢出 | 德语按钮文字比中文长 60%，顶破固定宽度布局 | 这是**应用侧布局问题**，但示例与文档要示范：文案区用 `weight` 占剩余空间，别写死 `width`（见「设置页七件套」的同名教训） |
 | `tr!` 误用 | 换语言时个别文案不变 | lint 只能查 key 存在性，查不出这个。靠文档 + code review |
+| 第三种语言缺 `windui.*` | 日文界面里冒出 Cut/Copy/Paste（回退链正常工作，但看着像 bug） | debug 下 warn + `Locales::languages_missing_framework_strings` 供应用写进测试 |
 | 外部文件语法错 | 用户改坏 TOML，整个语言加载失败 | **单文件失败只丢那一个文件**并 warn，不影响其它语言与内置译文；绝不 panic |
 
 ---

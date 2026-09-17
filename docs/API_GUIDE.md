@@ -2298,7 +2298,8 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 - **不支持 RTL（从右向左）排版**：阿拉伯语 / 希伯来语的双向重排没有实现，多行文本是
   自绘的视觉行布局、按字符切分，接上 RTL 译文会逐字错位。译文文件可以写 `[meta] rtl = true`
   作为标记（`LocaleInfo::rtl` 读得到），但渲染层不消费它——本库不假装能画对。
-- **多语言的三处已知边界**（详见 §12）：子窗口（`Window::new`）标题不跟随换语言；
+- **多语言的三处已知边界**（详见 §12）：框架自带文案只内置中英两份，用第三种语言时
+  那批 `windui.*` key 要由应用补（不补则按回退链落到英文，debug 下库会 warn 一声）；
   `tr!` 的产物当场定格、换语言不变（`t!` 才跟随）；复数只看整数，小数复数不在射程内。
 - **`#[non_exhaustive]` 的六个类型**（`MenuItem` / `DropdownItem` / `CheckMenuItem` /
   `Role` / `Intent` / `TextContent`）在下游不能用结构体字面量构造，穷尽 `match` 须留 `_` 兜底。
@@ -2419,7 +2420,23 @@ Element::label(t!("file.selected", count = n))   // 计数变了自动刷，换�
 载体，宿主每帧比对、变了才重发给系统——于是 `t!` 和 `Signal<String>` 两种都自动跟随。
 `App::new` 的第一个参数仍是建窗那一刻的标题（平台在窗口出现前就要一个字符串）。
 
-**子窗口（`Window::new`）暂不支持**：它的标题在 `WindowRequest` 里是 `String`。
+子窗口用 `Window::title(..)`，机制完全相同（子窗各有一份宿主，各跟各的）。托盘提示走
+既有的 `TrayHandle::set_tooltip`。
+
+### 12.7 加第三种语言时，`windui.*` 要跟着补
+
+库内置的框架文案**只有中英两份**。应用加日文译文、却没写 `windui.*` 那批 key 时，右键
+菜单会按回退链落到英文——日文界面里冒出一份 Cut / Copy / Paste。这**不是故障**（回退链
+正按设计工作），但多半不是你想要的，而唯一的症状是"截图看着怪"。
+
+所以 debug 下库会为每个缺这批 key 的语言 warn 一声，并把判断开放成 API 供你写进测试：
+
+```rust
+assert!(locales.languages_missing_framework_strings().is_empty());
+```
+
+补法就是在该语言的译文里写上那批 key（清单见仓库 `i18n/zh-CN.toml`，共 8 条），
+`examples/i18n.rs` 的 `JA` 常量里有现成的一份。
 
 ### 12.6 译文一致性靠测试挡
 
