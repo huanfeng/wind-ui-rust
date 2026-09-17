@@ -54,6 +54,30 @@ pub fn double_click_thresholds() -> (u32, i32) {
     (500, 4)
 }
 
+/// 用户偏好的界面语言（BCP-47，按优先级排序）。
+///
+/// 供 [`Initial::System`](crate::i18n::Initial::System) 挑启动语言。按**偏好列表**而不是
+/// 单一语言返回：用户可能把「英文优先、中文次之」设成一串，只取第一项会在应用没有英文
+/// 译文时直接掉到 fallback，而本该轮到中文。
+///
+/// 无法取得时返回空表——调用方据此走 fallback，不需要区分"取不到"和"没有偏好"。
+#[cfg(windows)]
+pub fn system_locales() -> Vec<String> {
+    win32::system_locales()
+}
+
+/// 见 Windows 版。
+#[cfg(target_os = "macos")]
+pub fn system_locales() -> Vec<String> {
+    macos::system_locales()
+}
+
+/// 见 Windows 版。其余平台暂无平台层，返回空表（调用方走 fallback）。
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn system_locales() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]
@@ -920,6 +944,21 @@ pub trait AppHandler {
 
     /// 取出并清除待执行的窗口操作（自定义标题栏按钮触发）。平台在事件分发后轮询。
     fn take_window_op(&mut self) -> Option<WindowOp> {
+        None
+    }
+
+    /// 窗口标题若与上次推送的不同，返回新标题（平台随即调 `SetWindowTextW` /
+    /// `setTitle:`）。**拉取式**：宿主不记"要不要改"，每次问都现算一遍当前标题。
+    ///
+    /// 为什么是拉取而不是像 `WindowOp` 那样排一条意图：标题的来源是
+    /// [`TextContent`](crate::ui::TextContent)，它可能绑在信号上、也可能是条待翻译消息
+    /// （[`t!`](crate::t)）。这两种都**不经过任何显式调用**就会变——换语言只动线程局部的
+    /// 译文目录，写信号只动信号运行时，谁都不会顺手去排一条"改标题"的意图。排队式
+    /// 就得在每个可能改变它的地方补一次通知，漏一处的症状是"换了语言标题还是旧的"。
+    ///
+    /// 平台在**事件分发后与出帧后**都要问一次：语言可以在点击回调里换（事件路径），
+    /// 也可以在 `on_interval`/`on_message` 里换（帧路径）。
+    fn take_window_title(&mut self) -> Option<String> {
         None
     }
 

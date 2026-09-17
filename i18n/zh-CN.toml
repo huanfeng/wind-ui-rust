@@ -1,0 +1,24 @@
+# windui 框架自带文案。
+#
+# 下游可以用同名 key 覆盖（应用自己的 `embed` / 外部 `load_dir` 都压得过这一层），
+# 也可以提供这里没有的第三种语言 —— 只要那份文件里也写 `windui.*` 这批 key。
+#
+# 改动纪律：这两份文件的 key 集合必须逐字相等，`cargo test i18n` 里的一致性测试会盯着。
+
+[meta]
+locale = "zh-CN"
+name = "简体中文"
+
+# 文本框右键菜单（src/ui/inputs.rs）
+[windui.menu]
+cut = "剪切"
+copy = "复制"
+paste = "粘贴"
+select_all = "全选"
+
+# 无边框窗口的标题栏右键菜单（src/event.rs::system_menu_items）
+[windui.window]
+restore = "还原"
+minimize = "最小化"
+maximize = "最大化"
+close = "关闭"

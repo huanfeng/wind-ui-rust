@@ -2487,6 +2487,10 @@ unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 unsafe fn apply_window_op(hwnd: HWND) {
     let op = state_from(hwnd).and_then(|s| s.handler.take_window_op());
     run_window_op(hwnd, op);
+    // 标题同点消费：本函数在事件路径与 WM_PAINT 两处都被调用，正是
+    // `take_window_title` 契约要求的两个时机（换语言可能发生在点击回调里，也可能
+    // 发生在 on_interval 里）。
+    apply_window_title(hwnd);
     // 运行期热键操作与窗口操作同点消费（HotkeyHandle 排队 → 此处落地）。
     // Register/UnregisterHotKey 不向本窗口同步派发消息，可在借用内直接执行。
     apply_hotkey_ops(hwnd);
@@ -2893,6 +2897,58 @@ pub fn open_url(url: &str) {
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
+    }
+}
+
+/// 把宿主现算出来的窗口标题推给系统。没变化时 `take_window_title` 返回 `None`，
+/// 这里一次 OS 调用都不发——`SetWindowTextW` 会同步重绘非客户区，不是免费的。
+///
+/// 两段式同 `apply_window_op`：借用在取出标题那条语句结束时释放，`SetWindowTextW`
+/// 会同步派发 `WM_SETTEXT` 重入 `wnd_proc`（铁律 6）。
+unsafe fn apply_window_title(hwnd: HWND) {
+    let title = state_from(hwnd).and_then(|s| s.handler.take_window_title());
+    if let Some(title) = title {
+        let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ =
+            windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(hwnd, PCWSTR(wide.as_ptr()));
+    }
+}
+
+/// 用户偏好的界面语言（BCP-47，按优先级排序）。
+///
+/// 用 `GetUserPreferredUILanguages` 而不是 `GetUserDefaultLocaleName`：后者给的是**区域
+/// 格式**（数字/日期的写法），与「界面用哪种语言」是两个设置项——把系统语言设成英文、
+/// 区域留在中国的机器相当常见，读错那个会把英文界面的用户判成中文。
+///
+/// 返回的是双 NUL 结尾的多串：每种语言一串，整体再以一个空串收尾。
+pub fn system_locales() -> Vec<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+    unsafe {
+        let mut count: u32 = 0;
+        let mut chars: u32 = 0;
+        // 第一次调用只问长度（缓冲区传 None）。
+        if GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut chars).is_err()
+            || chars == 0
+        {
+            return Vec::new();
+        }
+        let mut buf = vec![0u16; chars as usize];
+        if GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut count,
+            Some(PWSTR(buf.as_mut_ptr())),
+            &mut chars,
+        )
+        .is_err()
+        {
+            return Vec::new();
+        }
+        buf.truncate(chars as usize);
+        buf.split(|c| *c == 0)
+            .filter(|s| !s.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect()
     }
 }
 
@@ -3824,9 +3880,17 @@ mod tests {
         assert_eq!(t.bump(1, 11, 11, 1100, DBL, DX, DY), 2, "时限内同位=双击");
         // 连着往下钻目录：第三、四下必须重新构成一对双击，否则第二次双击落空。
         assert_eq!(t.bump(1, 12, 12, 1200, DBL, DX, DY), 1, "双击后重新起算");
-        assert_eq!(t.bump(1, 12, 12, 1300, DBL, DX, DY), 2, "第二次双击照样成立");
+        assert_eq!(
+            t.bump(1, 12, 12, 1300, DBL, DX, DY),
+            2,
+            "第二次双击照样成立"
+        );
         assert_eq!(t.bump(1, 12, 12, 1400, DBL, DX, DY), 1);
-        assert_eq!(t.bump(1, 12, 12, 1500, DBL, DX, DY), 2, "第三次双击照样成立");
+        assert_eq!(
+            t.bump(1, 12, 12, 1500, DBL, DX, DY),
+            2,
+            "第三次双击照样成立"
+        );
         // 超出时限：重置。
         assert_eq!(t.bump(1, 12, 12, 2200, DBL, DX, DY), 1, "超时重置为单击");
     }

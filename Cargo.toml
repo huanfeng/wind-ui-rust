@@ -83,6 +83,7 @@ raw-window-handle = "0.6"
 windows-numerics = "0.3"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_DirectWrite",
@@ -143,6 +144,7 @@ windows = { version = "0.62", features = [
 objc2 = { version = "0.6", features = ["catch-all"] }
 objc2-foundation = { version = "0.3", features = [
     "NSString",
+    "NSLocale",
     "NSURL",
     "NSData",
     "NSGeometry",

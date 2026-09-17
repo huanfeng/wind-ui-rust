@@ -1,0 +1,19 @@
+# windui built-in strings. Keys must match i18n/zh-CN.toml exactly (a test enforces it).
+
+[meta]
+locale = "en"
+name = "English"
+
+# Text field context menu (src/ui/inputs.rs)
+[windui.menu]
+cut = "Cut"
+copy = "Copy"
+paste = "Paste"
+select_all = "Select All"
+
+# Frameless window title bar context menu (src/event.rs::system_menu_items)
+[windui.window]
+restore = "Restore"
+minimize = "Minimize"
+maximize = "Maximize"
+close = "Close"

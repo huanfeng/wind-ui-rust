@@ -11,6 +11,7 @@ pub mod app;
 pub mod core;
 pub mod event;
 pub mod geometry;
+pub mod i18n;
 pub mod icon;
 pub mod platform;
 pub mod render;
@@ -33,6 +34,7 @@ pub mod prelude {
         MenuItem, Mods, Preedit, ToastKind, WindowRequest, WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
+    pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{
         PickDialog, Renderer, Tray, TrayCtx, TrayHandle, TrayMenuItem, TrayOp,
@@ -44,6 +46,10 @@ pub mod prelude {
     pub use crate::style::{Brush, Edges, Role, Shadow, Style};
     pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Len, TableTheme, Theme};
+    // 两个文案宏由 `#[macro_export]` 挂在 crate 根上。这里再导一次，让
+    // `use windui::prelude::*;` 之后 `t!` / `tr!` 直接可用——否则下游还得单独写
+    // 一行 `use windui::{t, tr};`，而 prelude 的全部意义就是省掉这种行。
+    pub use crate::{t, tr};
     // `TabItem` / `TabStyle` 是 `Element::tabs_items` 的参数类型，`ColorPickerOpts` 是
     // `Element::color_picker_opts` 的：构造器在 prelude 里，参数类型却要写一行深路径
     // import，那条路就没人走。`Hsva` 则是取色器对外的颜色模型，业务侧做色相运算时用得上。

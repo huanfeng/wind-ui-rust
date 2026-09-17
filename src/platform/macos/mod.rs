@@ -169,6 +169,21 @@ pub fn drag_files(
     crate::platform::DragEffect::None
 }
 
+/// 用户偏好的界面语言（BCP-47，按优先级排序）。对照 win32 `GetUserPreferredUILanguages`。
+///
+/// `NSLocale::preferredLanguages` 给的就是「系统设置 → 语言与地区」里那张有序表，
+/// 已经是 BCP-47（`zh-Hans-CN`、`en-US`），无需再折算。注意它与
+/// `NSLocale::currentLocale` 不是一回事：后者是**区域格式**（数字/日期的写法），
+/// 把语言设成英文、区域留在中国的机器上读它会判错。
+pub fn system_locales() -> Vec<String> {
+    use objc2_foundation::NSLocale;
+
+    NSLocale::preferredLanguages()
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// 用系统默认程序打开 URL/路径（链接点击）。对照 win32 `ShellExecuteW`。
 pub fn open_url(url: &str) {
     use objc2_app_kit::NSWorkspace;

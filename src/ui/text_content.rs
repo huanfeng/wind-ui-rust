@@ -1,7 +1,8 @@
 //! 控件文案载体 [`TextContent`]：一段静态串，或一个绑定的 `Signal<String>`。
 //!
 //! 凡是接受"一段文案"的控件参数（`label`/`button`/`link`/`badge`/`checkbox` …）都收
-//! `impl Into<TextContent>`，于是 `&str`、`String` 与 `Signal<String>` 可以互换地传进去：
+//! `impl Into<TextContent>`，于是 `&str`、`String`、`Signal<String>` 与
+//! [`t!`](crate::t)（多语言消息）四者可以互换地传进去：
 //!
 //! ```
 //! use windui::prelude::*;
@@ -30,6 +31,7 @@
 
 use std::borrow::Cow;
 
+use crate::i18n::Message;
 use crate::signal::Signal;
 
 /// 控件文案：静态串或信号绑定。
@@ -63,11 +65,15 @@ use crate::signal::Signal;
 ///     caption.set(format!("已选 {} 项", count.get()));
 /// });
 /// ```
+#[non_exhaustive]
 pub enum TextContent {
     /// 构建期定下、此后不变的文案。
     Static(String),
     /// 绑定到信号：每帧现取当前值，`Signal::set`/`update` 即改文案。
     Bound(Signal<String>),
+    /// 待翻译消息（[`t!`](crate::t) 的产物）：每帧按当前语言取译文并代入参数，
+    /// [`LocaleHandle::set`](crate::i18n::LocaleHandle::set) 换语言即自动跟随。
+    Msg(Message),
 }
 
 impl TextContent {
@@ -78,7 +84,16 @@ impl TextContent {
         match self {
             TextContent::Static(s) => Cow::Borrowed(s.as_str()),
             TextContent::Bound(sig) => Cow::Owned(sig.get()),
+            // 与 `Bound` 同代价、同理由：目录存在 `RefCell` 保护的线程局部里，借着它
+            // 跨越整个绘制过程，会把一次不相干的换语言变成 panic。
+            TextContent::Msg(m) => Cow::Owned(m.resolve()),
         }
+    }
+}
+
+impl From<Message> for TextContent {
+    fn from(m: Message) -> Self {
+        TextContent::Msg(m)
     }
 }
 
