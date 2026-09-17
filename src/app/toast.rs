@@ -121,6 +121,15 @@ impl UiHost {
         for req in self.tree.take_pending_toasts() {
             self.show_toast(req);
         }
+        // 开窗与菜单同理（见 `Tree::pending_windows`）。放在一起是因为三者同因同治，
+        // 分散在别处早晚会漏掉其中一个——这个函数本身就是当初只补了 toast 的产物。
+        let windows = self.tree.take_pending_windows();
+        self.pending_windows.extend(windows);
+        if let Some(req) = self.tree.take_pending_menu() {
+            if let Some(target) = self.focus.current.or(self.tree.root) {
+                self.open_menu(req, target);
+            }
+        }
     }
     /// 压入一条 toast；超过上限丢最旧。
     fn push_toast(&mut self, req: ToastRequest) {

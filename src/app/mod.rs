@@ -5481,6 +5481,52 @@ mod tests {
     }
 
     #[test]
+    fn window_opened_from_on_update_reaches_the_host() {
+        // 回归：`on_update`（响应式相位）不经 DispatchResult，此前只把 toast 与 focus
+        // 上交，其余副作用整个丢弃。于是在 on_update 里 `ctx.open_window` **什么都不
+        // 发生、也没有任何报错**——而"把命令排进队列、下一帧由某个控件的 on_update
+        // 兑现"是很自然的写法，那条命令十有八九要开个对话框。
+        use crate::core::Widget;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        use tiny_skia::Pixmap;
+
+        struct OpenOnce(Rc<StdCell<bool>>);
+        impl Widget for OpenOnce {
+            fn on_update(&mut self, ctx: &mut crate::core::EventCtx) {
+                if self.0.get() {
+                    return;
+                }
+                self.0.set(true);
+                ctx.open_window(Window::new("from-update", 100, 80).content(|| Element::leaf().width(10).height(10)));
+            }
+        }
+
+        let fired = Rc::new(StdCell::new(false));
+        let ui = Element::stack().fill().child(
+            Element::leaf()
+                .width(20)
+                .height(20)
+                .widget(OpenOnce(fired.clone()))
+                .reactive(),
+        );
+        let app = App::new("t", 40, 40).content(ui);
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(40, 40));
+
+        assert!(fired.get(), "on_update 应当被调到");
+        assert_eq!(
+            handler.take_new_windows(&|_| false).len(),
+            1,
+            "on_update 里请求的窗口必须交到宿主手上"
+        );
+    }
+
+    #[test]
     fn hiding_node_resets_its_interaction_state() {
         // 回归：控件在按下/悬停态被隐藏（如关闭其所在对话框）时，框架应调 reset_interaction
         // 重置其交互态，避免下次显示瞬间闪出旧的按下/悬停态。

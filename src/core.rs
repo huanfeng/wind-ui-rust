@@ -545,6 +545,12 @@ pub struct Tree {
     /// 自己消费的——行没法替父容器要焦点，只能由父容器在 on_update 里替自己要。没有
     /// 这条通道，鼠标点完一行之后方向键就落不到列表上，键盘与鼠标接不起来。
     pending_focus: Option<NodeId>,
+    /// on_update 相位里控件请求的**开窗**暂存区。与 `pending_toasts` 同因同治：
+    /// 该相位不经 `DispatchResult`，不暂存就会被整个丢掉——症状是
+    /// "在 on_update 里 `ctx.open_window` 什么都不发生，且没有任何报错"。
+    pending_windows: Vec<crate::event::WindowRequest>,
+    /// 同上，`ctx.show_context_menu`。延迟弹菜单（先记下、下一帧再弹）走的正是这条路。
+    pending_menu: Option<MenuRequest>,
     /// arrange 递归中当前节点父级的绝对左上角。
     ///
     /// `arrange` 全程使用相对父的坐标，但滚动条要判断"本容器是否贴着窗口右缘"必须知道
@@ -596,6 +602,8 @@ impl Tree {
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
             pending_focus: None,
+            pending_windows: Vec::new(),
+            pending_menu: None,
             arrange_origin: Point::new(0, 0),
             layout_size: Size::ZERO,
             modals: Vec::new(),
@@ -611,6 +619,16 @@ impl Tree {
     /// 取走 on_update 相位攒下的焦点转移请求（见 `pending_focus`）。
     pub fn take_pending_focus(&mut self) -> Option<NodeId> {
         self.pending_focus.take()
+    }
+
+    /// 取走 on_update 相位攒下的开窗请求（见 `pending_windows`）。
+    pub fn take_pending_windows(&mut self) -> Vec<crate::event::WindowRequest> {
+        std::mem::take(&mut self.pending_windows)
+    }
+
+    /// 取走 on_update 相位攒下的菜单请求（见 `pending_menu`）。
+    pub fn take_pending_menu(&mut self) -> Option<MenuRequest> {
+        self.pending_menu.take()
     }
 
     /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
@@ -737,6 +755,8 @@ impl Tree {
         // 等在此发的提示永不上屏，故先取出暂存（见 pending_toasts / take_pending_toasts）。
         let requested_toast = ctx.out.toast.take();
         let requested_focus = ctx.out.focus.take();
+        let requested_windows = std::mem::take(&mut ctx.out.open_windows);
+        let requested_menu = ctx.out.menu.take();
         if let Some(n) = self.get_mut(id) {
             n.widget = widget;
         }
@@ -747,6 +767,14 @@ impl Tree {
         // 事件路径的语义一致（`EventOutcome::focus` 本身也是单值）。
         if let Some(id) = requested_focus {
             self.pending_focus = Some(id);
+        }
+        // 开窗与菜单同 toast：该相位不经 DispatchResult，丢了就是"调了没反应、
+        // 也没报错"。应用把「下一帧再执行这条命令」排进队列、由某个控件的 on_update
+        // 兑现，是很自然的写法，而命令十有八九要开个对话框。
+        self.pending_windows.extend(requested_windows);
+        // 一帧里最多弹一个菜单；后来者覆盖，与 `EventOutcome::menu` 的单值语义一致。
+        if let Some(m) = requested_menu {
+            self.pending_menu = Some(m);
         }
     }
 
