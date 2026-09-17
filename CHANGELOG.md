@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-17
+
 - **`Element::tooltip` 收多行文本**：`\n` 是硬换行，与超宽自动换行叠加生效。此前那句
   `debug_assert!(!text.contains('\n'))` 拦的不是能力缺口，是"没测过"——两个平台引擎本来
   就各自处理硬换行（DirectWrite 整段交给 `CreateTextLayout`，CoreText 见 `is_single_line`），
@@ -87,6 +89,41 @@
   `zh-CN` 写 `{num}`，代入时那一处变空串）、变体表漏 `other`。下游应用会遇到一模一样的三种，
   没理由各写一遍。缺译文的显示也是分档的：debug 下 `⟪key⟫` + warn 一次，release 下显示 key
   本身——**都不是空串**，空串在界面上看着像"这里本来就没字"，能瞒过整轮自测。
+
+- **长列表的整窗帧不再每帧绘制全部内容**（`perf`）。`Canvas::cull_rect` 的契约是"返回可见
+  范围的超集"，而 D2D 后端压根没实现（用的是 trait 默认值 `None`）、GPU 后端在整窗帧上也
+  返回 `None`；调用方把 `None` 读作"拿不到范围，那就整个画"。于是内容远高于视口的节点每帧
+  画满全部内容——而整窗重绘并不罕见。下游实测三万项目录（内容高 60 万 px）：全窗帧
+  **828 ms → 4.75 ms**，进程私有内存峰值 **106 MB → 62 MB**。两个后端现在都据实报出可见
+  范围（D2D 报客户区，GPU 报 scissor 或整个目标），物理→逻辑向外取整并各放一像素——报小
+  了会真的丢内容。
+
+- **圆角图片每帧泄漏一个 COM 引用**（D2D）。`D2D1_LAYER_PARAMETERS1.geometricMask` 的类型是
+  `ManuallyDrop`，结构体析构**不会**帮忙松开那份引用，必须在 `PopLayer` 之后自己还。带圆角
+  图标的工具栏 / 驱动器栏 / 标题栏每帧要走这条分支二十多次，约 5 KB/帧、持续交互每分钟
+  二十余 MB 且永不回落。下游实测 1800 帧跨度：修复前 +7.7 MB，修复后 0。跨度是必要的——
+  头 150 帧 D2D 运行时自身要预热扩张几十 MB，短跨度里泄漏完全被它盖住。
+
+- **图片位图缓存按字节封顶，不只按条数**（D2D）。同一个缓存既装 16×16 的文件图标又装整屏
+  预览，两者差五个数量级：只按 64 条封顶在预览那一侧形同虚设（64 条 4000×3000 就是 3 GB
+  显存，而计数器才刚走到 64）。改成条数与字节双封顶（48 MB），超任一阈值整体清空重建，
+  手法与既有的 `shadow_cache` 一致。
+
+- **交叉轴的 margin 在 Linear / Frame / Scroll 三处补齐**。`measure` 发交叉轴约束时用的是容器
+  完整可用尺寸、没扣子节点自己的 margin，于是 `width_match` + `margin_xy(4, 0)` 的子节点量到
+  整栏宽，`arrange` 再按 `margin.left` 右移——净效果是**朝末端溢出一个 margin**，把紧邻的
+  分隔线压在自己身下。主轴一直是预扣的，交叉轴漏了。`Frame` 只在默认 `Start` 对齐下出现
+  （`Stretch` 那条路一直是对的），格外隐蔽；`Scroll` 则是 measure 不扣、arrange 扣，子树按更宽
+  的宽度算高、按更窄的宽度排版，带换行文本的子会少算一行。新增 `Element::margin_edges`，
+  `padding_edges` 的外侧对应物。
+
+- **连击计数改为 1 / 2 循环，三击由 `event::TripleClick` 认**。平台层原先一直往上数（win32
+  封顶 3、macOS 照搬 AppKit 的 `clickCount`），于是"双击进目录、紧接着再双击往下钻"的第三、
+  四下被读成 3 和 1，一次都匹配不上双击——连续钻目录断在第二层。第三下究竟是三击的尾巴
+  还是新一轮双击的头，在消息层面分不出来，Win32 的 `WM_LBUTTONDBLCLK` 与 Qt 都判成后者。
+  要三击选段 / 选行的控件改用 `event::TripleClick` 自己认（`TextInput` 与 `RichText` 已接上），
+  它的时限与漂移阈值取**系统值**而非写死的 500ms/4px——写死会让把双击速度调慢的用户遇到
+  "双击好使、三击不灵"。
 
 - **`TextContent` 加了 `#[non_exhaustive]`**（破坏性，随 `Msg` 变体一起）：下游若对它做过
   穷尽 `match`，需补一个 `_` 兜底分支。这类变更一次性做掉，日后再加变体不再破坏下游。
@@ -2335,7 +2372,9 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.15.0...v0.16.0
