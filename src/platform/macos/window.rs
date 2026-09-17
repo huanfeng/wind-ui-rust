@@ -1592,7 +1592,7 @@ impl ContentView {
         // 四下读成 3 和 4，一次都匹配不上双击。三击由 `event::TripleClick` 在控件侧认。
         let click_count = if matches!(kind, PointerKind::Down) {
             let n = ev.clickCount().max(1) as u32;
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 2
             } else {
                 1
