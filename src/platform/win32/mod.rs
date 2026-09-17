@@ -1028,6 +1028,14 @@ const TOUCH_THRESHOLD: i32 = 12;
 /// 触摸速度平滑系数（新样本权重）：低通滤噪，又不过度滞后。
 const TOUCH_VEL_SMOOTH: f32 = 0.4;
 
+/// 系统的双击时限（毫秒）与漂移阈值（每侧逻辑像素）。
+///
+/// `SM_CXDOUBLECLK` 是双击矩形的**全宽**、以首击为中心，故每侧容差取其半——
+/// 与 [`ClickTracker::bump`] 的调用点同一算法。
+pub(crate) fn double_click_thresholds() -> (u32, i32) {
+    unsafe { (GetDoubleClickTime(), GetSystemMetrics(SM_CXDOUBLECLK) / 2) }
+}
+
 /// 连续点击跟踪状态。在平台层把多次快速同位点击折算为 click_count。
 #[derive(Default, Clone, Copy)]
 struct ClickTracker {

@@ -571,16 +571,20 @@ pub struct TripleClick {
     last_dbl: Option<(std::time::Instant, Point)>,
 }
 
-/// 三击的时限：与 Windows 双击时限的默认值同量级。
-const TRIPLE_MS: u128 = 500;
-/// 三击的漂移阈值（逻辑像素，每侧）。
-const TRIPLE_DRIFT: i32 = 4;
-
 impl TripleClick {
-    /// 喂一次 `Down`，返回**有效**连击数：1 / 2 / 3。
+    /// 喂一次左键 `Down`，返回**有效**连击数：1 / 2 / 3。
     ///
-    /// 平台已经给出 >= 3 的（或测试直接合成的）原样放行，不再二次判定。
+    /// 非左键、非 `Down` 一律原样放行且不动内部状态。这道关是必须的：`TextInput`
+    /// 声明了 `wants_right_click()`，于是**所有**非左键的 Down 都会投递进来，右键
+    /// 在上游分流了、中键却会一路落到调用点。不挡的话，左键双击选词后原地按一下
+    /// 中键（滚轮误按、Linux 的中键粘贴习惯）就会被认成三击、整段被选中。
+    ///
+    /// 平台已经给出 >= 3 的（合成事件、或将来某个自己数三击的平台）原样放行，
+    /// 不再二次判定。
     pub fn feed(&mut self, p: &PointerEvent) -> u8 {
+        if p.kind != PointerKind::Down || p.button != MouseButton::Left {
+            return p.click_count.max(1);
+        }
         if p.click_count >= 3 {
             self.last_dbl = None;
             return p.click_count;
@@ -590,10 +594,14 @@ impl TripleClick {
             return 2;
         }
         // 首击：紧跟在一次就近的双击之后，即视为三击。
+        //
+        // 阈值取**系统**的双击设置而不是写死的常量：平台层判第一、二下用的就是它，
+        // 两边不同口径的话，把双击速度调慢的用户会遇到"双击好使、三击不灵"。
+        let (ms, drift) = crate::platform::double_click_thresholds();
         if let Some((t, at)) = self.last_dbl.take() {
-            if t.elapsed().as_millis() <= TRIPLE_MS
-                && (p.pos.x - at.x).abs() <= TRIPLE_DRIFT
-                && (p.pos.y - at.y).abs() <= TRIPLE_DRIFT
+            if t.elapsed().as_millis() <= u128::from(ms)
+                && (p.pos.x - at.x).abs() <= drift
+                && (p.pos.y - at.y).abs() <= drift
             {
                 return 3;
             }
@@ -1372,6 +1380,31 @@ mod triple_click_tests {
         let mut t = TripleClick::default();
         t.feed(&down(2, 10, 10));
         assert_eq!(t.feed(&down(1, 200, 10)), 1, "漂移超阈值：是另一处的新单击");
+    }
+
+    #[test]
+    fn 非左键与非按下一律不参与三击判定() {
+        // TextInput 声明了 wants_right_click，中键会一路落到调用点（见 feed 的文档）。
+        // 左键双击之后原地按一下中键，不得被认成三击。
+        let mut t = TripleClick::default();
+        assert_eq!(t.feed(&down(2, 10, 10)), 2);
+        let mid = PointerEvent {
+            button: MouseButton::Middle,
+            ..down(1, 10, 10)
+        };
+        assert_eq!(t.feed(&mid), 1, "中键不得窃取那次双击");
+        // 中键既没消费也没污染状态：随后的左键首击仍应认回三击
+        assert_eq!(t.feed(&down(1, 10, 10)), 3, "左键的三击序列不受中键影响");
+
+        // 非 Down（Up / Move）同样不参与
+        let mut t2 = TripleClick::default();
+        t2.feed(&down(2, 10, 10));
+        let up = PointerEvent {
+            kind: PointerKind::Up,
+            ..down(1, 10, 10)
+        };
+        assert_eq!(t2.feed(&up), 1);
+        assert_eq!(t2.feed(&down(1, 10, 10)), 3, "抬起不该吃掉三击");
     }
 
     #[test]

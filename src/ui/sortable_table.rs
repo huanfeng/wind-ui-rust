@@ -357,10 +357,12 @@ impl Widget for HoverRow {
                 // 命中的子单元格标签不吃 Down，事件沿祖先链冒泡到本行；落在操作列按钮上时
                 // 按钮已先消费 Down，故整行不会被预备。
                 PointerKind::Down => {
-                    // 恰好第二下才算双击：同一轮的第三下也放行的话，在同一坐标连点
-                    // 会反复激活（表格里表现为"单击就进去了"）。
+                    // 平台层的 click_count 到 2 就重新起算（1,2,1,2,…），故 `>= 2`
+                    // 已等价于"恰好一对"——同一轮的第三下报的是 1，不会重复激活。
+                    // 不写成 `== 2` 是要给合成事件留路：`TripleClick` 明文承诺 >= 3
+                    // 原样放行，库内两处契约得一致。
                     let dbl = p.button == MouseButton::Left
-                        && p.click_count == 2
+                        && p.click_count >= 2
                         && self.activate.is_some()
                         && ctx.bounds().contains(p.pos);
                     self.armed = dbl;

@@ -35,6 +35,25 @@ pub fn native_window_handle() -> Option<isize> {
 pub fn native_window_handle() -> Option<isize> {
     None
 }
+/// 系统的双击时限（毫秒）与漂移阈值（每侧逻辑像素）。
+///
+/// 平台层折算 `click_count` 用的就是这两个值；控件侧认三击
+/// （[`crate::event::TripleClick`]）必须用**同一套**，否则把双击速度调慢的用户
+/// 会遇到"双击好使、三击不灵"——第一、二下按系统阈值判，第三下却按写死的判。
+#[cfg(windows)]
+pub fn double_click_thresholds() -> (u32, i32) {
+    win32::double_click_thresholds()
+}
+
+/// 见 Windows 版。非 Windows 暂用 Windows 的默认值兜底。
+///
+/// macOS 本应读 `NSEvent::doubleClickInterval`；没有接上是因为改这里的人手上没有
+/// 能编译验证的 macOS 环境，与其塞一段编不过的猜测，不如把缺口写明。
+#[cfg(not(windows))]
+pub fn double_click_thresholds() -> (u32, i32) {
+    (500, 4)
+}
+
 #[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]

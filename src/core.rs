@@ -1205,7 +1205,11 @@ impl Tree {
                 let n = self.get(c).unwrap();
                 (n.width, n.height, n.margin)
             };
-            let cwspec = child_spec(cw, avail_w, false);
+            // 先扣子节点自己的横向 margin：`arrange_scroll` 排版时扣了
+            // （`inner.w - scrollbar_w - cm.horizontal()`），这里不扣的话，子树会按
+            // **更宽**的宽度算高、再按更窄的宽度排版——换行文本因此少算一行，底部被裁。
+            // （`scrollbar_w` 那一份在 measure 阶段拿不到：是否可滚要等 arrange 才知道。）
+            let cwspec = child_spec(cw, (avail_w - cm.horizontal()).max(0), false);
             // 高度方向视为无限：Px 固定其值，Wrap/Match 按内容展开。
             let chspec = child_spec(ch, 0, true);
             let s = self.measure(c, cwspec, chspec, text);
@@ -1235,8 +1239,21 @@ impl Tree {
                 let n = self.get(c).unwrap();
                 (n.width, n.height, n.margin)
             };
-            let cwspec = child_spec(cw, avail_w, wspec.mode == MeasureMode::Unbounded);
-            let chspec = child_spec(ch, avail_h, hspec.mode == MeasureMode::Unbounded);
+            // 同 `measure_linear`：交叉轴（Frame 两轴都是）先扣子节点自己的 margin。
+            // 不扣的话，`Match` 子量到整条可用宽，`arrange_frame` 对**非 Stretch**
+            // 对齐的子直接用这个测量值再按 margin.left 右移，右沿就溢出一个 margin。
+            // Stretch 那条路本来是对的（它用的是已扣 margin 的 avail），所以这个 bug
+            // 只在默认的 Start 对齐下出现，格外隐蔽。
+            let cwspec = child_spec(
+                cw,
+                (avail_w - cm.horizontal()).max(0),
+                wspec.mode == MeasureMode::Unbounded,
+            );
+            let chspec = child_spec(
+                ch,
+                (avail_h - cm.vertical()).max(0),
+                hspec.mode == MeasureMode::Unbounded,
+            );
             let s = self.measure(c, cwspec, chspec, text);
             mw = mw.max(s.w + cm.horizontal());
             mh = mh.max(s.h + cm.vertical());
@@ -3944,6 +3961,100 @@ mod tests {
             CursorShape::Hand,
             "悬停在 clickable 卡片内的子控件上应显示手型"
         );
+    }
+
+    /// 同一份 margin 在 Linear / Frame / Scroll 三种容器里必须是同一个语义。
+    ///
+    /// 曾经只有 Linear 预扣：`stack` 里一个 `width_match` + `margin_xy(4,0)`、默认
+    /// Start 对齐的子会量到整条 200、再右移 4，右沿落到 204。Stretch 那条路一直是对的，
+    /// 所以这个溢出只在默认对齐下出现，很难被看见。
+    #[test]
+    fn frame_cross_margin_dont_overflow() {
+        for (name, el) in [
+            (
+                "start（默认对齐）",
+                Element::leaf().width_match().height(20).margin_xy(4, 0),
+            ),
+            (
+                "stretch",
+                Element::leaf()
+                    .width_match()
+                    .height(20)
+                    .margin_xy(4, 0)
+                    .align(Align::Stretch),
+            ),
+        ] {
+            let tree = layout(Element::stack().width(200).height(60).child(el), 200, 60);
+            let root = tree.root.unwrap();
+            let kid = tree.get(root).unwrap().children[0];
+            let b = tree.get(kid).unwrap().bounds;
+            assert_eq!((b.x, b.w), (4, 192), "{name}：应为 x=4 w=200-4-4");
+            assert_eq!(b.x + b.w, 196, "{name}：右沿须留出右 margin，不得溢到 204");
+        }
+    }
+
+    /// 滚动容器：measure 与 arrange 必须按**同一个**宽度看子节点。
+    ///
+    /// `arrange_scroll` 一直扣着 `cm.horizontal()`，measure 侧却没扣。两边不一致时
+    /// 子树按更宽的宽度算高、按更窄的宽度排版，换行文本会少算一行、底部被裁。
+    #[test]
+    fn scroll_measures_child_at_the_width_it_will_be_arranged_at() {
+        let tree = layout(
+            Element::scroll()
+                .width(200)
+                .height(400)
+                .child(Element::leaf().width_match().height(20).margin_xy(4, 0)),
+            200,
+            400,
+        );
+        let root = tree.root.unwrap();
+        let kid = tree.get(root).unwrap().children[0];
+        let b = tree.get(kid).unwrap().bounds;
+        assert_eq!((b.x, b.w), (4, 192));
+        // 测量值（measured_of）与最终排版宽度必须一致，否则高度是按另一个宽度算的
+        assert_eq!(
+            tree.measured_of(kid).w,
+            b.w,
+            "measure 与 arrange 的宽度必须一致：不一致时高度按错的宽度算"
+        );
+    }
+
+    /// row 方向（交叉轴是纵向）的对称用例——之前只测了 col。
+    #[test]
+    fn cross_axis_margin_also_applies_on_the_vertical_cross_axis() {
+        let tree = layout(
+            Element::row()
+                .width(200)
+                .height(60)
+                .child(Element::leaf().height_match().width(20).margin_xy(0, 6)),
+            200,
+            60,
+        );
+        let root = tree.root.unwrap();
+        let kid = tree.get(root).unwrap().children[0];
+        let b = tree.get(kid).unwrap().bounds;
+        assert_eq!((b.y, b.h), (6, 48), "纵向交叉轴同样要扣上下 margin");
+    }
+
+    /// margin 大于可用空间时收敛到 0，不得算出负尺寸（钉住那几处 `.max(0)`）。
+    #[test]
+    fn margin_larger_than_available_collapses_to_zero_not_negative() {
+        for el in [
+            Element::col().width(10).height(40),
+            Element::stack().width(10).height(40),
+            Element::scroll().width(10).height(40),
+        ] {
+            let tree = layout(
+                el.child(Element::leaf().width_match().height(20).margin_xy(40, 0)),
+                10,
+                40,
+            );
+            let root = tree.root.unwrap();
+            let kid = tree.get(root).unwrap().children[0];
+            let b = tree.get(kid).unwrap().bounds;
+            assert!(b.w >= 0, "宽度不得为负，实为 {}", b.w);
+            assert_eq!(b.w, 0, "margin 吃光可用空间时应收敛到 0");
+        }
     }
 
     #[test]
