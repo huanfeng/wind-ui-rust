@@ -306,6 +306,19 @@ impl Locales {
         LocalesBuilder::default()
     }
 
+    /// 任何一种已加载的语言里有没有这条 key。
+    ///
+    /// 给 [`lint::check_usage`] 用：代码里 `t!("a.b")` 的 key 只要**某个**语言有译文就算
+    /// 有着落（其余语言缺的那份由 [`lint::check`] 管），故这里是"任一"而不是"当前语言"。
+    pub fn has_key(&self, key: &str) -> bool {
+        self.langs.values().any(|d| {
+            d.embedded
+                .iter()
+                .chain(d.external.iter())
+                .any(|t| t.contains_key(key))
+        })
+    }
+
     /// 哪些语言**自己没有** `windui.*` 文案（框架自带的菜单文案会落到回退语言）。
     ///
     /// 这是"日文界面里冒出一份 Cut / Copy / Paste"的成因：回退链正按设计工作，只是框架
@@ -1118,6 +1131,65 @@ other = "{count} files selected"
         // 这条测试红了就去改 `i18n/*.toml`，不是改代码。
         let problems = lint::check(BUILTIN);
         assert!(problems.is_empty(), "内置译文不一致：{problems:#?}");
+    }
+
+    /// 反方向的那一半：库源码里**写出来的**每个 `windui.*` key 都得有译文。
+    ///
+    /// 与下面那张手写清单是一对，缺一不可：
+    /// - 手写清单查「译文里有没有」——删掉一处 `tr!` 调用它照样在查；
+    /// - 这一条查「写出来的对不对」——`tr!("windui.menu.cutt")` 打错一个字母，
+    ///   界面上只会安静地显示 `⟪windui.menu.cutt⟫`，没有任何编译期信号。
+    ///
+    /// 只看 `windui.*` 前缀：`src/` 里其余的 `t!("app.…")` 都是测试各自现装的目录，
+    /// 不属于框架自带文案。
+    #[test]
+    fn framework_keys_written_in_the_source_all_have_translations() {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(Path::new("src"), &mut files);
+        assert!(
+            !files.is_empty(),
+            "扫不到 src/*.rs：测试的工作目录不是 crate 根？"
+        );
+
+        let locales = Locales::default();
+        let mut bad = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for path in files {
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for u in lint::keys_in_source(&src) {
+                if !u.key.starts_with("windui.") {
+                    continue;
+                }
+                seen.insert(u.key.clone());
+                if !locales.has_key(&u.key) {
+                    bad.push(format!("{}:{} `{}`", path.display(), u.line, u.key));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "源码里用了不存在的框架 key：{bad:#?}");
+        // 下限断言：没有它，`keys_in_source` 一旦退化成恒返回空（词法缺陷、或某次重构
+        // 把 `tr!("windui.…")` 藏到一个帮手函数后面），`bad` 恒为空、这条测试永远绿——
+        // 而它存在的全部意义就是盯拼写错误。这正是「测试自证循环」那条教训的形态。
+        assert!(
+            seen.len() >= 8,
+            "只扫到 {} 条 windui.* key：{seen:#?}——扫描器可能瞎了，这条测试就成了摆设",
+            seen.len()
+        );
     }
 
     #[test]
