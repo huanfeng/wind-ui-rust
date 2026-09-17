@@ -30,14 +30,22 @@ const TITLE_INSET_Y: i32 = 3;
 /// 助记字母不从标题文字里解析（`&File` 那套）：中文标题没有可下划线的字母，惯例是
 /// `"文件(F)"` 配 `.mnemonic('F')`——括号里的字母会被画上线，Alt+F 打开它。
 pub struct MenuBarEntry {
-    title: String,
+    title: crate::ui::TextContent,
     mnemonic: Option<char>,
     build: Rc<dyn Fn() -> Vec<MenuItem>>,
 }
 
 impl MenuBarEntry {
     /// 标题 + 项生成器（每次展开调用）。
-    pub fn new(title: impl Into<String>, build: impl Fn() -> Vec<MenuItem> + 'static) -> Self {
+    ///
+    /// 标题收 [`TextContent`](crate::ui::TextContent)：可以是 `&str` / `String` /
+    /// `Signal<String>` / [`t!`](crate::t)，与控件文案同一套规则。菜单栏是自绘的，标题在
+    /// 每次 measure/paint 时现取，于是换语言自动跟随；下拉项由 `build` 每次展开时生成，
+    /// 那里用 `tr!` 即可（同右键菜单）。
+    pub fn new(
+        title: impl Into<crate::ui::TextContent>,
+        build: impl Fn() -> Vec<MenuItem> + 'static,
+    ) -> Self {
         Self {
             title: title.into(),
             mnemonic: None,
@@ -109,7 +117,7 @@ impl Widget for MenuBar {
         let w: i32 = self
             .entries
             .iter()
-            .map(|e| text.measure(&e.title, &ts, None).w + 2 * TITLE_PAD_X)
+            .map(|e| text.measure(&e.title.resolve(), &ts, None).w + 2 * TITLE_PAD_X)
             .sum();
         Size::new(w, style.font_size as i32 + 14)
     }
@@ -131,7 +139,10 @@ impl Widget for MenuBar {
         let mut rects = Vec::with_capacity(self.entries.len());
         let mut x = bounds.x;
         for (i, e) in self.entries.iter().enumerate() {
-            let w = canvas.measure_text(&e.title, &ts).w + 2 * TITLE_PAD_X;
+            // 现取一次，本轮循环里复用：标题可能绑在信号或译文上，同一帧内多处引用
+            // （量宽、画字、助记下划线）必须是同一份值，否则下划线会画错位置。
+            let title = e.title.resolve();
+            let w = canvas.measure_text(&title, &ts).w + 2 * TITLE_PAD_X;
             let r = Rect::new(
                 x,
                 bounds.y + TITLE_INSET_Y,
@@ -159,7 +170,7 @@ impl Widget for MenuBar {
             } else {
                 mt.text(pal)
             };
-            canvas.draw_text(&e.title, r, color, Align::Center, &ts);
+            canvas.draw_text(&title, r, color, Align::Center, &ts);
             // 助记字母下划线（标题居中绘制：先算出文字起点）。只在键盘触达过菜单栏后
             // 才画：一排常驻的下划线会把标题栏搅得很花，而鼠标用户永远用不上它们。
             if !mnemonics {
@@ -167,8 +178,8 @@ impl Widget for MenuBar {
                 x += w;
                 continue;
             }
-            if let Some((pre, ch, _)) = e.mnemonic.and_then(|m| mnemonic_split(&e.title, m)) {
-                let tw = canvas.measure_text(&e.title, &ts).w;
+            if let Some((pre, ch, _)) = e.mnemonic.and_then(|m| mnemonic_split(&title, m)) {
+                let tw = canvas.measure_text(&title, &ts).w;
                 let x0 = r.x + (r.w - tw) / 2 + canvas.measure_text(pre, &ts).w;
                 let cw = canvas.measure_text(ch, &ts).w;
                 let y = r.y + (r.h + style.font_size as i32) / 2 + 1;
@@ -230,6 +241,37 @@ impl Widget for MenuBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 标题跟随换语言：菜单栏是自绘的，标题在每次 measure/paint 时现取。
+    ///
+    /// 判据取**量出来的宽度**而不是标题字符串本身：后者在"构建时就定格成 String"的
+    /// 旧实现里也能对（只要重建控件），唯有同一个控件实例量出不同宽度，才说明它真的
+    /// 每次都去查了当前语言。
+    #[test]
+    fn 标题跟随换语言() {
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[m]\nfile = \"文件\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[m]\nfile = \"File and a much longer title\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let bar = MenuBar::new(vec![MenuBarEntry::new(crate::t!("m.file"), Vec::new)]);
+        let style = Style::default();
+        let mut eng = crate::text::PlatformTextEngine::default();
+        let zh = bar.measure(Size::new(1000, 100), &style, &mut eng).w;
+
+        assert!(crate::i18n::LocaleHandle::new().set("en"));
+        let en = bar.measure(Size::new(1000, 100), &style, &mut eng).w;
+
+        assert!(
+            en > zh,
+            "换成更长的译文后同一个菜单栏应量得更宽（{zh} → {en}）"
+        );
+
+        // 复原线程局部的语言状态，理由见 `platform::tray` 里同名的那一处。
+        crate::i18n::install(crate::i18n::Locales::default());
+    }
 
     #[test]
     fn 助记字母按不分大小写切分标签() {

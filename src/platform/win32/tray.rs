@@ -184,8 +184,14 @@ impl Drop for PopupMenu {
 }
 
 impl TrayState {
-    /// 构建右键菜单。只 `CreatePopupMenu` + `AppendMenuW`，两者都不重入
-    /// `wnd_proc`，故可在持有 `WindowState` 借用期间安全调用。
+    /// 构建右键菜单。可在持有 `WindowState` 借用期间安全调用——但理由比"只调两个 API"
+    /// 长一点，值得写清楚，否则下一个人照着旧注释判断"这里还能加点别的"就会判错：
+    ///
+    /// - `CreatePopupMenu` / `AppendMenuW` 都不重入 `wnd_proc`；
+    /// - 循环里还有 `label.resolve()` 与 `checked.get()`。前者碰 i18n 的 `CURRENT`
+    ///   （debug 下缺 key 还会碰 `WARNED` 并 `log::warn!`），后者碰信号运行时——
+    ///   都是**与 `WindowState` 无关的另外几个 `RefCell`**，且都只在本函数内借完即还，
+    ///   不会与外层那个借用相撞。
     pub(crate) fn build_menu(&self) -> Option<PopupMenu> {
         let hmenu = unsafe { CreatePopupMenu() }.ok()?;
         for (i, it) in self.tray.items.iter().enumerate() {
@@ -207,7 +213,8 @@ impl TrayState {
                     if enabled.is_some_and(|e| !e.get()) {
                         flags |= MF_GRAYED;
                     }
-                    let w = wide_nul(label);
+                    // 现取：标签可能是译文或信号，构建菜单的这一刻才是它该被解析的时候。
+                    let w = wide_nul(&label.resolve());
                     // 命令 id = 序号+1（分隔线不可选，故返回 id 必对应 Action）。
                     unsafe {
                         let _ = AppendMenuW(hmenu, flags, i + 1, PCWSTR(w.as_ptr()));

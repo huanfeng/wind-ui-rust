@@ -246,7 +246,8 @@ impl TrayTarget {
                         let item = unsafe {
                             NSMenuItem::initWithTitle_action_keyEquivalent(
                                 NSMenuItem::alloc(mtm),
-                                &NSString::from_str(label),
+                                // 现取，理由同 win32 侧。
+                                &NSString::from_str(&label.resolve()),
                                 Some(sel!(menuClick:)),
                                 &NSString::from_str(""),
                             )

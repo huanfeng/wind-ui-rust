@@ -46,6 +46,10 @@ heading = "windui 多语言"
 greeting = "你好，{name}！欢迎使用 {product}。"
 ratio = "第 {0} 页，共 {1} 页"
 input_hint = "在这里右键，菜单跟着语言走"
+menu_file = "文件"
+menu_help = "帮助"
+menu_quit = "退出"
+menu_about = "关于"
 sec_named = "命名占位 {{name}} / {{product}}"
 sec_pos = "位置占位 {{0}} / {{1}}"
 sec_plural = "复数：count 选类别"
@@ -69,6 +73,10 @@ heading = "windui internationalization"
 greeting = "Hello {name}! Welcome to {product}."
 ratio = "Page {0} of {1}"
 input_hint = "Right-click here — the menu follows the language"
+menu_file = "File"
+menu_help = "Help"
+menu_quit = "Quit"
+menu_about = "About"
 sec_named = "Named placeholders {{name}} / {{product}}"
 sec_pos = "Positional placeholders {{0}} / {{1}}"
 sec_plural = "Plurals: count picks the category"
@@ -93,6 +101,10 @@ heading = "windui の多言語対応"
 greeting = "こんにちは、{name}さん！{product} へようこそ。"
 ratio = "{1} ページ中 {0} ページ目"
 input_hint = "ここを右クリック — メニューも言語に追従します"
+menu_file = "ファイル"
+menu_help = "ヘルプ"
+menu_quit = "終了"
+menu_about = "このアプリについて"
 sec_named = "名前付きプレースホルダ {{name}} / {{product}}"
 sec_pos = "位置プレースホルダ {{0}} / {{1}}"
 sec_plural = "複数形：count が分類を選ぶ"
@@ -176,43 +188,67 @@ fn main() {
 
     let text = signal(String::new());
 
-    let body = Element::col()
-        .fill()
-        .padding(24)
-        .spacing(18)
-        .bg_role(Role::Bg)
-        .child(
-            Element::label(t!("app.heading"))
-                .font_size(22.0)
-                .font_weight(700)
-                .fg_role(Role::Text)
-                .width_match(),
-        )
-        .child(switcher)
-        .child(Element::divider())
-        .child(section(
-            Element::label(t!("app.sec_named")),
-            Element::label(t!("app.greeting", name = "Ada", product = "windui")),
-        ))
-        .child(section(
-            Element::label(t!("app.sec_pos")),
-            Element::label(t!("app.ratio", 3, 12)),
-        ))
-        .child(section(Element::label(t!("app.sec_plural")), counter))
-        .child(section(
-            Element::label(t!("app.sec_list")),
-            Element::label(t!("app.weekdays", index = 2)),
-        ))
-        .child(section(
-            Element::label(t!("app.input_hint")),
-            Element::text_input(text, "..."),
-        ))
-        .child(
-            Element::label(t!("app.external"))
-                .font_size(12.0)
-                .fg_role(Role::TextSubtle)
-                .width_match(),
-        );
+    // 菜单栏标题走 `t!`：菜单栏是自绘的，标题每帧现取，于是换语言自动跟随。
+    // **下拉项**由这个生成器在每次展开时产出，那里用 `tr!` 当场求值即可——菜单每次
+    // 弹出都重建，定格在那一刻正是对的（同右键菜单、同托盘菜单）。
+    let menu = Element::menu_bar(vec![
+        MenuBarEntry::new(t!("app.menu_file"), || {
+            vec![MenuItem::run(
+                tr!("app.menu_quit"),
+                |ctx| ctx.request_close(),
+                false,
+            )]
+        }),
+        MenuBarEntry::new(t!("app.menu_help"), || {
+            vec![MenuItem::run(
+                tr!("app.menu_about"),
+                |ctx| ctx.toast("windui"),
+                false,
+            )]
+        }),
+    ])
+    .height(28)
+    .padding_xy(4, 0)
+    .bg_role(Role::Surface);
+
+    let body = Element::col().fill().bg_role(Role::Bg).child(menu).child(
+        Element::col()
+            .fill()
+            .padding(24)
+            .spacing(18)
+            .child(
+                Element::label(t!("app.heading"))
+                    .font_size(22.0)
+                    .font_weight(700)
+                    .fg_role(Role::Text)
+                    .width_match(),
+            )
+            .child(switcher)
+            .child(Element::divider())
+            .child(section(
+                Element::label(t!("app.sec_named")),
+                Element::label(t!("app.greeting", name = "Ada", product = "windui")),
+            ))
+            .child(section(
+                Element::label(t!("app.sec_pos")),
+                Element::label(t!("app.ratio", 3, 12)),
+            ))
+            .child(section(Element::label(t!("app.sec_plural")), counter))
+            .child(section(
+                Element::label(t!("app.sec_list")),
+                Element::label(t!("app.weekdays", index = 2)),
+            ))
+            .child(section(
+                Element::label(t!("app.input_hint")),
+                Element::text_input(text, "..."),
+            ))
+            .child(
+                Element::label(t!("app.external"))
+                    .font_size(12.0)
+                    .fg_role(Role::TextSubtle)
+                    .width_match(),
+            ),
+    );
 
     app.screenshot_from_args().content(body).run();
 }

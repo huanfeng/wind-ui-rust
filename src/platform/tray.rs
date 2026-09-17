@@ -251,7 +251,11 @@ pub(crate) fn invoke(cb: Option<&mut TrayFn>) -> Vec<TrayAction> {
 
 pub(crate) enum ItemKind {
     Action {
-        label: String,
+        /// 标签。收 [`TextContent`] 而不是 `String`，于是它能是一条待翻译消息
+        /// （[`t!`](crate::t)）或一个信号——**托盘菜单在每次弹出时才构建**
+        /// （win32 `build_menu`、macOS `pop_menu`），那时才解析，于是换语言下一次
+        /// 右键就是新文案，不必重建整个 `Tray`。
+        label: crate::ui::TextContent,
         /// 勾选态绑定（None=从不打勾）；菜单弹出时读当前值。
         checked: Option<Signal<bool>>,
         /// 禁用态绑定（None=始终可用）；菜单弹出时读当前值，false 则灰显且不可点。
@@ -268,7 +272,13 @@ pub struct TrayMenuItem {
 
 impl TrayMenuItem {
     /// 普通项：点击触发回调。
-    pub fn item(label: impl Into<String>, cb: impl FnMut(&mut TrayCtx) + 'static) -> Self {
+    ///
+    /// 标签可传 `&str` / `String` / `Signal<String>` / [`t!`](crate::t)，与控件文案同一套
+    /// 规则（见 [`TextContent`]）。菜单每次弹出时现取，故信号与语言都自动跟随。
+    pub fn item(
+        label: impl Into<crate::ui::TextContent>,
+        cb: impl FnMut(&mut TrayCtx) + 'static,
+    ) -> Self {
         Self {
             kind: ItemKind::Action {
                 label: label.into(),
@@ -285,7 +295,7 @@ impl TrayMenuItem {
     /// 托盘菜单在 UI 线程构建、勾选态也在 UI 线程的菜单弹出路径上读取，
     /// 把构建好的 `Tray` 搬到别的线程会在编译期就被拦下。
     pub fn check(
-        label: impl Into<String>,
+        label: impl Into<crate::ui::TextContent>,
         checked: Signal<bool>,
         cb: impl FnMut(&mut TrayCtx) + 'static,
     ) -> Self {
@@ -414,6 +424,40 @@ mod tests {
             ],
             "意图按调用顺序累积，且关窗那条自带键"
         );
+    }
+
+    /// 标签是**弹出时现取**而非构建时定格——托盘菜单在应用启动时就建好了，
+    /// 而它可能活到用户换过语言之后。
+    ///
+    /// 本测试钉住的是「存储不提前定格」这一半；另一半（平台在 `build_menu` /
+    /// `pop_menu` 里真的调 `resolve`）要真托盘才验得到，但那一半有编译器兜底：
+    /// `label` 的类型已不是 `String`，忘了解析根本编不过。
+    #[test]
+    fn label_is_taken_when_the_menu_pops_not_when_it_is_built() {
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[tray]\nquit = \"退出\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[tray]\nquit = \"Quit\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let it = TrayMenuItem::item(crate::t!("tray.quit"), |_| {});
+        let ItemKind::Action { label, .. } = &it.kind else {
+            unreachable!("item() 建的就是 Action 项");
+        };
+        assert_eq!(label.resolve(), "退出");
+
+        assert!(crate::i18n::LocaleHandle::new().set("en"));
+        assert_eq!(
+            label.resolve(),
+            "Quit",
+            "换语言后下一次弹出就该是新文案，不必重建整个 Tray"
+        );
+
+        // 复原：`LOCALES`/`CURRENT` 是线程局部的，而 libtest 会复用线程。留一个只装着
+        // `[tray] quit`、语言停在 en 的目录给下一条测试，会让「不 install 就该读到
+        // windui.*」那类断言按调度顺序随机红——最难查的那种 flaky。
+        crate::i18n::install(crate::i18n::Locales::default());
     }
 
     /// 勾选态是**弹出时现读**而非构建时快照：构建完菜单项后翻转信号，
