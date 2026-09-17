@@ -1135,11 +1135,8 @@ impl Tree {
             // 交叉轴上先扣掉子节点自己的 margin 再发约束：不扣的话 `Match` 会量到整条
             // 交叉轴，arrange 再按 margin.left 右移，净效果是**朝末端溢出一个 margin**
             // （表现为卡片盖住旁边的分隔线）。主轴一直是预扣的，这里是补上交叉轴那一半。
-            let cross_child = child_spec(
-                cross_dim,
-                (cross_avail - cm_cross).max(0),
-                cross_unbounded,
-            );
+            let cross_child =
+                child_spec(cross_dim, (cross_avail - cm_cross).max(0), cross_unbounded);
             let (cwspec, chspec) = if horizontal {
                 (main_child, cross_child)
             } else {
