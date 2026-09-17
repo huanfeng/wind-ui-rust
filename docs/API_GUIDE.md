@@ -2295,8 +2295,13 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
   `setting_row_desc` 这类组合构建器在**构建时**就把 `CardTheme` / `FormTheme` 的行高、
   内边距、间距、字号烘进 Element。颜色不受影响（走 `Role` 延迟解析，见 §7），
   但换主题后要尺寸也跟着变，必须重建这棵子树。
-- **`#[non_exhaustive]` 的五个类型**（`MenuItem` / `DropdownItem` / `CheckMenuItem` /
-  `Role` / `Intent`）在下游不能用结构体字面量构造，穷尽 `match` 须留 `_` 兜底。
+- **不支持 RTL（从右向左）排版**：阿拉伯语 / 希伯来语的双向重排没有实现，多行文本是
+  自绘的视觉行布局、按字符切分，接上 RTL 译文会逐字错位。译文文件可以写 `[meta] rtl = true`
+  作为标记（`LocaleInfo::rtl` 读得到），但渲染层不消费它——本库不假装能画对。
+- **多语言的三处已知边界**（详见 §12）：子窗口（`Window::new`）标题不跟随换语言；
+  `tr!` 的产物当场定格、换语言不变（`t!` 才跟随）；复数只看整数，小数复数不在射程内。
+- **`#[non_exhaustive]` 的六个类型**（`MenuItem` / `DropdownItem` / `CheckMenuItem` /
+  `Role` / `Intent` / `TextContent`）在下游不能用结构体字面量构造，穷尽 `match` 须留 `_` 兜底。
   一律走构造器 + builder 链（`MenuItem::run(..).icon(..).danger()`）。
 
 **平台状态**
@@ -2335,6 +2340,108 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 
 ---
 
+## 12. 多语言（i18n）
+
+设计全文见 `docs/i18n-design.md`，可运行示例见 `examples/i18n.rs`。
+
+### 12.1 三分钟接入
+
+```rust
+use windui::prelude::*;
+
+let locales = Locales::builder()
+    .embed(include_str!("../i18n/zh-CN.toml"))  // 内置：编译进二进制
+    .embed(include_str!("../i18n/en.toml"))
+    .load_dir("i18n")                           // 可选：外部覆盖，按 key 压过内置
+    .fallback("en")
+    .initial(Initial::Fixed("zh-CN".into()))    // 默认值；跟随系统写 Initial::System
+    .build();
+
+let mut app = App::new("占位", 560, 520).locales(locales).title(t!("app.title"));
+let lang = app.locale_handle();                 // 克隆进回调，lang.set("en") 即热切换
+```
+
+**不接也能用**：框架自带文案（右键菜单的剪切/复制/粘贴/全选、无边框窗口的系统菜单）内置
+中英两份，默认 `zh-CN`，与没有多语言时的行为逐字相同。
+
+### 12.2 两个宏的分工
+
+| | 产物 | 用在哪 | 换语言 |
+|---|---|---|---|
+| `t!("key", name = v)` | `Message` | 控件参数（任何收 `impl Into<TextContent>` 的位置） | **跟随** |
+| `tr!("key", name = v)` | `String` | `MenuItem` 标签、`ctx.toast`、日志 | 定格不变 |
+
+菜单每次弹出重建，所以用 `tr!` 定格正是对的。反过来把 `tr!` 塞进 `Element::label` 能编过，
+症状只是那条文案不跟随——编译期拦不住，靠 review。
+
+### 12.3 译文格式（TOML）
+
+```toml
+[meta]
+locale   = "zh-CN"      # BCP-47，以此为准（文件名只是提示）
+name     = "简体中文"    # 设置页下拉直接用，省得应用写死一张语言名表
+fallback = "en"         # 可选，覆盖全局 fallback
+
+[menu]
+copy = "复制"
+
+[file]
+moved = "已把 {name} 移到 {dest}"   # 命名占位：译文可调语序而不必动代码
+ratio = "{0} / {1}"                 # 位置占位
+hint  = "写 {{name}} 得到字面花括号"
+
+[file.selected]                     # 复数：值是表不是串
+other = "已选 {count} 个文件"        # 中文只有 other；英文再加一条 one
+
+[calendar]
+weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+```
+
+- 表层级扁平成点路径：`menu.copy`、`file.selected`、`calendar.weekdays`。
+- **含 `other` 子键且值全为字符串的表**判为变体表（复数 / select），否则是命名空间。
+  代价：命名空间里不要用 `other` 当叶子名，要显示"其它"这个词就叫 `other_label`。
+- 保留参数名：`count`（选复数类别）、`select`（选变体）、`index`（取数组下标）。
+- `windui.*` 前缀留给框架自带文案，应用别占用（同名 key 可以覆盖它）。
+
+### 12.4 动态数字：把**值**放信号，别把整句放信号
+
+```rust
+let n = signal(0i64);
+Element::label(t!("file.selected", count = n))   // 计数变了自动刷，换语言也自动刷
+```
+
+`ArgValue` 收 `Signal<String>` / `Signal<i64>`，显示时现取。反例是把**已翻译的整句**
+塞进 `Signal<String>`——那样换语言不跟随，而且每处都要手动重新格式化。
+
+### 12.5 窗口标题与其它"平台持有的字符串"
+
+窗口标题不经 paint，是一次性交给系统的。`App::title(impl Into<TextContent>)` 收的是文案
+载体，宿主每帧比对、变了才重发给系统——于是 `t!` 和 `Signal<String>` 两种都自动跟随。
+`App::new` 的第一个参数仍是建窗那一刻的标题（平台在窗口出现前就要一个字符串）。
+
+**子窗口（`Window::new`）暂不支持**：它的标题在 `WindowRequest` 里是 `String`。
+
+### 12.6 译文一致性靠测试挡
+
+漏 key、占位符改名（`en` 写 `{count}`、`zh-CN` 写 `{num}`）、变体表漏 `other` —— 三种都
+不报错，只在跑到那条路径时显形。`i18n::lint::check` 把它们变成编译-测试期的红：
+
+```rust
+#[test]
+fn translations_stay_in_sync() {
+    let problems = windui::i18n::lint::check(&[
+        include_str!("../i18n/zh-CN.toml"),
+        include_str!("../i18n/en.toml"),
+    ]);
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+```
+
+缺译文的表现也是分档的：debug 下显示 `⟪key⟫` 并 warn 一次，release 下显示 key 本身——
+**都不是空串**，空串在界面上看着像"这里本来就没字"，能瞒过整轮自测。
+
+---
+
 ## 附：模块速查
 
 | 模块 | 内容 |
@@ -2347,10 +2454,11 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 | `windui::spec` | `Align / Axis / Dimension` |
 | `windui::style::Style` | 内联视觉属性 |
 | `windui::theme` | `Theme / Palette / Metrics` + `current()/set_current()` |
+| `windui::i18n` | `Locales / LocaleHandle / Message` + `t!`/`tr!` 宏、`lint::check`（见 §12） |
 | `windui::event` | `Event / PointerEvent / KeyEvent / Key / MenuItem`；`window_state()`（窗口快照）、`window_open(key)`（某个单例窗口开着没有，常驻模式判显隐用它） |
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
 | `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画） |
 | `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.2）、`run_with_tray_ctx*()`、`run_with_hotkey_ctx()` / `run_with_hotkey_ctx_closes()`（热键回调请求的显隐意图 / 关窗键） |
 
-更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口等）。
+更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口、`i18n` 多语言等）。
