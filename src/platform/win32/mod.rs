@@ -1865,6 +1865,15 @@ unsafe extern "system" fn wnd_proc(
             push_window_state(hwnd);
             // 最小化（客户区 0×0）：无可见内容，跳过 resize/重绘，避免 1×1 无效缓冲。
             if wparam.0 as u32 == SIZE_MINIMIZED {
+                // 收进托盘：最小化**已经发生**，这里再把窗口藏掉，任务栏按钮随之消失。
+                //
+                // 放在这条消息上而不是拦下最小化请求，是因为最小化的来源不止自绘标题栏
+                // 那颗按钮：系统标题栏、任务栏点击、Win+Down、Alt+Space 菜单都能触发，
+                // 而它们根本不经过核心层的 WindowOp。代价是会闪一下最小化动画。
+                let hide = state_from(hwnd).is_some_and(|s| s.handler.hide_on_minimize());
+                if hide {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
                 return LRESULT(0);
             }
             // 客户区变化：通知后端调整缓冲（D2D 需 ResizeBuffers；Skia 为懒建无副作用），
@@ -2798,6 +2807,19 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
                     run_window_op(hwnd, Some(WindowOp::Hide));
                 }
             }
+            // 真实可见性说了算。最小化了也算"不可见"：那时用户按托盘图标要的显然是
+            // 把窗口拿回来，而不是把一个已经看不见的窗口再藏一次。
+            tray::TrayAction::Toggle => {
+                if let Some(hwnd) = main {
+                    let visible = IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool();
+                    let op = if visible {
+                        WindowOp::Hide
+                    } else {
+                        WindowOp::Show
+                    };
+                    run_window_op(hwnd, Some(op));
+                }
+            }
             // 位置标记：取队首那个配置建窗（见 `TrayAction::OpenWindow`）。
             tray::TrayAction::OpenWindow => open_callback_window(),
             // 键就在意图里，不必查旁路队列（见 `TrayAction::CloseWindow`）。
@@ -2844,9 +2866,18 @@ pub(crate) fn show_and_activate(hwnd: HWND) {
     unsafe {
         // 先问再显示：`ShowWindow` 之后 `IsWindowVisible` 恒为真，跃迁就无从判断了。
         let was_hidden = !IsWindowVisible(hwnd).as_bool();
+        // 隐藏与最小化是**两个独立的位**，可以同时为真——`hide_on_minimize` 就是这么
+        // 造出来的（先最小化、再 SW_HIDE）。那种复合态下单发 SW_RESTORE 只清得掉最小化，
+        // 窗口仍然是隐藏的：点托盘图标看着毫无反应。所以先显示、再还原。
+        //
+        // 不能图省事换成一句 SW_SHOWNORMAL：它会把最大化过的窗口还原成普通大小，
+        // 用户最大化着收进托盘，再拿回来就缩了。
+        if was_hidden {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
-        } else {
+        } else if !was_hidden {
             let _ = ShowWindow(hwnd, SW_SHOW);
         }
         let _ = SetForegroundWindow(hwnd);

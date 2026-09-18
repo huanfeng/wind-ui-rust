@@ -947,6 +947,18 @@ pub trait AppHandler {
         None
     }
 
+    /// 最小化是否应该改为隐藏窗口（见 [`App::hide_on_minimize`]）。
+    ///
+    /// 平台在**最小化已经发生之后**问（win32 是 `WM_SIZE` 的 `SIZE_MINIMIZED`），
+    /// 而不是拦下最小化请求：最小化的来源不止自绘标题栏那颗按钮，还有系统标题栏、
+    /// 任务栏点击、Win+Down、Alt+Space 菜单——拦请求只堵得住第一种，而"收进托盘"
+    /// 是应用级语义，哪条路进来都该一样。
+    ///
+    /// [`App::hide_on_minimize`]: crate::app::App::hide_on_minimize
+    fn hide_on_minimize(&self) -> bool {
+        false
+    }
+
     /// 窗口标题若与上次推送的不同，返回新标题（平台随即调 `SetWindowTextW` /
     /// `setTitle:`）。**拉取式**：宿主不记"要不要改"，每次问都现算一遍当前标题。
     ///

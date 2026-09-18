@@ -185,6 +185,18 @@ impl TrayTarget {
                     }
                 }
                 TrayAction::Hide => window.orderOut(None),
+                // 真实可见性说了算，应用不必自己记一份（见 `TrayAction::Toggle`）。
+                // 最小化了也算"不可见"：那时按托盘图标要的是把窗口拿回来。
+                TrayAction::Toggle => {
+                    let hidden = !window.isVisible() || window.isMiniaturized();
+                    if hidden {
+                        if let Some(mtm) = MainThreadMarker::new() {
+                            super::window::show_and_activate(&window, mtm);
+                        }
+                    } else {
+                        window.orderOut(None);
+                    }
+                }
                 TrayAction::Quit => {
                     // 截断旁路队列，与 win32 的 `quit_app` 对齐：`break` 只截断**意图**
                     // 队列，而开窗请求的配置在核心层的另一条队列上（`OpenWindow` 只是

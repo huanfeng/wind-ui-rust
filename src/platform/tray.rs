@@ -121,6 +121,12 @@ pub enum TrayAction {
     Show,
     /// 隐藏窗口（最小化到托盘），进程继续存活。
     Hide,
+    /// 在显示与隐藏之间切换，由**平台层**按窗口当前的真实可见性决定往哪边走。
+    ///
+    /// 为什么不让应用自己记一个 bool：窗口可以从应用不经手的地方隐去——最小化到托盘
+    /// （`App::hide_on_minimize`）、用户点任务栏、Win+D 显示桌面。应用记的那份状态
+    /// 会跟真实情况岔开，症状是"最小化之后点托盘图标没反应，要点两下才出来"。
+    Toggle,
     /// 退出应用。**刻意绕过 `hide_on_close`**——托盘退出是常驻工具的唯一真实出口，
     /// 若也转成隐藏，开了关闭转隐藏的应用将永远退不掉。
     Quit,
@@ -173,6 +179,13 @@ impl TrayCtx {
     /// 隐藏窗口（最小化到托盘）。
     pub fn hide_window(&mut self) {
         self.actions.push(TrayAction::Hide);
+    }
+    /// 在显示与隐藏之间切换（左键单击最常见的用法）。
+    ///
+    /// 由平台按窗口此刻**真实的**可见性决定往哪边走，应用不必自己记——见
+    /// [`TrayAction::Toggle`]。
+    pub fn toggle_window(&mut self) {
+        self.actions.push(TrayAction::Toggle);
     }
     /// 退出应用。
     pub fn quit(&mut self) {

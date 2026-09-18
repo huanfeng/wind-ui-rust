@@ -967,6 +967,10 @@ pub struct App {
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
+    /// 最小化转为隐藏窗口（收进托盘）。与 `hide_on_close` 不同，这一项**平台层要问**
+    /// （`UiHost::hide_on_minimize`）：最小化可以由系统标题栏、任务栏、Win+Down 触发，
+    /// 那些路径根本不经过核心层。
+    hide_on_minimize: bool,
     /// 用户是否经 `App::bg` 显式指定了窗口背景（是 → 固定色；否 → 清屏色随主题
     /// palette.bg 热切换，修"切暗色主题后清屏仍是亮色底"）。
     bg_explicit: bool,
@@ -1025,6 +1029,7 @@ impl App {
             start_window: None,
             system_theme: None,
             hide_on_close: false,
+            hide_on_minimize: false,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
             title_src: None,
@@ -1590,6 +1595,25 @@ impl App {
     /// # Panics
     ///
     /// debug 期，若既无托盘图标也无全局热键则 panic：窗口一旦被隐藏就再也无法唤起。
+    /// 最小化转为隐藏窗口：窗口从任务栏消失，只留托盘图标。
+    ///
+    /// 与 [`hide_on_close`](Self::hide_on_close) 并列，管的是另一颗按钮。二者都开着
+    /// 才是常见的托盘应用形态：最小化收起来、关闭也收起来，真退出走托盘菜单。
+    ///
+    /// 实现上是**最小化发生之后再隐藏**，不是拦下最小化：最小化的来源不止自绘标题栏
+    /// 那颗按钮，还有系统标题栏、任务栏点击、Win+Down、Alt+Space 菜单。拦请求只堵得住
+    /// 第一种，而"收进托盘"是应用级语义，哪条路进来都该一样。代价是会闪一下最小化
+    /// 动画——Windows 上的托盘应用普遍如此。
+    ///
+    /// # Panics
+    ///
+    /// debug 期，若既无托盘图标也无全局热键则 panic：窗口一旦被隐藏就再也无法唤起，
+    /// 同 [`start_hidden`](Self::start_hidden)。
+    pub fn hide_on_minimize(mut self) -> Self {
+        self.hide_on_minimize = true;
+        self
+    }
+
     pub fn hide_on_close(mut self) -> Self {
         self.hide_on_close = true;
         self
@@ -2070,6 +2094,7 @@ impl App {
             // 而**子窗口**那条构造路径（`build_new_window`）并不支持标题来源，多一个
             // 恒为 `None` 的参数只会让两处都更难读。
             host.title_src = self.title_src;
+            host.hide_on_minimize = self.hide_on_minimize;
             Box::new(host)
         } else {
             Box::new(ClosureHandler {
@@ -2100,6 +2125,7 @@ impl App {
             self.hide_on_close,
         );
         host.title_src = self.title_src;
+        host.hide_on_minimize = self.hide_on_minimize;
         host
     }
 
@@ -2256,6 +2282,9 @@ struct UiHost {
     system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
+    /// 最小化转为隐藏窗口。平台层经 `UiHost::hide_on_minimize` 拉取——最小化可以从
+    /// 系统标题栏、任务栏、Win+Down 进来，那些路径不经过核心层。
+    hide_on_minimize: bool,
     /// 正在跑关闭决策链（防 `on_close_request` 回调内再请求关闭导致的自我递归）。
     resolving_close: bool,
     /// 待创建的子窗口（`ctx.open_window` 排入，平台在事件分发完全返回后取走）。
@@ -2488,6 +2517,8 @@ impl UiHost {
             shortcut,
             system_theme,
             hide_on_close,
+            // 参数表已经有 12 个位置参数，这一项跟 `title_src` 一样建完再塞
+            hide_on_minimize: false,
             resolving_close: false,
             pending_windows: Vec::new(),
             scope: None,
@@ -3464,6 +3495,10 @@ impl AppHandler for UiHost {
         self.pending_window_op.take()
     }
 
+    fn hide_on_minimize(&self) -> bool {
+        self.hide_on_minimize
+    }
+
     /// 现算标题并与上次推送的比对（契约见 [`AppHandler::take_window_title`]）。
     ///
     /// 比对是必须的：平台每次事件与每帧都问，而 `SetWindowTextW` 不是免费的——它会同步
@@ -3924,6 +3959,29 @@ mod tests {
         assert!(
             host.take_dialog_request().is_none(),
             "队列已取空，不应重复交付"
+        );
+    }
+
+    /// hide_on_minimize 是**拉取式**的：平台层在 WM_SIZE/SIZE_MINIMIZED 里问一次，
+    /// 而不是像 hide_on_close 那样留一条 WindowOp 意图。
+    ///
+    /// 两者形状不同是有理由的：关闭必经核心层的决策链（`on_close_request`），最小化
+    /// 却可以从系统标题栏、任务栏、Win+Down 直接进来，核心层根本不在场。
+    #[test]
+    fn hide_on_minimize_is_pulled_by_platform() {
+        let app = App::new("t", 100, 100).content(Element::col());
+        let host = app.into_handler_for_test();
+        assert!(!host.hide_on_minimize(), "默认不该改最小化的行为");
+
+        let app = App::new("t", 100, 100)
+            .hide_on_minimize()
+            .content(Element::col());
+        let mut host = app.into_handler_for_test();
+        assert!(host.hide_on_minimize());
+        assert_eq!(
+            host.take_window_op(),
+            None,
+            "它不排意图——排了平台就会在最小化之外又隐藏一次"
         );
     }
 
