@@ -392,7 +392,10 @@ unsafe extern "system" fn app_host_proc(
         WM_NCCREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as isize);
+                // `SetWindowLongPtrW` is exposed as `SetWindowLongW` on x86 by
+                // the windows crate, so let the target-specific API choose the
+                // integer width for this pointer-sized user-data slot.
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -1804,7 +1807,9 @@ unsafe extern "system" fn wnd_proc(
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
                 let state_ptr = (*cs).lpCreateParams as isize;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr);
+                // The windows crate maps this API to the x86 `LONG` variant on
+                // 32-bit targets; the pointer is already target-sized here.
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
