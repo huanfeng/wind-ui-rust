@@ -813,6 +813,14 @@ pub struct MenuItem {
     pub enabled: bool,
     /// 当前选中项（下拉用，渲染勾选标记）。
     pub checked: bool,
+    /// 这一项**是个开关**（不管此刻勾没勾）。由 [`check`](MenuItem::check) 置位，
+    /// 或由 [`run`](MenuItem::run) 的 `checked = true` 推出来。
+    ///
+    /// 与 `checked` 分开，是因为勾选列的宽度不能随勾选态变：面板宽度在菜单**打开
+    /// 那一刻**就定死了（见 `ContextMenu::refresh_items` 的"保留 rect"），粘滞菜单
+    /// 里点一下开关就重算列宽的话，标签会集体右移到面板装不下的地方去。
+    /// 按"是不是开关"预留，一次打开内就稳定了。
+    pub checkable: bool,
     /// 前置图标（字符/emoji，None=无图标列）。
     pub icon: Option<String>,
     /// 尾随快捷键文本（如 "⌘C"）。submenu 非空时显示右箭头优先。
@@ -880,6 +888,7 @@ impl MenuItem {
             action,
             enabled: true,
             checked: false,
+            checkable: false,
             icon: None,
             shortcut: None,
             separator: false,
@@ -911,6 +920,9 @@ impl MenuItem {
         Self {
             label: label.into(),
             checked,
+            // 这条构造只给"当前勾没勾"，推不出"是不是开关"。勾着的必然要留位；
+            // 没勾的一律当普通动作项——真开关请改用 `.check(..)` 显式声明。
+            checkable: checked,
             ..Self::base(MenuAction::Run(std::rc::Rc::new(f)))
         }
     }
@@ -949,9 +961,14 @@ impl MenuItem {
         self.shortcut = Some(s.into());
         self
     }
-    /// 设置选中勾。
+    /// 声明这是个开关项，并给出它此刻的勾选态。
+    ///
+    /// 传 `false` 也算声明：菜单会照样为它留出勾选列，于是同一个菜单里勾与不勾的
+    /// 项标签对得齐，翻转开关时也不会整列跳动（见 [`checkable`](MenuItem::checkable)）。
+    /// 不想留位的纯动作项，就别调这个方法。
     pub fn check(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self.checkable = true;
         self
     }
     /// 设置第二行小字说明（该项渲染为两行，行高变高）。

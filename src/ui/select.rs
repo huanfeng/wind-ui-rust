@@ -607,6 +607,10 @@ impl CheckMenu {
                     enabled,
                 } => {
                     let (st, cb) = (*state, on_change.clone());
+                    // 勾选态走 `.check(..)` 而不是 `run` 的第三个参数：那个参数只说
+                    // "此刻勾没勾"，全部未勾的下拉就不会为勾选列留位，用户点上第一项
+                    // 时标签会整体右移到面板装不下的地方（面板宽度打开时就定死了）。
+                    // `.check` 同时声明"这是个开关"，位子一开始就留好。
                     let mut mi = MenuItem::run(
                         label.clone(),
                         move |ctx| {
@@ -616,8 +620,9 @@ impl CheckMenu {
                                 f(ctx, v);
                             }
                         },
-                        st.get(),
-                    );
+                        false,
+                    )
+                    .check(st.get());
                     if stay_open {
                         mi = mi.stay_open();
                     }
@@ -799,6 +804,14 @@ mod tests {
         assert!(built[1].separator);
         assert!(built[2].checked, "checked 取自 Signal 当前值");
         assert!(!built[3].stay_open, "动作项恒为点击即关");
+        // 开关项**不论勾没勾**都要声明 checkable：菜单据此在打开那一刻就为勾选列
+        // 留位。少了它，全部未勾的下拉在用户点上第一项时标签会整体右移，而面板
+        // 宽度是打开时定死的（见 `ContextMenu::refresh_items`）。
+        assert!(
+            built[0].checkable && built[2].checkable,
+            "开关项要留出勾选列的位子，与此刻勾没勾无关"
+        );
+        assert!(!built[3].checkable, "纯动作项不占这一列");
 
         // 触发开关项的动作 → Signal 翻转；重建后 checked 随之刷新（rebuild 的作用）。
         run_action(&built[0]);

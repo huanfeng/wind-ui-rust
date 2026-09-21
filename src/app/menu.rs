@@ -31,6 +31,12 @@ const MENU_MAX_H: i32 = 320;
 const MENU_FONT: f32 = 13.5;
 /// 图标列宽（有图标项时预留），也用作尾随可点击图标的命中/绘制列宽。
 pub(super) const MENU_ICON_W: i32 = 18;
+/// 勾选列的宽度（对勾画在这里，在图标列之前）。
+///
+/// 对勾**必须**有自己的一列，不能挤在尾随区里：那里已经被子菜单箭头与快捷键占着，
+/// 而"有快捷键的开关项"恰恰是最常见的一种。放在尾随区的后果是它永远排不上号，
+/// 开关态只剩靠文字变色表达——那既不是原生菜单的习惯，也让人分不清"开着"和"指着"。
+const MENU_CHECK_W: i32 = 16;
 /// 图标与标签间距。
 const MENU_GAP: i32 = 8;
 /// 标签与尾随（快捷键/箭头）间最小间距。
@@ -89,6 +95,12 @@ pub(super) struct MenuLevel {
     pub(super) rect: Rect,
     pub(super) hover: Option<usize>,
     pub(super) has_icons: bool,
+    /// 本级是否有**开关项**——有就为整级让出一列，标签统一右移，勾与不勾的项对得齐。
+    ///
+    /// 按 `checkable`（是不是开关）而不是 `checked`（此刻勾没勾）判定：面板宽度在
+    /// 打开那一刻定死、刷新不改（见 [`ContextMenu::refresh_items`]），随勾选态
+    /// 增删这一列的话，粘滞菜单里点一下开关标签就会右移到装不下的地方。
+    pub(super) has_checks: bool,
     /// 该级由父级哪一项展开（根级为 None）；用于避免同项重复重建子菜单。
     pub(super) spawn: Option<usize>,
     /// 项内容总高（含上下内边距，未截断）；超出 rect.h 时启用滚动。
@@ -201,6 +213,27 @@ pub(super) struct ContextMenu {
     pub(super) click_through: bool,
 }
 
+impl MenuLevel {
+    /// 本级标签的起始 x（面板左沿 + [`label_offset`]）。
+    ///
+    /// 有了它，绘制处就不必自己把两个同型 `bool` 按顺序摆进去——那两个参数接反了
+    /// 照样编译，错只体现在像素上。
+    fn label_x(&self) -> i32 {
+        self.rect.x + label_offset(self.has_checks, self.has_icons)
+    }
+
+    /// 勾选列之后、图标列所在的 x。
+    fn icon_x(&self) -> i32 {
+        self.rect.x
+            + MENU_PAD_X
+            + if self.has_checks {
+                MENU_CHECK_W + MENU_GAP
+            } else {
+                0
+            }
+    }
+}
+
 impl ContextMenu {
     /// 命中点落在最深（最上层）的哪一级面板内。
     fn level_at(&self, p: Point) -> Option<usize> {
@@ -231,6 +264,9 @@ impl ContextMenu {
                 s
             });
             self.levels[k].has_icons = items.iter().any(|it| it.icon.is_some());
+            // 只增不减：宽度是按打开时那一刻算的，这里把列收掉会让标签左移、
+            // 右边多出一截空白；而万一重建后冒出了新的开关项，列还是得有。
+            self.levels[k].has_checks |= items.iter().any(|it| it.checkable);
             self.levels[k].content_h =
                 items.iter().map(menu_item_height).sum::<i32>() + 2 * MENU_VPAD;
             self.levels[k].items = items;
@@ -248,6 +284,20 @@ impl ContextMenu {
         }
         self.levels.truncate(keep);
     }
+}
+
+/// 标签相对面板左沿的偏移：内边距 + 勾选列 + 图标列。
+///
+/// 自由函数而不是内联在绘制里：测量（`level_width`）与绘制（`paint`）必须给出同一个
+/// 数，加一列却只改了其中一头的话，表现是标签压住快捷键——那种错看截图才发现得了。
+fn label_offset(has_checks: bool, has_icons: bool) -> i32 {
+    MENU_PAD_X
+        + if has_checks {
+            MENU_CHECK_W + MENU_GAP
+        } else {
+            0
+        }
+        + if has_icons { MENU_ICON_W + MENU_GAP } else { 0 }
 }
 
 /// 菜单滚动条鼠标拖拽状态。
@@ -310,9 +360,11 @@ impl MenuHost {
 }
 
 impl UiHost {
-    /// 测量一组菜单项所需面板宽度（图标列 + 标签 + 尾随快捷键/箭头）及是否含图标列。
-    fn level_width(&mut self, items: &[MenuItem], min_width: i32) -> (i32, bool) {
+    /// 测量一组菜单项所需面板宽度（勾选列 + 图标列 + 标签 + 尾随快捷键/箭头），
+    /// 并返回这一级要不要那两个前置列。
+    fn level_width(&mut self, items: &[MenuItem], min_width: i32) -> (i32, bool, bool) {
         let has_icons = items.iter().any(|it| it.icon.is_some());
+        let has_checks = items.iter().any(|it| it.checkable);
         let mut max_label = 0;
         let mut max_trail = 0;
         for it in items {
@@ -337,8 +389,6 @@ impl UiHost {
                 self.engine
                     .measure(s, &TextStyle::new(MENU_FONT - 2.0), None)
                     .w
-            } else if it.checked {
-                12
             } else {
                 0
             };
@@ -353,15 +403,20 @@ impl UiHost {
             max_trail = max_trail.max(total);
         }
         let icon_w = if has_icons { MENU_ICON_W + MENU_GAP } else { 0 };
+        let check_w = if has_checks {
+            MENU_CHECK_W + MENU_GAP
+        } else {
+            0
+        };
         let trail_w = if max_trail > 0 {
             MENU_TRAIL_GAP + max_trail
         } else {
             0
         };
-        let w = (MENU_PAD_X + icon_w + max_label + trail_w + MENU_PAD_X)
+        let w = (MENU_PAD_X + check_w + icon_w + max_label + trail_w + MENU_PAD_X)
             .max(MENU_MIN_W)
             .max(min_width);
-        (w, has_icons)
+        (w, has_icons, has_checks)
     }
 
     /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻；
@@ -387,7 +442,7 @@ impl UiHost {
         // 与各级子菜单——都经过这里，故规范化对整棵菜单生效。
         let mut items = items;
         normalize_separators(&mut items);
-        let (w, has_icons) = self.level_width(&items, min_width);
+        let (w, has_icons, has_checks) = self.level_width(&items, min_width);
         let body: i32 = items.iter().map(menu_item_height).sum();
         let content_h = body + 2 * MENU_VPAD;
         let ws = self.logical_size;
@@ -465,6 +520,7 @@ impl UiHost {
             rect: Rect::new(x, y, w, h),
             hover: None,
             has_icons,
+            has_checks,
             spawn: None,
             content_h,
             scroll: initial_scroll,
@@ -1316,13 +1372,7 @@ impl MenuHost {
                 &Paint::fill(mt.border(pal)),
             );
             let child_spawn = menu.levels.get(li + 1).and_then(|l| l.spawn);
-            let label_x = r.x
-                + MENU_PAD_X
-                + if level.has_icons {
-                    MENU_ICON_W + MENU_GAP
-                } else {
-                    0
-                };
+            let label_x = level.label_x();
             // 裁剪到内缩矩形（`item_clip` 同时是命中判据，见其文档）：上下各留
             // MENU_VPAD 像素，使条目在触达圆角边框前自然裁切（scroll=0 时第一项
             // 恰在裁剪边界，滚动时产生平滑"滚出"效果）。
@@ -1358,12 +1408,23 @@ impl MenuHost {
                 let color = match (it.enabled, it.intent) {
                     (false, _) => mt.text_disabled(pal),
                     (true, Some(intent)) => intent.badge_colors(pal).1,
-                    _ if active || it.checked => mt.accent(pal),
+                    _ if active => mt.accent(pal),
                     _ => mt.text(pal),
                 };
+                // 勾选列（在图标列之前）。整级一旦有勾选项就恒占这一列，未勾的项在
+                // 这里留白——让所有标签左沿对齐，而不是勾一个缩一格。
+                if level.has_checks && it.checked {
+                    canvas.draw_text(
+                        "\u{2713}",
+                        Rect::new(r.x + MENU_PAD_X, top, MENU_CHECK_W, h),
+                        if it.enabled { mt.accent(pal) } else { color },
+                        crate::spec::Align::Center,
+                        &TextStyle::new(MENU_FONT),
+                    );
+                }
                 // 图标列。
                 if let Some(icon) = &it.icon {
-                    let ir = Rect::new(r.x + MENU_PAD_X, top, MENU_ICON_W, h);
+                    let ir = Rect::new(level.icon_x(), top, MENU_ICON_W, h);
                     canvas.draw_text(
                         icon,
                         ir,
@@ -1465,14 +1526,6 @@ impl MenuHost {
                         crate::spec::Align::End,
                         &TextStyle::new(MENU_FONT - 2.0),
                     );
-                } else if it.checked {
-                    canvas.draw_text(
-                        "\u{2713}",
-                        tr,
-                        mt.accent(pal),
-                        crate::spec::Align::End,
-                        &TextStyle::new(MENU_FONT),
-                    );
                 }
             }
             canvas.restore();
@@ -1559,6 +1612,7 @@ mod tests {
             rect: Rect::new(40, 100, 160, 5 * MENU_ITEM_H + 2 * MENU_VPAD),
             hover: None,
             has_icons: false,
+            has_checks: false,
             spawn: None,
             content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
             scroll: 0,
@@ -1601,6 +1655,7 @@ mod tests {
             rect: Rect::new(40, 100, 160, 5 * MENU_ITEM_H + 2 * MENU_VPAD),
             hover: None,
             has_icons: false,
+            has_checks: false,
             spawn: None,
             content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
             // 滚半行：行边界落在边带内部，两条边带底下都确实压着行。
@@ -1761,6 +1816,67 @@ mod tests {
         click!(2);
         assert!(ran.get(), "动作项应执行");
         assert!(app.menu.active.is_none(), "动作项点击后菜单须关闭");
+    }
+
+    /// 勾选列的核心回归，两条各管一头。
+    ///
+    /// **一、带快捷键的开关项也得有对勾。** 原先对勾画在尾随区，与子菜单箭头、
+    /// 快捷键同处一条 `else if` 链上，于是「显示隐藏文件 Ctrl+H」这种最典型的开关
+    /// 永远轮不到画勾，开关态只剩文字变色。现在它有自己的前置一列。
+    ///
+    /// **二、这一列的有无不能随勾选态变。** 面板宽度在菜单打开那一刻定死、刷新
+    /// 不改（见 `ContextMenu::refresh_items`）。若按"此刻勾没勾"决定让不让列，
+    /// 粘滞菜单里点一下开关，标签就会集体右移 24 像素到面板装不下的地方去。
+    /// 所以判据是 `checkable`（是不是开关），不是 `checked`。
+    #[test]
+    fn checked_items_get_a_leading_gutter_even_with_shortcuts() {
+        // 绘制侧的判据，原样复刻
+        let has_checks = |v: &[MenuItem]| v.iter().any(|it| it.checkable);
+
+        let plain = vec![
+            MenuItem::run("打开", |_| {}, false).shortcut("Enter"),
+            MenuItem::run("关闭", |_| {}, false).shortcut("Ctrl+W"),
+        ];
+        assert!(!has_checks(&plain), "纯动作项不该白占一列");
+
+        let toggles = vec![
+            MenuItem::run("显示隐藏文件", |_| {}, false)
+                .shortcut("Ctrl+H")
+                .check(true),
+            MenuItem::run("快速预览", |_| {}, false)
+                .shortcut("Ctrl+Q")
+                .check(false),
+        ];
+        assert!(has_checks(&toggles), "有快捷键不妨碍它是开关项");
+        assert!(
+            toggles.iter().all(|it| it.checkable),
+            "check(false) 也是在声明开关，同样要留位——否则同一菜单里勾与不勾的标签对不齐"
+        );
+
+        // 全部翻到关：列必须还在，否则标签会整体左移、面板右边空出一截
+        let all_off: Vec<MenuItem> = toggles.iter().cloned().map(|it| it.check(false)).collect();
+        assert!(all_off.iter().all(|it| !it.checked));
+        assert!(has_checks(&all_off), "开关全关时这一列仍要留着");
+
+        // `run(.., true)` 这条老路推不出"是不是开关"，只能按"勾着的必然要留位"处理
+        assert!(MenuItem::run("详细信息", |_| {}, true).checkable);
+        assert!(!MenuItem::run("复制", |_| {}, false).checkable);
+
+        // 让出的这一列是实打实的偏移，且与图标列相加而不是相互顶掉
+        let bare = label_offset(false, false);
+        let checked_only = label_offset(true, false);
+        let icon_only = label_offset(false, true);
+        let both = label_offset(true, true);
+        assert!(checked_only > bare, "有开关项就得让出一列");
+        assert_eq!(
+            both - icon_only,
+            checked_only - bare,
+            "勾选列宽度与有没有图标列无关"
+        );
+        assert!(
+            both > icon_only && both > checked_only,
+            "两列并存，不是二选一"
+        );
     }
 
     /// 回调签名立法的核心回归：菜单项动作拿得到真正的 `EventCtx`，且它请求的副作用
@@ -1963,6 +2079,7 @@ mod tests {
             rect: Rect::new(0, 0, 100, 100),
             hover: None,
             has_icons: false,
+            has_checks: false,
             spawn,
             content_h: 0,
             scroll: 0,
@@ -2004,7 +2121,7 @@ mod tests {
         let pick = |it: &MenuItem, active: bool| match (it.enabled, it.intent) {
             (false, _) => pal.text_disabled,
             (true, Some(i)) => i.badge_colors(&pal).1,
-            _ if active || it.checked => pal.accent,
+            _ if active => pal.accent,
             _ => pal.text,
         };
         let del = MenuItem::run("删除", |_ctx| {}, false).danger();
