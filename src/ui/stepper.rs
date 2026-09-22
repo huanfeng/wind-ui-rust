@@ -836,7 +836,11 @@ mod tests {
         // 按在「+」按钮正中（最右 BTN_W 宽的一格）。
         let plus_x = W - BTN_W / 2;
         tree.dispatch_pointer(
-            PointerEvent::single(PointerKind::Down, Point::new(plus_x, H / 2), MouseButton::Left),
+            PointerEvent::single(
+                PointerKind::Down,
+                Point::new(plus_x, H / 2),
+                MouseButton::Left,
+            ),
             &mut None,
             &mut None,
         );
@@ -854,7 +858,10 @@ mod tests {
         let before = value.get();
 
         // 越过等待期后的一帧：应当步进，且脏区盖住整个控件。
-        paint_frame(1_000 + REPEAT_DELAY_MS + REPEAT_INTERVAL_SLOW_MS + 10, &mut pm);
+        paint_frame(
+            1_000 + REPEAT_DELAY_MS + REPEAT_INTERVAL_SLOW_MS + 10,
+            &mut pm,
+        );
         assert!(
             value.get() > before,
             "前提不成立：越过等待期后应当步进（{before} -> {}）",
@@ -915,7 +922,11 @@ mod tests {
         // 「谁来写 whole」写错也照样绿。
         tree.layout_root(Size::new(W1, H), &mut crate::text::NullTextEngine);
         tree.dispatch_pointer(
-            PointerEvent::single(PointerKind::Down, Point::new(BTN_W / 2, H / 2), MouseButton::Left),
+            PointerEvent::single(
+                PointerKind::Down,
+                Point::new(BTN_W / 2, H / 2),
+                MouseButton::Left,
+            ),
             &mut None,
             &mut None,
         );
@@ -984,7 +995,11 @@ mod tests {
 
         // 点中部数字框取得焦点（± 按钮刻意不请求焦点，故必须点中间那格）。
         let hit = tree.dispatch_pointer(
-            PointerEvent::single(PointerKind::Down, Point::new(W / 2, H / 2), MouseButton::Left),
+            PointerEvent::single(
+                PointerKind::Down,
+                Point::new(W / 2, H / 2),
+                MouseButton::Left,
+            ),
             &mut None,
             &mut None,
         );

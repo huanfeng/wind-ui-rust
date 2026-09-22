@@ -1140,6 +1140,16 @@ impl ContentView {
             // 脏区那一块。只有**新建**的缓冲要在这里清一次：它的内容是透明黑，而宿主
             // 未必立刻走全窗帧。
             let fresh = st.ensure_pixmap(pw, ph);
+            // 缓冲刚重建：内容不完整，必须让宿主本帧画**整窗**（对照 win32 的同名分支）。
+            // 少了这一步，窗口纯缩放（backingScaleFactor 不变，走不到 `set_scale`）时宿主
+            // 手里若还有小脏区（光标闪烁就够），就会只画脏区，整张 CGImage 上屏后除脏区
+            // 外全是纯底色；GPU 降级到软路径的第一帧同理。
+            //
+            // 这是全框架唯一的「缓冲尺寸变了 → 必须整窗」闸门：宿主自己不与上一帧比对
+            // 尺寸，`AppHandler` 也没有 on_resize。
+            if fresh {
+                st.handler.request_full_frame();
+            }
             let bg = st.handler.bg().unwrap_or(st.bg);
             let pixmap = st.pixmap.as_mut().unwrap();
             if fresh {

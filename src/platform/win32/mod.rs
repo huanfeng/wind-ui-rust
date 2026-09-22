@@ -1,7 +1,8 @@
 //! Win32 窗口、消息循环与 GDI 呈现。
 //!
-//! 渲染全在 CPU：单份 tiny-skia `Pixmap`（RGBA 预乘）作后备缓冲；呈现时原地
-//! R/B 交换为 BGRA 后 `SetDIBitsToDevice` 直接拷屏。空闲时阻塞在 `GetMessageW`，零 CPU。
+//! 渲染全在 CPU：单份 tiny-skia `Pixmap`（RGBA 预乘、跨帧持久）作绘制目标；呈现时
+//! 「拷贝 + R/B 交换」进一块 BGRA 上传缓冲，再 `SetDIBitsToDevice` 拷屏。不在 pixmap 上
+//! 原地交换，是因为宿主的局部重绘要靠它保存上一帧画面。空闲时阻塞在 `GetMessageW`，零 CPU。
 
 pub mod clipboard;
 #[cfg(feature = "d2d")]
@@ -807,9 +808,11 @@ struct SkiaBackend {
     ///
     /// 不在 `pixmap` 上原地交换，是因为那会把它毁成 BGRA，宿主就拿不到「上一帧的 RGBA
     /// 画面」来重建局部帧未变的区域，只能自己再整窗拷一份（旧实现的 `DamageState::back`）。
-    /// 于是每个整窗帧要走两趟 8MB 级遍历：拷贝一趟、原地交换一趟。合成一趟（拷贝时顺带
-    /// 交换）后内存流量减半——1920×1080（物理 2880×1676）实测 seed_back 2.9ms + 原地交换
-    /// 2.5ms ≈ 5.4ms 降到约 2.5ms。
+    ///
+    /// **这么改不是为了快**：1920×1080（物理 2880×1676）实测，删掉的 seed_back（稳态
+    /// 1.2ms）恰好被这里新增的拷贝开销抵消（原地交换 2.7ms → 拷贝+交换 3.9ms，差值来自
+    /// write-allocate 的额外写流量）。Windows 上持平，macOS 因为本就不交换只有「删掉」
+    /// 没有「新增」，净省约 0.5ms。保留的理由是少一层中转，不是速度。
     upload: Vec<u8>,
     buf_w: i32,
     buf_h: i32,
@@ -1148,6 +1151,13 @@ impl WindowState {
 ///
 /// `r` 由调用方钳进缓冲边界；这里再取一次交集兜底，避免越界 panic。
 fn copy_swap_rect(src: &[u8], dst: &mut [u8], buf_w: i32, r: Rect) {
+    // 行数只由 `src` 推算，`dst` 更短的话下面会越界 panic。当前由 `ensure` 两块一起
+    // 重建保证同长——这是不变量，不是兜底，所以在这里钉住。
+    debug_assert_eq!(
+        src.len(),
+        dst.len(),
+        "上传缓冲与 pixmap 必须同尺寸同 stride"
+    );
     let stride = buf_w as usize * 4;
     let rows = (src.len() / stride.max(1)) as i32;
     let r = r.intersect(&Rect::new(0, 0, buf_w, rows));
@@ -1164,8 +1174,9 @@ fn copy_swap_rect(src: &[u8], dst: &mut [u8], buf_w: i32, r: Rect) {
 /// 把一段 RGBA 拷进 BGRA（交换 R/B），供 GDI 直接呈现。两片长度须相等。
 ///
 /// **按 u32 整字做位运算，不要逐字节 shuffle**：`d[0]=s[2]; d[1]=s[1]; …` 那种写法
-/// LLVM 向量化不了，1920×1080（物理 2880×1676）实测要 7ms，而位运算版约 2.5ms——
-/// 同一件事差了近三倍，而这条是每帧必经的路径。
+/// LLVM 向量化不了。1920×1080（物理 2880×1676）实测三种写法：逐字节 shuffle 7.0ms、
+/// `u32::from_ne_bytes` 从 slice 逐字节组装 12.0ms（最差）、裸指针 u32 读写 3.9ms——
+/// 同一件事差了三倍，而这条是每帧必经的路径，写法不能随手挑。
 fn copy_swap_range(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
     let n = src.len() / 4;
@@ -3771,7 +3782,11 @@ mod live_windows_tests {
         // 第一帧整窗：整张搬过去。
         copy_swap_rect(&pixmap, &mut upload, W, Rect::new(0, 0, W, H));
         for (u, p) in upload.chunks_exact(4).zip(pixmap.chunks_exact(4)) {
-            assert_eq!(u, swapped(p), "整窗帧后 upload 应逐像素等于 pixmap 的 R/B 交换");
+            assert_eq!(
+                u,
+                swapped(p),
+                "整窗帧后 upload 应逐像素等于 pixmap 的 R/B 交换"
+            );
         }
 
         // 第二帧局部：宿主只把脏矩形改成另一种颜色（R 与 B 差别最大，搬错立刻显形）。
@@ -3815,25 +3830,75 @@ mod live_windows_tests {
         }
     }
 
-    /// 越界的脏矩形只做交集，不得 panic。
+    /// 越界的脏矩形只做交集：不得 panic，且**钳后写的仍是正确的那几个像素**。
     ///
     /// 上游把脏区钳进缓冲边界是常态，但 `copy_swap_rect` 直接对切片下标，钳漏一次
     /// 就是越界 panic——真窗口上表现为缩放窗口时偶发崩溃。故自己再兜一层。
+    ///
+    /// 光断言「不 panic」不够：把交集算错（比如钳成空、或钳掉了本该搬的行）同样不
+    /// panic，画面却少一块。所以逐像素对账「该搬的搬了、不该碰的没碰」。
+    ///
+    /// `dst` 比 `src` 短那条不在这里测：`copy_swap_rect` 开头的 `debug_assert_eq!` 声明
+    /// 那是**调用方的不变量**（`ensure` 两块一起重建），不是要兜的输入。
     #[test]
     fn copy_swap_rect_clamps_out_of_bounds() {
         const W: i32 = 4;
         const H: i32 = 3;
-        let src = vec![0x11u8; (W * H * 4) as usize];
-        let mut dst = vec![0u8; (W * H * 4) as usize];
-        for r in [
-            Rect::new(-5, -5, 100, 100), // 四面都超
-            Rect::new(3, 2, 10, 10),     // 右下超
-            Rect::new(10, 10, 4, 4),     // 整个在外
-            Rect::new(0, 0, 0, 0),       // 空
-            Rect::new(1, 1, -3, -3),     // 负尺寸
-        ] {
-            copy_swap_rect(&src, &mut dst, W, r); // 不 panic 即通过
+        const STRIDE: usize = (W * 4) as usize;
+        const UNTOUCHED: u8 = 0xCD;
+        // src 每个像素带各自的坐标指纹，搬错位置立刻显形。
+        let mut src = vec![0u8; (W * H * 4) as usize];
+        for y in 0..H {
+            for x in 0..W {
+                let o = y as usize * STRIDE + x as usize * 4;
+                src[o..o + 4].copy_from_slice(&[x as u8, y as u8, 0x80, 0xFF]);
+            }
         }
+        let swapped = |x: i32, y: i32| [0x80u8, y as u8, x as u8, 0xFF];
+
+        // 期望交集由测试独立算出，不从被测实现反推。
+        let cases: [(Rect, Rect); 6] = [
+            (Rect::new(-5, -5, 100, 100), Rect::new(0, 0, W, H)), // 四面都超 → 整幅
+            (Rect::new(3, 2, 10, 10), Rect::new(3, 2, 1, 1)),     // 右下超 → 只剩一格
+            (Rect::new(-2, -1, 4, 3), Rect::new(0, 0, 2, 2)),     // 左上超 → x0/y0 生效
+            (Rect::new(10, 10, 4, 4), Rect::new(0, 0, 0, 0)),     // 整个在外 → 空
+            (Rect::new(0, 0, 0, 0), Rect::new(0, 0, 0, 0)),       // 空
+            (Rect::new(1, 1, -3, -3), Rect::new(0, 0, 0, 0)),     // 负尺寸 → 空
+        ];
+        for (r, want) in cases {
+            let mut dst = vec![UNTOUCHED; (W * H * 4) as usize];
+            copy_swap_rect(&src, &mut dst, W, r);
+            for y in 0..H {
+                for x in 0..W {
+                    let o = y as usize * STRIDE + x as usize * 4;
+                    let inside = !want.is_empty()
+                        && x >= want.x
+                        && x < want.right()
+                        && y >= want.y
+                        && y < want.bottom();
+                    if inside {
+                        assert_eq!(
+                            &dst[o..o + 4],
+                            &swapped(x, y),
+                            "{r:?} 钳成 {want:?}：({x},{y}) 该搬却没搬对"
+                        );
+                    } else {
+                        assert!(
+                            dst[o..o + 4].iter().all(|&b| b == UNTOUCHED),
+                            "{r:?} 钳成 {want:?}：({x},{y}) 在交集外却被写了"
+                        );
+                    }
+                }
+            }
+        }
+
+        // buf_w = 0：stride 为 0，行数推算会除零。单独走一遍确认不炸。
+        let mut dst = vec![UNTOUCHED; (W * H * 4) as usize];
+        copy_swap_rect(&src, &mut dst, 0, Rect::new(0, 0, 4, 4));
+        assert!(
+            dst.iter().all(|&b| b == UNTOUCHED),
+            "buf_w=0 时没有任何有效像素，不该写出任何东西"
+        );
     }
 
     /// 注销一个没登记过的句柄不得报告「已空」。

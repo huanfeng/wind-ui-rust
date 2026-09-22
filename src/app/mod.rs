@@ -12,7 +12,7 @@
 //! | [`tooltip`] | 悬停提示浮层：延时、抑制、翻转定位 |
 //! | [`fling`] | 触摸惯性滑动与平移残差 |
 //! | [`focus`] | 焦点归属：Tab 顺序、焦点环、模态移交 |
-//! | [`damage`] | 局部重绘仲裁与后备缓冲 |
+//! | [`damage`] | 局部重绘仲裁 |
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -2233,7 +2233,7 @@ struct UiHost {
     /// 最近一次指针事件的命中结果，供离屏截图路径诊断（见 `AppHandler::last_pointer_hit`）。
     /// 只在指针路径写，不参与任何绘制决策。
     last_hit: Option<crate::platform::PointerHit>,
-    /// 局部重绘仲裁与后备缓冲，见 [`damage`]。
+    /// 局部重绘仲裁，见 [`damage`]。
     damage: DamageState,
     /// 最近一帧的逻辑窗口尺寸（菜单弹出位置钳制用）。
     logical_size: Size,
@@ -2954,7 +2954,7 @@ fn prof_frame(kind: &str, frame_t0: std::time::Instant) {
 
 impl AppHandler for UiHost {
     /// 一帧的调度流程：帧起始 → 惯性步进 → 条件重排 → 重绘决策 →（局部快路 |
-    /// 全窗绘制 + 三层浮层 + 种入后备缓冲）。各段的实质逻辑都在下面的私有方法与
+    /// 全窗绘制 + 三层浮层）。各段的实质逻辑都在下面的私有方法与
     /// 子模块里，这里只负责顺序。
     fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size) {
         // 帧耗时计时（WINDUI_FPS=1 时在左上角显示，用于排查渲染开销）。
@@ -2989,7 +2989,7 @@ impl AppHandler for UiHost {
         // 否则会走局部重绘的 early-return 而漏画。
         self.flush_pending_toasts();
 
-        let (do_full, damage) = self.decide_repaint(target);
+        let (do_full, damage) = self.decide_repaint(target, size);
 
         if !do_full {
             let damage = damage.expect("局部帧必有脏区（无脏区时 decide_repaint 判整窗）");
@@ -3005,7 +3005,7 @@ impl AppHandler for UiHost {
             return;
         }
 
-        // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果种入后备缓冲供后续局部帧复用。----
+        // ---- 全窗重绘：完整布局 + 整树绘制 + 浮层；结果留在 pixmap 里供后续局部帧复用。----
         // 清底由这里做，不再由平台每帧无条件 fill：局部帧根本不需要清（内容随后被脏区
         // 覆盖），而那一次 fill 是整窗的，与脏区多小无关。
         //
@@ -3043,7 +3043,8 @@ impl AppHandler for UiHost {
         // 不再需要「种入后备缓冲」这一步：软后端的 pixmap 由平台跨帧持有且恒为 RGBA
         // （win32 另备 BGRA 上传缓冲，不再原地交换毁掉它），刚画好的这一帧本身就是下一个
         // 局部帧要复用的「上一帧画面」。此前每个整窗帧要为此整窗拷贝一次（1920×1080 的
-        // 物理 2880×1676 下实测 2.9ms）。GPU 后端同理，它的上一帧在常驻色纹理上。
+        // 物理 2880×1676 下稳态 1.2ms，Windows 上被平台侧新增的拷贝抵消，净收益在 macOS）。
+        // GPU 后端同理，它的上一帧在常驻色纹理上。
         self.finish_frame_damage();
         prof_frame("full", frame_t0);
     }
@@ -5555,7 +5556,10 @@ mod tests {
                     return;
                 }
                 self.0.set(true);
-                ctx.open_window(Window::new("from-update", 100, 80).content(|| Element::leaf().width(10).height(10)));
+                ctx.open_window(
+                    Window::new("from-update", 100, 80)
+                        .content(|| Element::leaf().width(10).height(10)),
+                );
             }
         }
 

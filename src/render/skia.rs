@@ -1186,10 +1186,13 @@ mod tests {
         let solid = Color::rgba(200, 60, 40, 255);
         let half = Color::rgba(200, 60, 40, 128);
         let wash = Color::rgba(200, 60, 40, 32); // RoleAlpha 淡底量级
-        // 切掉左上：交集起点由裁剪决定，x0.max / y0.max 才真正生效。
+                                                 // 切掉左上：交集起点由裁剪决定，x0.max / y0.max 才真正生效。
         let clip_tl = Some(Rect::new(10, 8, 20, 14));
         let clip_br = Some(Rect::new(0, 0, 16, 12));
         let o = Point::new(0, 0);
+        // 一行一例的对照表：rustfmt 会把每个元组炸成 10 行，19 例共 190 行，
+        // 「哪一维在变」就再也看不出来了。这张表的价值全在纵向对齐上。
+        #[rustfmt::skip]
         let cases: &[Case] = &[
             ("不透明・直角・无裁剪", 1.0, o, None, opaque_bg, solid, 0.0, true),
             ("半透明・直角・无裁剪", 1.0, o, None, opaque_bg, half, 0.0, true),
@@ -1239,7 +1242,10 @@ mod tests {
                 [p.red(), p.green(), p.blue(), p.alpha()]
             };
             let maxdiff = |a: [u8; 4], b: [u8; 4]| {
-                (0..4).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap()
+                (0..4)
+                    .map(|i| (a[i] as i32 - b[i] as i32).abs())
+                    .max()
+                    .unwrap()
             };
             // 背景色与实心色都**独立算出**，不从图上采样：矩形跨越原点时（负坐标用例）
             // (0,0) 根本不是背景，靠采样会得出「背景与实心色相同」的荒谬前提。
@@ -1257,7 +1263,9 @@ mod tests {
                 mix(color.r, bgpx[0]),
                 mix(color.g, bgpx[1]),
                 mix(color.b, bgpx[2]),
-                (color.a as f32 + bgpx[3] as f32 * (1.0 - sa)).round().min(255.0) as u8,
+                (color.a as f32 + bgpx[3] as f32 * (1.0 - sa))
+                    .round()
+                    .min(255.0) as u8,
             ];
             // 投影轴取背景与实心差得最开的通道，量化噪声在它上面相对最小。
             let ch = (0..4)
@@ -1311,7 +1319,10 @@ mod tests {
                 }
             }
             if *radius > 0.0 && *aa {
-                assert!(edge > 0, "[{name}] 圆角却没有抗锯齿过渡像素，圆角多半没画出来");
+                assert!(
+                    edge > 0,
+                    "[{name}] 圆角却没有抗锯齿过渡像素，圆角多半没画出来"
+                );
             }
             if !*aa {
                 assert_eq!(edge, 0, "[{name}] 关了抗锯齿却仍有 {edge} 个过渡像素");
@@ -1331,8 +1342,7 @@ mod tests {
             pm.fill(tiny_skia::Color::from_rgba8(30, 40, 60, 255));
             let mut eng = crate::text::NullTextEngine;
             {
-                let mut c =
-                    SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
                 let p = Paint::fill(Color::rgba(200, 60, 40, 255));
                 c.push_layer(0.5);
                 if fast {
@@ -1415,15 +1425,17 @@ mod tests {
             pm.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
             let mut eng = crate::text::NullTextEngine;
             {
-                let mut c =
-                    SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
                 assert!(
                     !c.fast_fill_rect(x, y, w, h, r, true, Color::rgba(255, 0, 0, 255)),
                     "[{label}] 非有限坐标须落回通用路径"
                 );
             }
             let painted = pm.pixels().iter().filter(|p| p.red() > 0).count();
-            assert_eq!(painted, 0, "[{label}] 快路拒绝后不应留下任何笔迹，却染了 {painted} 像素");
+            assert_eq!(
+                painted, 0,
+                "[{label}] 快路拒绝后不应留下任何笔迹，却染了 {painted} 像素"
+            );
         }
     }
 
@@ -1689,7 +1701,8 @@ mod tests {
             pm.fill(tiny_skia::Color::WHITE);
             {
                 let mut eng = crate::text::NullTextEngine;
-                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, Point::new(0, 0));
+                let mut c =
+                    SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, Point::new(0, 0));
                 c.draw_image(&img, dst, Fit::Fill, radius, 1.0);
             }
             let pd = dst.scaled(scale);
@@ -1763,7 +1776,10 @@ mod tests {
                 }
                 // 前提校验：裁剪区内确实画上了图，否则本用例什么都没验证。
                 let keep = clip.intersect(&dst);
-                assert!(!keep.is_empty(), "[{name}] 用例无效：裁剪后不剩任何图片区域");
+                assert!(
+                    !keep.is_empty(),
+                    "[{name}] 用例无效：裁剪后不剩任何图片区域"
+                );
                 let (cx, cy) = (keep.x + keep.w / 2, keep.y + keep.h / 2);
                 let (r, g, b) = px(&pm, cx as u32, cy as u32);
                 assert!(
@@ -2118,4 +2134,3 @@ mod tests {
         );
     }
 }
-

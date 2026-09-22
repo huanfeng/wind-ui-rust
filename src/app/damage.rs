@@ -1,8 +1,10 @@
-//! 局部重绘仲裁与后备缓冲。
+//! 局部重绘仲裁。
 //!
 //! 每帧要回答一个问题：这一帧能只重画一小块，还是必须整窗重画？输入是控件上报的
-//! 交互脏区、动画脏区、结构签名变化与浮层存在与否；输出是决策本身与一块持久的
-//! 后备缓冲（保留上一全窗帧，供局部帧重建未变区域）。
+//! 交互脏区、动画脏区、结构签名变化与浮层存在与否；输出是决策本身与脏区。
+//!
+//! 「上一帧画面」不由这里保管：软后端是平台跨帧持有的 `Pixmap`、GPU 后端是目标的
+//! 常驻色纹理，两者都经 `RenderTarget::supports_partial` 表态（见那里的平台契约）。
 //!
 //! 只依赖 `Rect` 与 `Pixmap`，与控件树的关系仅止于"把树画进子 pixmap"。
 
@@ -19,6 +21,8 @@ const DAMAGE_MARGIN: i32 = 2;
 
 /// 宿主持有的重绘仲裁状态。
 pub(super) struct DamageState {
+    /// 上一帧的**物理**尺寸；与本帧不符说明目标缓冲被重建过，局部重绘的前提不成立。
+    last_size: Option<Size>,
     /// 上一帧累积的动画脏区（逻辑坐标）：下一动画帧据此局部重绘；None=下一帧需全窗。
     pending: Option<Rect>,
     /// 交互事件累积的失效区域（逻辑坐标）：下一帧与动画脏区并集后决定局部/整窗。
@@ -39,12 +43,13 @@ pub(super) struct DamageState {
 impl Default for DamageState {
     fn default() -> Self {
         Self {
+            last_size: None,
             pending: None,
             event: None,
             needs_relayout: false,
             last_layout_sig: 0,
             sig_valid: false,
-            // 首帧无后备缓冲可复用，必须整窗。
+            // 首帧目标缓冲里没有可复用的画面，必须整窗。
             needs_full: true,
             #[cfg(test)]
             last_frame_full: false,
@@ -69,9 +74,16 @@ impl UiHost {
     }
 
     /// 全窗 vs 局部重绘决策，返回 `(是否整窗, 本帧脏区)`：
-    /// - `needs_full`（输入/结构/尺寸变更）、后备缓冲缺失/尺寸不符、有浮层、无脏区 → 全窗。
+    /// - `needs_full`（输入/结构变更）、目标不支持局部、目标缓冲尺寸不符、有浮层、无脏区、
+    ///   脏区超半窗 → 全窗。
     /// - 否则用上一帧动画脏区做局部重绘（仅重画动的那一小块，高 DPI 也稳 60fps）。
-    pub(super) fn decide_repaint(&mut self, target: &mut dyn RenderTarget) -> (bool, Option<Rect>) {
+    ///
+    /// `size` 是本帧的**物理**尺寸。
+    pub(super) fn decide_repaint(
+        &mut self,
+        target: &mut dyn RenderTarget,
+        size: Size,
+    ) -> (bool, Option<Rect>) {
         let overlay = self.menu.is_open()
             || self.toast.is_active()
             || self.tooltip.will_show(&self.tree, self.hover);
@@ -98,8 +110,19 @@ impl UiHost {
         // 平台跨帧持有（win32 另备一块 BGRA 上传缓冲，故 pixmap 不再被原地交换毁掉；
         // macOS 本就不交换），GPU 后端靠目标自己的常驻色纹理。d2d 两者都没有 → 恒整窗。
         //
-        // 缓冲刚重建那一帧内容不完整，由平台在绘制前调 `request_full_frame` 兜住。
-        let partial_ok = target.supports_partial();
+        // 物理尺寸变了 → 目标缓冲必然是重建的，里面不是「上一帧的这个窗口」，只能整窗。
+        //
+        // 判据必须是**与上一帧比**，不能拿目标缓冲的尺寸跟 `size` 比：平台交来的新缓冲
+        // 尺寸恰好就是 `size`，两者相等，什么也检测不出来（这个写法写出来过，被下面的
+        // `buffer_resize_forces_full_frame` 当场证伪）。
+        //
+        // 平台侧在缓冲重建那一帧也会调 `request_full_frame`（它还管清底时机），但那是
+        // **每个平台各自实现**的一步，漏一处就是「窗口缩放时画面只剩脏区那一小块」——
+        // 静止界面完全正常，只在宿主手里恰好有小脏区（聚焦文本框的光标闪烁就够）时发作，
+        // 极难归因。macOS 侧就漏过一次。这里自己判一次，两个整数比较，代价可忽略。
+        let size_ok = self.damage.last_size == Some(size);
+        self.damage.last_size = Some(size);
+        let partial_ok = target.supports_partial() && size_ok;
         let do_full =
             self.damage.needs_full || !partial_ok || overlay || !scale_ok || !damage_small;
         self.damage.needs_full = false;
@@ -113,7 +136,7 @@ impl UiHost {
     /// 下一帧**预计**的脏区（逻辑坐标）；`None` = 预计整窗。
     ///
     /// 供平台收窄窗口失效区（见 `AppHandler::pending_damage`）。只是预测：真正的
-    /// 局部/整窗判定在 `decide_repaint`，它还会看后备缓冲、浮层、DPI 等条件。
+    /// 局部/整窗判定在 `decide_repaint`，它还会看目标能否局部、浮层、DPI 等条件。
     pub(super) fn next_frame_damage(&self) -> Option<Rect> {
         if self.damage.needs_full || self.damage.needs_relayout {
             return None;
@@ -146,7 +169,7 @@ impl UiHost {
     }
 
     /// 局部重绘：把脏区渲染进脏区大小的子 pixmap（tiny-skia 按 pixmap 边界自动剔除框外
-    /// 图元，成本降到脏区面积），合成进后备缓冲，再整窗拷给平台 pixmap。复用上一全窗帧的
+    /// 图元，成本降到脏区面积），再把这一块合成进平台 pixmap 的对应位置。复用上一全窗帧的
     /// 布局（当前动画均为视觉位移、不改布局）。
     /// 脏区规整（两条局部路径共用）：外扩 AA 余量、对齐到 4 逻辑像素网格、钳回窗口。
     ///
@@ -169,7 +192,7 @@ impl UiHost {
     /// GPU 后端的局部重绘：画在目标的常驻色纹理上，范围由 scissor（片元）与
     /// `Canvas::cull_rect`（CPU 侧的节点剔除）两头收窄。
     ///
-    /// 与软路径的结构差异只有一处：软路径要开一张脏区大小的子 pixmap 再合成回后备缓冲
+    /// 与软路径的结构差异只有一处：软路径要开一张脏区大小的子 pixmap 再合成回平台 pixmap
     /// （因而绘制带一个原点偏移），GPU 直接画在绝对坐标的常驻纹理上，没有子目标也没有
     /// 合成。相同的那一处是**脏区铺底**：常驻纹理里留着上一帧的像素，不铺底的话半透明
     /// 图元会叠在旧内容上（对应软路径子 pixmap 的 `fill(bg)`）。
@@ -248,7 +271,6 @@ impl UiHost {
         blit(&sub, pixmap, pdmg.x, pdmg.y);
         self.last_present = Some(pdmg);
     }
-
 }
 
 /// 取本帧累积的动画脏区，映射为下一帧的局部脏区；Full（浮层/fling 等节点外请求）→
@@ -359,7 +381,7 @@ mod tests {
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
         let mut pm = Pixmap::new(60, 60).unwrap();
-        // 首帧：全窗，种入后备缓冲。
+        // 首帧：全窗，画面留在 pixmap 里供后续局部帧复用。
         handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
         assert!(handler.damage.last_frame_full, "首帧应为全窗");
         // 模拟交互产生的小脏区：下一帧应走局部重绘，不重排整树。
@@ -369,6 +391,71 @@ mod tests {
             !handler.damage.last_frame_full,
             "带小脏区的交互帧应走局部重绘"
         );
+    }
+
+    /// 回归：目标缓冲换了尺寸 → 这一帧必须整窗，哪怕手里攥着一个小脏区。
+    ///
+    /// 新缓冲里根本不是「上一帧的这个窗口」，局部帧只写脏区，其余区域上屏就是纯底色。
+    /// 触发场景很普通：**聚焦的文本框光标在闪（每帧一个小脏区），同时拖动窗口边缘缩放**。
+    ///
+    /// 这条判据一度随「宿主的后备缓冲」一起被删掉——那时它藏在 `back_ok` 里，表面上只在
+    /// 判「后备缓冲还能不能用」，实际兼任了全框架唯一的尺寸变更探测器。删除时只论证了
+    /// 前一个职责。win32 侧因为 `fresh` 分支碰巧补了 `request_full_frame` 而没有暴露，
+    /// macOS 侧没补，于是闸门彻底消失。
+    ///
+    /// 平台侧那一步仍然保留（它还管清底时机），但不再是唯一防线：宿主自己就知道本帧要
+    /// 按什么尺寸画，两次整数比较的事，不必赌每个平台都记得。
+    #[test]
+    fn buffer_resize_forces_full_frame() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let app = App::new("t", 60, 60).content(Element::col().width(60).height(60));
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
+        assert!(handler.damage.last_frame_full, "首帧应为全窗");
+
+        // 前提自证：同尺寸 + 小脏区确实会走局部帧。否则下面那条断言"整窗"就可能是
+        // 别的原因给的，测不到尺寸判据。
+        handler.damage.event = Some(Rect::new(10, 10, 12, 12));
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
+        assert!(
+            !handler.damage.last_frame_full,
+            "前提不成立：同尺寸下带小脏区的帧本应走局部重绘"
+        );
+
+        // 同样的小脏区，但缓冲换了尺寸（窗口被拖大）→ 必须整窗。
+        let mut bigger = Pixmap::new(90, 70).unwrap();
+        handler.damage.event = Some(Rect::new(10, 10, 12, 12));
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut bigger,
+            },
+            Size::new(90, 70),
+        );
+        assert!(
+            handler.damage.last_frame_full,
+            "目标缓冲换了尺寸，这一帧必须整窗——否则脏区之外上屏是纯底色"
+        );
+
+        // 变小同样算：新缓冲一样不含上一帧画面。
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut bigger,
+            },
+            Size::new(90, 70),
+        );
+        handler.damage.event = Some(Rect::new(5, 5, 8, 8));
+        let mut smaller = Pixmap::new(40, 40).unwrap();
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut smaller,
+            },
+            Size::new(40, 40),
+        );
+        assert!(handler.damage.last_frame_full, "缓冲变小同样必须整窗");
     }
 
     #[test]
@@ -569,7 +656,7 @@ mod tests {
                 handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(160, 100))
             };
         }
-        frame!(); // 首帧兑现 autofocus 并种入后备缓冲
+        frame!(); // 首帧兑现 autofocus 并把画面留进 pixmap
 
         // 前提一：普通打字（不改颜色信号）确实走局部——否则本测试等于什么都没验。
         let k = key_ev();

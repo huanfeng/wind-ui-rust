@@ -246,7 +246,9 @@ pub trait Canvas {
 ```
 
 ### tiny-skia 后端
-- 持有一个 `Pixmap`（RGBA8888 预乘）作为窗口后备缓冲，仅在 resize 时重分配。
+- 持有一个 `Pixmap`（RGBA8888 预乘）作为窗口后备缓冲，仅在 resize 时重分配；它**跨帧持久**，
+  局部重绘时脏区之外直接沿用里面已有的像素（故 win32 的 R/B 交换改成拷进独立上传缓冲，
+  不再原地毁掉它）。重分配的那一帧内容不完整，平台须先 `request_full_frame`。
 - 图形原语直接映射到 tiny-skia 的 `PathBuilder` + `Paint` + `fill_path/stroke_path`。
 - 变换/裁剪用 `Transform` + 手动裁剪矩形栈（裁剪外的绘制早退，省光栅）。
 - 文字由 `draw_text` 委托给 **Text 层**，把字形位图 alpha-over 合成进 pixmap。
