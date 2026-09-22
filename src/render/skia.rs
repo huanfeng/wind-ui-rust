@@ -1186,7 +1186,10 @@ mod tests {
         let solid = Color::rgba(200, 60, 40, 255);
         let half = Color::rgba(200, 60, 40, 128);
         let wash = Color::rgba(200, 60, 40, 32); // RoleAlpha 淡底量级
-                                                 // 切掉左上：交集起点由裁剪决定，x0.max / y0.max 才真正生效。
+
+        // 切掉左上：交集起点由裁剪决定，x0.max / y0.max 才真正生效。
+        // （上面必须留空行，否则 rustfmt 把这段当成 `wash` 那行尾注的续行，推到第 50 列
+        //   去，读起来像是在说 `wash`。）
         let clip_tl = Some(Rect::new(10, 8, 20, 14));
         let clip_br = Some(Rect::new(0, 0, 16, 12));
         let o = Point::new(0, 0);

@@ -1145,8 +1145,13 @@ impl ContentView {
             // 手里若还有小脏区（光标闪烁就够），就会只画脏区，整张 CGImage 上屏后除脏区
             // 外全是纯底色；GPU 降级到软路径的第一帧同理。
             //
-            // 这是全框架唯一的「缓冲尺寸变了 → 必须整窗」闸门：宿主自己不与上一帧比对
-            // 尺寸，`AppHandler` 也没有 on_resize。
+            // 与宿主侧那道闸门**互补，不是冗余**：宿主比的是「与上一次渲染的尺寸是否
+            // 相同」（`decide_repaint` 里的 `last_size`），于是两类重建它看不见——
+            // ① 尺寸压根没变的重建，典型是 `degrade_to_software`（GPU 窗口降级到软路径，
+            //    窗口一点没变，pixmap 却是头一回分配）；
+            // ② 尺寸变了又变回来、期间一帧都没出的（两次 layout 之间没有 `drawRect:`）。
+            // 这两类只能靠这里。反过来，本函数只在这个视图被绘制时才跑，跨平台的一致性
+            // 由宿主那道保证。删任何一道之前先确认另一道覆盖得到。
             if fresh {
                 st.handler.request_full_frame();
             }
@@ -1164,7 +1169,7 @@ impl ContentView {
             };
             st.handler.render(&mut tgt, size);
             // 与本次失效区对账。`last_frame_damage()` 为 `None` 表示宿主把这一帧升级成了
-            // 整帧（重排、浮层、后备缓冲失效…都会触发）；为 `Some(r)` 时 `r` 也可能比预测
+            // 整帧（重排、浮层、缓冲尺寸不符…都会触发）；为 `Some(r)` 时 `r` 也可能比预测
             // 略大——`render_partial` 会再外扩 AA 余量并对齐 4 像素网格。两种都算"跑出去了"，
             // 出了借用补一次整窗失效（多一帧，换绝不留陈旧像素）。
             escaped = damage_escapes(partial, st.handler.last_frame_damage());
