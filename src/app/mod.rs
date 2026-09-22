@@ -2989,7 +2989,7 @@ impl AppHandler for UiHost {
         // 否则会走局部重绘的 early-return 而漏画。
         self.flush_pending_toasts();
 
-        let (do_full, damage) = self.decide_repaint(target, size);
+        let (do_full, damage) = self.decide_repaint(target);
 
         if !do_full {
             let damage = damage.expect("局部帧必有脏区（无脏区时 decide_repaint 判整窗）");
@@ -3040,13 +3040,10 @@ impl AppHandler for UiHost {
             paint_fps(&mut *canvas, frame_t0);
         }
         drop(canvas);
-        // 种入后备缓冲（整窗），供后续局部帧重建未变区域。
-        // 只有软后端要做这一步：它的后备缓冲在**宿主**这边（`damage.back`），得从刚画好的
-        // pixmap 拷一份。GPU 后端同样走局部重绘，但它的"上一帧"就在目标自己的常驻色纹理
-        // 上——绘制本来就画在那张上面，无所谓种入（见 `render/gpu/surface.rs::BackBuffer`）。
-        if let Some(pixmap) = target.as_pixmap() {
-            self.seed_back(pixmap, size);
-        }
+        // 不再需要「种入后备缓冲」这一步：软后端的 pixmap 由平台跨帧持有且恒为 RGBA
+        // （win32 另备 BGRA 上传缓冲，不再原地交换毁掉它），刚画好的这一帧本身就是下一个
+        // 局部帧要复用的「上一帧画面」。此前每个整窗帧要为此整窗拷贝一次（1920×1080 的
+        // 物理 2880×1676 下实测 2.9ms）。GPU 后端同理，它的上一帧在常驻色纹理上。
         self.finish_frame_damage();
         prof_frame("full", frame_t0);
     }

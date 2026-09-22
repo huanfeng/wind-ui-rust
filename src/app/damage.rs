@@ -19,8 +19,6 @@ const DAMAGE_MARGIN: i32 = 2;
 
 /// 宿主持有的重绘仲裁状态。
 pub(super) struct DamageState {
-    /// 持久后备缓冲（物理像素，整窗）：保留上一全窗帧，供局部帧重建未变区域。
-    back: Option<Pixmap>,
     /// 上一帧累积的动画脏区（逻辑坐标）：下一动画帧据此局部重绘；None=下一帧需全窗。
     pending: Option<Rect>,
     /// 交互事件累积的失效区域（逻辑坐标）：下一帧与动画脏区并集后决定局部/整窗。
@@ -41,7 +39,6 @@ pub(super) struct DamageState {
 impl Default for DamageState {
     fn default() -> Self {
         Self {
-            back: None,
             pending: None,
             event: None,
             needs_relayout: false,
@@ -74,17 +71,7 @@ impl UiHost {
     /// 全窗 vs 局部重绘决策，返回 `(是否整窗, 本帧脏区)`：
     /// - `needs_full`（输入/结构/尺寸变更）、后备缓冲缺失/尺寸不符、有浮层、无脏区 → 全窗。
     /// - 否则用上一帧动画脏区做局部重绘（仅重画动的那一小块，高 DPI 也稳 60fps）。
-    pub(super) fn decide_repaint(
-        &mut self,
-        target: &mut dyn RenderTarget,
-        size: Size,
-    ) -> (bool, Option<Rect>) {
-        let back_ok = self
-            .damage
-            .back
-            .as_ref()
-            .map(|b| b.width() == size.w as u32 && b.height() == size.h as u32)
-            .unwrap_or(false);
+    pub(super) fn decide_repaint(&mut self, target: &mut dyn RenderTarget) -> (bool, Option<Rect>) {
         let overlay = self.menu.is_open()
             || self.toast.is_active()
             || self.tooltip.will_show(&self.tree, self.hover);
@@ -107,15 +94,12 @@ impl UiHost {
                 win > 0 && (d.w as i64 * d.h as i64) * 2 <= win
             })
             .unwrap_or(false);
-        // 「上一帧的画面还在不在」是局部重绘的前提，两条后端各有各的落点：软后端是宿主
-        // 维护的后备 `Pixmap`（`back_ok`），GPU 后端是目标自己的常驻色纹理
-        // （`supports_partial`，见 `render/gpu/surface.rs` 的 `BackBuffer`）。d2d 两者都没有，
-        // 恒 false → 恒整窗，与此前的行为逐字相同。
-        let partial_ok = if target.as_pixmap().is_some() {
-            back_ok
-        } else {
-            target.supports_partial()
-        };
+        // 「上一帧的画面还在不在」是局部重绘的前提，交由目标自己回答：软后端的 pixmap 由
+        // 平台跨帧持有（win32 另备一块 BGRA 上传缓冲，故 pixmap 不再被原地交换毁掉；
+        // macOS 本就不交换），GPU 后端靠目标自己的常驻色纹理。d2d 两者都没有 → 恒整窗。
+        //
+        // 缓冲刚重建那一帧内容不完整，由平台在绘制前调 `request_full_frame` 兜住。
+        let partial_ok = target.supports_partial();
         let do_full =
             self.damage.needs_full || !partial_ok || overlay || !scale_ok || !damage_small;
         self.damage.needs_full = false;
@@ -239,8 +223,9 @@ impl UiHost {
         }
         // 子 pixmap：脏区大小，按窗口背景填底（与全窗帧平台 fill 同色，重建一致）。
         let Some(mut sub) = Pixmap::new(pdmg.w as u32, pdmg.h as u32) else {
-            // 分配失败：退回整窗拷贝（正确优先），并让平台整窗上传。
-            self.blit_back_to(pixmap);
+            // 分配失败（本质是 OOM）：这一帧不动 pixmap——它仍是上一帧的完整画面，
+            // 显示正确只是没更新——并要求下一帧整窗重画。
+            self.damage.needs_full = true;
             self.last_present = None;
             return;
         };
@@ -257,63 +242,13 @@ impl UiHost {
             );
             self.tree.paint(&mut canvas);
         }
-        // 合成进后备缓冲（脏区物理原点），再把这一块拷给平台 pixmap。
-        if let Some(back) = self.damage.back.as_mut() {
-            blit(&sub, back, pdmg.x, pdmg.y);
-        }
-        self.blit_back_rect_to(pixmap, pdmg);
+        // 直接合成进平台 pixmap（脏区物理原点）。pixmap 跨帧持久且恒为 RGBA，框外行
+        // 保留着上一帧的内容——此前要经宿主的后备缓冲中转一道，是因为 win32 会把 pixmap
+        // 原地交换成 BGRA 毁掉它；改由平台另备上传缓冲后，这层中转连同整窗种入一起取消。
+        blit(&sub, pixmap, pdmg.x, pdmg.y);
         self.last_present = Some(pdmg);
     }
 
-    /// 把后备缓冲整窗拷入 pixmap（两者同尺寸时）。
-    fn blit_back_to(&self, pixmap: &mut Pixmap) {
-        if let Some(back) = self.damage.back.as_ref() {
-            if back.width() == pixmap.width() && back.height() == pixmap.height() {
-                pixmap.data_mut().copy_from_slice(back.data());
-            }
-        }
-    }
-
-    /// 只把后备缓冲的 `r`（物理像素）拷入 pixmap。
-    ///
-    /// 局部帧此前整窗拷贝：520×700 的窗口每帧 1.4MB 内存搬运，而实际变的可能只有
-    /// 光标那 4×32。pixmap 在帧间由平台复用，框外保持上一帧内容——正因如此，平台侧
-    /// 的 R/B 交换与上传也必须同样只做这一块（见 `AppHandler::last_frame_damage`）。
-    fn blit_back_rect_to(&self, pixmap: &mut Pixmap, r: Rect) {
-        let Some(back) = self.damage.back.as_ref() else {
-            return;
-        };
-        let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
-        if back.width() as i32 != w || back.height() as i32 != h {
-            return;
-        }
-        let r = r.intersect(&Rect::new(0, 0, w, h));
-        if r.is_empty() {
-            return;
-        }
-        let (src, dst) = (back.data(), pixmap.data_mut());
-        let row_bytes = (r.w * 4) as usize;
-        for y in r.y..r.bottom() {
-            let off = ((y * w + r.x) * 4) as usize;
-            dst[off..off + row_bytes].copy_from_slice(&src[off..off + row_bytes]);
-        }
-    }
-
-    /// 全窗帧结束：把刚绘好的 pixmap 整窗种入后备缓冲，供后续局部帧复用（按需重建尺寸）。
-    pub(super) fn seed_back(&mut self, pixmap: &Pixmap, size: Size) {
-        let need_new = self
-            .damage
-            .back
-            .as_ref()
-            .map(|b| b.width() != size.w as u32 || b.height() != size.h as u32)
-            .unwrap_or(true);
-        if need_new {
-            self.damage.back = Pixmap::new(size.w as u32, size.h as u32);
-        }
-        if let Some(back) = self.damage.back.as_mut() {
-            back.data_mut().copy_from_slice(pixmap.data());
-        }
-    }
 }
 
 /// 取本帧累积的动画脏区，映射为下一帧的局部脏区；Full（浮层/fling 等节点外请求）→
