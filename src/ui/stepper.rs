@@ -193,6 +193,13 @@ struct Shared {
     /// 聚焦 → 点三次 + → 打错一个字 → Escape，用户要的是撤销那个字，不是退回三次点击之前。
     /// 放在 `Shared` 里而不是 `NumberField` 内，正是因为按钮也要重设它。
     edit_origin: Cell<f64>,
+    /// 整个复合控件的最近一次 bounds（逻辑坐标），由 `StepperFrame::paint` 写。
+    ///
+    /// 给 ± 按钮报脏区用：按钮改的是共享的 `value`/`text`，而数字显示在**兄弟节点**
+    /// 上，按钮自己的 bounds 盖不住它。外框正好画的就是整体，且在按钮之前绘制，
+    /// 同一帧内写了就能被读到。局部帧里外框若不在脏区内不会重绘，但那时布局没变，
+    /// 上一次记下的矩形依然有效。
+    whole: Cell<Rect>,
 }
 
 impl Shared {
@@ -226,6 +233,8 @@ impl Widget for StepperFrame {
         canvas: &mut dyn Canvas,
         _style: &Style,
     ) {
+        // 记下整体矩形供 ± 按钮报脏区（见 `Shared::whole`）。
+        self.shared.whole.set(bounds);
         let th = crate::theme::current();
         let (pal, st) = (&th.palette, &th.stepper);
         let (x, y, w, h) = (
@@ -356,6 +365,17 @@ impl Widget for StepperButton {
             let now = crate::anim::clock_ms();
             if advance_repeat(now, &self.press_start_ms, &self.last_step_ms) {
                 self.step();
+                // 脏区必须自报成**整个复合控件**。`step()` 改的是共享的 `value`/`text`，
+                // 而数字显示在**兄弟节点**（中部输入框）上；`Signal::set` 在非事件期
+                // 自动走的 `request_repaint()` 只把脏区归到当前绘制节点、也就是本按钮，
+                // 局部帧于是只重画按钮——长按期间数字定在原地，直到松手那一下走事件
+                // 路径（脏区由 `ctx.mark_dirty()` 正确给出）才跳到终值。
+                //
+                // 与 `NumberField::paint` 里焦点变色那处同因同治，只是那边脏的是外框。
+                let whole = self.shared.whole.get();
+                if !whole.is_empty() {
+                    crate::anim::request_repaint_in(whole);
+                }
             }
             crate::anim::request_repaint();
         }
@@ -749,6 +769,79 @@ mod tests {
     /// 模拟按下：起点置哨兵，交给首帧锚定。
     fn press() -> (Cell<u64>, Cell<u64>) {
         (Cell::new(PRESS_START_PENDING), Cell::new(0))
+    }
+
+    /// 回归：长按 ± 时，脏区必须覆盖**整个复合控件**，否则中部的数字不刷新。
+    ///
+    /// 长按的重复步进跑在 `StepperButton::paint` 里，属**非事件期**。那条路上
+    /// `Signal::set` 自动走的是 `anim::request_repaint()`，它把脏区归到「当前绘制
+    /// 节点」——也就是按钮自己。而数字显示在兄弟节点（中部输入框）上，于是局部帧
+    /// 只重画了按钮：长按期间数字定在原地，直到松手那一下走事件路径
+    /// （`ctx.mark_dirty()` 给出正确脏区）才跳到终值。
+    ///
+    /// 判据取「脏区宽度是否盖过整个控件」而非「是否等于某个矩形」：盖住即可，
+    /// 多盖一点只是多画，少盖一点就是这个 bug。
+    #[test]
+    fn long_press_damage_covers_the_whole_stepper() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::{Point, Size};
+
+        const W: i32 = 120;
+        const H: i32 = 40;
+
+        crate::anim::reset_request();
+        let value = crate::signal::signal(5.0f64);
+        let mut tree = crate::core::Tree::new();
+        let root = crate::ui::Element::stepper(value, 0.0, 100.0, 1.0)
+            .width(W)
+            .height(H)
+            .build(&mut tree);
+        tree.root = Some(root);
+        // 可用空间**正好**给到控件尺寸：row 作为根会被拉伸到可用宽度，留富余的话
+        // ± 按钮的位置就要靠猜（实测给 160 时按钮跑到了 [130,160)）。
+        tree.layout_root(Size::new(W, H), &mut crate::text::NullTextEngine);
+
+        // 按在「+」按钮正中（最右 BTN_W 宽的一格）。
+        let plus_x = W - BTN_W / 2;
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(plus_x, H / 2), MouseButton::Left),
+            &mut None,
+            &mut None,
+        );
+
+        let mut pm = tiny_skia::Pixmap::new(W as u32, H as u32).unwrap();
+        let paint_frame = |ms: u64, pm: &mut tiny_skia::Pixmap| {
+            crate::anim::reset_request();
+            crate::anim::set_clock_ms(ms);
+            let mut canvas = crate::render::SkiaCanvas::new(pm);
+            tree.paint(&mut canvas);
+        };
+
+        // 首帧只锚定长按起点，不步进。
+        paint_frame(1_000, &mut pm);
+        let before = value.get();
+
+        // 越过等待期后的一帧：应当步进，且脏区盖住整个控件。
+        paint_frame(1_000 + REPEAT_DELAY_MS + REPEAT_INTERVAL_SLOW_MS + 10, &mut pm);
+        assert!(
+            value.get() > before,
+            "前提不成立：越过等待期后应当步进（{before} -> {}）",
+            value.get()
+        );
+
+        match crate::anim::take_damage() {
+            crate::anim::Damage::Full => {} // 整窗重绘自然盖得住
+            crate::anim::Damage::Rect(r) => {
+                assert!(
+                    r.x <= 0 && r.x + r.w >= W,
+                    "脏区只盖住了按钮而非整个控件：{r:?}（控件横跨 0..{W}）——\
+                     中部数字将不会重绘，长按时数字定在原地"
+                );
+            }
+            crate::anim::Damage::None => {
+                panic!("长按步进后没有任何脏区，数字不可能刷新");
+            }
+        }
     }
 
     /// 回归：两次点击之间的静默期不得计入长按时长。
