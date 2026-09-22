@@ -708,7 +708,15 @@ impl Canvas for SkiaCanvas<'_> {
             return;
         };
         mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
-        // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形。
+        // 与当前裁剪矩形求交（滚动视口等）；当前裁剪皆为矩形（见 `Clip` 的不变量）。
+        //
+        // **不能用 `Mask::intersect_path`**：那是整幅 mask 的操作，成本只与窗口大小有关、
+        // 与图片大小无关——1920×1080 下实测 2.2ms/次，占单张图片绘制的 83%，而真正的
+        // 像素搬运只要 0.36ms。一个图片 tab 里 17 张小图就是 37ms 白付，窗口拖得越大越卡。
+        //
+        // 这里利用一个性质把它降到 O(dst)：`fill_path` 之后 mask **只有 dst 那一块非零**，
+        // 其余恒为 0，而 0 与任何东西求交还是 0。于是只需在 dst 区域内把裁剪矩形之外的
+        // 像素清零；dst 整个落在裁剪区内时（最常见）更是一点都不用动。
         if let Some(c) = self.clips.last() {
             let cr = c
                 .rect
@@ -717,18 +725,29 @@ impl Canvas for SkiaCanvas<'_> {
             if cr.is_empty() {
                 return;
             }
-            if let Some(rect) =
-                tiny_skia::Rect::from_xywh(cr.x as f32, cr.y as f32, cr.w as f32, cr.h as f32)
-            {
-                let mut pb = PathBuilder::new();
-                pb.push_rect(rect);
-                if let Some(clip_path) = pb.finish() {
-                    mask.intersect_path(
-                        &clip_path,
-                        FillRule::Winding,
-                        false,
-                        Transform::identity(),
-                    );
+            let (cx0, cy0) = (cr.x, cr.y);
+            let (cx1, cy1) = (cr.x + cr.w, cr.y + cr.h);
+            // mask 非零区域 = dst 矩形（圆角只会让它更小），钳进 mask 边界。
+            let bx0 = pdst.x.max(0);
+            let by0 = pdst.y.max(0);
+            let bx1 = (pdst.x + pdst.w).min(mw as i32);
+            let by1 = (pdst.y + pdst.h).min(mh as i32);
+            let fully_inside = cx0 <= bx0 && cy0 <= by0 && cx1 >= bx1 && cy1 >= by1;
+            if !fully_inside && bx1 > bx0 && by1 > by0 {
+                let stride = mw as usize;
+                let data = mask.data_mut();
+                for y in by0..by1 {
+                    let row = y as usize * stride;
+                    if y < cy0 || y >= cy1 {
+                        // 整行都在裁剪区外。
+                        data[row + bx0 as usize..row + bx1 as usize].fill(0);
+                        continue;
+                    }
+                    // 行内左右两侧超出裁剪区的部分。
+                    let l = cx0.clamp(bx0, bx1);
+                    data[row + bx0 as usize..row + l as usize].fill(0);
+                    let r = cx1.clamp(bx0, bx1);
+                    data[row + r as usize..row + bx1 as usize].fill(0);
                 }
             }
         }
@@ -1552,6 +1571,68 @@ mod tests {
             r2 > 240 && g2 > 240 && b2 > 240,
             "dst 外不应被绘制，实得 ({r2},{g2},{b2})"
         );
+    }
+
+    /// 图片被裁剪矩形切掉的部分必须不落笔——**四条边分别验**。
+    ///
+    /// 裁剪求交原先用 `Mask::intersect_path`（整幅 mask 操作，1920×1080 下 2.2ms/次，
+    /// 占单张图片绘制的 83%）。现改为只在 dst 区域内把裁剪区外的像素清零，四条边是
+    /// 四段独立的边界算术。若某一侧算错，症状是图片溢出到裁剪区外——滚动容器里就是
+    /// 图片盖住了容器边框或相邻内容。
+    ///
+    /// 四条边分开写而不是用一个"切掉一角"的用例：裁剪矩形若总是从原点起，左边界与
+    /// 上边界的算术永远不生效，那两侧写错也照样全绿。
+    #[test]
+    fn draw_image_respects_clip_rect_on_every_side() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        // 图片铺在 (20,20)-(60,60)；每个用例用裁剪矩形切掉它的一侧。
+        let dst = Rect::new(20, 20, 40, 40);
+        let cases: &[(&str, Rect, Rect)] = &[
+            // (名称, 裁剪矩形, 应当保持空白的探测区域——落在图片内但裁剪外)
+            ("切左", Rect::new(40, 0, 60, 100), Rect::new(20, 20, 20, 40)),
+            ("切上", Rect::new(0, 40, 100, 60), Rect::new(20, 20, 40, 20)),
+            ("切右", Rect::new(0, 0, 40, 100), Rect::new(40, 20, 20, 40)),
+            ("切下", Rect::new(0, 0, 100, 40), Rect::new(20, 40, 40, 20)),
+        ];
+        for (name, clip, blank) in cases {
+            for &radius in &[0.0f32, 8.0] {
+                let mut pm = Pixmap::new(100, 100).unwrap();
+                pm.fill(tiny_skia::Color::WHITE);
+                {
+                    let mut c = SkiaCanvas::new(&mut pm);
+                    c.save();
+                    c.clip_rect(*clip);
+                    c.draw_image(&img, dst, Fit::Fill, radius, 1.0);
+                    c.restore();
+                }
+                // 裁剪区外、但在图片 dst 内的区域必须仍是白的。
+                for y in blank.y..blank.y + blank.h {
+                    for x in blank.x..blank.x + blank.w {
+                        let (r, g, b) = px(&pm, x as u32, y as u32);
+                        assert!(
+                            r > 240 && g > 240 && b > 240,
+                            "[{name} r={radius}] ({x},{y}) 在裁剪区外却被画上了 ({r},{g},{b})"
+                        );
+                    }
+                }
+                // 前提校验：裁剪区内确实画上了图，否则本用例什么都没验证。
+                let keep = clip.intersect(&dst);
+                assert!(!keep.is_empty(), "[{name}] 用例无效：裁剪后不剩任何图片区域");
+                let (cx, cy) = (keep.x + keep.w / 2, keep.y + keep.h / 2);
+                let (r, g, b) = px(&pm, cx as u32, cy as u32);
+                assert!(
+                    r > 200 && g < 80 && b < 80,
+                    "[{name} r={radius}] 裁剪区内 ({cx},{cy}) 应有图片, 实得 ({r},{g},{b})"
+                );
+            }
+        }
     }
 
     /// draw_image：物理尺寸与源图一致时须 1:1 blit——边缘不得出现插值灰边。
