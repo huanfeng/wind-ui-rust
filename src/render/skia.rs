@@ -60,6 +60,12 @@ use crate::spec::Align;
 use crate::text::TextEngine;
 
 /// 裁剪层：有效裁剪矩形（各级交集）+ 对应 alpha mask。
+///
+/// **不变量：`mask` 恒是 `rect` 对应的轴对齐矩形**（`clip_rect` 是唯一的入栈处，
+/// 那里用 `push_rect` 填充、且不开抗锯齿）。`SkiaCanvas::fast_fill_rect` 依赖这一点
+/// 直接对 `rect` 求交而**不读 `mask`**。若将来新增 `clip_path` 之类的非矩形裁剪，
+/// 必须同时让快路认得出它并退回通用路径——否则那条路会静默画错：不报错、不 panic，
+/// 只是裁剪失效，多出来的部分照画。
 struct Clip {
     rect: Rect,
     mask: Mask,
@@ -322,10 +328,35 @@ impl<'a> SkiaCanvas<'a> {
                 }
                 continue;
             };
-            // 圆角行：按到所属圆心的距离求覆盖率。`pr + 0.5 - d` 钳到 0..1 即是该像素
-            // 被圆覆盖的近似比例——弧线在一个像素尺度上足够接近直线，这个线性近似与
-            // 通用路径的解析覆盖率在肉眼与 ±1 量级上一致。
+            // 圆角行的中段（左右圆心之间）覆盖率恒为 1，和直段一样可以整段写。不拆出来
+            // 的话，一张 1884×412、r=10 的卡片会有约 2×10×1864 ≈ 3.7 万个满覆盖像素
+            // 白白走逐像素分支 + 四次乘法——而这条快路的全部理由就是常数因子。
+            //
+            // 满覆盖的条件是 left <= x+0.5 <= right，即 x ∈ [ceil(left-0.5), floor(right-0.5)]。
+            let mid0 = (left - 0.5).ceil().max(x0 as f32) as i32;
+            let mid1 = ((right - 0.5).floor() + 1.0).min(x1 as f32) as i32;
+            if mid1 > mid0 {
+                let (mlo, mhi) = (mid0 as usize * 4, mid1 as usize * 4);
+                if color.a == 255 {
+                    for p in data[base + mlo..base + mhi].chunks_exact_mut(4) {
+                        p.copy_from_slice(&src);
+                    }
+                } else {
+                    let ia = 255 - a;
+                    for p in data[base + mlo..base + mhi].chunks_exact_mut(4) {
+                        p[0] = src[0] + mul255(p[0] as u32, ia) as u8;
+                        p[1] = src[1] + mul255(p[1] as u32, ia) as u8;
+                        p[2] = src[2] + mul255(p[2] as u32, ia) as u8;
+                        p[3] = src[3] + mul255(p[3] as u32, ia) as u8;
+                    }
+                }
+            }
+            // 两侧的圆角带：按到所属圆心的距离求覆盖率。
             for x in x0..x1 {
+                // 中段已整段写过，跳过。
+                if x >= mid0 && x < mid1 {
+                    continue;
+                }
                 let fx = x as f32 + 0.5;
                 let ccx = if fx < left {
                     Some(left)
@@ -1201,11 +1232,17 @@ mod tests {
                     }
                     let (cf, cs) = (cov(f), cov(sl));
                     if cs >= 254 {
+                        // 满覆盖区没有抗锯齿，两条路径应当**精确**相同。放宽到覆盖度
+                        // 比较会漏掉一整类缺陷：圆角行的中段若与两侧重叠而被画了两次，
+                        // 半透明处颜色会变深，但覆盖度双方都钳在 255，看不出来。
                         assert!(
-                            cf >= 128,
-                            "[{name}] 形状分歧：({x}, {y}) 通用路径为实心，快路覆盖度仅 {cf}"
+                            maxdiff(f, sl) <= 1,
+                            "[{name}] 满覆盖处不一致：({x}, {y}) 快路 {f:?} vs 通用路径 {sl:?}（重复绘制？）"
                         );
                     } else if cs <= 1 {
+                        // 空白区**不能**要求精确：两种 AA 对边界外沿一个像素的判定不同，
+                        // 快路可能给出极淡的覆盖（4×4 超采样里落进 1 个子样本 = 15/255）
+                        // 而通用路径给 0。那是 AA 边界游移，不是画错。
                         assert!(
                             cf <= 128,
                             "[{name}] 形状分歧：({x}, {y}) 通用路径为空白，快路覆盖度已 {cf}"
