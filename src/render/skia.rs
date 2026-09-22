@@ -699,6 +699,11 @@ impl Canvas for SkiaCanvas<'_> {
         let transform = Transform::from_scale(sx, sy).post_translate(tx, ty);
 
         // 裁剪 mask：dst 圆角矩形 ∩ 当前裁剪区。radius<=0 时退化为矩形。
+        //
+        // 注意这块 mask 仍是**整幅窗口**大小（tiny-skia 要求 mask 与目标同尺寸），
+        // 1920×1080 下每张图 2MB 的分配 + 清零。也就是说本函数整体仍是 O(窗口)，
+        // 下面消掉的只是「逐像素求交」那一项；真要根治得把图先画进 dst 大小的临时
+        // pixmap 再合成，或复用一块按帧复位的 mask。
         let (mw, mh) = (self.pixmap.width(), self.pixmap.height());
         let Some(mut mask) = Mask::new(mw, mh) else {
             return;
@@ -714,9 +719,20 @@ impl Canvas for SkiaCanvas<'_> {
         // 与图片大小无关——1920×1080 下实测 2.2ms/次，占单张图片绘制的 83%，而真正的
         // 像素搬运只要 0.36ms。一个图片 tab 里 17 张小图就是 37ms 白付，窗口拖得越大越卡。
         //
-        // 这里利用一个性质把它降到 O(dst)：`fill_path` 之后 mask **只有 dst 那一块非零**，
-        // 其余恒为 0，而 0 与任何东西求交还是 0。于是只需在 dst 区域内把裁剪矩形之外的
-        // 像素清零；dst 整个落在裁剪区内时（最常见）更是一点都不用动。
+        // 这里利用一个性质把**这一项**降到 O(dst)：`fill_path` 之后 mask **只有 dst 那一块
+        // 非零**，其余恒为 0，而 0 与任何东西求交还是 0。于是只需在 dst 区域内把裁剪矩形
+        // 之外的像素清零；dst 整个落在裁剪区内时（最常见）更是一点都不用动。
+        //
+        // 「非零区 ⊆ dst」为何是硬保证、而不是碰巧：`rounded_rect_path` 的点集严格落在
+        // `[x,x+w]×[y,y+h]` 闭包内（四段直线加四段 cubic，控制点都是边界 ± r、± k，
+        // 贝塞尔的凸包性质保证曲线也不越界），**而 `px/py/pw/ph` 来自 `pdst` 这个 i32
+        // 矩形、恒为整数**——路径边界压在整数像素栅格上时，抗锯齿扫描线对格外像素的
+        // 覆盖率恒为 0，不存在「AA 边溢出一圈」。承重的是后半句：哪天有人把 `pdst` 改成
+        // 浮点、或给这条路径加 stroke，前提就静默失效，症状是图片边缘越界一像素盖在
+        // 容器边框上，没人会联想到这里。`image_ink_never_escapes_dst` 钉的就是这条。
+        //
+        // 顺带：旧的 `intersect_path` 那条路上，`Rect::from_xywh` 或 `finish()` 返回
+        // `None` 时会**静默地整个不裁剪**；新写法没有这两个逃逸口，更严。
         if let Some(c) = self.clips.last() {
             let cr = c
                 .rect
@@ -733,6 +749,9 @@ impl Canvas for SkiaCanvas<'_> {
             let bx1 = (pdst.x + pdst.w).min(mw as i32);
             let by1 = (pdst.y + pdst.h).min(mh as i32);
             let fully_inside = cx0 <= bx0 && cy0 <= by0 && cx1 >= bx1 && cy1 >= by1;
+            // `bx1 > bx0 && by1 > by0` 不只是省事的短路：dst 完全落在缓冲之外时
+            // （`pdst.x` 超过 `mw`）会得到 `bx0 > bx1`，而 `i32::clamp` 在 min > max 时
+            // **panic**。少了这个守卫，下面那两行 clamp 会直接崩。
             if !fully_inside && bx1 > bx0 && by1 > by0 {
                 let stride = mw as usize;
                 let data = mask.data_mut();
@@ -1571,6 +1590,126 @@ mod tests {
             r2 > 240 && g2 > 240 && b2 > 240,
             "dst 外不应被绘制，实得 ({r2},{g2},{b2})"
         );
+    }
+
+    /// 裁剪在**局部帧 + 高 DPI + dst 四边都越出缓冲**的组合下同样成立。
+    ///
+    /// `draw_image_respects_clip_rect_on_every_side` 全部跑在 `SkiaCanvas::new`
+    /// （scale=1、offset=0、dst 恒在缓冲内），三类真实缺陷能从它下面溜过去，而且
+    /// 都经故意破坏验证过确实溜得过去：
+    /// - `bx1.min(mw)` / `by1.min(mh)` 的上界钳制：dst 越出缓冲**右下**才会走到，
+    ///   删掉它的真实症状是切片索引越界 panic；
+    /// - `bx0.max(0)` / `by0.max(0)` 的下界钳制：dst 越出**左上**才会走到；
+    /// - `cr` 与 `pdst` 都要**先 `offset(-self.offset)` 再 `scaled`**。顺序写反会让
+    ///   裁剪矩形整体偏移（这里是 +10,+8 物理像素）、裁得更严，于是"裁剪区外没有
+    ///   笔迹"照样成立——只有一个**紧贴裁剪边界内侧**的探测点能抓住它。局部帧正是
+    ///   这个函数最热的路径。
+    ///
+    /// 故用例让 dst 四边全部越出子 pixmap，并把"应当有图"的探测点压在裁剪边界内缘。
+    #[test]
+    fn draw_image_clip_holds_under_offset_scale_and_out_of_bounds_dst() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        // 局部帧：子 pixmap 的 (0,0) 对应世界 (10,8)，2 倍 DPI，覆盖世界 x∈[10,34)、y∈[8,28)。
+        let offset = Point::new(10, 8);
+        let scale = 2.0f32;
+        // dst 世界 (4,2)-(44,32) → 物理 (-12,-12)-(68,48)：左上越界、右下也越界。
+        let dst = Rect::new(4, 2, 40, 30);
+        // 裁剪切掉世界 x<14 与 y<10（物理 x<8、y<4）。
+        let clip = Rect::new(14, 10, 40, 40);
+        let mut pm = Pixmap::new(48, 40).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, offset);
+            c.save();
+            c.clip_rect(clip);
+            c.draw_image(&img, dst, Fit::Fill, 6.0, 1.0);
+            c.restore();
+        }
+        // 裁剪区之外不得有任何笔迹。物理 (px,py) 对应世界 (px/2+10, py/2+8)。
+        for y in 0..pm.height() {
+            for x in 0..pm.width() {
+                let (wx, wy) = (x as i32 / 2 + offset.x, y as i32 / 2 + offset.y);
+                if wx >= clip.x && wy >= clip.y {
+                    continue;
+                }
+                let (r, g, b) = px(&pm, x, y);
+                assert!(
+                    r > 250 && g > 250 && b > 250,
+                    "({x},{y})=世界({wx},{wy}) 在裁剪区外却有笔迹 ({r},{g},{b})"
+                );
+            }
+        }
+        // 紧贴裁剪边界内缘的探测点：物理 (10,6)，正确实现的裁剪矩形是 (8,4,80,80)、
+        // 包含它；若 offset/scale 顺序写反则变成 (18,12,80,80)、把它裁掉。
+        for (label, ix, iy) in [("裁剪边界内缘", 10u32, 6u32), ("右下远端", 40, 34)] {
+            let (r, g, b) = px(&pm, ix, iy);
+            assert!(
+                r > 200 && g < 80 && b < 80,
+                "[{label}] 物理({ix},{iy}) 在裁剪区内且被图片覆盖, 应有图, 实得 ({r},{g},{b})"
+            );
+        }
+    }
+
+    /// 图片的笔迹不得溢出 dst 哪怕一个像素——这是"裁剪只需处理 dst 区域"的前提。
+    ///
+    /// `draw_image` 的裁剪求交从 `Mask::intersect_path`（整幅 mask，2.19ms/次）改成了
+    /// 只清 dst 区域内、裁剪区外的像素，依据是：`fill_path` 之后 mask **只有 dst 那块
+    /// 非零**，而 0 与任何东西求交还是 0。若抗锯齿边会让非零像素外溢一圈，那一圈就
+    /// 再也不会被裁剪清零——滚动容器里表现为图片边缘越界一像素，盖在容器边框上。
+    ///
+    /// 成立的原因是 `pdst` 经 `Rect::scaled` 后恒为整数坐标，AA 边正好压在像素边界上。
+    /// 这是个不成文前提（依赖 `Rect::scaled` 的取整行为），故钉住：圆角与非整数缩放
+    /// 都要验，那是最可能把边缘推出整数格的两种情形。
+    #[test]
+    fn image_ink_never_escapes_dst() {
+        let red = {
+            let mut v = Vec::new();
+            for _ in 0..16 {
+                v.extend_from_slice(&[255, 0, 0, 255]);
+            }
+            v
+        };
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        let dst = Rect::new(20, 20, 40, 40);
+        for (label, radius, scale) in [
+            ("直角・1x", 0.0f32, 1.0f32),
+            ("圆角・1x", 8.0, 1.0),
+            ("圆角・1.5x", 8.0, 1.5),
+            ("圆角・2x", 8.0, 2.0),
+        ] {
+            let mut pm = Pixmap::new(140, 140).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            {
+                let mut eng = crate::text::NullTextEngine;
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, Point::new(0, 0));
+                c.draw_image(&img, dst, Fit::Fill, radius, 1.0);
+            }
+            let pd = dst.scaled(scale);
+            for y in 0..pm.height() {
+                for x in 0..pm.width() {
+                    let inside = (x as i32) >= pd.x
+                        && (x as i32) < pd.x + pd.w
+                        && (y as i32) >= pd.y
+                        && (y as i32) < pd.y + pd.h;
+                    if inside {
+                        continue;
+                    }
+                    let (r, g, b) = px(&pm, x, y);
+                    assert!(
+                        r > 250 && g > 250 && b > 250,
+                        "[{label}] ({x},{y}) 在 dst {pd:?} 之外却有笔迹 ({r},{g},{b})——                         mask 非零区域溢出了 dst, 「裁剪只需处理 dst 区域」的前提不再成立"
+                    );
+                }
+            }
+        }
     }
 
     /// 图片被裁剪矩形切掉的部分必须不落笔——**四条边分别验**。
