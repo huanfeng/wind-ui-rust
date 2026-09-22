@@ -1172,6 +1172,13 @@ mod tests {
             ("淡底・圆角・裁左上", 1.0, o, clip_tl, opaque_bg, wash, 5.0, true),
             ("淡底・直角・半透明背景", 1.0, o, None, alpha_bg, wash, 0.0, true),
             ("圆角・关抗锯齿（须无过渡带）", 1.0, o, None, opaque_bg, solid, 5.0, false),
+            // 非整数缩放：pr 在物理坐标钳制、通用路径在逻辑坐标钳制，只有这里能验证
+            // 两者不分歧。1.5 下逻辑 (6,4,20,14) 的物理边界是 (9,6)-(39,27)，仍是整数。
+            ("圆角・1.5x（非整数缩放）", 1.5, o, None, opaque_bg, solid, 4.0, true),
+            ("圆角・1.5x + 裁左上", 1.5, o, clip_tl, opaque_bg, half, 4.0, true),
+            // 负坐标：局部重绘里"矩形左上角在子 pixmap 之外"是常态，验 x0.max(0)/y0.max(0)。
+            ("圆角・偏移到左上角外（负坐标）", 1.0, Point::new(20, 15), None, opaque_bg, solid, 5.0, true),
+            ("直角・偏移到左上角外（负坐标）", 1.0, Point::new(20, 15), None, opaque_bg, half, 0.0, true),
         ];
 
         for (name, scale, offset, clip, bg, color, radius, aa) in cases {
@@ -1196,9 +1203,16 @@ mod tests {
             let maxdiff = |a: [u8; 4], b: [u8; 4]| {
                 (0..4).map(|i| (a[i] as i32 - b[i] as i32).abs()).max().unwrap()
             };
-            // 背景取自图上角落（矩形最早从物理 (4,4) 起，(0,0) 恒是纯背景）；实心色
-            // 由它独立算出，不从被测实现反推。
-            let bgpx = rgba(&slow, 0, 0);
+            // 背景色与实心色都**独立算出**，不从图上采样：矩形跨越原点时（负坐标用例）
+            // (0,0) 根本不是背景，靠采样会得出「背景与实心色相同」的荒谬前提。
+            let ba = bg.alpha();
+            let q = |v: f32| (v * ba * 255.0).round() as u8;
+            let bgpx = [
+                q(bg.red()),
+                q(bg.green()),
+                q(bg.blue()),
+                (ba * 255.0).round() as u8,
+            ];
             let sa = color.a as f32 / 255.0;
             let mix = |src: u8, dst: u8| (src as f32 * sa + dst as f32 * (1.0 - sa)).round() as u8;
             let fullpx = [
@@ -1263,6 +1277,61 @@ mod tests {
             }
             if !*aa {
                 assert_eq!(edge, 0, "[{name}] 关了抗锯齿却仍有 {edge} 个过渡像素");
+            }
+        }
+    }
+
+    /// 离屏层（子树 opacity）里走快路：像素必须落在**层**上，而不是主缓冲。
+    ///
+    /// `fast_fill_rect` 通过 `target_pixmap()` 做重定向，与通用路径的
+    /// `fill_path_on_target` 用的是同一个 `layers.last_mut()` 判据。一旦两者分岔，
+    /// 症状是子树 opacity 失效——内容以全不透明画进主缓冲，层合成时又叠一遍。
+    #[test]
+    fn fast_fill_rect_draws_into_offscreen_layer() {
+        let render = |fast: bool| {
+            let mut pm = Pixmap::new(48, 36).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(30, 40, 60, 255));
+            let mut eng = crate::text::NullTextEngine;
+            {
+                let mut c =
+                    SkiaCanvas::with_text_offset(&mut pm, &mut eng, 1.0, Point::new(0, 0));
+                let p = Paint::fill(Color::rgba(200, 60, 40, 255));
+                c.push_layer(0.5);
+                if fast {
+                    c.fill_round_rect(6.0, 4.0, 20.0, 14.0, 5.0, &p);
+                } else {
+                    let path = rounded_rect_path(6.0, 4.0, 20.0, 14.0, 5.0).expect("路径");
+                    let sp = SkiaCanvas::fill_paint(&p, 6.0, 4.0, 20.0, 14.0);
+                    let tf = c.tf();
+                    c.fill_path_on_target(&path, &sp, tf);
+                }
+                c.pop_layer();
+            }
+            pm
+        };
+        let (fast, slow) = (render(true), render(false));
+        // 层内画的是不透明色，合成时乘 0.5：中心应当是背景与填充色的中点附近，
+        // 绝不能是纯填充色（那说明画进了主缓冲、绕过了层的 opacity）。
+        let mid = fast.pixel(16, 11).unwrap();
+        assert!(
+            mid.red() < 200 && mid.red() > 60,
+            "层 opacity 未生效：中心像素 red={}（画进主缓冲了？）",
+            mid.red()
+        );
+        for y in 0..fast.height() {
+            for x in 0..fast.width() {
+                let (a, b) = (fast.pixel(x, y).unwrap(), slow.pixel(x, y).unwrap());
+                let d = [
+                    a.red() as i32 - b.red() as i32,
+                    a.green() as i32 - b.green() as i32,
+                    a.blue() as i32 - b.blue() as i32,
+                    a.alpha() as i32 - b.alpha() as i32,
+                ]
+                .into_iter()
+                .map(|v| v.abs())
+                .max()
+                .unwrap();
+                assert!(d <= 64, "({x}, {y}) 层内快路与通用路径分歧 {d}");
             }
         }
     }
