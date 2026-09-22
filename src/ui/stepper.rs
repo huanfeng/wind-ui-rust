@@ -195,10 +195,18 @@ struct Shared {
     edit_origin: Cell<f64>,
     /// 整个复合控件的最近一次 bounds（逻辑坐标），由 `StepperFrame::paint` 写。
     ///
-    /// 给 ± 按钮报脏区用：按钮改的是共享的 `value`/`text`，而数字显示在**兄弟节点**
-    /// 上，按钮自己的 bounds 盖不住它。外框正好画的就是整体，且在按钮之前绘制，
-    /// 同一帧内写了就能被读到。局部帧里外框若不在脏区内不会重绘，但那时布局没变，
-    /// 上一次记下的矩形依然有效。
+    /// 给各子节点互相报脏区用：谁改了共享的 `value`/`text`，要重绘的往往在**兄弟节点**
+    /// 上（按钮改数字、中部改 ± 的置灰态），自己的 bounds 盖不住。
+    ///
+    /// **paint 期读到的必是同帧新鲜值**，理由是结构性的而非"布局恰好没变"：
+    /// `StepperFrame` 是 row 节点**自身**的 widget，± 与中部是它的**子节点**，而
+    /// `Tree::paint_node` 恒先画自身 widget 再递归子树；剪枝只跳过自绘、子树照常递归，
+    /// 但外框的 bounds **包含**每个子节点的 bounds，对父的剔除判定恒不严于对子。
+    /// 于是只要任一子节点的 `paint` 跑了，本帧外框的 `paint` 一定已经跑过。
+    /// 首帧、resize 后的第一帧、局部帧，三种情形都不例外。
+    ///
+    /// 事件期（`on_event`）读到的则是上一帧的值：布局未变时精确，而会改变布局的操作
+    /// 本身走整窗帧，盖得住。
     whole: Cell<Rect>,
 }
 
@@ -372,6 +380,8 @@ impl Widget for StepperButton {
                 // 路径（脏区由 `ctx.mark_dirty()` 正确给出）才跳到终值。
                 //
                 // 与 `NumberField::paint` 里焦点变色那处同因同治，只是那边脏的是外框。
+                // `whole` 由外框写，而外框是本节点的父 widget、恒先于本节点绘制
+                // （见 `Shared::whole`），故这里读到的是本帧新鲜值。
                 let whole = self.shared.whole.get();
                 if !whole.is_empty() {
                     crate::anim::request_repaint_in(whole);
@@ -534,6 +544,12 @@ impl NumberField {
         let s = self.spec.format(self.value.get());
         if self.text.with(|t| *t != s) {
             self.text.set(s);
+            // 同族：数字本身画在本节点上会跟着刷新，但 ± 的置灰态在兄弟节点上。
+            // 这里在 paint 内，`Signal::set` 自动走的 `request_repaint()` 只脏本节点。
+            let whole = self.shared.whole.get();
+            if !whole.is_empty() {
+                crate::anim::request_repaint_in(whole);
+            }
         }
         self.shared.mark_synced(self.value, self.text);
     }
@@ -552,7 +568,20 @@ impl NumberField {
         // 步进当场落地，Escape 的基线随之前移（见 `Shared::edit_origin`）。
         self.shared.edit_origin.set(v);
         self.inner.select_all();
-        ctx.mark_dirty();
+        // 脏区要盖住**整个复合控件**：改的是共享的 `value`，而 ± 的置灰态
+        // （`StepperButton::at_limit`）画在**兄弟节点**上。`ctx.mark_dirty()` 给的只是
+        // 本节点的 `visual_bounds`，而键盘事件的失效升级也只到 `DamageReq::Rect(本节点)`，
+        // 不像指针那样升整窗——于是按 ↑ 顶到 max 时数字到位了，「+」却一直不变灰，
+        // 要等下一次整窗帧（切页/弹对话框/换主题）才碰巧补齐。
+        //
+        // 事件期读到的 `whole` 是上一帧 paint 写的：布局未变时精确，而会改变布局的
+        // 操作（resize/DPI 切换）本身就走整窗帧，盖得住。
+        let whole = self.shared.whole.get();
+        if whole.is_empty() {
+            ctx.mark_dirty();
+        } else {
+            ctx.mark_dirty_rect(whole);
+        }
     }
 }
 
@@ -589,12 +618,15 @@ impl Widget for NumberField {
         // ——直到下一次整窗帧（切页/弹对话框/换主题）才碰巧补齐。
         if self.shared.focused.get() != focused {
             self.shared.focused.set(focused);
-            crate::anim::request_repaint_in(Rect::new(
-                bounds.x - BTN_W,
-                bounds.y,
-                bounds.w + 2 * BTN_W,
-                bounds.h,
-            ));
+            // 读 `Shared::whole` 这个权威值，不再按「左右各一个 BTN_W」现算：那份算法
+            // 把布局假设复制了一份，一旦排布改成别的样式（两个按钮都在右侧的 spinner）
+            // 就会算错，而 `whole` 总是对的。为空时才回退现算。
+            let whole = self.shared.whole.get();
+            crate::anim::request_repaint_in(if whole.is_empty() {
+                Rect::new(bounds.x - BTN_W, bounds.y, bounds.w + 2 * BTN_W, bounds.h)
+            } else {
+                whole
+            });
         }
 
         self.sync_text_from_value();
@@ -841,6 +873,147 @@ mod tests {
             crate::anim::Damage::None => {
                 panic!("长按步进后没有任何脏区，数字不可能刷新");
             }
+        }
+    }
+
+    /// `Shared::whole` 必须是**同帧**写入、且写在子节点读它之前——布局变了也不例外。
+    ///
+    /// 上面两条测试守不住这一点：它们布局静止，矩形永不变，于是把 `whole.set` 挪到
+    /// 更晚绘制的节点（比如中部的 `NumberField`）照样全绿。真实后果是 resize / DPI
+    /// 切换后的第一帧拿旧矩形报脏，长按期间闪一帧局部残影。
+    ///
+    /// 这里按的是「−」——它是 row 的**第一个**子节点，绘制早于中部与「+」。若 `whole`
+    /// 改由比它更晚的节点写，它读到的就是上一帧的旧宽度，断言立刻失败。
+    #[test]
+    fn whole_stays_fresh_across_relayout() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::{Point, Size};
+
+        const W1: i32 = 120;
+        const W2: i32 = 220;
+        const H: i32 = 40;
+
+        crate::anim::reset_request();
+        let value = crate::signal::signal(50.0f64);
+        let mut tree = crate::core::Tree::new();
+        let root = crate::ui::Element::stepper(value, 0.0, 100.0, 1.0)
+            .height(H)
+            .build(&mut tree);
+        tree.root = Some(root);
+
+        let frame = |tree: &mut crate::core::Tree, w: i32, ms: u64| {
+            crate::anim::reset_request();
+            crate::anim::set_clock_ms(ms);
+            let mut pm = tiny_skia::Pixmap::new(w as u32, H as u32).unwrap();
+            let mut canvas = crate::render::SkiaCanvas::new(&mut pm);
+            tree.paint(&mut canvas);
+        };
+
+        // 窄宽度布局，按住「−」（row 的第一个子节点，绘制早于中部与「+」），
+        // 并让长按先跑过等待期——关键是把 resize 后的那一帧变成**立刻步进**的帧。
+        // 若等到 resize 后的第二帧才步进，上一帧已经把 whole 刷新过了，
+        // 「谁来写 whole」写错也照样绿。
+        tree.layout_root(Size::new(W1, H), &mut crate::text::NullTextEngine);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(BTN_W / 2, H / 2), MouseButton::Left),
+            &mut None,
+            &mut None,
+        );
+        frame(&mut tree, W1, 1_000); // 锚定长按起点
+        frame(&mut tree, W1, 1_000 + REPEAT_DELAY_MS + 10); // 过等待期, 步进一次
+
+        // 窗口变宽后重新布局——紧接着的这一帧就会步进, whole 必须已是新宽度。
+        tree.layout_root(Size::new(W2, H), &mut crate::text::NullTextEngine);
+        frame(
+            &mut tree,
+            W2,
+            1_000 + REPEAT_DELAY_MS + REPEAT_INTERVAL_SLOW_MS + 20,
+        );
+
+        match crate::anim::take_damage() {
+            crate::anim::Damage::Full => {}
+            crate::anim::Damage::Rect(r) => {
+                assert!(
+                    r.x <= 0 && r.x + r.w >= W2,
+                    "脏区仍是重排前的宽度：{r:?}（控件已变为横跨 0..{W2}）——\
+                     whole 不是同帧新鲜值, resize 后第一帧会用旧矩形报脏"
+                );
+            }
+            crate::anim::Damage::None => panic!("长按步进后没有任何脏区"),
+        }
+    }
+
+    /// 回归：键盘 ↑/↓ 步进时，脏区也必须覆盖**整个复合控件**。
+    ///
+    /// 与长按那条同因同族、方向相反：那边是按钮改中部的数字，这边是中部改**按钮**的
+    /// 置灰态（`StepperButton::at_limit` 决定 ± 字形灰不灰，画在兄弟节点上）。
+    /// `ctx.mark_dirty()` 给的是本节点的 `visual_bounds`，而键盘事件走的失效升级
+    /// 只到 `DamageReq::Rect(本节点)`，不像指针那样升整窗。
+    ///
+    /// 可复现的用户可见症状：聚焦中部数字框、按住 ↑ 一路顶到 max，数字正常走到上限，
+    /// 但「+」号**不会变灰**，一直停在正常色，直到下一次整窗帧（切页/弹对话框/换主题）
+    /// 才碰巧补齐。按 ↓ 顶到 min 同理。
+    #[test]
+    fn keyboard_step_damage_covers_the_whole_stepper() {
+        use crate::core::DamageReq;
+        use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::{Point, Size};
+
+        const W: i32 = 120;
+        const H: i32 = 40;
+
+        crate::anim::reset_request();
+        // 起始值差一步到顶：按一次 ↑ 正好把「+」推进置灰态。
+        let value = crate::signal::signal(99.0f64);
+        let mut tree = crate::core::Tree::new();
+        let root = crate::ui::Element::stepper(value, 0.0, 100.0, 1.0)
+            .width(W)
+            .height(H)
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(W, H), &mut crate::text::NullTextEngine);
+
+        // 先绘制一帧：`Shared::whole` 由外框在 paint 里写，而真实场景中控件必然先画出来
+        // 才谈得上被点击和按键。少了这一帧，读到的 `whole` 是空的、走回退分支，
+        // 测出来的就不是真实通路。
+        {
+            let mut pm = tiny_skia::Pixmap::new(W as u32, H as u32).unwrap();
+            let mut canvas = crate::render::SkiaCanvas::new(&mut pm);
+            tree.paint(&mut canvas);
+        }
+
+        // 点中部数字框取得焦点（± 按钮刻意不请求焦点，故必须点中间那格）。
+        let hit = tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(W / 2, H / 2), MouseButton::Left),
+            &mut None,
+            &mut None,
+        );
+        let focus = hit.focus;
+        assert!(focus.is_some(), "前提不成立：点中部应当取得焦点");
+
+        let res = tree.dispatch_key(
+            KeyEvent {
+                key: Key::Up,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
+            focus,
+        );
+        assert_eq!(value.get(), 100.0, "前提不成立：↑ 应把值推到上限");
+
+        match res.damage {
+            DamageReq::Full | DamageReq::Layout(_) => {} // 整窗/重排自然盖得住
+            DamageReq::Rect(r) => {
+                assert!(
+                    r.x <= 0 && r.x + r.w >= W,
+                    "脏区没盖住整个控件：{r:?}（控件横跨 0..{W}）——\
+                     ± 按钮的置灰态画在兄弟节点上, 不重绘就一直停在旧色"
+                );
+            }
+            DamageReq::None => panic!("键盘步进后没有任何脏区"),
         }
     }
 
