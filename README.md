@@ -23,6 +23,7 @@
 |------|-----------|------|
 | **Windows** | Win32 + GDI（DIB 拷屏） | DirectWrite |
 | **macOS** | Cocoa/AppKit + CoreGraphics（CGImage blit） | Core Text |
+| **Linux** | X11（x11rb，纯 Rust 协议实现；Wayland 经 XWayland）+ PutImage | fontconfig 选字 + 自带光栅 |
 
 渲染层（`tiny-skia`）与全部控件/布局/事件逻辑平台无关；每个平台只实现「窗口+事件循环」与「文字引擎」两条缝。
 
@@ -51,9 +52,9 @@
 - **命令式 Builder API** — 纯 Rust 链式构建，类型安全、零解析开销。
 - **Copy 句柄状态** — 状态是 `Signal<T>`，闭包里 `move` 直接捕获、不用 `clone()` 前戏；`set()` 自动触发重绘。数据变化驱动子树重建（`list_signal`），动态列表不用手写 diff。
 - **运行期换主题** — `App::theme_handle()` 拿句柄，回调里 `set(Theme::dark())` 即整树热切换；用 `Role` 表达的颜色（`fg_role`/`bg_role`）自动跟随。
-- **一份代码，两个平台** — 控件树、布局、事件、动画、主题全平台无关；切换平台零改动。
+- **一份代码，三个平台** — 控件树、布局、事件、动画、主题全平台无关；切换平台零改动。
 - **Retained 模式 + 脏触发** — 空闲不重绘、阻塞在事件循环，零 CPU 占用。
-- **高质量文字** — 平台原生排版（DirectWrite / Core Text）+ 灰度抗锯齿，CJK 清晰；Label 自动换行；**彩色 emoji**（含 ZWJ 组合序列、肤色修饰），文本框可输入 emoji。
+- **高质量文字** — 平台原生排版（DirectWrite / Core Text；Linux 为 fontconfig 选字 + 自带排版光栅）+ 灰度抗锯齿，CJK 清晰；Label 自动换行；**彩色 emoji**（含 ZWJ 组合序列、肤色修饰），文本框可输入 emoji。
 - **DPI / Retina 感知** — 控件树用逻辑坐标、绘制层统一缩放到物理像素，文字按物理字号渲染（测量与绘制同源），高 DPI（1.5x/2x/Retina）下依然锐利、不偏小。
 - **纯净焦点环** — 焦点环仅在键盘 Tab 导航时显示，纯鼠标操作不显示外框。
 - **完整控件集** — 布局、文本、按钮、表单输入、容器导航、列表、图片、托盘一应俱全。
@@ -168,15 +169,15 @@ cargo clippy --all-targets                                  # 静态检查
 控件层  Element Builder · Widget trait · 布局算法
 核心层  Arena + Node 树 · Measure/Arrange/Paint 三阶段 · 事件分发
 渲染层  Canvas trait → tiny-skia 后端（纯 Rust，跨平台）
-文字层  TextEngine trait → DirectWrite（Windows）/ Core Text（macOS）
-平台层  AppHandler trait → win32（窗口/WndProc/DIB 呈现）/ macos（NSWindow/NSView/CGImage 呈现）
+文字层  TextEngine trait → DirectWrite（Windows）/ Core Text（macOS）/ fontconfig + ttf-parser（Linux）
+平台层  AppHandler trait → win32（窗口/WndProc/DIB 呈现）/ macos（NSWindow/NSView/CGImage 呈现）/ linux（X11/PutImage 呈现）
 ```
 
-关键设计：节点存于 **generational arena**（非 `Rc<RefCell>`），`Widget` trait 退化为纯内容、布局递归由 `Tree` 独占 `&mut self` 驱动 —— 从根上规避 Rust 借用冲突。文字用平台原生引擎在 tiny-skia 预乘缓冲上抗锯齿合成。平台缝合层映射见 [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md)。
+关键设计：节点存于 **generational arena**（非 `Rc<RefCell>`），`Widget` trait 退化为纯内容、布局递归由 `Tree` 独占 `&mut self` 驱动 —— 从根上规避 Rust 借用冲突。文字用平台原生引擎在 tiny-skia 预乘缓冲上抗锯齿合成。平台缝合层映射见 [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) 与 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。
 
 ## 状态
 
-Windows 与 macOS 均已支持。MVP 控件集完成，持续完善中。
+Windows 与 macOS 均已支持；Linux（X11）基本可用——托盘、文件拖出、零窗口常驻与窗口模式 GPU 尚未实现，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
 
 ## 文档
 
@@ -188,6 +189,7 @@ Windows 与 macOS 均已支持。MVP 控件集完成，持续完善中。
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 架构设计与取舍 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 实施路线与验收 |
 | [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) | macOS 后端缝合层映射 |
+| [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) | Linux（X11）后端：依赖取舍、现状、无桌面验证方法 |
 | [`AGENTS.md`](AGENTS.md) | 仓库开发约定（流程、陷阱速查） |
 
 ## 许可证

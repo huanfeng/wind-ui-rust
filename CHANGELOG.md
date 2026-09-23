@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Linux（X11）平台后端**，达到基本可用。取「小依赖」路线：窗口走 `x11rb`（纯 Rust 实现
+  X11 协议，编译期不要任何 `-dev` 包），文字走 `ttf-parser` + `ab_glyph_rasterizer` 自带排版
+  光栅、字体查找在运行期 `dlopen` 系统 fontconfig（取不到时退回扫字体目录），输入法走 `xim`
+  （fcitx5 / ibus 的 XIM 前端），文件对话框用 `rfd` 的 `xdg-portal` 特性。已落地：窗口与事件
+  循环（空闲零 CPU）、HiDPI（`Xft.dpi` / `WINDUI_SCALE`）、光标、键盘与快捷键、剪贴板、
+  XIM 合成串内联绘制、无边框窗口（拖动 / 边缘缩放 / 双击最大化 / 右键系统菜单）、多窗口与
+  模态、文件拖入（XDND）、全局热键（`GrabKey`）、单实例转发、`--screenshot`。尚未实现：
+  系统托盘、文件拖出、零窗口常驻、窗口模式 GPU、Wayland 原生。详见 `docs/LINUX_PORTING.md`。
+
+  实测关于窗（620×556）私有内存 3.7MB@100% / 8.8MB@200%。
+- CI 增加 `ubuntu-latest`。docs.rs 同时构建 Linux 目标。
+
 ### 修复
 
 - **在控件回调里换语言，第一下界面不变**（全平台）。`LocaleHandle::set` / `ThemeHandle::set`
@@ -12,6 +26,10 @@
   只按被点按钮的小脏区局部重画，别处文字停在旧语言上，要再点一次才切过去（换主题碰巧同时
   写了信号时不显形）。宿主改为每帧比对主题快照与语言目录的指针，变了就整窗重排。
 - `LocaleHandle::reload` 在目录尚未建立时会二次借用同一个 `RefCell` 而 panic（正常流程碰不到）。
+
+### 变更
+
+- 自绘标题栏的右键系统菜单默认接管扩展到 Linux（Linux 桌面同有此惯例，平台层也推送窗口状态）。
 
 ## [0.20.0] - 2026-09-22
 

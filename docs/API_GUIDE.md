@@ -7,13 +7,13 @@
 
 ## 1. 设计哲学
 
-windui 是一个**轻量、命令式、retained-mode** 的跨平台桌面 GUI 库（Windows 与 macOS 均已支持）。五条核心原则，决定了所有 API 的样子：
+windui 是一个**轻量、命令式、retained-mode** 的跨平台桌面 GUI 库（Windows、macOS 与 Linux/X11 均已支持）。五条核心原则，决定了所有 API 的样子：
 
 1. **命令式 Builder，零解析**。UI 用纯 Rust 链式调用构建，无 DSL、无宏、无运行时解析。类型即文档，编译期即校验。
 2. **共享可变状态用 `Signal<T>`**。控件不持有"模型"，而是绑定到一个 `Copy` 的状态句柄。你 `set` 信号、框架自动请求重绘，UI 下一帧反映。这是贯穿全库的统一心智模型（见 §3.2）。
 3. **retained + 空闲零 CPU**。控件树常驻，无事件/无脏区时不重绘、不唤醒。动画按需驱动（见 §8）。
 4. **样式两层**：控件不硬编码颜色/间距，全部走 `Theme`（全局调色板 + 每控件覆盖层），可映射 TOML。单点视觉调整走内联 `Style` 修饰符。主题可在运行期热切换（见 §7.3）。
-5. **平台差异收口在平台层**。控件与核心层平台无关，Windows 与 macOS 共用同一份 UI 代码（见 DESIGN.md 跨平台缝合）；少数尚未拉齐的能力见 §11。
+5. **平台差异收口在平台层**。控件与核心层平台无关，Windows、macOS 与 Linux 共用同一份 UI 代码（见 DESIGN.md 跨平台缝合）；少数尚未拉齐的能力见 §11。
 
 ---
 
@@ -805,7 +805,7 @@ App::new("查词", 480, 360)
 - `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
-> **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`——两者都**不需要用户授权**，语义一致（全局生效、组合被占用则该热键静默失效、运行期可改绑与启停）。macOS 上另两条路（`CGEventTap`、`NSEvent` 全局监听）都要用户在「系统设置 → 隐私与安全性 → 辅助功能」手动授权，且后者只能监听不能拦截，故不采用。
+> **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`，Linux 走 X11 根窗口 `GrabKey`（Wayland 会话经 XWayland 时只在本程序有焦点时生效，协议所限）——三者都**不需要用户授权**，语义一致（全局生效、组合被占用则该热键静默失效、运行期可改绑与启停）。macOS 上另两条路（`CGEventTap`、`NSEvent` 全局监听）都要用户在「系统设置 → 隐私与安全性 → 辅助功能」手动授权，且后者只能监听不能拦截，故不采用。
 
 完整示例见 `examples/hotkey.rs`。
 
@@ -870,7 +870,7 @@ app.run_resident();
 - **退出只有托盘的 `ctx.quit()` 一条路**。故 debug 期若既无托盘也无热键就 panic：那样的进程既没有
   入口也没有出口。
 - 空闲仍是零 CPU：零窗口时消息循环纯阻塞在 `GetMessage`，不参与帧配速。
-- **仅 Windows**。macOS 尚未实现，调用会打印一行错误并退出，不会悄悄退化成开一个窗口。
+- **仅 Windows**。macOS 与 Linux 尚未实现，调用会打印一行错误并退出，不会悄悄退化成开一个窗口。
 
 实测（100% 缩放，`PrivateMemorySize64`）：常驻示例零窗口 **1.8 MB**，开一个 460×260 窗口
 4.8 MB，关掉后回到 **2.7 MB**；作为对照，`examples/hotkey.rs`（420×300，`hide_on_close`）
@@ -909,7 +909,7 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
       items
   })
   ```
-  **仅 Windows**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
+  **Windows 与 Linux**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
 - 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
@@ -1375,7 +1375,7 @@ Element::label("标题")
 > `underline` / `strike` 一样按「或」合并——命名样式开了斜体，内联样式不会把它关掉
 > （它们是开关不是取值）。
 >
-> **平台状态**：`font_family` 两平台均生效。`font_weight` **当前仅 Windows 生效**——macOS 的 CoreText 路径尚未接入字重（`src/text/coretext.rs` 构造 `CTFont` 时不传 traits），传入非 400 的值不报错，但没有视觉变化。
+> **平台状态**：`font_family` 三平台均生效（Linux 经 fontconfig 匹配，未安装时按其替换规则回退）。`font_weight` 在 Windows 与 Linux 生效（Linux 上字体缺对应字面时合成加粗）——macOS 的 CoreText 路径尚未接入字重（`src/text/coretext.rs` 构造 `CTFont` 时不传 traits），传入非 400 的值不报错，但没有视觉变化。
 
 **派生信号 `Signal::map`**：同一份状态要以另一种形态喂给控件时用它——应用只维护一个语气信号，颜色与文案都从它派生，改一处两处同时跟上：
 
@@ -1605,7 +1605,7 @@ Element::label("\u{f015} 首页").font_size(18.0)
 - 运行期换字体用 `DWriteEngine::set_private_use_font`；`register_*` 只在引擎创建时读取一次。
 
 > **平台状态**：**当前仅 Windows**。macOS 的 CoreText 路径尚未接入（`src/text/coretext.rs`），
-> 该函数在 macOS 上不存在（`#[cfg(windows)]`）——是编译期缺失而非静默失效，跨平台代码需自行
+> 该函数在 macOS 与 Linux 上不存在（`#[cfg(windows)]`）——是编译期缺失而非静默失效，跨平台代码需自行
 > `cfg` 分支。
 
 ---
@@ -2071,7 +2071,7 @@ Window::new("设置", 420, 320).content(move || Element::text_input(name, "名�
 **退出语义**：关掉**最后一个**窗口才退出进程。主窗可以先关、留着子窗继续用；托盘菜单的
 「退出」会销毁全部窗口。
 
-**平台**：Windows 与 macOS 均已实现，语义一致（开窗、独立关闭、各窗自己的
+**平台**：Windows、macOS 与 Linux 均已实现，语义一致（开窗、独立关闭、各窗自己的
 `on_close_request`/`on_interval`、跨窗共享 `Signal`、换肤联动、关掉最后一个才退出）。
 
 **截图验证**：`--screenshot` 走离屏路径、不开真窗口，但合成交互（`--click X Y`）开出的子窗
@@ -2273,8 +2273,9 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 ## 11. 已知约束
 
 **功能约束**
-- 默认 CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。两平台各有可 opt-in 的 GPU 后端：
-  Windows 走 Direct2D（feature `d2d`，默认开），macOS 走 wgpu/Metal（feature `gpu`，默认关）。见 §5。
+- 默认 CPU 软光栅，适合中小工具；不适合大面积高频全屏动画。Windows 与 macOS 各有可 opt-in 的
+  GPU 后端：Windows 走 Direct2D（feature `d2d`，默认开），macOS 走 wgpu/Metal（默认编入）；
+  Linux 窗口模式暂只有软光栅。见 §5。
 - `list` 当前每行是独立 Tab 停靠点，超长列表会拉长焦点链（计划：单 Tab 停靠 + 方向键导航）。
 - `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
 - 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
@@ -2307,19 +2308,25 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 
 **平台状态**
 
-Windows 与 macOS 均已支持——控件树、布局、事件、动画、主题是同一份平台无关代码，
-两平台间无需改动。缝合面已基本对齐，下表列出各平台的实现方式与**两处尚未拉齐**的能力：
+Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持——控件树、布局、事件、动画、
+主题是同一份平台无关代码，平台间无需改动。下表列出各平台的实现方式与尚未拉齐的能力
+（Linux 后端的取舍与验证方法见 `docs/LINUX_PORTING.md`）：
 
-| 能力 | Windows | macOS |
-|---|---|---|
-| 窗口 / 事件循环 / 文字 / 触摸 / 剪贴板 / 托盘 / 文件拖放 / 无边框窗口 | ✓ | ✓ |
-| 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） |
-| 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 |
-| 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 |
-| 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` |
-| `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） |
-| 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数在 macOS 上**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 |
-| GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（默认**编入**，无需 feature；运行期默认档仍是 `Software`） |
+| 能力 | Windows | macOS | Linux |
+|---|---|---|---|
+| 窗口 / 事件循环 / 文字 / 剪贴板 / 文件拖入 / 无边框窗口 | ✓ | ✓ | ✓ x11rb + 自带文字栈（fontconfig 选字，无复杂文字整形与彩色 emoji） |
+| 输入法（合成串内联绘制、候选窗跟随光标） | ✓ | ✓ | ✓ XIM（fcitx5 / ibus 的 XIM 前端，按 `XMODIFIERS` 连接） |
+| 触摸 / 惯性滚动 | ✓ | ✓ 系统动量 | ✗ 滚轮 / 触控板两指滚动可用，无触摸事件 |
+| 系统托盘 | ✓ | ✓ | ✗ 配置被忽略并记日志 |
+| 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） | ✓ 根窗口 `GrabKey`（Wayland 下受限，见「全局热键与启动即隐藏」） |
+| 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 | ✓ 同语义 |
+| 文件拖出（`platform::drag_files`） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
+| 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误并退出 | ✗ 同 macOS |
+| 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |
+| 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送 |
+| `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） | ✓ 缺字面时合成加粗 |
+| 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 | ✗ 同 macOS |
+| GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（默认**编入**，无需 feature；运行期默认档仍是 `Software`） | ✗ 窗口模式恒走软件渲染（`Renderer::Gpu` 打印提示后回退）；`gpu` feature 可编译 |
 
 **命名一致性**
 

@@ -18,6 +18,7 @@ windui = 轻量 Windows 桌面 GUI 框架（Win32 窗口 + GDI 呈现 + tiny-ski
 | 懂为什么这样设计（内存模型、三阶段布局、借用规避） | `docs/DESIGN.md` |
 | 看已交付的阶段与验收方式 | `docs/ROADMAP.md` |
 | 在仓库里加控件/改框架 | **本文件** |
+| 改 Linux 后端 / 在无桌面机器上做真窗口验证 | `docs/LINUX_PORTING.md` |
 
 ---
 
@@ -25,7 +26,7 @@ windui = 轻量 Windows 桌面 GUI 框架（Win32 窗口 + GDI 呈现 + tiny-ski
 
 1. **Widget 是纯内容**——不持有、不访问节点树。跨节点协调一律走共享状态 `Rc<Cell<T>>`。
 2. **控件不硬编码视觉**——颜色/间距/字号一律读 `theme::current()`，新控件须接入 `Theme`。
-3. **平台差异收口在 `platform/` 层**——控件与核心层保持平台无关（为 macOS 预留）。
+3. **平台差异收口在 `platform/` 层**——控件与核心层保持平台无关（Windows / macOS / Linux 共用）。
 4. **OS 重入前释放借用**——平台层调用可能回调进 `wnd_proc` 的 API 前，先放掉 `state` 的可变借用（两段式）。
 5. **作者与审查分离**——实现后由独立 `code-reviewer` 审，不在同一上下文自审自批。
 6. **提交不含 AI 元信息**——简体中文 conventional commit，无 `Constraint/Rejected/Confidence` 等 trailer、无 `Co-Authored-By`。
@@ -52,6 +53,7 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 ```
 
 平台：Windows，PowerShell 为主（Bash 工具可用于 POSIX 脚本）。包管理 cargo。
+Linux 上上述命令同样可跑（单测、截图回归都不需要 X 服务器）；真窗口验证见 `docs/LINUX_PORTING.md` §6。
 
 ---
 
@@ -73,6 +75,7 @@ powershell scripts/screenshots.ps1                   # 一键生成所有示例�
 | `src/render/{mod,skia}.rs` | `Canvas` trait + tiny-skia 后端 |
 | `src/text/{mod,dwrite}.rs` | `TextEngine` + DirectWrite |
 | `src/platform/{mod,win32/mod,win32/clipboard}.rs` | `AppHandler` trait + Win32 窗口/消息循环/剪贴板 |
+| `src/platform/linux/` · `src/text/linux/` | Linux（X11）平台层与自带文字栈 |
 | `src/testing.rs` | 给下游写测试用：借 `EventCtx` 跑回调并收回副作用 |
 
 **热点文件**（改动频繁且牵一发动全身，改前务必通读相关段落）：`src/ui/inputs.rs`、`src/platform/win32/mod.rs`、`src/core.rs`。
