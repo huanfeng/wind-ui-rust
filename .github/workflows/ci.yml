@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -53,13 +53,15 @@ jobs:
       # 跨平台 GPU 后端（wgpu）。**macOS 不在这里跑**：那边后端是默认编入的，上面
       # 三步（build / test / clippy）已经覆盖；`gpu` feature 只对非 macOS 目标有意义。
       #
-      # Windows runner 走 DX12/WARP 软件回退。拿不到适配器时 GPU 用例会打印「跳过」
-      # 后返回——绿灯不等于跑了，怀疑时进日志搜「跳过：本机没有可用的 wgpu 适配器」。
-      - name: Clippy（gpu feature，仅 Windows）
-        if: runner.os == 'Windows'
+      # Windows runner 走 DX12/WARP 软件回退；Linux runner 通常没有 Vulkan/GL 适配器。
+      # 拿不到适配器时 GPU 用例会打印「跳过」后返回——绿灯不等于跑了，怀疑时进日志搜
+      # 「跳过：本机没有可用的 wgpu 适配器」。Linux 上这一档守的主要是「能编译」：
+      # Linux 平台层尚未接 GPU 呈现，但 `src/render/gpu/` 在那里照样要编得过。
+      - name: Clippy（gpu feature，非 macOS）
+        if: runner.os != 'macOS'
         run: cargo clippy --all-targets --features gpu -- -D warnings
-      - name: Test（gpu feature，仅 Windows）
-        if: runner.os == 'Windows'
+      - name: Test（gpu feature，非 macOS）
+        if: runner.os != 'macOS'
         run: cargo test --features gpu
 
   dco:

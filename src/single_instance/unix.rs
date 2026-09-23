@@ -34,6 +34,8 @@ static PENDING_LISTENER: Mutex<Option<UnixListener>> = Mutex::new(None);
 /// 首实例上下文(UI 线程局部):二次实例回调 + 主窗口 `NSWindow` 指针(as usize)。
 struct SiCtx {
     on_second: Box<dyn FnMut(Vec<String>)>,
+    // Linux 的激活由事件循环自己做（它知道主窗口是谁），不经这里。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     main_window: usize,
 }
 thread_local! {
@@ -119,6 +121,7 @@ pub(crate) fn install_listener(
 }
 
 /// 外部来源的 argv(macOS URL scheme)走与二次实例同一条主线程通路。
+#[cfg(target_os = "macos")]
 pub(crate) fn deliver_argv(argv: Vec<String>) {
     dispatch_to_main(argv);
 }
@@ -143,9 +146,41 @@ fn dispatch_to_main(argv: Vec<String>) {
     unsafe { dispatch_async_f(std::ptr::addr_of!(_dispatch_main_q), ctx, on_main) };
 }
 
-#[cfg(not(target_os = "macos"))]
-fn dispatch_to_main(_argv: Vec<String>) {
-    // 本 crate 目前只有 win32 / macOS 两个 GUI 后端；其它 unix 无主线程可派。
+/// Linux：入队后写唤醒管道，由 X11 事件循环在主线程取出执行（见 [`run_pending_on_main`]）。
+#[cfg(target_os = "linux")]
+fn dispatch_to_main(argv: Vec<String>) {
+    PENDING_ARGV
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(argv);
+    crate::platform::linux::sys::wake();
+}
+
+#[cfg(target_os = "linux")]
+static PENDING_ARGV: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+/// 主线程：执行积压的二次实例 argv。返回 true = 执行过至少一条（调用方据此唤出主窗口）。
+#[cfg(target_os = "linux")]
+pub(crate) fn run_pending_on_main() -> bool {
+    let batch = std::mem::take(&mut *PENDING_ARGV.lock().unwrap_or_else(|e| e.into_inner()));
+    if batch.is_empty() {
+        return false;
+    }
+    SI_CTX.with(|c| {
+        // 先 take 释放借用再调回调（同 macOS 版 `on_main`）。
+        let maybe_ctx = c.borrow_mut().take();
+        let Some(mut ctx) = maybe_ctx else { return };
+        for argv in batch {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                (ctx.on_second)(argv);
+            }));
+        }
+        let mut guard = c.borrow_mut();
+        if guard.is_none() {
+            *guard = Some(ctx);
+        }
+    });
+    true
 }
 
 /// 主线程:调 on_second 并把主窗口带到前台。

@@ -262,6 +262,8 @@ pub(crate) fn invoke(cb: Option<&mut TrayFn>) -> Vec<TrayAction> {
     ctx.take_actions()
 }
 
+// Linux 后端尚无托盘，菜单项的标签 / 勾选态与按下标取回调在那里无人读取。
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) enum ItemKind {
     Action {
         /// 标签。收 [`TextContent`] 而不是 `String`，于是它能是一条待翻译消息
@@ -385,6 +387,7 @@ impl Tray {
         self
     }
     /// 取指定下标菜单项的回调（平台层在模态菜单关闭后分发用）。
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn item_callback(&mut self, idx: usize) -> Option<&mut TrayFn> {
         self.items.get_mut(idx)?.callback()
     }

@@ -856,7 +856,8 @@ pub(crate) fn take_app_hotkey_ops() -> Vec<(usize, crate::event::HotkeyOp)> {
 ///
 /// 逐个取而不是一次取完：托盘的 `TrayAction::OpenWindow` 是位置标记，执行到哪一个就
 /// 取哪一个，顺序才跟得上回调里的调用顺序。
-// macOS 尚未消费这两条路（见 `platform/macos` 里的 TODO），在那里它们暂时无人调用。
+// macOS 尚未消费这两条路（见 `platform/macos` 里的 TODO），在那里它们暂时无人调用；
+// Linux 只有热键路径（取全部），逐个取的托盘路径无人调用。
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn take_callback_window(is_open: &dyn Fn(&str) -> bool) -> Option<NewWindow> {
     let req = crate::event::take_callback_window()?;
@@ -872,7 +873,7 @@ pub(crate) fn take_callback_window(is_open: &dyn Fn(&str) -> bool) -> Option<New
 ///
 /// 这条路是可达的：`App::channel` 的 pump 一次排空全部消息，排空后才统一落地开窗请求，
 /// 故「用户双击图标没反应、再双击一次」这类两条消息就会落进同一批。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn take_callback_windows(is_open: &dyn Fn(&str) -> bool) -> Vec<NewWindow> {
     let mut batch: std::collections::HashSet<String> = std::collections::HashSet::new();
     crate::event::take_callback_windows()
@@ -2559,11 +2560,12 @@ impl UiHost {
         ev: crate::event::PointerEvent,
         res: &mut crate::core::DispatchResult,
     ) {
-        // 默认接管**仅限 Windows**。macOS 没有"标题栏右键出系统菜单"这个惯例，更要紧的是
-        // 它的平台层还不推送窗口状态（`on_window_state` 未实现），真弹出来「还原」会永远
-        // 是灰的、「最大化」在已放大时也还亮着——宁可不弹，也不弹一个状态说谎的菜单。
+        // 默认接管限 Windows 与 Linux（两者的桌面都有标题栏右键出窗口菜单的惯例，平台层
+        // 也都推送窗口状态）。macOS 没有这个惯例，更要紧的是它的平台层还不推送窗口状态
+        // （`on_window_state` 未实现），真弹出来「还原」会永远是灰的、「最大化」在已放大
+        // 时也还亮着——宁可不弹，也不弹一个状态说谎的菜单。
         // 想在 macOS 上自己做，`window_state()` 与 `system_menu_items()` 照常可用。
-        if !cfg!(target_os = "windows") {
+        if !cfg!(any(target_os = "windows", target_os = "linux")) {
             return;
         }
         if !self.frameless
@@ -6362,7 +6364,7 @@ mod tests {
     }
 
     /// 默认接管：无边框窗口的拖动区右键，零代码弹出系统菜单。
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn frameless_drag_region_right_click_opens_system_menu() {
         use crate::event::MouseButton;
@@ -6457,7 +6459,7 @@ mod tests {
     ///
     /// 用 End+Enter 而不是算像素点最后一项：项高/内边距是菜单的实现细节，
     /// 按它们算坐标的测试会在改版式时误报。
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn system_menu_close_goes_through_the_close_guard() {
         use crate::event::{Key, KeyEvent, MouseButton};
@@ -6495,9 +6497,9 @@ mod tests {
     /// macOS 上默认**不**接管：系统无此惯例，且平台层还不推送窗口状态——
     /// 弹出来的菜单会拿 `from_config` 那份猜测值画禁用态，「还原」永远是灰的、
     /// 「最大化」在已放大时也还亮。宁可不弹，也不弹一个状态说谎的菜单。
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     #[test]
-    fn system_menu_is_windows_only_for_now() {
+    fn system_menu_is_not_taken_over_on_macos() {
         use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
@@ -6505,9 +6507,6 @@ mod tests {
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
         press(&mut host, 60, 16, MouseButton::Right);
-        assert!(
-            menu_rows(&host).is_empty(),
-            "非 Windows 平台不该默认接管标题栏右键"
-        );
+        assert!(menu_rows(&host).is_empty(), "macOS 不该默认接管标题栏右键");
     }
 }

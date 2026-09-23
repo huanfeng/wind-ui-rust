@@ -1,4 +1,4 @@
-//! 平台抽象层。按目标平台分发到具体后端：Windows→`win32`，macOS→`macos`。
+//! 平台抽象层。按目标平台分发到具体后端：Windows→`win32`，macOS→`macos`，Linux→`linux`（X11）。
 //!
 //! 各后端对外暴露同形的 API（`run` / `open_url` / `Clipboard`），由本模块按 `cfg` 统一
 //! re-export；上层（`app`/`lib::prelude`）只依赖 `crate::platform::*`，不直接触碰任何具体
@@ -72,10 +72,10 @@ pub fn system_locales() -> Vec<String> {
     macos::system_locales()
 }
 
-/// 见 Windows 版。其余平台暂无平台层，返回空表（调用方走 fallback）。
-#[cfg(not(any(windows, target_os = "macos")))]
+/// 见 Windows 版。
+#[cfg(target_os = "linux")]
 pub fn system_locales() -> Vec<String> {
-    Vec::new()
+    linux::system_locales()
 }
 
 #[cfg(windows)]
@@ -111,8 +111,23 @@ pub(crate) fn single_window_open(_key: &str) -> bool {
     false
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
-compile_error!("windui 目前仅支持 Windows 与 macOS 平台");
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::clipboard::X11Clipboard as Clipboard;
+#[cfg(target_os = "linux")]
+pub use linux::drag_files;
+#[cfg(target_os = "linux")]
+pub use linux::open_url;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::run;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::single_window_open;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::system_prefers_dark;
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台");
 
 /// 托盘的平台无关声明层（`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction`）。
 pub mod tray;
@@ -1089,6 +1104,13 @@ fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
 }
 
 #[cfg(target_os = "macos")]
+fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
+    d
+}
+
+/// Linux：门户对话框按窗口标识定父窗口，而本后端的窗口句柄尚未对外暴露（见
+/// `native_window_handle`），暂不注入——对话框照常弹出，只是不挂在主窗口上。
+#[cfg(target_os = "linux")]
 fn inject_parent(d: rfd::FileDialog) -> rfd::FileDialog {
     d
 }

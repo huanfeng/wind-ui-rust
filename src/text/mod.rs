@@ -1,4 +1,5 @@
-//! 文字引擎抽象。Windows 下由 DirectWrite 实现（`dwrite`）；macOS 下由 Core Text 实现（`coretext`）。
+//! 文字引擎抽象。Windows 下由 DirectWrite 实现（`dwrite`）；macOS 下由 Core Text 实现（`coretext`）；
+//! Linux 下由 fontconfig + 自带光栅实现（`linux`）。
 
 #[cfg(windows)]
 pub mod dwrite;
@@ -10,11 +11,18 @@ pub mod coretext;
 #[cfg(target_os = "macos")]
 pub use coretext::CoreTextEngine;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::LinuxTextEngine;
+
 /// 当前平台的具体文字引擎类型。`app` 层用此别名持有引擎，避免 `cfg` 散落到宿主逻辑里。
 #[cfg(windows)]
 pub type PlatformTextEngine = DWriteEngine;
 #[cfg(target_os = "macos")]
 pub type PlatformTextEngine = CoreTextEngine;
+#[cfg(target_os = "linux")]
+pub type PlatformTextEngine = LinuxTextEngine;
 
 use tiny_skia::Pixmap;
 

@@ -11,8 +11,8 @@ env:
 
 jobs:
   publish:
-    # 在受支持的 host 上发布，使 cargo publish 的校验构建能通过
-    # （平台后端仅 Windows/macOS 可编译；Linux host 会触发 compile_error!）。
+    # macOS host 发布：cargo publish 的校验构建会编进 macOS 恒编入的 wgpu 依赖树，
+    # 在这里校验能覆盖到它（Linux / Windows host 上那棵树是 optional、默认不编）。
     runs-on: macos-latest
     permissions:
       contents: write

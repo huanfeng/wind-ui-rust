@@ -150,9 +150,15 @@ pub(crate) fn forward(app_id: &str, argv: &[String]) -> bool {
 /// 供 macOS 的 URL scheme 用:`myapp://…` 由 LaunchServices 经 Apple Event 送达,
 /// **不进 argv**,故走不了 socket 转发那条路;但对应用而言「被 URL 打开」与「被带参数
 /// 再次启动」是同一件事,复用同一个回调即可。见 `platform::macos::url_scheme`。
-#[cfg(all(unix, not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
 pub(crate) fn deliver_argv(argv: Vec<String>) {
     unix::deliver_argv(argv);
+}
+
+/// Linux 事件循环在主线程调用：执行二次实例转来的 argv（见 `unix::run_pending_on_main`）。
+#[cfg(target_os = "linux")]
+pub(crate) fn run_pending_on_main() -> bool {
+    unix::run_pending_on_main()
 }
 
 /// 首实例:主窗口就绪后安装监听(收二次实例 argv → on_second + 激活主窗口)。

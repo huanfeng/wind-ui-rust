@@ -2,7 +2,7 @@
 name = "windui"
 version = "0.20.0"
 edition = "2021"
-description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText）"
+description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText；Linux: X11+fontconfig）"
 authors = ["huanfeng <huanfengf@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/huanfeng/wind-ui-rust"
@@ -116,6 +116,22 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ] }
+
+# ---- Linux 平台后端（X11 + 自带文字栈）----
+# 取向是「小依赖」：窗口走 x11rb（纯 Rust 实现 X11 协议，不链 libX11/libxcb），文字走
+# ttf-parser（字体解析，零依赖）+ ab_glyph_rasterizer（覆盖度光栅，零依赖），字体查找
+# 在运行期 dlopen 系统的 libfontconfig——编译期不需要任何 -dev 包，运行期没有 fontconfig
+# 也能退回扫字体目录。Wayland 会话经 XWayland 运行。详见 docs/LINUX_PORTING.md。
+[target.'cfg(target_os = "linux")'.dependencies]
+# 0.13 而非最新：与 xim（XIM 输入法协议）依赖的大版本对齐，两者共用同一个连接类型。
+x11rb = "0.13"
+# XIM 客户端：与 fcitx5 / ibus 的 XIM 前端通话（合成串回调 + 提交）。
+xim = { version = "0.5", default-features = false, features = ["x11rb-client"] }
+ttf-parser = "0.25"
+ab_glyph_rasterizer = "0.1"
+# rfd 在 Linux 上必须选一个后端：xdg-portal 走 D-Bus 门户（无门户时回退 zenity），
+# 只多一个 pollster；gtk3 会把整套 GTK 拉进进程，与低内存目标相悖。
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 # ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
 # objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
@@ -264,9 +280,8 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# docs.rs 默认在 Linux x86_64 构建文档，但本 crate 仅 Windows/macOS 可编译
-# （Linux 会触发 platform/mod.rs 的 compile_error!）。指定构建目标，否则文档页常红。
+# docs.rs 默认目标仍取 Windows（API 文档里的平台说明以它为主），Linux 一并构建。
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
-targets = ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "aarch64-apple-darwin"]
+targets = ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 all-features = true
