@@ -39,6 +39,10 @@
 //! 因为主题**可能**将来按窗口分。语言不会——它是应用级的，且所有窗口同线程（见
 //! 「多窗口地基」）。于是这里**只有一个线程局部**，[`LocaleHandle`] 是它的薄句柄，
 //! 不进 `UiHost`、不需要每帧同步，也就少了一处"忘了注入"的失效点。
+//!
+//! 宿主只做一件事：每帧比对 [`current()`] 的指针，变了就整窗重排（`UiHost::begin_frame`）。
+//! 不能只靠 `set` 里的 `anim::request_repaint`——控件回调里发出的请求会被下一帧开头的
+//! `reset_request` 清掉，那一帧只局部重画被点的按钮。
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -862,9 +866,11 @@ impl LocaleHandle {
     /// 不做文件监听：那要拉一个 watcher 依赖 + 一条后台线程，而"改完译文点一下刷新"
     /// 是开发期就够用的粒度。
     pub fn reload(&self) {
+        // 先取语言再进闭包：`language()` → `current()` 在目录尚未建立时会去借 `LOCALES`，
+        // 放在 `with_locales` 里面就是同一个 `RefCell` 的二次借用。
+        let lang = language();
         let cat = with_locales(|l| {
             l.rescan();
-            let lang = language();
             Rc::new(l.catalog(&lang))
         });
         CURRENT.with(|c| *c.borrow_mut() = Some(cat));

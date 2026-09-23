@@ -2216,6 +2216,8 @@ impl AppHandler for ClosureHandler {
 struct UiHost {
     tree: Tree,
     engine: PlatformTextEngine,
+    /// 上一帧所用的语言目录（指针比对用，见 `begin_frame`）。
+    lang_seen: Option<Rc<crate::i18n::Catalog>>,
     hover: Option<NodeId>,
     capture: Option<NodeId>,
     close: bool,
@@ -2485,6 +2487,7 @@ impl UiHost {
         Self {
             tree,
             engine: PlatformTextEngine::new(),
+            lang_seen: None,
             hover: None,
             capture: None,
             close: false,
@@ -2744,7 +2747,24 @@ impl UiHost {
         // 多窗口下每帧各注各的）。
         crate::ui::caret::set_window_active(self.window_active);
         // 从运行期句柄刷新主题快照（热切换下一帧生效），注入线程局部供控件读取。
-        self.theme = self.theme_src.current();
+        //
+        // 主题 / 语言换了就**整窗重排**，判据是快照指针变没变，而不是 `set` 时发出的
+        // `anim::request_repaint`：那一位是帧概念，本帧 `render` 开头的 `reset_request`
+        // 会先把它清掉——在控件回调里换语言，请求活不到下一帧，那一帧只按按钮自己的小
+        // 脏区局部重画，别处文字停在旧语言上（「第一次点语言按钮没反应」）。指针比对
+        // 也顺带覆盖了别的窗口里换的、以及 `LocaleHandle::reload`。
+        let theme = self.theme_src.current();
+        let lang = crate::i18n::current();
+        let lang_changed = self
+            .lang_seen
+            .as_ref()
+            .is_some_and(|seen| !Rc::ptr_eq(seen, &lang));
+        if !Rc::ptr_eq(&theme, &self.theme) || lang_changed {
+            self.damage.needs_full = true;
+            self.damage.needs_relayout = true;
+        }
+        self.lang_seen = Some(lang);
+        self.theme = theme;
         crate::theme::set_current(self.theme.clone());
         // 清屏色随主题（未经 App::bg 显式固定时）：暗色主题下窗口底色同步转暗。
         if self.bg_follows_theme {
@@ -4379,6 +4399,57 @@ mod tests {
             host.take_window_title(),
             None,
             "没有标题来源，换语言也不该推"
+        );
+    }
+
+    /// 在**控件回调里**换语言，紧接着的那一帧必须整窗重画。
+    ///
+    /// `LocaleHandle::set` 经 `anim::request_repaint` 请求整窗，而那一位是帧概念：
+    /// 下一帧 `render` 开头的 `reset_request` 会先把它清掉。回调里发出的请求因此活不到
+    /// 下一帧——实测症状是「启动后第一次点语言按钮界面不变，再点一次才切过去」：
+    /// 那一帧只按按钮自己的小脏区局部重画，别处的文字停在旧语言上。
+    #[test]
+    fn language_switch_from_a_click_repaints_the_whole_window() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed("[meta]\nlocale = \"zh-CN\"\n[t]\nlabel = \"短\"\n")
+                .embed("[meta]\nlocale = \"en\"\n[t]\nlabel = \"long\"\n")
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+        let lang = crate::i18n::LocaleHandle::new();
+        let mut host = App::new("t", 300, 200)
+            .content(
+                Element::col()
+                    .child(
+                        Element::button("EN")
+                            .width(80)
+                            .height(30)
+                            .on_click(move |_| {
+                                lang.set("en");
+                            }),
+                    )
+                    .child(Element::label(crate::t!("t.label")).width(200)),
+            )
+            .into_handler_for_test();
+        host.set_scale(1.0);
+        let mut pm = tiny_skia::Pixmap::new(300, 200).unwrap();
+        host.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        for kind in [PointerKind::Move, PointerKind::Down, PointerKind::Up] {
+            host.on_pointer(PointerEvent::single(
+                kind,
+                Point::new(20, 10),
+                MouseButton::Left,
+            ));
+        }
+        assert_eq!(crate::i18n::language(), "en", "前提：点击确实换了语言");
+        host.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        assert!(
+            host.damage.last_frame_full,
+            "换语言后的那一帧必须整窗：否则只重画按钮，别处的文字停在旧语言上"
         );
     }
 
