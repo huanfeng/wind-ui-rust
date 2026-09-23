@@ -561,7 +561,7 @@ impl Widget for RadioButton {
 // ---------------- Slider ----------------
 
 /// 值标签额外占用的宽度（px），仅 `show_value` 开启时生效。"100%" 约 4 字符。
-const VALUE_LABEL_W: i32 = 44;
+pub(crate) const VALUE_LABEL_W: i32 = 44;
 
 pub struct Slider {
     value: Signal<f32>, // 0.0..=1.0
@@ -583,17 +583,27 @@ impl Slider {
         self.show_value = on;
     }
 
+    /// 轨道占用的宽度：`show_value` 时右侧让给值标签。绘制与指针换算共用这一处，
+    /// 否则旋钮视觉到头后鼠标还得多拖一个标签宽才换算到 100%（#11）。
+    fn track_w(&self, w: i32) -> i32 {
+        if self.show_value {
+            w - VALUE_LABEL_W
+        } else {
+            w
+        }
+    }
+
     fn set_from_pos(&self, ctx: &mut EventCtx, x: i32) {
         let b = ctx.bounds();
         let r = KNOB_R;
-        let usable = (b.w - 2 * r).max(1);
+        let usable = (self.track_w(b.w) - 2 * r).max(1);
         let v = ((x - b.x - r) as f32 / usable as f32).clamp(0.0, 1.0);
         self.value.set(v);
         ctx.mark_dirty();
     }
 }
 
-const KNOB_R: i32 = 9;
+pub(crate) const KNOB_R: i32 = 9;
 
 impl Widget for Slider {
     fn measure(&self, _avail: Size, style: &Style, _text: &mut dyn TextEngine) -> Size {
@@ -621,12 +631,7 @@ impl Widget for Slider {
         let (pal, tg) = (&th.palette, &th.toggle);
         let accent = if enabled { tg.accent(pal) } else { pal.track };
 
-        // show_value 时把轨道限制在左侧，右侧留给标签。
-        let track_w = if self.show_value {
-            bounds.w - VALUE_LABEL_W
-        } else {
-            bounds.w
-        };
+        let track_w = self.track_w(bounds.w);
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
         let r = KNOB_R as f32;
         let x0 = bounds.x as f32 + r;
