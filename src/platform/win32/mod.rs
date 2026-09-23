@@ -393,7 +393,9 @@ unsafe extern "system" fn app_host_proc(
         WM_NCCREATE => {
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as isize);
+                // `as _` 而非 `as isize`：32 位目标上 windows crate 把它映射成
+                // `SetWindowLongW`（收 i32），让目标自己的签名定整数宽度（#17）。
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -1847,8 +1849,8 @@ unsafe extern "system" fn wnd_proc(
             // 取出 CreateWindow 传入的 WindowState 指针并挂到 HWND
             let cs = lparam.0 as *const CREATESTRUCTW;
             if !cs.is_null() {
-                let state_ptr = (*cs).lpCreateParams as isize;
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr);
+                // `as _`：32 位目标上此 API 收 i32，理由同 `app_host_proc`（#17）。
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }

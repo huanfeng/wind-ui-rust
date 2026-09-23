@@ -50,6 +50,18 @@ jobs:
       # 关闭时的门控疏漏一路溜到发布版才被发现（0.11.0 即如此）。
       - name: Clippy（关闭默认 feature）
         run: cargo clippy --no-default-features --all-targets -- -D warnings
+      # 32 位 Windows。windows-rs 在 x86 上有两处与 64 位不同的形状：`NOTIFYICONDATAW`
+      # 是 packed(1)（对字段取引用即 E0793），`SetWindowLongPtrW` 收 i32。本矩阵的
+      # windows-latest 只编 x86_64，没有这条就只能等下游用户撞上（#17、#9 各一次）。
+      # 只 clippy lib：要守的是平台层能否编译，测试与示例在 x64 那档已覆盖。
+      - name: Clippy（i686，仅 Windows）
+        if: runner.os == 'Windows'
+        # bash 带 -e：pwsh 下多行 run 只看最后一条命令的退出码，前一档失败会被吞掉。
+        shell: bash
+        run: |
+          rustup target add i686-pc-windows-msvc
+          cargo clippy --target i686-pc-windows-msvc --lib -- -D warnings
+          cargo clippy --target i686-pc-windows-msvc --lib --no-default-features -- -D warnings
       # 跨平台 GPU 后端（wgpu）。**macOS 不在这里跑**：那边后端是默认编入的，上面
       # 三步（build / test / clippy）已经覆盖；`gpu` feature 只对非 macOS 目标有意义。
       #

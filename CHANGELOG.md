@@ -18,6 +18,7 @@
 
   实测关于窗（620×556）私有内存 3.7MB@100% / 8.8MB@200%。
 - CI 增加 `ubuntu-latest`。docs.rs 同时构建 Linux 目标。
+- CI 的 Windows 档增加 `i686-pc-windows-msvc` 的 clippy（默认 / 关闭默认 feature 各一次）。
 
 ### 修复
 
@@ -26,6 +27,9 @@
   只按被点按钮的小脏区局部重画，别处文字停在旧语言上，要再点一次才切过去（换主题碰巧同时
   写了信号时不显形）。宿主改为每帧比对主题快照与语言目录的指针，变了就整窗重排。
 - `LocaleHandle::reload` 在目录尚未建立时会二次借用同一个 `RefCell` 而 panic（正常流程碰不到）。
+- **32 位 Windows（`i686-pc-windows-msvc`）编译失败**：`SetWindowLongPtrW` 在 x86 上收
+  `i32`；`NOTIFYICONDATAW` 在 x86 上是 `packed(1)`，对其字符数组字段取引用是 E0793。
+  感谢 @0x696c757a696f（#17、#18）。
 - **`Slider::show_value` 拖到头还差 44px**：绘制时轨道右侧让出值标签，指针换算却按整宽，
   旋钮视觉到 100% 后鼠标还要再拖一个标签宽。两处改为共用同一条轨道宽（#11）。
 

@@ -293,8 +293,8 @@ pub(crate) fn notify(hwnd: HWND, uid: u32, title: &str, body: &str) {
     unsafe {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_INFO;
-        copy_wide(&mut nid.szInfoTitle, title);
-        copy_wide(&mut nid.szInfo, body);
+        nid.szInfoTitle = wide_buf(title);
+        nid.szInfo = wide_buf(body);
         nid.dwInfoFlags = NIIF_INFO;
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -309,7 +309,7 @@ pub(crate) fn set_tooltip(hwnd: HWND, uid: u32, tip: &str) {
     unsafe {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_TIP;
-        copy_wide(&mut nid.szTip, tip);
+        nid.szTip = wide_buf(tip);
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 }
@@ -361,8 +361,20 @@ fn add_nid(hwnd: HWND, uid: u32, hicon: HICON, tip: &str) -> NOTIFYICONDATAW {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = hicon;
-    copy_wide(&mut nid.szTip, tip);
+    nid.szTip = wide_buf(tip);
     nid
+}
+
+/// &str → 定长 UTF-16 数组（截断 + NUL 收尾），长度由赋值目标推导。
+///
+/// **按值整体赋给字段，而不是借 `&mut nid.szTip` 原地写**：32 位 Windows 上
+/// `NOTIFYICONDATAW` 是 `repr(C, packed(1))`，对其字段取引用是 E0793 硬错误
+/// （x86_64/aarch64 上是自然对齐，故只有 i686 编译才暴露，#17）。读写 packed 字段的
+/// **值**始终合法，也免去裸指针与手写的数组长度。
+fn wide_buf<const N: usize>(s: &str) -> [u16; N] {
+    let mut buf = [0u16; N];
+    copy_wide(&mut buf, s);
+    buf
 }
 
 /// 把 &str 写入定长 UTF-16 缓冲（截断 + NUL 收尾）。
