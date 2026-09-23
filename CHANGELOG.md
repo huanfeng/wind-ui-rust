@@ -18,6 +18,8 @@
 
   实测关于窗（620×556）私有内存 3.7MB@100% / 8.8MB@200%。
 - CI 增加 `ubuntu-latest`。docs.rs 同时构建 Linux 目标。
+- `TrayHandle::notify(title, body)`：从应用状态变化处弹系统通知，不必先有一次托盘交互
+  （Win32 / macOS；与 `TrayCtx::notify` 同一平台实现）。感谢 @m2selfA（#13）。
 - CI 的 Windows 档增加 `i686-pc-windows-msvc` 的 clippy（默认 / 关闭默认 feature 各一次）。
 
 ### 修复

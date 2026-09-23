@@ -2672,13 +2672,7 @@ unsafe fn materialize_window(item: NewWindow) {
     }
 }
 
-/// 消费运行期热键操作队列（改绑/启停），落地到 `HotkeyState`。
-///
-/// 队列在窗口的 handler 上（`HotkeyHandle` 排进去的），而 `HotkeyState` 在 App 级宿主上，
-/// 故要跨两个 state。**先取完队列、释放窗口那份借用，再借宿主**：两份借用不重叠，
-/// 与铁律 6 同一个理由——中间隔着的 `Register/UnregisterHotKey` 虽不向本线程同步派发
-/// 消息，但让两个 `&mut` 同时活着本身就是别名。
-/// 落实运行期托盘意图（`TrayHandle::set_tooltip`）。
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify`）。
 ///
 /// 队列是线程局部的（托盘是应用级单例，不属于任何窗口），故这里不需要 hwnd——
 /// 投递目标从 app 宿主上的 `TrayState` 取。**先取出目标释放借用，再调
@@ -2707,10 +2701,20 @@ unsafe fn apply_tray_ops() {
                     ts.remember_tooltip(s);
                 }
             }
+            // 气泡是一次性的，shell 重启后无需重放，故不进 `TrayState`。
+            crate::platform::tray::TrayOp::Notify { title, body } => {
+                tray::notify(h, uid, &title, &body);
+            }
         }
     }
 }
 
+/// 消费运行期热键操作队列（改绑/启停），落地到 `HotkeyState`。
+///
+/// 队列在窗口的 handler 上（`HotkeyHandle` 排进去的），而 `HotkeyState` 在 App 级宿主上，
+/// 故要跨两个 state。**先取完队列、释放窗口那份借用，再借宿主**：两份借用不重叠，
+/// 与铁律 6 同一个理由——中间隔着的 `Register/UnregisterHotKey` 虽不向本线程同步派发
+/// 消息，但让两个 `&mut` 同时活着本身就是别名。
 unsafe fn apply_hotkey_ops(hwnd: HWND) {
     let ops = match state_from(hwnd) {
         Some(state) => state.handler.take_hotkey_ops(),

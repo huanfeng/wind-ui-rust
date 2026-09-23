@@ -57,7 +57,7 @@ thread_local! {
     static INSTALLED: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
 }
 
-/// 落实运行期托盘意图（`TrayHandle::set_tooltip`），与 win32 的 `apply_tray_ops` 对齐。
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify`），与 win32 的 `apply_tray_ops` 对齐。
 ///
 /// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
 /// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
@@ -74,13 +74,16 @@ pub(crate) fn apply_tray_ops() {
         let Some(item) = borrowed.as_ref() else {
             return;
         };
-        let Some(button) = item.button(mtm) else {
-            return;
-        };
         for op in ops {
             match op {
+                // 按钮只有改提示要用；通知不经它，取不到按钮时不能连带丢掉通知。
                 crate::platform::tray::TrayOp::SetTooltip(s) => {
-                    button.setToolTip(Some(&NSString::from_str(&s)));
+                    if let Some(button) = item.button(mtm) {
+                        button.setToolTip(Some(&NSString::from_str(&s)));
+                    }
+                }
+                crate::platform::tray::TrayOp::Notify { title, body } => {
+                    deliver_notification(&title, &body);
                 }
             }
         }

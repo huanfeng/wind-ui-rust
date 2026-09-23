@@ -31,6 +31,8 @@ use std::rc::Rc;
 pub enum TrayOp {
     /// 换鼠标悬停提示。
     SetTooltip(String),
+    /// 弹出系统通知。与托盘回调的 [`TrayAction::Notify`] 走同一平台实现。
+    Notify { title: String, body: String },
 }
 
 thread_local! {
@@ -96,6 +98,20 @@ impl TrayHandle {
         self.queue.borrow_mut().push(TrayOp::SetTooltip(s.into()));
         // 排完队要**踢一帧**，否则这条意图要等到下一次有人动鼠标才被消费。改提示
         // 多半发生在设置页里，而那之后用户可能直接去托盘上悬停——中间一个事件都没有。
+        crate::anim::request_repaint();
+    }
+
+    /// 弹出系统通知。与托盘菜单里的 [`TrayCtx::notify`] 是同一条平台实现，区别只在
+    /// 发起方：这里是**应用状态**变了（后台任务完成、同步失败），不必先有一次托盘交互。
+    ///
+    /// 通知挂在托盘图标上（Win32 的气泡本就是 `NOTIFYICONDATAW` 的一部分），故没装托盘时
+    /// 同样被丢弃；Linux 尚无托盘，也一并丢弃。
+    pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
+        self.queue.borrow_mut().push(TrayOp::Notify {
+            title: title.into(),
+            body: body.into(),
+        });
+        // 踢一帧的理由同 `set_tooltip`：发起方多在后台状态回调里，之后未必再有事件。
         crate::anim::request_repaint();
     }
 
@@ -522,6 +538,24 @@ mod tests {
                     body: "正文".into()
                 },
                 TrayAction::Show,
+            ]
+        );
+    }
+
+    /// 运行期通知与改提示走同一条意图队列，按调用顺序排队（不会被合并或重排）。
+    #[test]
+    fn runtime_handle_queues_notification_in_call_order() {
+        let handle = TrayHandle::detached();
+        handle.set_tooltip("同步中");
+        handle.notify("同步完成", "已上传 3 个文件");
+        assert_eq!(
+            handle.pending_ops(),
+            vec![
+                TrayOp::SetTooltip("同步中".into()),
+                TrayOp::Notify {
+                    title: "同步完成".into(),
+                    body: "已上传 3 个文件".into(),
+                },
             ]
         );
     }
