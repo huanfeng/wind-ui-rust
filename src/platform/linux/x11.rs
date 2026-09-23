@@ -549,7 +549,7 @@ impl X11 {
             let icon = src.at((px as f32 * self.scale).round() as u32);
             data.push(icon.width());
             data.push(icon.height());
-            data.extend(icon.rgba().chunks_exact(4).map(|p| {
+            data.extend(icon.rgba().as_chunks::<4>().0.iter().map(|p| {
                 ((p[3] as u32) << 24) | ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | p[2] as u32
             }));
         }
@@ -856,7 +856,7 @@ impl X11 {
             buf.clear();
             for row in y..y + n as i32 {
                 let off = row as usize * stride + r.x as usize * 4;
-                for px in data[off..off + row_bytes].chunks_exact(4) {
+                for px in data[off..off + row_bytes].as_chunks::<4>().0 {
                     if self.fmt.lsb {
                         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                     } else {
