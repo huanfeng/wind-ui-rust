@@ -551,6 +551,9 @@ pub struct Tree {
     pending_windows: Vec<crate::event::WindowRequest>,
     /// 同上，`ctx.show_context_menu`。延迟弹菜单（先记下、下一帧再弹）走的正是这条路。
     pending_menu: Option<MenuRequest>,
+    /// 同上，`ctx.defer_blocking` 与各 `request_pick_*`。应用「先排队、下一帧由某个控件的
+    /// on_update 兑现」的命令里，弹系统原生菜单 / 对话框的那些原先在此静默消失。
+    pending_dialog: Option<DialogRequest>,
     /// arrange 递归中当前节点父级的绝对左上角。
     ///
     /// `arrange` 全程使用相对父的坐标，但滚动条要判断"本容器是否贴着窗口右缘"必须知道
@@ -604,6 +607,7 @@ impl Tree {
             pending_focus: None,
             pending_windows: Vec::new(),
             pending_menu: None,
+            pending_dialog: None,
             arrange_origin: Point::new(0, 0),
             layout_size: Size::ZERO,
             modals: Vec::new(),
@@ -629,6 +633,11 @@ impl Tree {
     /// 取走 on_update 相位攒下的菜单请求（见 `pending_menu`）。
     pub fn take_pending_menu(&mut self) -> Option<MenuRequest> {
         self.pending_menu.take()
+    }
+
+    /// 取走 on_update 相位攒下的对话框请求（见 `pending_dialog`）。
+    pub fn take_pending_dialog(&mut self) -> Option<DialogRequest> {
+        self.pending_dialog.take()
     }
 
     /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
@@ -757,6 +766,7 @@ impl Tree {
         let requested_focus = ctx.out.focus.take();
         let requested_windows = std::mem::take(&mut ctx.out.open_windows);
         let requested_menu = ctx.out.menu.take();
+        let requested_dialog = ctx.out.dialog.take();
         if let Some(n) = self.get_mut(id) {
             n.widget = widget;
         }
@@ -775,6 +785,10 @@ impl Tree {
         // 一帧里最多弹一个菜单；后来者覆盖，与 `EventOutcome::menu` 的单值语义一致。
         if let Some(m) = requested_menu {
             self.pending_menu = Some(m);
+        }
+        // 对话框同理，单值、后来者覆盖（`EventOutcome::dialog` 本身也是单值）。
+        if let Some(d) = requested_dialog {
+            self.pending_dialog = Some(d);
         }
     }
 
@@ -6718,5 +6732,30 @@ mod tests {
         assert_eq!(toasts.len(), 1, "on_update 发出的 toast 应被暂存供宿主上屏");
         assert_eq!(toasts[0].text, "已保存");
         assert!(tree.take_pending_toasts().is_empty(), "取走后应清空暂存");
+    }
+
+    #[test]
+    fn on_update_dialog_is_captured_for_host() {
+        // 回归：on_update 里的 `defer_blocking` 曾随 EventOutcome 一起被丢弃——应用把
+        // 「弹系统右键菜单」排到下一帧兑现时，菜单永远不出来，也没有任何报错。
+        struct DeferOnUpdate;
+        impl Widget for DeferOnUpdate {
+            fn on_update(&mut self, ctx: &mut EventCtx) {
+                ctx.defer_blocking(|| {});
+            }
+        }
+        let mut tree = Tree::new();
+        let id = Element::leaf()
+            .reactive()
+            .widget(DeferOnUpdate)
+            .build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert!(
+            matches!(tree.take_pending_dialog(), Some(DialogRequest::Custom(_))),
+            "on_update 发出的对话框请求应被暂存供宿主执行"
+        );
+        assert!(tree.take_pending_dialog().is_none(), "取走后应清空暂存");
     }
 }

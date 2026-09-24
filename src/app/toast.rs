@@ -121,13 +121,20 @@ impl UiHost {
         for req in self.tree.take_pending_toasts() {
             self.show_toast(req);
         }
-        // 开窗与菜单同理（见 `Tree::pending_windows`）。放在一起是因为三者同因同治，
+        // 开窗、菜单、对话框同理（见 `Tree::pending_windows`）。放在一起是因为三者同因同治，
         // 分散在别处早晚会漏掉其中一个——这个函数本身就是当初只补了 toast 的产物。
         let windows = self.tree.take_pending_windows();
         self.pending_windows.extend(windows);
         if let Some(req) = self.tree.take_pending_menu() {
             if let Some(target) = self.focus.current.or(self.tree.root) {
                 self.open_menu(req, target);
+            }
+        }
+        // 对话框：交给与事件路径同一个暂存位，平台在本帧绘制完后执行（WM_PAINT 之后的
+        // `apply_dialog_request`）。事件路径已排了一个的话不覆盖——那个更早，先到先得。
+        if let Some(req) = self.tree.take_pending_dialog() {
+            if self.pending_dialog.is_none() {
+                self.pending_dialog = Some(req);
             }
         }
     }

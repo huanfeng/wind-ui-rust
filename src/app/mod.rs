@@ -5659,6 +5659,52 @@ mod tests {
     }
 
     #[test]
+    fn dialog_deferred_from_on_update_reaches_the_host() {
+        // 同上一条，`ctx.defer_blocking`：应用把「弹系统右键菜单」排到下一帧由 on_update
+        // 兑现，菜单曾永远不出来。平台在绘制后调 `take_dialog_request`，这里走同一个出口。
+        use crate::core::Widget;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use std::cell::Cell as StdCell;
+        use std::rc::Rc;
+        use tiny_skia::Pixmap;
+
+        struct DeferOnce(Rc<StdCell<bool>>, Rc<StdCell<bool>>);
+        impl Widget for DeferOnce {
+            fn on_update(&mut self, ctx: &mut crate::core::EventCtx) {
+                if self.0.get() {
+                    return;
+                }
+                self.0.set(true);
+                let ran = self.1.clone();
+                ctx.defer_blocking(move || ran.set(true));
+            }
+        }
+
+        let fired = Rc::new(StdCell::new(false));
+        let ran = Rc::new(StdCell::new(false));
+        let ui = Element::stack().fill().child(
+            Element::leaf()
+                .width(20)
+                .height(20)
+                .widget(DeferOnce(fired.clone(), ran.clone()))
+                .reactive(),
+        );
+        let app = App::new("t", 40, 40).content(ui);
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(40, 40).unwrap();
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(40, 40));
+
+        assert!(fired.get(), "on_update 应当被调到");
+        let req = handler
+            .take_dialog_request()
+            .expect("on_update 里的 defer_blocking 必须交到宿主手上");
+        req.run();
+        assert!(ran.get(), "取到的正是那个闭包");
+    }
+
+    #[test]
     fn hiding_node_resets_its_interaction_state() {
         // 回归：控件在按下/悬停态被隐藏（如关闭其所在对话框）时，框架应调 reset_interaction
         // 重置其交互态，避免下次显示瞬间闪出旧的按下/悬停态。
