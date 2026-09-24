@@ -105,7 +105,10 @@ impl Cursor {
             match CursorTheme::load_from_name(conn, shm.clone(), &name, base * int_scale as u32) {
                 Ok(t) => self.theme = Some((t, int_scale)),
                 Err(e) => {
-                    log::warn!("加载光标主题 {name} 失败：{e}");
+                    // 失败会在每次换形状时重试（主题可能后来才装上），但只提示一次。
+                    if !std::mem::replace(&mut self.warned, true) {
+                        log::warn!("加载光标主题 {name} 失败：{e}");
+                    }
                     return;
                 }
             }

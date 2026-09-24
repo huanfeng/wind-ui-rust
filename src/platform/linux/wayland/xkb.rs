@@ -263,6 +263,7 @@ mod tests {
                 x.keymap,
                 xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
             );
+            assert!(!p.is_null(), "xkb_keymap_get_as_string 返回空指针");
             let s = std::ffi::CStr::from_ptr(p).to_bytes_with_nul().to_vec();
             extern "C" {
                 fn free(p: *mut std::ffi::c_void);

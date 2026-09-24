@@ -496,6 +496,81 @@ mod tests {
         assert!(translate_key(XK_A, false, Mods::default(), &mut alt, || None).is_empty());
     }
 
+    const XK_KP_ADD: u32 = 0xffab;
+    const XK_KP_DIVIDE: u32 = 0xffaf;
+    const XK_KP_1: u32 = 0xffb1;
+    const XK_DEAD_GRAVE: u32 = 0xfe50;
+
+    #[test]
+    fn keypad_operators_emit_key_then_char_but_not_under_ctrl() {
+        let mut alt = false;
+        let evs = translate_key(XK_KP_ADD, true, Mods::default(), &mut alt, || None);
+        assert_eq!(
+            keys_of(&evs),
+            [(Key::NumpadAdd, true), (Key::Char('+'), true)],
+            "小键盘运算键与 win32 一样双发"
+        );
+        let evs = translate_key(XK_KP_DIVIDE, true, Mods::default(), &mut alt, || None);
+        assert_eq!(
+            keys_of(&evs),
+            [(Key::NumpadDivide, true), (Key::Char('/'), true)]
+        );
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        let evs = translate_key(XK_KP_ADD, true, ctrl, &mut alt, || None);
+        assert_eq!(
+            keys_of(&evs),
+            [(Key::NumpadAdd, true)],
+            "Ctrl+小键盘不补字符"
+        );
+        assert!(evs[0].ctrl);
+        let evs = translate_key(XK_KP_1, true, Mods::default(), &mut alt, || None);
+        assert_eq!(
+            keys_of(&evs),
+            [(Key::Char('1'), true)],
+            "小键盘数字只出字符"
+        );
+    }
+
+    #[test]
+    fn keys_without_text_or_name_produce_nothing() {
+        let mut alt = false;
+        // 死键（组合用）：既不是具名键也不对应字符。
+        let evs = translate_key(XK_DEAD_GRAVE, true, Mods::default(), &mut alt, || None);
+        assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn shortcut_code_is_only_computed_under_ctrl_or_alt() {
+        let mut alt = false;
+        let evs = translate_key(XK_A, true, Mods::default(), &mut alt, || {
+            panic!("没按 Ctrl / Alt 不该求快捷键码")
+        });
+        assert_eq!(keys_of(&evs), [(Key::Char('a'), true)]);
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        let evs = translate_key(0x41, true, shift, &mut alt, || panic!("Shift 不算快捷键"));
+        assert_eq!(
+            keys_of(&evs),
+            [(Key::Char('A'), true)],
+            "字符事件不带修饰键"
+        );
+        assert!(!evs[0].shift);
+        let a = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        let evs = translate_key(XK_A, true, a, &mut alt, || None);
+        assert!(
+            evs.is_empty(),
+            "Alt+字母但拿不到快捷键码：什么都不报，也不漏出文本"
+        );
+    }
+
     #[test]
     fn bgra_swaps_red_and_blue() {
         let mut out = Vec::new();
