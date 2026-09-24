@@ -1,4 +1,4 @@
-# Linux 后端（X11）
+# Linux 后端（X11 / Wayland）
 
 本文给在 Linux 上接续开发的人：后端怎么分层、选了哪些依赖和为什么、哪些已经实测过、
 哪些还没做，以及在没有桌面的机器上怎么验证。
@@ -10,8 +10,10 @@
 > `--features gpu` 两档）/ `cargo clippy` 在 Linux 上通过。
 >
 > 尚未实现：系统托盘、文件拖出、零窗口常驻（`App::run_resident`）、窗口模式下的
-> GPU 后端、Wayland 原生会话（现经 XWayland 运行）。这些入口都存在且不 panic——
-> 空操作并记日志，API 形状与另两个平台一致，下游不必按平台分支。
+> GPU 后端。这些入口都存在且不 panic——空操作并记日志，API 形状与另两个平台一致，
+> 下游不必按平台分支。
+>
+> **原生 Wayland 后端正在分阶段落地**（`wayland` feature，默认开），现状见 §8。
 
 ---
 
@@ -22,7 +24,10 @@
 
 | 缝 | Linux 实现 | 文件 |
 |----|-----------|------|
-| `platform::run` 等 | X11 事件循环、窗口、呈现、窗口操作 | `src/platform/linux/x11.rs` |
+| `platform::run` 等 | 运行期选后端（见 §8.1） | `src/platform/linux/mod.rs` |
+| X11 | 事件循环、窗口、呈现、窗口操作 | `src/platform/linux/x11.rs` |
+| Wayland | 事件循环、窗口、`wl_shm` 呈现（见 §8） | `src/platform/linux/wayland.rs` |
+| 宿主簿记 | 与协议无关、两个后端共用：点击计数、定时器、帧配速、出帧、事件后意图 | `src/platform/linux/host.rs` |
 | 键位 | 核心协议键盘映射表 → keysym → `Key` | `src/platform/linux/keys.rs` |
 | 输入法 | XIM 客户端（合成串回调风格） | `src/platform/linux/ime.rs` |
 | `Clipboard` | 独立线程拥有 `CLIPBOARD` 选区 | `src/platform/linux/clipboard.rs` |
@@ -145,5 +150,136 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
    复用本库的菜单渲染。
 2. **MIT-SHM 呈现**：大窗口整窗帧下 `PutImage` 要把整帧过一遍 socket，SHM 可省掉这次拷贝。
 3. **窗口模式 GPU**：`src/render/gpu/` 已在 Linux 编译通过，差的是从 X 窗口建 wgpu surface。
-4. **Wayland 原生**：`sctk` 一套平台层；文字栈、渲染器可原样复用。
+4. **Wayland 原生**：进行中，见 §8 与仓库根 `IMPLEMENTATION_PLAN.md`。
 5. **文件拖出**（XDND 源端）、**零窗口常驻**、运行期 DPI / 主题跟随。
+
+## 8. Wayland 原生后端（进行中）
+
+计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**当前完成 Stage 1**：窗口与呈现。
+
+> ⚠ 本阶段没有任何输入（指针 / 键盘）、没有标题栏（weston / KDE / sway 给服务端装饰，
+> GNOME 不给）、没有剪贴板与输入法。自动选择会让 Wayland 会话走这个后端，**在输入
+> 落地（Stage 2）之前要交互请设 `WINDUI_BACKEND=x11`** 回到 XWayland。
+
+### 8.1 后端选择
+
+编译期：`wayland` feature（默认开；依赖只声明在 Linux 的 target 段，别的平台开着也
+不多编东西）。`--no-default-features` 得到纯 X11 后端。
+
+运行期（`platform/linux/mod.rs` 的 `choose_backend`，有单测）：
+
+| 条件 | 结果 |
+|------|------|
+| `WINDUI_BACKEND=x11` | X11 |
+| `WINDUI_BACKEND=wayland` | Wayland；连不上**报错退出**（点名要的，悄悄换 X11 只会让人查不出为什么还是 XWayland） |
+| 未设（或值认不出，记警告） | 有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就试 Wayland，连不上（含缺 `xdg_wm_base` / `wl_shm` / v4+ `wl_compositor`）记警告回退 X11；否则 X11 |
+| 点名 wayland 但编译时关了 feature | 提示后走 X11 |
+
+### 8.2 依赖
+
+`wayland-client` 0.31 + `wayland-protocols` 0.32（`client` 特性）。默认即纯 Rust 协议实现，
+不链 libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：它带 calloop
+事件循环与整套抽象，而我们已有自己的 `poll` 循环；与 X11 直接用 x11rb 同理。
+
+### 8.3 实现要点
+
+- **事件循环**：`dispatch_pending` → 唤醒管道 → 定时器 → 出帧 → `flush` →
+  `prepare_read` → 连接 fd 与唤醒管道一起进 `poll` → `read`。`prepare_read` 返回
+  `None` 说明队列里已有事件，不睡直接回去分发。
+- **呈现**：宿主画进 `Pixmap`，脏区换成 XRGB8888 写进 `wl_shm` 缓冲。缓冲以 memfd 为底、
+  **用 `pwrite` 写而不在本进程 mmap**——合成器映射同一个 fd，本进程私有内存里只有
+  `Pixmap` 一份（`RssShmem` 为 0）。每窗最多两块缓冲；合成器没 `release` 的那块不写，
+  拿不到空闲块时脏区留着等 `release`。每块记着「自己上次写入以来别的帧改过哪里」，
+  复用时补写这部分（`ShmSlots`，纯簿记、有单测）。尺寸变了只重建空闲的那块，忙的那块
+  等它 `release` 后再按新尺寸重建。
+- **帧配速**：有动画的窗口**在本轮真出了帧时**附 `wl_surface.frame`，回调到了、且到了
+  控件自报的下次变化时刻才出下一帧。没有像素变化的动画帧也照样请求回调并提交（否则没有
+  回调可等、退化成按下限空转）；但没出帧的轮次不请求——否则报 500ms 截止的光标闪烁会在
+  每个回调之后立刻再要一个，退化成按刷新率空提交。**不再叠
+  `host::FRAME_MS` 的 16ms 下限**——回调本身按显示器节拍来，叠上去会让「回调到了但离
+  16ms 还差一点」错过一个垂直同步；只留 4ms 防失控下限。窗口被遮住 / 最小化时合成器
+  不发回调，动画自然停下。无动画时不请求回调，阻塞在 `poll`。
+- **隐藏 / 再显示**：销毁 `xdg_toplevel` + `xdg_surface`、卸下并销毁缓冲；显示时重建角色
+  对象。旧角色在队列里残留的事件按对象身份过滤掉（拿新角色 ack 旧 serial 是协议错误）。
+  「挂空缓冲取消映射 → 再做一次无缓冲首提交」按协议也能重新映射，但 **weston 13 对第二
+  次首提交不回 configure**，窗口再也出不来；换一套角色对象在各家合成器上都成立。
+- **尺寸**：合成器 configure 给了尺寸就服从（最大化实测 1280×800 铺满）；给 0×0 表示
+  「客户端自定」，回到最后一次非最大化尺寸（mutter 还原时就是这么给的）。
+- **缩放**：本阶段只认 `WINDUI_SCALE` 的整数部分（`set_buffer_scale`）；分数缩放与运行期
+  跟随在 Stage 2。
+
+### 8.4 协议做不到、只能文档化的
+
+应用不能设窗口坐标（`centered` 无效，由合成器摆放）；不能查询是否被最小化
+（`WindowState::minimized` 恒 false，`hide_on_minimize` 无从触发）；唤起已显示的窗口要
+`xdg-activation-v1`（Stage 5）。全局热键见 `IMPLEMENTATION_PLAN.md` 末节：不实现，
+兜底是桌面设置里把快捷键绑到 `应用 --参数`，经单实例转发送达。
+
+### 8.5 实测数据（weston 13 headless + pixman，release）
+
+私有内存（`RssAnon`）与 X11 后端同示例、**同窗口尺寸**对比：
+
+| 示例 / 缩放 | X11 | Wayland |
+|-------------|-----|---------|
+| `about` 620×556 @1x | 2668 KB | 2656 KB |
+| `about` 1240×1112 @2x | 6840 KB | 6824 KB |
+| `fullshowcase` 760×700 @1x | 7352 KB | 7344 KB |
+| `fullshowcase` 1520×1400 @2x | 13588 KB | 13584 KB |
+
+⚠ 2x 对比要用 2560×1600 的 Xvfb：1280×800 的屏上 openbox 会把窗口钳到屏幕大小，
+X11 那边的 Pixmap 随之变小，看起来像 Wayland 多占了 1.5–4MB。
+
+空闲 CPU：`about` 静止 10 秒 `utime+stime` 增量 0 tick（阻塞在 `poll`）；自动聚焦的输入框
+（光标约 530ms 翻转一次、12×24 的局部脏区）10 秒 0 tick，6 秒内只提交 13 次。
+不定进度条动画：约 40fps（headless weston 的 repaint 节拍），4 秒 2 tick，240 帧只建了
+2 块缓冲。离屏 `--screenshot` 与 weston 抓屏裁出的窗口逐像素一致（620×556 全等）；
+不定进度条跑过上百帧局部重绘后，进度条以外的像素仍与首帧全等、条内只有一段高亮
+（双缓冲补写欠账正确）。
+
+### 8.6 无桌面验证环境（weston headless，无 root）
+
+```bash
+mkdir -p ~/.local/weston && cd ~/.local/weston
+apt-get download weston libweston-13-0 libseat1 libmtdev1t64 libwacom9 libwacom-common \
+                 libgudev-1.0-0 libevdev2
+# libinput10：索引里的版本可能已从镜像下架（404），到 pool 目录直接取现存的那版
+curl -sO http://archive.ubuntu.com/ubuntu/pool/main/libi/libinput/libinput10_1.25.0-1ubuntu3.7_amd64.deb
+for f in *.deb; do dpkg -x "$f" root; done
+```
+
+踩过的坑：
+
+- **模块路径是编译期写死的**（`/usr/lib/x86_64-linux-gnu/libweston-13/…`）。用环境变量
+  `WESTON_MODULE_MAP="headless-backend.so=<路径>;desktop-shell.so=<路径>;weston-desktop-shell=<路径>;…"`
+  逐个重定向；`LD_LIBRARY_PATH` 还要包含 `…/x86_64-linux-gnu/weston`（`libexec_weston.so.0` 在那）。
+- **默认渲染器是 no-op，抓不了屏**：`--renderer=pixman`。抓屏协议要 `--debug` 才开放，
+  之后 `weston-screenshooter` 把整屏存成 PNG（到当前目录）。
+- **300 秒无输入后输出休眠、不再重绘**，`weston-screenshooter` 从此一直挂着等——症状像
+  客户端把合成器弄坏了，其实是 idle。配置里 `[core] idle-time=0`。
+- 配置里 `[input-method] path=` 置空，否则反复拉起不存在的 `weston-keyboard` 刷屏。
+- `XDG_RUNTIME_DIR` 沿用会话已有的即可（socket 建在那里）；没有就自建一个 0700 目录。
+
+```ini
+# ~/.local/weston/weston.ini
+[core]
+shell=desktop-shell.so
+idle-time=0
+[shell]
+background-color=0xff303030
+panel-position=none
+[input-method]
+path=
+```
+
+```bash
+R=~/.local/weston/root/usr/lib/x86_64-linux-gnu
+LD_LIBRARY_PATH=$R:$R/weston WESTON_MODULE_MAP="headless-backend.so=$R/libweston-13/headless-backend.so;desktop-shell.so=$R/weston/desktop-shell.so;weston-desktop-shell=$HOME/.local/weston/root/usr/libexec/weston-desktop-shell" \
+  ~/.local/weston/root/usr/bin/weston --config=$HOME/.local/weston/weston.ini \
+  --backend=headless --renderer=pixman --socket=wl-test --width=1280 --height=800 --debug &
+WAYLAND_DISPLAY=wl-test cargo run --release --example about
+WAYLAND_DISPLAY=wl-test LD_LIBRARY_PATH=$R ~/.local/weston/root/usr/bin/weston-screenshooter
+```
+
+`WAYLAND_DEBUG=1` 对纯 Rust 后端同样生效（打印每条收发的协议消息），排查时很有用；
+**测 CPU 时别开**——打印本身让动画帧的 CPU 翻了十倍。headless 没有输入设备，关窗 /
+最大化 / 隐藏这类路径用一个按 `on_interval` 脚本化调用 `ctx.*` 的临时示例驱动。

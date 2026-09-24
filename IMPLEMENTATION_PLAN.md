@@ -29,7 +29,11 @@
 - 同尺寸同 DPI 下私有内存不高于 X11 后端（3.7MB@100% 关于窗基准）。
 **Tests**: 后端选择逻辑单测（环境变量 / 连接失败回退）；shm 缓冲池复用与尺寸变化单测；
 weston headless 真协议往返（读回 buffer 做像素断言）。
-**Status**: Not Started
+**Status**: Complete（2026-09-24）。验证数据与环境搭法见 `docs/LINUX_PORTING.md` §8。偏差：
+像素断言用 `weston-screenshooter` 抓屏对比离屏渲染，未写成 `cargo test` 里的自动化用例
+（需要外部 weston 进程）；「可缩放」只验了合成器给定尺寸（最大化 / 还原），headless 无输入
+设备、拖边缩放留到 Stage 2 与真桌面。**注意**：自动选择已让 Wayland 会话走本后端，而它还
+没有输入——Stage 2 落地前不宜合入主线发布，或临时要求 `WINDUI_BACKEND=wayland` 才启用。
 
 ## Stage 2: 输入与缩放
 **Goal**: `wl_seat` 指针（含 `axis_value120` 高精度滚轮、`frame` 聚合）、键盘（xkbcommon keymap

@@ -2313,7 +2313,11 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
 
 Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持——控件树、布局、事件、动画、
 主题是同一份平台无关代码，平台间无需改动。下表列出各平台的实现方式与尚未拉齐的能力
-（Linux 后端的取舍与验证方法见 `docs/LINUX_PORTING.md`）：
+（Linux 后端的取舍与验证方法见 `docs/LINUX_PORTING.md`）。
+
+Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开）分阶段落地，目前只有窗口与呈现、
+**没有输入**；运行期 `WINDUI_BACKEND=x11|wayland` 可强制选后端（选择规则见
+`LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 
 | 能力 | Windows | macOS | Linux |
 |---|---|---|---|
