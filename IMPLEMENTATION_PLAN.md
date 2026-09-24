@@ -45,6 +45,18 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 `repeat_info`；窗口在两块不同缩放的显示器间拖动时重新出图不糊。
 **Tests**: 按键重复计时器单测（延迟/速率/松键即停/失焦即停）；分数缩放尺寸换算单测
 （逻辑↔物理取整，避免 1px 缝）；headless weston 注入输入的往返测试。
+**Stage 1 审查遗留（本阶段顺带处理）**：
+- 旧角色的 `wl_callback.done` 会误清新角色的 `frame_pending`（回调只凭窗口号认窗）：存当前
+  `WlCallback`，比对身份后才复位。
+- 两块缓冲都被合成器占着时，`tick_timers` 仍会反复置 `needs_paint` → 反复 `render_frame`
+  却无处呈现：拿不到空闲缓冲时应暂停动画出帧，等 `release`。
+- owner 隐藏再显示后，子窗的 `set_parent` 不恢复（子窗角色仍指着已销毁的旧 toplevel）：
+  owner 重建角色时给现存子窗重设 parent。
+- `memfd_create` 需 glibc ≥ 2.27：更老的系统上链接期找不到符号，需要时改走 `syscall` 或
+  在文档写明下限。
+- 空 commit（无新缓冲）上挂的 `frame` 回调，某些合成器可能不回 → 动画卡住：GNOME 真桌面
+  实测，必要时加兜底超时（约 1s，只在动画期间生效）。
+- 分发回调内弹阻塞对话框期间不回 `xdg_wm_base.ping`，合成器会判应用无响应（X11 同样现状）。
 **Status**: Not Started
 
 ## Stage 3: 剪贴板与文件拖入

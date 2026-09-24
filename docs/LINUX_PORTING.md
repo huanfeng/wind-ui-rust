@@ -279,10 +279,11 @@ R=~/.local/weston/root/usr/lib/x86_64-linux-gnu
 LD_LIBRARY_PATH=$R:$R/weston WESTON_MODULE_MAP="headless-backend.so=$R/libweston-13/headless-backend.so;desktop-shell.so=$R/weston/desktop-shell.so;weston-desktop-shell=$HOME/.local/weston/root/usr/libexec/weston-desktop-shell" \
   ~/.local/weston/root/usr/bin/weston --config=$HOME/.local/weston/weston.ini \
   --backend=headless --renderer=pixman --socket=wl-test --width=1280 --height=800 --debug &
-WAYLAND_DISPLAY=wl-test cargo run --release --example about
+# Wayland 后端须显式启用（见 §8.1），漏了这个变量跑的是 X11（没有 DISPLAY 时直接连不上）
+WINDUI_BACKEND=wayland WAYLAND_DISPLAY=wl-test cargo run --release --example about
 WAYLAND_DISPLAY=wl-test LD_LIBRARY_PATH=$R ~/.local/weston/root/usr/bin/weston-screenshooter
 ```
 
-`WAYLAND_DEBUG=1` 对纯 Rust 后端同样生效（打印每条收发的协议消息），排查时很有用；
+`WAYLAND_DEBUG=1`（同样要配 `WINDUI_BACKEND=wayland`）对纯 Rust 后端同样生效（打印每条收发的协议消息），排查时很有用；
 **测 CPU 时别开**——打印本身让动画帧的 CPU 翻了十倍。headless 没有输入设备，关窗 /
 最大化 / 隐藏这类路径用一个按 `on_interval` 脚本化调用 `ctx.*` 的临时示例驱动。

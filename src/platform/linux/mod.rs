@@ -69,8 +69,9 @@ pub(crate) fn run(
     let forced = std::env::var("WINDUI_BACKEND").ok();
     let (choice, note) = choose_backend(forced.as_deref(), cfg!(feature = "wayland"));
     match note {
-        Some(Note::Unknown) => log::warn!(
-            "WINDUI_BACKEND={:?} 无法识别（可选 x11 / wayland），按默认走 X11",
+        // 点名要后端的人必须看得见拼错了，与 NotCompiled 一样走 stderr 而不只记日志。
+        Some(Note::Unknown) => eprintln!(
+            "[windui] WINDUI_BACKEND={:?} 无法识别（可选 x11 / wayland），按默认走 X11",
             forced.unwrap_or_default()
         ),
         Some(Note::NotCompiled) => eprintln!(
