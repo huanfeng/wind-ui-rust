@@ -38,14 +38,15 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::CURRENT_TIME;
 
 use super::dnd::{self, DndAtoms, DragState};
+use super::host::{self, ClickTracker, Intervals, LinuxWake, Requests, DOUBLE_CLICK_SLOP};
 use super::hotkey::Hotkeys;
 use super::ime::{Ime, ImeOut};
 use super::keys::{self, Keymap};
 use crate::event::{
     CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedit, WindowOp,
 };
-use crate::geometry::{Color, Point, Rect, Size};
-use crate::platform::{to_skia_color, AppHandler, NewWindow, WindowConfig};
+use crate::geometry::{Color, Point, Rect};
+use crate::platform::{AppHandler, NewWindow, WindowConfig};
 
 x11rb::atom_manager! {
     pub(super) Atoms: AtomsCookie {
@@ -71,13 +72,6 @@ x11rb::atom_manager! {
     }
 }
 
-/// 动画帧间隔（ms）。X 上拿不到可靠的刷新率，按 60Hz。
-const FRAME_MS: u64 = 16;
-/// 控件自报的「下次变化」最长只睡这么久（与 win32 `MAX_FRAME_DELAY_MS` 同值）。
-const MAX_FRAME_DELAY_MS: u64 = 5000;
-/// 双击判定：时限与漂移（逻辑像素，按 scale 换算）。与 `platform::double_click_thresholds` 一致。
-const DOUBLE_CLICK_MS: u32 = 400;
-const DOUBLE_CLICK_SLOP: f32 = 4.0;
 /// 无边框窗口的缩放边宽（逻辑像素）。
 const RESIZE_BORDER: f32 = 6.0;
 
@@ -112,7 +106,7 @@ struct Win {
     hidden: bool,
     maximized: bool,
     minimized: bool,
-    intervals: Vec<(Duration, Instant)>,
+    intervals: Intervals,
     capturing: bool,
     cursor: CursorShape,
     click: ClickTracker,
@@ -127,31 +121,6 @@ struct Win {
     swallow_up: bool,
     /// 输入法合成进行中（已向宿主推过非空合成串）。
     composing: bool,
-}
-
-#[derive(Default)]
-struct ClickTracker {
-    time: u32,
-    pos: (i32, i32),
-    button: u8,
-    count: u8,
-}
-
-impl ClickTracker {
-    /// 折进 1 / 2 的循环（见 `PointerEvent::click_count`）。
-    fn press(&mut self, time: u32, pos: (i32, i32), button: u8, slop: i32) -> u8 {
-        let near = (pos.0 - self.pos.0).abs() <= slop && (pos.1 - self.pos.1).abs() <= slop;
-        let quick = time.wrapping_sub(self.time) <= DOUBLE_CLICK_MS;
-        self.count = if near && quick && button == self.button && self.count == 1 {
-            2
-        } else {
-            1
-        };
-        self.time = time;
-        self.pos = pos;
-        self.button = button;
-        self.count
-    }
 }
 
 /// 像素上屏所需的服务器格式信息。
@@ -239,14 +208,6 @@ pub(super) fn run_windowed(
         crate::single_instance::install_listener(&si.app_id, main as isize, si.on_second);
     }
     x.run_loop(main);
-}
-
-/// 跨线程唤醒：写唤醒管道，事件循环醒来后标脏所有窗口（宿主 render 时排空消息通道）。
-struct LinuxWake;
-impl crate::sync::RawWakeSignal for LinuxWake {
-    fn signal(&self) {
-        super::sys::wake();
-    }
 }
 
 impl X11 {
@@ -466,14 +427,7 @@ impl X11 {
         }
 
         handler.set_scale(s);
-        let now = Instant::now();
-        let intervals = handler
-            .intervals()
-            .into_iter()
-            // 下限 10ms（同 win32 `SetTimer` 的最小周期）：周期 0 会让循环超时恒为 0、空转。
-            .map(|d| d.max(Duration::from_millis(10)))
-            .map(|d| (d, now + d))
-            .collect();
+        let intervals = Intervals::new(handler.intervals(), Instant::now());
         self.windows.push(Win {
             id,
             handler,
@@ -713,17 +667,12 @@ impl X11 {
         let mut fired: Vec<(Window, usize)> = Vec::new();
         for w in self.windows.iter_mut() {
             let id = w.id;
-            for (idx, (period, due)) in w.intervals.iter_mut().enumerate() {
-                if now >= *due {
-                    fired.push((id, idx));
-                    // 按周期推进而不是从 now 起算，但落后太多时直接对齐到 now（挂起恢复后不补发一串）。
-                    *due += *period;
-                    if *due < now {
-                        *due = now + *period;
-                    }
-                }
-                next = Some(next.map_or(*due, |n: Instant| n.min(*due)));
-            }
+            fired.extend(
+                w.intervals
+                    .fire_due(now, &mut next)
+                    .into_iter()
+                    .map(|idx| (id, idx)),
+            );
         }
         for (id, idx) in fired {
             let Some(wi) = self.idx(id) else { continue };
@@ -745,7 +694,7 @@ impl X11 {
             .map(|w| w.handler.next_frame_delay_ms() as u64)
             .collect();
         if let Some(&ask) = asks.iter().min() {
-            let due = Duration::from_millis(FRAME_MS.max(ask.min(MAX_FRAME_DELAY_MS)));
+            let due = host::anim_frame_interval(ask);
             let elapsed = self.last_anim_frame.elapsed();
             if elapsed >= due {
                 self.last_anim_frame = now;
@@ -786,35 +735,16 @@ impl X11 {
     fn paint(&mut self, i: usize) {
         let w = &mut self.windows[i];
         w.needs_paint = false;
-        if w.w <= 0 || w.h <= 0 {
-            return;
-        }
-        let rebuilt = match &w.pixmap {
-            Some(p) => p.width() as i32 != w.w || p.height() as i32 != w.h,
-            None => true,
-        };
-        if rebuilt {
-            w.pixmap = Pixmap::new(w.w as u32, w.h as u32);
-            w.fresh = true;
-        }
-        let Some(pixmap) = w.pixmap.as_mut() else {
+        let Some(drawn) = host::render_frame(
+            w.handler.as_mut(),
+            &mut w.pixmap,
+            &mut w.fresh,
+            (w.w, w.h),
+            w.bg,
+        ) else {
             return;
         };
-        if w.fresh {
-            // 新缓冲内容不完整：宿主本帧必须画整窗（对照 win32 / macOS 的同名分支）。
-            w.handler.request_full_frame();
-            pixmap.fill(to_skia_color(w.handler.bg().unwrap_or(w.bg)));
-        }
-        {
-            let mut tgt = crate::render::PixmapTarget { pixmap };
-            w.handler.render(&mut tgt, Size::new(w.w, w.h));
-        }
         let full = Rect::new(0, 0, w.w, w.h);
-        let drawn = match (w.fresh, w.handler.last_frame_damage()) {
-            (false, Some(d)) => d.intersect(&full),
-            _ => full,
-        };
-        w.fresh = false;
         let rect = match w.exposed.take() {
             Some(e) => drawn.union(&e.intersect(&full)),
             None => drawn,
@@ -856,10 +786,11 @@ impl X11 {
             buf.clear();
             for row in y..y + n as i32 {
                 let off = row as usize * stride + r.x as usize * 4;
-                for px in data[off..off + row_bytes].as_chunks::<4>().0 {
-                    if self.fmt.lsb {
-                        buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-                    } else {
+                let src = &data[off..off + row_bytes];
+                if self.fmt.lsb {
+                    host::rgba_to_bgra(src, &mut buf);
+                } else {
+                    for px in src.as_chunks::<4>().0 {
                         buf.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
                     }
                 }
@@ -1621,20 +1552,18 @@ impl X11 {
             .filter_map(|w| w.single.clone())
             .collect();
         let w = &mut self.windows[i];
-        let op = w.handler.take_window_op();
-        let dialog = w.handler.take_dialog_request();
-        let close = w.handler.wants_close();
-        let title = w.handler.take_window_title();
-        let hotkey_ops = w.handler.take_hotkey_ops();
-        // 托盘操作：本后端尚无托盘，取走丢弃以免队列无限增长。
-        let _ = crate::platform::tray::take_tray_ops();
-        let new_windows = w
-            .handler
-            .take_new_windows(&|key| open.iter().any(|k| k == key));
-        let shape = w.handler.cursor();
+        let Requests {
+            op,
+            dialog,
+            close,
+            title,
+            hotkey_ops,
+            new_windows,
+            cursor: shape,
+            ime_caret: caret,
+        } = Requests::take(w.handler.as_mut(), &|key| open.iter().any(|k| k == key));
         let cursor_changed = shape != w.cursor;
         w.cursor = shape;
-        let caret = w.handler.ime_caret();
         if let (Some(ime), Some((cx, cy, ch))) = (&mut self.ime, caret) {
             // 候选窗锚在光标底边（窗口内物理像素）。
             ime.set_spot(id, cx, cy + ch);
@@ -1824,16 +1753,5 @@ mod tests {
         assert_eq!(edge_direction(Point::new(99, 99), 100, 100, 5), Some(4));
         assert_eq!(edge_direction(Point::new(0, 50), 100, 100, 5), Some(7));
         assert_eq!(edge_direction(Point::new(50, 50), 100, 100, 5), None);
-    }
-
-    #[test]
-    fn click_count_folds_into_one_two_cycle() {
-        let mut t = ClickTracker::default();
-        assert_eq!(t.press(1000, (10, 10), 1, 4), 1);
-        assert_eq!(t.press(1100, (11, 10), 1, 4), 2);
-        assert_eq!(t.press(1200, (11, 10), 1, 4), 1, "第三下重新起算");
-        assert_eq!(t.press(1300, (11, 10), 1, 4), 2);
-        assert_eq!(t.press(2000, (11, 10), 1, 4), 1, "超时不算双击");
-        assert_eq!(t.press(2100, (40, 10), 1, 4), 1, "漂移过大不算双击");
     }
 }

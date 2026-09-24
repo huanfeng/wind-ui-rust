@@ -5,6 +5,7 @@
 //!
 //! 模块划分：
 //! - `x11`：窗口、事件循环、呈现（`PutImage`）、窗口操作（EWMH）、无边框拖动。
+//! - `host`：与显示协议无关的宿主簿记（点击计数、定时器、帧配速、出帧、事件后意图）。
 //! - `ime`：XIM 输入法客户端（合成串回调 → 宿主内联绘制，候选窗跟随光标）。
 //! - `keys`：键码 → keysym → 框架键。
 //! - `hotkey`：全局热键（根窗口 `GrabKey`）。
@@ -19,6 +20,7 @@
 
 pub mod clipboard;
 mod dnd;
+mod host;
 mod hotkey;
 mod ime;
 mod keys;
