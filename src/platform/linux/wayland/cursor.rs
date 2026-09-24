@@ -56,7 +56,9 @@ pub(super) struct Cursor {
     surface: Option<wl_surface::WlSurface>,
     /// 上次挂上去的（enter serial，形状，缩放）：相同就不重发。
     applied: Option<(u32, CursorShape, i32)>,
-    warned: bool,
+    /// 两条诊断各提示一次：主题加载失败 / 主题里缺某个形状。
+    warned_load: bool,
+    warned_missing: bool,
 }
 
 impl Cursor {
@@ -66,7 +68,8 @@ impl Cursor {
             theme: None,
             surface: None,
             applied: None,
-            warned: false,
+            warned_load: false,
+            warned_missing: false,
         }
     }
 
@@ -106,7 +109,7 @@ impl Cursor {
                 Ok(t) => self.theme = Some((t, int_scale)),
                 Err(e) => {
                     // 失败会在每次换形状时重试（主题可能后来才装上），但只提示一次。
-                    if !std::mem::replace(&mut self.warned, true) {
+                    if !std::mem::replace(&mut self.warned_load, true) {
                         log::warn!("加载光标主题 {name} 失败：{e}");
                     }
                     return;
@@ -121,7 +124,7 @@ impl Cursor {
             .iter()
             .find(|n| theme.get_cursor(n).is_some())
         else {
-            if !std::mem::replace(&mut self.warned, true) {
+            if !std::mem::replace(&mut self.warned_missing, true) {
                 log::warn!("光标主题里找不到 {shape:?} 对应的光标图，保留合成器当前光标");
             }
             return;

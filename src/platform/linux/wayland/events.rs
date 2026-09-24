@@ -385,7 +385,7 @@ impl Wl {
                     // 上一次标题栏拖动的残留作废：move / resize 之后合成器不一定发 leave，
                     // 留着的话下一次在内容区的松开会被吞掉。
                     let w = &mut self.windows[i];
-                    w.drag.reset();
+                    w.title_drag.reset();
                     w.key
                 });
                 if let Some(p) = self.pointer.as_mut() {
@@ -406,7 +406,7 @@ impl Wl {
                 let Some(key) = focus else { return };
                 let Some(i) = self.idx(key) else { return };
                 let w = &mut self.windows[i];
-                w.drag.reset();
+                w.title_drag.reset();
                 // 按着按钮离开 = 隐式抓取被合成器收走了（开始移动 / 缩放窗口、弹出系统菜单等），
                 // 配对的松开不会再来：收掉逻辑捕获，同 X11 / win32 的「捕获被抢」。
                 if pressed > 0 && std::mem::take(&mut w.capturing) {
@@ -524,10 +524,11 @@ impl Wl {
         let left = button == MouseButton::Left;
         if left && self.windows[i].frameless {
             if press {
-                self.windows[i].drag.press();
+                // 先作废上一次接管的残留（同 X11 后端的说明）。
+                self.windows[i].title_drag.press();
                 if let Some(pending) = self.try_frameless_drag(i, serial, time, pos) {
                     let w = &mut self.windows[i];
-                    w.drag.take_over(pending);
+                    w.title_drag.take_over(pending);
                     // 非客户区按下：收起菜单类浮层（这一下不会作为指针事件下发）。
                     let r = {
                         let _g = crate::platform::EventDispatchGuard::enter();
@@ -539,7 +540,7 @@ impl Wl {
                     self.after_event(key);
                     return;
                 }
-            } else if self.windows[i].drag.release() {
+            } else if self.windows[i].title_drag.release() {
                 return;
             }
         }
@@ -566,7 +567,7 @@ impl Wl {
 
     /// 无边框窗口：边缘 → 待定缩放；标题栏拖动区 → 待定移动（双击切最大化）。返回 `Some`
     /// 表示这一下已被接管、不再下发给控件，内含待定拖动（双击切最大化时为 `None`）；真正交给
-    /// 合成器要等指针移出阈值（见 `Win::drag`）。
+    /// 合成器要等指针移出阈值（见 `Win::title_drag`）。
     fn try_frameless_drag(
         &mut self,
         i: usize,
@@ -615,7 +616,7 @@ impl Wl {
         let slop = ((DOUBLE_CLICK_SLOP as f64 * w.scale.factor).round() as i32).max(1);
         let beyond =
             |d: &PendingDrag| (pos.x - d.at.0).abs() > slop || (pos.y - d.at.1).abs() > slop;
-        let d = match w.drag.motion(beyond) {
+        let d = match w.title_drag.motion(beyond) {
             host::DragMotion::Free => return false,
             host::DragMotion::Held => return true,
             host::DragMotion::Start(d) => d,

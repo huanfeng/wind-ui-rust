@@ -118,7 +118,7 @@ struct Win {
     ///
     /// 与「这次左键被标题栏 / 缩放边接管、配对的松开也不下发」（含双击切最大化那一下）一起
     /// 由 `host::DragGate` 管。
-    drag: host::DragGate<(u32, i16, i16)>,
+    title_drag: host::DragGate<(u32, i16, i16)>,
     /// 输入法合成进行中（已向宿主推过非空合成串）。
     composing: bool,
 }
@@ -451,7 +451,7 @@ impl X11 {
             capturing: false,
             cursor: CursorShape::Arrow,
             click: ClickTracker::default(),
-            drag: host::DragGate::default(),
+            title_drag: host::DragGate::default(),
             composing: false,
         });
         if let Some(ime) = &mut self.ime {
@@ -1244,10 +1244,13 @@ impl X11 {
         };
         if e.detail == 1 && self.windows[i].frameless {
             if press {
-                self.windows[i].drag.press();
+                // 先作废上一次接管的残留（交给 WM 的拖动收不到松开）——少了这一行，拖过
+                // 标题栏之后下一次点击的松开会被吞（单测只覆盖 DragGate 本身，这一行靠
+                // Xvfb 回归：拖标题栏后点关闭按钮）。
+                self.windows[i].title_drag.press();
                 if let Some(pending) = self.try_frameless_drag(i, &e, pos) {
                     let w = &mut self.windows[i];
-                    w.drag.take_over(pending);
+                    w.title_drag.take_over(pending);
                     // 非客户区按下：收起菜单类浮层（对照 win32 `WM_NCLBUTTONDOWN`）——
                     // 这一下不会作为指针事件下发，宿主自己看不到。
                     let r = {
@@ -1260,7 +1263,7 @@ impl X11 {
                     self.after_event(id);
                     return;
                 }
-            } else if self.windows[i].drag.release() {
+            } else if self.windows[i].title_drag.release() {
                 return;
             }
         }
@@ -1292,7 +1295,7 @@ impl X11 {
 
     /// 无边框窗口：边缘 → 交 WM 缩放；标题栏拖动区 → 交 WM 移动（双击切最大化）。
     /// 返回 `Some` 表示这一下已被接管、不再下发给控件，内含待定拖动（双击切最大化时为
-    /// `None`）；真正交给 WM 要等指针移出阈值（见 `Win::drag`）。
+    /// `None`）；真正交给 WM 要等指针移出阈值（见 `Win::title_drag`）。
     fn try_frameless_drag(
         &mut self,
         i: usize,
@@ -1330,7 +1333,7 @@ impl X11 {
         let beyond = |&(_, x0, y0): &(u32, i16, i16)| {
             (root.0 as i32 - x0 as i32).abs() > slop || (root.1 as i32 - y0 as i32).abs() > slop
         };
-        let (dir, x0, y0) = match self.windows[i].drag.motion(beyond) {
+        let (dir, x0, y0) = match self.windows[i].title_drag.motion(beyond) {
             host::DragMotion::Free => return false,
             host::DragMotion::Held => return true,
             host::DragMotion::Start(d) => d,

@@ -271,7 +271,7 @@ impl Default for WmCaps {
     }
 }
 
-/// 无边框窗口上按下、尚未移出阈值的待定拖动（见 [`Win::drag`]）。
+/// 无边框窗口上按下、尚未移出阈值的待定拖动（见 [`Win::title_drag`]）。
 #[derive(Clone, Copy, Debug)]
 struct PendingDrag {
     /// `None` = 移动；`Some(边)` = 缩放。
@@ -356,7 +356,7 @@ struct Win {
     /// 松开都完整留在客户端。按下的 serial 在按住期间一直有效，晚一点发不影响合成器认可。
     ///
     /// 「这次按下被接管、配对松开也不下发」一并由 `host::DragGate` 管（与 X11 同一份逻辑）。
-    drag: host::DragGate<PendingDrag>,
+    title_drag: host::DragGate<PendingDrag>,
 }
 
 impl Win {
@@ -516,7 +516,7 @@ impl Wl {
             bufs: Vec::new(),
             click: ClickTracker::default(),
             capturing: false,
-            drag: host::DragGate::default(),
+            title_drag: host::DragGate::default(),
         });
         if let Some(i) = self.idx(key) {
             self.ensure_viewport(i);
@@ -626,7 +626,7 @@ impl Wl {
             w.configured = false;
             w.frame_cb = None;
             w.pending = None;
-            w.drag.reset();
+            w.title_drag.reset();
             // 隐藏期间不留共享内存缓冲（memfd 不计入本进程 RSS，但照样占系统内存）。
             // 合成器可能还持有其中一块：协议允许先销毁，存储由它自己的映射撑到用完。
             for b in w.bufs.drain(..).flatten() {
