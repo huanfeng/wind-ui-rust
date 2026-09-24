@@ -1725,10 +1725,7 @@ fn xft_dpi(resources: &str) -> Option<f32> {
 /// WM_CLASS 的 (instance, class)：可执行文件名与其首字母大写形式。任务栏据此归组窗口、
 /// 匹配 .desktop 文件的 `StartupWMClass`。
 fn wm_class() -> (String, String) {
-    let inst = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "windui".into());
+    let inst = host::exe_name();
     let mut class = inst.clone();
     if let Some(f) = class.get_mut(0..1) {
         f.make_ascii_uppercase();

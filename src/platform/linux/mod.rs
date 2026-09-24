@@ -1,10 +1,14 @@
-//! Linux 平台后端（X11，经 x11rb；Wayland 会话走 XWayland）。
+//! Linux 平台后端：X11（经 x11rb）与原生 Wayland（经 wayland-client，`wayland` feature）。
+//!
+//! 运行期选后端，见 [`choose_backend`]。Wayland 后端尚在分阶段落地（见仓库根
+//! `IMPLEMENTATION_PLAN.md`），目前只有窗口与呈现。
 //!
 //! 对外暴露与 `win32` / `macos` 同形的 API：`run` / `open_url` / `clipboard::X11Clipboard` /
 //! `drag_files` / `system_prefers_dark` / `system_locales`。上层只依赖 `crate::platform::*`。
 //!
 //! 模块划分：
 //! - `x11`：窗口、事件循环、呈现（`PutImage`）、窗口操作（EWMH）、无边框拖动。
+//! - `wayland`：Wayland 窗口、事件循环、`wl_shm` 呈现、`frame` 回调配速。
 //! - `host`：与显示协议无关的宿主簿记（点击计数、定时器、帧配速、出帧、事件后意图）。
 //! - `ime`：XIM 输入法客户端（合成串回调 → 宿主内联绘制，候选窗跟随光标）。
 //! - `keys`：键码 → keysym → 框架键。
@@ -25,11 +29,14 @@ mod hotkey;
 mod ime;
 mod keys;
 pub(crate) mod sys;
+#[cfg(feature = "wayland")]
+mod wayland;
 mod x11;
 
 use super::{AppHandler, WindowConfig};
 
-/// 运行应用：截屏模式离屏渲染存盘；否则连接 X 服务器创建窗口进入事件循环。
+/// 运行应用：截屏模式离屏渲染存盘；否则按 [`choose_backend`] 连接合成器 / X 服务器，
+/// 创建窗口进入事件循环。
 pub(crate) fn run(
     cfg: WindowConfig,
     mut handler: Box<dyn AppHandler>,
@@ -59,7 +66,82 @@ pub(crate) fn run(
             return;
         }
     }
+    let forced = std::env::var("WINDUI_BACKEND").ok();
+    let has_wayland = ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()));
+    let (choice, note) = choose_backend(forced.as_deref(), has_wayland, cfg!(feature = "wayland"));
+    match note {
+        Some(Note::Unknown) => log::warn!(
+            "WINDUI_BACKEND={:?} 无法识别（可选 x11 / wayland），按自动选择处理",
+            forced.unwrap_or_default()
+        ),
+        Some(Note::NotCompiled) => eprintln!(
+            "[windui] WINDUI_BACKEND=wayland，但本次构建未启用 `wayland` feature，改用 X11"
+        ),
+        None => {}
+    }
+    if let Choice::Wayland { fallback } = choice {
+        #[cfg(feature = "wayland")]
+        match wayland::connect() {
+            Ok(session) => return wayland::run_windowed(session, cfg, handler, waker, single),
+            Err(e) if fallback => log::warn!("Wayland 不可用（{e}），回退 X11"),
+            Err(e) => {
+                eprintln!("[windui] WINDUI_BACKEND=wayland，但 Wayland 不可用：{e}");
+                return;
+            }
+        }
+        #[cfg(not(feature = "wayland"))]
+        let _ = fallback;
+    }
     x11::run_windowed(cfg, handler, waker, single);
+}
+
+/// 运行期选定的显示后端。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Choice {
+    X11,
+    /// `fallback`：连不上时能否回退 X11（自动选择时能；`WINDUI_BACKEND=wayland` 强制时不能——
+    /// 用户点名要 Wayland，悄悄换成 X11 只会让「为什么还是 XWayland」无从查起）。
+    Wayland {
+        fallback: bool,
+    },
+}
+
+/// 选后端时要告诉用户的事。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Note {
+    /// `WINDUI_BACKEND` 的值认不出，按自动选择处理。
+    Unknown,
+    /// 点名要 Wayland，但编译时关了 `wayland` feature。
+    NotCompiled,
+}
+
+/// 选后端：`WINDUI_BACKEND=x11|wayland`（不分大小写）强制；否则会话里有 Wayland
+/// （`WAYLAND_DISPLAY` / `WAYLAND_SOCKET`）且编进了 Wayland 后端就走 Wayland、
+/// 连不上回退 X11，其余走 X11。
+fn choose_backend(
+    forced: Option<&str>,
+    has_wayland: bool,
+    compiled: bool,
+) -> (Choice, Option<Note>) {
+    let auto = if has_wayland && compiled {
+        Choice::Wayland { fallback: true }
+    } else {
+        Choice::X11
+    };
+    match forced.map(str::trim).filter(|v| !v.is_empty()) {
+        None => (auto, None),
+        Some(v) if v.eq_ignore_ascii_case("x11") => (Choice::X11, None),
+        Some(v) if v.eq_ignore_ascii_case("wayland") => {
+            if compiled {
+                (Choice::Wayland { fallback: false }, None)
+            } else {
+                (Choice::X11, Some(Note::NotCompiled))
+            }
+        }
+        Some(_) => (auto, Some(Note::Unknown)),
+    }
 }
 
 /// 系统是否偏好暗色外观。
@@ -159,6 +241,48 @@ pub(crate) fn single_window_open(_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_prefers_wayland_session_and_may_fall_back() {
+        let wl = Choice::Wayland { fallback: true };
+        assert_eq!(choose_backend(None, true, true), (wl, None));
+        assert_eq!(
+            choose_backend(Some(""), true, true),
+            (wl, None),
+            "空值视同未设"
+        );
+        assert_eq!(choose_backend(None, false, true), (Choice::X11, None));
+        assert_eq!(
+            choose_backend(None, true, false),
+            (Choice::X11, None),
+            "没编进 Wayland 后端：Wayland 会话照样走 XWayland"
+        );
+    }
+
+    #[test]
+    fn forced_backend_wins_and_forced_wayland_does_not_fall_back() {
+        assert_eq!(choose_backend(Some("x11"), true, true), (Choice::X11, None));
+        assert_eq!(
+            choose_backend(Some("Wayland"), false, true),
+            (Choice::Wayland { fallback: false }, None)
+        );
+        assert_eq!(
+            choose_backend(Some("wayland"), true, false),
+            (Choice::X11, Some(Note::NotCompiled))
+        );
+    }
+
+    #[test]
+    fn unknown_forced_value_behaves_like_auto_with_a_note() {
+        assert_eq!(
+            choose_backend(Some("mir"), true, true),
+            (Choice::Wayland { fallback: true }, Some(Note::Unknown))
+        );
+        assert_eq!(
+            choose_backend(Some("mir"), false, true),
+            (Choice::X11, Some(Note::Unknown))
+        );
+    }
 
     #[test]
     fn posix_locales_become_bcp47() {

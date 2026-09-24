@@ -163,6 +163,15 @@ pub(super) fn rgba_to_bgra(src: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// 可执行文件名（不含扩展名），取不到时为 `windui`。X11 的 `WM_CLASS` 与 Wayland 的
+/// `app_id` 都用它：桌面据此把窗口归组、匹配 .desktop 文件。
+pub(super) fn exe_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "windui".into())
+}
+
 /// 跨线程唤醒：写唤醒管道，事件循环醒来后标脏所有窗口（宿主 render 时排空消息通道）。
 pub(super) struct LinuxWake;
 impl crate::sync::RawWakeSignal for LinuxWake {

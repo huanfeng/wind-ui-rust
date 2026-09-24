@@ -16,9 +16,14 @@ exclude = [".github/", ".remember/", "/scripts", "/temp", "/artifacts"]
 
 [features]
 # SVG 支持默认开启；体积敏感可 `--no-default-features` 关掉以剔除 resvg/usvg 依赖树。
-default = ["svg", "d2d"]
+default = ["svg", "d2d", "wayland"]
 svg = ["dep:resvg"]
 d2d = []
+# Linux 原生 Wayland 后端（默认开）。只对 Linux 有意义：依赖声明在 Linux 的 target 段里，
+# 别的平台开着它也不会多编任何东西（与 `d2d` 之于非 Windows 同理）——所以能直接放进
+# 全局 `default`，不必走 `gpu_backend` 那种 build.rs cfg 别名。关掉它（`--no-default-features`）
+# 得到纯 X11 后端，Wayland 会话经 XWayland 运行。运行期怎么选后端见 `platform/linux/mod.rs`。
+wayland = ["dep:wayland-client", "dep:wayland-protocols"]
 # 跨平台 GPU 渲染后端（wgpu）。
 #
 # **macOS 上无需开启，它恒可用**：那里 GPU 后端是唯一的硬件加速路径（Windows 有 D2D），
@@ -132,6 +137,11 @@ ab_glyph_rasterizer = "0.1"
 # rfd 在 Linux 上必须选一个后端：xdg-portal 走 D-Bus 门户（无门户时回退 zenity），
 # 只多一个 pollster；gtk3 会把整套 GTK 拉进进程，与低内存目标相悖。
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+# Wayland 协议（`wayland` feature）：默认特性即纯 Rust 协议实现，不链 libwayland-client，
+# 同 x11rb 的取向。不用 smithay-client-toolkit——它自带 calloop 事件循环与整套抽象，
+# 而我们已有自己的 poll 循环与宿主结构。
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", optional = true, features = ["client"] }
 
 # ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
 # objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
