@@ -1,0 +1,286 @@
+//! `wl_shm` 呈现缓冲：簿记（纯逻辑、可单测）与协议对象。
+//!
+//! 缓冲以 memfd 为底、用 `pwrite` 写入而**不在本进程映射**——合成器映射同一个 fd 读取，
+//! 本进程的私有内存里只有宿主的 `Pixmap` 那一份。每窗最多两块缓冲：合成器还占着（未
+//! `release`）的那块不能写，拿不到空闲缓冲时脏区留着，等 `release` 事件再呈现。每块缓冲
+//! 记着「自己上次写入以来别的帧改过哪里」，复用时补写这部分，而不是整窗重写。
+//!
+//! memfd 走 glibc 的 `memfd_create`（2.27 起才有，见 `sys::memfd`）：更老的 glibc 上进程
+//! 起不来，而那些系统（2018 年以前）本就没有可用的 Wayland 桌面，不单独做 `syscall` 回退。
+
+use std::fs::File;
+use std::os::fd::AsFd;
+use std::os::unix::fs::FileExt;
+
+use tiny_skia::Pixmap;
+use wayland_client::protocol::{wl_buffer, wl_shm};
+use wayland_client::QueueHandle;
+
+use super::super::host;
+use super::Wl;
+use crate::geometry::Rect;
+
+/// 上屏转换缓冲的上限（字节）：整窗帧分块转换、分块写入，峰值不随窗口变大。
+const UPLOAD_CHUNK: usize = 256 * 1024;
+/// 每窗的 `wl_shm` 缓冲数。两块足够：一块在合成器手里，一块给下一帧写。
+const MAX_BUFFERS: usize = 2;
+
+/// 一块缓冲的簿记。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct SlotState {
+    w: i32,
+    h: i32,
+    /// 已 attach 给合成器、尚未收到 `release`：不能写。
+    busy: bool,
+    /// 自己上次写入以来，别的帧改过的区域——复用时要补写。
+    debt: Option<Rect>,
+}
+
+/// 一次呈现的安排：写哪块缓冲、是否要按新尺寸重建、写哪个矩形。
+#[derive(Debug, PartialEq)]
+pub(super) struct SlotPlan {
+    pub index: usize,
+    pub recreate: bool,
+    pub write: Rect,
+}
+
+#[derive(Default)]
+pub(super) struct ShmSlots {
+    slots: Vec<SlotState>,
+}
+
+impl ShmSlots {
+    /// 为一帧（尺寸 `w×h`，相对上次呈现改了 `damage`）挑一块缓冲。都被合成器占着时返回
+    /// `None`，调用方留着脏区，等 `release` 再来。
+    ///
+    /// 优先复用同尺寸的空闲块（只写 `damage ∪ debt`）；其次重建尺寸不对的空闲块；
+    /// 不足 `MAX_BUFFERS` 块时新建。选中后标忙，其余块把本帧脏区记进欠账。
+    pub fn plan(&mut self, w: i32, h: i32, damage: Rect) -> Option<SlotPlan> {
+        let full = Rect::new(0, 0, w, h);
+        let free_same = self
+            .slots
+            .iter()
+            .position(|s| !s.busy && s.w == w && s.h == h);
+        let plan = if let Some(index) = free_same {
+            let debt = self.slots[index].debt;
+            let write = debt.map_or(damage, |d| d.union(&damage)).intersect(&full);
+            SlotPlan {
+                index,
+                recreate: false,
+                write,
+            }
+        } else if let Some(index) = self.slots.iter().position(|s| !s.busy) {
+            SlotPlan {
+                index,
+                recreate: true,
+                write: full,
+            }
+        } else if self.slots.len() < MAX_BUFFERS {
+            self.slots.push(SlotState {
+                w,
+                h,
+                busy: false,
+                debt: None,
+            });
+            SlotPlan {
+                index: self.slots.len() - 1,
+                recreate: true,
+                write: full,
+            }
+        } else {
+            return None;
+        };
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if i == plan.index {
+                *s = SlotState {
+                    w,
+                    h,
+                    busy: true,
+                    debt: None,
+                };
+            } else {
+                s.debt = Some(s.debt.map_or(damage, |d| d.union(&damage)));
+            }
+        }
+        Some(plan)
+    }
+
+    pub fn release(&mut self, index: usize) {
+        if let Some(s) = self.slots.get_mut(index) {
+            s.busy = false;
+        }
+    }
+
+    /// `plan` 之后建缓冲或写像素失败：这块的内容不可信，作废到「下次必须按新建处理、
+    /// 整块重写」。只 `release` 的话它会被当成已写好，下次只补一小块脏区。
+    pub fn fail(&mut self, index: usize) {
+        if let Some(s) = self.slots.get_mut(index) {
+            *s = SlotState {
+                w: 0,
+                h: 0,
+                busy: false,
+                debt: None,
+            };
+        }
+    }
+}
+
+/// 一块缓冲的协议对象。memfd 留着给 `pwrite`；池在建完缓冲后即销毁（缓冲自己持有映射）。
+pub(super) struct ShmBuffer {
+    pub file: File,
+    pub buffer: wl_buffer::WlBuffer,
+}
+
+impl ShmBuffer {
+    pub fn destroy(self) {
+        self.buffer.destroy();
+    }
+}
+
+pub(super) fn create_buffer(
+    shm: &wl_shm::WlShm,
+    qh: &QueueHandle<Wl>,
+    key: u32,
+    slot: usize,
+    w: i32,
+    h: i32,
+) -> std::io::Result<ShmBuffer> {
+    let stride = w * 4;
+    let size = i32::try_from(stride as i64 * h as i64)
+        .map_err(|_| std::io::Error::other(format!("缓冲过大（{w}×{h}）")))?;
+    let file = super::super::sys::memfd(c"windui-shm", size as u64)?;
+    let pool = shm.create_pool(file.as_fd(), size, qh, ());
+    let buffer = pool.create_buffer(0, w, h, stride, wl_shm::Format::Xrgb8888, qh, (key, slot));
+    // 池只是建缓冲的中介：缓冲自己持有映射，销毁池不影响它。
+    pool.destroy();
+    Ok(ShmBuffer { file, buffer })
+}
+
+/// 把 pixmap 的 `r` 区域换成 XRGB8888 写进缓冲文件（同尺寸、行距 = 宽 × 4）。
+/// 整行宽的区域按块连续写，否则逐行写。
+pub(super) fn write_pixels(
+    file: &File,
+    pm: &Pixmap,
+    r: Rect,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    let r = r.intersect(&Rect::new(0, 0, pm.width() as i32, pm.height() as i32));
+    if r.is_empty() {
+        return Ok(());
+    }
+    let stride = pm.width() as usize * 4;
+    let data = pm.data();
+    let row_bytes = r.w as usize * 4;
+    let full_rows = row_bytes == stride;
+    let rows_per = if full_rows {
+        (UPLOAD_CHUNK / row_bytes).max(1)
+    } else {
+        1
+    };
+    let mut y = r.y as usize;
+    let bottom = r.bottom() as usize;
+    while y < bottom {
+        let n = rows_per.min(bottom - y);
+        buf.clear();
+        for row in y..y + n {
+            let off = row * stride + r.x as usize * 4;
+            host::rgba_to_bgra(&data[off..off + row_bytes], buf);
+        }
+        file.write_all_at(buf, (y * stride + r.x as usize * 4) as u64)?;
+        y += n;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn first_frames_create_two_buffers_then_wait_for_release() {
+        let mut p = ShmSlots::default();
+        let a = p.plan(100, 50, r(0, 0, 100, 50)).unwrap();
+        assert_eq!((a.index, a.recreate, a.write), (0, true, r(0, 0, 100, 50)));
+        let b = p.plan(100, 50, r(10, 10, 5, 5)).unwrap();
+        assert_eq!(
+            (b.index, b.recreate),
+            (1, true),
+            "第一块还在合成器手里，新建第二块"
+        );
+        assert_eq!(b.write, r(0, 0, 100, 50), "新缓冲整块写");
+        assert_eq!(p.plan(100, 50, r(0, 0, 1, 1)), None, "两块都忙：等 release");
+    }
+
+    #[test]
+    fn reused_buffer_writes_damage_plus_what_it_missed() {
+        let mut p = ShmSlots::default();
+        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 0
+        p.plan(100, 50, r(10, 10, 5, 5)).unwrap(); // 1，0 欠 (10,10,5,5)
+        p.release(0);
+        let c = p.plan(100, 50, r(40, 20, 2, 2)).unwrap();
+        assert_eq!(c.index, 0);
+        assert!(!c.recreate);
+        assert_eq!(c.write, r(10, 10, 5, 5).union(&r(40, 20, 2, 2)));
+        p.release(1);
+        let d = p.plan(100, 50, r(0, 0, 1, 1)).unwrap();
+        assert_eq!(d.index, 1);
+        assert_eq!(
+            d.write,
+            r(40, 20, 2, 2).union(&r(0, 0, 1, 1)),
+            "欠账在自己被写之后清零，只剩之后别的帧的脏区"
+        );
+    }
+
+    #[test]
+    fn resize_recreates_free_buffers_and_keeps_busy_ones() {
+        let mut p = ShmSlots::default();
+        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 0 忙
+        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 1 忙
+        p.release(1);
+        let e = p.plan(120, 60, r(0, 0, 120, 60)).unwrap();
+        assert_eq!((e.index, e.recreate, e.write), (1, true, r(0, 0, 120, 60)));
+        p.release(0);
+        let f = p.plan(120, 60, r(5, 5, 1, 1)).unwrap();
+        assert_eq!(
+            (f.index, f.recreate),
+            (0, true),
+            "旧尺寸的块空出来后按新尺寸重建"
+        );
+        assert_eq!(f.write, r(0, 0, 120, 60));
+    }
+
+    #[test]
+    fn failed_slot_is_rebuilt_and_fully_rewritten() {
+        let mut p = ShmSlots::default();
+        p.plan(100, 50, r(0, 0, 100, 50)).unwrap();
+        p.fail(0);
+        let h = p.plan(100, 50, r(1, 1, 1, 1)).unwrap();
+        assert_eq!((h.index, h.recreate, h.write), (0, true, r(0, 0, 100, 50)));
+    }
+
+    #[test]
+    fn pixels_land_in_xrgb_layout_at_the_right_offset() {
+        let mut pm = Pixmap::new(4, 3).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(10, 20, 30, 255));
+        let file = super::super::super::sys::memfd(c"windui-test", 4 * 3 * 4).unwrap();
+        let mut buf = Vec::new();
+        // 非整行：只写 (1,1) 一个像素。
+        write_pixels(&file, &pm, r(1, 1, 1, 1), &mut buf).unwrap();
+        let mut out = vec![0u8; 48];
+        file.read_exact_at(&mut out, 0).unwrap();
+        fn px(out: &[u8], x: usize, y: usize) -> &[u8] {
+            &out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4]
+        }
+        assert_eq!(px(&out, 1, 1), [30, 20, 10, 255]);
+        assert_eq!(px(&out, 0, 0), [0, 0, 0, 0], "区域外不写");
+        // 整行：第 2 行整行连续写。
+        write_pixels(&file, &pm, r(0, 2, 4, 1), &mut buf).unwrap();
+        file.read_exact_at(&mut out, 0).unwrap();
+        assert_eq!(px(&out, 3, 2), [30, 20, 10, 255]);
+        assert_eq!(px(&out, 0, 1), [0, 0, 0, 0]);
+    }
+}
