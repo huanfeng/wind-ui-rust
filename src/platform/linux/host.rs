@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
 
-use crate::event::{CursorShape, HotkeyOp, WindowOp};
-use crate::geometry::{Color, Rect, Size};
+use super::keys;
+use crate::event::{CursorShape, HotkeyOp, Key, KeyEvent, Mods, WindowOp};
+use crate::geometry::{Color, Point, Rect, Size};
 use crate::platform::{to_skia_color, AppHandler, DialogRequest, NewWindow};
 
 /// 动画帧间隔（ms）。软件呈现拿不到可靠的刷新率，按 60Hz。
@@ -163,6 +164,107 @@ pub(super) fn rgba_to_bgra(src: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// 无边框窗口的边缘命中 → 方向码（0 = 左上，顺时针到 7 = 左），即 `_NET_WM_MOVERESIZE`
+/// 的编号；Wayland 后端再换成 `xdg_toplevel.resize_edge`。坐标与尺寸同为物理像素。
+pub(super) fn edge_direction(p: Point, w: i32, h: i32, border: i32) -> Option<u32> {
+    let left = p.x < border;
+    let right = p.x >= w - border;
+    let top = p.y < border;
+    let bottom = p.y >= h - border;
+    Some(match (left, right, top, bottom) {
+        (true, _, true, _) => 0,
+        (_, true, true, _) => 2,
+        (_, true, _, true) => 4,
+        (true, _, _, true) => 6,
+        (_, _, true, _) => 1,
+        (_, true, _, _) => 3,
+        (_, _, _, true) => 5,
+        (true, _, _, _) => 7,
+        _ => return None,
+    })
+}
+
+/// 一次物理按键 → 交给宿主的键盘事件（X11 与 Wayland 共用，保证快捷键 / 单击 Alt / 文本
+/// 的口径一致）。
+///
+/// - `ks`：按当前修饰键与布局解析出的 keysym；`mods`：按下时的修饰键。
+/// - `alt_down`：Alt 是否已按着——X 的自动重复会把按住的 Alt 报成一串按下，只认第一下。
+/// - `shortcut`：Ctrl / Alt 组合要用的 `Key::Other` 码（基础层 keysym 取码，非拉丁布局回退到
+///   同键位上的拉丁字母），只在需要时才算。
+///
+/// 规则：松开只报 Alt（见 `Key::Alt`）；具名键先报本身，空格与小键盘运算键在无 Ctrl / Alt 时
+/// 再补一个字符（与 win32 `WM_KEYDOWN` + `WM_CHAR` 的双发一致）；纯修饰键不报；Ctrl / Alt
+/// 组合报 `Key::Other(大写 ASCII)`、不产出文本；其余可打印字符报 `Key::Char`（不带修饰键）。
+pub(super) fn translate_key(
+    ks: u32,
+    press: bool,
+    mods: Mods,
+    alt_down: &mut bool,
+    shortcut: impl FnOnce() -> Option<u32>,
+) -> Vec<KeyEvent> {
+    let mk = |key| KeyEvent {
+        key,
+        pressed: true,
+        shift: mods.shift,
+        ctrl: mods.ctrl,
+        alt: mods.alt,
+        meta: mods.meta,
+    };
+    let plain = |key| KeyEvent {
+        key,
+        pressed: true,
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
+    let mut out = Vec::new();
+    if !press {
+        if keys::special_key(ks) == Some(Key::Alt) {
+            *alt_down = false;
+            out.push(KeyEvent {
+                pressed: false,
+                ..plain(Key::Alt)
+            });
+        }
+        return out;
+    }
+    if let Some(k) = keys::special_key(ks) {
+        if k == Key::Alt {
+            if *alt_down {
+                return out; // 自动重复
+            }
+            *alt_down = true;
+        }
+        out.push(mk(k));
+        let emits_char = matches!(
+            k,
+            Key::Space
+                | Key::NumpadAdd
+                | Key::NumpadSubtract
+                | Key::NumpadMultiply
+                | Key::NumpadDivide
+        );
+        if !emits_char || mods.ctrl || mods.alt {
+            return out;
+        }
+    } else if keys::is_modifier(ks) {
+        return out;
+    }
+    if mods.ctrl || mods.alt {
+        if keys::special_key(ks).is_none() {
+            if let Some(code) = shortcut() {
+                out.push(mk(Key::Other(code)));
+            }
+        }
+        return out;
+    }
+    if let Some(c) = keys::keysym_char(ks).filter(|c| !c.is_control()) {
+        out.push(plain(Key::Char(c)));
+    }
+    out
+}
+
 /// 可执行文件名（不含扩展名），取不到时为 `windui`。X11 的 `WM_CLASS` 与 Wayland 的
 /// `app_id` 都用它：桌面据此把窗口归组、匹配 .desktop 文件。
 pub(super) fn exe_name() -> String {
@@ -221,6 +323,67 @@ mod tests {
         let mut next = None;
         assert_eq!(iv.fire_due(late, &mut next), vec![0, 1]);
         assert_eq!(next, Some(late + Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn edges_map_to_ewmh_directions() {
+        assert_eq!(edge_direction(Point::new(0, 0), 100, 100, 5), Some(0));
+        assert_eq!(edge_direction(Point::new(50, 0), 100, 100, 5), Some(1));
+        assert_eq!(edge_direction(Point::new(99, 99), 100, 100, 5), Some(4));
+        assert_eq!(edge_direction(Point::new(0, 50), 100, 100, 5), Some(7));
+        assert_eq!(edge_direction(Point::new(50, 50), 100, 100, 5), None);
+    }
+
+    const XK_A: u32 = 0x61;
+    const XK_SPACE: u32 = 0x20;
+    const XK_ALT_L: u32 = 0xffe9;
+    const XK_SHIFT_L: u32 = 0xffe1;
+
+    fn keys_of(evs: &[KeyEvent]) -> Vec<(Key, bool)> {
+        evs.iter().map(|e| (e.key, e.pressed)).collect()
+    }
+
+    #[test]
+    fn plain_letter_is_text_and_ctrl_letter_is_shortcut() {
+        let mut alt = false;
+        let evs = translate_key(XK_A, true, Mods::default(), &mut alt, || None);
+        assert_eq!(keys_of(&evs), [(Key::Char('a'), true)]);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        let evs = translate_key(XK_A, true, ctrl, &mut alt, || Some(b'A' as u32));
+        assert_eq!(keys_of(&evs), [(Key::Other(b'A' as u32), true)]);
+        assert!(evs[0].ctrl);
+    }
+
+    #[test]
+    fn space_reports_key_then_char_unless_modified() {
+        let mut alt = false;
+        let evs = translate_key(XK_SPACE, true, Mods::default(), &mut alt, || None);
+        assert_eq!(keys_of(&evs), [(Key::Space, true), (Key::Char(' '), true)]);
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::default()
+        };
+        let evs = translate_key(XK_SPACE, true, ctrl, &mut alt, || None);
+        assert_eq!(keys_of(&evs), [(Key::Space, true)]);
+    }
+
+    #[test]
+    fn alt_press_is_reported_once_and_release_resets() {
+        let mut alt = false;
+        let a = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        assert_eq!(translate_key(XK_ALT_L, true, a, &mut alt, || None).len(), 1);
+        assert!(translate_key(XK_ALT_L, true, a, &mut alt, || None).is_empty());
+        let up = translate_key(XK_ALT_L, false, a, &mut alt, || None);
+        assert_eq!(keys_of(&up), [(Key::Alt, false)]);
+        assert!(!alt);
+        assert!(translate_key(XK_SHIFT_L, true, Mods::default(), &mut alt, || None).is_empty());
+        assert!(translate_key(XK_A, false, Mods::default(), &mut alt, || None).is_empty());
     }
 
     #[test]

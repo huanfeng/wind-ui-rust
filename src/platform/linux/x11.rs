@@ -1298,7 +1298,7 @@ impl X11 {
         let w = &mut self.windows[i];
         let border = (RESIZE_BORDER * self.scale).round() as i32;
         if w.resizable && !w.maximized {
-            if let Some(dir) = edge_direction(pos, w.w, w.h, border) {
+            if let Some(dir) = host::edge_direction(pos, w.w, w.h, border) {
                 if !w.handler.interactive_at(pos) {
                     w.pending_drag = Some((dir, e.root_x, e.root_y));
                     return true;
@@ -1364,89 +1364,15 @@ impl X11 {
         if self.blocked_by_modal(id).is_some() {
             return;
         }
-        let ks = self.keymap.keysym(keycode, state);
-        let shift = state & keys::SHIFT != 0;
-        let ctrl = state & keys::CONTROL != 0;
-        let alt = state & keys::MOD1 != 0;
-        let meta = state & keys::MOD4 != 0;
-        let mk = |key| KeyEvent {
-            key,
-            pressed: true,
-            shift,
-            ctrl,
-            alt,
-            meta,
-        };
-        if !press {
-            // 只报 Alt 的松开（见 `Key::Alt`）。
-            if keys::special_key(ks) == Some(Key::Alt) {
-                self.alt_down = false;
-                self.dispatch_key(
-                    id,
-                    KeyEvent {
-                        key: Key::Alt,
-                        pressed: false,
-                        shift: false,
-                        ctrl: false,
-                        alt: false,
-                        meta: false,
-                    },
-                );
-            }
-            return;
-        }
         let _ = i;
-        if let Some(k) = keys::special_key(ks) {
-            if k == Key::Alt {
-                if self.alt_down {
-                    return; // 自动重复
-                }
-                self.alt_down = true;
-            }
-            self.dispatch_key(id, mk(k));
-            // 空格与小键盘运算键还要产出字符（与 win32 WM_KEYDOWN + WM_CHAR 的双发一致）。
-            let emits_char = matches!(
-                k,
-                Key::Space
-                    | Key::NumpadAdd
-                    | Key::NumpadSubtract
-                    | Key::NumpadMultiply
-                    | Key::NumpadDivide
-            );
-            if !emits_char || ctrl || alt {
-                return;
-            }
-        } else if keys::is_modifier(ks) {
-            return;
-        }
-        if ctrl || alt {
-            // 快捷键：Key::Other(大写 ASCII)，与 win32 VK / macOS 同一口径。不产出文本。
-            if keys::special_key(ks).is_none() {
-                let code = keys::shortcut_code(self.keymap.base(keycode)).or_else(|| {
-                    self.keymap
-                        .ascii_on_key(keycode)
-                        .and_then(keys::shortcut_code)
-                });
-                if let Some(code) = code {
-                    self.dispatch_key(id, mk(Key::Other(code)));
-                }
-            }
-            return;
-        }
-        if let Some(c) = keys::keysym_char(ks) {
-            if !c.is_control() {
-                self.dispatch_key(
-                    id,
-                    KeyEvent {
-                        key: Key::Char(c),
-                        pressed: true,
-                        shift: false,
-                        ctrl: false,
-                        alt: false,
-                        meta: false,
-                    },
-                );
-            }
+        let ks = self.keymap.keysym(keycode, state);
+        let keymap = &self.keymap;
+        let events = host::translate_key(ks, press, mods_of(state), &mut self.alt_down, || {
+            keys::shortcut_code(keymap.base(keycode))
+                .or_else(|| keymap.ascii_on_key(keycode).and_then(keys::shortcut_code))
+        });
+        for ev in events {
+            self.dispatch_key(id, ev);
         }
     }
 
@@ -1636,25 +1562,6 @@ fn mods_of(state: u16) -> crate::event::Mods {
     }
 }
 
-/// 无边框窗口的边缘命中 → `_NET_WM_MOVERESIZE` 方向码（0 = 左上，顺时针到 7 = 左）。
-fn edge_direction(p: Point, w: i32, h: i32, border: i32) -> Option<u32> {
-    let left = p.x < border;
-    let right = p.x >= w - border;
-    let top = p.y < border;
-    let bottom = p.y >= h - border;
-    Some(match (left, right, top, bottom) {
-        (true, _, true, _) => 0,
-        (_, true, true, _) => 2,
-        (_, true, _, true) => 4,
-        (true, _, _, true) => 6,
-        (_, _, true, _) => 1,
-        (_, true, _, _) => 3,
-        (_, _, _, true) => 5,
-        (true, _, _, _) => 7,
-        _ => return None,
-    })
-}
-
 fn cursor_index(s: CursorShape) -> usize {
     match s {
         CursorShape::Arrow => 0,
@@ -1741,14 +1648,5 @@ mod tests {
     fn xft_dpi_is_parsed_from_resource_string() {
         assert_eq!(xft_dpi("Xft.antialias:\t1\nXft.dpi:\t192\n"), Some(192.0));
         assert_eq!(xft_dpi("Xft.antialias:\t1\n"), None);
-    }
-
-    #[test]
-    fn edges_map_to_ewmh_directions() {
-        assert_eq!(edge_direction(Point::new(0, 0), 100, 100, 5), Some(0));
-        assert_eq!(edge_direction(Point::new(50, 0), 100, 100, 5), Some(1));
-        assert_eq!(edge_direction(Point::new(99, 99), 100, 100, 5), Some(4));
-        assert_eq!(edge_direction(Point::new(0, 50), 100, 100, 5), Some(7));
-        assert_eq!(edge_direction(Point::new(50, 50), 100, 100, 5), None);
     }
 }
