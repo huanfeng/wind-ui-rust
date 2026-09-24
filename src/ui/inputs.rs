@@ -803,6 +803,8 @@ pub struct TextInput {
     anchor: Option<usize>, // 选区锚点（Some 且 != cursor 时有选区）
     scroll_x: Cell<i32>,   // 水平滚动偏移（逻辑 px），paint 时按光标更新
     scroll_y: Cell<i32>,   // 垂直滚动偏移（逻辑 px，多行用），paint 时按光标更新
+    /// 多行滚轮的亚格零头（见 `WheelCarry`）。
+    wheel: crate::event::WheelCarry,
     /// 上下移动时保持的目标列像素（粘性 goal column）；水平移动/编辑后清空。
     goal_x: Cell<Option<i32>>,
     layout: RefCell<TextLayout>, // paint 重建的视觉行缓存
@@ -882,6 +884,7 @@ impl TextInput {
             anchor: None,
             scroll_x: Cell::new(0),
             scroll_y: Cell::new(0),
+            wheel: crate::event::WheelCarry::default(),
             goal_x: Cell::new(None),
             layout: RefCell::new(TextLayout::default()),
             caret_local: Cell::new(None),
@@ -2135,16 +2138,19 @@ impl Widget for TextInput {
                         (lay.lines.len() as i32 * lh, lh)
                     };
                     if content_h <= inner_h {
+                        self.wheel.reset();
                         return false; // 无溢出 → 冒泡给外层滚动容器
                     }
                     let max_scroll = (content_h - inner_h).max(0);
                     let sy_old = self.scroll_y.get();
-                    // 每刻度 120，滚动约 3 行（与外层 ScrollWidget 步长对齐）。
+                    // 每刻度 120，滚动约 3 行（与外层 ScrollWidget 步长对齐）；亚格零头攒着。
                     let step = (3 * line_h).max(48);
-                    let dy = -delta * step / 120;
-                    // 已到边界 → 冒泡让外层继续滚动。
-                    let at_boundary = (dy < 0 && sy_old == 0) || (dy > 0 && sy_old >= max_scroll);
+                    let dy = self.wheel.scroll_px(delta, step);
+                    // 已到边界 → 冒泡让外层继续滚动（按滚动方向判，见 ScrollWidget）。
+                    let down = delta < 0;
+                    let at_boundary = (!down && sy_old == 0) || (down && sy_old >= max_scroll);
                     if at_boundary {
+                        self.wheel.reset();
                         return false;
                     }
                     self.scroll_y.set((sy_old + dy).clamp(0, max_scroll));

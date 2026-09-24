@@ -185,6 +185,8 @@ pub struct ScrollWidget {
     dragging: bool,
     start_y: i32,
     start_scroll: i32,
+    /// 高精度滚轮 / 触控板的亚格零头（见 `WheelCarry`）。
+    wheel: crate::event::WheelCarry,
 }
 
 impl Widget for ScrollWidget {
@@ -196,13 +198,17 @@ impl Widget for ScrollWidget {
                 let max_scroll = (content_h - view_h).max(0);
                 // 无溢出内容 → 直接冒泡。
                 if max_scroll == 0 {
+                    self.wheel.reset();
                     return false;
                 }
-                // delta>0 向上（减小 scroll_y），delta<0 向下（增大 scroll_y）。
-                let dy = -delta * 48 / 120;
-                // 已到边界 → 冒泡给外层滚动容器，实现嵌套滚动。
-                let at_boundary = (dy < 0 && scroll_y <= 0) || (dy > 0 && scroll_y >= max_scroll);
+                // delta>0 向上（减小 scroll_y），delta<0 向下（增大 scroll_y）；每格 48px。
+                let dy = self.wheel.scroll_px(delta, 48);
+                // 已到边界 → 冒泡给外层滚动容器，实现嵌套滚动。按滚动方向判（dy 可能因
+                // 零头为 0），免得触控板在边界处一点一点地把事件吞掉、外层永远滚不动。
+                let down = delta < 0;
+                let at_boundary = (!down && scroll_y <= 0) || (down && scroll_y >= max_scroll);
                 if at_boundary {
+                    self.wheel.reset();
                     return false;
                 }
                 ctx.scroll_by(dy);

@@ -4978,6 +4978,56 @@ mod tests {
         assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
     }
 
+    /// 亚格滚轮量（Wayland 的 `axis_value120`、触控板连续量）按比例累加；整格与改动前一样
+    /// 每格 48 像素。改动前 `-delta * 48 / 120` 在 |delta| < 3 时恒为 0，触控板慢慢滑永远不动。
+    #[test]
+    fn scroll_wheel_sub_notch_deltas_accumulate() {
+        let make = || {
+            let mut sc = Element::scroll().width(100).height(100);
+            for _ in 0..30 {
+                sc = sc.child(Element::leaf().width_match().height(30));
+            }
+            let mut tree = Tree::new();
+            let id = sc.build(&mut tree);
+            tree.root = Some(id);
+            let mut te = crate::text::NullTextEngine;
+            tree.layout_root(Size::new(100, 100), &mut te);
+            (tree, id, te)
+        };
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
+        };
+        let (mut h, mut cap) = (None, None);
+
+        let (mut tree, id, mut te) = make();
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            48,
+            "整格：48 像素，与改动前相同"
+        );
+        tree.dispatch_pointer(wheel(120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0);
+
+        let (mut tree, id, mut te) = make();
+        for _ in 0..2 {
+            tree.dispatch_pointer(wheel(-1), &mut h, &mut cap);
+        }
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "不足 1 像素时攒着");
+        for _ in 0..118 {
+            tree.dispatch_pointer(wheel(-1), &mut h, &mut cap);
+        }
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            48,
+            "120 个 1/120 格合计正好一格"
+        );
+    }
+
     #[test]
     fn pan_scroll_scrolls_container() {
         let mut sc = Element::scroll().width(100).height(100);

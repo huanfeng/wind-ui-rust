@@ -17,6 +17,9 @@ use super::focus::FocusSource;
 use super::UiHost;
 
 pub(super) const MENU_ITEM_H: i32 = 30;
+/// 菜单每格滚轮（120）滚动的像素。原先是 `max(|delta| / 3, MENU_ITEM_H)`，对整格（±120
+/// 及其倍数）恰为 `|delta| / 3`，这里保持整格行为不变，只是不足一格时按比例、不再兜底一整项。
+const MENU_WHEEL_PX: i32 = 40;
 /// 两行项（带 subtitle）行高。
 const MENU_ITEM_H_TALL: i32 = 46;
 const MENU_SEP_H: i32 = 9;
@@ -107,6 +110,8 @@ pub(super) struct MenuLevel {
     pub(super) content_h: i32,
     /// 当前滚动偏移（像素，0=顶部）。
     pub(super) scroll: i32,
+    /// 高精度滚轮 / 触控板的亚格零头（见 `WheelCarry`）。
+    pub(super) wheel: crate::event::WheelCarry,
 }
 
 impl MenuLevel {
@@ -524,6 +529,7 @@ impl UiHost {
             spawn: None,
             content_h,
             scroll: initial_scroll,
+            wheel: Default::default(),
         }
     }
 
@@ -998,8 +1004,9 @@ impl UiHost {
                 // 滚轮在菜单面板内滚动：delta>0=上滚（内容下移，scroll 减小）。
                 if let Some(k) = self.menu.active.as_ref().and_then(|m| m.level_at(ev.pos)) {
                     let level = &mut self.menu.active.as_mut().unwrap().levels[k];
-                    let step = (delta.abs() / 3).max(MENU_ITEM_H);
-                    let dir = if delta > 0 { -step } else { step };
+                    // 一格（120）滚 40 像素；按比例换算、零头攒着——触控板 / 高精度滚轮一次
+                    // 只报几个单位，每个小 frame 都滚一整项的话一抹就飞到底。
+                    let dir = level.wheel.scroll_px(delta, MENU_WHEEL_PX);
                     level.scroll = (level.scroll + dir).clamp(0, level.max_scroll());
                 }
                 true
@@ -1616,6 +1623,7 @@ mod tests {
             spawn: None,
             content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
             scroll: 0,
+            wheel: Default::default(),
         };
         let (track, _, _) = level.scrollbar_geom().expect("内容超高应有滚动条");
         let r = level.rect;
@@ -1660,6 +1668,7 @@ mod tests {
             content_h: 10 * MENU_ITEM_H + 2 * MENU_VPAD,
             // 滚半行：行边界落在边带内部，两条边带底下都确实压着行。
             scroll: MENU_ITEM_H / 2,
+            wheel: Default::default(),
         };
         let (r, x) = (level.rect, level.rect.x + 20);
         let rows = level.item_rows();
@@ -1744,6 +1753,55 @@ mod tests {
         assert!(trashed.get(), "点击尾随图标应触发其自身回调");
         assert!(!selected.get(), "点击尾随图标不应触发主项 action（选中）");
         assert!(app.menu.active.is_none(), "点击后菜单应关闭");
+    }
+
+    /// 滚轮滚长菜单：整格（±120）与改动前完全一样（每格 40 像素）；触控板 / 高精度滚轮的
+    /// 小量按比例累加，不再每个小 frame 都滚一整项（改动前 `max(|d|/3, 行高)` 兜底 30 像素，
+    /// 12 次 ±10 会滚 360 像素，一抹到底）。
+    #[test]
+    fn menu_wheel_notch_unchanged_and_sub_notch_accumulates() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        let app = App::new("t", 400, 300).content(Element::col());
+        let mut app = app.into_handler_for_test();
+        let target = app.tree.root.unwrap();
+        let items: Vec<MenuItem> = (0..40)
+            .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+            .collect();
+        let level = app.build_level(items, 20, 20, 0, None, None, false);
+        assert!(level.max_scroll() > 400, "前置：菜单要足够长才能滚");
+        app.menu.active = Some(ContextMenu {
+            levels: vec![level],
+            target,
+            rebuild: None,
+            bar: None,
+            click_through: false,
+        });
+        let rect = app.menu.active.as_ref().unwrap().levels[0].rect;
+        let at = Point::new(rect.x + 10, rect.y + rect.h / 2);
+        let mut wheel = |d: i32| {
+            app.handle_menu_pointer(PointerEvent::single(
+                PointerKind::Wheel(d),
+                at,
+                MouseButton::Left,
+            ));
+            app.menu.active.as_ref().unwrap().levels[0].scroll
+        };
+        assert_eq!(wheel(-120), 40, "一格向下 40 像素（与改动前相同）");
+        assert_eq!(wheel(-240), 120, "两格 80 像素");
+        assert_eq!(wheel(120), 80, "向上一格");
+        let base = 80;
+        let mut last = base;
+        for _ in 0..12 {
+            last = wheel(-10);
+        }
+        assert_eq!(last - base, 40, "12 次 1/12 格合计一格");
+        assert_eq!(
+            wheel(-10) - last,
+            3,
+            "单次小量按比例（400/120 取整），不再兜底一整项"
+        );
     }
 
     #[test]
@@ -2083,6 +2141,7 @@ mod tests {
             spawn,
             content_h: 0,
             scroll: 0,
+            wheel: Default::default(),
         };
         let mut sub = build()[1].submenu.clone();
         normalize_separators(&mut sub);

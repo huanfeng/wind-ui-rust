@@ -518,6 +518,60 @@ pub enum CursorShape {
     SizeNS,
 }
 
+/// 滚轮量 → 像素位移的换算，**留着不足 1 像素的零头**给下一次。
+///
+/// 滚轮量以 1/120 格为单位（`PointerKind::Wheel`）。整格（±120 的倍数）换算与直接
+/// `-delta * px_per_notch / 120` 完全相同；高精度滚轮 / 触控板一次只报几个单位，直接
+/// 整除会得 0、永远滚不动（Wayland 的 `axis_value120` 与触控板连续量就是这样），
+/// 所以零头攒着。换方向时旧零头作废，不拿来抵消新方向。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WheelCarry {
+    /// 未兑现的位移，单位 1/120 像素（正 = 向下）。
+    rem: i32,
+}
+
+impl WheelCarry {
+    /// 本次滚轮对应的像素位移（正 = 内容向下滚、scroll 增大；与 `delta` 符号相反）。
+    pub(crate) fn scroll_px(&mut self, delta: i32, px_per_notch: i32) -> i32 {
+        let total = -delta * px_per_notch;
+        if total.signum() * self.rem.signum() < 0 {
+            self.rem = 0;
+        }
+        let t = total + self.rem;
+        self.rem = t % 120;
+        t / 120
+    }
+
+    /// 滚到头冒泡给外层时丢掉零头：那一下没有在本控件兑现。
+    pub(crate) fn reset(&mut self) {
+        self.rem = 0;
+    }
+}
+
+#[cfg(test)]
+mod wheel_carry_tests {
+    use super::WheelCarry;
+
+    #[test]
+    fn whole_notches_match_plain_division() {
+        let mut c = WheelCarry::default();
+        for d in [120, -120, 240, -360, 60] {
+            assert_eq!(c.scroll_px(d, 48), -d * 48 / 120, "delta {d}");
+        }
+    }
+
+    #[test]
+    fn fractions_accumulate_and_reset_on_direction_change() {
+        let mut c = WheelCarry::default();
+        assert_eq!(c.scroll_px(-1, 48), 0);
+        assert_eq!(c.scroll_px(-2, 48), 1, "3/120 格 × 48 = 1.2 像素");
+        assert_eq!(c.scroll_px(1, 48), 0, "换方向：旧零头作废，0.4 像素不够 1");
+        assert_eq!(c.scroll_px(2, 48), -1);
+        c.reset();
+        assert_eq!(c.scroll_px(-2, 48), 0, "reset 后从零攒起");
+    }
+}
+
 /// 指针动作。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PointerKind {
