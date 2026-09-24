@@ -561,14 +561,22 @@ mod wheel_carry_tests {
     }
 
     #[test]
-    fn fractions_accumulate_and_reset_on_direction_change() {
+    fn fractions_accumulate() {
         let mut c = WheelCarry::default();
         assert_eq!(c.scroll_px(-1, 48), 0);
         assert_eq!(c.scroll_px(-2, 48), 1, "3/120 格 × 48 = 1.2 像素");
-        assert_eq!(c.scroll_px(1, 48), 0, "换方向：旧零头作废，0.4 像素不够 1");
-        assert_eq!(c.scroll_px(2, 48), -1);
         c.reset();
         assert_eq!(c.scroll_px(-2, 48), 0, "reset 后从零攒起");
+    }
+
+    #[test]
+    fn direction_change_drops_the_old_fraction() {
+        let mut c = WheelCarry::default();
+        assert_eq!(c.scroll_px(-2, 48), 0, "攒下 0.8 像素（向下）");
+        // 改向上：有复位时 -0.4 像素、没复位时会被旧的 0.8 抵成 +0.4。
+        assert_eq!(c.scroll_px(1, 48), 0);
+        // 再向上 1.2 像素：有复位时累计 -1.6 → 出 -1；没复位时累计 -0.8 → 出 0。
+        assert_eq!(c.scroll_px(3, 48), -1, "旧方向的零头不能拿来抵消新方向");
     }
 }
 

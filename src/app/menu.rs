@@ -17,8 +17,11 @@ use super::focus::FocusSource;
 use super::UiHost;
 
 pub(super) const MENU_ITEM_H: i32 = 30;
-/// 菜单每格滚轮（120）滚动的像素。原先是 `max(|delta| / 3, MENU_ITEM_H)`，对整格（±120
-/// 及其倍数）恰为 `|delta| / 3`，这里保持整格行为不变，只是不足一格时按比例、不再兜底一整项。
+/// 菜单滚轮：单次 `|delta| >= MENU_WHEEL_COARSE` 的事件照旧按 `max(|delta| / 3, MENU_ITEM_H)`
+/// 滚（win32 / X11 一格 = 120 → 40 像素；macOS 鼠标滚轮一行 = 40 单位 → 兜底 30 像素，
+/// 不兜底就只剩 13 像素、不到半项）。更小的量（高精度滚轮、触控板一帧几个单位）按每 120
+/// 单位 `MENU_WHEEL_PX` 像素比例换算、零头攒着——原先它们也兜底一整项，一抹就飞到底。
+const MENU_WHEEL_COARSE: i32 = 40;
 const MENU_WHEEL_PX: i32 = 40;
 /// 两行项（带 subtitle）行高。
 const MENU_ITEM_H_TALL: i32 = 46;
@@ -1004,9 +1007,18 @@ impl UiHost {
                 // 滚轮在菜单面板内滚动：delta>0=上滚（内容下移，scroll 减小）。
                 if let Some(k) = self.menu.active.as_ref().and_then(|m| m.level_at(ev.pos)) {
                     let level = &mut self.menu.active.as_mut().unwrap().levels[k];
-                    // 一格（120）滚 40 像素；按比例换算、零头攒着——触控板 / 高精度滚轮一次
-                    // 只报几个单位，每个小 frame 都滚一整项的话一抹就飞到底。
-                    let dir = level.wheel.scroll_px(delta, MENU_WHEEL_PX);
+                    // 粗粒度（整格 / macOS 一行）照旧、细粒度按比例，见 `MENU_WHEEL_COARSE`。
+                    let dir = if delta.abs() >= MENU_WHEEL_COARSE {
+                        level.wheel.reset();
+                        let step = (delta.abs() / 3).max(MENU_ITEM_H);
+                        if delta > 0 {
+                            -step
+                        } else {
+                            step
+                        }
+                    } else {
+                        level.wheel.scroll_px(delta, MENU_WHEEL_PX)
+                    };
                     level.scroll = (level.scroll + dir).clamp(0, level.max_scroll());
                 }
                 true
@@ -1791,6 +1803,12 @@ mod tests {
         assert_eq!(wheel(-120), 40, "一格向下 40 像素（与改动前相同）");
         assert_eq!(wheel(-240), 120, "两格 80 像素");
         assert_eq!(wheel(120), 80, "向上一格");
+        assert_eq!(
+            wheel(-40),
+            110,
+            "macOS 鼠标滚轮一行（40 单位）仍兜底 30 像素"
+        );
+        assert_eq!(wheel(40), 80);
         let base = 80;
         let mut last = base;
         for _ in 0..12 {
