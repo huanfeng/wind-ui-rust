@@ -12,8 +12,9 @@
   - `wayland-cursor` 0.31：仅作 `cursor-shape-v1` 不可用时的光标主题回退。
   - **不用 smithay-client-toolkit**：它带 calloop 事件循环与一整套抽象，而我们已有自己的
     `poll` 循环与宿主结构，与 X11 后端直接用 x11rb 同理。
-- **后端选择**：运行期决定。`WINDUI_BACKEND=x11|wayland` 强制；否则有 `WAYLAND_DISPLAY`
-  且连得上就走 Wayland，失败回退 X11。Cargo feature `wayland`（Linux 默认开，可关以缩依赖）。
+- **后端选择**：运行期决定。**功能对齐前默认 X11**：只有 `WINDUI_BACKEND=wayland` 才试
+  Wayland（连不上提示后回退 X11）。Stage 2–5 完成并在 GNOME 真桌面验证后，再改为有
+  `WAYLAND_DISPLAY` 且连得上就自动优先 Wayland。Cargo feature `wayland`（Linux 默认开，可关以缩依赖）。
 - **复用**：文字栈 `src/text/linux/`、软件渲染器、`keys.rs` 的 keysym→`Key` 表、离屏截图、
   单实例转发，全部原样复用。
 - **协议做不到、只能文档化的**：应用不能设窗口坐标（居中/定位类 API 空操作）；不能查询/撤销最小化
@@ -32,8 +33,8 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 **Status**: Complete（2026-09-24）。验证数据与环境搭法见 `docs/LINUX_PORTING.md` §8。偏差：
 像素断言用 `weston-screenshooter` 抓屏对比离屏渲染，未写成 `cargo test` 里的自动化用例
 （需要外部 weston 进程）；「可缩放」只验了合成器给定尺寸（最大化 / 还原），headless 无输入
-设备、拖边缩放留到 Stage 2 与真桌面。**注意**：自动选择已让 Wayland 会话走本后端，而它还
-没有输入——Stage 2 落地前不宜合入主线发布，或临时要求 `WINDUI_BACKEND=wayland` 才启用。
+设备、拖边缩放留到 Stage 2 与真桌面。后端默认不启用，须
+`WINDUI_BACKEND=wayland` 显式指定（2026-09-24 定，理由见上「后端选择」）。
 
 ## Stage 2: 输入与缩放
 **Goal**: `wl_seat` 指针（含 `axis_value120` 高精度滚轮、`frame` 聚合）、键盘（xkbcommon keymap

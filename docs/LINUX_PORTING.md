@@ -158,8 +158,8 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**当前完成 Stage 1**：窗口与呈现。
 
 > ⚠ 本阶段没有任何输入（指针 / 键盘）、没有标题栏（weston / KDE / sway 给服务端装饰，
-> GNOME 不给）、没有剪贴板与输入法。自动选择会让 Wayland 会话走这个后端，**在输入
-> 落地（Stage 2）之前要交互请设 `WINDUI_BACKEND=x11`** 回到 XWayland。
+> GNOME 不给）、没有剪贴板与输入法。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
+> 才走它，其余情况 Wayland 会话照旧经 XWayland 运行。
 
 ### 8.1 后端选择
 
@@ -170,10 +170,13 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 | 条件 | 结果 |
 |------|------|
-| `WINDUI_BACKEND=x11` | X11 |
-| `WINDUI_BACKEND=wayland` | Wayland；连不上**报错退出**（点名要的，悄悄换 X11 只会让人查不出为什么还是 XWayland） |
-| 未设（或值认不出，记警告） | 有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就试 Wayland，连不上（含缺 `xdg_wm_base` / `wl_shm` / v4+ `wl_compositor`）记警告回退 X11；否则 X11 |
+| `WINDUI_BACKEND=wayland` | 试 Wayland；连不上（含缺 `xdg_wm_base` / `wl_shm` / v4+ `wl_compositor`）`eprintln` 提示后**回退 X11**——显式指定也不该让程序起不来 |
+| `WINDUI_BACKEND=x11`、未设、或值认不出（记警告） | X11（Wayland 会话经 XWayland） |
 | 点名 wayland 但编译时关了 feature | 提示后走 X11 |
+
+**何时改为自动优先**：Stage 2–5 全部完成、并在 GNOME 真桌面验证过之后，把未设时的分支改成
+「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」。在那之前自动选上
+一个没有输入的后端，会让 Wayland 桌面上的现有应用点不动。
 
 ### 8.2 依赖
 

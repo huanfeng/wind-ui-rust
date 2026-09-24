@@ -2316,7 +2316,7 @@ Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持—�
 （Linux 后端的取舍与验证方法见 `docs/LINUX_PORTING.md`）。
 
 Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开）分阶段落地，目前只有窗口与呈现、
-**没有输入**；运行期 `WINDUI_BACKEND=x11|wayland` 可强制选后端（选择规则见
+**没有输入**，因此默认不启用，须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则见
 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 
 | 能力 | Windows | macOS | Linux |
