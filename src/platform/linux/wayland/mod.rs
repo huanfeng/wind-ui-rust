@@ -271,7 +271,7 @@ impl Default for WmCaps {
     }
 }
 
-/// 无边框窗口上按下、尚未移出阈值的待定拖动（见 [`Win::pending_drag`]）。
+/// 无边框窗口上按下、尚未移出阈值的待定拖动（见 [`Win::drag`]）。
 #[derive(Clone, Copy, Debug)]
 struct PendingDrag {
     /// `None` = 移动；`Some(边)` = 缩放。
@@ -354,9 +354,9 @@ struct Win {
     /// 点一下标题栏（没想拖）也会被当成一次移动，而双击标题栏的第二下要靠我们自己的点击
     /// 计数认出来——两下都被合成器吞掉的话就凑不齐。等移出阈值再发，单击 / 双击的按下与
     /// 松开都完整留在客户端。按下的 serial 在按住期间一直有效，晚一点发不影响合成器认可。
-    pending_drag: Option<PendingDrag>,
-    /// 这一次左键按下被标题栏 / 缩放边接管了，配对的松开也不下发给控件。
-    swallow_up: bool,
+    ///
+    /// 「这次按下被接管、配对松开也不下发」一并由 `host::DragGate` 管（与 X11 同一份逻辑）。
+    drag: host::DragGate<PendingDrag>,
 }
 
 impl Win {
@@ -516,8 +516,7 @@ impl Wl {
             bufs: Vec::new(),
             click: ClickTracker::default(),
             capturing: false,
-            pending_drag: None,
-            swallow_up: false,
+            drag: host::DragGate::default(),
         });
         if let Some(i) = self.idx(key) {
             self.ensure_viewport(i);
@@ -627,7 +626,7 @@ impl Wl {
             w.configured = false;
             w.frame_cb = None;
             w.pending = None;
-            w.pending_drag = None;
+            w.drag.reset();
             // 隐藏期间不留共享内存缓冲（memfd 不计入本进程 RSS，但照样占系统内存）。
             // 合成器可能还持有其中一块：协议允许先销毁，存储由它自己的映射撑到用完。
             for b in w.bufs.drain(..).flatten() {

@@ -115,10 +115,10 @@ struct Win {
     /// 不在按下时就交给 WM：`_NET_WM_MOVERESIZE` 到达 WM 时松开可能已经发生，WM 于是一直
     /// 停在移动态、把下一次点击当作「结束移动」吃掉——双击最大化因此永远凑不齐第二下。
     /// 移动超过阈值才发，与 GTK 的做法一致。
-    pending_drag: Option<(u32, i16, i16)>,
-    /// 这一次左键按下被标题栏 / 缩放边接管了，配对的松开也不下发给控件（含双击切最大化
-    /// 那一下——那时没有待定拖动，只靠这个标志吞掉松开）。
-    swallow_up: bool,
+    ///
+    /// 与「这次左键被标题栏 / 缩放边接管、配对的松开也不下发」（含双击切最大化那一下）一起
+    /// 由 `host::DragGate` 管。
+    drag: host::DragGate<(u32, i16, i16)>,
     /// 输入法合成进行中（已向宿主推过非空合成串）。
     composing: bool,
 }
@@ -451,8 +451,7 @@ impl X11 {
             capturing: false,
             cursor: CursorShape::Arrow,
             click: ClickTracker::default(),
-            pending_drag: None,
-            swallow_up: false,
+            drag: host::DragGate::default(),
             composing: false,
         });
         if let Some(ime) = &mut self.ime {
@@ -1245,9 +1244,10 @@ impl X11 {
         };
         if e.detail == 1 && self.windows[i].frameless {
             if press {
-                if self.try_frameless_drag(i, &e, pos) {
+                self.windows[i].drag.press();
+                if let Some(pending) = self.try_frameless_drag(i, &e, pos) {
                     let w = &mut self.windows[i];
-                    w.swallow_up = true;
+                    w.drag.take_over(pending);
                     // 非客户区按下：收起菜单类浮层（对照 win32 `WM_NCLBUTTONDOWN`）——
                     // 这一下不会作为指针事件下发，宿主自己看不到。
                     let r = {
@@ -1260,8 +1260,7 @@ impl X11 {
                     self.after_event(id);
                     return;
                 }
-            } else if std::mem::take(&mut self.windows[i].swallow_up) {
-                self.windows[i].pending_drag = None;
+            } else if self.windows[i].drag.release() {
                 return;
             }
         }
@@ -1292,16 +1291,20 @@ impl X11 {
     }
 
     /// 无边框窗口：边缘 → 交 WM 缩放；标题栏拖动区 → 交 WM 移动（双击切最大化）。
-    /// 返回 true 表示这一下已被接管、不再下发给控件。真正交给 WM 要等指针移出阈值
-    /// （见 `Win::pending_drag`）。
-    fn try_frameless_drag(&mut self, i: usize, e: &xproto::ButtonPressEvent, pos: Point) -> bool {
+    /// 返回 `Some` 表示这一下已被接管、不再下发给控件，内含待定拖动（双击切最大化时为
+    /// `None`）；真正交给 WM 要等指针移出阈值（见 `Win::drag`）。
+    fn try_frameless_drag(
+        &mut self,
+        i: usize,
+        e: &xproto::ButtonPressEvent,
+        pos: Point,
+    ) -> Option<Option<(u32, i16, i16)>> {
         let w = &mut self.windows[i];
         let border = (RESIZE_BORDER * self.scale).round() as i32;
         if w.resizable && !w.maximized {
             if let Some(dir) = host::edge_direction(pos, w.w, w.h, border) {
                 if !w.handler.interactive_at(pos) {
-                    w.pending_drag = Some((dir, e.root_x, e.root_y));
-                    return true;
+                    return Some(Some((dir, e.root_x, e.root_y)));
                 }
             }
         }
@@ -1310,35 +1313,35 @@ impl X11 {
             let n = w.click.press(e.time, (pos.x, pos.y), 1, slop);
             let (id, resizable) = (w.id, w.resizable);
             if n == 2 {
-                w.pending_drag = None;
                 if resizable {
                     self.set_maximized(id, 2);
                 }
-            } else {
-                w.pending_drag = Some((MOVERESIZE_MOVE, e.root_x, e.root_y));
+                return Some(None);
             }
-            return true;
+            return Some(Some((MOVERESIZE_MOVE, e.root_x, e.root_y)));
         }
-        false
+        None
     }
 
     /// 待定拖动的指针移动：超过阈值就交给 WM。返回 true 表示这次移动已被接管。
     fn pending_drag_motion(&mut self, id: Window, root: (i16, i16)) -> bool {
         let Some(i) = self.idx(id) else { return false };
-        let Some((dir, x0, y0)) = self.windows[i].pending_drag else {
-            return false;
-        };
         let slop = (DOUBLE_CLICK_SLOP * self.scale).round().max(1.0) as i32;
-        if (root.0 as i32 - x0 as i32).abs() > slop || (root.1 as i32 - y0 as i32).abs() > slop {
-            self.windows[i].pending_drag = None;
-            // 先放掉按下时的隐式抓取，WM 才抓得到指针。
-            let _ = self.conn.ungrab_pointer(CURRENT_TIME);
-            self.client_message(
-                id,
-                self.atoms._NET_WM_MOVERESIZE,
-                [x0 as u32, y0 as u32, dir, 1, 1],
-            );
-        }
+        let beyond = |&(_, x0, y0): &(u32, i16, i16)| {
+            (root.0 as i32 - x0 as i32).abs() > slop || (root.1 as i32 - y0 as i32).abs() > slop
+        };
+        let (dir, x0, y0) = match self.windows[i].drag.motion(beyond) {
+            host::DragMotion::Free => return false,
+            host::DragMotion::Held => return true,
+            host::DragMotion::Start(d) => d,
+        };
+        // 先放掉按下时的隐式抓取，WM 才抓得到指针。
+        let _ = self.conn.ungrab_pointer(CURRENT_TIME);
+        self.client_message(
+            id,
+            self.atoms._NET_WM_MOVERESIZE,
+            [x0 as u32, y0 as u32, dir, 1, 1],
+        );
         true
     }
 

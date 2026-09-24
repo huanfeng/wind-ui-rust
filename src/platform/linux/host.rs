@@ -184,6 +184,77 @@ pub(super) fn edge_direction(p: Point, w: i32, h: i32, border: i32) -> Option<u3
     })
 }
 
+/// 无边框窗口「这次左键被标题栏 / 缩放边接管」的簿记（X11 与 Wayland 共用）。
+///
+/// `D` 是后端交给窗口管理器 / 合成器的拖动描述（方向、起点、serial 等）。拖动**移出阈值
+/// 才交出去**（理由见两个后端的 `pending_drag` 说明）；交出去之后，这次按下配对的松开归
+/// WM / 合成器，**永远不会送回来**——所以「吞掉配对松开」的标志必须在下一次按下时作废，
+/// 否则下一次在内容区点击的松开会被吞掉（按钮按下去弹不起来，关闭按钮点了没反应）。
+#[derive(Debug)]
+pub(super) struct DragGate<D> {
+    pending: Option<D>,
+    swallow_up: bool,
+}
+
+impl<D> Default for DragGate<D> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            swallow_up: false,
+        }
+    }
+}
+
+/// 指针移动归谁。
+#[derive(Debug, PartialEq)]
+pub(super) enum DragMotion<D> {
+    /// 没有待定拖动：照常下发给控件。
+    Free,
+    /// 有待定拖动、还没移出阈值：吃掉这次移动。
+    Held,
+    /// 刚移出阈值：把这个拖动交给 WM / 合成器（本次移动也吃掉）。
+    Start(D),
+}
+
+impl<D: Copy> DragGate<D> {
+    /// 左键按下：先作废上一次接管的残留，再由调用方判定这次要不要接管。
+    pub fn press(&mut self) {
+        self.pending = None;
+        self.swallow_up = false;
+    }
+
+    /// 这次按下被接管：配对的松开也不下发。`pending` 是待移出阈值再交出去的拖动
+    /// （双击切最大化那一下没有拖动，传 `None`）。
+    pub fn take_over(&mut self, pending: Option<D>) {
+        self.pending = pending;
+        self.swallow_up = true;
+    }
+
+    /// 左键松开：返回 true 表示吞掉（配对的按下被接管过）。
+    pub fn release(&mut self) -> bool {
+        self.pending = None;
+        std::mem::take(&mut self.swallow_up)
+    }
+
+    /// 指针移动。`beyond(&d)`：是否已移出阈值。
+    pub fn motion(&mut self, beyond: impl FnOnce(&D) -> bool) -> DragMotion<D> {
+        match self.pending {
+            None => DragMotion::Free,
+            Some(d) if beyond(&d) => {
+                self.pending = None;
+                DragMotion::Start(d)
+            }
+            Some(_) => DragMotion::Held,
+        }
+    }
+
+    /// 指针离开 / 进入窗口：残留一律作废。（X11 靠 `press` 的复位就够，只有 Wayland 用。）
+    #[cfg_attr(not(feature = "wayland"), allow(dead_code))]
+    pub fn reset(&mut self) {
+        self.press();
+    }
+}
+
 /// 一次物理按键 → 交给宿主的键盘事件（X11 与 Wayland 共用，保证快捷键 / 单击 Alt / 文本
 /// 的口径一致）。
 ///
@@ -323,6 +394,45 @@ mod tests {
         let mut next = None;
         assert_eq!(iv.fire_due(late, &mut next), vec![0, 1]);
         assert_eq!(next, Some(late + Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn drag_handed_off_without_release_does_not_swallow_next_click() {
+        let mut g = DragGate::default();
+        // 标题栏按下 → 接管，移动未过阈值被吃掉，过阈值交出去。
+        g.press();
+        g.take_over(Some(7u32));
+        assert_eq!(g.motion(|_| false), DragMotion::Held);
+        assert_eq!(g.motion(|_| true), DragMotion::Start(7));
+        assert_eq!(g.motion(|_| true), DragMotion::Free, "交出去后移动照常下发");
+        // 松开归 WM，没送回来。接着在内容区点一下：按下不接管，松开必须照常下发。
+        g.press();
+        assert!(!g.release(), "上一次接管的残留不能吞掉这次松开");
+    }
+
+    #[test]
+    fn taken_over_click_swallows_its_own_release() {
+        let mut g: DragGate<u32> = DragGate::default();
+        g.press();
+        g.take_over(Some(1));
+        assert!(g.release(), "没拖出去就松开：配对的松开吞掉");
+        assert_eq!(g.motion(|_| true), DragMotion::Free, "松开后待定拖动作废");
+        // 双击切最大化：接管但没有待定拖动。
+        g.press();
+        g.take_over(None);
+        assert_eq!(g.motion(|_| true), DragMotion::Free);
+        assert!(g.release());
+        assert!(!g.release(), "只吞一次");
+    }
+
+    #[test]
+    fn leave_resets_leftovers() {
+        let mut g = DragGate::default();
+        g.press();
+        g.take_over(Some(3u32));
+        g.reset();
+        assert_eq!(g.motion(|_| true), DragMotion::Free);
+        assert!(!g.release());
     }
 
     #[test]

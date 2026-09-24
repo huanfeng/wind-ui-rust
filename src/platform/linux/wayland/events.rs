@@ -385,8 +385,7 @@ impl Wl {
                     // 上一次标题栏拖动的残留作废：move / resize 之后合成器不一定发 leave，
                     // 留着的话下一次在内容区的松开会被吞掉。
                     let w = &mut self.windows[i];
-                    w.pending_drag = None;
-                    w.swallow_up = false;
+                    w.drag.reset();
                     w.key
                 });
                 if let Some(p) = self.pointer.as_mut() {
@@ -407,8 +406,7 @@ impl Wl {
                 let Some(key) = focus else { return };
                 let Some(i) = self.idx(key) else { return };
                 let w = &mut self.windows[i];
-                w.pending_drag = None;
-                w.swallow_up = false;
+                w.drag.reset();
                 // 按着按钮离开 = 隐式抓取被合成器收走了（开始移动 / 缩放窗口、弹出系统菜单等），
                 // 配对的松开不会再来：收掉逻辑捕获，同 X11 / win32 的「捕获被抢」。
                 if pressed > 0 && std::mem::take(&mut w.capturing) {
@@ -526,12 +524,10 @@ impl Wl {
         let left = button == MouseButton::Left;
         if left && self.windows[i].frameless {
             if press {
-                // 新的一次按下：上一次接管留下的标志一律作废（同 Enter 里的复位）。
-                self.windows[i].swallow_up = false;
-                self.windows[i].pending_drag = None;
-                if self.try_frameless_drag(i, serial, time, pos) {
+                self.windows[i].drag.press();
+                if let Some(pending) = self.try_frameless_drag(i, serial, time, pos) {
                     let w = &mut self.windows[i];
-                    w.swallow_up = true;
+                    w.drag.take_over(pending);
                     // 非客户区按下：收起菜单类浮层（这一下不会作为指针事件下发）。
                     let r = {
                         let _g = crate::platform::EventDispatchGuard::enter();
@@ -543,8 +539,7 @@ impl Wl {
                     self.after_event(key);
                     return;
                 }
-            } else if std::mem::take(&mut self.windows[i].swallow_up) {
-                self.windows[i].pending_drag = None;
+            } else if self.windows[i].drag.release() {
                 return;
             }
         }
@@ -569,20 +564,26 @@ impl Wl {
         self.dispatch_pointer(key, ev);
     }
 
-    /// 无边框窗口：边缘 → 待定缩放；标题栏拖动区 → 待定移动（双击切最大化）。返回 true 表示
-    /// 这一下已被接管、不再下发给控件。真正交给合成器要等指针移出阈值（见 `Win::pending_drag`）。
-    fn try_frameless_drag(&mut self, i: usize, serial: u32, time: u32, pos: Point) -> bool {
+    /// 无边框窗口：边缘 → 待定缩放；标题栏拖动区 → 待定移动（双击切最大化）。返回 `Some`
+    /// 表示这一下已被接管、不再下发给控件，内含待定拖动（双击切最大化时为 `None`）；真正交给
+    /// 合成器要等指针移出阈值（见 `Win::drag`）。
+    fn try_frameless_drag(
+        &mut self,
+        i: usize,
+        serial: u32,
+        time: u32,
+        pos: Point,
+    ) -> Option<Option<PendingDrag>> {
         let w = &mut self.windows[i];
         let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
         if w.resizable && !w.state.maximized {
             if let Some(dir) = host::edge_direction(pos, w.w, w.h, border) {
                 if !w.handler.interactive_at(pos) {
-                    w.pending_drag = Some(PendingDrag {
+                    return Some(Some(PendingDrag {
                         edge: Some(input::resize_edge(dir)),
                         at: (pos.x, pos.y),
                         serial,
-                    });
-                    return true;
+                    }));
                 }
             }
         }
@@ -590,21 +591,19 @@ impl Wl {
             let slop = (DOUBLE_CLICK_SLOP as f64 * w.scale.factor).round() as i32;
             let n = w.click.press(time, (pos.x, pos.y), 1, slop);
             if n == 2 {
-                w.pending_drag = None;
                 let key = w.key;
                 if w.resizable {
                     self.apply_window_op(key, crate::event::WindowOp::ToggleMaximize);
                 }
-            } else {
-                w.pending_drag = Some(PendingDrag {
-                    edge: None,
-                    at: (pos.x, pos.y),
-                    serial,
-                });
+                return Some(None);
             }
-            return true;
+            return Some(Some(PendingDrag {
+                edge: None,
+                at: (pos.x, pos.y),
+                serial,
+            }));
         }
-        false
+        None
     }
 
     /// 待定拖动的指针移动：超过阈值就交给合成器。返回 true 表示这次移动已被接管。
@@ -613,19 +612,20 @@ impl Wl {
             return false;
         };
         let w = &mut self.windows[i];
-        let Some(d) = w.pending_drag else {
-            return false;
-        };
         let slop = ((DOUBLE_CLICK_SLOP as f64 * w.scale.factor).round() as i32).max(1);
-        if (pos.x - d.at.0).abs() > slop || (pos.y - d.at.1).abs() > slop {
-            w.pending_drag = None;
-            let (Some(role), Some(seat)) = (&w.role, &self.g.seat) else {
-                return true;
-            };
-            match d.edge {
-                None => role.top._move(seat, d.serial),
-                Some(edge) => role.top.resize(seat, d.serial, edge),
-            }
+        let beyond =
+            |d: &PendingDrag| (pos.x - d.at.0).abs() > slop || (pos.y - d.at.1).abs() > slop;
+        let d = match w.drag.motion(beyond) {
+            host::DragMotion::Free => return false,
+            host::DragMotion::Held => return true,
+            host::DragMotion::Start(d) => d,
+        };
+        let (Some(role), Some(seat)) = (&w.role, &self.g.seat) else {
+            return true;
+        };
+        match d.edge {
+            None => role.top._move(seat, d.serial),
+            Some(edge) => role.top.resize(seat, d.serial, edge),
         }
         true
     }
