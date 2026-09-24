@@ -155,10 +155,11 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 ## 8. Wayland 原生后端（进行中）
 
-计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**当前完成 Stage 1**：窗口与呈现。
+计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–2**：窗口与呈现；
+指针、键盘、光标、HiDPI、无边框拖动 / 缩放（GNOME 真桌面的交互项待人工验证）。
 
-> ⚠ 本阶段没有任何输入（指针 / 键盘）、没有标题栏（weston / KDE / sway 给服务端装饰，
-> GNOME 不给）、没有剪贴板与输入法。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
+> ⚠ 还没有标题栏（weston / KDE / sway 给服务端装饰，GNOME 不给——有边框窗口在 GNOME 下
+> 没有标题栏）、剪贴板、输入法、文件拖入。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
 > 才走它，其余情况 Wayland 会话照旧经 XWayland 运行。
 
 ### 8.1 后端选择
@@ -180,9 +181,23 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 ### 8.2 依赖
 
-`wayland-client` 0.31 + `wayland-protocols` 0.32（`client` 特性）。默认即纯 Rust 协议实现，
-不链 libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：它带 calloop
-事件循环与整套抽象，而我们已有自己的 `poll` 循环；与 X11 直接用 x11rb 同理。
+`wayland-client` 0.31 + `wayland-protocols` 0.32（`client` / `staging` / `unstable` 特性——
+cursor-shape-v1 要后两者同开才生成，只多生成绑定代码）。默认即纯 Rust 协议实现，不链
+libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：它带 calloop 事件循环与
+整套抽象，而我们已有自己的 `poll` 循环；与 X11 直接用 x11rb 同理。
+
+- `xkbcommon-dl` 0.4：运行期 `dlopen` libxkbcommon（同 fontconfig 做法）。加载不到时
+  `eprintln` 一次、键盘不可用，指针照常。
+- `wayland-cursor` 0.31：合成器没有 cursor-shape-v1 时读 XCursor 主题自己挂光标。
+- `memfd_create` 走 glibc（2.27+）：更老的 glibc 进程起不来，那些系统本就没有可用的
+  Wayland 桌面，不单独做 `syscall` 回退。
+
+源码划分：`wayland/mod.rs`（连接、窗口、事件循环、出帧）、`events.rs`（协议事件分发、
+指针 / 键盘翻译）、`shm.rs`、`scale.rs`、`input.rs`（按键重复、滚轮聚合，纯逻辑）、
+`xkb.rs`、`cursor.rs`。按键翻译（`host::translate_key`）与无边框边缘命中
+（`host::edge_direction`）与 X11 共用，快捷键 / 单击 Alt / 空格双发的口径两边一致；唯一差异是
+快捷键码取**当前**布局的基础层（X11 取第一布局），两个拉丁布局并存（`de,us`）时 Z / Y 位置
+的快捷键跟着当前布局走。
 
 ### 8.3 实现要点
 
@@ -208,8 +223,40 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
   次首提交不回 configure**，窗口再也出不来；换一套角色对象在各家合成器上都成立。
 - **尺寸**：合成器 configure 给了尺寸就服从（最大化实测 1280×800 铺满）；给 0×0 表示
   「客户端自定」，回到最后一次非最大化尺寸（mutter 还原时就是这么给的）。
-- **缩放**：本阶段只认 `WINDUI_SCALE` 的整数部分（`set_buffer_scale`）；分数缩放与运行期
-  跟随在 Stage 2。
+- **缩放**（`scale.rs`，有单测）：优先级 `WINDUI_SCALE`（可为分数）> `fractional-scale-v1`
+  的首选缩放 > `wl_surface.preferred_buffer_scale`（v6）> 表面所在输出 `wl_output.scale` 的
+  最大值 > 1。分数值要 viewporter 才能按分数画（缓冲 = `round(逻辑 × s)`，`viewport` 目标 =
+  逻辑尺寸，buffer_scale = 1）；没有 viewporter 就近取整走 `set_buffer_scale`。整数值一律走
+  buffer_scale。buffer_scale / viewport 目标只在「挂新尺寸缓冲」的那次提交里改，免得旧缓冲
+  配上新缩放（尺寸不整除是协议错误）。运行期缩放变化（换显示器、改设置）→ `set_scale` +
+  整窗重画；首帧按「唯一一块屏的 scale」预猜，少一次重排。
+- **指针**：坐标 = `round(表面坐标 × 缩放)`。滚轮按 `wl_pointer.frame` 聚合：有
+  `axis_value120`（v8）/ `axis_discrete` 就只认格数，否则连续量按 10 单位一格换算、零头
+  留给下一帧（触控板）。横向滚轮丢弃（框架没有横向滚动事件，同 X11 / win32）。按着按钮
+  收到 `leave` = 隐式抓取被合成器收走（开始移动窗口等）→ `on_capture_lost`。
+- **键盘**：keymap fd 按文件 `pread` 读出来交给 xkbcommon（v7 起只许 MAP_PRIVATE 映射，
+  干脆不映射）；修饰键状态只经 `wl_keyboard.modifiers` 同步。**按键重复客户端自己做**
+  （`input::KeyRepeat`，有单测）：速率 / 延迟跟 `repeat_info`（rate=0 不重复），只有
+  `xkb_keymap_key_repeats` 为真的键才重复，松开那个键 / 失焦 / 换 keymap 即停，计时并进
+  `poll` 超时，循环卡住后恢复只补一下不补一串。
+- **光标**：有 `cursor-shape-v1` 就只报形状名；没有（GNOME 42）用 `wayland-cursor` 读
+  `XCURSOR_THEME` / `XCURSOR_SIZE`（默认 `default` / 24），尺寸乘缩放向上取整、光标表面
+  设 buffer_scale——取不超过缩放、且整除图像宽高的最大整数（主题挑到的档未必是缩放的
+  整数倍，不整除是协议错误、连接直接断开）。
+- **无边框窗口**：拖动区 / 缩放边（6 逻辑像素）按下后**移出阈值才**发
+  `xdg_toplevel.move` / `resize`（带按下的 serial）。Wayland 上理由换了形式：move 一发合成器
+  立即接管指针，配对的松开不再送给客户端，单击标题栏也会变成一次移动、双击的第二下凑不齐；
+  按下的 serial 在按住期间一直有效，晚发不影响合成器认可。双击拖动区切最大化。拖动区右键
+  弹的是框架自己的系统菜单（与另两个平台同一套，用户可拼自己的项），不用
+  `show_window_menu`。`wm_capabilities`（v5）决定能否最大化 / 最小化，没收到按全支持。
+- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape` 假装合成器
+  没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径。
+- **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定；
+  `wl_output.scale` 收到即生效，没等 `done`；阻塞对话框期间不回 ping；被遮挡的动画窗口
+  每秒醒一次（下一条），没做退避。
+- **frame 回调兜底**：等了 1 秒还没回（合成器扣住被遮挡窗口的回调、或对空提交不回）就当
+  丢了，按普通定时继续出帧——代价是被遮挡的动画窗口每秒醒一次。回调按对象身份认，旧的
+  晚到不作数。
 
 ### 8.4 协议做不到、只能文档化的
 
@@ -218,7 +265,7 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 `xdg-activation-v1`（Stage 5）。全局热键见 `IMPLEMENTATION_PLAN.md` 末节：不实现，
 兜底是桌面设置里把快捷键绑到 `应用 --参数`，经单实例转发送达。
 
-### 8.5 实测数据（weston 13 headless + pixman，release）
+### 8.5 实测数据（weston 13 / sway 1.9 headless + pixman，release）
 
 私有内存（`RssAnon`）与 X11 后端同示例、**同窗口尺寸**对比：
 
@@ -238,6 +285,23 @@ X11 那边的 Pixmap 随之变小，看起来像 Wayland 多占了 1.5–4MB。
 2 块缓冲。离屏 `--screenshot` 与 weston 抓屏裁出的窗口逐像素一致（620×556 全等）；
 不定进度条跑过上百帧局部重绘后，进度条以外的像素仍与首帧全等、条内只有一段高亮
 （双缓冲补写欠账正确）。
+
+Stage 2（sway headless + 自写注入器，见 §8.7）：
+- 键盘：点进输入框、End、`Ab1` 正确输入；Ctrl+A 后按住 `x` 1000ms（repeat_info 25 次/秒、
+  延迟 600ms）得到恰好 11 个 x（1 + 400ms / 40ms），松开即停。
+- 滚轮：3 格 → `axis_value120` 360 → 一次 `Wheel(-360)`，内容下移 144 像素。
+- 光标：悬停输入框 `set_shape(text)`；关掉 cursor-shape 后走主题（2x 下加载 48px、光标表面
+  buffer_scale 2、热点折半）。
+- 缩放：运行期把输出改成 1.5 → 收到 `preferred_scale 180` → 建 viewport、缓冲 1140×1050、
+  目标 760×700，文字锐利；1.5 下点击标签页命中正确；改 2 → buffer_scale 2、清 viewport 目标；
+  改回 1 正常。关掉 viewporter / fractional-scale 后按 `wl_output.scale` / `preferred_buffer_scale`
+  走整数路径。
+- 无边框（`about`）：拖标题栏窗口移动、拖右下角尺寸变大、双击标题栏发出 `set_maximized`
+  （sway 的 xdg_wm_base 只有 v2，没有 wm_capabilities，浮动窗口不理最大化——合成器行为）、
+  右键标题栏弹框架系统菜单、点菜单「关闭」进程退出。
+- 私有内存 `about` 620×556@1x：weston（无输入设备）2664 KB；sway 无输入设备 3000 KB、
+  出现键鼠后 3348 KB——多出的约 350 KB 是 libxkbcommon 编译 keymap 的常驻结构。
+  空闲 10 秒 0 tick（weston / sway / GNOME 42 三处）。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 
@@ -287,3 +351,48 @@ WAYLAND_DISPLAY=wl-test LD_LIBRARY_PATH=$R ~/.local/weston/root/usr/bin/weston-s
 `WAYLAND_DEBUG=1`（同样要配 `WINDUI_BACKEND=wayland`）对纯 Rust 后端同样生效（打印每条收发的协议消息），排查时很有用；
 **测 CPU 时别开**——打印本身让动画帧的 CPU 翻了十倍。headless 没有输入设备，关窗 /
 最大化 / 隐藏这类路径用一个按 `on_interval` 脚本化调用 `ctx.*` 的临时示例驱动。
+
+### 8.7 带输入注入的无桌面验证（sway headless，无 root）
+
+weston headless 没有输入设备，Stage 2 起改用 sway：它有 virtual-pointer / virtual-keyboard、
+screencopy（`grim` 抓屏）、fractional-scale-v1、cursor-shape-v1，运行期还能 `swaymsg` 改输出
+缩放——正向路径一处全覆盖（回退路径用 `WINDUI_WAYLAND_DISABLE` 或 GNOME 42 验）。
+
+```bash
+mkdir -p ~/.local/sway && cd ~/.local/sway
+apt-get download sway libwlroots12t64 grim libjson-c5 libseat1 libxcb-icccm4 libliftoff0 \
+  libdisplay-info1 libxcb-res0 libxcb-render-util0 libxcb-xinput0 libxcb-composite0 libxcb-ewmh2
+for f in *.deb; do dpkg -x "$f" root; done
+# 运行：headless 后端 + pixman，窗口一律浮动（否则被平铺拉满、尺寸不可控）
+cat > config <<'CFG'
+output HEADLESS-1 resolution 1280x800 position 0 0 scale 1
+for_window [app_id=".*"] floating enable
+default_border none
+default_floating_border none
+CFG
+LD_LIBRARY_PATH=$PWD/root/usr/lib/x86_64-linux-gnu:$HOME/.local/weston/root/usr/lib/x86_64-linux-gnu \
+  WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman \
+  env -u WAYLAND_DISPLAY -u DISPLAY root/usr/bin/sway -c config &
+# socket 名由 sway 自己挑（wayland-1 等），看 $XDG_RUNTIME_DIR
+```
+
+踩过的坑：
+
+- **`wlrctl` / `wtype` 每次调用新建、退出即销毁虚拟设备**，seat 的 capabilities 随之来回跳，
+  客户端的 `wl_pointer` / `wl_keyboard` 被反复建拆，点击时机对不上。改为自写一个常驻注入器
+  （几十行：wayland-client + wayland-protocols-wlr 的 virtual-pointer 绝对移动 / 按钮 / 滚轮，
+  wayland-protocols-misc 的 virtual-keyboard + 用 xkbcommon 按默认 RMLVO 生成 keymap 上传），
+  从 stdin 读 `move x y` / `click left` / `key x down` / `sleep ms` 之类的脚本。当时放在会话
+  草稿目录，需要时按此重写。
+- virtual-pointer 的绝对坐标按 `extent` 映射到输出**逻辑**坐标；传物理像素 + 物理 extent
+  在任何缩放下都落在同一个像素上。
+- sway 1.9 的 `xdg_wm_base` 只有 v2：没有 `wm_capabilities`、浮动窗口忽略最大化请求。
+  最大化的正向结果要在 weston（无输入，靠脚本化 `ctx.toggle_maximize` 验）或真桌面看。
+- `swaymsg output HEADLESS-1 scale 1.5` 即可验运行期换 DPI；`grim` 抓的是物理像素整屏。
+
+**GNOME 42（192.168.5.55）上抓屏**：`org.gnome.Shell.Screenshot` 对非白名单调用方返回
+AccessDenied；门户 `Screenshot`（`interactive: false`）能出图，但**每次都会在对方桌面弹一个
+「Share this screenshot」确认框**且不会自己消失——远程无人值守时别用，或事后
+`systemctl --user restart xdg-desktop-portal-gnome` 收掉。屏保熄屏时抓到的是全黑：先
+`org.gnome.ScreenSaver.SetActive false`。
+
