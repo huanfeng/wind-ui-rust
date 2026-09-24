@@ -39,10 +39,18 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Wayland 后端的 xkb 单测要真跑 libxkbcommon（运行期 dlopen）+ XKB 数据。runner 镜像
+      # 一般自带，但不装保证、缺了测试只会打印「跳过」后算通过——显式装上，再让下面的
+      # WINDUI_REQUIRE_XKB=1 把「缺库」变成失败。
+      - name: 安装 libxkbcommon（仅 Linux）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libxkbcommon0 xkb-data
       - name: Build
         run: cargo build --all-targets
       - name: Test
         run: cargo test
+        env:
+          WINDUI_REQUIRE_XKB: ${{ runner.os == 'Linux' && '1' || '' }}
       - name: Clippy（零警告）
         run: cargo clippy --all-targets -- -D warnings
       # 默认 feature 之外唯一在用的组合（wind-portable 用 default-features = false）。
@@ -75,6 +83,8 @@ jobs:
       - name: Test（gpu feature，非 macOS）
         if: runner.os != 'macOS'
         run: cargo test --features gpu
+        env:
+          WINDUI_REQUIRE_XKB: ${{ runner.os == 'Linux' && '1' || '' }}
 
   dco:
     name: DCO sign-off
