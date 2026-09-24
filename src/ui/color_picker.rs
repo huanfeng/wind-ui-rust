@@ -204,6 +204,24 @@ impl PickerState {
 /// 画布只有矩形裁剪（[`Canvas::clip_rect`]），没有圆角裁剪可用。
 fn paint_checkerboard(canvas: &mut dyn Canvas, r: Rect, radius: f32, light: Color, dark: Color) {
     let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+    paint_checkerboard_f(canvas, (x, y, w, h), radius, light, dark);
+}
+
+/// [`paint_checkerboard`] 的浮点矩形版：触发器色块要落在物理像素上，逻辑坐标可能是小数。
+fn paint_checkerboard_f(
+    canvas: &mut dyn Canvas,
+    (x, y, w, h): (f32, f32, f32, f32),
+    radius: f32,
+    light: Color,
+    dark: Color,
+) {
+    // 矩形裁剪只收整数逻辑坐标：向内取整，深格宁可少一丝也不越出圆角。
+    let r = Rect::new(
+        x.ceil() as i32,
+        y.ceil() as i32,
+        (x + w).floor() as i32 - x.ceil() as i32,
+        (y + h).floor() as i32 - y.ceil() as i32,
+    );
     canvas.fill_round_rect(x, y, w, h, radius, &Paint::fill(light));
     canvas.save();
     canvas.clip_rect(Rect::new(
@@ -868,6 +886,36 @@ impl ColorTrigger {
     }
 }
 
+/// 触发器里色块的逻辑矩形 `(x, y, w, h)`，四边都落在物理整数像素上。
+///
+/// 两个坑都会在非整数缩放（125% / 150%）下露成「色块有点偏」：
+/// - 外框与色块四条边各自由画布吸附到物理像素，内边距按逻辑 5 各算各的，取整方向不同时
+///   两侧边距差 1 个物理像素。这里先把外框吸附，再在**物理像素**里扣同一个整数内边距。
+/// - 不带文字时触发器比色块宽（`h + 12`），色块若仍贴左画，左 5 右 17，本来就不居中。
+///   此时水平居中；宽度差为奇数时色块窄 1 个物理像素，保证左右边距相等。
+fn trigger_chip_rect(bounds: Rect, scale: f32, show_text: bool) -> (f32, f32, f32, f32) {
+    const PAD: f32 = 5.0;
+    let s = if scale > 0.0 { scale } else { 1.0 };
+    let (bx, by, bw, bh) = crate::render::align_to_device(
+        bounds.x as f32,
+        bounds.y as f32,
+        bounds.w as f32,
+        bounds.h as f32,
+        s,
+    );
+    let (px, py) = ((bx * s).round(), (by * s).round());
+    let (pw, ph) = ((bw * s).round(), (bh * s).round());
+    let pad = (PAD * s).round();
+    let side = (ph - 2.0 * pad).max(0.0);
+    let (cx, cw) = if show_text {
+        (px + pad, side)
+    } else {
+        let w = side - (pw - side).rem_euclid(2.0);
+        (px + ((pw - w) / 2.0).floor(), w)
+    };
+    (cx / s, (py + pad) / s, cw / s, side / s)
+}
+
 impl Widget for ColorTrigger {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let h = (style.font_size as i32 + 14).max(28);
@@ -911,44 +959,29 @@ impl Widget for ColorTrigger {
         };
         canvas.stroke_round_rect(x, y, w, h, radius, 1.0, &Paint::fill(border));
 
-        // 色块
-        let pad = 5.0;
-        let chip = Rect::new(
-            bounds.x + pad as i32,
-            bounds.y + pad as i32,
-            bounds.h - 2 * pad as i32,
-            bounds.h - 2 * pad as i32,
-        );
+        // 色块：在**物理像素**里定位（见 [`trigger_chip_rect`]）。
+        let (cx, cy, cw, ch) = trigger_chip_rect(bounds, canvas.dpi_scale(), self.show_text);
         let c = if enabled {
             self.st.value.get()
         } else {
             pal.track
         };
         if c.a < 255 {
-            paint_checkerboard(
+            paint_checkerboard_f(
                 canvas,
-                chip,
+                (cx, cy, cw, ch),
                 radius,
                 cp.checker_light(pal),
                 cp.checker_dark(pal),
             );
         }
-        canvas.fill_round_rect(
-            chip.x as f32,
-            chip.y as f32,
-            chip.w as f32,
-            chip.h as f32,
-            radius,
-            &Paint::fill(c),
-        );
-        canvas.stroke_round_rect(
-            chip.x as f32,
-            chip.y as f32,
-            chip.w as f32,
-            chip.h as f32,
-            radius,
-            1.0,
-            &Paint::fill(cp.border(pal)),
+        canvas.fill_round_rect(cx, cy, cw, ch, radius, &Paint::fill(c));
+        canvas.stroke_round_rect(cx, cy, cw, ch, radius, 1.0, &Paint::fill(cp.border(pal)));
+        let chip = Rect::new(
+            cx.round() as i32,
+            cy.round() as i32,
+            cw.round() as i32,
+            ch.round() as i32,
         );
 
         if !self.show_text {
@@ -1299,6 +1332,44 @@ mod tests {
     }
 
     // ---- 交互 ----
+
+    /// 非整数缩放下色块四周边距在物理像素上对称（不带文字时水平居中）。
+    #[test]
+    fn trigger_chip_is_symmetric_in_device_pixels() {
+        for s in [1.0f32, 1.25, 1.5, 1.75, 2.0] {
+            for (bx, by) in [(0, 0), (37, 13), (401, 229)] {
+                let b = Rect::new(bx, by, 40, 28);
+                let (x, y, w, h) = trigger_chip_rect(b, s, false);
+                let p = |v: f32| (v * s).round();
+                let (l, t, r, btm) = (
+                    p(x) - p(b.x as f32),
+                    p(y) - p(b.y as f32),
+                    p((b.x + b.w) as f32) - p(x + w),
+                    p((b.y + b.h) as f32) - p(y + h),
+                );
+                assert_eq!(l, r, "scale={s} @({bx},{by}) 左右边距 {l} vs {r}");
+                assert_eq!(t, btm, "scale={s} @({bx},{by}) 上下边距 {t} vs {btm}");
+                for v in [x, y, x + w, y + h] {
+                    assert!(
+                        ((v * s) - (v * s).round()).abs() < 1e-3,
+                        "边缘须落在物理整数像素"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 带文字时色块仍贴左，但上下对称、左边距等于上边距。
+    #[test]
+    fn trigger_chip_with_text_keeps_left_pad_equal_to_top() {
+        for s in [1.0f32, 1.25, 1.5] {
+            let b = Rect::new(7, 9, 140, 28);
+            let (x, y, _w, h) = trigger_chip_rect(b, s, true);
+            let p = |v: f32| (v * s).round();
+            assert_eq!(p(x) - p(7.0), p(y) - p(9.0), "scale={s}");
+            assert_eq!(p(y) - p(9.0), p(37.0) - p(y + h), "scale={s}");
+        }
+    }
 
     #[test]
     fn clicking_the_trigger_toggles_the_popup() {
