@@ -219,8 +219,8 @@ fn paint_checkerboard_f(
     let r = Rect::new(
         x.ceil() as i32,
         y.ceil() as i32,
-        (x + w).floor() as i32 - x.ceil() as i32,
-        (y + h).floor() as i32 - y.ceil() as i32,
+        ((x + w).floor() as i32 - x.ceil() as i32).max(0),
+        ((y + h).floor() as i32 - y.ceil() as i32).max(0),
     );
     canvas.fill_round_rect(x, y, w, h, radius, &Paint::fill(light));
     canvas.save();
@@ -906,7 +906,8 @@ fn trigger_chip_rect(bounds: Rect, scale: f32, show_text: bool) -> (f32, f32, f3
     let (px, py) = ((bx * s).round(), (by * s).round());
     let (pw, ph) = ((bw * s).round(), (bh * s).round());
     let pad = (PAD * s).round();
-    let side = (ph - 2.0 * pad).max(0.0);
+    // 父布局把触发器压得比色块还窄时，按宽度收色块，免得居中算出负偏移越出左边框。
+    let side = (ph - 2.0 * pad).min(pw - 2.0 * pad).max(0.0);
     let (cx, cw) = if show_text {
         (px + pad, side)
     } else {
@@ -1356,6 +1357,17 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// 触发器被压得比色块还窄：色块不得越出外框。
+    #[test]
+    fn trigger_chip_stays_inside_a_squeezed_trigger() {
+        for s in [1.0f32, 1.5] {
+            let b = Rect::new(10, 10, 12, 28);
+            let (x, _y, w, _h) = trigger_chip_rect(b, s, false);
+            assert!(x >= 10.0 - 1e-3, "scale={s} 左越界 x={x}");
+            assert!(x + w <= 22.0 + 1e-3, "scale={s} 右越界 {}", x + w);
         }
     }
 
