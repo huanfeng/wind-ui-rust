@@ -1039,4 +1039,71 @@ mod tests {
         handler.on_window_shown();
         assert_eq!(hits.get(), 2, "每次唤起都触发；回调可重复调用（FnMut）");
     }
+
+    /// `App::on_window_activated` 只在激活态**真正变化**时触发，参数是新的激活态，
+    /// 且它请求的副作用要落地。
+    ///
+    /// 没有它时错在哪：设置类程序想「切回窗口就刷新」没有落点——窗口一直可见、只是被
+    /// Alt+Tab 切走再切回，`on_show`（只管隐藏→可见）不会触发，应用侧根本感知不到。
+    #[test]
+    fn activate_handler_fires_on_real_transitions_only_and_effects_land() {
+        use crate::platform::AppHandler;
+        let hits = crate::signal::signal(0u32);
+        let last = crate::signal::signal(None::<bool>);
+        let app = App::new("t", 120, 90)
+            .on_window_activated(move |ctx, active| {
+                hits.update(|n| *n += 1);
+                last.set(Some(active));
+                ctx.toast_ok("激活态变了");
+            })
+            .content(Element::col());
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+
+        assert!(handler.on_window_activated(false));
+        assert_eq!(
+            (hits.get(), last.get()),
+            (1, Some(false)),
+            "失活应触发，参数为 false"
+        );
+        assert!(
+            handler.toast.is_active(),
+            "回调请求的 toast 应被宿主收下，而不是随 ctx 一起丢掉"
+        );
+
+        handler.on_window_activated(false);
+        assert_eq!(hits.get(), 1, "同值重复通知不应再触发（平台会重复通知）");
+
+        handler.on_window_activated(true);
+        assert_eq!(
+            (hits.get(), last.get()),
+            (2, Some(true)),
+            "重新激活应触发，参数为 true"
+        );
+    }
+
+    /// 窗口刚建出来按「已激活」计：平台随后通知「激活」是同值，不该触发——首次加载要靠应用自己。
+    #[test]
+    fn activate_handler_does_not_fire_for_the_initial_state() {
+        use crate::platform::AppHandler;
+        let hits = crate::signal::signal(0u32);
+        let app = App::new("t", 120, 90)
+            .on_window_activated(move |_ctx, _active| hits.update(|n| *n += 1))
+            .content(Element::col());
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        handler.on_window_activated(true);
+        assert_eq!(hits.get(), 0, "初始就是激活态，同值通知不触发");
+    }
+
+    /// 没登记回调时激活态变化照旧（光标静止等既有行为不受影响）。
+    #[test]
+    fn window_activation_without_a_handler_keeps_working() {
+        use crate::platform::AppHandler;
+        let app = App::new("t", 120, 90).content(Element::col());
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        assert!(handler.on_window_activated(false), "激活态变化仍要求重绘");
+        assert!(!handler.on_window_activated(false));
+    }
 }

@@ -398,6 +398,8 @@ type ShowHandler = Box<dyn FnMut(&mut EventCtx)>;
 type ShortcutHandler = crate::event::WindowShortcutHandler;
 /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。参数为「是否暗色」。
 type SystemThemeHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
+/// 窗口激活态变化的回调（见 [`App::on_window_activated`]）。参数为「是否激活（前台）」。
+type ActivateHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
 
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
 /// 控件 paint 期读 `theme::current()` 自动跟随；用 `Brush::Role`/`bg_role` 等
@@ -957,6 +959,8 @@ pub struct App {
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
     show_handler: Option<ShowHandler>,
+    /// 窗口激活态变化的回调（见 [`App::on_window_activated`]）。
+    activate_handler: Option<ActivateHandler>,
     /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
     shortcut: Option<ShortcutHandler>,
     /// 常驻应用的截图目标窗口（见 [`App::screenshot_window`]）。
@@ -1025,6 +1029,7 @@ impl App {
             single: None,
             close_handler: None,
             show_handler: None,
+            activate_handler: None,
             shortcut: None,
             screenshot_window: None,
             start_window: None,
@@ -1798,6 +1803,36 @@ impl App {
         self
     }
 
+    /// 窗口的**激活态**（是否在前台）变化时调用，参数为新的激活态：`true` = 刚被激活，
+    /// `false` = 刚失活。
+    ///
+    /// 典型用法是「每次回到窗口就刷新一次」：数据可能在窗口失活期间被别的进程改过
+    /// （设置类程序尤其如此），用户切回来时该看到最新值。与 [`on_show`](Self::on_show) 的区别：
+    /// `on_show` 只在**隐藏→可见**的跃迁上触发；本回调覆盖的是窗口**一直可见**、只是被
+    /// Alt+Tab / 点击别的窗口切走再切回来的情形，两者互不包含。
+    ///
+    /// 只在激活态**真正变化**时触发：平台重复通知同一个状态不会再调一次（与内部的光标静止、
+    /// 浮层收起共用同一份去重）。回调先取出再放回，回调内可以请求窗口操作；它请求的副作用
+    /// （toast / 改信号 / 关窗…）与控件回调一样落地。
+    ///
+    /// ⚠ 窗口刚建出来时按「已激活」计，不会为初始状态触发；需要首次加载请另行处理。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// App::new("设置", 480, 360)
+    ///     .on_window_activated(|ctx, active| {
+    ///         if active {
+    ///             ctx.toast_ok("欢迎回来，正在刷新");
+    ///         }
+    ///     })
+    ///     .content(Element::col())
+    ///     .run();
+    /// ```
+    pub fn on_window_activated(mut self, f: impl FnMut(&mut EventCtx, bool) + 'static) -> Self {
+        self.activate_handler = Some(Box::new(f));
+        self
+    }
+
     /// 窗口级快捷键：焦点控件**没要**这个键时才轮到，返回 `true` 表示已处理。
     ///
     /// 为什么需要它：键盘事件只发给焦点节点，而「Ctrl+L 回到搜索框」「F5 刷新」这类
@@ -2095,6 +2130,7 @@ impl App {
             // 而**子窗口**那条构造路径（`build_new_window`）并不支持标题来源，多一个
             // 恒为 `None` 的参数只会让两处都更难读。
             host.title_src = self.title_src;
+            host.activate_handler = self.activate_handler;
             host.hide_on_minimize = self.hide_on_minimize;
             Box::new(host)
         } else {
@@ -2126,6 +2162,7 @@ impl App {
             self.hide_on_close,
         );
         host.title_src = self.title_src;
+        host.activate_handler = self.activate_handler;
         host.hide_on_minimize = self.hide_on_minimize;
         host
     }
@@ -2279,6 +2316,10 @@ struct UiHost {
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
     show_handler: Option<ShowHandler>,
+    /// 窗口激活态变化的回调（见 [`App::on_window_activated`]）。
+    ///
+    /// 不进 `new` 的参数表（已有 12 个位置参数）：与 `title_src` 一样建完再塞。
+    activate_handler: Option<ActivateHandler>,
     /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
     shortcut: Option<ShortcutHandler>,
     /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。
@@ -2422,6 +2463,20 @@ impl UiHost {
         self.damage.needs_relayout = true;
     }
 
+    /// 跑应用的激活态回调（`App::on_window_activated`），并落地它请求的副作用。
+    /// 取出再放回的理由同 [`Self::run_show_handler`]。
+    fn run_activate_handler(&mut self, active: bool) {
+        let Some(mut f) = self.activate_handler.take() else {
+            return;
+        };
+        let root = self.tree.root;
+        if let Some(root) = root {
+            let res = self.tree.run_detached(root, |ctx| f(ctx, active));
+            self.apply_app_effects(res);
+        }
+        self.activate_handler = Some(f);
+    }
+
     /// 跑应用的唤起回调（`App::on_show`），并落地它请求的副作用。
     ///
     /// 借 ctx 走 `run_detached`，与菜单动作、`on_close_request` 同一条路——回调因此能
@@ -2518,6 +2573,7 @@ impl UiHost {
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
             close_handler,
             show_handler,
+            activate_handler: None,
             shortcut,
             system_theme,
             hide_on_close,
@@ -3208,6 +3264,9 @@ impl AppHandler for UiHost {
             return dismissed;
         }
         self.window_active = active;
+        // 应用的激活态回调：与「设置类程序回到窗口就刷新」同构。放在状态落定之后、只在真的变化时跑。
+        self.enter();
+        self.run_activate_handler(active);
         // 重绘一帧把光标切到（或切回）该有的状态：失活时它停在最后一帧的相位上，
         // 那可能正好是"淡到一半"，不重绘就定格成一根半透明的杠。
         //
