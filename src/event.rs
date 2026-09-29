@@ -1305,6 +1305,11 @@ pub struct WindowRequest {
     /// 必须是**每个窗口自己的**：平台在 `WM_CLOSE` / `windowShouldClose:` 里同步等这个
     /// `bool`，问的是"这个窗口能不能关"。跨窗共享的 `Signal` 表达不了它。
     pub close_handler: Option<WindowCloseHandler>,
+    /// 本窗口的激活态回调（`Window::on_window_activated`）。参数是新的激活态。
+    ///
+    /// 必须是**每个窗口自己的**：激活态是这个窗口的事，主窗那份（`App::on_window_activated`）
+    /// 只归主窗——设置窗被关掉重建成子窗之后，「回到窗口就刷新」也得跟过去。
+    pub activate_handler: Option<WindowActivateHandler>,
     /// 本窗口的周期回调（`Window::on_interval`）。随窗口关闭一并停止。
     pub intervals: Vec<(std::time::Duration, WindowIntervalFn)>,
     /// 窗口级快捷键回调（`Window::on_shortcut`）。返回 true = 已处理。
@@ -1328,6 +1333,9 @@ pub struct WindowRequest {
 /// 与 `App::on_close_request` 收的是同一种闭包——那个作用在主窗，这个作用在
 /// [`WindowRequest`] 对应的子窗上。
 pub type WindowCloseHandler = Box<dyn FnMut(&mut crate::core::EventCtx) -> bool>;
+
+/// 窗口激活态回调：参数为「是否激活（前台）」。与 `App::on_window_activated` 收的是同一种闭包。
+pub type WindowActivateHandler = Box<dyn FnMut(&mut crate::core::EventCtx, bool)>;
 
 /// 窗口周期回调，与 `App::on_interval` 同形。
 pub type WindowIntervalFn = Box<dyn FnMut(&mut crate::core::EventCtx)>;

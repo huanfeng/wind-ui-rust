@@ -137,6 +137,7 @@ impl Window {
                 title_src: None,
                 content: crate::event::WindowContent::new(|| NoContent),
                 close_handler: None,
+                activate_handler: None,
                 intervals: Vec::new(),
                 shortcut: None,
                 single: None,
@@ -220,6 +221,27 @@ impl Window {
     /// ```
     pub fn on_close_request(mut self, f: impl FnMut(&mut EventCtx) -> bool + 'static) -> Self {
         self.req.close_handler = Some(Box::new(f));
+        self
+    }
+
+    /// 本窗口的**激活态**（是否在前台）变化时调用，参数为新的激活态。语义与
+    /// [`App::on_window_activated`] 完全一致（只在真正变化时触发、窗口初始按「已激活」计），
+    /// 只是作用在这个子窗上。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # let mut app = App::new("t", 100, 100);
+    /// # let _ = app;
+    /// Window::new("设置", 420, 320)
+    ///     .on_window_activated(|ctx, active| {
+    ///         if active {
+    ///             ctx.toast_ok("回到设置窗");
+    ///         }
+    ///     })
+    ///     .content(|| Element::col().fill());
+    /// ```
+    pub fn on_window_activated(mut self, f: impl FnMut(&mut EventCtx, bool) + 'static) -> Self {
+        self.req.activate_handler = Some(Box::new(f));
         self
     }
 
@@ -623,6 +645,7 @@ fn build_new_window(
     // 标题来源交给这个子窗自己的宿主：此后它每帧现算、变了才推给系统，与主窗同一条路
     // （见 `AppHandler::take_window_title`）。子窗各有一份宿主，故各跟各的。
     host.title_src = req.title_src;
+    host.activate_handler = req.activate_handler;
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
 
@@ -5246,6 +5269,49 @@ mod tests {
         // 主窗不受子窗那份影响（各是各的）。
         assert!(h.on_close_request(), "主窗未设拦截器，应默认放行");
         assert!(h.intervals().is_empty(), "主窗没注册定时器");
+    }
+
+    /// 子窗自己的激活态回调要真的挂到子窗宿主上，且不与主窗那份串。
+    ///
+    /// 漏接的症状是「设了回调没反应」，编译期抓不到；设置窗被关掉重建成子窗后，
+    /// 「回到窗口就刷新」全靠这一条。
+    #[test]
+    fn child_window_carries_its_own_activate_handler() {
+        use crate::platform::AppHandler;
+        let main_hits = crate::signal::signal(0u32);
+        let child_hits = crate::signal::signal(None::<bool>);
+        let mut h = App::new("main", 200, 200)
+            .on_window_activated(move |_c, _a| main_hits.update(|n| *n += 1))
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        let root = h.tree.root.unwrap();
+        let res = h.tree.run_detached(root, |ctx| {
+            ctx.open_window(
+                Window::new("子窗", 200, 150)
+                    .on_window_activated(move |_c, active| child_hits.set(Some(active)))
+                    .content(|| Element::col().fill()),
+            )
+        });
+        h.apply_app_effects(res);
+        let mut made: Vec<_> = h
+            .take_new_windows(&|_| false)
+            .into_iter()
+            .map(expect_create)
+            .collect();
+        let (_, child) = &mut made[0];
+
+        child.on_window_activated(false);
+        assert_eq!(
+            child_hits.get(),
+            Some(false),
+            "子窗的激活态回调应在子窗宿主上触发"
+        );
+        assert_eq!(main_hits.get(), 0, "不能触发主窗那份");
+        child.on_window_activated(true);
+        assert_eq!(child_hits.get(), Some(true));
+        h.on_window_activated(false);
+        assert_eq!(main_hits.get(), 1, "主窗的回调仍归主窗");
+        assert_eq!(child_hits.get(), Some(true), "也不影响子窗");
     }
 
     /// 子窗内容构建期创建的信号，随窗口关闭整批回收。
