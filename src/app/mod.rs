@@ -2278,6 +2278,9 @@ struct UiHost {
     engine: PlatformTextEngine,
     /// 上一帧所用的语言目录（指针比对用，见 `begin_frame`）。
     lang_seen: Option<Rc<crate::i18n::Catalog>>,
+    /// 正显示着输入法合成串的节点。焦点可能在合成中被程序移走，清合成串要清它而不是
+    /// 新焦点（否则旧框里的下划线拼音一直留着）。
+    preedit_node: Option<NodeId>,
     hover: Option<NodeId>,
     capture: Option<NodeId>,
     close: bool,
@@ -2566,6 +2569,7 @@ impl UiHost {
             tree,
             engine: PlatformTextEngine::new(),
             lang_seen: None,
+            preedit_node: None,
             hover: None,
             capture: None,
             close: false,
@@ -3672,10 +3676,22 @@ impl AppHandler for UiHost {
     }
 
     fn set_ime_preedit(&mut self, pe: &crate::event::Preedit) -> bool {
-        let Some(focus) = self.focus.current else {
-            return false;
-        };
-        if !self.tree.set_preedit(focus, pe) {
+        let focus = self.focus.current;
+        let mut changed = false;
+        // 合成串挂在别的节点上（合成中焦点被移走）：先从那里撤掉。
+        if let Some(old) = self.preedit_node.filter(|&n| Some(n) != focus) {
+            changed |= self
+                .tree
+                .set_preedit(old, &crate::event::Preedit::default());
+            self.preedit_node = None;
+        }
+        if let Some(focus) = focus {
+            if self.tree.set_preedit(focus, pe) {
+                changed = true;
+                self.preedit_node = pe.is_active().then_some(focus);
+            }
+        }
+        if !changed {
             return false;
         }
         // 合成串会改变文本宽度并可能触发换行——这是**非局部**变更：文本框内文字重排、
@@ -3770,6 +3786,62 @@ mod test_support {
 mod tests {
     use super::*;
 
+    /// 合成中焦点被移走（程序 / Tab）：随后的「清合成串」要清到原来那个框上，
+    /// 而不是新焦点——否则旧框里的合成串一直挂着。
+    #[test]
+    fn clearing_preedit_after_focus_moved_clears_the_old_field() {
+        use crate::app::test_support::key_ev;
+        use crate::event::Preedit;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let (a, b) = (
+            crate::signal::signal(String::from("甲")),
+            crate::signal::signal(String::new()),
+        );
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .spacing(8)
+                .child(Element::text_input(a, "a"))
+                .child(Element::text_input(b, "b").width(200)),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let k = key_ev();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        };
+        frame(&mut handler);
+        handler.on_key(k(Key::Tab));
+        frame(&mut handler);
+        let x0 = handler.ime_caret().expect("a 有焦点").0;
+        let pe = Preedit {
+            text: "zhong".into(),
+            caret: 5,
+            sel: None,
+        };
+        assert!(handler.set_ime_preedit(&pe));
+        frame(&mut handler);
+        assert!(handler.ime_caret().unwrap().0 > x0, "合成串把光标推到后面");
+
+        handler.on_key(k(Key::Tab)); // 合成中焦点移到 b
+        frame(&mut handler);
+        assert!(
+            handler.set_ime_preedit(&Preedit::default()),
+            "清掉了 a 上的合成串"
+        );
+        let back = crate::event::KeyEvent {
+            shift: true,
+            ..k(Key::Tab)
+        };
+        handler.on_key(back);
+        frame(&mut handler);
+        assert_eq!(handler.ime_caret().unwrap().0, x0, "回到 a：合成串已不在");
+    }
+
     /// `ime_field` 经真实焦点路径（Tab 切换）给出：换控件身份必变，多行 / 密码取自控件
     /// 真实配置。第一个框不设宽（Wrap 宽），见 AGENTS.md §5「宽度不能只测一种」。
     #[test]
@@ -3779,8 +3851,9 @@ mod tests {
         use crate::render::PixmapTarget;
         use tiny_skia::Pixmap;
 
-        let (a, b, c) = (
+        let (a, b, c, d) = (
             crate::signal::signal(String::from("甲")),
+            crate::signal::signal(String::new()),
             crate::signal::signal(String::new()),
             crate::signal::signal(String::new()),
         );
@@ -3791,7 +3864,15 @@ mod tests {
                 .child(Element::button("按钮"))
                 .child(Element::text_input(a, "普通"))
                 .child(Element::text_input(b, "密码").password().width(200))
-                .child(Element::text_input(c, "多行").multiline().width_match()),
+                .child(Element::text_input(c, "多行").multiline().width_match())
+                // 先密码后多行（`password()` 会清多行，反过来的顺序测不到）：密码恒为单行，
+                // 报 multiline 的话输入法会把回车当换行。
+                .child(
+                    Element::text_input(d, "两者")
+                        .password()
+                        .multiline()
+                        .width(200),
+                ),
         );
         let mut handler = app.into_handler_for_test();
         handler.set_scale(1.0);
@@ -3807,7 +3888,7 @@ mod tests {
         assert_eq!(handler.ime_field(), None, "焦点在按钮上：不是文本焦点");
 
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             handler.on_key(k(Key::Tab));
             frame(&mut handler);
             let f = handler.ime_field().expect("Tab 之后焦点在文本框上");
@@ -3818,7 +3899,10 @@ mod tests {
             .iter()
             .map(|f| (f.hints.multiline, f.hints.password))
             .collect();
-        assert_eq!(hints, vec![(false, false), (false, true), (true, false)]);
+        assert_eq!(
+            hints,
+            vec![(false, false), (false, true), (true, false), (false, true)]
+        );
         assert!(
             seen[0].id != seen[1].id && seen[1].id != seen[2].id && seen[0].id != seen[2].id,
             "每换一个框身份都变：{seen:?}"

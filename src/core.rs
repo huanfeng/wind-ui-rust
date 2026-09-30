@@ -3325,6 +3325,19 @@ mod tests {
         tree
     }
 
+    /// `as_u64` 是给平台层当「焦点控件身份」比较用的：槽位被复用后必须不同，否则删掉一个
+    /// 输入框、新建的恰好落在同一槽位时，输入法以为焦点没换。
+    #[test]
+    fn node_identity_changes_when_a_slot_is_reused() {
+        let mut tree = Tree::new();
+        let a = Element::leaf().build(&mut tree);
+        tree.remove(a);
+        let b = Element::leaf().build(&mut tree);
+        assert_eq!(format!("{a:?}"), "#0");
+        assert_eq!(format!("{b:?}"), "#0g1", "同一槽位被复用");
+        assert_ne!(a.as_u64(), b.as_u64());
+    }
+
     /// 三行竖排（各 100×40）的树，返回 (tree, 三个子节点 id)。
     fn three_rows() -> (Tree, Vec<NodeId>) {
         let tree = layout(
