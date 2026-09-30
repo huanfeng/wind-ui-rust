@@ -836,6 +836,7 @@ pub struct ImeHints {
 pub struct ImeField {
     /// 焦点控件的身份：焦点换到另一个控件必变（输入法据此换上下文）。只用于比较相等。
     pub id: u64,
+    /// 焦点控件的内容类型（见 `Widget::ime_hints`）。
     pub hints: ImeHints,
 }
 

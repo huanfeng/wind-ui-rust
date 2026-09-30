@@ -843,7 +843,10 @@ pub trait AppHandler {
     ///
     /// **仅 win32 走这条**：那边合成串由系统 IME 自己画（`ImmSetCompositionWindow`），
     /// 上层只需知道「合成中」以便藏起自绘光标、消除双光标。需要自绘合成串的平台
-    /// （macOS、将来的 Linux）走 [`Self::set_ime_preedit`]。
+    /// （macOS、Linux）走 [`Self::set_ime_preedit`]。
+    ///
+    /// 契约：`true` 作用于当前焦点；`false` 要作用到**进入合成时的那个控件**——合成中焦点
+    /// 可能被程序移走，宿主自己记住它（平台层不必关心）。
     fn set_ime_composing(&mut self, _composing: bool) -> bool {
         false
     }
@@ -853,6 +856,9 @@ pub trait AppHandler {
     ///
     /// 与 [`Self::set_ime_composing`] 互斥：**走系统内联绘制的平台（win32）永不调用本方法**，
     /// 否则系统画一份、控件自绘一份，屏幕上会出现双份合成串。
+    ///
+    /// 契约：非空合成串作用于当前焦点；**清空**（空 `text`）要作用到合成串所在的控件——合成中
+    /// 焦点可能被程序移走，宿主自己记住它，平台层照常发清空即可。
     fn set_ime_preedit(&mut self, _pe: &crate::event::Preedit) -> bool {
         false
     }

@@ -2281,6 +2281,9 @@ struct UiHost {
     /// 正显示着输入法合成串的节点。焦点可能在合成中被程序移走，清合成串要清它而不是
     /// 新焦点（否则旧框里的下划线拼音一直留着）。
     preedit_node: Option<NodeId>,
+    /// 同理，处于「合成中」的节点（win32 的 `set_ime_composing`）：结束合成时清它，
+    /// 否则合成中焦点被移走，原框一直以为在合成、回到它时光标不画。
+    composing_node: Option<NodeId>,
     hover: Option<NodeId>,
     capture: Option<NodeId>,
     close: bool,
@@ -2570,6 +2573,7 @@ impl UiHost {
             engine: PlatformTextEngine::new(),
             lang_seen: None,
             preedit_node: None,
+            composing_node: None,
             hover: None,
             capture: None,
             close: false,
@@ -3669,10 +3673,20 @@ impl AppHandler for UiHost {
     }
 
     fn set_ime_composing(&mut self, composing: bool) -> bool {
-        let Some(focus) = self.focus.current else {
-            return false;
-        };
-        self.tree.set_composing(focus, composing)
+        let focus = self.focus.current;
+        let mut changed = false;
+        // 合成态挂在别的节点上（合成中焦点被移走）：先从那里撤掉。
+        if let Some(old) = self.composing_node.filter(|&n| Some(n) != focus) {
+            changed |= self.tree.set_composing(old, false);
+            self.composing_node = None;
+        }
+        if let Some(focus) = focus {
+            if self.tree.set_composing(focus, composing) {
+                changed = true;
+                self.composing_node = composing.then_some(focus);
+            }
+        }
+        changed
     }
 
     fn set_ime_preedit(&mut self, pe: &crate::event::Preedit) -> bool {
@@ -3840,6 +3854,59 @@ mod tests {
         handler.on_key(back);
         frame(&mut handler);
         assert_eq!(handler.ime_caret().unwrap().0, x0, "回到 a：合成串已不在");
+    }
+
+    /// win32 的「合成中」标志同理：合成中焦点被移走，随后的 `set_ime_composing(false)` 要落在
+    /// 原来那个框上，否则回到它时光标一直不画（`TextInput` 在合成中藏起自绘光标）。
+    #[test]
+    fn ending_composition_after_focus_moved_restores_the_old_fields_caret() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let (a, b) = (
+            crate::signal::signal(String::from("甲")),
+            crate::signal::signal(String::new()),
+        );
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .spacing(8)
+                .child(Element::text_input(a, "a"))
+                .child(Element::text_input(b, "b").width(200)),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let k = key_ev();
+        // 光标条所在那一列有没有墨（与底色明显不同的像素）。
+        let caret_drawn = |h: &mut UiHost, pm: &mut Pixmap| -> bool {
+            h.render(&mut PixmapTarget { pixmap: pm }, Size::new(300, 200));
+            let (x, y, ht) = h.ime_caret().expect("有文本焦点");
+            let bg = pm.pixel((x + 6) as u32, (y + ht / 2) as u32).unwrap();
+            (y..y + ht).any(|yy| {
+                let p = pm.pixel(x as u32, yy as u32).unwrap();
+                (i32::from(p.red()) - i32::from(bg.red())).abs() > 60
+            })
+        };
+        handler.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        handler.on_key(k(Key::Tab));
+        assert!(caret_drawn(&mut handler, &mut pm), "a 聚焦：光标照常画");
+        assert!(handler.set_ime_composing(true));
+        assert!(!caret_drawn(&mut handler, &mut pm), "合成中：自绘光标藏起");
+
+        handler.on_key(k(Key::Tab)); // 合成中焦点移到 b
+        handler.set_ime_composing(false);
+        let back = crate::event::KeyEvent {
+            shift: true,
+            ..k(Key::Tab)
+        };
+        handler.on_key(back);
+        assert!(
+            caret_drawn(&mut handler, &mut pm),
+            "回到 a：合成态已清，光标恢复"
+        );
     }
 
     /// `ime_field` 经真实焦点路径（Tab 切换）给出：换控件身份必变，多行 / 密码取自控件
