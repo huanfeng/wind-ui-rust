@@ -545,6 +545,11 @@ impl Wl {
                 return;
             }
         }
+        if press {
+            // 合成中点击别处：先放弃合成——命中位置要按不含合成串的文本算（同 X11）。
+            self.ime_abort_composition(key);
+        }
+        let Some(i) = self.idx(key) else { return };
         let w = &mut self.windows[i];
         let slop = (DOUBLE_CLICK_SLOP as f64 * w.scale.factor).round() as i32;
         let click_count = if press {

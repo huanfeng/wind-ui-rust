@@ -6,16 +6,16 @@
 //! - `events.rs`：各协议对象的事件分发（xdg 外壳、输出、表面、指针、键盘、缓冲、回调）。
 //! - `shm.rs`：`wl_shm` 缓冲的簿记与写入。`scale.rs`：HiDPI 换算。`input.rs`：按键重复、
 //!   滚轮聚合等纯逻辑。`xkb.rs`：libxkbcommon 封装。`cursor.rs`：光标。`data.rs`：剪贴板与
-//!   文件拖入（`wl_data_device`）。
+//!   文件拖入（`wl_data_device`）。`ime.rs`：输入法（text-input-v3），状态机在 `text_input.rs`。
 //!
-//! # 当前范围（实施计划 Stage 1–3）
+//! # 当前范围（实施计划 Stage 1–4）
 //!
 //! 已有：建窗、按脏区呈现、`frame` 回调配速、多窗口、窗口操作；指针（含高精度滚轮、双击、
 //! 捕获）、键盘（xkbcommon、客户端按键重复）、光标（cursor-shape-v1 / XCursor 主题回退）、
 //! HiDPI（fractional-scale-v1 + viewporter / 整数 buffer_scale，运行期跟随）、无边框窗口的
-//! 拖动 / 边缘缩放 / 双击最大化；剪贴板（文本）与文件拖入。
+//! 拖动 / 边缘缩放 / 双击最大化；剪贴板（文本）与文件拖入；输入法（合成串内联绘制）。
 //!
-//! 尚无（入口空操作，必要处记日志，不 panic）：输入法、文件拖出、primary selection、窗口装饰
+//! 尚无（入口空操作，必要处记日志，不 panic）：文件拖出、primary selection、窗口装饰
 //! （无服务端装饰的合成器上窗口没有标题栏）、窗口图标、全局热键、唤起已有窗口、横向滚轮
 //! （框架没有横向滚动事件，与 X11 / win32 后端一致丢弃）。协议本身不允许的：应用自定窗口
 //! 坐标（`centered` 无效）、查询是否最小化。
@@ -34,9 +34,11 @@
 mod cursor;
 mod data;
 mod events;
+mod ime;
 mod input;
 mod scale;
 mod shm;
+mod text_input;
 mod xkb;
 
 use std::os::fd::AsRawFd;
@@ -107,6 +109,8 @@ struct Globals {
     viewporter: Option<WpViewporter>,
     fractional: Option<WpFractionalScaleManagerV1>,
     cursor_shape: Option<WpCursorShapeManagerV1>,
+    /// 输入法（text-input-v3）；启动时交给 `ime::Ime`。
+    text_input: Option<wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     /// 剪贴板与拖入（`data.rs`）；启动时交给 `data::init`。
     data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     outputs: Vec<Output>,
@@ -140,7 +144,7 @@ pub(super) fn connect() -> Result<Session, String> {
         .map_err(|e| format!("xdg_wm_base：{e}"))?;
     // v8 起有 axis_value120（高精度滚轮）；v5 起有 pointer frame。
     let seat = globals.bind(&qh, 1..=8, ()).ok();
-    // 诊断开关：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape`（逗号分隔）
+    // 诊断开关：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input`（逗号分隔）
     // 假装合成器没有这些协议，在新合成器上也能走一遍回退路径（GNOME 42 就三个都没有）。
     let disabled = std::env::var("WINDUI_WAYLAND_DISABLE").unwrap_or_default();
     let off = |name: &str| disabled.split(',').any(|d| d.trim() == name);
@@ -156,6 +160,11 @@ pub(super) fn connect() -> Result<Session, String> {
         .bind(&qh, 1..=1, ())
         .ok()
         .filter(|_| !off("cursor-shape"));
+    // v1：光标矩形随 commit 生效（v2 改成随下一次表面提交生效，GNOME 42 只有 v1）。
+    let text_input = globals
+        .bind(&qh, 1..=1, ())
+        .ok()
+        .filter(|_| !off("text-input"));
     // v3 起有拖放动作协商（set_actions / finish）。
     let data_manager = globals.bind(&qh, 1..=3, ()).ok();
     let registry = globals.registry().clone();
@@ -180,6 +189,7 @@ pub(super) fn connect() -> Result<Session, String> {
             viewporter,
             fractional,
             cursor_shape,
+            text_input,
             data_manager,
             outputs,
         },
@@ -230,6 +240,15 @@ pub(super) fn run_windowed(
         alt_down: false,
         drag: None,
         drops: Vec::new(),
+        ime: None,
+    };
+    wl.ime = match (wl.g.text_input.as_ref(), wl.g.seat.as_ref()) {
+        (Some(m), Some(seat)) => Some(ime::Ime::new(m, seat, &wl.qh)),
+        _ => {
+            // 一次性诊断走 stderr（同「找不到 libxkbcommon」）。
+            eprintln!("[windui] 合成器不支持 text-input-v3（或没有 seat），Wayland 下没有输入法");
+            None
+        }
     };
     data::init(
         &wl.conn,
@@ -372,6 +391,8 @@ struct Win {
     // ── 指针 ──
     click: ClickTracker,
     capturing: bool,
+    /// 有输入法合成串正在内联显示。
+    composing: bool,
     /// 无边框窗口：在拖动区 / 缩放边上按下、尚未移动够阈值的待定拖动。
     ///
     /// 与 X11 后端同样「移出阈值才交给合成器」，理由在 Wayland 上换了个形式但依然成立：
@@ -447,6 +468,8 @@ struct Wl {
     drag: Option<data::DropTarget>,
     /// 已放下、还在读 uri-list 的拖入（`data.rs`）。
     drops: Vec<data::PendingDrop>,
+    /// 输入法（`ime.rs`）；合成器不支持 text-input-v3 时为 `None`。
+    ime: Option<ime::Ime>,
 }
 
 impl Wl {
@@ -545,6 +568,7 @@ impl Wl {
             bufs: Vec::new(),
             click: ClickTracker::default(),
             capturing: false,
+            composing: false,
             title_drag: host::DragGate::default(),
         });
         if let Some(i) = self.idx(key) {
@@ -1102,7 +1126,7 @@ impl Wl {
             hotkey_ops,
             new_windows,
             cursor,
-            ime_caret: _,
+            ime_caret,
         } = Requests::take(w.handler.as_mut(), &|k| open.iter().any(|o| o == k));
         let cursor_changed = std::mem::replace(&mut w.cursor, cursor) != cursor;
         if let Some(t) = title {
@@ -1114,6 +1138,7 @@ impl Wl {
         if cursor_changed && self.pointer.as_ref().is_some_and(|p| p.focus == Some(key)) {
             self.apply_cursor();
         }
+        self.ime_update(key, ime_caret);
         if !hotkey_ops.is_empty() && !std::mem::replace(&mut self.hotkey_warned, true) {
             log::warn!("Wayland 下全局热键不可用，运行期热键增删被忽略");
         }
