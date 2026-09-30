@@ -282,12 +282,6 @@ pub(super) fn plan_update(
     }
 }
 
-/// 窗口集合变了之后要不要给文本焦点所在窗口补一次对账：开了或关了窗都要——模态子窗的
-/// 开关会改变 owner 里的文本框能否输入，而那扇窗自己不一定再有事件。
-pub(super) fn resync_after_windows_changed(closed: bool, opened: bool) -> bool {
-    closed || opened
-}
-
 /// 输入法的合成串（字节下标的光标）→ 框架的 `Preedit`（字符下标）。两端都是 -1 表示隐藏光标，
 /// 这里把光标放在末尾；两端不同时那一段作为「选中分句」高亮。
 fn preedit_from_bytes(text: String, begin: i32, end: i32) -> Preedit {
@@ -432,12 +426,14 @@ mod tests {
     fn a_batch_the_compositor_sent_before_seeing_our_enable_keeps_only_the_commit() {
         let mut s = TextInputState::default();
         s.on_enter();
-        s.sync(Some(&want(1))); // commits = 1, enabled_at = 1
+        // commits = 1，enabled_at = 1。
+        s.sync(Some(&want(1)));
+        // 换框：disable(2) + enable(3)，enabled_at = 3。
         s.sync(Some(&Want {
             field: 2,
             ..want(1)
-        })); // 换框：disable(2) + enable(3)，enabled_at = 3
-             // 合成器还没处理我们的换框时发出的一批（serial 1）：给上一个框的。
+        }));
+        // 合成器还没处理我们的换框时发出的一批（serial 1）：给上一个框的。
         s.on_preedit(Some("zhong".into()), 5, 5);
         s.on_commit_string(Some("中".into()));
         s.on_delete(3, 0);
@@ -507,16 +503,6 @@ mod tests {
         );
         assert!(plan_update(Some(1), Some(1), false, true).defer);
         assert!(!plan_update(Some(1), Some(1), false, false).defer);
-    }
-
-    #[test]
-    fn closing_or_opening_a_window_resyncs_the_text_focus_window() {
-        assert!(
-            resync_after_windows_changed(true, false),
-            "关了窗（含合成器关模态子窗）"
-        );
-        assert!(resync_after_windows_changed(false, true));
-        assert!(!resync_after_windows_changed(false, false));
     }
 
     #[test]
