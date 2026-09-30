@@ -20,7 +20,9 @@
 //! `wl_display.sync`，合成器按序处理请求，选区事件必先于它的 `done` 到达；到 `done` 还没见到
 //! 自己的选区、而窗口又有键盘焦点（合成器只给焦点客户端发选区事件），说明请求被拒了
 //! （serial 无效——比如没有任何输入就复制；wlroots 拒绝时既不采用也不发 `cancelled`）。
-//! 这时销毁那个 source，读剪贴板回到实际选区，不再拿本地文本冒充。
+//! 这时只放弃本地认定（读剪贴板回到实际选区，不再拿本地文本冒充），source 留到下一次选区
+//! 事件才释放：万一合成器是异步回发选区、判错了，随后到来的自家选区还能把它认回来——判错的
+//! 代价只是多留一个 source，而不是丢掉这次复制。
 //!
 //! 剪贴板状态放在事件循环线程的 thread-local 里：`ClipboardProvider` 是个无状态的单元类型、
 //! 碰不到 `Wl`，而 `QueueHandle<Wl>` 也不宜跨线程。其它线程读写剪贴板时记警告并当空处理
@@ -179,6 +181,8 @@ impl Owner {
         match sel {
             Sel::Ours(k) => {
                 if let Some(e) = self.live.iter_mut().find(|e| e.0 == k) {
+                    // 此前判它被拒（合成器回发选区晚于 sync）的，确认后自然认回来：`current` 已空，
+                    // `plan` 按选区归属读它的本地文本。
                     e.1 = true;
                 }
                 // 已 sync 过却从未被确认的都是被拒了（失焦时发出的：当时没法判定，现在选区仍是
@@ -220,8 +224,8 @@ impl Owner {
         old
     }
 
-    /// `set_selection` 之后的 `sync` 回来了。有键盘焦点却没见到自己的选区 = 被拒，返回 true，
-    /// 调用方销毁该 source。没焦点时合成器本就不给我们发选区事件，无从判断，留着。
+    /// `set_selection` 之后的 `sync` 回来了。有键盘焦点却没见到自己的选区 = 判为被拒，返回 true
+    /// （调用方记诊断）。没焦点时合成器本就不给我们发选区事件，无从判断，照旧以它为准。
     fn on_synced(&mut self, id: u64, focused: bool) -> bool {
         let Some(e) = self.live.iter_mut().find(|e| e.0 == id) else {
             return false;
@@ -230,7 +234,11 @@ impl Owner {
         if e.1 || !focused {
             return false;
         }
-        self.forget(id);
+        // 只放弃本地认定、不销毁 source：万一合成器是异步回发选区（判错了），随后到来的
+        // `Ours(id)` 还能把它认回来；真被拒的，等下一次选区事件再释放（见 `on_selection`）。
+        if self.current == Some(id) {
+            self.current = None;
+        }
         true
     }
 
@@ -767,7 +775,6 @@ impl Dispatch<wl_callback::WlCallback, SelectionSync> for Wl {
             with_local(|c| {
                 if c.owner.on_synced(sync.0, c.focused) {
                     log::warn!("合成器没有采用这次剪贴板写入（输入 serial 无效，或窗口没有焦点）");
-                    c.destroy_source(sync.0);
                 }
             });
         }
@@ -1048,9 +1055,30 @@ mod tests {
         let mut o = Owner::default();
         let a = o.set();
         // 合成器不采用、也不发 cancelled：到 sync 回来都没见到自己的选区。
-        assert!(o.on_synced(a, true), "有焦点却没确认 = 被拒，交调用方销毁");
+        assert!(o.on_synced(a, true), "有焦点却没确认 = 判为被拒");
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
         assert_eq!(o.plan(Sel::Empty), ReadPlan::Empty);
+        // source 留到下一次选区事件才释放。
+        assert_eq!(o.on_selection(Sel::Foreign), vec![a]);
+    }
+
+    #[test]
+    fn copy_misjudged_as_rejected_is_recovered_when_its_selection_arrives_late() {
+        let mut o = Owner::default();
+        let a = o.set();
+        assert!(
+            o.on_synced(a, true),
+            "合成器异步回发选区：sync 先回来，先判为被拒"
+        );
+        assert!(o.on_selection(Sel::Ours(a)).is_empty(), "不释放");
+        assert_eq!(
+            o.plan(Sel::Ours(a)),
+            ReadPlan::Local(a),
+            "认回来，读本地，绝不对自家 offer 走管道"
+        );
+        // 认回来之后，被别人取代时照常清掉本地认定（cancelled 另行释放 source）。
+        o.on_selection(Sel::Foreign);
+        assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
     }
 
     #[test]
