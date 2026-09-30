@@ -61,7 +61,20 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 事件循环）、文件拖入（`text/uri-list` → 落点路由到 `on_drop_files`，与 XDND 同一上层接口）。
 **Success Criteria**: 与其它 Wayland 应用双向复制中文/大段文本；从文件管理器拖入多文件、含空格与中文路径。
 **Tests**: uri-list 解析单测（百分号解码、`file://` 以外的跳过）；headless 下自写最小 data source 往返。
-**Status**: Not Started
+**Status**: In Progress（2026-09-30）——实现与 sway headless 自动化验证完成（证据见
+`docs/LINUX_PORTING.md` §8.5）；**待 GNOME 42 真桌面人工验证**后改 Complete，清单：
+1. gedit / 终端里复制中文，本应用 Ctrl+V 粘进输入框；反向：本应用复制，gedit 粘贴。
+2. 大段文本（>1MB，比如 `seq 1 200000` 的输出）两个方向都完整。
+3. 本应用复制后关掉本应用，再在 gedit 粘贴：GNOME 42 无剪贴板管理器时预期**贴不出**
+   （Wayland 协议如此），记录实际表现。
+4. X 应用（经 XWayland，如 `xterm`）与本应用互相复制。
+5. 从 Nautilus 拖 1 个、多个文件到 `file_drop` 示例，含空格与中文路径；拖到窗口不同位置
+   （示例里全窗接收，另可用分左右两区的探针）；拖网页链接 / 选中文字进来应显示禁止光标。
+6. 拖入时 Nautilus 里源文件不被移走（我们只接受复制）。
+偏差：拖入读 uri-list 是同步的（源端卡死时界面冻至多 1.5 秒），X11 那边是异步；
+剪贴板只能在界面线程读写（X11 有独立剪贴板线程）；只处理启动时绑定的那一个 seat；
+「写入被合成器拒绝」的判定只有状态机单测，sway 上没能构造出被拒的场景（有键盘焦点时
+enter 的 serial 就足够）。不做：文件拖出、primary selection（中键粘贴）。
 
 ## Stage 4: 输入法
 **Goal**: `text-input-v3`：焦点进出 enable/disable、`set_cursor_rectangle` 让候选窗跟随光标、

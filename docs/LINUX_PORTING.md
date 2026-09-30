@@ -155,11 +155,12 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 ## 8. Wayland 原生后端（进行中）
 
-计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–2**：窗口与呈现；
-指针、键盘、光标、HiDPI、无边框拖动 / 缩放（GNOME 真桌面的交互项待人工验证）。
+计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–3**：窗口与呈现；
+指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入（GNOME 真桌面的
+交互项待人工验证）。
 
 > ⚠ 还没有标题栏（weston / KDE / sway 给服务端装饰，GNOME 不给——有边框窗口在 GNOME 下
-> 没有标题栏）、剪贴板、输入法、文件拖入。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
+> 没有标题栏）、输入法。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
 > 才走它，其余情况 Wayland 会话照旧经 XWayland 运行。
 
 ### 8.1 后端选择
@@ -194,7 +195,7 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
 
 源码划分：`wayland/mod.rs`（连接、窗口、事件循环、出帧）、`events.rs`（协议事件分发、
 指针 / 键盘翻译）、`shm.rs`、`scale.rs`、`input.rs`（按键重复、滚轮聚合，纯逻辑）、
-`xkb.rs`、`cursor.rs`。按键翻译（`host::translate_key`）与无边框边缘命中
+`xkb.rs`、`cursor.rs`、`data.rs`（剪贴板与文件拖入）。按键翻译（`host::translate_key`）与无边框边缘命中
 （`host::edge_direction`）与 X11 共用，快捷键 / 单击 Alt / 空格双发的口径两边一致；唯一差异是
 快捷键码取**当前**布局的基础层（X11 取第一布局），两个拉丁布局并存（`de,us`）时 Z / Y 位置
 的快捷键跟着当前布局走。
@@ -249,9 +250,33 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   按下的 serial 在按住期间一直有效，晚发不影响合成器认可。双击拖动区切最大化。拖动区右键
   弹的是框架自己的系统菜单（与另两个平台同一套，用户可拼自己的项），不用
   `show_window_menu`。`wm_capabilities`（v5）决定能否最大化 / 最小化，没收到按全支持。
+- **剪贴板**（`data.rs`，对外仍是 `platform::Clipboard`，原生 Wayland 下转给它，否则走 X11
+  的剪贴板线程）：复制 = `wl_data_source` 声明 `text/plain;charset=utf-8` / `UTF8_STRING` /
+  `text/plain` / `TEXT` / `STRING`（后三个给 XWayland 里的 X 应用），`set_selection` 带最近一次
+  输入事件（按键、按钮、键盘焦点进入）的 serial。`send` 给的 fd **非阻塞写**，写不完挂进事件
+  循环的 `poll`，5 秒没进展就放弃（关 fd）——读取方慢或卡死都不拖住界面。粘贴 = 对当前选区
+  offer `receive` 到 `pipe2` 管道、`flush`、限时 1.5 秒读到 EOF（64MB 上限）；MIME 优先
+  UTF-8，大小写不敏感，只有 `STRING` 时按 Latin-1 解。
+  **自家的选区绝不走管道**（应答要等事件循环分发，而事件循环正阻塞在读管道上，互等到
+  超时）：每个 source 另声明私有 MIME `application/x-windui-source;token=…;id=…`（token 是
+  进程启动时的随机值，不用 pid——沙箱里各应用 pid 常相同），选区 offer 带本进程标记、且那个
+  source 还活着就直接取本地文本；标记在但 source 没了，是剪贴板管理器照抄的副本，照常读。`set_selection` 后发 `wl_display.sync`：合成器按序处理，选区事件先于
+  `done`；有焦点却到 `done` 都没见到自家选区 = 被拒（wlroots 拒绝时不发 `cancelled`），销毁
+  source、读剪贴板回到实际选区；失焦时发出的那次无从当场判定，等重获焦点合成器补发选区时
+  再看（补发的仍是自家更早的 / 是别人的 → 那次被拒，释放）。这套记账是纯逻辑（`Owner`），有单测。
+  与 X11 的差异：只能在界面线程读写（其它线程记警告当空）；**应用退出后复制的内容随之
+  消失**（协议没有剪贴板管理器，除非桌面自带）。
+- **文件拖入**：`enter` 时 offer 含 `text/uri-list` 且没被模态挡住就 `accept` +
+  `set_actions(copy, copy)`（只接受复制——接受移动的话文件管理器会删源文件）；拖动途中模态
+  状态变了在 `motion` 里改口。`drop` 时同步限时读 uri-list → `host::parse_uri_list`（与 XDND
+  同一份）→ 落点按缩放换成物理像素交给 `on_drop_files`（与 X11 同口径）。读到了路径且合成器
+  选定了动作才 `finish`（否则是 `invalid_finish` 协议错误），然后销毁 offer；没读到只销毁，
+  源端收到 `cancelled`。同步读的代价：源端卡死时界面冻至多 1.5 秒（XDND 那边是异步的）。
 - **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape` 假装合成器
   没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径。
-- **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定；
+- **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定，剪贴板与拖入
+  也随之不可用（数据设备按 seat 建，只建启动时那一个）；文件拖出、primary selection（中键
+  粘贴）未做；
   `wl_output.scale` 收到即生效，没等 `done`；阻塞对话框期间不回 ping；被遮挡的动画窗口
   每秒醒一次（下一条），没做退避。
 - **frame 回调兜底**：等了 1 秒还没回（合成器扣住被遮挡窗口的回调、或对空提交不回）就当
@@ -302,6 +327,25 @@ Stage 2（sway headless + 自写注入器，见 §8.7）：
 - 私有内存 `about` 620×556@1x：weston（无输入设备）2664 KB；sway 无输入设备 3000 KB、
   出现键鼠后 3348 KB——多出的约 350 KB 是 libxkbcommon 编译 keymap 的常驻结构。
   空闲 10 秒 0 tick（weston / sway / GNOME 42 三处）。
+
+Stage 3（sway headless；外部一侧用 `wl-clipboard` 2.2.1 的 `wl-copy` / `wl-paste`——sway 有
+`wlr-data-control`，它们不需要焦点；拖放源是自写的最小客户端，见 §8.7）：
+- 复制：本应用复制中文 → `wl-paste` 原样读到，`-l` 列出 5 种文本 MIME + 私有标记；190 KB
+  中文 + emoji 文本 `UTF8_STRING` / `text/plain` / `STRING` 三种读法都完整（FNV 校验一致）。
+- 粘贴：`wl-copy` 206 KB 中文 → 本应用读到全文、校验一致，耗时 2ms；只有 `text/plain` 时回退
+  读到；只有 `image/png` 时读空、不挂起。输入框里 Ctrl+V 粘外部中文、Ctrl+A Ctrl+C 再被
+  `wl-paste` 读回，键盘通路的 serial 被合成器采用。
+- 慢读取方：1.3 MB 选区，一个读取方晚 3 秒才读（收到全部 1308890 字节）、一个卡 8 秒（5 秒后
+  放弃，收到 196608 字节）；期间点粘贴 0ms 返回（自家选区不走管道），界面照常响应；结束后
+  fd 数回到基线。
+- 拖入：含中文、空格、`file://localhost/`、注释行、CRLF、`https://` 的 uri-list → 两条本地路径
+  正确解码、网址被跳过，源端依次收到 `target text/uri-list`、`action copy`、`finished`；只有
+  `text/plain` 的拖动 → `target None`、源端 `cancelled`；uri-list 里只有网址 → 不 `finish`、
+  源端 `cancelled`。1.5 分数缩放下，落在左右两区分界线两侧（逻辑 x=270 / 330，分界 ~300）的
+  拖入分别命中左 / 右区——若漏乘或重复乘缩放，330 会落到左区、270 会落到右区。
+- 未能自动化：「写入被合成器拒绝」的真实路径（sway 上键盘焦点进入的 serial 就够用，构造不出
+  被拒），只有状态机单测；拖动途中模态状态改变。
+- `about` 空闲 10 秒仍 0 tick；私有内存 3004 KB（无输入设备，§8.5 同条件 3000 KB）。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 
@@ -384,6 +428,11 @@ LD_LIBRARY_PATH=$PWD/root/usr/lib/x86_64-linux-gnu:$HOME/.local/weston/root/usr/
   wayland-protocols-misc 的 virtual-keyboard + 用 xkbcommon 按默认 RMLVO 生成 keymap 上传），
   从 stdin 读 `move x y` / `click left` / `key x down` / `sleep ms` 之类的脚本。当时放在会话
   草稿目录，需要时按此重写。
+- 剪贴板外部一侧：`apt-get download wl-clipboard` + `dpkg -x` 解到 `~/.local/wlclip`，
+  `wl-copy` / `wl-paste` 走 `wlr-data-control`，不需要窗口也不需要焦点（weston headless 没有
+  seat，用不了）。拖放源：自写的最小客户端（开一个小窗口，收到指针按下就 `start_drag`，
+  MIME 与数据从参数 / 环境变量取，把 source 的各个事件打印出来），注入器在它上面按下、
+  移到目标窗口、松开。注入器每次运行都从 0 计时，相隔很近的两次运行各点一下会被判成双击。
 - virtual-pointer 的绝对坐标按 `extent` 映射到输出**逻辑**坐标；传物理像素 + 物理 extent
   在任何缩放下都落在同一个像素上。
 - sway 1.9 的 `xdg_wm_base` 只有 v2：没有 `wm_capabilities`、浮动窗口忽略最大化请求。
