@@ -27,6 +27,24 @@ extern "C" {
     fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
 }
 
+// 下面 `O_CLOEXEC` / `O_NONBLOCK` 按 x86 / ARM / RISC-V / PowerPC 等「通用」Linux ABI 取值；
+// MIPS 与 SPARC 的值不同，写错会让读剪贴板的管道变成阻塞读、无限挂起。那几个架构上没人跑
+// 桌面，与其维护一套没法验证的常量，不如直接拒绝编译（关掉 `wayland` feature 即可）。
+#[cfg(all(
+    feature = "wayland",
+    any(
+        target_arch = "mips",
+        target_arch = "mips64",
+        target_arch = "mips32r6",
+        target_arch = "mips64r6",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    )
+))]
+compile_error!(
+    "windui 的 Wayland 后端未适配本架构的 fcntl / pipe2 常量，请用 --no-default-features 关掉 `wayland` feature"
+);
+
 /// 管道（`O_CLOEXEC`），返回（读端，写端）。
 #[cfg(feature = "wayland")]
 pub(super) fn pipe_cloexec() -> std::io::Result<(std::fs::File, std::fs::File)> {

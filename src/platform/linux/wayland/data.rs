@@ -181,32 +181,36 @@ impl Owner {
                 if let Some(e) = self.live.iter_mut().find(|e| e.0 == k) {
                     e.1 = true;
                 }
-                // `current` 只会是最近一次复制（序号 ≥ k）或空。比 k 新、还在路上的，本地仍以它
-                // 为准；比 k 新却已 sync 过，说明它被拒了（失焦时发出的：当时没法判定，现在
-                // 选区仍是 k 才看出来）——被接受后又被取代的话，早该先收到 `cancelled`。
-                if let Some(c) = self.current.filter(|&c| c > k && self.synced(c)) {
-                    self.forget(c);
-                    let mut old = self.release_older(k);
-                    old.push(c);
-                    return old;
-                }
-                self.release_older(k)
+                // 已 sync 过却从未被确认的都是被拒了（失焦时发出的：当时没法判定，现在选区仍是
+                // k 才看出来）——被接受后又被取代的话，早该先收到 `cancelled`。比 k 旧的一并
+                // 释放（已被 k 取代）；比 k 新、还在路上的不动，`current` 若是它，本地仍以它为准。
+                let mut gone = self.release_rejected();
+                gone.extend(self.release_older(k));
+                gone
             }
             // 别人的（或清空了）：我们的那次复制若已被合成器处理过，就是被取代了；还在路上
-            // 的不算（这条事件早于它产生）。从未被确认过的那次是被拒了（同上理），一并释放。
+            // 的不算（这条事件早于它产生）。已 sync 却从未被确认的都是被拒了（同上理），释放。
             Sel::Foreign | Sel::Empty => {
-                let Some(c) = self.current.filter(|&c| self.synced(c)) else {
-                    return Vec::new();
-                };
-                self.current = None;
-                let confirmed = self.live.iter().any(|e| e.0 == c && e.1);
-                if confirmed {
-                    return Vec::new();
+                if self.current.is_some_and(|c| self.synced(c)) {
+                    self.current = None;
                 }
-                self.forget(c);
-                vec![c]
+                self.release_rejected()
             }
         }
+    }
+
+    /// 释放已 sync 却从未被确认成为选区的 source（被拒的）。
+    fn release_rejected(&mut self) -> Vec<u64> {
+        let gone: Vec<u64> = self
+            .live
+            .iter()
+            .filter(|&&(_, confirmed, synced)| synced && !confirmed)
+            .map(|e| e.0)
+            .collect();
+        for &id in &gone {
+            self.forget(id);
+        }
+        gone
     }
 
     /// 释放序号比 `k` 小的 source（已被 k 取代）。
@@ -1057,6 +1061,36 @@ mod tests {
         o.on_selection(Sel::Ours(b));
         o.on_synced(b, true);
         assert!(o.on_selection(Sel::Foreign).is_empty());
+    }
+
+    #[test]
+    fn several_copies_rejected_while_unfocused_are_all_released_on_our_old_selection() {
+        let mut o = Owner::default();
+        let a = o.set();
+        o.on_selection(Sel::Ours(a));
+        o.on_synced(a, true);
+        let b = o.set();
+        o.on_synced(b, false);
+        let c = o.set();
+        o.on_synced(c, false);
+        let d = o.set(); // 还在路上
+        let mut gone = o.on_selection(Sel::Ours(a));
+        gone.sort();
+        assert_eq!(gone, vec![b, c], "b 与 c 都被拒；在路上的 d 不动");
+        assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(d));
+    }
+
+    #[test]
+    fn several_copies_rejected_while_unfocused_are_all_released_on_a_foreign_selection() {
+        let mut o = Owner::default();
+        let a = o.set();
+        o.on_synced(a, false);
+        let b = o.set();
+        o.on_synced(b, false);
+        let mut gone = o.on_selection(Sel::Foreign);
+        gone.sort();
+        assert_eq!(gone, vec![a, b]);
+        assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
     }
 
     #[test]
