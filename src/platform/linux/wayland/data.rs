@@ -362,6 +362,8 @@ struct Clip {
     sends: Vec<Outgoing>,
     /// 最近一次 `set_selection`：（source 序号，所用的 serial）。
     last_set: Option<(u64, u32)>,
+    /// 「写入被拒」已在 stderr 提示过。
+    warned_rejected: bool,
 }
 
 impl Clip {
@@ -410,7 +412,9 @@ pub(super) fn init(
     seat: Option<&wl_seat::WlSeat>,
 ) {
     let (Some(manager), Some(seat)) = (manager, seat) else {
-        log::warn!("合成器没有 wl_data_device_manager 或 wl_seat，Wayland 剪贴板与文件拖入不可用");
+        eprintln!(
+            "[windui] 合成器没有 wl_data_device_manager 或 wl_seat，Wayland 剪贴板与文件拖入不可用"
+        );
         return;
     };
     let device = manager.get_data_device(seat, qh, ());
@@ -429,6 +433,7 @@ pub(super) fn init(
             sel: Sel::Empty,
             sends: Vec::new(),
             last_set: None,
+            warned_rejected: false,
         })
     });
     ACTIVE.store(true, Ordering::Relaxed);
@@ -465,8 +470,9 @@ fn with_clip<R>(f: impl FnOnce(&mut Clip) -> R) -> Option<Option<R>> {
     }
     Some(CLIP.with(|c| {
         let mut c = c.borrow_mut();
+        // 一次性诊断走 stderr（同「找不到 libxkbcommon」）：没装 log 后端的应用也要看得见。
         if c.is_none() && !OFF_THREAD_WARNED.swap(true, Ordering::Relaxed) {
-            log::warn!("Wayland 下剪贴板只能在界面线程上读写（其它线程的读写当空处理）");
+            eprintln!("[windui] Wayland 下剪贴板只能在界面线程上读写（其它线程的读写当空处理）");
         }
         c.as_mut().map(f)
     }))
@@ -812,7 +818,16 @@ impl Dispatch<wl_callback::WlCallback, SelectionSync> for Wl {
         if let wl_callback::Event::Done { .. } = event {
             with_local(|c| {
                 if c.owner.on_synced(sync.0, c.focused) {
-                    log::warn!("合成器没有采用这次剪贴板写入（输入 serial 无效，或窗口没有焦点）");
+                    // 首次走 stderr（没装 log 后端也看得见），之后只记日志，免得反复刷屏。
+                    if !std::mem::replace(&mut c.warned_rejected, true) {
+                        eprintln!(
+                            "[windui] 合成器没有采用这次剪贴板写入（输入 serial 无效，或窗口没有焦点）"
+                        );
+                    } else {
+                        log::warn!(
+                            "合成器没有采用这次剪贴板写入（输入 serial 无效，或窗口没有焦点）"
+                        );
+                    }
                 }
             });
         }
