@@ -141,8 +141,8 @@ fn marker_id(mimes: &[String], token: u64) -> Option<u64> {
 #[derive(Default)]
 struct Owner {
     next: u64,
-    /// 尚未销毁的 source：（序号，合成器已确认成为选区，`sync` 已回）。
-    live: Vec<(u64, bool, bool)>,
+    /// 尚未销毁的 source：（序号，合成器已确认成为选区，`sync` 已回，所用的输入 serial）。
+    live: Vec<(u64, bool, bool, u32)>,
     /// 本地认定的当前选区：读剪贴板直接取它的文本。
     current: Option<u64>,
 }
@@ -174,15 +174,15 @@ enum ReadPlan {
 
 impl Owner {
     /// 发出一次 `set_selection`，返回新 source 的序号。
-    fn set(&mut self) -> u64 {
+    fn set(&mut self, serial: u32) -> u64 {
         self.next += 1;
-        self.live.push((self.next, false, false));
+        self.live.push((self.next, false, false, serial));
         self.current = Some(self.next);
         self.next
     }
 
     fn synced(&self, id: u64) -> bool {
-        self.live.iter().any(|&(i, _, s)| i == id && s)
+        self.live.iter().any(|&(i, _, s, _)| i == id && s)
     }
 
     /// 收到 `selection` 事件。返回可以销毁的 source（被更新的选区取代了的旧 source）。
@@ -217,7 +217,7 @@ impl Owner {
         let gone: Vec<u64> = self
             .live
             .iter()
-            .filter(|&&(_, confirmed, synced)| synced && !confirmed)
+            .filter(|&&(_, confirmed, synced, _)| synced && !confirmed)
             .map(|e| e.0)
             .collect();
         for &id in &gone {
@@ -237,12 +237,16 @@ impl Owner {
     /// （[`Synced::rejected`]，调用方记诊断）。没焦点时合成器本就不给我们发选区事件，无从判断，
     /// 照旧以它为准。
     ///
-    /// 无论哪种，已 sync 却未确认的 source 只留两个：最旧的与最新的，中间的当场释放
-    /// （[`Synced::gone`]）。被拒、失焦时的复制都不带来选区事件，不这样做就会无上限累积（后台
-    /// 应用定时复制的典型情形）。留最旧的：serial 的有效性只会随时间变差，这些复制里若有被
-    /// 合成器采用的，是最早的那些，而被采用的又会被更晚被采用的取代（先收到 `cancelled`），
-    /// 所以还活着的里面至多最旧的一个是真实选区——它也可能是被异步回发的合成器误判的那个，
-    /// 留着才认得回来。留最新的：它是本地认定（失焦时）或等认回的最近一次。
+    /// 无论哪种，已 sync 却未确认的 source 只留「每个 serial 里最旧的一个」加「整体最新的一个」，
+    /// 其余当场释放（[`Synced::gone`]）。被拒、失焦时的复制都不带来选区事件，不这样做就会无上限
+    /// 累积（后台应用定时复制的典型情形）；这样留的个数以用过的不同 serial 数为限。
+    ///
+    /// 留每组最旧的：同一 serial 的几次复制里，被合成器采用的只可能是最早的那些（weston 丢弃
+    /// 同 serial 的后一次；wlroots 都采用，但后采用的取代前者、前者先收到 `cancelled`），所以
+    /// 每组活着的里面至多最旧的一个是真实选区。不同 serial 之间没有这个顺序——旧 serial 被拒
+    /// 之后，一次新输入带来的新 serial 照样可能被采用——所以按 serial 分组，而不是整体只留最旧。
+    /// 真实选区也可能正是被异步回发的合成器误判的那个，留着才认得回来。留最新的：它是本地认定
+    /// （失焦时）或等认回的最近一次。
     fn on_synced(&mut self, id: u64, focused: bool) -> Synced {
         let Some(e) = self.live.iter_mut().find(|e| e.0 == id) else {
             return Synced::default();
@@ -257,16 +261,19 @@ impl Owner {
         if rejected && self.current == Some(id) {
             self.current = None;
         }
-        let pending: Vec<u64> = self
+        let pending: Vec<(u64, u32)> = self
             .live
             .iter()
-            .filter(|&&(_, confirmed, synced)| synced && !confirmed)
-            .map(|e| e.0)
+            .filter(|&&(_, confirmed, synced, _)| synced && !confirmed)
+            .map(|e| (e.0, e.3))
             .collect();
-        let (oldest, newest) = (pending.iter().min().copied(), pending.iter().max().copied());
+        let newest = pending.iter().map(|p| p.0).max();
+        let oldest_of_its_serial =
+            |&(i, serial): &(u64, u32)| !pending.iter().any(|p| p.1 == serial && p.0 < i);
         let gone: Vec<u64> = pending
-            .into_iter()
-            .filter(|&i| Some(i) != oldest && Some(i) != newest)
+            .iter()
+            .filter(|p| Some(p.0) != newest && !oldest_of_its_serial(p))
+            .map(|p| p.0)
             .collect();
         for &i in &gone {
             self.forget(i);
@@ -586,7 +593,7 @@ pub(in super::super) fn set_text(text: &str) -> bool {
                 return;
             }
         }
-        let id = c.owner.set();
+        let id = c.owner.set(c.serial);
         c.last_set = Some((id, c.serial));
         let source = c.manager.create_data_source(
             &c.qh,
@@ -1160,7 +1167,7 @@ mod tests {
     #[test]
     fn copy_then_confirmed_reads_locally() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a), "发出即以本地为准");
         assert!(o.on_selection(Sel::Ours(a)).is_empty());
         assert!(!o.on_synced(a, true).rejected);
@@ -1170,7 +1177,7 @@ mod tests {
     #[test]
     fn rejected_copy_falls_back_to_real_selection() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         // 合成器不采用、也不发 cancelled：到 sync 回来都没见到自己的选区。
         assert!(o.on_synced(a, true).rejected, "有焦点却没确认 = 判为被拒");
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
@@ -1182,7 +1189,7 @@ mod tests {
     #[test]
     fn copy_misjudged_as_rejected_is_recovered_when_its_selection_arrives_late() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         assert!(
             o.on_synced(a, true).rejected,
             "合成器异步回发选区：sync 先回来，先判为被拒"
@@ -1201,7 +1208,7 @@ mod tests {
     #[test]
     fn unfocused_copy_is_kept_since_no_selection_event_is_expected() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         assert!(!o.on_synced(a, false).rejected);
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a));
         // 回到焦点时合成器补发当前选区：是别人的，说明我们那次被取代或被拒。
@@ -1212,7 +1219,7 @@ mod tests {
     #[test]
     fn foreign_selection_older_than_our_request_does_not_evict_it() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         // 这条别人的选区事件是合成器处理我们的请求之前发的。
         o.on_selection(Sel::Foreign);
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a));
@@ -1226,8 +1233,8 @@ mod tests {
     #[test]
     fn newer_copy_in_flight_wins_and_older_sources_are_released() {
         let mut o = Owner::default();
-        let a = o.set();
-        let b = o.set();
+        let a = o.set(1);
+        let b = o.set(1);
         assert!(o.on_selection(Sel::Ours(a)).is_empty());
         assert_eq!(
             o.plan(Sel::Ours(a)),
@@ -1245,10 +1252,10 @@ mod tests {
     #[test]
     fn live_own_offer_is_read_locally_even_after_a_newer_copy_was_rejected() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
-        let b = o.set();
+        let b = o.set(1);
         assert!(o.on_synced(b, true).rejected, "b 被拒");
         assert_eq!(
             o.plan(Sel::Ours(a)),
@@ -1260,7 +1267,7 @@ mod tests {
     #[test]
     fn marker_copied_by_a_clipboard_manager_is_read_through_the_pipe() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         // 管理器接手：我们的 source 先被 cancelled，随后它照抄的 offer（带我们的标记）成为选区。
@@ -1272,10 +1279,10 @@ mod tests {
     #[test]
     fn copy_rejected_while_unfocused_is_evicted_when_our_old_selection_comes_back() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
-        let b = o.set();
+        let b = o.set(1);
         assert!(!o.on_synced(b, false).rejected, "失焦时无从判定，先留着");
         // 重获焦点：合成器补发的选区仍是 a，b 显然没被采用。
         assert_eq!(o.on_selection(Sel::Ours(a)), vec![b]);
@@ -1285,7 +1292,7 @@ mod tests {
     #[test]
     fn copy_rejected_while_unfocused_is_released_when_a_foreign_selection_comes_back() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_synced(a, false);
         assert_eq!(
             o.on_selection(Sel::Foreign),
@@ -1294,7 +1301,7 @@ mod tests {
         );
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
         // 被接受过、后来被别人取代的，由 `cancelled` 释放，这里不重复。
-        let b = o.set();
+        let b = o.set(1);
         o.on_selection(Sel::Ours(b));
         o.on_synced(b, true);
         assert!(o.on_selection(Sel::Foreign).is_empty());
@@ -1303,14 +1310,14 @@ mod tests {
     #[test]
     fn several_copies_rejected_while_unfocused_are_all_released_on_our_old_selection() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
-        let b = o.set();
+        let b = o.set(1);
         o.on_synced(b, false);
-        let c = o.set();
+        let c = o.set(1);
         o.on_synced(c, false);
-        let d = o.set(); // 还在路上
+        let d = o.set(1); // 还在路上
         let mut gone = o.on_selection(Sel::Ours(a));
         gone.sort();
         assert_eq!(gone, vec![b, c], "b 与 c 都被拒；在路上的 d 不动");
@@ -1320,9 +1327,9 @@ mod tests {
     #[test]
     fn several_copies_rejected_while_unfocused_are_all_released_on_a_foreign_selection() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_synced(a, false);
-        let b = o.set();
+        let b = o.set(1);
         o.on_synced(b, false);
         let mut gone = o.on_selection(Sel::Foreign);
         gone.sort();
@@ -1356,7 +1363,7 @@ mod tests {
     #[test]
     fn repeated_rejections_keep_only_the_oldest_and_the_latest() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         assert_eq!(
             o.on_synced(a, true),
             Synced {
@@ -1364,13 +1371,13 @@ mod tests {
                 gone: vec![]
             }
         );
-        let b = o.set();
+        let b = o.set(1);
         assert_eq!(
             o.on_synced(b, true).gone,
             vec![],
             "a（最旧）与 b（最新）都留"
         );
-        let c = o.set();
+        let c = o.set(1);
         assert_eq!(o.on_synced(c, true).gone, vec![b], "中间的 b 释放");
         assert_eq!(o.live.len(), 2);
     }
@@ -1378,9 +1385,9 @@ mod tests {
     #[test]
     fn copies_while_unfocused_do_not_accumulate() {
         let mut o = Owner::default();
-        let first = o.set();
+        let first = o.set(1);
         for _ in 0..100 {
-            let id = o.set();
+            let id = o.set(1);
             o.on_synced(id, false);
         }
         o.on_synced(first, false);
@@ -1401,12 +1408,34 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_copy_with_a_newer_serial_survives_between_rejections() {
+        // weston、失焦：旧 serial s1 复制 a 被拒 → 一次指针点击带来新 serial s3，复制 b 被采用
+        // （失焦收不到选区事件）→ 定时器仍用 s3 复制 c 被拒。候选 {a, b, c} 里 b 是真实选区，
+        // 释放它就清空了全局剪贴板。
+        let mut o = Owner::default();
+        let a = o.set(1);
+        o.on_synced(a, false);
+        let b = o.set(3);
+        o.on_synced(b, false);
+        let c = o.set(3);
+        let r = o.on_synced(c, false);
+        assert!(!r.gone.contains(&b), "b 是 s3 组里最旧的，不能释放");
+        assert!(
+            r.gone.is_empty(),
+            "a（s1 组最旧）、b（s3 组最旧）、c（最新）都留"
+        );
+        // 同组再来一次：组内中间的 c 才释放。
+        let d = o.set(3);
+        assert_eq!(o.on_synced(d, false).gone, vec![c]);
+    }
+
+    #[test]
     fn a_misjudged_copy_survives_a_later_real_rejection() {
         // 异步回发选区的合成器：a 实际被采用却先判为被拒；随后 b 真被拒。
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         assert!(o.on_synced(a, true).rejected);
-        let b = o.set();
+        let b = o.set(1);
         assert!(
             o.on_synced(b, true).gone.is_empty(),
             "不能连带释放 a（清空全局选区）"
@@ -1469,7 +1498,7 @@ mod tests {
     #[test]
     fn cancelled_clears_ownership() {
         let mut o = Owner::default();
-        let a = o.set();
+        let a = o.set(1);
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         o.forget(a);
