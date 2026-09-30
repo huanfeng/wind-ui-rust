@@ -155,12 +155,12 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 ## 8. Wayland 原生后端（进行中）
 
-计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–3**：窗口与呈现；
-指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入（GNOME 真桌面的
-交互项待人工验证）。
+计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–4**：窗口与呈现；
+指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入；输入法
+（text-input-v3）（GNOME 真桌面的交互项待人工验证）。
 
 > ⚠ 还没有标题栏（weston / KDE / sway 给服务端装饰，GNOME 不给——有边框窗口在 GNOME 下
-> 没有标题栏）、输入法。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
+> 没有标题栏）。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
 > 才走它，其余情况 Wayland 会话照旧经 XWayland 运行。
 
 ### 8.1 后端选择
@@ -310,7 +310,33 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   读的期间目标窗口已关或被模态子窗挡住、或事件循环已退出，都只销毁，源端收到 `cancelled`。
   交付回调里弹阻塞对话框（门户 / zenity）时，同一轮里其余已读完的拖入等对话框关掉才交付
   （数据不丢；还没读完、期间又过了 1.5 秒的会被放弃）。
-- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape` 假装合成器
+- **输入法**（`ime.rs` 收发协议，`text_input.rs` 是纯逻辑状态机、有单测）：`zwp_text_input_v3`
+  绑 v1（光标矩形随 `commit` 生效；v2 改为随下一次表面提交生效，GNOME 42 只有 v1），每 seat
+  一个。上层与 X11 / macOS 同一套：宿主报 `ime_caret` / `ime_text` / `ime_selection`，合成串经
+  `set_ime_preedit` 由 `TextInput` 内联绘制，提交的文字按 `Key::Char` 逐字送进去。
+  - **启停**：文本焦点（text-input 自己的 `enter`）在某窗口、宿主报了光标、且没被模态挡住 →
+    `enable` + `set_content_type` + `set_cursor_rectangle` + `set_surrounding_text` + `commit`；
+    否则 `disable` + `commit`。每次事件收尾对账，**状态真变了才发、才 `commit`**（打一个字通常
+    两次：正文变 → 周围文本，重画后光标位置变 → 矩形）。`enter` / `disable` 之后状态全作废重发。
+    `leave` 时清掉本地合成串。
+  - **光标矩形**：宿主给物理像素，除以窗口缩放换成表面逻辑坐标（1.5 倍下与 1 倍同值，已验）。
+  - **周围文本**：正文与选区（字符）换成字节；超过协议上限 4000 字节时截取光标附近一段、切在
+    字符边界上。（光标，选区）都没变时沿用上次的结果，不每个事件都复制一遍正文——代价是只删
+    光标后文字（Delete 键）这类「光标不动、正文变了」的改动要等下一次光标变化才同步。
+  - **`done` 批量应用**：清旧合成串 → 删周围文本（按上次送出的周围文本把字节换成字符，发
+    Backspace / Delete）→ 提交串逐字 `Key::Char` → 设新合成串（光标字节换字符；两端 -1 = 隐藏
+    光标，放末尾；两端不同 = 高亮分句）；期间不对账，应用完统一对账一次。serial 与我们的
+    `commit` 次数不符：文本照常应用，状态请求压到对得上的 `done` 再发（协议原文）；
+    `enable` / `disable` 不受此限。
+  - **合成中**：输入法抓着键盘时合成器不把按键发给我们（Enter 确认、Esc 取消都由它消化），
+    它放行的照常走本地，与 X11「输入法不要的才转回来」同效，无需另拦；合成中点击 → 先放弃
+    合成（本地清掉 + `disable` / `enable` 让输入法丢掉），同 X11 的 `abort_composition`。
+  - **缺口**：框架没有向平台层暴露「多行 / 密码」属性，内容类型一律普通文本、不带
+    sensitive / hidden 提示，**密码框也会弹输入法**（X11 的 XIM 同样如此；密码框不交出正文）。
+    要补得给 `AppHandler` 加查询，属于扩大平台接口，另议。
+  - 合成器没有 text-input-v3 → 没有输入法，stderr 提示一次。Mutter 从 GNOME 3.34 起实现了
+    text-input-v3，GNOME 42 应有（本机未实测，见人工清单）。
+- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input` 假装合成器
   没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径。
 - **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定，剪贴板与拖入
   也随之不可用（数据设备按 seat 建，只建启动时那一个）；文件拖出、primary selection（中键
@@ -389,6 +415,22 @@ Stage 3（sway headless；外部一侧用 `wl-clipboard` 2.2.1 的 `wl-copy` / `
 - 未能自动化：「写入被合成器拒绝」的真实路径（sway 上键盘焦点进入的 serial 就够用，构造不出
   被拒），只有状态机单测；拖动途中模态状态改变。
 - `about` 空闲 10 秒仍 0 tick；私有内存 3004 KB（无输入设备，§8.5 同条件 3000 KB）。
+
+Stage 4（sway headless；输入法端是自写的最小 `zwp_input_method_v2` 客户端，从 FIFO 读
+`preedit` / `commit` / `delete` / `send` 命令，把收到的 activate / surrounding_text / done 打出来）：
+- 点进输入框 → 输入法收到 activate、`surrounding_text("" 0 0)`、content_type normal；打 `ab`
+  后周围文本 `"ab" 2 2`；点按钮（非文本）→ deactivate。协议请求（`WAYLAND_DEBUG`）：没变化时
+  不发，光标矩形 `(20,63,1,17)` 随打字右移。
+- `preedit zhong 5 5` → 输入框里内联显示下划线的 `zhong`，光标在其后；`commit 中文` → 输入框
+  变成 `ab中文`（Ctrl+A Ctrl+C 经 `wl-paste` 读回），周围文本 `"ab中文" 8 8`（字节）；
+  `delete 3 0` → `ab中`。
+- 合成中把焦点切到另一窗口 → text-input `leave`、本地合成串清掉；切回 → 重新 `enable`，新合成串
+  正常显示；合成中点击输入框开头 → 合成串放弃、`disable` + `enable`、光标落到点击处。
+- 1.5 倍缩放：光标矩形与 1 倍完全相同（逻辑坐标），`preferred_scale 180` 生效。
+- `WINDUI_WAYLAND_DISABLE=text-input`：stderr 一行提示，其余照常。`about` 空闲 10 秒 0 tick，
+  私有内存 3012 KB。
+- 未能自动化：真实输入法（ibus / fcitx5）的候选窗位置与拼音流程；sway 1.9 不给输入法的弹出
+  表面发 `text_input_rectangle`，矩形只能从请求参数核对。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 

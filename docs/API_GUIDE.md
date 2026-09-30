@@ -2317,7 +2317,7 @@ Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持—�
 
 Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开）分阶段落地，目前有窗口与呈现、
 键鼠输入、剪贴板（文本；**仅界面线程可用**，其它线程读写当空处理，见 `LINUX_PORTING.md` §8.3）
-与文件拖入，**还没有标题栏（GNOME 下）与输入法**，因此默认不启用，
+与文件拖入、输入法（text-input-v3），**还没有标题栏（GNOME 下）**，因此默认不启用，
 须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则见 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 
 | 能力 | Windows | macOS | Linux |

@@ -85,7 +85,23 @@ enter 的 serial 就足够）。不做：文件拖出、primary selection（中�
 **Success Criteria**: fcitx5 与 ibus 下中文输入、候选窗位置、合成串内联显示正确。
 **Tests**: 协议状态机单测（preedit/commit/done 的批量应用顺序）；**真桌面人工验证**
 （headless 合成器无现成输入法，此项不声称自动化覆盖）。
-**Status**: Not Started
+**Status**: In Progress（2026-09-30）——实现、状态机单测与 sway 上自写 `input_method_v2` 客户端
+的协议往返完成（证据见 `docs/LINUX_PORTING.md` §8.5）；**待 192.168.5.55（GNOME 42）+ ibus
+（Ubuntu 默认）/ fcitx5 人工验证**后改 Complete。运行时加 `WINDUI_BACKEND=wayland`，清单：
+1. 中文拼音输入：打 `nihao` 选词上屏，结果正确，无重复、无丢字。
+2. 候选窗跟随光标：出现在输入框光标下方，打字 / 换行 / 滚动后跟着走。
+3. 合成串内联：拼音在输入框里带下划线显示，光标在合成串内正确；Esc 取消后清干净。
+4. 多行输入框（`multiline` 示例）里输入、换行后候选窗位置。
+5. 密码框：**预期仍会弹输入法**（已知缺口，框架未暴露密码属性，X11 同样）——记录实际表现。
+6. 切换窗口焦点：合成到一半 Alt+Tab 走再切回，合成串已清、输入法状态正常；点到按钮等
+   非文本控件后输入法关闭（候选窗不再出现）。
+7. 1x / 2x 缩放下候选窗位置都贴光标（GNOME 设置里改缩放）。
+8. 首次启动时终端里**不应**出现「合成器不支持 text-input-v3」——出现即说明 Mutter 42 没提供，
+   需要记下来。
+fcitx5 在 GNOME Wayland 下经其 ibus 前端 / Mutter 走同一条 text-input-v3，两者都测一遍。
+偏差：内容类型一律普通文本（无多行 / 密码提示）；「光标不动、正文变了」的改动（Delete 键）
+周围文本要等下次光标变化才同步；sway 不给输入法弹出表面发 `text_input_rectangle`，光标矩形
+只从请求参数核对。
 
 ## Stage 5: 装饰与桌面集成
 **Goal**:
