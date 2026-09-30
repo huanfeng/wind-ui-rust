@@ -14,9 +14,32 @@
   循环（空闲零 CPU）、HiDPI（`Xft.dpi` / `WINDUI_SCALE`）、光标、键盘与快捷键、剪贴板、
   XIM 合成串内联绘制、无边框窗口（拖动 / 边缘缩放 / 双击最大化 / 右键系统菜单）、多窗口与
   模态、文件拖入（XDND）、全局热键（`GrabKey`）、单实例转发、`--screenshot`。尚未实现：
-  系统托盘、文件拖出、零窗口常驻、窗口模式 GPU、Wayland 原生。详见 `docs/LINUX_PORTING.md`。
+  系统托盘、文件拖出、零窗口常驻、窗口模式 GPU。Wayland 原生后端见下一条（实验性）；默认
+  仍走本条的 X11 后端（Wayland 会话经 XWayland）。详见 `docs/LINUX_PORTING.md`。
 
   实测关于窗（620×556）私有内存 3.7MB@100% / 8.8MB@200%。
+- **Linux 原生 Wayland 后端（实验性）**：`wayland` feature（默认编入），运行期须
+  `WINDUI_BACKEND=wayland` 显式启用，连不上或未编入时提示后回退 X11；**默认仍走 X11**。
+  依赖 `wayland-client` 0.31（纯 Rust 协议实现，不链 libwayland）+ `wayland-protocols`，
+  libxkbcommon 运行期 `dlopen`。已落地：
+  - 窗口与呈现：`wl_shm` 按脏区上屏、`frame` 回调配速（空闲零 CPU）、多窗口与模态、窗口操作；
+  - 输入：指针（高精度滚轮、双击、捕获）、键盘（xkbcommon、客户端按键重复）、光标
+    （cursor-shape-v1 / XCursor 主题回退）；
+  - HiDPI：fractional-scale-v1 + viewporter 分数缩放，回退整数 buffer_scale，运行期跟随；
+  - 无边框窗口的拖动 / 边缘缩放 / 双击最大化；
+  - 剪贴板（文本，`wl_data_device`；读写不阻塞界面）与文件拖入（`text/uri-list`，异步读取）；
+  - 输入法（text-input-v3）：合成串内联绘制、候选窗跟随光标、换输入框重新启用、密码 / 多行
+    内容提示。
+
+  已知限制：全局热键不实现（协议不允许，兜底是桌面快捷键绑到 `应用 --参数` 经单实例转发）；
+  剪贴板仅界面线程可用（其它线程读写当空）；不给服务端装饰的合成器（GNOME）上窗口还没有
+  标题栏（客户端装饰未做）；文件拖出、primary selection、系统托盘未做；应用不能自定窗口坐标、
+  查询不到最小化（协议所限）。GNOME 真桌面的交互项待人工验证。详见 `docs/LINUX_PORTING.md` §8。
+- **输入法内容类型与焦点身份**（公共 API，均带默认实现）：`Widget::ime_hints()` 返回
+  `ImeHints { multiline, password }`（`TextInput` 按 `.multiline()` / `.password()` 如实报告，
+  密码框恒为单行）；`AppHandler::ime_field()` 返回 `ImeField { id, hints }`，`id` 在焦点换到
+  另一个控件时必变。自绘可编辑控件可覆盖 `ime_hints`。目前 Wayland 后端用它们，其它平台
+  后续可接。
 - CI 增加 `ubuntu-latest`。docs.rs 同时构建 Linux 目标。
 - `TrayHandle::notify(title, body)`：从应用状态变化处弹系统通知，不必先有一次托盘交互
   （Win32 / macOS；与 `TrayCtx::notify` 同一平台实现）。感谢 @m2selfA（#13）。
@@ -32,6 +55,9 @@
 - **32 位 Windows（`i686-pc-windows-msvc`）编译失败**：`SetWindowLongPtrW` 在 x86 上收
   `i32`；`NOTIFYICONDATAW` 在 x86 上是 `packed(1)`，对其字符数组字段取引用是 E0793。
   感谢 @0x696c757a696f（#17、#18）。
+- **合成中焦点被移走，旧输入框里的合成串一直挂着**（全平台）。宿主清合成串只作用于当前
+  焦点：合成到一半焦点被程序或 Tab 移到别的框，随后「清合成串」落在新焦点上。宿主改为记住
+  合成串所在节点，清的是原来那个框。
 - **`Slider::show_value` 拖到头还差 44px**：绘制时轨道右侧让出值标签，指针换算却按整宽，
   旋钮视觉到 100% 后鼠标还要再拖一个标签宽。两处改为共用同一条轨道宽（#11）。
 
