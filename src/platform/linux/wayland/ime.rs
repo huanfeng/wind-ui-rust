@@ -12,8 +12,8 @@
 //!   拦截。
 //! - **合成中点击**：先放弃合成（本地清掉，`disable` + `enable` 让输入法也丢掉），命中位置才
 //!   按不含合成串的文本算——同 X11 的 `abort_composition`。
-//! - **缺口**：框架没有向平台层暴露「多行 / 密码」属性，内容类型一律「普通」，密码框也会弹
-//!   输入法（X11 的 XIM 同样如此；密码框不交出正文，`ime_text` 为空）。
+//! - **换输入框**：宿主经 `ime_field` 报焦点控件身份，变了就 `disable` 再 `enable`（协议要求，
+//!   同一表面内也算），内容类型按控件的多行 / 密码属性设。
 
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::text_input::zv3::client::{
@@ -23,10 +23,29 @@ use wayland_protocols::wp::text_input::zv3::client::{
 
 use super::text_input::{surrounding, Req, TextInputState, Want};
 use super::Wl;
-use crate::event::{Key, KeyEvent, Preedit};
+use crate::event::{ImeHints, Key, KeyEvent, Preedit};
 
-/// 对账时向宿主取的（光标，选区）：两者都没变，正文多半也没变。
-type Probe = ((i32, i32, i32), Option<(usize, usize)>);
+/// 对账时向宿主取的（光标，选区，焦点控件）：都没变、期间又没有按键，正文多半也没变。
+type Probe = (
+    (i32, i32, i32),
+    Option<(usize, usize)>,
+    Option<crate::event::ImeField>,
+);
+
+/// 框架的内容类型 → 协议的提示与用途。密码：用途 password，并提示「敏感、隐藏」（输入法不
+/// 联想、不记忆、不显示明文候选）；多行：提示 multiline（回车是换行）。
+fn content_type(h: ImeHints) -> (ContentHint, ContentPurpose) {
+    if h.password {
+        (
+            ContentHint::SensitiveData | ContentHint::HiddenText,
+            ContentPurpose::Password,
+        )
+    } else if h.multiline {
+        (ContentHint::Multiline, ContentPurpose::Normal)
+    } else {
+        (ContentHint::None, ContentPurpose::Normal)
+    }
+}
 
 /// 每 seat 一个 text-input 对象（本后端只绑启动时那一个 seat）。
 pub(super) struct Ime {
@@ -62,9 +81,10 @@ impl Ime {
             match r {
                 Req::Enable => self.obj.enable(),
                 Req::Disable => self.obj.disable(),
-                Req::ContentType => self
-                    .obj
-                    .set_content_type(ContentHint::None, ContentPurpose::Normal),
+                Req::ContentType(h) => {
+                    let (hint, purpose) = content_type(h);
+                    self.obj.set_content_type(hint, purpose)
+                }
                 Req::Rect(x, y, w, h) => self.obj.set_cursor_rectangle(x, y, w, h),
                 Req::Surrounding(t, c, a) => self.obj.set_surrounding_text(t, c, a),
                 Req::Commit => self.obj.commit(),
@@ -228,7 +248,8 @@ impl Wl {
         let mut fresh = None;
         let want = caret.map(|c| {
             let sel = w.handler.ime_selection();
-            let probe = (c, sel);
+            let field = w.handler.ime_field();
+            let probe = (c, sel, field);
             match ime.want.clone().filter(|_| ime.probe == Some(probe)) {
                 Some(cached) => cached,
                 None => {
@@ -236,8 +257,17 @@ impl Wl {
                     let f = w.scale.factor;
                     let lg = |v: i32| (v as f64 / f).round() as i32;
                     let rect = (lg(c.0), lg(c.1), 1, lg(c.2).max(1));
-                    let surrounding = sel.map(|s| surrounding(&w.handler.ime_text(), s));
-                    let want = Want { rect, surrounding };
+                    let hints = field.map(|f| f.hints).unwrap_or_default();
+                    // 密码框不发周围文本（宿主本就给空正文，这里连空串也不发）。
+                    let surrounding = sel
+                        .filter(|_| !hints.password)
+                        .map(|s| surrounding(&w.handler.ime_text(), s));
+                    let want = Want {
+                        rect,
+                        surrounding,
+                        field: field.map_or(0, |f| f.id),
+                        hints,
+                    };
                     fresh = Some((probe, want.clone()));
                     want
                 }

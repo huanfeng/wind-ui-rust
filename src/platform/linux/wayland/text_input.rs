@@ -14,7 +14,7 @@
 //!
 //! 文本里的下标、长度都是 UTF-8 **字节**；框架的合成串与选区用**字符**，换算在这里做。
 
-use crate::event::Preedit;
+use crate::event::{ImeHints, Preedit};
 
 /// 协议规定 `set_surrounding_text` 的文本不超过 4000 字节。
 pub(super) const SURROUNDING_MAX: usize = 4000;
@@ -27,6 +27,10 @@ pub(super) struct Want {
     /// 周围文本与光标 / 锚点（字节）。`None` = 宿主没给选区（不是文本控件），不发。密码框
     /// 宿主给空正文，这里发空串（不把密码交给输入法）。
     pub surrounding: Option<(String, u32, u32)>,
+    /// 焦点控件的身份：变了 = 换了输入框，协议要求重新 `enable`。
+    pub field: u64,
+    /// 内容类型（多行 / 密码）。
+    pub hints: ImeHints,
 }
 
 /// 要发的协议请求，按顺序。
@@ -34,8 +38,8 @@ pub(super) struct Want {
 pub(super) enum Req {
     Enable,
     Disable,
-    /// 内容类型：目前一律「普通文本」（框架没有向平台层暴露多行 / 密码属性）。
-    ContentType,
+    /// 内容类型（多行 / 密码）。
+    ContentType(ImeHints),
     Rect(i32, i32, i32, i32),
     Surrounding(String, i32, i32),
     Commit,
@@ -78,6 +82,8 @@ pub(super) struct TextInputState {
     enabled: bool,
     rect: Option<(i32, i32, i32, i32)>,
     surrounding: Option<(String, u32, u32)>,
+    field: Option<u64>,
+    hints: Option<ImeHints>,
     // ── 输入法发来、等 `done` 的 ──
     preedit: Option<(String, i32, i32)>,
     commit: Option<String>,
@@ -108,6 +114,8 @@ impl TextInputState {
         self.enabled = false;
         self.rect = None;
         self.surrounding = None;
+        self.field = None;
+        self.hints = None;
         self.stale = false;
     }
 
@@ -164,6 +172,13 @@ impl TextInputState {
             return Vec::new();
         }
         let mut out = Vec::new();
+        // 焦点换到了另一个输入框（同一表面内也算）：协议要求重新 `enable`，先 `disable` 收掉
+        // 上一个——输入法据此换上下文（中英状态、联想），也不会把旧框的合成串带过来。
+        if want.is_some_and(|w| self.enabled && self.field != Some(w.field)) {
+            out.extend([Req::Disable, Req::Commit]);
+            self.commits = self.commits.wrapping_add(1);
+            self.forget_sent();
+        }
         match want {
             None => {
                 if self.enabled {
@@ -173,8 +188,10 @@ impl TextInputState {
             }
             Some(w) if !self.enabled => {
                 // enable 重置一切状态：把全部状态随它一起送。
-                out.extend([Req::Enable, Req::ContentType]);
+                out.extend([Req::Enable, Req::ContentType(w.hints)]);
                 self.enabled = true;
+                self.field = Some(w.field);
+                self.hints = Some(w.hints);
                 self.stale = false;
                 self.push_state(w, &mut out, true);
             }
@@ -182,7 +199,7 @@ impl TextInputState {
             Some(_) if self.stale => {}
             Some(w) => self.push_state(w, &mut out, false),
         }
-        if !out.is_empty() {
+        if out.last().is_some_and(|r| *r != Req::Commit) {
             out.push(Req::Commit);
             self.commits = self.commits.wrapping_add(1);
         }
@@ -200,6 +217,10 @@ impl TextInputState {
     }
 
     fn push_state(&mut self, w: &Want, out: &mut Vec<Req>, all: bool) {
+        if !all && self.hints != Some(w.hints) {
+            out.push(Req::ContentType(w.hints));
+            self.hints = Some(w.hints);
+        }
         if all || self.rect != Some(w.rect) {
             let (x, y, ww, h) = w.rect;
             out.push(Req::Rect(x, y, ww, h));
@@ -283,7 +304,63 @@ mod tests {
         Want {
             rect: (x, 10, 1, 20),
             surrounding: Some(("ab".into(), 2, 2)),
+            field: 1,
+            hints: ImeHints::default(),
         }
+    }
+
+    #[test]
+    fn switching_to_another_field_disables_then_reenables_with_its_content_type() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        s.sync(Some(&want(1)));
+        let pw = ImeHints {
+            multiline: false,
+            password: true,
+        };
+        let other = Want {
+            field: 2,
+            hints: pw,
+            surrounding: None,
+            ..want(1)
+        };
+        assert_eq!(
+            s.sync(Some(&other)),
+            vec![
+                Req::Disable,
+                Req::Commit,
+                Req::Enable,
+                Req::ContentType(pw),
+                Req::Rect(1, 10, 1, 20),
+                Req::Commit
+            ],
+            "同一表面内换输入框：光标位置恰好相同也要重新 enable"
+        );
+        assert_eq!(
+            s.on_done(3),
+            Batch::default(),
+            "首次 + 切换时的两次 commit 都计数"
+        );
+        assert!(!s.stale);
+        assert!(s.sync(Some(&other)).is_empty());
+    }
+
+    #[test]
+    fn content_type_change_on_the_same_field_is_sent_without_reenabling() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        s.sync(Some(&want(1)));
+        let ml = ImeHints {
+            multiline: true,
+            password: false,
+        };
+        assert_eq!(
+            s.sync(Some(&Want {
+                hints: ml,
+                ..want(1)
+            })),
+            vec![Req::ContentType(ml), Req::Commit]
+        );
     }
 
     #[test]
@@ -300,7 +377,7 @@ mod tests {
             s.sync(Some(&want(1))),
             vec![
                 Req::Enable,
-                Req::ContentType,
+                Req::ContentType(ImeHints::default()),
                 Req::Rect(1, 10, 1, 20),
                 Req::Surrounding("ab".into(), 2, 2),
                 Req::Commit
@@ -352,6 +429,8 @@ mod tests {
         s.sync(Some(&Want {
             rect: (0, 0, 1, 1),
             surrounding: Some(("你好ab".into(), 6, 6)),
+            field: 1,
+            hints: ImeHints::default(),
         }));
         s.on_delete(6, 1);
         s.on_commit_string(Some("世界".into()));
@@ -459,6 +538,8 @@ mod tests {
         s.sync(Some(&Want {
             rect: (0, 0, 1, 1),
             surrounding: Some(("你好ab".into(), 6, 3)),
+            field: 1,
+            hints: ImeHints::default(),
         }));
         s.on_delete(6, 2);
         assert_eq!(
