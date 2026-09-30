@@ -226,20 +226,29 @@ impl Owner {
 
     /// `set_selection` 之后的 `sync` 回来了。有键盘焦点却没见到自己的选区 = 判为被拒，返回 true
     /// （调用方记诊断）。没焦点时合成器本就不给我们发选区事件，无从判断，照旧以它为准。
-    fn on_synced(&mut self, id: u64, focused: bool) -> bool {
-        let Some(e) = self.live.iter_mut().find(|e| e.0 == id) else {
-            return false;
-        };
+    fn on_synced(&mut self, id: u64, focused: bool) -> Option<Vec<u64>> {
+        let e = self.live.iter_mut().find(|e| e.0 == id)?;
         e.2 = true;
         if e.1 || !focused {
-            return false;
+            return None;
         }
-        // 只放弃本地认定、不销毁 source：万一合成器是异步回发选区（判错了），随后到来的
+        // 只放弃本地认定、不销毁这个 source：万一合成器是异步回发选区（判错了），随后到来的
         // `Ours(id)` 还能把它认回来；真被拒的，等下一次选区事件再释放（见 `on_selection`）。
         if self.current == Some(id) {
             self.current = None;
         }
-        true
+        // 被拒本身不改变选区、不会带来选区事件：反复被拒（比如定时器拿旧 serial 复制）时
+        // 等不到释放时机。只留最新这一个等认回，更早的被拒者现在就释放。
+        let older: Vec<u64> = self
+            .live
+            .iter()
+            .filter(|&&(i, confirmed, synced)| i < id && synced && !confirmed)
+            .map(|e| e.0)
+            .collect();
+        for &i in &older {
+            self.forget(i);
+        }
+        Some(older)
     }
 
     /// source 被合成器 `cancelled`，或被我们销毁。
@@ -302,14 +311,23 @@ impl SourceData {
     }
 }
 
-/// 这次复制能不能直接改写上一个 source 的文本：上一次复制用的是同一个输入 serial，且它仍是本地
-/// 认定的当前选区（没被取代、没判为被拒）。
+/// 这次复制能不能直接改写上一个 source 的文本：上一次复制用的是同一个输入 serial，它仍是本地
+/// 认定的当前选区（没被取代、没判为被拒），且它的 `sync` 还没回来。
+///
+/// 最后一条是因为改写不产生选区事件：`sync` 回来后，监听选区变化的程序（剪贴板历史、合成器
+/// 自带的剪贴板管理器）多半已经读走了旧文本，再改写它们看不见。同 serial 在一个回调里连写
+/// 两次必然落在 `sync` 之前；隔了很久、中间又没有新输入（定时器复制）的，照常发新请求。
 ///
 /// 同一 serial 连发两次 `set_selection`，weston 会把后一次当作「不比现有选区新」丢掉，与 X11 /
 /// win32 的「后写者胜」不一致；改写文本则两边行为相同。返回要改写的 source 序号。
-fn reuse_source(last_set: Option<(u64, u32)>, serial: u32, current: Option<u64>) -> Option<u64> {
+fn reuse_source(
+    last_set: Option<(u64, u32)>,
+    serial: u32,
+    current: Option<u64>,
+    synced: impl Fn(u64) -> bool,
+) -> Option<u64> {
     let (id, used) = last_set?;
-    (used == serial && current == Some(id)).then_some(id)
+    (used == serial && current == Some(id) && !synced(id)).then_some(id)
 }
 
 /// `set_selection` 之后那个 `wl_display.sync` 的 user data：对应的 source 序号。
@@ -337,6 +355,13 @@ pub(super) struct PendingDrop {
     file: File,
     data: Vec<u8>,
     deadline: Instant,
+}
+
+impl PendingDrop {
+    /// 放弃这次拖入（不 `finish`）。
+    pub(super) fn cancel(self) {
+        self.offer.destroy();
+    }
 }
 
 // ── 剪贴板状态（事件循环线程的 thread-local） ────────────────────────────────
@@ -523,7 +548,8 @@ pub(in super::super) fn get_text() -> Option<Option<String>> {
 /// 写剪贴板文本。返回 `false` = Wayland 剪贴板没在用，调用方走 X11。
 pub(in super::super) fn set_text(text: &str) -> bool {
     with_clip(|c| {
-        if let Some(id) = reuse_source(c.last_set, c.serial, c.owner.current) {
+        if let Some(id) = reuse_source(c.last_set, c.serial, c.owner.current, |i| c.owner.synced(i))
+        {
             let data = c
                 .sources
                 .iter()
@@ -817,7 +843,10 @@ impl Dispatch<wl_callback::WlCallback, SelectionSync> for Wl {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             with_local(|c| {
-                if c.owner.on_synced(sync.0, c.focused) {
+                if let Some(gone) = c.owner.on_synced(sync.0, c.focused) {
+                    for id in gone {
+                        c.destroy_source(id);
+                    }
                     // 首次走 stderr（没装 log 后端也看得见），之后只记日志，免得反复刷屏。
                     if !std::mem::replace(&mut c.warned_rejected, true) {
                         eprintln!(
@@ -990,7 +1019,10 @@ impl Wl {
 
     fn finish_drop(&mut self, d: PendingDrop, ok: bool) {
         // 读完期间窗口可能已经关了：没人收，就当失败（不 finish）。
-        let target = self.idx(d.key).filter(|_| ok);
+        // 读的期间开了模态子窗：同 drop 那一刻被挡住，一样不交付。
+        let target = self
+            .idx(d.key)
+            .filter(|_| ok && self.blocked_by_modal(d.key).is_none());
         let paths = match target {
             Some(_) => host::parse_uri_list(&d.data),
             None => Vec::new(),
@@ -1099,7 +1131,7 @@ mod tests {
         let a = o.set();
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a), "发出即以本地为准");
         assert!(o.on_selection(Sel::Ours(a)).is_empty());
-        assert!(!o.on_synced(a, true));
+        assert!(o.on_synced(a, true).is_none());
         assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(a));
     }
 
@@ -1108,7 +1140,7 @@ mod tests {
         let mut o = Owner::default();
         let a = o.set();
         // 合成器不采用、也不发 cancelled：到 sync 回来都没见到自己的选区。
-        assert!(o.on_synced(a, true), "有焦点却没确认 = 判为被拒");
+        assert!(o.on_synced(a, true).is_some(), "有焦点却没确认 = 判为被拒");
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
         assert_eq!(o.plan(Sel::Empty), ReadPlan::Empty);
         // source 留到下一次选区事件才释放。
@@ -1120,7 +1152,7 @@ mod tests {
         let mut o = Owner::default();
         let a = o.set();
         assert!(
-            o.on_synced(a, true),
+            o.on_synced(a, true).is_some(),
             "合成器异步回发选区：sync 先回来，先判为被拒"
         );
         assert!(o.on_selection(Sel::Ours(a)).is_empty(), "不释放");
@@ -1138,7 +1170,7 @@ mod tests {
     fn unfocused_copy_is_kept_since_no_selection_event_is_expected() {
         let mut o = Owner::default();
         let a = o.set();
-        assert!(!o.on_synced(a, false));
+        assert!(o.on_synced(a, false).is_none());
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a));
         // 回到焦点时合成器补发当前选区：是别人的，说明我们那次被取代或被拒。
         o.on_selection(Sel::Foreign);
@@ -1185,7 +1217,7 @@ mod tests {
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         let b = o.set();
-        assert!(o.on_synced(b, true), "b 被拒");
+        assert!(o.on_synced(b, true).is_some(), "b 被拒");
         assert_eq!(
             o.plan(Sel::Ours(a)),
             ReadPlan::Local(a),
@@ -1212,7 +1244,7 @@ mod tests {
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         let b = o.set();
-        assert!(!o.on_synced(b, false), "失焦时无从判定，先留着");
+        assert!(o.on_synced(b, false).is_none(), "失焦时无从判定，先留着");
         // 重获焦点：合成器补发的选区仍是 a，b 显然没被采用。
         assert_eq!(o.on_selection(Sel::Ours(a)), vec![b]);
         assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(a));
@@ -1268,19 +1300,41 @@ mod tests {
 
     #[test]
     fn second_copy_with_the_same_serial_rewrites_the_current_source() {
-        assert_eq!(reuse_source(Some((3, 77)), 77, Some(3)), Some(3));
+        let unsynced = |_| false;
+        assert_eq!(reuse_source(Some((3, 77)), 77, Some(3), unsynced), Some(3));
         assert_eq!(
-            reuse_source(Some((3, 77)), 78, Some(3)),
+            reuse_source(Some((3, 77)), 78, Some(3), unsynced),
             None,
             "新的输入：照常发"
         );
         assert_eq!(
-            reuse_source(Some((3, 77)), 77, None),
+            reuse_source(Some((3, 77)), 77, None, unsynced),
             None,
             "已被取代 / 判为被拒：不能改写一个不再是选区的 source"
         );
-        assert_eq!(reuse_source(Some((3, 77)), 77, Some(4)), None);
-        assert_eq!(reuse_source(None, 77, None), None);
+        assert_eq!(reuse_source(Some((3, 77)), 77, Some(4), unsynced), None);
+        assert_eq!(reuse_source(None, 77, None, unsynced), None);
+        assert_eq!(
+            reuse_source(Some((3, 77)), 77, Some(3), |_| true),
+            None,
+            "sync 已回：监听者可能已读走旧文本，改写它们看不见，照常发新请求"
+        );
+    }
+
+    #[test]
+    fn repeated_rejections_keep_only_the_latest_for_recovery() {
+        let mut o = Owner::default();
+        let a = o.set();
+        assert_eq!(o.on_synced(a, true), Some(vec![]));
+        let b = o.set();
+        assert_eq!(
+            o.on_synced(b, true),
+            Some(vec![a]),
+            "被拒不带来选区事件，旧的现在就放"
+        );
+        let c = o.set();
+        assert_eq!(o.on_synced(c, true), Some(vec![b]));
+        assert_eq!(o.live.len(), 1, "无论被拒多少次，只留最新一个");
     }
 
     #[test]

@@ -255,6 +255,12 @@ pub(super) fn run_windowed(
         crate::single_instance::install_listener(&si.app_id, main as isize, si.on_second);
     }
     wl.run_loop(&mut queue);
+    // 没读完的拖入：销毁 offer，源端收到 `cancelled` 即知结束（进程若还不退出，不至于让文件
+    // 管理器一直等着）。
+    for d in wl.drops.drain(..) {
+        d.cancel();
+    }
+    let _ = queue.flush();
     data::shutdown();
 }
 
