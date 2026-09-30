@@ -147,6 +147,15 @@ struct Owner {
     current: Option<u64>,
 }
 
+/// [`Owner::on_synced`] 的结果。
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Synced {
+    /// 判为被拒。
+    rejected: bool,
+    /// 可以销毁的 source。
+    gone: Vec<u64>,
+}
+
 /// 当前选区是谁的。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sel {
@@ -224,31 +233,45 @@ impl Owner {
         old
     }
 
-    /// `set_selection` 之后的 `sync` 回来了。有键盘焦点却没见到自己的选区 = 判为被拒，返回 true
-    /// （调用方记诊断）。没焦点时合成器本就不给我们发选区事件，无从判断，照旧以它为准。
-    fn on_synced(&mut self, id: u64, focused: bool) -> Option<Vec<u64>> {
-        let e = self.live.iter_mut().find(|e| e.0 == id)?;
+    /// `set_selection` 之后的 `sync` 回来了。有键盘焦点却没见到自己的选区 = 判为被拒
+    /// （[`Synced::rejected`]，调用方记诊断）。没焦点时合成器本就不给我们发选区事件，无从判断，
+    /// 照旧以它为准。
+    ///
+    /// 无论哪种，已 sync 却未确认的 source 只留两个：最旧的与最新的，中间的当场释放
+    /// （[`Synced::gone`]）。被拒、失焦时的复制都不带来选区事件，不这样做就会无上限累积（后台
+    /// 应用定时复制的典型情形）。留最旧的：serial 的有效性只会随时间变差，这些复制里若有被
+    /// 合成器采用的，是最早的那些，而被采用的又会被更晚被采用的取代（先收到 `cancelled`），
+    /// 所以还活着的里面至多最旧的一个是真实选区——它也可能是被异步回发的合成器误判的那个，
+    /// 留着才认得回来。留最新的：它是本地认定（失焦时）或等认回的最近一次。
+    fn on_synced(&mut self, id: u64, focused: bool) -> Synced {
+        let Some(e) = self.live.iter_mut().find(|e| e.0 == id) else {
+            return Synced::default();
+        };
         e.2 = true;
-        if e.1 || !focused {
-            return None;
+        if e.1 {
+            return Synced::default();
         }
+        let rejected = focused;
         // 只放弃本地认定、不销毁这个 source：万一合成器是异步回发选区（判错了），随后到来的
-        // `Ours(id)` 还能把它认回来；真被拒的，等下一次选区事件再释放（见 `on_selection`）。
-        if self.current == Some(id) {
+        // `Ours(id)` 还能把它认回来。
+        if rejected && self.current == Some(id) {
             self.current = None;
         }
-        // 被拒本身不改变选区、不会带来选区事件：反复被拒（比如定时器拿旧 serial 复制）时
-        // 等不到释放时机。只留最新这一个等认回，更早的被拒者现在就释放。
-        let older: Vec<u64> = self
+        let pending: Vec<u64> = self
             .live
             .iter()
-            .filter(|&&(i, confirmed, synced)| i < id && synced && !confirmed)
+            .filter(|&&(_, confirmed, synced)| synced && !confirmed)
             .map(|e| e.0)
             .collect();
-        for &i in &older {
+        let (oldest, newest) = (pending.iter().min().copied(), pending.iter().max().copied());
+        let gone: Vec<u64> = pending
+            .into_iter()
+            .filter(|&i| Some(i) != oldest && Some(i) != newest)
+            .collect();
+        for &i in &gone {
             self.forget(i);
         }
-        Some(older)
+        Synced { rejected, gone }
     }
 
     /// source 被合成器 `cancelled`，或被我们销毁。
@@ -843,10 +866,11 @@ impl Dispatch<wl_callback::WlCallback, SelectionSync> for Wl {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             with_local(|c| {
-                if let Some(gone) = c.owner.on_synced(sync.0, c.focused) {
-                    for id in gone {
-                        c.destroy_source(id);
-                    }
+                let r = c.owner.on_synced(sync.0, c.focused);
+                for id in r.gone {
+                    c.destroy_source(id);
+                }
+                if r.rejected {
                     // 首次走 stderr（没装 log 后端也看得见），之后只记日志，免得反复刷屏。
                     if !std::mem::replace(&mut c.warned_rejected, true) {
                         eprintln!(
@@ -1018,11 +1042,13 @@ impl Wl {
     }
 
     fn finish_drop(&mut self, d: PendingDrop, ok: bool) {
-        // 读完期间窗口可能已经关了：没人收，就当失败（不 finish）。
-        // 读的期间开了模态子窗：同 drop 那一刻被挡住，一样不交付。
-        let target = self
-            .idx(d.key)
-            .filter(|_| ok && self.blocked_by_modal(d.key).is_none());
+        let i = self.idx(d.key);
+        let blocked = self.blocked_by_modal(d.key).is_some();
+        let target = if deliverable(ok, i.is_some(), blocked) {
+            i
+        } else {
+            None
+        };
         let paths = match target {
             Some(_) => host::parse_uri_list(&d.data),
             None => Vec::new(),
@@ -1055,6 +1081,12 @@ impl Wl {
         }
         self.after_event(d.key);
     }
+}
+
+/// 读完的拖入交不交付：数据读齐了（EOF）、目标窗口还在、且读的期间没被模态子窗挡住（同 drop
+/// 那一刻的判断）。不交付就不 `finish`，源端收到 `cancelled`。
+fn deliverable(read_ok: bool, window_exists: bool, blocked_by_modal: bool) -> bool {
+    read_ok && window_exists && !blocked_by_modal
 }
 
 /// 告诉源端接不接受（`force`：`enter` 时无论如何都要表态一次）。只接受复制：接受「移动」的话，
@@ -1131,7 +1163,7 @@ mod tests {
         let a = o.set();
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a), "发出即以本地为准");
         assert!(o.on_selection(Sel::Ours(a)).is_empty());
-        assert!(o.on_synced(a, true).is_none());
+        assert!(!o.on_synced(a, true).rejected);
         assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(a));
     }
 
@@ -1140,7 +1172,7 @@ mod tests {
         let mut o = Owner::default();
         let a = o.set();
         // 合成器不采用、也不发 cancelled：到 sync 回来都没见到自己的选区。
-        assert!(o.on_synced(a, true).is_some(), "有焦点却没确认 = 判为被拒");
+        assert!(o.on_synced(a, true).rejected, "有焦点却没确认 = 判为被拒");
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
         assert_eq!(o.plan(Sel::Empty), ReadPlan::Empty);
         // source 留到下一次选区事件才释放。
@@ -1152,7 +1184,7 @@ mod tests {
         let mut o = Owner::default();
         let a = o.set();
         assert!(
-            o.on_synced(a, true).is_some(),
+            o.on_synced(a, true).rejected,
             "合成器异步回发选区：sync 先回来，先判为被拒"
         );
         assert!(o.on_selection(Sel::Ours(a)).is_empty(), "不释放");
@@ -1170,7 +1202,7 @@ mod tests {
     fn unfocused_copy_is_kept_since_no_selection_event_is_expected() {
         let mut o = Owner::default();
         let a = o.set();
-        assert!(o.on_synced(a, false).is_none());
+        assert!(!o.on_synced(a, false).rejected);
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Local(a));
         // 回到焦点时合成器补发当前选区：是别人的，说明我们那次被取代或被拒。
         o.on_selection(Sel::Foreign);
@@ -1217,7 +1249,7 @@ mod tests {
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         let b = o.set();
-        assert!(o.on_synced(b, true).is_some(), "b 被拒");
+        assert!(o.on_synced(b, true).rejected, "b 被拒");
         assert_eq!(
             o.plan(Sel::Ours(a)),
             ReadPlan::Local(a),
@@ -1244,7 +1276,7 @@ mod tests {
         o.on_selection(Sel::Ours(a));
         o.on_synced(a, true);
         let b = o.set();
-        assert!(o.on_synced(b, false).is_none(), "失焦时无从判定，先留着");
+        assert!(!o.on_synced(b, false).rejected, "失焦时无从判定，先留着");
         // 重获焦点：合成器补发的选区仍是 a，b 显然没被采用。
         assert_eq!(o.on_selection(Sel::Ours(a)), vec![b]);
         assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(a));
@@ -1322,19 +1354,116 @@ mod tests {
     }
 
     #[test]
-    fn repeated_rejections_keep_only_the_latest_for_recovery() {
+    fn repeated_rejections_keep_only_the_oldest_and_the_latest() {
         let mut o = Owner::default();
         let a = o.set();
-        assert_eq!(o.on_synced(a, true), Some(vec![]));
+        assert_eq!(
+            o.on_synced(a, true),
+            Synced {
+                rejected: true,
+                gone: vec![]
+            }
+        );
         let b = o.set();
         assert_eq!(
-            o.on_synced(b, true),
-            Some(vec![a]),
-            "被拒不带来选区事件，旧的现在就放"
+            o.on_synced(b, true).gone,
+            vec![],
+            "a（最旧）与 b（最新）都留"
         );
         let c = o.set();
-        assert_eq!(o.on_synced(c, true), Some(vec![b]));
-        assert_eq!(o.live.len(), 1, "无论被拒多少次，只留最新一个");
+        assert_eq!(o.on_synced(c, true).gone, vec![b], "中间的 b 释放");
+        assert_eq!(o.live.len(), 2);
+    }
+
+    #[test]
+    fn copies_while_unfocused_do_not_accumulate() {
+        let mut o = Owner::default();
+        let first = o.set();
+        for _ in 0..100 {
+            let id = o.set();
+            o.on_synced(id, false);
+        }
+        o.on_synced(first, false);
+        assert!(
+            o.live.len() <= 2,
+            "失焦连发 100 次后仍留 {} 个",
+            o.live.len()
+        );
+        assert!(
+            o.live.iter().any(|e| e.0 == first),
+            "最旧的留着（它才可能是真实选区）"
+        );
+        assert_eq!(
+            o.plan(Sel::Foreign),
+            ReadPlan::Local(101),
+            "失焦时以最新一次为准"
+        );
+    }
+
+    #[test]
+    fn a_misjudged_copy_survives_a_later_real_rejection() {
+        // 异步回发选区的合成器：a 实际被采用却先判为被拒；随后 b 真被拒。
+        let mut o = Owner::default();
+        let a = o.set();
+        assert!(o.on_synced(a, true).rejected);
+        let b = o.set();
+        assert!(
+            o.on_synced(b, true).gone.is_empty(),
+            "不能连带释放 a（清空全局选区）"
+        );
+        // a 的选区事件迟到：认回来，b 这时才释放。
+        assert_eq!(o.on_selection(Sel::Ours(a)), vec![b]);
+        assert_eq!(o.plan(Sel::Ours(a)), ReadPlan::Local(a));
+    }
+
+    #[test]
+    fn drop_is_delivered_only_when_read_window_and_no_modal() {
+        assert!(deliverable(true, true, false));
+        assert!(!deliverable(false, true, false), "超时 / 读失败");
+        assert!(!deliverable(true, false, false), "读的期间窗口关了");
+        assert!(!deliverable(true, true, true), "读的期间开了模态子窗");
+    }
+
+    fn pipe() -> (File, File) {
+        let (rd, wr) = super::super::super::sys::pipe_cloexec().expect("pipe2");
+        super::super::super::sys::set_nonblocking(&rd).expect("O_NONBLOCK");
+        (rd, wr)
+    }
+
+    #[test]
+    fn read_available_reports_pending_then_eof_over_a_real_pipe() {
+        let (mut rd, mut wr) = pipe();
+        let mut out = Vec::new();
+        assert_eq!(
+            read_available(&mut rd, &mut out),
+            ReadStep::Pending,
+            "还没写"
+        );
+        wr.write_all("file:///a%20b\r\n".as_bytes()).unwrap();
+        assert_eq!(
+            read_available(&mut rd, &mut out),
+            ReadStep::Pending,
+            "写了一部分、没关写端"
+        );
+        wr.write_all(b"file:///c\r\n").unwrap();
+        drop(wr);
+        assert_eq!(read_available(&mut rd, &mut out), ReadStep::Eof);
+        assert_eq!(
+            host::parse_uri_list(&out),
+            vec![
+                std::path::PathBuf::from("/a b"),
+                std::path::PathBuf::from("/c")
+            ]
+        );
+    }
+
+    #[test]
+    fn read_available_fails_past_the_limit() {
+        let (mut rd, mut wr) = pipe();
+        // 已读的加上管道里的超过上限即失败（不必真写 64MB：预填到上限边缘）。
+        let mut out = vec![0u8; READ_LIMIT - 1];
+        wr.write_all(b"xy").unwrap();
+        assert_eq!(read_available(&mut rd, &mut out), ReadStep::Failed);
     }
 
     #[test]
