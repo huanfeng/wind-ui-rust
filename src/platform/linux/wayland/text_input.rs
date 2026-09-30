@@ -78,6 +78,9 @@ pub(super) struct TextInputState {
     commits: u32,
     /// 最近一次 `done` 的 serial 与 `commits` 不符：状态请求先压着。
     stale: bool,
+    /// 最近一次 `enable` 随之 `commit` 后的 serial。`done` 的 serial 比它小，说明合成器发出
+    /// 这批改动时还没处理我们的 `enable`：那是给上一个输入框的，合成串丢掉（提交串照收，免得丢字）。
+    enabled_at: u32,
     /// 已随 `commit` 送出、合成器那边生效的状态。`enabled == false` 时其余无意义。
     enabled: bool,
     rect: Option<(i32, i32, i32, i32)>,
@@ -134,6 +137,11 @@ impl TextInputState {
     /// `done`：取出这一批改动，并按 serial 对账。
     pub fn on_done(&mut self, serial: u32) -> Batch {
         self.stale = serial != self.commits;
+        if serial < self.enabled_at {
+            // 迟到的一批：合成串与删除都是按上一个输入框算的，只留提交串。
+            self.preedit = None;
+            self.delete = (0, 0);
+        }
         let (before, after) = std::mem::take(&mut self.delete);
         // 删周围文本按「上次送出的周围文本」换算字节 → 字符（协议的长度相对于它）。没送过
         // （密码框等）就按一字节一字符近似——输入法没有上下文时本就极少发删除。
@@ -208,6 +216,9 @@ impl TextInputState {
         if out.last().is_some_and(|r| *r != Req::Commit) {
             out.push(Req::Commit);
             self.commits = self.commits.wrapping_add(1);
+        }
+        if out.contains(&Req::Enable) {
+            self.enabled_at = self.commits;
         }
         out
     }
@@ -415,6 +426,28 @@ mod tests {
         s.on_commit_string(Some("x".into()));
         s.reset(&want(1)); // 放弃合成：disable + enable
         assert_eq!(s.on_done(3), Batch::default(), "放弃之前的合成串不再冒出来");
+    }
+
+    #[test]
+    fn a_batch_the_compositor_sent_before_seeing_our_enable_keeps_only_the_commit() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        s.sync(Some(&want(1))); // commits = 1, enabled_at = 1
+        s.sync(Some(&Want {
+            field: 2,
+            ..want(1)
+        })); // 换框：disable(2) + enable(3)，enabled_at = 3
+             // 合成器还没处理我们的换框时发出的一批（serial 1）：给上一个框的。
+        s.on_preedit(Some("zhong".into()), 5, 5);
+        s.on_commit_string(Some("中".into()));
+        s.on_delete(3, 0);
+        let b = s.on_done(1);
+        assert_eq!(b.preedit, Preedit::default(), "旧框的合成串不落到新框");
+        assert!(b.delete.is_empty(), "删除按旧框的正文算，不能用");
+        assert_eq!(b.commit.as_deref(), Some("中"), "提交串照收，免得丢字");
+        // serial 对上之后照常。
+        s.on_preedit(Some("ni".into()), 2, 2);
+        assert_eq!(s.on_done(3).preedit.text, "ni");
     }
 
     #[test]
