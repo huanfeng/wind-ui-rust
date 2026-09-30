@@ -1055,7 +1055,7 @@ impl X11 {
                 )
                 .ok()
                 .and_then(|c| c.reply().ok())
-                .map(|r| dnd::parse_uri_list(&r.value))
+                .map(|r| host::parse_uri_list(&r.value))
                 .unwrap_or_default()
         };
         let accepted = !paths.is_empty();

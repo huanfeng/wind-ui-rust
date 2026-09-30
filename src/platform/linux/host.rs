@@ -4,6 +4,7 @@
 //! 一帧的渲染与脏区计算、`after_event` 要从宿主取走的意图、像素换序。怎么建窗、
 //! 怎么上屏、窗口操作落到哪条协议请求上，仍各归各的后端。
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tiny_skia::Pixmap;
@@ -353,6 +354,50 @@ impl crate::sync::RawWakeSignal for LinuxWake {
     }
 }
 
+/// 解析文件拖入的 `text/uri-list`（RFC 2483）：跳过注释行与空行，只取 `file://` 且能解码的
+/// 本地路径。X11（XDND）与 Wayland（`wl_data_offer`）两个后端共用。
+pub(super) fn parse_uri_list(data: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(data)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(file_uri_to_path)
+        .collect()
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    // `file:///abs` 或 `file://localhost/abs`；别的主机名是网络路径，不是本机文件。
+    let path = if rest.starts_with('/') {
+        rest
+    } else {
+        let (host, p) = rest.split_once('/')?;
+        if !host.eq_ignore_ascii_case("localhost") {
+            return None;
+        }
+        return percent_decode(&format!("/{p}")).map(PathBuf::from);
+    };
+    percent_decode(path).map(PathBuf::from)
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            // 截断的转义（`%2` 在末尾）取不到两位十六进制，整条丢弃。
+            let hex = std::str::from_utf8(b.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +621,55 @@ mod tests {
         let mut out = Vec::new();
         rgba_to_bgra(&[1, 2, 3, 4, 5, 6, 7, 8], &mut out);
         assert_eq!(out, [3, 2, 1, 4, 7, 6, 5, 8]);
+    }
+
+    #[test]
+    fn uri_list_yields_decoded_local_paths() {
+        let data = b"# comment\r\nfile:///home/u/a%20b.txt\r\nfile://localhost/tmp/%E4%B8%AD.png\r\nhttps://x.org/y\r\nfile://otherhost/z\r\n";
+        assert_eq!(
+            parse_uri_list(data),
+            vec![
+                PathBuf::from("/home/u/a b.txt"),
+                PathBuf::from("/tmp/中.png")
+            ]
+        );
+    }
+
+    #[test]
+    fn uri_list_accepts_raw_utf8_blank_lines_and_missing_final_newline() {
+        // 有的源端不转义非 ASCII（Nautilus 转义、部分 Qt 应用不转义），两种都要认；
+        // 空行、行尾空白、缺最后一个换行都不影响。
+        let data = "\r\nfile:///srv/照片 2024/海边.jpg  \n\n#file:///ignored\nfile:///srv/%E6%96%87%E6%A1%A3.txt";
+        assert_eq!(
+            parse_uri_list(data.as_bytes()),
+            vec![
+                PathBuf::from("/srv/照片 2024/海边.jpg"),
+                PathBuf::from("/srv/文档.txt")
+            ]
+        );
+    }
+
+    #[test]
+    fn uri_list_skips_non_file_schemes_and_remote_hosts() {
+        let data = b"sftp://h/x\nsmb://h/share/y\ntrash:///z\nfile://127.0.0.1/no\n";
+        assert_eq!(
+            parse_uri_list(data),
+            Vec::<PathBuf>::new(),
+            "只有 file:// 且主机为空或 localhost 才算本机文件"
+        );
+        assert_eq!(
+            parse_uri_list(b"file://LocalHost/etc/hosts\n"),
+            vec![PathBuf::from("/etc/hosts")],
+            "主机名 localhost 不分大小写"
+        );
+    }
+
+    #[test]
+    fn malformed_escapes_are_dropped_not_panicking() {
+        assert_eq!(
+            parse_uri_list(b"file:///a%2\nfile:///b%zz\nfile:///c%FF\nfile:///d%41\n"),
+            vec![PathBuf::from("/dA")],
+            "截断 / 非十六进制 / 解出非法 UTF-8 的整条丢弃，其余照收"
+        );
     }
 }
