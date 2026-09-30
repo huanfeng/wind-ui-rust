@@ -36,9 +36,9 @@
 //! uri-list，解析（`host::parse_uri_list`，与 XDND 同一份）后按落点交给 `on_drop_files`，读到了
 //! 路径才 `finish`（否则只销毁 offer，源端收到 `cancelled` 即知失败）。
 //!
-//! 拖入读数据是**同步**的（X11 的 XDND 经事件异步到达）：源端是别的进程（我们不做拖出），数据
-//! 由它直接写进管道，不依赖我们的事件循环；文件管理器毫秒级就写完。代价是源端卡死时界面会
-//! 冻住至多 [`READ_TIMEOUT`]。
+//! 拖入读数据是**异步**的（与 XDND 一致）：放下时只发 `receive`，读端挂进事件循环的 `poll`
+//! （[`Wl::pump_drops`]），读到 EOF 再解析交付；源端卡住也不冻界面，[`READ_TIMEOUT`] 内没写完
+//! 就放弃。读的期间目标窗口关了，读完也不交付、不 `finish`。
 //!
 //! 不做：文件拖出（`start_drag`）、primary selection（中键粘贴，`zwp_primary_selection`）。
 
@@ -300,6 +300,17 @@ pub(super) struct DropTarget {
     accepted: bool,
 }
 
+/// 已放下、正在读 uri-list 的拖入。读端挂进事件循环的 `poll`，读到 EOF 再交给窗口。
+pub(super) struct PendingDrop {
+    offer: wl_data_offer::WlDataOffer,
+    key: u32,
+    /// 落点（表面坐标，逻辑）。完成时按窗口那时的缩放换算。
+    pos: (f64, f64),
+    file: File,
+    data: Vec<u8>,
+    deadline: Instant,
+}
+
 // ── 剪贴板状态（事件循环线程的 thread-local） ────────────────────────────────
 
 struct Clip {
@@ -498,9 +509,9 @@ pub(in super::super) fn set_text(text: &str) -> bool {
     .is_some()
 }
 
-/// 向 offer 要 `mime` 格式的数据：管道写端交给对方，限时读完读端。
-fn receive(conn: &Connection, offer: &wl_data_offer::WlDataOffer, mime: &str) -> Option<Vec<u8>> {
-    let (mut rd, wr) = match super::super::sys::pipe_cloexec() {
+/// 向 offer 要 `mime` 格式的数据：管道写端交给对方（请求尚未 flush），返回已设非阻塞的读端。
+fn start_receive(offer: &wl_data_offer::WlDataOffer, mime: &str) -> Option<File> {
+    let (rd, wr) = match super::super::sys::pipe_cloexec() {
         Ok(p) => p,
         Err(e) => {
             log::warn!("建管道失败：{e}");
@@ -510,12 +521,18 @@ fn receive(conn: &Connection, offer: &wl_data_offer::WlDataOffer, mime: &str) ->
     offer.receive(mime.to_string(), wr.as_fd());
     // 协议层已复制了这个 fd；我们这份必须关掉，否则读端永远等不到 EOF。
     drop(wr);
-    let deadline = Instant::now() + READ_TIMEOUT;
-    if !flush_until(conn, deadline) {
-        return None;
-    }
     if let Err(e) = super::super::sys::set_nonblocking(&rd) {
         log::warn!("管道设为非阻塞失败：{e}");
+        return None;
+    }
+    Some(rd)
+}
+
+/// 向 offer 要 `mime` 格式的数据，限时读完（剪贴板读取用：调用方要同步拿到结果）。
+fn receive(conn: &Connection, offer: &wl_data_offer::WlDataOffer, mime: &str) -> Option<Vec<u8>> {
+    let mut rd = start_receive(offer, mime)?;
+    let deadline = Instant::now() + READ_TIMEOUT;
+    if !flush_until(conn, deadline) {
         return None;
     }
     let r = read_until_eof(&mut rd, deadline);
@@ -547,29 +564,51 @@ fn flush_until(conn: &Connection, deadline: Instant) -> bool {
     }
 }
 
-/// 读到 EOF；超时、出错或超过 [`READ_LIMIT`] 返回 `None`。`rd` 须已设非阻塞。
-fn read_until_eof(rd: &mut File, deadline: Instant) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
+/// 一轮非阻塞读的结果。
+#[derive(Debug, PartialEq, Eq)]
+enum ReadStep {
+    /// 读到 EOF，数据齐了。
+    Eof,
+    /// 暂时没有更多数据。
+    Pending,
+    /// 出错或超过 [`READ_LIMIT`]。
+    Failed,
+}
+
+/// 把 `rd` 里眼下能读的都读进 `out`。`rd` 须已设非阻塞。
+fn read_available(rd: &mut File, out: &mut Vec<u8>) -> ReadStep {
     let mut buf = [0u8; 16 * 1024];
     loop {
         match rd.read(&mut buf) {
-            Ok(0) => return Some(out),
+            Ok(0) => return ReadStep::Eof,
             Ok(n) => {
                 if out.len() + n > READ_LIMIT {
                     log::warn!("剪贴板 / 拖入数据超过 {} MB，已丢弃", READ_LIMIT >> 20);
-                    return None;
+                    return ReadStep::Failed;
                 }
                 out.extend_from_slice(&buf[..n]);
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return ReadStep::Pending,
+            Err(_) => return ReadStep::Failed,
+        }
+    }
+}
+
+/// 读到 EOF；超时、出错或超过 [`READ_LIMIT`] 返回 `None`。`rd` 须已设非阻塞。
+fn read_until_eof(rd: &mut File, deadline: Instant) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    loop {
+        match read_available(rd, &mut out) {
+            ReadStep::Eof => return Some(out),
+            ReadStep::Failed => return None,
+            ReadStep::Pending => {
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     return None;
                 }
                 super::super::sys::wait_readable(&[rd.as_raw_fd()], Some(left));
             }
-            Err(_) => return None,
         }
     }
 }
@@ -833,14 +872,68 @@ impl Wl {
         d.has_uris && self.blocked_by_modal(d.key).is_none()
     }
 
+    /// 放下：发出读取请求，读端交给事件循环（见 [`Wl::pump_drops`]），不在这里等。
     fn drag_drop(&mut self) {
         let Some(d) = self.drag.take() else { return };
-        let paths = if self.drop_allowed(&d) {
-            receive(&self.conn, &d.offer, URI_LIST)
-                .map(|b| host::parse_uri_list(&b))
-                .unwrap_or_default()
+        let file = if self.drop_allowed(&d) {
+            start_receive(&d.offer, URI_LIST)
         } else {
-            Vec::new()
+            None
+        };
+        let Some(file) = file else {
+            d.offer.destroy();
+            return;
+        };
+        self.drops.push(PendingDrop {
+            offer: d.offer,
+            key: d.key,
+            pos: d.pos,
+            file,
+            data: Vec::new(),
+            deadline: Instant::now() + READ_TIMEOUT,
+        });
+    }
+
+    /// 读端的 fd 与最早的放弃时刻，给事件循环的 `poll`。
+    pub(super) fn pending_drops(&self) -> (Vec<RawFd>, Option<Instant>) {
+        let fds = self.drops.iter().map(|d| d.file.as_raw_fd()).collect();
+        (fds, self.drops.iter().map(|d| d.deadline).min())
+    }
+
+    /// 事件循环每轮调用：接着读正在进行的拖入，读完的交给窗口，超时的放弃。
+    pub(super) fn pump_drops(&mut self) {
+        if self.drops.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut done = Vec::new();
+        let mut i = 0;
+        while i < self.drops.len() {
+            let d = &mut self.drops[i];
+            match read_available(&mut d.file, &mut d.data) {
+                ReadStep::Pending if now < d.deadline => i += 1,
+                step => {
+                    if step == ReadStep::Pending {
+                        log::warn!(
+                            "拖入的源端 {} 秒内没写完 uri-list，放弃",
+                            READ_TIMEOUT.as_secs_f32()
+                        );
+                    }
+                    done.push((self.drops.swap_remove(i), step == ReadStep::Eof));
+                }
+            }
+        }
+        for (d, ok) in done {
+            self.finish_drop(d, ok);
+        }
+    }
+
+    fn finish_drop(&mut self, d: PendingDrop, ok: bool) {
+        // 读完期间窗口可能已经关了：没人收，就当失败（不 finish）。
+        let target = self.idx(d.key).filter(|_| ok);
+        let paths = match target {
+            Some(_) => host::parse_uri_list(&d.data),
+            None => Vec::new(),
         };
         // 读到了路径才算完成；合成器还要选定了动作，否则 `finish` 是协议错误（invalid_finish）。
         // 不 `finish` 直接销毁，源端收到 `cancelled`（与 XDND 回 Finished(accepted=0) 同义）。
@@ -852,10 +945,9 @@ impl Wl {
             d.offer.finish();
         }
         d.offer.destroy();
-        if paths.is_empty() {
+        let (Some(i), false) = (target, paths.is_empty()) else {
             return;
-        }
-        let Some(i) = self.idx(d.key) else { return };
+        };
         let w = &mut self.windows[i];
         // 与 X11 同一口径：落点换成物理像素（宿主再按自己的缩放换回逻辑坐标去命中）。
         let pos = Point::new(

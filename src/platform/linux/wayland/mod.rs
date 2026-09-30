@@ -229,6 +229,7 @@ pub(super) fn run_windowed(
         keyboard: None,
         alt_down: false,
         drag: None,
+        drops: Vec::new(),
     };
     data::init(
         &wl.conn,
@@ -438,6 +439,8 @@ struct Wl {
     alt_down: bool,
     /// 进行中的文件拖入（`data.rs`）。
     drag: Option<data::DropTarget>,
+    /// 已放下、还在读 uri-list 的拖入（`data.rs`）。
+    drops: Vec<data::PendingDrop>,
 }
 
 impl Wl {
@@ -833,6 +836,8 @@ impl Wl {
             }
             // 剪贴板应答：接着写上一轮没写完的（对方读得慢时分多轮写完，不卡界面）。
             data::pump_sends();
+            // 拖入：接着读已放下的 uri-list，读完的交给窗口。
+            self.pump_drops();
             let timeout = self.tick_timers();
             self.paint_dirty();
             if self.windows.is_empty() {
@@ -858,20 +863,23 @@ impl Wl {
             };
             let any_dirty = self.windows.iter().any(|w| w.needs_paint && w.visible());
             let (mut writable, send_deadline) = data::pending_sends();
+            let (drop_fds, drop_deadline) = self.pending_drops();
             let timeout = if any_dirty {
                 Some(Duration::ZERO)
             } else {
-                let until = send_deadline.map(|d| d.saturating_duration_since(Instant::now()));
-                match (timeout, until) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                }
+                [send_deadline, drop_deadline]
+                    .into_iter()
+                    .flatten()
+                    .map(|d| d.saturating_duration_since(Instant::now()))
+                    .chain(timeout)
+                    .min()
             };
             let wl_fd = guard.connection_fd().as_raw_fd();
             let mut fds = vec![wl_fd];
             if let Some(p) = pipe {
                 fds.push(p.read.as_raw_fd());
             }
+            fds.extend(drop_fds);
             if unsent {
                 writable.push(wl_fd);
             }

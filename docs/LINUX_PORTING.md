@@ -276,10 +276,11 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   消失**（协议没有剪贴板管理器，除非桌面自带）。
 - **文件拖入**：`enter` 时 offer 含 `text/uri-list` 且没被模态挡住就 `accept` +
   `set_actions(copy, copy)`（只接受复制——接受移动的话文件管理器会删源文件）；拖动途中模态
-  状态变了在 `motion` 里改口。`drop` 时同步限时读 uri-list → `host::parse_uri_list`（与 XDND
-  同一份）→ 落点按缩放换成物理像素交给 `on_drop_files`（与 X11 同口径）。读到了路径且合成器
-  选定了动作才 `finish`（否则是 `invalid_finish` 协议错误），然后销毁 offer；没读到只销毁，
-  源端收到 `cancelled`。同步读的代价：源端卡死时界面冻至多 1.5 秒（XDND 那边是异步的）。
+  状态变了在 `motion` 里改口。`drop` 时只发 `receive`，管道读端**挂进事件循环的 `poll`**
+  异步读（与 XDND 一样不冻界面），读到 EOF → `host::parse_uri_list`（与 XDND 同一份）→ 落点按
+  窗口那时的缩放换成物理像素交给 `on_drop_files`（与 X11 同口径）。读到了路径且合成器选定了
+  动作才 `finish`（否则是 `invalid_finish` 协议错误），然后销毁 offer；没读到、1.5 秒内没写完、
+  或读的期间目标窗口已关，都只销毁，源端收到 `cancelled`。
 - **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape` 假装合成器
   没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径。
 - **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定，剪贴板与拖入
@@ -351,6 +352,9 @@ Stage 3（sway headless；外部一侧用 `wl-clipboard` 2.2.1 的 `wl-copy` / `
   `text/plain` 的拖动 → `target None`、源端 `cancelled`；uri-list 里只有网址 → 不 `finish`、
   源端 `cancelled`。1.5 分数缩放下，落在左右两区分界线两侧（逻辑 x=270 / 330，分界 ~300）的
   拖入分别命中左 / 右区——若漏乘或重复乘缩放，330 会落到左区、270 会落到右区。
+- 拖入异步读：源端放下后晚 1 秒才写 uri-list，放下后 200ms 注入的点击先被处理（探针先打出
+  复制按钮的结果），数据到了再交付路径、源端收到 `finished`；晚 3 秒 → 1.5 秒时放弃，源端
+  `cancelled`，没有交付。
 - 未能自动化：「写入被合成器拒绝」的真实路径（sway 上键盘焦点进入的 serial 就够用，构造不出
   被拒），只有状态机单测；拖动途中模态状态改变。
 - `about` 空闲 10 秒仍 0 tick；私有内存 3004 KB（无输入设备，§8.5 同条件 3000 KB）。
