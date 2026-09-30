@@ -3690,6 +3690,16 @@ impl AppHandler for UiHost {
         self.tree.selection_of(focus)
     }
 
+    fn ime_field(&self) -> Option<crate::event::ImeField> {
+        let focus = self.focus.current?;
+        // 与 `ime_caret` 同一口径：焦点控件报了光标才算文本焦点。
+        self.tree.caret_of(focus)?;
+        Some(crate::event::ImeField {
+            id: focus.as_u64(),
+            hints: self.tree.ime_hints_of(focus)?,
+        })
+    }
+
     fn ime_text(&self) -> String {
         self.focus
             .current
@@ -3759,6 +3769,61 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ime_field` 经真实焦点路径（Tab 切换）给出：换控件身份必变，多行 / 密码取自控件
+    /// 真实配置。第一个框不设宽（Wrap 宽），见 AGENTS.md §5「宽度不能只测一种」。
+    #[test]
+    fn ime_field_tracks_the_focused_text_input_and_its_content_type() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let (a, b, c) = (
+            crate::signal::signal(String::from("甲")),
+            crate::signal::signal(String::new()),
+            crate::signal::signal(String::new()),
+        );
+        let app = App::new("t", 300, 300).content(
+            Element::col()
+                .padding(10)
+                .spacing(8)
+                .child(Element::button("按钮"))
+                .child(Element::text_input(a, "普通"))
+                .child(Element::text_input(b, "密码").password().width(200))
+                .child(Element::text_input(c, "多行").multiline().width_match()),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        let k = key_ev();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        };
+        frame(&mut handler);
+        assert_eq!(handler.ime_field(), None, "没有焦点");
+        handler.on_key(k(Key::Tab));
+        frame(&mut handler);
+        assert_eq!(handler.ime_field(), None, "焦点在按钮上：不是文本焦点");
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            handler.on_key(k(Key::Tab));
+            frame(&mut handler);
+            let f = handler.ime_field().expect("Tab 之后焦点在文本框上");
+            assert!(handler.ime_caret().is_some(), "与 ime_caret 同一口径");
+            seen.push(f);
+        }
+        let hints: Vec<_> = seen
+            .iter()
+            .map(|f| (f.hints.multiline, f.hints.password))
+            .collect();
+        assert_eq!(hints, vec![(false, false), (false, true), (true, false)]);
+        assert!(
+            seen[0].id != seen[1].id && seen[1].id != seen[2].id && seen[0].id != seen[2].id,
+            "每换一个框身份都变：{seen:?}"
+        );
+    }
 
     /// ESC 的处理次序：先收锚定浮层，再关对话框，最后才轮到关窗口。
     ///

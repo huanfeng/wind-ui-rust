@@ -732,6 +732,9 @@ impl Widget for NumberField {
     fn ime_text(&self) -> Option<String> {
         self.inner.ime_text()
     }
+    fn ime_hints(&self) -> crate::event::ImeHints {
+        self.inner.ime_hints()
+    }
     fn wants_right_click(&self) -> bool {
         self.inner.wants_right_click()
     }

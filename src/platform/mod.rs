@@ -866,6 +866,15 @@ pub trait AppHandler {
         None
     }
 
+    /// 焦点文本控件的身份与内容类型（多行 / 密码）。无文本焦点返回 `None`。
+    ///
+    /// 供输入法协议区分「焦点换到了另一个输入框」（Wayland text-input-v3 要求此时重新
+    /// `enable`，输入法据此换上下文）与设内容提示（密码框不联想）。目前只有 Wayland 后端用；
+    /// win32 / macOS / X11 可据此做同样的事（见 `docs/LINUX_PORTING.md` §8.3「后续可接」）。
+    fn ime_field(&self) -> Option<crate::event::ImeField> {
+        None
+    }
+
     /// 焦点文本控件的**已提交**正文（不含未上屏的合成串）。无文本焦点返回空串。
     ///
     /// 供输入法读取上下文（macOS `attributedSubstringForProposedRange:`，用于重转换与

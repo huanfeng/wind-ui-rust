@@ -821,6 +821,24 @@ impl Preedit {
     }
 }
 
+/// 可编辑文本控件交给输入法的内容类型（见 `Widget::ime_hints`）。平台据此给输入法提示：
+/// 密码框不联想、不记忆（Wayland 的 `sensitive_data` / `hidden_text`），多行框里回车是换行。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImeHints {
+    /// 多行编辑（回车插入换行，而不是提交）。
+    pub multiline: bool,
+    /// 密码输入：输入法不应联想、记忆或显示明文候选。
+    pub password: bool,
+}
+
+/// 焦点文本控件的身份与内容类型（见 `AppHandler::ime_field`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImeField {
+    /// 焦点控件的身份：焦点换到另一个控件必变（输入法据此换上下文）。只用于比较相等。
+    pub id: u64,
+    pub hints: ImeHints,
+}
+
 /// 浮层菜单/下拉项的动作。两种：向焦点控件合成按键（右键菜单复用控件键盘处理、
 /// 可移植），或运行任意闭包（下拉选择设置绑定值等）。
 ///

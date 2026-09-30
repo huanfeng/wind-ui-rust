@@ -131,6 +131,14 @@ pub struct NodeId {
     generation: u32,
 }
 
+impl NodeId {
+    /// 把（槽位，代际）拼成一个整数：同一时刻不同节点必不同，槽位复用后代际变了也不同。
+    /// 给平台层当不透明身份比较用（如输入法的焦点控件身份）。
+    pub(crate) fn as_u64(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 /// 紧凑格式 `#12`（复用过的槽位带代际：`#12g2`）。
 ///
 /// 手写而非 `derive`：派生格式是 `NodeId { index: 12, generation: 0 }`，一行诊断里塞三五个
@@ -247,6 +255,11 @@ pub trait Widget {
     /// 非文本控件返回 `None`；密码框应返回 `None`（不把密码交给输入法）。
     fn ime_text(&self) -> Option<String> {
         None
+    }
+    /// 本控件交给输入法的内容类型（多行 / 密码）。只对报 [`Self::ime_caret`] 的可编辑控件
+    /// 有意义；默认单行普通文本。
+    fn ime_hints(&self) -> crate::event::ImeHints {
+        crate::event::ImeHints::default()
     }
     /// layout 前由框架向**已注册的响应式节点**调用（见 `Tree::register_reactive`）。
     /// 响应式控件在此检测绑定信号的版本变化，若有变化则通过 `ctx.tree_mut()` 重建子节点。
@@ -2482,6 +2495,11 @@ impl Tree {
     /// 读节点当前选区（见 `Widget::selection_range`）。
     pub fn selection_of(&self, id: NodeId) -> Option<(usize, usize)> {
         self.get(id)?.widget.selection_range()
+    }
+
+    /// 读节点交给输入法的内容类型（见 `Widget::ime_hints`）。
+    pub fn ime_hints_of(&self, id: NodeId) -> Option<crate::event::ImeHints> {
+        Some(self.get(id)?.widget.ime_hints())
     }
 
     /// 读节点的已提交正文（见 `Widget::ime_text`）。

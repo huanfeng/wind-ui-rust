@@ -2337,6 +2337,12 @@ impl Widget for TextInput {
         // 返回 None 会被理解成「没有文本上下文」。
         Some(self.selection().unwrap_or((self.cursor, self.cursor)))
     }
+    fn ime_hints(&self) -> crate::event::ImeHints {
+        crate::event::ImeHints {
+            multiline: self.is_multiline(),
+            password: self.config.password,
+        }
+    }
     fn ime_text(&self) -> Option<String> {
         // 密码框不把内容交给输入法：这段文字会被 IME 读去做联想与重转换，
         // 密码不该流到那里。

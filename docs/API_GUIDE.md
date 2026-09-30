@@ -2178,6 +2178,7 @@ let dot = Element::leaf().widget(Dot { on: state });
 fn set_preedit(&mut self, pe: &windui::event::Preedit) { /* 存起来，paint 时插在光标处画 */ }
 fn selection_range(&self) -> Option<(usize, usize)> { /* 当前选区，字符索引 */ }
 fn ime_text(&self) -> Option<String> { /* 已提交正文，供 IME 重转换/联想；密码框返回 None */ }
+fn ime_hints(&self) -> ImeHints { /* 可选：多行 / 密码，平台据此给输入法内容提示（默认单行普通） */ }
 ```
 
 `Preedit` 带 `text`（合成串）、`caret`（合成串**内部**的光标位置）、`sel`（选中分句，
