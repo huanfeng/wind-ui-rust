@@ -64,6 +64,10 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 **Status**: In Progress（2026-09-30）——实现与 sway headless 自动化验证完成（证据见
 `docs/LINUX_PORTING.md` §8.5）；**待 GNOME 42 真桌面人工验证**后改 Complete，清单：
 1. gedit / 终端里复制中文，本应用 Ctrl+V 粘进输入框；反向：本应用复制，gedit 粘贴。
+   若「本应用复制、gedit 粘贴」失败，优先怀疑「有焦点、sync 回来前没见到自家选区即判被拒」
+   这条判定（依赖合成器同步回发选区，mutter 未实测，见 LINUX_PORTING §8.3「剪贴板」）；
+   判定生效时经 `log` 记一条警告「合成器没有采用这次剪贴板写入」（要应用装了 log 后端才看得到，
+   示例都没装）。
 2. 大段文本（>1MB，比如 `seq 1 200000` 的输出）两个方向都完整。
 3. 本应用复制后关掉本应用，再在 gedit 粘贴：GNOME 42 无剪贴板管理器时预期**贴不出**
    （Wayland 协议如此），记录实际表现。
