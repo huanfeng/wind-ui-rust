@@ -333,11 +333,15 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   - **合成中**：输入法抓着键盘时合成器不把按键发给我们（Enter 确认、Esc 取消都由它消化），
     它放行的照常走本地，与 X11「输入法不要的才转回来」同效，无需另拦；合成中点击 → 先放弃
     合成（本地清掉 + `disable` / `enable` 让输入法丢掉），同 X11 的 `abort_composition`。
-  - **缺口**：框架没有向平台层暴露「多行 / 密码」属性，内容类型一律普通文本、不带
-    sensitive / hidden 提示，**密码框也会弹输入法**（X11 的 XIM 同样如此；密码框不交出正文）。
-    要补得给 `AppHandler` 加查询，属于扩大平台接口，另议。同理两条：同一窗口里焦点从一个
-    输入框换到另一个时，协议要求重新 `enable`（输入法据此换上下文），平台层分不出「焦点控件
-    换了」，目前只更新光标与周围文本；选区方向（光标在头还是尾）宿主不给，一律报光标在尾。
+  - **换输入框与内容类型**：宿主经 `AppHandler::ime_field` 报焦点文本控件的身份（焦点
+    `NodeId` 的槽位 + 代际）与 `ImeHints`（取自控件真实配置：`Widget::ime_hints`，`TextInput`
+    按 `password` / `multiline` 修饰符）。身份变了（同一窗口里 Tab 到另一个框也算）→ `disable`
+    + `commit` 再 `enable` + 全部状态 + `commit`，协议要求如此，输入法据此换上下文；同一控件
+    内容类型变了只补发 `set_content_type`。密码框：用途 `password`、提示
+    `sensitive_data | hidden_text`，**不发周围文本**；多行框：提示 `multiline`。
+    后续可接（本次不做）：win32 对密码框 `ImmAssociateContextEx` 关 IME、macOS 的 secure
+    input、X11 的 XIM 按焦点控件重建 / 重置 IC——都可以用同一个 `ime_field`。
+  - **缺口**：选区方向（光标在头还是尾）宿主不给，一律报光标在尾。
   - 合成器没有 text-input-v3 → 没有输入法，stderr 提示一次。Mutter 从 GNOME 3.34 起实现了
     text-input-v3，GNOME 42 应有（本机未实测，见人工清单）。
 - **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input`
@@ -430,6 +434,8 @@ Stage 4（sway headless；输入法端是自写的最小 `zwp_input_method_v2` �
   `delete 3 0` → `ab中`。
 - 合成中把焦点切到另一窗口 → text-input `leave`、本地合成串清掉；切回 → 重新 `enable`，新合成串
   正常显示；合成中点击输入框开头 → 合成串放弃、`disable` + `enable`、光标落到点击处。
+- 同一窗口两个输入框间 Tab：输入法端依次收到 deactivate、activate（周围文本、内容类型
+  重发）；Tab 到密码框：content_type 为 `HiddenText | SensitiveData` + `Password`，没有周围文本。
 - 选中 `xyz` 里的 `y` 后输入法 `delete 1 1` → 剩 `y`（选区之外各删一个，选区保留）。
 - 1.5 倍缩放：光标矩形与 1 倍完全相同（逻辑坐标），`preferred_scale 180` 生效。
 - `WINDUI_WAYLAND_DISABLE=text-input`：stderr 一行提示，其余照常。`about` 空闲 10 秒 0 tick，
