@@ -21,7 +21,7 @@ use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_v3::{self, ContentHint, ContentPurpose, ZwpTextInputV3},
 };
 
-use super::text_input::{surrounding, Req, TextInputState, Want};
+use super::text_input::{plan_update, surrounding, Req, TextInputState, Want};
 use super::Wl;
 use crate::event::{ImeHints, Key, KeyEvent, Preedit};
 
@@ -163,8 +163,8 @@ impl Wl {
                 self.dispatch_preedit(key, Preedit::default());
                 let d = batch.delete;
                 if !d.is_empty() {
-                    // 选区里的文字保留、只删其前后（选区本身收拢，光标停在其后）：Left 把选区收到开头删前面，再右移过选区删后面，
-                    // 光标停在选区之后（`TextInput` 的 Left / Right 在有选区时先收拢选区）。
+                    // 选区里的文字保留、只删其前后：Left 把选区收拢到开头、删前面，再右移过选区、
+                    // 删后面，光标停在选区之后（`TextInput` 的 Left / Right 在有选区时先收拢选区）。
                     let keys = std::iter::repeat_n(Key::Left, (d.selected > 0) as usize)
                         .chain(std::iter::repeat_n(Key::Backspace, d.before))
                         .chain(std::iter::repeat_n(Key::Right, d.selected))
@@ -243,22 +243,42 @@ impl Wl {
             return;
         }
         let Some(i) = self.idx(key) else { return };
-        // 要重画了：宿主报的光标还是重画前的（`ime_caret` 取自上一帧 paint），现在对账会先按
-        // 旧矩形 commit 一次、重画后再 commit 一次，中间那次矩形与周围文本对不上。重画后的
-        // 收尾（`paint_dirty` → `after_event`）会再来。
-        if self.windows[i].needs_paint && self.windows[i].visible() {
-            return;
-        }
         let caret = caret.filter(|_| self.blocked_by_modal(key).is_none());
         let w = &self.windows[i];
-        let want = caret.map(|c| {
+        let field = caret.and(w.handler.ime_field());
+        let plan = plan_update(
+            ime.want.as_ref().map(|w| w.field),
+            caret.map(|_| field.map_or(0, |f| f.id)),
+            w.composing,
+            w.needs_paint && w.visible(),
+        );
+        if plan.clear_preedit {
+            // 合成中焦点被移到另一个控件（程序改焦点、Tab）或离开文本控件：旧框的合成串先撤掉
+            // （宿主清的是合成串所在的那个节点）；输入法那边随下面的重新 enable 一并丢弃。
+            // 放在推迟判断之前：否则旧框要多显示一帧合成串。
+            if let Some(ime) = self.ime.as_mut() {
+                ime.applying = true;
+            }
+            self.dispatch_preedit(key, Preedit::default());
+            let Some(ime) = self.ime.as_mut() else { return };
+            ime.applying = false;
+            // 清合成串的回调里可能关窗、焦点跟着走了。
+            if ime.focus != Some(key) {
+                return;
+            }
+        }
+        if plan.defer {
+            return;
+        }
+        let Some(i) = self.idx(key) else { return };
+        let w = &self.windows[i];
+        let Some(ime) = self.ime.as_ref() else { return };
+        // 缓存（光标、选区、焦点控件）没变且期间没有按键：沿用上次算好的 Want，不重算、不复制。
+        let fresh = caret.and_then(|c| {
             let sel = w.handler.ime_selection();
-            let field = w.handler.ime_field();
             let probe = (c, sel, field);
-            if ime.probe == Some(probe) {
-                if let Some(cached) = &ime.want {
-                    return (cached.clone(), None);
-                }
+            if ime.probe == Some(probe) && ime.want.is_some() {
+                return None;
             }
             // 物理像素 → 表面逻辑坐标（与 X11 / win32 同样锚在光标上，候选窗贴其底边）。
             let f = w.scale.factor;
@@ -275,36 +295,21 @@ impl Wl {
                 field: field.map_or(0, |f| f.id),
                 hints,
             };
-            (want, Some(probe))
+            Some((want, probe))
         });
-        // 合成中焦点被移到另一个控件（程序改焦点、Tab）：旧框的合成串先撤掉——输入法那边随
-        // 下面的重新 enable 一并丢弃。宿主会把合成串从原来那个节点上清掉。
-        let old_field = ime.want.as_ref().map(|w| w.field);
-        let switched = want
-            .as_ref()
-            .is_none_or(|(w, _)| old_field.is_some_and(|f| f != w.field));
-        if switched && self.windows[i].composing {
-            if let Some(ime) = self.ime.as_mut() {
-                ime.applying = true;
-            }
-            self.dispatch_preedit(key, Preedit::default());
-            if let Some(ime) = self.ime.as_mut() {
-                ime.applying = false;
-            }
-        }
         let Some(ime) = self.ime.as_mut() else { return };
-        match &want {
-            None => {
+        match (caret, fresh) {
+            (None, _) => {
                 ime.probe = None;
                 ime.want = None;
             }
-            Some((w, Some(probe))) => {
-                ime.probe = Some(*probe);
-                ime.want = Some(w.clone());
+            (Some(_), Some((want, probe))) => {
+                ime.probe = Some(probe);
+                ime.want = Some(want);
             }
-            Some((_, None)) => {}
+            (Some(_), None) => {}
         }
-        let reqs = ime.state.sync(want.as_ref().map(|(w, _)| w));
+        let reqs = ime.state.sync(ime.want.as_ref());
         ime.send(reqs);
     }
 

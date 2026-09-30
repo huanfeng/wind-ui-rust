@@ -745,7 +745,9 @@ impl Wl {
         if allow {
             self.close_window(key);
             // 关的可能是模态子窗：owner 的文本框随之可以输入了（同 `after_event` 的补对账）。
-            self.ime_resync_focus();
+            if text_input::resync_after_windows_changed(true, false) {
+                self.ime_resync_focus();
+            }
         } else {
             self.windows[i].needs_paint = true;
             self.after_event(key);
@@ -1178,7 +1180,7 @@ impl Wl {
                 }
             }
         }
-        let windows_changed = close || opened;
+        let windows_changed = text_input::resync_after_windows_changed(close, opened);
         if close {
             self.close_window(key);
         }

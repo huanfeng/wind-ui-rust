@@ -241,6 +241,42 @@ impl TextInputState {
     }
 }
 
+/// 一次对账前的决定（`ime.rs` 的 `ime_update` 照此执行）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct UpdatePlan {
+    /// 先撤掉本地合成串：合成中焦点换到了另一个控件，或离开了文本控件。
+    pub clear_preedit: bool,
+    /// 这一轮不对账：窗口待重画，宿主报的光标还是上一帧的，交给重画后的收尾。
+    pub defer: bool,
+}
+
+/// - `old_field`：上次对账时的焦点控件（`None` = 当时没有文本焦点）。
+/// - `new_field`：现在的（`None` = 没有文本焦点，或被模态挡住）。
+/// - `composing`：本地正显示着合成串。`pending_paint`：窗口可见且待重画。
+///
+/// 撤合成串不受推迟影响（先撤，旧框就不会多显示一帧）；第一次拿到文本焦点不算「换了」。
+pub(super) fn plan_update(
+    old_field: Option<u64>,
+    new_field: Option<u64>,
+    composing: bool,
+    pending_paint: bool,
+) -> UpdatePlan {
+    let switched = match new_field {
+        None => true,
+        Some(n) => old_field.is_some_and(|o| o != n),
+    };
+    UpdatePlan {
+        clear_preedit: composing && switched,
+        defer: pending_paint,
+    }
+}
+
+/// 窗口集合变了之后要不要给文本焦点所在窗口补一次对账：开了或关了窗都要——模态子窗的
+/// 开关会改变 owner 里的文本框能否输入，而那扇窗自己不一定再有事件。
+pub(super) fn resync_after_windows_changed(closed: bool, opened: bool) -> bool {
+    closed || opened
+}
+
 /// 输入法的合成串（字节下标的光标）→ 框架的 `Preedit`（字符下标）。两端都是 -1 表示隐藏光标，
 /// 这里把光标放在末尾；两端不同时那一段作为「选中分句」高亮。
 fn preedit_from_bytes(text: String, begin: i32, end: i32) -> Preedit {
@@ -397,6 +433,57 @@ mod tests {
             })),
             vec![Req::ContentType(ml), Req::Commit]
         );
+    }
+
+    #[test]
+    fn switching_fields_while_composing_clears_the_preedit_first() {
+        assert_eq!(
+            plan_update(Some(1), Some(2), true, false),
+            UpdatePlan {
+                clear_preedit: true,
+                defer: false
+            }
+        );
+        assert!(
+            plan_update(Some(1), None, true, false).clear_preedit,
+            "离开文本控件（或被模态挡住）也撤"
+        );
+        assert!(
+            !plan_update(Some(1), Some(1), true, false).clear_preedit,
+            "同一个框：不撤"
+        );
+        assert!(
+            !plan_update(Some(1), Some(2), false, false).clear_preedit,
+            "没在合成：无可撤"
+        );
+        assert!(
+            !plan_update(None, Some(2), true, false).clear_preedit,
+            "第一次拿到文本焦点不算「换了」"
+        );
+    }
+
+    #[test]
+    fn pending_repaint_defers_the_sync_but_not_the_preedit_clear() {
+        assert_eq!(
+            plan_update(Some(1), Some(2), true, true),
+            UpdatePlan {
+                clear_preedit: true,
+                defer: true
+            },
+            "旧框的合成串现在就撤，状态等重画后再对"
+        );
+        assert!(plan_update(Some(1), Some(1), false, true).defer);
+        assert!(!plan_update(Some(1), Some(1), false, false).defer);
+    }
+
+    #[test]
+    fn closing_or_opening_a_window_resyncs_the_text_focus_window() {
+        assert!(
+            resync_after_windows_changed(true, false),
+            "关了窗（含合成器关模态子窗）"
+        );
+        assert!(resync_after_windows_changed(false, true));
+        assert!(!resync_after_windows_changed(false, false));
     }
 
     #[test]
