@@ -705,6 +705,7 @@ impl Wl {
             self.close_window(o);
         }
         let Some(i) = self.idx(key) else { return };
+        self.ime_window_closed(key);
         if let Some(p) = self.pointer.as_mut().filter(|p| p.focus == Some(key)) {
             p.focus = None;
         }
@@ -1155,6 +1156,7 @@ impl Wl {
                 self.windows[i].needs_paint = true;
             }
         }
+        let opened = !new_windows.is_empty();
         for item in new_windows {
             match item {
                 NewWindow::Focus(k) => {
@@ -1174,8 +1176,13 @@ impl Wl {
                 }
             }
         }
+        let windows_changed = close || opened;
         if close {
             self.close_window(key);
+        }
+        if windows_changed {
+            // 模态子窗开 / 关会改变文本焦点窗口能否输入。
+            self.ime_resync_focus();
         }
         if crate::signal::take_cross_window_dirty() {
             for w in &mut self.windows {

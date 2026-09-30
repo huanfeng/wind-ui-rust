@@ -24,7 +24,8 @@ pub(super) const SURROUNDING_MAX: usize = 4000;
 pub(super) struct Want {
     /// 光标矩形（表面逻辑坐标）：x, y, w, h。
     pub rect: (i32, i32, i32, i32),
-    /// 周围文本与光标 / 锚点（字节）。`None` = 不知道（密码框、非文本控件），不发。
+    /// 周围文本与光标 / 锚点（字节）。`None` = 宿主没给选区（不是文本控件），不发。密码框
+    /// 宿主给空正文，这里发空串（不把密码交给输入法）。
     pub surrounding: Option<(String, u32, u32)>,
 }
 
@@ -40,11 +41,26 @@ pub(super) enum Req {
     Commit,
 }
 
+/// 删周围文本：协议的长度相对光标、**不含选区**——选区之前删 `before` 个字符、之后删 `after`
+/// 个，选区本身保留。`selected` 是选区的字符数（0 = 没有选区）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Delete {
+    pub before: usize,
+    pub after: usize,
+    pub selected: usize,
+}
+
+impl Delete {
+    pub fn is_empty(&self) -> bool {
+        self.before == 0 && self.after == 0
+    }
+}
+
 /// `done` 时要应用的一批改动（顺序见模块说明）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Batch {
-    /// 删掉光标前 / 后多少个**字符**（已按上次送出的周围文本从字节换算）。
-    pub delete: (usize, usize),
+    /// 删周围文本（已按上次送出的周围文本从字节换算成字符）。
+    pub delete: Delete,
     pub commit: Option<String>,
     /// 新合成串（空 = 没有合成）。
     pub preedit: Preedit,
@@ -114,11 +130,22 @@ impl TextInputState {
         // 删周围文本按「上次送出的周围文本」换算字节 → 字符（协议的长度相对于它）。没送过
         // （密码框等）就按一字节一字符近似——输入法没有上下文时本就极少发删除。
         let delete = match &self.surrounding {
-            Some((text, cursor, _)) => (
-                chars_before(text, *cursor as usize, before as usize),
-                chars_after(text, *cursor as usize, after as usize),
-            ),
-            None => (before as usize, after as usize),
+            Some((text, cursor, anchor)) => {
+                let (lo, hi) = (
+                    (*cursor).min(*anchor) as usize,
+                    (*cursor).max(*anchor) as usize,
+                );
+                Delete {
+                    before: chars_before(text, lo, before as usize),
+                    after: chars_after(text, hi, after as usize),
+                    selected: chars_after(text, lo, hi - lo),
+                }
+            }
+            None => Delete {
+                before: before as usize,
+                after: after as usize,
+                selected: 0,
+            },
         };
         let preedit = match self.preedit.take() {
             Some((text, begin, end)) => preedit_from_bytes(text, begin, end),
@@ -231,12 +258,16 @@ pub(super) fn surrounding(text: &str, sel: (usize, usize)) -> (String, u32, u32)
     if text.len() <= SURROUNDING_MAX {
         return (text.to_string(), cursor as u32, anchor as u32);
     }
+    // 以光标为中心取一段；靠近末尾时往前多取，用满上限。选区超长时锚点被钳到段的边上，
+    // 光标（输入法最关心的）始终在段内。
     let half = SURROUNDING_MAX / 2;
-    let mut start = anchor.min(cursor).saturating_sub(half);
-    let mut end = (start + SURROUNDING_MAX).min(text.len());
+    let mut start = cursor
+        .saturating_sub(half)
+        .min(text.len() - SURROUNDING_MAX);
     while !text.is_char_boundary(start) {
         start += 1;
     }
+    let mut end = (start + SURROUNDING_MAX).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -326,7 +357,15 @@ mod tests {
         s.on_commit_string(Some("世界".into()));
         s.on_preedit(Some("zhong".into()), 5, 5);
         let b = s.on_done(1);
-        assert_eq!(b.delete, (2, 1), "6 字节 = 两个汉字；后面 1 字节 = a");
+        assert_eq!(
+            b.delete,
+            Delete {
+                before: 2,
+                after: 1,
+                selected: 0
+            },
+            "6 字节 = 两个汉字；后面 1 字节 = a"
+        );
         assert_eq!(b.commit.as_deref(), Some("世界"));
         assert_eq!(
             b.preedit,
@@ -410,6 +449,35 @@ mod tests {
             (c as usize) > 1000 && (c as usize) < 3000,
             "光标在截取段中部附近：{c}"
         );
+    }
+
+    #[test]
+    fn delete_is_measured_outside_the_selection() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        // 「你好ab」里选中了「好」（字节 3..6，光标在 6）。
+        s.sync(Some(&Want {
+            rect: (0, 0, 1, 1),
+            surrounding: Some(("你好ab".into(), 6, 3)),
+        }));
+        s.on_delete(6, 2);
+        assert_eq!(
+            s.on_done(1).delete,
+            Delete {
+                before: 1,
+                after: 2,
+                selected: 1
+            },
+            "选区前只有「你」可删、选区后删「ab」，选区里的「好」保留"
+        );
+    }
+
+    #[test]
+    fn long_surrounding_near_the_end_uses_the_whole_budget() {
+        let text: String = "a".repeat(9000);
+        let (t, c, _) = surrounding(&text, (8990, 8990));
+        assert_eq!(t.len(), SURROUNDING_MAX);
+        assert_eq!(c as usize, SURROUNDING_MAX - 10);
     }
 
     #[test]

@@ -141,12 +141,20 @@ impl Wl {
                 ime.applying = true;
                 // 顺序见 `text_input.rs`：清旧合成串 → 删周围 → 提交 → 新合成串。
                 self.dispatch_preedit(key, Preedit::default());
-                let (before, after) = batch.delete;
-                for k in std::iter::repeat_n(Key::Backspace, before)
-                    .chain(std::iter::repeat_n(Key::Delete, after))
-                {
-                    self.dispatch_text_key(key, k);
+                let d = batch.delete;
+                if !d.is_empty() {
+                    // 选区保留、只删其前后：Left 把选区收到开头删前面，再右移过选区删后面，
+                    // 光标停在选区之后（`TextInput` 的 Left / Right 在有选区时先收拢选区）。
+                    let keys = std::iter::repeat_n(Key::Left, (d.selected > 0) as usize)
+                        .chain(std::iter::repeat_n(Key::Backspace, d.before))
+                        .chain(std::iter::repeat_n(Key::Right, d.selected))
+                        .chain(std::iter::repeat_n(Key::Delete, d.after));
+                    for k in keys {
+                        self.dispatch_text_key(key, k);
+                    }
                 }
+                let had_commit = batch.commit.is_some();
+                let had_preedit = batch.preedit.is_active();
                 if let Some(text) = batch.commit {
                     for c in text.chars().filter(|c| !c.is_control()) {
                         self.dispatch_text_key(key, Key::Char(c));
@@ -155,14 +163,48 @@ impl Wl {
                 if batch.preedit.is_active() {
                     self.dispatch_preedit(key, batch.preedit);
                 }
+                let changed = !d.is_empty() || had_commit || had_preedit;
                 if let Some(ime) = self.ime.as_mut() {
                     ime.applying = false;
                     // 正文变了：重算周围文本。
                     ime.probe = None;
                 }
-                self.ime_update_now(key);
+                if changed {
+                    // 交给重画后的那次收尾对账：那时光标位置才是新的，周围文本与矩形一次送出
+                    // （现在就对账会先按旧光标 commit 一次、重画后再 commit 一次）。
+                    if let Some(i) = self.idx(key) {
+                        self.windows[i].needs_paint = true;
+                    }
+                } else {
+                    // 空批次：可能只是 serial 刚对上，压着的状态请求要现在发。
+                    self.ime_update_now(key);
+                }
             }
             _ => {}
+        }
+    }
+
+    /// 按键改了正文：光标与选区可能都没动（Delete 键），缓存的周围文本不能再用。
+    pub(super) fn ime_text_changed(&mut self) {
+        if let Some(ime) = self.ime.as_mut() {
+            ime.probe = None;
+        }
+    }
+
+    /// 关窗：若文本焦点在它上面，本地当作 `leave`（合成器对已销毁的表面不一定再发）。
+    pub(super) fn ime_window_closed(&mut self, key: u32) {
+        if let Some(ime) = self.ime.as_mut().filter(|m| m.focus == Some(key)) {
+            ime.state.on_leave();
+            ime.focus = None;
+            ime.probe = None;
+            ime.want = None;
+        }
+    }
+
+    /// 窗口集合变了（开了 / 关了窗，模态状态可能随之变化）：给文本焦点所在窗口补一次对账。
+    pub(super) fn ime_resync_focus(&mut self) {
+        if let Some(key) = self.ime.as_ref().and_then(|m| m.focus) {
+            self.ime_update_now(key);
         }
     }
 

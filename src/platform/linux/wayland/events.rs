@@ -773,6 +773,7 @@ impl Wl {
             if r {
                 w.needs_paint = true;
             }
+            self.ime_text_changed();
             self.after_event(key);
         }
     }
