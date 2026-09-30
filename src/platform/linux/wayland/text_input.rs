@@ -189,13 +189,19 @@ impl TextInputState {
             Some(w) if !self.enabled => {
                 // enable 重置一切状态：把全部状态随它一起送。
                 out.extend([Req::Enable, Req::ContentType(w.hints)]);
+                // enable 连同输入法那边的合成 / 提交 / 删除状态一起重置（协议原文）：本地还没
+                // `done` 的也作废，免得刚放弃的合成串随一个迟到的 `done` 冒回来。
+                self.preedit = None;
+                self.commit = None;
+                self.delete = (0, 0);
                 self.enabled = true;
                 self.field = Some(w.field);
                 self.hints = Some(w.hints);
                 self.stale = false;
                 self.push_state(w, &mut out, true);
             }
-            // serial 没对上：状态请求等下一个对得上的 `done`。
+            // serial 没对上：状态请求等下一个对得上的 `done`。（换框 / `reset` 走上面的 enable
+            // 分支，照常带全部状态——enable 本身就重置了状态，没有「旧状态」可冲突，有意为之。）
             Some(_) if self.stale => {}
             Some(w) => self.push_state(w, &mut out, false),
         }
@@ -343,6 +349,36 @@ mod tests {
         );
         assert!(!s.stale);
         assert!(s.sync(Some(&other)).is_empty());
+    }
+
+    #[test]
+    fn switching_fields_while_stale_still_reenables_with_full_state() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        s.sync(Some(&want(1))); // commits = 1
+        s.on_done(0); // serial 对不上 → stale
+        assert!(s.sync(Some(&want(5))).is_empty(), "同一框：状态请求压着");
+        let r = s.sync(Some(&Want {
+            field: 2,
+            ..want(5)
+        }));
+        assert_eq!(r[..3], [Req::Disable, Req::Commit, Req::Enable]);
+        assert!(
+            r.contains(&Req::Rect(5, 10, 1, 20)),
+            "enable 之后带全部状态"
+        );
+        assert!(!s.stale, "enable 重置状态，stale 随之解除");
+    }
+
+    #[test]
+    fn enable_discards_input_method_events_not_yet_done() {
+        let mut s = TextInputState::default();
+        s.on_enter();
+        s.sync(Some(&want(1)));
+        s.on_preedit(Some("zhong".into()), 5, 5);
+        s.on_commit_string(Some("x".into()));
+        s.reset(&want(1)); // 放弃合成：disable + enable
+        assert_eq!(s.on_done(3), Batch::default(), "放弃之前的合成串不再冒出来");
     }
 
     #[test]
