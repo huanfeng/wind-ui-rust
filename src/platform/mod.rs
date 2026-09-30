@@ -114,7 +114,7 @@ pub(crate) fn single_window_open(_key: &str) -> bool {
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::clipboard::X11Clipboard as Clipboard;
+pub use linux::clipboard::LinuxClipboard as Clipboard;
 #[cfg(target_os = "linux")]
 pub use linux::drag_files;
 #[cfg(target_os = "linux")]

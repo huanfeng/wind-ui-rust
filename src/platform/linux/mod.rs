@@ -1,20 +1,22 @@
 //! Linux 平台后端：X11（经 x11rb）与原生 Wayland（经 wayland-client，`wayland` feature）。
 //!
 //! 运行期选后端，见 [`choose_backend`]：目前须 `WINDUI_BACKEND=wayland` 显式启用 Wayland。
-//! Wayland 后端尚在分阶段落地（见仓库根 `IMPLEMENTATION_PLAN.md`），目前只有窗口与呈现。
+//! Wayland 后端尚在分阶段落地（见仓库根 `IMPLEMENTATION_PLAN.md`），目前有窗口、呈现、输入、
+//! 剪贴板与文件拖入。
 //!
-//! 对外暴露与 `win32` / `macos` 同形的 API：`run` / `open_url` / `clipboard::X11Clipboard` /
+//! 对外暴露与 `win32` / `macos` 同形的 API：`run` / `open_url` / `clipboard::LinuxClipboard` /
 //! `drag_files` / `system_prefers_dark` / `system_locales`。上层只依赖 `crate::platform::*`。
 //!
 //! 模块划分：
 //! - `x11`：窗口、事件循环、呈现（`PutImage`）、窗口操作（EWMH）、无边框拖动。
-//! - `wayland`：Wayland 窗口、事件循环、`wl_shm` 呈现、`frame` 回调配速。
+//! - `wayland`：Wayland 窗口、事件循环、`wl_shm` 呈现、`frame` 回调配速、输入、剪贴板与拖入。
 //! - `host`：与显示协议无关的宿主簿记（点击计数、定时器、帧配速、出帧、事件后意图）。
 //! - `ime`：XIM 输入法客户端（合成串回调 → 宿主内联绘制，候选窗跟随光标）。
 //! - `keys`：键码 → keysym → 框架键。
 //! - `hotkey`：全局热键（根窗口 `GrabKey`）。
 //! - `dnd`：文件拖入（XDND 目标端）。
-//! - `clipboard`：独立线程专职拥有 / 读取 `CLIPBOARD` 选区。
+//! - `clipboard`：对外的剪贴板类型；X11 下由独立线程专职拥有 / 读取 `CLIPBOARD` 选区，
+//!   原生 Wayland 下转给 `wayland::data`。
 //! - `sys`：`poll(2)` 与跨线程唤醒管道。
 //! - 文字渲染见 `crate::text::linux`。
 //!
@@ -113,7 +115,7 @@ enum Note {
 /// 选后端：只有 `WINDUI_BACKEND=wayland`（不分大小写）且编进了 Wayland 后端才试 Wayland，
 /// 其余一律 X11（Wayland 会话经 XWayland）。
 ///
-/// **暂不按会话自动优先 Wayland**：原生后端还缺输入、装饰、剪贴板、输入法等（见
+/// **暂不按会话自动优先 Wayland**：原生后端还缺装饰、输入法等（见
 /// `IMPLEMENTATION_PLAN.md`），自动选上它会让 Wayland 桌面上的现有应用点不动。等 Stage 2–5
 /// 全部完成、并在 GNOME 真桌面验证过之后，再改为「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET`
 /// 就优先 Wayland、连不上回退 X11」——改的只是这里未指定分支的返回值与对应单测。

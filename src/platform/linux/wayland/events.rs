@@ -441,6 +441,7 @@ impl Wl {
                 button,
                 state: bstate,
             } => {
+                super::data::note_serial(serial);
                 let press = bstate == WEnum::Value(wl_pointer::ButtonState::Pressed);
                 if let Some(p) = self.pointer.as_mut() {
                     p.pressed = if press {
@@ -686,7 +687,11 @@ impl Wl {
                     Err(e) => log::warn!("读取 keymap 失败：{e}"),
                 }
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter {
+                serial, surface, ..
+            } => {
+                super::data::note_serial(serial);
+                super::data::note_focus(true);
                 k.repeat.stop();
                 k.focus = self
                     .windows
@@ -695,6 +700,7 @@ impl Wl {
                     .map(|w| w.key);
             }
             wl_keyboard::Event::Leave { .. } => {
+                super::data::note_focus(false);
                 k.repeat.stop();
                 k.focus = None;
                 self.alt_down = false;
@@ -712,8 +718,12 @@ impl Wl {
             }
             wl_keyboard::Event::RepeatInfo { rate, delay } => k.repeat.set_info(rate, delay),
             wl_keyboard::Event::Key {
-                key, state: kstate, ..
+                serial,
+                key,
+                state: kstate,
+                ..
             } => {
+                super::data::note_serial(serial);
                 let press = kstate == WEnum::Value(wl_keyboard::KeyState::Pressed);
                 // XKB 键码 = evdev 键码 + 8。
                 self.on_key_code(key + 8, press, false);

@@ -1,4 +1,7 @@
-//! X11 剪贴板（`CLIPBOARD` 选区）。
+//! 剪贴板：对外的 [`LinuxClipboard`]，以及 X11 的实现（`CLIPBOARD` 选区）。
+//!
+//! 在用原生 Wayland 后端时，读写转给 `wayland::data`（`wl_data_device`）；否则走这里的
+//! X11 实现（Wayland 会话经 XWayland 时也是它）。
 //!
 //! X 的剪贴板不是一块共享存储，而是「谁拥有选区，谁负责应答别人的读取请求」：复制之后
 //! 程序必须一直在线应答 `SelectionRequest`。把这件事放在主事件循环里会让 `set_text`
@@ -25,15 +28,23 @@ use x11rb::CURRENT_TIME;
 use crate::core::ClipboardProvider;
 
 /// 剪贴板实现，由 `UiHost` 注入 `Tree`。
-pub struct X11Clipboard;
+pub struct LinuxClipboard;
 
-impl ClipboardProvider for X11Clipboard {
+impl ClipboardProvider for LinuxClipboard {
     fn get_text(&self) -> Option<String> {
+        #[cfg(feature = "wayland")]
+        if let Some(r) = super::wayland::clipboard_get() {
+            return r;
+        }
         let (tx, rx) = mpsc::channel();
         send(Req::Get(tx))?;
         rx.recv_timeout(Duration::from_millis(1500)).ok().flatten()
     }
     fn set_text(&self, text: &str) {
+        #[cfg(feature = "wayland")]
+        if super::wayland::clipboard_set(text) {
+            return;
+        }
         let _ = send(Req::Set(text.to_string()));
     }
 }
