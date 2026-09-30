@@ -286,10 +286,30 @@ fn offer_mimes(offer: &wl_data_offer::WlDataOffer) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `wl_data_source` 的 user data。
+/// `wl_data_source` 的 user data。文本可替换：同一次输入里连着复制两回时改写它，不再发第二次
+/// `set_selection`（见 [`reuse_source`]）。
 pub(super) struct SourceData {
     id: u64,
-    text: Arc<str>,
+    text: Mutex<Arc<str>>,
+}
+
+impl SourceData {
+    fn text(&self) -> Arc<str> {
+        match self.text.lock() {
+            Ok(t) => t.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+}
+
+/// 这次复制能不能直接改写上一个 source 的文本：上一次复制用的是同一个输入 serial，且它仍是本地
+/// 认定的当前选区（没被取代、没判为被拒）。
+///
+/// 同一 serial 连发两次 `set_selection`，weston 会把后一次当作「不比现有选区新」丢掉，与 X11 /
+/// win32 的「后写者胜」不一致；改写文本则两边行为相同。返回要改写的 source 序号。
+fn reuse_source(last_set: Option<(u64, u32)>, serial: u32, current: Option<u64>) -> Option<u64> {
+    let (id, used) = last_set?;
+    (used == serial && current == Some(id)).then_some(id)
 }
 
 /// `set_selection` 之后那个 `wl_display.sync` 的 user data：对应的 source 序号。
@@ -340,6 +360,8 @@ struct Clip {
     sel: Sel,
     /// 还没写完的 `send` 应答。
     sends: Vec<Outgoing>,
+    /// 最近一次 `set_selection`：（source 序号，所用的 serial）。
+    last_set: Option<(u64, u32)>,
 }
 
 impl Clip {
@@ -348,7 +370,7 @@ impl Clip {
             .iter()
             .filter_map(|s| s.data::<SourceData>())
             .find(|d| d.id == id)
-            .map(|d| d.text.clone())
+            .map(SourceData::text)
     }
 
     fn destroy_source(&mut self, id: u64) {
@@ -406,6 +428,7 @@ pub(super) fn init(
             selection: None,
             sel: Sel::Empty,
             sends: Vec::new(),
+            last_set: None,
         })
     });
     ACTIVE.store(true, Ordering::Relaxed);
@@ -494,12 +517,27 @@ pub(in super::super) fn get_text() -> Option<Option<String>> {
 /// 写剪贴板文本。返回 `false` = Wayland 剪贴板没在用，调用方走 X11。
 pub(in super::super) fn set_text(text: &str) -> bool {
     with_clip(|c| {
+        if let Some(id) = reuse_source(c.last_set, c.serial, c.owner.current) {
+            let data = c
+                .sources
+                .iter()
+                .filter_map(|s| s.data::<SourceData>())
+                .find(|d| d.id == id);
+            if let Some(d) = data {
+                match d.text.lock() {
+                    Ok(mut t) => *t = Arc::from(text),
+                    Err(p) => *p.into_inner() = Arc::from(text),
+                }
+                return;
+            }
+        }
         let id = c.owner.set();
+        c.last_set = Some((id, c.serial));
         let source = c.manager.create_data_source(
             &c.qh,
             SourceData {
                 id,
-                text: Arc::from(text),
+                text: Mutex::new(Arc::from(text)),
             },
         );
         for m in OFFER_MIMES {
@@ -623,7 +661,7 @@ fn read_until_eof(rd: &mut File, deadline: Instant) -> Option<Vec<u8>> {
 
 /// 应答一次 `send`（`text` 是那个 source 自己的文本——被取代、尚未 `cancelled` 的旧 source
 /// 也照它当时的内容答）：先写一轮，写不完的挂起等 `poll`。
-fn on_send(text: &Arc<str>, fd: OwnedFd) {
+fn on_send(text: Arc<str>, fd: OwnedFd) {
     let file = File::from(fd);
     if let Err(e) = super::super::sys::set_nonblocking(&file) {
         log::warn!("剪贴板应答 fd 设为非阻塞失败：{e}");
@@ -631,7 +669,7 @@ fn on_send(text: &Arc<str>, fd: OwnedFd) {
     }
     let mut out = Outgoing {
         file,
-        data: text.clone(),
+        data: text,
         written: 0,
         progress: Instant::now(),
     };
@@ -742,7 +780,7 @@ impl Dispatch<wl_data_source::WlDataSource, SourceData> for Wl {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_data_source::Event::Send { fd, .. } => on_send(&data.text, fd),
+            wl_data_source::Event::Send { fd, .. } => on_send(data.text(), fd),
             // 选区被别人（或我们自己的新 source）取代。
             wl_data_source::Event::Cancelled => {
                 let mut ours = false;
@@ -1211,6 +1249,23 @@ mod tests {
         gone.sort();
         assert_eq!(gone, vec![a, b]);
         assert_eq!(o.plan(Sel::Foreign), ReadPlan::Pipe);
+    }
+
+    #[test]
+    fn second_copy_with_the_same_serial_rewrites_the_current_source() {
+        assert_eq!(reuse_source(Some((3, 77)), 77, Some(3)), Some(3));
+        assert_eq!(
+            reuse_source(Some((3, 77)), 78, Some(3)),
+            None,
+            "新的输入：照常发"
+        );
+        assert_eq!(
+            reuse_source(Some((3, 77)), 77, None),
+            None,
+            "已被取代 / 判为被拒：不能改写一个不再是选区的 source"
+        );
+        assert_eq!(reuse_source(Some((3, 77)), 77, Some(4)), None);
+        assert_eq!(reuse_source(None, 77, None), None);
     }
 
     #[test]
