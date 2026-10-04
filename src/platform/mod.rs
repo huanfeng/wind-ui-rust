@@ -562,9 +562,9 @@ pub struct Decoration {
     pub handler: Box<dyn AppHandler>,
     /// 标题栏高度（逻辑像素）。
     pub height: i32,
-    /// 改标题（窗口标题变了时平台层调用）。
+    /// 改标题（窗口标题变了时平台层调用）。不触发重画通知：调用方随后自己让标题栏整条重画。
     pub set_title: Box<dyn Fn(&str)>,
-    /// 窗口激活 / 失活：失活时标题与按钮转淡。
+    /// 窗口激活 / 失活：失活时标题与按钮转淡。同上，重画由调用方安排。
     pub set_active: Box<dyn Fn(bool)>,
 }
 

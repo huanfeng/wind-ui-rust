@@ -723,12 +723,19 @@ fn build_decoration(
     crate::platform::Decoration {
         handler: Box::new(host),
         height: DECORATION_HEIGHT,
+        // 平台层在事件期外调这两个回调：用不触发通知的写法（普通 `set` 会让所有窗口整窗
+        // 重画），重画由平台层对标题栏自己安排（整条重画，含重新布局）。
         set_title: Box::new(move |t| {
             if title_sig.with(|s| s != t) {
-                title_sig.set(t.to_string());
+                title_sig.set_quiet(t.to_string());
             }
         }),
-        set_active: Box::new(move |a| fg.set(if a { Role::Text } else { Role::TextMuted })),
+        set_active: Box::new(move |a| {
+            let role = if a { Role::Text } else { Role::TextMuted };
+            if fg.get() != role {
+                fg.set_quiet(role);
+            }
+        }),
     }
 }
 

@@ -699,6 +699,23 @@ impl<T: 'static> Signal<T> {
         notify_changed();
     }
 
+    /// 写值但**不**触发任何重绘通知（不置跨窗口脏、不请求续帧）。只给平台层驱动的、自己
+    /// 负责重画的小宿主用（客户端装饰标题栏的标题 / 激活态）：普通的 `set` 在事件期外会让
+    /// 所有窗口整窗重画。
+    pub(crate) fn set_quiet(&self, value: T) {
+        RT.with(|rt| {
+            let mut rt = rt.borrow_mut();
+            if let Some(slot) = rt.slot_mut(self.key) {
+                if slot.derived.is_some() {
+                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
+                    return;
+                }
+                slot.value = Some(Box::new(value));
+                slot.version = slot.version.wrapping_add(1);
+            }
+        });
+    }
+
     /// 原地修改并触发重绘（避免 get→改→set 的一次 clone）。
     ///
     /// 失效语义同 [`Signal::set`]。
