@@ -18,6 +18,14 @@
 //!   浮在主窗上方、不占任务栏；开着期间主窗点不动（点它只会把对话框拉到前面）；按「清空」
 //!   或「取消」关掉后焦点回到主窗，结果经共享的 `Signal` 传回。
 //!
+//! - **单实例二次启动**（`--single` 开关，开 `App::single_instance`）：先
+//!   `cargo run --release --example multi_window -- --single` 跑起来，切到别的应用或把它
+//!   盖住，再从另一个终端跑一次 `… -- --single 随便 什么参数`：第二个进程把 argv 转给
+//!   运行中的这个后立即退出，不开新窗口；这边弹 toast、主窗底部那行显示收到的参数，主窗被
+//!   唤出到前台（隐藏的会显示）。Linux Wayland 下能否真拿到焦点由合成器决定：从桌面启动器
+//!   （应用菜单 / 概览）启动时有激活令牌，一般能到前台；终端里直接跑没有令牌，GNOME 多半只弹
+//!   「已就绪」通知（见 `docs/LINUX_PORTING.md` §8.3「把窗口提到前台」）。
+//!
 //! 子窗只有对自己有意义的配置（标题/尺寸/可缩放/居中/无边框/最小尺寸/背景）。托盘、
 //! 全局热键、单实例、渲染后端都是**应用级**的，由 `App` 那次配置决定，子窗自动跟随。
 //!
@@ -35,6 +43,25 @@ fn main() {
 
     let th_main = theme.clone();
     let th_child = theme.clone();
+
+    // 二次启动转来的参数。单实例回调够不着 ctx（见 `App::single_instance` 文档），经通道
+    // 回到界面线程再弹 toast、改显示。
+    let second = signal(String::new());
+    if std::env::args().any(|a| a == "--single") {
+        let tx = app.channel::<Vec<String>>(move |ctx, argv| {
+            let args: Vec<String> = argv
+                .into_iter()
+                .skip(1)
+                .filter(|a| a != "--single")
+                .collect();
+            let args = args.join(" ");
+            ctx.toast(format!("又启动了一次：{args}"));
+            second.set(format!("二次启动收到的参数：{args}"));
+        });
+        app = app.single_instance("windui_multi_window_example", move |argv| {
+            let _ = tx.send(argv);
+        });
+    }
 
     app.screenshot_from_args()
         .content(
@@ -99,7 +126,8 @@ fn main() {
                 )
                 .child(theme_button(th_main, dark))
                 .child(Element::flex_spacer())
-                .child(Element::label("关掉最后一个窗口才会退出进程").fg_role(Role::TextMuted)),
+                .child(Element::label("关掉最后一个窗口才会退出进程").fg_role(Role::TextMuted))
+                .child(Element::label(second).fg_role(Role::TextMuted)),
         )
         .run();
 }
