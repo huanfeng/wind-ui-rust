@@ -150,15 +150,15 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
    复用本库的菜单渲染。
 2. **MIT-SHM 呈现**：大窗口整窗帧下 `PutImage` 要把整帧过一遍 socket，SHM 可省掉这次拷贝。
 3. **窗口模式 GPU**：`src/render/gpu/` 已在 Linux 编译通过，差的是从 X 窗口建 wgpu surface。
-4. **Wayland 原生**：进行中，见 §8 与仓库根 `IMPLEMENTATION_PLAN.md`。
+4. **Wayland 原生**：已完成（默认仍走 X11），见 §8；默认后端是否改为 Wayland 见 §8.1。
 5. **文件拖出**（XDND 源端）、**零窗口常驻**、运行期 DPI / 主题跟随。
 
-## 8. Wayland 原生后端（进行中）
+## 8. Wayland 原生后端
 
-计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。Stage 1–4 已完成并经 GNOME 42 真桌面验证：
-窗口与呈现；指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入；输入法
-（text-input-v3）。Stage 5（窗口装饰：服务端装饰协商 + 客户端标题栏、模态对话框登记）已实现，
-待真桌面人工验证。
+分五个阶段落地，2026-10-04 全部完成，并在 GNOME 42 Wayland 会话（192.168.5.55，fcitx5）上过了
+真桌面回归清单（§8.10）：窗口与呈现；指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）
+与文件拖入；输入法（text-input-v3）；窗口装饰（服务端装饰协商 + 客户端标题栏）与模态对话框登记。
+**未实测**：ibus、Deepin Treeland（192.168.5.50）。
 
 > ⚠ **默认不启用**：只有 `WINDUI_BACKEND=wayland` 才走它，其余情况 Wayland 会话照旧经
 > XWayland 运行。改为自动优先的条件与剩余风险见 §8.1。
@@ -179,8 +179,8 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 **何时改为自动优先**（决定权在维护者与用户，代码只改 `choose_backend` 未设时的分支与其单测）：
 把未设时改成「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」。条件：
 
-1. Stage 5 的人工清单在 GNOME（必须 CSD 的那一类）上通过，且至少一个给服务端装饰的桌面
-   （KDE / Deepin Treeland / sway）上确认「不重复画标题栏」。
+1. 真桌面回归清单（§8.10）在 GNOME（必须 CSD 的那一类）上通过——**2026-10-04 已过**；且至少
+   一个给服务端装饰的桌面（KDE / Deepin Treeland）上确认「不重复画标题栏」——**未测**。
 2. 下面的剩余风险逐条被接受或补上。
 
 剩余风险（自动优先后，原本经 XWayland 正常工作、换到原生后端会变差或变化的）：
@@ -366,7 +366,7 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
     input、X11 的 XIM 按焦点控件重建 / 重置 IC——都可以用同一个 `ime_field`。
   - **缺口**：选区方向（光标在头还是尾）宿主不给，一律报光标在尾。
   - 合成器没有 text-input-v3 → 没有输入法，stderr 提示一次。Mutter 从 GNOME 3.34 起实现了
-    text-input-v3，GNOME 42 应有（本机未实测，见人工清单）。
+    text-input-v3，GNOME 42 实测有（§8.10）。
 - **窗口装饰**（`decor.rs` 协议与交互，`csd.rs` 几何是纯逻辑、有单测）：
   - 协商：有 `zxdg_decoration_manager_v1`（sway、KDE）时有边框窗口请求服务端装饰，合成器回
     `server_side` 就不画；回 `client_side`、或根本没有这个协议（Mutter / GNOME、weston）时，有边框
@@ -422,7 +422,7 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
 
 应用不能设窗口坐标（`centered` 无效，由合成器摆放）；不能查询是否被最小化
 （`WindowState::minimized` 恒 false，`hide_on_minimize` 无从触发）；唤起已显示的窗口要
-`xdg-activation-v1`（未实现）。全局热键见 `IMPLEMENTATION_PLAN.md` 末节：不实现，启动时
+`xdg-activation-v1`（未实现）。全局热键见 §8.8：不实现，启动时
 stderr 提示一次、`App::hotkey` 成为空操作；兜底是桌面设置里把快捷键绑到 `应用 --toggle` 这样
 的命令，应用开 `App::single_instance`，第二次启动的 argv 转给运行中的实例（见 API_GUIDE §5）。
 
@@ -625,3 +625,98 @@ AccessDenied；门户 `Screenshot`（`interactive: false`）能出图，但**每
 `systemctl --user restart xdg-desktop-portal-gnome` 收掉。屏保熄屏时抓到的是全黑：先
 `org.gnome.ScreenSaver.SetActive false`。
 
+### 8.8 已记录、暂不实现
+
+**全局热键**（2026-09-24 决定，有用户反馈再做）。Wayland 协议刻意不让客户端抓全局按键，可选路线：
+
+- **兜底（零代码，现在就能用）**：用户在桌面设置里把快捷键绑到 `myapp --toggle`，单实例转发
+  （`App::single_instance` 把第二次启动的 argv 转给运行中实例）送达应用。用法写在 API_GUIDE §5
+  与 §8.4。
+- **首选实现**：xdg-desktop-portal `GlobalShortcuts`（KDE 5.27+、GNOME 48+、Hyprland；sway 无）。
+  不引 `zbus` / `ashpd`（体量大且异步），自写最小同步 D-Bus 客户端（EXTERNAL 认证 + 方法调用 +
+  信号匹配 + 必要的序列化），其 fd 并入现有 `poll` 循环。首次使用会弹系统授权框。
+- 排除：合成器私有协议（太碎）、读 `/dev/input`（需 input 组，等同键盘记录器）。
+
+**非界面线程访问剪贴板**（2026-09-30 决定，有用户反馈再做）。方案与不做的理由见 §8.3「已知
+限制：剪贴板仅界面线程可用」。
+
+**不在这一轮范围内**：系统托盘（SNI，与 X11 共用，另立）、文件拖出、窗口模式 GPU、零窗口常驻、
+唤起已显示的窗口（`xdg-activation-v1`）、primary selection。
+
+### 8.9 真桌面验证环境
+
+- **192.168.5.55**：Ubuntu 22.04，GNOME Shell 42.9 **Wayland 会话**，输入法 fcitx5。Mutter 42
+  **没有** `fractional-scale-v1` / `cursor-shape-v1` / `xdg-dialog-v1` / `xdg-decoration`——恰好
+  覆盖各项的**回退路径**（整数缩放、光标主题、无对话框登记、必须客户端标题栏）；这些新协议的
+  **正向路径**靠 sway / weston headless 与更新的桌面补验，不能以这台机器的结果声称已覆盖。
+- 该机 glibc 2.35，本机编的二进制跑不了：用 cargo-zigbuild
+  `--target x86_64-unknown-linux-gnu.2.35` 交叉编译后拷过去。
+- **虚拟机里 GDM 不给 Wayland 会话的坑**（2026-10-01）：虚拟机显示配置一变，内核同时出了
+  `simpledrm`（固件帧缓冲）与 `virtio_gpu` 两个 DRM 设备，GDM 的 `61-gdm.rules` 把它判成「虚拟
+  显卡 + 直通物理显卡」而禁用 Wayland——登录界面没有齿轮、只能进 Xorg，重启也一样。症状是
+  `/run/udev/gdm-machine-has-{virtual-gpu,hardware-gpu,hybrid-graphics}` 三个标记同时存在。该机
+  已用 `sudo ln -s /dev/null /etc/udev/rules.d/61-gdm.rules` 屏蔽这套规则。
+- **192.168.5.50**：Deepin 25，Treeland 合成器。用来验「服务端装饰时不重复画标题栏」与
+  `xdg-dialog-v1` 的正向路径；截至 2026-10-04 尚未实测。
+- 远程无人值守时别在这两台机器上弹界面（抓屏门户的确认框会留在对方桌面，见 §8.7 末）。
+
+### 8.10 真桌面回归清单
+
+改动 Wayland 后端后在真桌面上逐项过一遍。运行时都加 `WINDUI_BACKEND=wayland`；有边框的示例用
+`file_drop`、`multi_window`、`settings`，无边框的用 `about`、`frameless`。
+
+**状态**：2026-10-04 在 GNOME 42 + fcitx5 上全部通过（输入法项用 fcitx5）；**ibus 未测**（该机
+默认输入法是 fcitx5，需要时 `im-config -n ibus` 补测）；**Deepin Treeland 未测**（装饰一节的
+服务端装饰项）。
+
+*窗口、输入与缩放*
+1. 点击、打字、长按重复（速率跟随系统设置）、快捷键（Ctrl+A / C / V）。
+2. 无边框窗口：拖动、边缘缩放、双击最大化、右键框架系统菜单。
+3. 改缩放（100% / 200%，有分数缩放的桌面再试 125% / 150%）后文字锐利、点击命中正确。
+   两块不同缩放的显示器间拖动未测过（只验了单输出运行期改缩放）。
+
+*剪贴板与拖入*
+
+4. gedit / 终端里复制中文，本应用 Ctrl+V 粘进输入框；反向：本应用复制，gedit 粘贴。若本应用
+   复制后**自己**立刻粘贴得到旧内容（gedit 那边却是新的），是「有焦点、sync 回来前没见到自家
+   选区即判被拒」在该合成器上判错了（依赖合成器同步回发选区，见 §8.3「剪贴板」）；判定首次
+   生效时 stderr 有一行 `[windui] 合成器没有采用这次剪贴板写入…`。
+5. 大段文本（>1MB，比如 `seq 1 200000` 的输出）两个方向都完整。
+6. 本应用复制后关掉本应用再在 gedit 粘贴：没有剪贴板管理器时预期贴不出（协议如此）。
+7. X 应用（经 XWayland，如 `xterm`）与本应用互相复制。
+8. 从文件管理器拖 1 个、多个文件到 `file_drop`，含空格与中文路径；拖网页链接 / 选中文字进来
+   显示禁止光标；拖入后源文件不被移走（只接受复制）。
+
+*输入法*
+
+9. 拼音 `nihao` 选词上屏，无重复、无丢字；合成串在输入框里带下划线内联显示，Esc 取消后清干净。
+10. 候选窗贴光标下方，打字 / 换行 / 滚动后跟着走；多行输入框里换行后位置正确；1x / 2x 都贴光标。
+11. 密码框：输入法收到「密码」用途与敏感 / 隐藏提示，预期不出中文候选（取决于输入法）。
+12. 合成到一半 Alt+Tab 走再切回、点到按钮、点输入框里别处、由程序把焦点移到另一个框：合成串
+    都清干净，不应有残字插到新位置（部分 ibus 引擎在重置时会提交合成串，出现即记下）。
+13. 同一窗口两个输入框间 Tab 切换后继续打中文，候选窗跟到新框；多行框里回车是换行。
+14. 启动时 stderr **不应**出现「合成器不支持 text-input-v3」。
+
+*窗口装饰*（客户端标题栏一节在必须 CSD 的桌面上测，如 GNOME）
+
+15. 有边框窗口出现标题栏：标题居中、三个按钮；亮 / 暗主题各看一次；切到别的窗口后转淡。
+16. 拖标题栏移动（单击不移动）；双击最大化 / 还原，最大化后再拖能拉出来；右键空白处弹合成器
+    的窗口菜单。
+17. 四边四角缩放（窗口内侧约 6 像素），落在输入框 / 按钮上时操作控件而不缩放；最大化、平铺后
+    边缘不能缩放；拖到最小尺寸时标题栏不被压扁。
+18. 按钮悬停高亮（关闭键红底）、按下、松开触发；按下拖出松开不触发；应用拦截关闭时窗口不关、
+    之后再点仍能正常关。
+19. 内容区坐标无偏移：标题栏下方的点击、拖入落点、输入法候选窗都不偏 33 像素；分数缩放下拖动
+    改窗高时标题文字可能上下跳 1 像素（已知）。
+20. 模态子窗（`multi_window`）打开时父窗的标题栏按钮不响应。
+21. 给服务端装饰的桌面（KDE / Treeland / sway）：我们**不重复画**标题栏；无边框窗口不被加边框；
+    运行期切换装饰模式时（若合成器会这样做）最大化 / 平铺下窗口不超出屏幕、内容不错位；有
+    `xdg-dialog-v1` 时模态子窗被识别为对话框。
+
+*自动化覆盖的缺口*（各阶段交付时记下的偏差，回归时心里有数）：Stage 1 的像素比对用
+`weston-screenshooter` 抓屏与离屏渲染比对，不在 `cargo test` 里；Stage 2 的输入注入在 sway 上
+做（weston headless 没有输入设备）；Stage 3「写入被合成器拒绝」只有状态机单测（sway 上构造不出
+被拒）；Stage 4 用自写的 `zwp_input_method_v2` 客户端做协议往返，真实输入法只在真桌面测，sway
+不给输入法弹出表面发 `text_input_rectangle`，光标矩形只核对请求参数；Stage 5「装饰模式切换截图
+回归」改为 sway / weston 抓屏 + 像素量化核对（离屏截图路径不经平台层），`xdg-dialog-v1` 在
+sway / weston 上都没有、未自动化验证。

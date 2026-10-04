@@ -9,7 +9,7 @@
 //!   文件拖入（`wl_data_device`）。`ime.rs`：输入法（text-input-v3），状态机在 `text_input.rs`。
 //!   `decor.rs`：窗口装饰协商与客户端标题栏，几何在 `csd.rs`。
 //!
-//! # 当前范围（实施计划 Stage 1–5）
+//! # 当前范围
 //!
 //! 已有：建窗、按脏区呈现、`frame` 回调配速、多窗口、窗口操作；指针（含高精度滚轮、双击、
 //! 捕获）、键盘（xkbcommon、客户端按键重复）、光标（cursor-shape-v1 / XCursor 主题回退）、

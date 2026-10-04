@@ -2318,10 +2318,11 @@ Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持—�
 主题是同一份平台无关代码，平台间无需改动。下表列出各平台的实现方式与尚未拉齐的能力
 （Linux 后端的取舍与验证方法见 `docs/LINUX_PORTING.md`）。
 
-Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开）分阶段落地，目前有窗口与呈现、
-键鼠输入、剪贴板（文本；**仅界面线程可用**，其它线程读写当空处理，见 `LINUX_PORTING.md` §8.3）
-与文件拖入、输入法（text-input-v3）、窗口装饰（合成器不画边框时自绘标题栏），尚待各桌面
-人工验证，因此默认不启用，须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则见 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
+Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗口与呈现、键鼠输入、剪贴板
+（文本；**仅界面线程可用**，其它线程读写当空处理，见 `LINUX_PORTING.md` §8.3）与文件拖入、
+输入法（text-input-v3）、窗口装饰（合成器不画边框时自绘标题栏），已在 GNOME 42 真桌面验证。
+目前仍默认不启用，须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则与改为默认的条件见
+`LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 
 | 能力 | Windows | macOS | Linux |
 |---|---|---|---|

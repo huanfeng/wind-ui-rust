@@ -37,7 +37,8 @@
   已知限制：全局热键不实现（协议不允许，兜底是桌面快捷键绑到 `应用 --参数` 经单实例转发）；
   剪贴板仅界面线程可用（其它线程读写当空）；自绘标题栏方角无阴影、缩放边在窗口内侧；唤起
   已显示的窗口（xdg-activation）、文件拖出、primary selection、系统托盘未做；应用不能自定窗口坐标、
-  查询不到最小化（协议所限）。GNOME 真桌面的交互项待人工验证。详见 `docs/LINUX_PORTING.md` §8。
+  查询不到最小化（协议所限）。已在 GNOME 42（fcitx5）真桌面验证；ibus 与 Deepin Treeland 尚未
+  实测。详见 `docs/LINUX_PORTING.md` §8（含真桌面回归清单）。
 - **`AppHandler::decoration`**（带默认实现，返回 `None`）与 `platform::Decoration`：宿主造一条
   客户端装饰标题栏交给平台层画（目前 Wayland 后端在合成器不画边框时使用）。
 - **输入法内容类型与焦点身份**（公共 API，均带默认实现）：`Widget::ime_hints()` 返回

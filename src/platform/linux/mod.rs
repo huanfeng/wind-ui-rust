@@ -1,8 +1,8 @@
 //! Linux 平台后端：X11（经 x11rb）与原生 Wayland（经 wayland-client，`wayland` feature）。
 //!
 //! 运行期选后端，见 [`choose_backend`]：目前须 `WINDUI_BACKEND=wayland` 显式启用 Wayland。
-//! Wayland 后端尚在分阶段落地（见仓库根 `IMPLEMENTATION_PLAN.md`），目前有窗口、呈现、输入、
-//! 剪贴板与文件拖入。
+//! Wayland 后端已有窗口、呈现、输入、剪贴板与文件拖入、输入法、窗口装饰（现状、缺口与真桌面
+//! 回归清单见 `docs/LINUX_PORTING.md` §8）。
 //!
 //! 对外暴露与 `win32` / `macos` 同形的 API：`run` / `open_url` / `clipboard::LinuxClipboard` /
 //! `drag_files` / `system_prefers_dark` / `system_locales`。上层只依赖 `crate::platform::*`。
@@ -116,8 +116,8 @@ enum Note {
 /// 选后端：只有 `WINDUI_BACKEND=wayland`（不分大小写）且编进了 Wayland 后端才试 Wayland，
 /// 其余一律 X11（Wayland 会话经 XWayland）。
 ///
-/// **暂不按会话自动优先 Wayland**：原生后端的五个阶段都已实现，但窗口装饰还待各桌面人工
-/// 验证，且有几处相对 XWayland 的行为差异（全局热键、剪贴板线程等）需要维护者决定是否接受——
+/// **暂不按会话自动优先 Wayland**：原生后端已完成并在 GNOME 真桌面验证，但给服务端装饰的桌面
+/// 还没实测，且有几处相对 XWayland 的行为差异（全局热键、剪贴板线程等）需要维护者决定是否接受——
 /// 条件与剩余风险见 `docs/LINUX_PORTING.md` §8.1。决定之后改为「有 `WAYLAND_DISPLAY` /
 /// `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」——改的只是这里未指定分支的返回值与对应单测。
 fn choose_backend(forced: Option<&str>, compiled: bool) -> (Choice, Option<Note>) {
