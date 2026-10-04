@@ -73,7 +73,7 @@ use crate::platform::{AppHandler, NewWindow, WindowConfig};
 use cursor::Cursor;
 use input::{KeyRepeat, WheelFrame};
 use scale::Scale;
-use shm::{create_buffer, write_pixels, ShmBuffer, ShmSlots};
+use shm::{create_buffer, write_pixels, Damage, ShmBuffer, ShmSlots};
 use xkb::Xkb;
 
 pub(super) use data::{get_text as clipboard_get, set_text as clipboard_set};
@@ -407,7 +407,7 @@ struct Win {
     fresh: bool,
     needs_paint: bool,
     /// 已画进 pixmap、尚未送上屏的区域（拿不到空闲缓冲时留到 `release` 之后）。
-    unpresented: Option<Rect>,
+    unpresented: Damage,
     /// 回了 `ack_configure`、还欠一次 `commit`。
     must_commit: bool,
     /// 当前角色收到过 configure，可以挂缓冲了。
@@ -591,7 +591,7 @@ impl Wl {
             pixmap: None,
             fresh: true,
             needs_paint: true,
-            unpresented: None,
+            unpresented: Damage::default(),
             must_commit: false,
             configured: false,
             pending: None,
@@ -882,11 +882,24 @@ impl Wl {
             return;
         }
         // 装饰协商的结果与尺寸一起生效：先定标题栏有没有，下面才知道内容区多高。
-        if let Some(on) = self.windows[i].pending_deco.take() {
-            self.set_csd(i, on);
-        }
+        let old_bar = self.bar_logical(i);
+        let switched = match self.windows[i].pending_deco.take() {
+            Some(on) => self.set_csd(i, on),
+            None => false,
+        };
         let bar = self.bar_logical(i);
         let w = &mut self.windows[i];
+        // 只换了装饰模式、合成器没给新尺寸：整窗尺寸照旧（最大化 / 平铺时它就是合成器配置的
+        // 尺寸，不能超出），内容区随标题栏的有无伸缩。
+        if switched && w.pending.is_none() {
+            let content = csd::rebar(w.logical.1, old_bar, bar);
+            w.logical.1 = content;
+            w.h = w.scale.to_physical(content);
+            if !w.state.maximized {
+                w.floating.1 = csd::rebar(w.floating.1, old_bar, bar);
+            }
+            w.handler.on_window_state(w.window_state());
+        }
         // 只认当前角色：隐藏再显示换过一套角色对象，旧的那套在队列里残留的事件要丢掉，
         // 拿新角色去 ack 旧 serial 是协议错误。
         let Some(role) = w.role.as_ref().filter(|r| &r.xdg == xdg) else {
@@ -978,8 +991,11 @@ impl Wl {
                 continue;
             };
             let any_dirty = self.windows.iter().any(|w| {
-                w.visible()
-                    && (w.needs_paint || w.deco.as_ref().is_some_and(|d| d.on && d.needs_paint))
+                csd::frame_due(
+                    w.visible(),
+                    w.needs_paint,
+                    w.deco.as_ref().is_some_and(|d| d.on && d.needs_paint),
+                )
             });
             let (mut writable, send_deadline) = data::pending_sends();
             let (drop_fds, drop_deadline) = self.pending_drops();
@@ -1073,29 +1089,35 @@ impl Wl {
                 }
                 w.frame_cb = None;
             }
-            if w.unpresented.is_some_and(|u| !u.is_empty()) {
+            if !w.unpresented.is_empty() {
                 continue;
             }
-            // 标题栏按钮的淡入淡出按满帧走；只有它在动时内容不重画。
-            let ask = if deco_anim {
-                0
-            } else {
-                w.handler.next_frame_delay_ms() as u64
-            };
-            let due = anim_gap(ask);
-            let elapsed = w.last_anim.elapsed();
-            if elapsed >= due {
+            // 内容与标题栏各按各的截止时间：标题栏按钮的淡入淡出按满帧走，内容照它自报的
+            // （光标闪烁 500ms）——不能让标题栏动画逼内容每帧重画。
+            let content = content_anim.then(|| {
+                (
+                    w.last_anim.elapsed(),
+                    anim_gap(w.handler.next_frame_delay_ms() as u64),
+                )
+            });
+            let bar = w
+                .deco
+                .as_ref()
+                .filter(|_| deco_anim)
+                .map(|d| (d.last_anim.elapsed(), anim_gap(0)));
+            let tick = csd::anim_tick(content, bar);
+            if tick.content {
                 w.last_anim = now;
-                if content_anim {
-                    w.needs_paint = true;
+                w.needs_paint = true;
+            }
+            if tick.bar {
+                if let Some(d) = w.deco.as_mut() {
+                    d.last_anim = now;
+                    d.needs_paint = true;
                 }
-                if deco_anim {
-                    if let Some(d) = w.deco.as_mut() {
-                        d.needs_paint = true;
-                    }
-                }
-            } else {
-                at(now + (due - elapsed));
+            }
+            if let Some(left) = tick.wait {
+                at(now + left);
             }
         }
         next.map(|n| n.saturating_duration_since(Instant::now()))
@@ -1116,7 +1138,7 @@ impl Wl {
             if content || deco {
                 let bar = self.bar_phys(i);
                 let w = &mut self.windows[i];
-                let mut damage = None;
+                let mut damage = Damage::default();
                 let mut full = false;
                 if content {
                     w.needs_paint = false;
@@ -1130,15 +1152,15 @@ impl Wl {
                     );
                     full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
                     // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
-                    damage = drawn.map(|d| Rect::new(d.x, d.y + bar, d.w, d.h));
+                    if let Some(d) = drawn {
+                        damage = Damage::content(csd::content_to_buffer(d, bar));
+                    }
                 }
                 if let Some(d) = self.paint_deco(i, full) {
-                    damage = Some(damage.map_or(d, |u: Rect| u.union(&d)));
+                    damage = damage.union(Damage::bar(d));
                 }
                 let w = &mut self.windows[i];
-                if let Some(d) = damage {
-                    w.unpresented = Some(w.unpresented.map_or(d, |u| u.union(&d)));
-                }
+                w.unpresented = w.unpresented.union(damage);
                 if content {
                     self.after_event(key);
                 }
@@ -1166,12 +1188,12 @@ impl Wl {
             .is_some_and(|d| d.on && d.host.handler.wants_animation());
         let want_frame =
             painted && w.frame_cb.is_none() && (w.handler.wants_animation() || deco_anim);
-        let damage = match w.unpresented {
-            Some(d) if !d.is_empty() => d,
-            _ => {
+        let damage = w.unpresented;
+        if damage.is_empty() {
+            {
                 // 没有新像素，但 ack 过的 configure 要一次提交才生效；动画中的窗口也照样
                 // 要 frame 回调——否则这一帧没回调可等，退化成按 `MIN_FRAME_GAP_MS` 空转。
-                w.unpresented = None;
+                w.unpresented = Damage::default();
                 if want_frame {
                     w.frame_cb = Some((w.surface.frame(&self.qh, w.key), Instant::now()));
                 }
@@ -1180,7 +1202,7 @@ impl Wl {
                 }
                 return;
             }
-        };
+        }
         let Some(pixmap) = w.pixmap.as_ref() else {
             return;
         };
@@ -1197,7 +1219,7 @@ impl Wl {
             return;
         }
         let total_h = w.h + bar;
-        let Some(plan) = w.slots.plan(w.w, total_h, damage) else {
+        let Some(plan) = w.slots.plan(w.w, total_h, bar, damage) else {
             return; // 缓冲都在合成器手里，等 release。
         };
         if plan.recreate || w.bufs.get(plan.index).is_none_or(|b| b.is_none()) {
@@ -1219,21 +1241,15 @@ impl Wl {
         let Some(buf) = w.bufs[plan.index].as_ref() else {
             return;
         };
-        // 标题栏占缓冲的上 `bar` 行，内容在它下面。
+        // 标题栏占缓冲的上 `bar` 行，内容在它下面；两段各写各的。
         let wr = plan.write;
-        let bar_rect = wr.intersect(&Rect::new(0, 0, w.w, bar));
-        let content_rect = wr.intersect(&Rect::new(0, bar, w.w, w.h));
-        let content_src = Rect::new(
-            content_rect.x,
-            content_rect.y - bar,
-            content_rect.w,
-            content_rect.h,
-        );
-        let mut res = write_pixels(&buf.file, pixmap, content_src, bar, &mut self.upload_buf);
-        if let (Ok(()), Some(bpm)) = (&res, bar_pm) {
-            if !bar_rect.is_empty() {
-                res = write_pixels(&buf.file, bpm, bar_rect, 0, &mut self.upload_buf);
-            }
+        let mut res = Ok(());
+        if let Some(c) = wr.content {
+            let src = csd::buffer_to_content(c, bar);
+            res = write_pixels(&buf.file, pixmap, src, bar, &mut self.upload_buf);
+        }
+        if let (Ok(()), Some(bpm), Some(b)) = (&res, bar_pm, wr.bar) {
+            res = write_pixels(&buf.file, bpm, b, 0, &mut self.upload_buf);
         }
         if let Err(e) = res {
             log::error!("写 wl_shm 缓冲失败：{e}");
@@ -1258,14 +1274,15 @@ impl Wl {
                 w.applied_dest = dest;
             }
         }
-        let r = plan.write;
         w.surface.attach(Some(&buf.buffer), 0, 0);
-        w.surface.damage_buffer(r.x, r.y, r.w, r.h);
+        for r in plan.write.rects() {
+            w.surface.damage_buffer(r.x, r.y, r.w, r.h);
+        }
         if want_frame {
             w.frame_cb = Some((w.surface.frame(&self.qh, w.key), Instant::now()));
         }
         w.surface.commit();
-        w.unpresented = None;
+        w.unpresented = Damage::default();
         w.must_commit = false;
     }
 

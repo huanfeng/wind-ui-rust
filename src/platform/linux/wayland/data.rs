@@ -62,7 +62,6 @@ use wayland_client::{event_created_child, Connection, Dispatch, Proxy, QueueHand
 
 use super::super::host;
 use super::Wl;
-use crate::geometry::Point;
 
 /// 读别家剪贴板 / 拖入数据的时限。与 X11 后端（1 秒等应答 + 1.5 秒总限）同量级：够对方
 /// 应用在正常负载下应答，又不至于让一次卡死的源端把界面冻住太久。
@@ -1081,10 +1080,7 @@ impl Wl {
         let w = &mut self.windows[i];
         // 与 X11 同一口径：落点换成物理像素（宿主再按自己的缩放换回逻辑坐标去命中）；内容区坐标
         // 扣掉客户端标题栏。
-        let pos = Point::new(
-            w.scale.pos_to_physical(d.pos.0),
-            w.scale.pos_to_physical(d.pos.1) - bar,
-        );
+        let pos = super::csd::drop_point(d.pos, w.scale.factor, bar);
         let r = {
             let _g = crate::platform::EventDispatchGuard::enter();
             w.handler.on_drop_files(pos, paths)

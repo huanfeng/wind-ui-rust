@@ -12,7 +12,7 @@
 //!   不是可交互控件时才接管——与无边框窗口一致。最大化时没有缩放边。
 //! - **不画圆角与阴影**：标题栏是方的、贴满窗口宽，最大化 / 平铺时也就无需去掉什么。
 
-use crate::geometry::Point;
+use crate::geometry::{Point, Rect};
 
 use super::super::host;
 
@@ -71,9 +71,86 @@ pub(super) fn content_height(configured: i32, bar: i32) -> i32 {
     }
 }
 
+/// 只换了装饰模式（标题栏从有到无或反过来）、窗口整体尺寸不变时的新内容高度（逻辑）。
+pub(super) fn rebar(content: i32, old_bar: i32, new_bar: i32) -> i32 {
+    (content + old_bar - new_bar).max(1)
+}
+
 /// 内容区的尺寸约束（逻辑）→ 告诉合成器的窗口约束：高度加上标题栏。
 pub(super) fn with_bar((w, h): (i32, i32), bar: i32) -> (i32, i32) {
     (w, if h > 0 { h + bar } else { h })
+}
+
+/// 内容区里的矩形（宿主报的脏区）→ 缓冲坐标：下移标题栏。
+pub(super) fn content_to_buffer(r: Rect, bar: i32) -> Rect {
+    Rect::new(r.x, r.y + bar, r.w, r.h)
+}
+
+/// 缓冲坐标 → 内容区坐标（[`content_to_buffer`] 的逆）。
+pub(super) fn buffer_to_content(r: Rect, bar: i32) -> Rect {
+    Rect::new(r.x, r.y - bar, r.w, r.h)
+}
+
+/// 宿主报的输入法光标（内容区物理像素：x, y_top, 行高）→ `set_cursor_rectangle` 的矩形（表面
+/// 逻辑坐标）：除以缩放，再下移标题栏的逻辑高。
+pub(super) fn ime_rect(
+    caret: (i32, i32, i32),
+    factor: f64,
+    bar_logical: i32,
+) -> (i32, i32, i32, i32) {
+    let lg = |v: i32| (v as f64 / factor).round() as i32;
+    (
+        lg(caret.0),
+        lg(caret.1) + bar_logical,
+        1,
+        lg(caret.2).max(1),
+    )
+}
+
+/// 拖入落点（表面逻辑坐标，带小数）→ 宿主要的内容区物理像素：乘缩放（与指针同一取整），再扣
+/// 标题栏的物理高。
+pub(super) fn drop_point(pos: (f64, f64), factor: f64, bar_phys: i32) -> Point {
+    let ph = |v: f64| (v * factor).round() as i32;
+    Point::new(ph(pos.0), ph(pos.1) - bar_phys)
+}
+
+/// 这一轮要不要出帧（也是事件循环要不要立即醒）：窗口可见，且内容或标题栏有一处待重画。
+/// 标题栏单独算：它的悬停 / 按下只置标题栏脏，不置窗口脏。
+pub(super) fn frame_due(visible: bool, content_dirty: bool, bar_dirty: bool) -> bool {
+    visible && (content_dirty || bar_dirty)
+}
+
+/// 一轮动画排程的结果（见 [`anim_tick`]）。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct AnimTick {
+    /// 内容到了续帧时刻，重画。
+    pub content: bool,
+    /// 标题栏到了，重画（只重画标题栏）。
+    pub bar: bool,
+    /// 还没到的那一路最早还差多久。
+    pub wait: Option<std::time::Duration>,
+}
+
+/// 内容与标题栏的动画各按各的截止时间走：`content` / `bar` 是（距该路上一帧多久，该路的帧
+/// 间隔），`None` = 那一路没在动。标题栏按钮的淡入淡出按满帧走，但不能把内容拖着一起：内容
+/// 报的是光标闪烁那种 500ms 截止，跟着满帧重画就成了每帧整窗重画。
+pub(super) fn anim_tick(
+    content: Option<(std::time::Duration, std::time::Duration)>,
+    bar: Option<(std::time::Duration, std::time::Duration)>,
+) -> AnimTick {
+    let mut wait: Option<std::time::Duration> = None;
+    let mut step = |track: Option<(std::time::Duration, std::time::Duration)>| match track {
+        Some((elapsed, due)) if elapsed >= due => true,
+        Some((elapsed, due)) => {
+            let left = due - elapsed;
+            wait = Some(wait.map_or(left, |w| w.min(left)));
+            false
+        }
+        None => false,
+    };
+    let content = step(content);
+    let bar = step(bar);
+    AnimTick { content, bar, wait }
 }
 
 /// 标题栏的物理高度：由「整窗高 − 内容高」得出（`to_physical` 是逻辑 → 物理的取整），而不是
@@ -204,6 +281,73 @@ mod tests {
         let int2 = |v: i32| v * 2;
         assert_eq!(bar_physical(400, 33, int2), 66, "整数缩放：就是 33 × 2");
         assert_eq!(bar_physical(400, 0, phys), 0);
+    }
+
+    #[test]
+    fn content_rects_and_points_shift_by_the_bar() {
+        let r = Rect::new(5, 0, 10, 20);
+        assert_eq!(content_to_buffer(r, 50), Rect::new(5, 50, 10, 20));
+        assert_eq!(buffer_to_content(content_to_buffer(r, 50), 50), r);
+        assert_eq!(content_to_buffer(r, 0), r, "没有标题栏：原样");
+    }
+
+    #[test]
+    fn ime_rectangle_is_logical_and_below_the_bar() {
+        assert_eq!(ime_rect((20, 63, 17), 1.0, 33), (20, 96, 1, 17));
+        assert_eq!(ime_rect((20, 63, 17), 1.0, 0), (20, 63, 1, 17));
+        // 1.5 倍：物理 (30, 94.5→95, 25.5→26) → 逻辑 (20, 63, 17)，再加 33。
+        assert_eq!(ime_rect((30, 95, 26), 1.5, 33), (20, 96, 1, 17));
+    }
+
+    #[test]
+    fn drop_point_is_physical_and_content_relative() {
+        assert_eq!(drop_point((100.0, 140.0), 1.0, 33), Point::new(100, 107));
+        assert_eq!(drop_point((100.0, 140.0), 1.5, 50), Point::new(150, 160));
+        assert_eq!(drop_point((100.0, 140.0), 1.0, 0), Point::new(100, 140));
+    }
+
+    #[test]
+    fn titlebar_animation_does_not_drag_the_content_deadline_along() {
+        use std::time::Duration as D;
+        let ms = D::from_millis;
+        // 标题栏悬停淡入（满帧，4ms 间隔）期间，内容只是光标闪烁（500ms 后才变）。
+        let t = anim_tick(Some((ms(16), ms(500))), Some((ms(16), ms(4))));
+        assert_eq!(
+            t,
+            AnimTick {
+                content: false,
+                bar: true,
+                wait: Some(ms(484))
+            },
+            "只画标题栏，内容等它自己的截止"
+        );
+        let t = anim_tick(Some((ms(500), ms(500))), Some((ms(1), ms(4))));
+        assert!(t.content && !t.bar);
+        assert_eq!(t.wait, Some(ms(3)));
+        assert_eq!(
+            anim_tick(None, None),
+            AnimTick {
+                content: false,
+                bar: false,
+                wait: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_dirty_titlebar_alone_is_enough_to_paint_and_wake() {
+        assert!(frame_due(true, false, true), "只有标题栏悬停变了也要出帧");
+        assert!(frame_due(true, true, false));
+        assert!(!frame_due(true, false, false));
+        assert!(!frame_due(false, true, true), "不可见不出帧");
+    }
+
+    #[test]
+    fn switching_decoration_mode_keeps_the_window_size() {
+        assert_eq!(rebar(400, 0, 33), 367, "开标题栏：内容让出 33");
+        assert_eq!(rebar(367, 33, 0), 400, "关标题栏：内容收回");
+        assert_eq!(rebar(400, 33, 33), 400);
+        assert_eq!(rebar(10, 0, 33), 1, "至少 1");
     }
 
     #[test]

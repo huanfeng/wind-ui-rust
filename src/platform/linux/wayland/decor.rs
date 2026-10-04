@@ -37,6 +37,8 @@ pub(super) struct Deco {
     pub hover: bool,
     /// 在标题栏的按钮上按下、还没松开：移动与松开都归它（按钮自己捕获）。
     pub captured: bool,
+    /// 标题栏上一帧动画的时刻（它与内容各按各的截止时间走）。
+    pub last_anim: std::time::Instant,
     /// 右键在拖动区按下、已弹合成器窗口菜单：配对的右键松开吞掉（不经左键的 `DragGate`，
     /// 免得把左键那次的「吞松开」标志冲掉）。
     pub swallow_right_up: bool,
@@ -53,9 +55,26 @@ impl Deco {
             hover: false,
             captured: false,
             swallow_right_up: false,
+            last_anim: std::time::Instant::now(),
         };
         d.host.handler.set_scale(scale as f32);
         d
+    }
+
+    /// 把一个指针事件交给标题栏宿主：它说要重画就标脏（只脏标题栏，不碰内容）。返回它发出的
+    /// 窗口操作与是否请求关闭。
+    pub fn pointer(&mut self, ev: PointerEvent) -> (Option<WindowOp>, bool) {
+        let r = {
+            let _g = crate::platform::EventDispatchGuard::enter();
+            self.host.handler.on_pointer(ev)
+        };
+        if r {
+            self.needs_paint = true;
+        }
+        (
+            self.host.handler.take_window_op(),
+            self.host.handler.wants_close(),
+        )
     }
 
     /// 标题栏高度（逻辑像素），不用时 0。
@@ -234,15 +253,7 @@ impl Wl {
         let Some(d) = w.deco.as_mut().filter(|d| d.on) else {
             return;
         };
-        let r = {
-            let _g = crate::platform::EventDispatchGuard::enter();
-            d.host.handler.on_pointer(ev)
-        };
-        if r {
-            d.needs_paint = true;
-        }
-        let op = d.host.handler.take_window_op();
-        let close = d.host.handler.wants_close();
+        let (op, close) = d.pointer(ev);
         if close {
             // 标题栏宿主的「关闭」是粘住的：先换一个新的，再把关闭请求交给窗口（窗口可能拒绝）。
             // 换不出来（理论上不会）就干脆不画标题栏，免得粘住的关闭标志让之后每个事件都请求关闭。
@@ -281,8 +292,9 @@ impl Wl {
         if !std::mem::take(&mut d.hover) {
             return;
         }
+        // 清悬停不经模态拦截（模态子窗开着时指针移开，悬停态也得清掉），也不落实任何窗口操作。
         let ev = PointerEvent::single(PointerKind::Move, Point::new(-1, -1), MouseButton::Left);
-        self.deco_pointer(key, ev);
+        d.pointer(ev);
     }
 
     /// 标题栏空白处按下：拖动 / 双击最大化 / 右键窗口菜单。返回 `Some` = 这一下被接管（内含
@@ -360,5 +372,64 @@ impl Wl {
                 d.needs_paint = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Size;
+    use crate::platform::AppHandler;
+
+    /// 只用来驱动 `Deco` 簿记的最小宿主：`on_pointer` 按给定结果回答「要不要重画」。
+    struct Host {
+        repaint: bool,
+        op: Option<WindowOp>,
+    }
+
+    impl AppHandler for Host {
+        fn render(&mut self, _: &mut dyn crate::render::RenderTarget, _: Size) {}
+        fn on_pointer(&mut self, _: PointerEvent) -> bool {
+            self.repaint
+        }
+        fn take_window_op(&mut self) -> Option<WindowOp> {
+            self.op.take()
+        }
+    }
+
+    fn deco(repaint: bool, op: Option<WindowOp>) -> Deco {
+        let mut d = Deco::new(
+            Decoration {
+                handler: Box::new(Host { repaint, op }),
+                height: 33,
+                set_title: Box::new(|_| {}),
+                set_active: Box::new(|_| {}),
+            },
+            1.0,
+        );
+        d.on = true;
+        d.needs_paint = false;
+        d
+    }
+
+    fn mv() -> PointerEvent {
+        PointerEvent::single(PointerKind::Move, Point::new(5, 5), MouseButton::Left)
+    }
+
+    #[test]
+    fn a_titlebar_event_that_needs_a_repaint_marks_only_the_titlebar_dirty() {
+        let mut d = deco(true, None);
+        assert_eq!(d.pointer(mv()), (None, false));
+        assert!(d.needs_paint, "悬停 / 按下要画出来");
+        let mut d = deco(false, None);
+        d.pointer(mv());
+        assert!(!d.needs_paint, "宿主说不用画就不画");
+    }
+
+    #[test]
+    fn window_operations_from_the_titlebar_are_handed_back() {
+        let mut d = deco(false, Some(WindowOp::ToggleMaximize));
+        assert_eq!(d.pointer(mv()).0, Some(WindowOp::ToggleMaximize));
+        assert_eq!(d.pointer(mv()).0, None, "取走一次就没了");
     }
 }

@@ -26,6 +26,76 @@ const UPLOAD_CHUNK: usize = 256 * 1024;
 const MAX_BUFFERS: usize = 2;
 
 /// 一块缓冲的簿记。
+/// 一帧的脏区，按缓冲里的两段分开记：上面的客户端标题栏、下面的内容（都是缓冲坐标）。
+///
+/// 分开是因为两段在缓冲的两头：标题栏按钮悬停（顶上一小块）与内容里的光标闪烁（中间一小块）
+/// 并成一个包围盒就成了近乎整窗的上传。没有标题栏时 `bar` 恒为空。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Damage {
+    pub bar: Option<Rect>,
+    pub content: Option<Rect>,
+}
+
+impl Damage {
+    pub fn bar(r: Rect) -> Self {
+        Self {
+            bar: Some(r),
+            content: None,
+        }
+    }
+
+    pub fn content(r: Rect) -> Self {
+        Self {
+            bar: None,
+            content: Some(r),
+        }
+    }
+
+    /// 整块：标题栏 `bar` 行 + 其下内容。
+    pub fn full(w: i32, h: i32, bar: i32) -> Self {
+        Self {
+            bar: (bar > 0).then(|| Rect::new(0, 0, w, bar)),
+            content: Some(Rect::new(0, bar, w, h - bar)),
+        }
+    }
+
+    pub fn union(self, o: Damage) -> Self {
+        let u = |a: Option<Rect>, b: Option<Rect>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.union(&b)),
+            (a, b) => a.or(b),
+        };
+        Self {
+            bar: u(self.bar, o.bar),
+            content: u(self.content, o.content),
+        }
+    }
+
+    /// 裁到各自那一段里（尺寸变了、或调用方给的矩形越界时）。
+    pub fn clip(self, w: i32, h: i32, bar: i32) -> Self {
+        let f = Self::full(w, h, bar);
+        let c = |a: Option<Rect>, full: Option<Rect>| {
+            a.zip(full)
+                .map(|(a, f)| a.intersect(&f))
+                .filter(|r| !r.is_empty())
+        };
+        Self {
+            bar: c(self.bar, f.bar),
+            content: c(self.content, f.content),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rects().next().is_none()
+    }
+
+    pub fn rects(&self) -> impl Iterator<Item = Rect> + '_ {
+        [self.bar, self.content]
+            .into_iter()
+            .flatten()
+            .filter(|r| !r.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SlotState {
     w: i32,
@@ -33,7 +103,9 @@ pub(super) struct SlotState {
     /// 已 attach 给合成器、尚未收到 `release`：不能写。
     busy: bool,
     /// 自己上次写入以来，别的帧改过的区域——复用时要补写。
-    debt: Option<Rect>,
+    debt: Damage,
+    /// 建这块时的标题栏高度：变了等同尺寸变了（分段不同）。
+    bar: i32,
 }
 
 /// 一次呈现的安排：写哪块缓冲、是否要按新尺寸重建、写哪个矩形。
@@ -41,7 +113,7 @@ pub(super) struct SlotState {
 pub(super) struct SlotPlan {
     pub index: usize,
     pub recreate: bool,
-    pub write: Rect,
+    pub write: Damage,
 }
 
 #[derive(Default)]
@@ -55,15 +127,16 @@ impl ShmSlots {
     ///
     /// 优先复用同尺寸的空闲块（只写 `damage ∪ debt`）；其次重建尺寸不对的空闲块；
     /// 不足 `MAX_BUFFERS` 块时新建。选中后标忙，其余块把本帧脏区记进欠账。
-    pub fn plan(&mut self, w: i32, h: i32, damage: Rect) -> Option<SlotPlan> {
-        let full = Rect::new(0, 0, w, h);
+    /// `bar`：缓冲最上面的客户端标题栏行数（没有为 0），脏区与欠账按它分两段记。
+    pub fn plan(&mut self, w: i32, h: i32, bar: i32, damage: Damage) -> Option<SlotPlan> {
+        let full = Damage::full(w, h, bar);
         let free_same = self
             .slots
             .iter()
-            .position(|s| !s.busy && s.w == w && s.h == h);
+            .position(|s| !s.busy && s.w == w && s.h == h && s.bar == bar);
         let plan = if let Some(index) = free_same {
             let debt = self.slots[index].debt;
-            let write = debt.map_or(damage, |d| d.union(&damage)).intersect(&full);
+            let write = debt.union(damage).clip(w, h, bar);
             SlotPlan {
                 index,
                 recreate: false,
@@ -80,7 +153,8 @@ impl ShmSlots {
                 w,
                 h,
                 busy: false,
-                debt: None,
+                debt: Damage::default(),
+                bar,
             });
             SlotPlan {
                 index: self.slots.len() - 1,
@@ -96,10 +170,11 @@ impl ShmSlots {
                     w,
                     h,
                     busy: true,
-                    debt: None,
+                    debt: Damage::default(),
+                    bar,
                 };
             } else {
-                s.debt = Some(s.debt.map_or(damage, |d| d.union(&damage)));
+                s.debt = s.debt.union(damage);
             }
         }
         Some(plan)
@@ -119,7 +194,8 @@ impl ShmSlots {
                 w: 0,
                 h: 0,
                 busy: false,
-                debt: None,
+                debt: Damage::default(),
+                bar: 0,
             };
         }
     }
@@ -206,34 +282,52 @@ mod tests {
     #[test]
     fn first_frames_create_two_buffers_then_wait_for_release() {
         let mut p = ShmSlots::default();
-        let a = p.plan(100, 50, r(0, 0, 100, 50)).unwrap();
-        assert_eq!((a.index, a.recreate, a.write), (0, true, r(0, 0, 100, 50)));
-        let b = p.plan(100, 50, r(10, 10, 5, 5)).unwrap();
+        let a = p
+            .plan(100, 50, 0, Damage::content(r(0, 0, 100, 50)))
+            .unwrap();
+        assert_eq!(
+            (a.index, a.recreate, a.write.content),
+            (0, true, Some(r(0, 0, 100, 50)))
+        );
+        let b = p
+            .plan(100, 50, 0, Damage::content(r(10, 10, 5, 5)))
+            .unwrap();
         assert_eq!(
             (b.index, b.recreate),
             (1, true),
             "第一块还在合成器手里，新建第二块"
         );
-        assert_eq!(b.write, r(0, 0, 100, 50), "新缓冲整块写");
-        assert_eq!(p.plan(100, 50, r(0, 0, 1, 1)), None, "两块都忙：等 release");
+        assert_eq!(b.write.content, Some(r(0, 0, 100, 50)), "新缓冲整块写");
+        assert_eq!(
+            p.plan(100, 50, 0, Damage::content(r(0, 0, 1, 1))),
+            None,
+            "两块都忙：等 release"
+        );
     }
 
     #[test]
     fn reused_buffer_writes_damage_plus_what_it_missed() {
         let mut p = ShmSlots::default();
-        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 0
-        p.plan(100, 50, r(10, 10, 5, 5)).unwrap(); // 1，0 欠 (10,10,5,5)
+        p.plan(100, 50, 0, Damage::content(r(0, 0, 100, 50)))
+            .unwrap(); // 0
+        p.plan(100, 50, 0, Damage::content(r(10, 10, 5, 5)))
+            .unwrap(); // 1，0 欠 (10,10,5,5)
         p.release(0);
-        let c = p.plan(100, 50, r(40, 20, 2, 2)).unwrap();
+        let c = p
+            .plan(100, 50, 0, Damage::content(r(40, 20, 2, 2)))
+            .unwrap();
         assert_eq!(c.index, 0);
         assert!(!c.recreate);
-        assert_eq!(c.write, r(10, 10, 5, 5).union(&r(40, 20, 2, 2)));
+        assert_eq!(
+            c.write.content,
+            Some(r(10, 10, 5, 5).union(&r(40, 20, 2, 2)))
+        );
         p.release(1);
-        let d = p.plan(100, 50, r(0, 0, 1, 1)).unwrap();
+        let d = p.plan(100, 50, 0, Damage::content(r(0, 0, 1, 1))).unwrap();
         assert_eq!(d.index, 1);
         assert_eq!(
-            d.write,
-            r(40, 20, 2, 2).union(&r(0, 0, 1, 1)),
+            d.write.content,
+            Some(r(40, 20, 2, 2).union(&r(0, 0, 1, 1))),
             "欠账在自己被写之后清零，只剩之后别的帧的脏区"
         );
     }
@@ -241,28 +335,82 @@ mod tests {
     #[test]
     fn resize_recreates_free_buffers_and_keeps_busy_ones() {
         let mut p = ShmSlots::default();
-        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 0 忙
-        p.plan(100, 50, r(0, 0, 100, 50)).unwrap(); // 1 忙
+        p.plan(100, 50, 0, Damage::content(r(0, 0, 100, 50)))
+            .unwrap(); // 0 忙
+        p.plan(100, 50, 0, Damage::content(r(0, 0, 100, 50)))
+            .unwrap(); // 1 忙
         p.release(1);
-        let e = p.plan(120, 60, r(0, 0, 120, 60)).unwrap();
-        assert_eq!((e.index, e.recreate, e.write), (1, true, r(0, 0, 120, 60)));
+        let e = p
+            .plan(120, 60, 0, Damage::content(r(0, 0, 120, 60)))
+            .unwrap();
+        assert_eq!(
+            (e.index, e.recreate, e.write.content),
+            (1, true, Some(r(0, 0, 120, 60)))
+        );
         p.release(0);
-        let f = p.plan(120, 60, r(5, 5, 1, 1)).unwrap();
+        let f = p.plan(120, 60, 0, Damage::content(r(5, 5, 1, 1))).unwrap();
         assert_eq!(
             (f.index, f.recreate),
             (0, true),
             "旧尺寸的块空出来后按新尺寸重建"
         );
-        assert_eq!(f.write, r(0, 0, 120, 60));
+        assert_eq!(f.write.content, Some(r(0, 0, 120, 60)));
     }
 
     #[test]
     fn failed_slot_is_rebuilt_and_fully_rewritten() {
         let mut p = ShmSlots::default();
-        p.plan(100, 50, r(0, 0, 100, 50)).unwrap();
+        p.plan(100, 50, 0, Damage::content(r(0, 0, 100, 50)))
+            .unwrap();
         p.fail(0);
-        let h = p.plan(100, 50, r(1, 1, 1, 1)).unwrap();
-        assert_eq!((h.index, h.recreate, h.write), (0, true, r(0, 0, 100, 50)));
+        let h = p.plan(100, 50, 0, Damage::content(r(1, 1, 1, 1))).unwrap();
+        assert_eq!(
+            (h.index, h.recreate, h.write.content),
+            (0, true, Some(r(0, 0, 100, 50)))
+        );
+    }
+
+    #[test]
+    fn titlebar_and_content_damage_stay_separate_instead_of_one_bounding_box() {
+        let mut p = ShmSlots::default();
+        // 600×433，标题栏 33 行。
+        p.plan(600, 433, 33, Damage::full(600, 433, 33)).unwrap(); // 0
+        p.release(0);
+        // 标题栏按钮悬停（顶上）+ 内容里光标闪烁（中间）。
+        let dmg = Damage {
+            bar: Some(r(500, 0, 50, 33)),
+            content: Some(r(20, 200, 2, 17)),
+        };
+        let w = p.plan(600, 433, 33, dmg).unwrap().write;
+        assert_eq!(w, dmg, "两段各写各的，不并成从顶到中间的大块");
+        let area: i32 = w.rects().map(|r| r.w * r.h).sum();
+        assert!(area < 2000, "上传面积 {area}");
+        // 第二块新建（整块）；之后第一块复用时，欠账同样分段记。
+        p.plan(600, 433, 33, Damage::bar(r(0, 0, 1, 1))).unwrap(); // 1，0 欠一个标题栏像素
+        p.release(0);
+        let w = p
+            .plan(600, 433, 33, Damage::content(r(10, 300, 1, 1)))
+            .unwrap()
+            .write;
+        assert_eq!(
+            w,
+            Damage {
+                bar: Some(r(0, 0, 1, 1)),
+                content: Some(r(10, 300, 1, 1)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_titlebar_height_change_rebuilds_the_buffer() {
+        let mut p = ShmSlots::default();
+        p.plan(600, 400, 0, Damage::full(600, 400, 0)).unwrap();
+        p.release(0);
+        let q = p
+            .plan(600, 400, 33, Damage::content(r(0, 40, 1, 1)))
+            .unwrap();
+        assert!(q.recreate, "分段变了：整块重写");
+        assert_eq!(q.write, Damage::full(600, 400, 33));
     }
 
     #[test]
