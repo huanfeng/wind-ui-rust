@@ -809,6 +809,8 @@ App::new("查词", 480, 360)
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
 > **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`，Linux 走 X11 根窗口 `GrabKey`（Wayland 会话经 XWayland 时只在本程序有焦点时生效，协议所限）——三者都**不需要用户授权**，语义一致（全局生效、组合被占用则该热键静默失效、运行期可改绑与启停）。macOS 上另两条路（`CGEventTap`、`NSEvent` 全局监听）都要用户在「系统设置 → 隐私与安全性 → 辅助功能」手动授权，且后者只能监听不能拦截，故不采用。
+>
+> **原生 Wayland 后端**（`WINDUI_BACKEND=wayland`）下全局热键**不注册**（协议刻意不让应用抓全局按键），启动时 stderr 提示一次、`App::hotkey` / `hotkey_handle` 成为空操作。兜底用法：让用户在桌面设置里把快捷键绑到「`你的应用 --toggle`」这样的命令，应用开 `App::single_instance`——第二次启动的进程把 argv 转给运行中的实例后退出，回调里按参数唤起 / 隐藏窗口即可（回调不收 ctx，变通见 §8.7）。
 
 完整示例见 `examples/hotkey.rs`。
 
@@ -2318,8 +2320,8 @@ Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持—�
 
 Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开）分阶段落地，目前有窗口与呈现、
 键鼠输入、剪贴板（文本；**仅界面线程可用**，其它线程读写当空处理，见 `LINUX_PORTING.md` §8.3）
-与文件拖入、输入法（text-input-v3），**还没有标题栏（GNOME 下）**，因此默认不启用，
-须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则见 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
+与文件拖入、输入法（text-input-v3）、窗口装饰（合成器不画边框时自绘标题栏），尚待各桌面
+人工验证，因此默认不启用，须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则见 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 
 | 能力 | Windows | macOS | Linux |
 |---|---|---|---|

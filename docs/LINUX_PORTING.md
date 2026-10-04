@@ -155,13 +155,13 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 ## 8. Wayland 原生后端（进行中）
 
-计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。**已完成 Stage 1–4**：窗口与呈现；
-指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入；输入法
-（text-input-v3）（GNOME 真桌面的交互项待人工验证）。
+计划分五阶段（仓库根 `IMPLEMENTATION_PLAN.md`）。Stage 1–4 已完成并经 GNOME 42 真桌面验证：
+窗口与呈现；指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）与文件拖入；输入法
+（text-input-v3）。Stage 5（窗口装饰：服务端装饰协商 + 客户端标题栏、模态对话框登记）已实现，
+待真桌面人工验证。
 
-> ⚠ 还没有标题栏（weston / KDE / sway 给服务端装饰，GNOME 不给——有边框窗口在 GNOME 下
-> 没有标题栏）。因此**默认不启用**：只有 `WINDUI_BACKEND=wayland`
-> 才走它，其余情况 Wayland 会话照旧经 XWayland 运行。
+> ⚠ **默认不启用**：只有 `WINDUI_BACKEND=wayland` 才走它，其余情况 Wayland 会话照旧经
+> XWayland 运行。改为自动优先的条件与剩余风险见 §8.1。
 
 ### 8.1 后端选择
 
@@ -176,9 +176,27 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 | `WINDUI_BACKEND=x11`、未设、或值认不出（记警告） | X11（Wayland 会话经 XWayland） |
 | 点名 wayland 但编译时关了 feature | 提示后走 X11 |
 
-**何时改为自动优先**：Stage 2–5 全部完成、并在 GNOME 真桌面验证过之后，把未设时的分支改成
-「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」。在那之前自动选上
-一个没有输入的后端，会让 Wayland 桌面上的现有应用点不动。
+**何时改为自动优先**（决定权在维护者与用户，代码只改 `choose_backend` 未设时的分支与其单测）：
+把未设时改成「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」。条件：
+
+1. Stage 5 的人工清单在 GNOME（必须 CSD 的那一类）上通过，且至少一个给服务端装饰的桌面
+   （KDE / Deepin Treeland / sway）上确认「不重复画标题栏」。
+2. 下面的剩余风险逐条被接受或补上。
+
+剩余风险（自动优先后，原本经 XWayland 正常工作、换到原生后端会变差或变化的）：
+
+- **全局热键失效**：XWayland 下 `GrabKey` 至少在本程序有焦点时生效；原生 Wayland 下不注册
+  （见 §8.4）。用了 `App::hotkey` 的应用需要文档化的兜底，或这类应用显式 `WINDUI_BACKEND=x11`。
+- **剪贴板仅界面线程**：其它线程读写当空（XWayland 下任何线程可用）。
+- **窗口坐标 / 居中、是否最小化**：协议不提供，`centered` 无效、`minimized` 恒 false。
+- **CSD 外观**：自绘标题栏是方的、无阴影、缩放边在窗口内侧 6 像素（GNOME 原生应用在窗口外有
+  不可见缩放边与圆角阴影），视觉与 GNOME 原生应用不一致；标题栏按钮不跟合成器能力
+  （`wm_capabilities`）隐藏，最大化后按钮图标不变成「还原」。
+- **唤起已显示的窗口**（单实例第二次启动、托盘）要 `xdg-activation-v1`，未实现：窗口已显示时
+  不会被提到前台。
+- **文件拖出、primary selection（中键粘贴）、系统托盘** 在两条路上都没有，不算回退。
+- 默认后端一变，所有下游应用同时换路径：建议先在 CHANGELOG 里公告一个版本，留出
+  `WINDUI_BACKEND=x11` 作为逃生口。
 
 ### 8.2 依赖
 
@@ -349,8 +367,38 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   - **缺口**：选区方向（光标在头还是尾）宿主不给，一律报光标在尾。
   - 合成器没有 text-input-v3 → 没有输入法，stderr 提示一次。Mutter 从 GNOME 3.34 起实现了
     text-input-v3，GNOME 42 应有（本机未实测，见人工清单）。
-- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input`
-  假装合成器没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径。
+- **窗口装饰**（`decor.rs` 协议与交互，`csd.rs` 几何是纯逻辑、有单测）：
+  - 协商：有 `zxdg_decoration_manager_v1`（sway、KDE）时有边框窗口请求服务端装饰，合成器回
+    `server_side` 就不画；回 `client_side`、或根本没有这个协议（Mutter / GNOME、weston）时，有边框
+    窗口自己画标题栏。无边框窗口明确请求 `client_side`（免得被加边框）。协商结果与尺寸一起随
+    `xdg_surface.configure` 生效；装饰对象先于 toplevel 销毁，隐藏再显示时重新协商。
+  - 标题栏是宿主经 `AppHandler::decoration` 造的一个小宿主（标题居中 + 最小化 / 最大化 / 关闭
+    三个 `window_button`，整条 `window_drag`；底 `Surface`、字 `Text`、失活转 `TextMuted`、底边
+    `Divider`），与窗口共用主题源，运行期换主题跟随。高 33 逻辑像素。
+  - **一张表面**：标题栏与内容画进同一块 `wl_shm` 缓冲，上 `bar` 行是标题栏，内容整体下移
+    （`write_pixels` 带下移量）。平台层把内容区坐标统一减掉标题栏：应用看到的尺寸、指针、输入法
+    光标矩形、拖入落点都按内容区计，感知不到标题栏；`configure` 给的尺寸与告诉合成器的 min / max
+    约束都含标题栏（有标题栏时最小高度至少留出标题栏 + 1 行）。没用子表面（libdecor 的做法）：
+    它能把阴影与不可见缩放边放到窗口外，但要多管一组表面；我们不画阴影，用不上。
+  - **分数缩放取整**：标题栏物理高 =「整窗高换算 − 内容高换算」，而不是单独取整——两次独立
+    取整之和会比整窗多 1 像素，缓冲与 viewport 目标差一行、整窗被重采样发糊。
+  - **交互**：窗口按钮的操作转给窗口（关闭走窗口自己的关闭决策链，可被拒绝）；空白处按下移出
+    阈值才 `move`（沿用 `DragGate`）、双击切最大化、右键 `show_window_menu`（合成器的窗口菜单是
+    CSD 惯例；框架自己的系统菜单是窗口里的浮层，塞不进 33 像素高的标题栏——与无边框窗口用框架
+    菜单的惯例在此分开）；缩放边在窗口内侧 6 像素一圈（含标题栏顶边），落在可交互控件上时让给
+    控件、最大化 / 平铺时没有（GNOME 原生应用的缩放边在窗口外的透明阴影区，我们没有阴影区）；
+    指针在标题栏上时光标归标题栏宿主；滚轮在标题栏上不下发；拖入落在标题栏上不收。
+  - **重画**：标题栏单独一条通路——它的悬停 / 按下 / 淡入淡出只重画那 33 行（实测悬停动画的
+    `damage_buffer` 全落在标题栏行内），不逼内容整窗重画；内容整窗重画时（换主题、改尺寸）
+    标题栏一并重画；标题与激活态变化用不发通知的信号写入，只重画标题栏。
+  - **模态**：子窗 `set_parent`；有 `xdg-dialog-v1`（KDE 6.1+ 等）时模态子窗另 `set_modal`，
+    父窗隐藏期间显示的模态子窗在父窗再显示时补登记；没有该协议（GNOME 42、sway）时只有层级
+    关系，父窗的输入（含标题栏）由我们自己挡。
+  - **偏差**：标题栏方角、无阴影；没有边缘的斜向缩放光标（无边框窗口同样没有）；按钮不跟
+    `wm_capabilities` 隐藏；最大化后按钮图标不变。
+- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input,xdg-decoration,xdg-dialog`
+  假装合成器没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径（`xdg-decoration` 关掉即在
+  sway 上走客户端标题栏）。
 - **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定，剪贴板与拖入
   也随之不可用（数据设备按 seat 建，只建启动时那一个）；文件拖出、primary selection（中键
   粘贴）未做；
@@ -364,8 +412,9 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
 
 应用不能设窗口坐标（`centered` 无效，由合成器摆放）；不能查询是否被最小化
 （`WindowState::minimized` 恒 false，`hide_on_minimize` 无从触发）；唤起已显示的窗口要
-`xdg-activation-v1`（Stage 5）。全局热键见 `IMPLEMENTATION_PLAN.md` 末节：不实现，
-兜底是桌面设置里把快捷键绑到 `应用 --参数`，经单实例转发送达。
+`xdg-activation-v1`（未实现）。全局热键见 `IMPLEMENTATION_PLAN.md` 末节：不实现，启动时
+stderr 提示一次、`App::hotkey` 成为空操作；兜底是桌面设置里把快捷键绑到 `应用 --toggle` 这样
+的命令，应用开 `App::single_instance`，第二次启动的 argv 转给运行中的实例（见 API_GUIDE §5）。
 
 ### 8.5 实测数据（weston 13 / sway 1.9 headless + pixman，release）
 
@@ -448,6 +497,25 @@ Stage 4（sway headless；输入法端是自写的最小 `zwp_input_method_v2` �
   补一次对账（模态子窗开关会改变它能否输入）。
 - 未能自动化：真实输入法（ibus / fcitx5）的候选窗位置与拼音流程；sway 1.9 不给输入法的弹出
   表面发 `text_input_rectangle`，矩形只能从请求参数核对。
+
+Stage 5（sway headless，`WINDUI_WAYLAND_DISABLE=xdg-decoration` 走客户端标题栏；weston 13 没有
+装饰协议，天然走客户端标题栏）：
+- sway 默认：协商得 `server_side`，窗口 600×400、不画标题栏；关掉协议：窗口 600×433，上 33 行
+  是标题栏（标题居中、三个按钮）。weston 抓屏同样有标题栏。
+- 内容区：点「copy-small」（标题栏下方）正确触发；输入法光标矩形 y = 63 + 33 = 96（无标题栏时
+  63）；拖入左右两区命中正确，拖到标题栏上源端得 `target None`、`cancelled`。
+- 标题栏：拖动空白处窗口移动（过阈值后交给合成器）；拖右下角内侧缩放；双击发 `set_maximized`
+  （sway 浮动窗口不理会最大化，合成器行为）；右键发 `show_window_menu`；最小化键发
+  `set_minimized`；关闭键进程退出；悬停关闭键红底（截图）、在三个按钮间移动悬停跟着走、移开
+  后清掉。
+- 1.5 倍：缓冲 900×650（逻辑 600×433）；缩放到 629×424 后缓冲 944×636 = 整窗逻辑高换算，
+  viewport 目标 629×424，一像素不差；标题文字锐利；标题栏下的按钮点击命中正确。
+- 失活：聚焦别的窗口后标题区墨量 94621 → 70408、最深像素 45 → 99（转淡）；切回恢复。运行期
+  切暗色主题，标题栏随之变暗（截图）。
+- `file_drop` 空闲 10 秒 0 tick（服务端装饰 / 客户端标题栏两种都是）；私有内存 1884 KB →
+  2024 KB（客户端标题栏多一个小宿主 + 一条 480×33 的像素图）。
+- 未能自动化：GNOME 下的真实外观与交互、合成器真实的最大化 / 平铺、`xdg-dialog-v1`（sway 与
+  weston 都没有）。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 

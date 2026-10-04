@@ -116,10 +116,10 @@ enum Note {
 /// 选后端：只有 `WINDUI_BACKEND=wayland`（不分大小写）且编进了 Wayland 后端才试 Wayland，
 /// 其余一律 X11（Wayland 会话经 XWayland）。
 ///
-/// **暂不按会话自动优先 Wayland**：原生后端还缺装饰等（见
-/// `IMPLEMENTATION_PLAN.md`），自动选上它会让 Wayland 桌面上的现有应用点不动。等 Stage 2–5
-/// 全部完成、并在 GNOME 真桌面验证过之后，再改为「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET`
-/// 就优先 Wayland、连不上回退 X11」——改的只是这里未指定分支的返回值与对应单测。
+/// **暂不按会话自动优先 Wayland**：原生后端的五个阶段都已实现，但窗口装饰还待各桌面人工
+/// 验证，且有几处相对 XWayland 的行为差异（全局热键、剪贴板线程等）需要维护者决定是否接受——
+/// 条件与剩余风险见 `docs/LINUX_PORTING.md` §8.1。决定之后改为「有 `WAYLAND_DISPLAY` /
+/// `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」——改的只是这里未指定分支的返回值与对应单测。
 fn choose_backend(forced: Option<&str>, compiled: bool) -> (Choice, Option<Note>) {
     match forced.map(str::trim).filter(|v| !v.is_empty()) {
         None => (Choice::X11, None),

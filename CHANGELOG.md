@@ -29,12 +29,17 @@
   - 无边框窗口的拖动 / 边缘缩放 / 双击最大化；
   - 剪贴板（文本，`wl_data_device`；读写不阻塞界面）与文件拖入（`text/uri-list`，异步读取）；
   - 输入法（text-input-v3）：合成串内联绘制、候选窗跟随光标、换输入框重新启用、密码 / 多行
-    内容提示。
+    内容提示；
+  - 窗口装饰：有 `xdg-decoration` 时请求服务端装饰，合成器不画（GNOME）时自绘客户端标题栏
+    （标题、最小化 / 最大化 / 关闭、拖动、双击最大化、右键合成器窗口菜单、边缘缩放，视觉走主题、
+    失活转淡），应用看到的尺寸与坐标都按内容区计；有 `xdg-dialog-v1` 时模态子窗登记为对话框。
 
   已知限制：全局热键不实现（协议不允许，兜底是桌面快捷键绑到 `应用 --参数` 经单实例转发）；
-  剪贴板仅界面线程可用（其它线程读写当空）；不给服务端装饰的合成器（GNOME）上窗口还没有
-  标题栏（客户端装饰未做）；文件拖出、primary selection、系统托盘未做；应用不能自定窗口坐标、
+  剪贴板仅界面线程可用（其它线程读写当空）；自绘标题栏方角无阴影、缩放边在窗口内侧；唤起
+  已显示的窗口（xdg-activation）、文件拖出、primary selection、系统托盘未做；应用不能自定窗口坐标、
   查询不到最小化（协议所限）。GNOME 真桌面的交互项待人工验证。详见 `docs/LINUX_PORTING.md` §8。
+- **`AppHandler::decoration`**（带默认实现，返回 `None`）与 `platform::Decoration`：宿主造一条
+  客户端装饰标题栏交给平台层画（目前 Wayland 后端在合成器不画边框时使用）。
 - **输入法内容类型与焦点身份**（公共 API，均带默认实现）：`Widget::ime_hints()` 返回
   `ImeHints { multiline, password }`（`TextInput` 按 `.multiline()` / `.password()` 如实报告，
   密码框恒为单行）；`AppHandler::ime_field()` 返回 `ImeField { id, hints }`，`id` 在焦点换到
