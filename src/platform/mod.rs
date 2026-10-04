@@ -556,6 +556,18 @@ pub enum ScreenshotKey {
     Key(KeyEvent),
 }
 
+/// 客户端装饰标题栏（见 [`AppHandler::decoration`]）。
+pub struct Decoration {
+    /// 画标题栏、处理其上指针事件的宿主。尺寸 = 窗口内容宽 × [`Self::height`]。
+    pub handler: Box<dyn AppHandler>,
+    /// 标题栏高度（逻辑像素）。
+    pub height: i32,
+    /// 改标题（窗口标题变了时平台层调用）。
+    pub set_title: Box<dyn Fn(&str)>,
+    /// 窗口激活 / 失活：失活时标题与按钮转淡。
+    pub set_active: Box<dyn Fn(bool)>,
+}
+
 pub struct WindowConfig {
     pub title: String,
     pub width: i32,
@@ -869,6 +881,15 @@ pub trait AppHandler {
     /// 供输入法查询上下文（macOS `selectedRange`）。返回错误的值不会崩，只会让
     /// 部分输入法的候选联想与重转换失准，故值必须真实反映控件状态。
     fn ime_selection(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// 造一条客户端装饰（CSD）标题栏：合成器不给窗口画边框时（GNOME 的 Wayland 会话），由平台层
+    /// 把它画在内容区上方。标题栏本身也是一个宿主，与本窗口共用主题，换主题照样跟随；
+    /// 它的按钮发出的窗口操作（最小化 / 最大化 / 关闭）由平台层转给本窗口。
+    ///
+    /// `maximizable`：显示最大化按钮。默认 `None`（不支持 CSD 的宿主，平台层就不画标题栏）。
+    fn decoration(&self, _title: &str, _maximizable: bool) -> Option<Decoration> {
         None
     }
 

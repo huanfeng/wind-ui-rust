@@ -649,6 +649,89 @@ fn build_new_window(
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
 
+/// 客户端装饰标题栏的高度（逻辑像素）：按钮行 32 + 底边分隔线 1。
+pub(crate) const DECORATION_HEIGHT: i32 = 33;
+
+/// 造客户端装饰标题栏（见 `AppHandler::decoration`）：一个只有「标题 + 窗口按钮」的小宿主。
+///
+/// 全部现成控件拼成，视觉走主题角色（底 `Surface`、字 `Text`，失活转 `TextMuted`，底边
+/// `Divider`）；窗口按钮自带悬停 / 按下与关闭键的红底。与窗口共用 `theme_src`，所以运行期
+/// 换主题时标题栏跟着变。整条可拖（`window_drag`），按钮可聚焦、不算拖动区。
+fn build_decoration(
+    theme_src: &ThemeHandle,
+    hotkey_ops: &HotkeyOpQueue,
+    title: &str,
+    maximizable: bool,
+) -> crate::platform::Decoration {
+    use crate::style::Role;
+    use crate::ui::WindowButtonKind as K;
+    let mut scope = crate::signal::SignalScope::new();
+    let (root, title_sig, fg) = scope.collect(|| {
+        let title_sig = crate::signal::signal(title.to_string());
+        let fg = crate::signal::signal(Role::Text);
+        let button = |k| Element::window_button(k).fg_role_signal(fg);
+        let mut buttons = Element::row().child(button(K::Minimize));
+        if maximizable {
+            buttons = buttons.child(button(K::Maximize));
+        }
+        buttons = buttons.child(button(K::Close));
+        let bar = Element::stack()
+            .width_match()
+            .height(DECORATION_HEIGHT - 1)
+            // 标题居中（GNOME 的惯例），按钮靠右。
+            .child(
+                Element::label_signal(title_sig)
+                    .fg_role_signal(fg)
+                    .align(crate::spec::Align::Center),
+            )
+            .child(
+                Element::row()
+                    .width_match()
+                    .height_match()
+                    .child(Element::row().weight(1.0))
+                    .child(buttons),
+            );
+        let root = Element::col()
+            .width_match()
+            .height(DECORATION_HEIGHT)
+            .bg_role(Role::Surface)
+            .window_drag()
+            .child(bar)
+            .child(Element::divider());
+        (root, title_sig, fg)
+    });
+    let cfg = WindowConfig {
+        height: DECORATION_HEIGHT,
+        ..WindowConfig::default()
+    };
+    let bg = theme_src.current().palette.surface;
+    let mut host = UiHost::new(
+        root,
+        &cfg,
+        theme_src.clone(),
+        bg,
+        false,
+        hotkey_ops.clone(),
+        Vec::new(),
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    host.scope = Some(scope);
+    crate::platform::Decoration {
+        handler: Box::new(host),
+        height: DECORATION_HEIGHT,
+        set_title: Box::new(move |t| {
+            if title_sig.with(|s| s != t) {
+                title_sig.set(t.to_string());
+            }
+        }),
+        set_active: Box::new(move |a| fg.set(if a { Role::Text } else { Role::TextMuted })),
+    }
+}
+
 /// **不属于任何窗口**的那几样应用级设施，装在线程局部里活到进程结束。
 ///
 /// 为什么必须有这么一处：`ctx.open_window`、`on_system_theme_changed`、`on_interval`
@@ -3720,6 +3803,15 @@ impl AppHandler for UiHost {
         self.tree.selection_of(focus)
     }
 
+    fn decoration(&self, title: &str, maximizable: bool) -> Option<crate::platform::Decoration> {
+        Some(build_decoration(
+            &self.theme_src,
+            &self.hotkey_ops,
+            title,
+            maximizable,
+        ))
+    }
+
     fn ime_field(&self) -> Option<crate::event::ImeField> {
         let focus = self.focus.current?;
         // 与 `ime_caret` 同一口径：焦点控件报了光标才算文本焦点。
@@ -3799,6 +3891,101 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 客户端装饰标题栏：按钮发对应窗口操作、空白处是拖动区，视觉跟主题与激活态走。
+    /// 经真实宿主（指针分发、渲染）验证，而不是只看构造出来的元素树。
+    #[test]
+    fn decoration_titlebar_buttons_drag_area_theme_and_activation() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind, WindowOp};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        const W: i32 = 400;
+        let theme_src = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let mut d = build_decoration(&theme_src, &ops, "标题", true);
+        let h = d.handler.as_mut();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(W as u32, DECORATION_HEIGHT as u32).unwrap();
+        let frame = |h: &mut dyn AppHandler, pm: &mut Pixmap| {
+            h.render(
+                &mut PixmapTarget { pixmap: pm },
+                Size::new(W, DECORATION_HEIGHT),
+            );
+        };
+        frame(h, &mut pm);
+        let y = 16;
+        // 按钮从右往左：关闭、最大化、最小化，各 46 宽。
+        let (close, max, min) = (W - 23, W - 46 - 23, W - 92 - 23);
+        assert!(h.window_drag_at(Point::new(60, y)) && !h.interactive_at(Point::new(60, y)));
+        assert!(
+            h.window_drag_at(Point::new(W / 2, y)) && !h.interactive_at(Point::new(W / 2, y)),
+            "标题文字上也是拖动区"
+        );
+        for x in [close, max, min] {
+            assert!(h.interactive_at(Point::new(x, y)), "按钮 x={x} 不是拖动区");
+        }
+        let click = |h: &mut dyn AppHandler, x: i32| {
+            for kind in [PointerKind::Down, PointerKind::Up] {
+                h.on_pointer(PointerEvent::single(
+                    kind,
+                    Point::new(x, y),
+                    MouseButton::Left,
+                ));
+            }
+        };
+        click(h, min);
+        assert_eq!(h.take_window_op(), Some(WindowOp::Minimize));
+        click(h, max);
+        assert_eq!(h.take_window_op(), Some(WindowOp::ToggleMaximize));
+        assert!(!h.wants_close());
+        click(h, close);
+        assert!(h.wants_close(), "关闭键 = 请求关闭（由平台层转给窗口）");
+
+        // 底色是主题的 surface；运行期换暗色主题，标题栏跟着变。
+        let px = |pm: &Pixmap| {
+            let p = pm.pixel(5, 5).unwrap(); // 左上角：标题居中、按钮靠右，这里只有底色
+            (p.red(), p.green(), p.blue())
+        };
+        let light = Theme::default().palette.surface;
+        assert_eq!(px(&pm), (light.r, light.g, light.b));
+        // 失活：标题字转淡（墨量变少）。
+        let ink = |pm: &Pixmap| -> u32 {
+            let bg = pm.pixel(5, 5).unwrap();
+            (W / 2 - 40..W / 2 + 40)
+                .flat_map(|x| (4..DECORATION_HEIGHT - 4).map(move |y| (x, y)))
+                .map(|(x, y)| {
+                    let p = pm.pixel(x as u32, y as u32).unwrap();
+                    u32::from(bg.red().abs_diff(p.red()))
+                })
+                .sum()
+        };
+        let active_ink = ink(&pm);
+        assert!(active_ink > 0, "标题画出来了");
+        (d.set_active)(false);
+        let h = d.handler.as_mut();
+        frame(h, &mut pm);
+        let inactive_ink = ink(&pm);
+        assert!(
+            inactive_ink < active_ink,
+            "失活后标题转淡：{inactive_ink} < {active_ink}"
+        );
+        theme_src.set(Theme::dark());
+        frame(h, &mut pm);
+        let dark = Theme::dark().palette.surface;
+        assert_eq!(
+            px(&pm),
+            (dark.r, dark.g, dark.b),
+            "换暗色主题后标题栏跟着变"
+        );
+        // 改标题：画面随之变化。
+        let before = pm.data().to_vec();
+        (d.set_title)("另一个更长的标题");
+        let h = d.handler.as_mut();
+        frame(h, &mut pm);
+        assert_ne!(before, pm.data(), "标题变了，画面跟着变");
+    }
 
     /// 合成中焦点被移走（程序 / Tab）：随后的「清合成串」要清到原来那个框上，
     /// 而不是新焦点——否则旧框里的合成串一直挂着。
