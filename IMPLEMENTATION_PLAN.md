@@ -49,9 +49,9 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 （缓冲全忙）时不再为动画反复出帧；owner 重建角色时给从属窗口重设 parent；memfd 的 glibc
 ≥ 2.27 下限写进 `shm.rs` 与 LINUX_PORTING §8.2；frame 回调 1 秒兜底超时；阻塞对话框期间
 不回 ping 记为已知缺口（`after_event` 注释，X11 同样现状）。
-**Status**: In Progress（2026-09-24）——实现与 sway / weston headless 自动化验证完成（证据见
-`docs/LINUX_PORTING.md` §8.5、§8.7）；**待 GNOME 42 真桌面人工验证**交互项（点击、打字、
-长按重复、拖动 / 缩放无边框窗口、双击最大化、改缩放）后改 Complete。偏差：headless weston
+**Status**: Complete（2026-10-04）——实现与 sway / weston headless 自动化验证（证据见
+`docs/LINUX_PORTING.md` §8.5、§8.7），并于 2026-10-04 在 192.168.5.55（GNOME 42 Wayland 会话）
+人工验证交互项（点击、打字、长按重复、拖动 / 缩放无边框窗口、双击最大化、改缩放）正常。偏差：headless weston
 无输入，注入改在 sway 上做（自写常驻注入器，理由见 §8.7）；「两块不同缩放的显示器间拖动」
 只验了单输出运行期改缩放，双输出留给真桌面。拖动区右键用框架自己的系统菜单而非
 `show_window_menu`（与另两个平台一致）。
@@ -61,8 +61,9 @@ weston headless 真协议往返（读回 buffer 做像素断言）。
 事件循环）、文件拖入（`text/uri-list` → 落点路由到 `on_drop_files`，与 XDND 同一上层接口）。
 **Success Criteria**: 与其它 Wayland 应用双向复制中文/大段文本；从文件管理器拖入多文件、含空格与中文路径。
 **Tests**: uri-list 解析单测（百分号解码、`file://` 以外的跳过）；headless 下自写最小 data source 往返。
-**Status**: In Progress（2026-09-30）——实现与 sway headless 自动化验证完成（证据见
-`docs/LINUX_PORTING.md` §8.5）；**待 GNOME 42 真桌面人工验证**后改 Complete，清单：
+**Status**: Complete（2026-10-04）——实现与 sway headless 自动化验证（证据见
+`docs/LINUX_PORTING.md` §8.5），2026-10-04 在 192.168.5.55（GNOME 42 Wayland 会话）按下列清单
+人工验证正常。清单（留作回归参考）：
 1. gedit / 终端里复制中文，本应用 Ctrl+V 粘进输入框；反向：本应用复制，gedit 粘贴。
    若本应用复制后**自己**立刻粘贴得到旧内容（gedit 那边却是新的），是「有焦点、sync 回来前
    没见到自家选区即判被拒」这条判定在 mutter 上判错了（依赖合成器同步回发选区，未实测，见
@@ -85,9 +86,10 @@ enter 的 serial 就足够）。不做：文件拖出、primary selection（中�
 **Success Criteria**: fcitx5 与 ibus 下中文输入、候选窗位置、合成串内联显示正确。
 **Tests**: 协议状态机单测（preedit/commit/done 的批量应用顺序）；**真桌面人工验证**
 （headless 合成器无现成输入法，此项不声称自动化覆盖）。
-**Status**: In Progress（2026-09-30）——实现、状态机单测与 sway 上自写 `input_method_v2` 客户端
-的协议往返完成（证据见 `docs/LINUX_PORTING.md` §8.5）；**待 192.168.5.55（GNOME 42）+ ibus
-（Ubuntu 默认）/ fcitx5 人工验证**后改 Complete。运行时加 `WINDUI_BACKEND=wayland`，清单：
+**Status**: Complete（2026-10-04，fcitx5）——实现、状态机单测与 sway 上自写 `input_method_v2` 客户端
+的协议往返（证据见 `docs/LINUX_PORTING.md` §8.5），2026-10-04 在 192.168.5.55（GNOME 42 Wayland
+会话）用 **fcitx5** 人工验证正常；**ibus 未实测**（该机默认输入法是 fcitx5），留待有反馈或顺手时
+`im-config -n ibus` 补测。清单（运行时加 `WINDUI_BACKEND=wayland`，留作回归参考）：
 1. 中文拼音输入：打 `nihao` 选词上屏，结果正确，无重复、无丢字。
 2. 候选窗跟随光标：出现在输入框光标下方，打字 / 换行 / 滚动后跟着走。
 3. 合成串内联：拼音在输入框里带下划线显示，光标在合成串内正确；Esc 取消后清干净。
@@ -148,6 +150,11 @@ Wayland 协议刻意不让客户端抓全局按键，可选路线：
   无对话框提示、必须 CSD）；这些新协议的**正向路径**要靠 weston 或更新的桌面补验，
   不能以这台机器的结果声称已覆盖。
 - 该机 glibc 2.35，本机编的二进制跑不了，用 cargo-zigbuild `--target x86_64-unknown-linux-gnu.2.35`。
+- **虚拟机里 GDM 不给 Wayland 会话的坑**（2026-10-01）：虚拟机显示配置一变，内核同时出了
+  `simpledrm`（固件帧缓冲）与 `virtio_gpu` 两个 DRM 设备，GDM 的 `61-gdm.rules` 把它判成
+  「虚拟显卡 + 直通物理显卡」而禁用 Wayland——登录界面没有齿轮、只能进 Xorg，重启也一样。
+  该机已用 `sudo ln -s /dev/null /etc/udev/rules.d/61-gdm.rules` 屏蔽这套规则。症状是
+  `/run/udev/gdm-machine-has-{virtual-gpu,hardware-gpu,hybrid-graphics}` 三个标记同时存在。
 
 ## 不在本计划内
 系统托盘（SNI 与 X11 共用，另立）、文件拖出、窗口模式 GPU、零窗口常驻。
