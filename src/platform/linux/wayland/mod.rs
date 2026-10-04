@@ -330,6 +330,8 @@ impl Role {
 struct TopState {
     maximized: bool,
     activated: bool,
+    /// 贴边平铺（任一边，xdg_wm_base v2 起）：同最大化，没有缩放边。
+    tiled: bool,
 }
 
 /// `xdg_toplevel.wm_capabilities`（v5）：合成器支持哪些窗口操作。没收到时按全支持。
@@ -544,9 +546,6 @@ impl Wl {
         } else {
             (None, None)
         };
-        if cfg.frameless {
-            log::debug!("Wayland 后端尚未协商装饰（xdg-decoration），frameless 按合成器默认处理");
-        }
         if cfg.icon.is_some() {
             log::debug!("Wayland 后端尚未接窗口图标（xdg-toplevel-icon），图标被忽略");
         }
@@ -704,8 +703,7 @@ impl Wl {
         };
         let bar = self.bar_logical(i);
         let w = &mut self.windows[i];
-        if let Some(s) = w.min_size {
-            let (mw, mh) = csd::with_bar(s, bar);
+        if let Some((mw, mh)) = csd::min_with_bar(w.min_size, bar) {
             top.set_min_size(mw, mh);
         }
         if let Some(s) = w.max_size {
@@ -714,11 +712,17 @@ impl Wl {
         }
         // 无缓冲的首次提交：合成器据此回第一个 configure，之后才能挂缓冲。
         w.surface.commit();
-        // 从属窗口的 parent 指着旧角色（本窗隐藏时已销毁）：换成新的。
-        for c in &self.windows {
+        // 从属窗口的 parent 指着旧角色（本窗隐藏时已销毁）：换成新的。父窗隐藏期间显示出来的
+        // 模态子窗当时没有父窗、没登记成对话框，这里补上。
+        for c in &mut self.windows {
             if c.owner == Some(key) {
-                if let Some(r) = &c.role {
+                if let Some(r) = &mut c.role {
                     r.top.set_parent(Some(&top));
+                    if let (Some(m), true, None) = (&self.g.dialog, c.modal, &r.dialog) {
+                        let d = m.get_xdg_dialog(&r.top, &self.qh, ());
+                        d.set_modal();
+                        r.dialog = Some(d);
+                    }
                 }
             }
         }
@@ -971,7 +975,10 @@ impl Wl {
             let Some(guard) = queue.prepare_read() else {
                 continue;
             };
-            let any_dirty = self.windows.iter().any(|w| w.needs_paint && w.visible());
+            let any_dirty = self.windows.iter().any(|w| {
+                w.visible()
+                    && (w.needs_paint || w.deco.as_ref().is_some_and(|d| d.on && d.needs_paint))
+            });
             let (mut writable, send_deadline) = data::pending_sends();
             let (drop_fds, drop_deadline) = self.pending_drops();
             let timeout = if any_dirty {
@@ -1053,7 +1060,8 @@ impl Wl {
                 .deco
                 .as_ref()
                 .is_some_and(|d| d.on && d.host.handler.wants_animation());
-            if !w.visible() || !(w.handler.wants_animation() || deco_anim) {
+            let content_anim = w.handler.wants_animation();
+            if !w.visible() || !(content_anim || deco_anim) {
                 continue;
             }
             if let Some((_, since)) = &w.frame_cb {
@@ -1066,6 +1074,7 @@ impl Wl {
             if w.unpresented.is_some_and(|u| !u.is_empty()) {
                 continue;
             }
+            // 标题栏按钮的淡入淡出按满帧走；只有它在动时内容不重画。
             let ask = if deco_anim {
                 0
             } else {
@@ -1075,7 +1084,9 @@ impl Wl {
             let elapsed = w.last_anim.elapsed();
             if elapsed >= due {
                 w.last_anim = now;
-                w.needs_paint = true;
+                if content_anim {
+                    w.needs_paint = true;
+                }
                 if deco_anim {
                     if let Some(d) = w.deco.as_mut() {
                         d.needs_paint = true;
@@ -1097,32 +1108,41 @@ impl Wl {
             if !w.visible() {
                 continue;
             }
-            let painted = w.needs_paint || w.pixmap.is_none();
-            if painted {
-                w.needs_paint = false;
-                let (cw, ch) = (w.w, w.h);
-                let drawn = host::render_frame(
-                    w.handler.as_mut(),
-                    &mut w.pixmap,
-                    &mut w.fresh,
-                    (cw, ch),
-                    w.bg,
-                );
-                // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
+            // 内容与客户端标题栏各画各的：标题栏按钮的悬停 / 动画不逼内容整窗重画，反之亦然。
+            let content = w.needs_paint || w.pixmap.is_none();
+            let deco = w.deco.as_ref().is_some_and(|d| d.on && d.needs_paint);
+            if content || deco {
                 let bar = self.bar_phys(i);
-                let full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
-                let mut damage = drawn.map(|d| Rect::new(d.x, d.y + bar, d.w, d.h));
+                let w = &mut self.windows[i];
+                let mut damage = None;
+                let mut full = false;
+                if content {
+                    w.needs_paint = false;
+                    let (cw, ch) = (w.w, w.h);
+                    let drawn = host::render_frame(
+                        w.handler.as_mut(),
+                        &mut w.pixmap,
+                        &mut w.fresh,
+                        (cw, ch),
+                        w.bg,
+                    );
+                    full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
+                    // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
+                    damage = drawn.map(|d| Rect::new(d.x, d.y + bar, d.w, d.h));
+                }
                 if let Some(d) = self.paint_deco(i, full) {
-                    damage = Some(damage.map_or(d, |u| u.union(&d)));
+                    damage = Some(damage.map_or(d, |u: Rect| u.union(&d)));
                 }
                 let w = &mut self.windows[i];
                 if let Some(d) = damage {
                     w.unpresented = Some(w.unpresented.map_or(d, |u| u.union(&d)));
                 }
-                self.after_event(key);
+                if content {
+                    self.after_event(key);
+                }
             }
             if let Some(i) = self.idx(key) {
-                self.present(i, painted);
+                self.present(i, content || deco);
             }
         }
     }
@@ -1133,14 +1153,11 @@ impl Wl {
     /// 不看它的话，报了较长截止时间（光标闪烁 500ms）的窗口会在每个回调之后立刻再要一个，
     /// 退化成按刷新率空提交。
     fn present(&mut self, i: usize, painted: bool) {
+        let bar = self.bar_phys(i);
         let w = &mut self.windows[i];
         if !w.visible() {
             return;
         }
-        let bar = match w.deco.as_ref().map(decor::Deco::height) {
-            Some(h) if h > 0 => w.scale.to_physical(h),
-            _ => 0,
-        };
         let deco_anim = w
             .deco
             .as_ref()
@@ -1375,6 +1392,12 @@ fn parse_states(raw: &[u8]) -> TopState {
         match xdg_toplevel::State::try_from(v) {
             Ok(xdg_toplevel::State::Maximized) => st.maximized = true,
             Ok(xdg_toplevel::State::Activated) => st.activated = true,
+            Ok(
+                xdg_toplevel::State::TiledLeft
+                | xdg_toplevel::State::TiledRight
+                | xdg_toplevel::State::TiledTop
+                | xdg_toplevel::State::TiledBottom,
+            ) => st.tiled = true,
             _ => {}
         }
     }
@@ -1418,7 +1441,8 @@ mod tests {
             parse_states(&raw(&[4, 1, 3])),
             TopState {
                 maximized: true,
-                activated: true
+                activated: true,
+                tiled: false
             }
         );
         assert_eq!(parse_states(&[]), TopState::default());

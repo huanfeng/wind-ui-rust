@@ -422,9 +422,7 @@ impl Wl {
                 let (focus, pressed) = (p.focus.take(), std::mem::take(&mut p.pressed));
                 let Some(key) = focus else { return };
                 let Some(i) = self.idx(key) else { return };
-                if let Some(d) = self.windows[i].deco.as_mut() {
-                    d.captured = false;
-                }
+                self.deco_capture_lost(i);
                 self.deco_leave(key);
                 let Some(i) = self.idx(key) else { return };
                 let w = &mut self.windows[i];
@@ -578,11 +576,28 @@ impl Wl {
         let left = button == MouseButton::Left;
         if self.frame(i).bar > 0 {
             // 客户端标题栏：缩放边 / 拖动区 / 右键窗口菜单先接管，其余（窗口按钮）交给标题栏宿主。
+            // `DragGate` 只管左键（拖动、双击）；右键的「吞松开」单独记，互不冲掉。
+            let right = button == MouseButton::Right;
+            if !press && right {
+                let swallow = self.windows[i]
+                    .deco
+                    .as_mut()
+                    .is_some_and(|d| std::mem::take(&mut d.swallow_right_up));
+                if swallow {
+                    return;
+                }
+            }
             if press {
-                self.windows[i].title_drag.press();
+                if left {
+                    self.windows[i].title_drag.press();
+                }
                 if let Some(pending) = self.try_csd_drag(i, serial, time, pos, button) {
                     let w = &mut self.windows[i];
-                    w.title_drag.take_over(pending);
+                    if left {
+                        w.title_drag.take_over(pending);
+                    } else if let Some(d) = w.deco.as_mut() {
+                        d.swallow_right_up = true;
+                    }
                     let r = {
                         let _g = crate::platform::EventDispatchGuard::enter();
                         w.handler.on_dismiss_overlays()
@@ -593,7 +608,7 @@ impl Wl {
                     self.after_event(key);
                     return;
                 }
-            } else if self.windows[i].title_drag.release() {
+            } else if left && self.windows[i].title_drag.release() {
                 return;
             }
             let on_bar = matches!(self.pointer_region(), Some((_, Region::Bar(_))));
@@ -686,7 +701,8 @@ impl Wl {
         let frame = self.frame(i);
         let w = &self.windows[i];
         let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
-        let edges = w.resizable && !w.state.maximized && button == MouseButton::Left;
+        let edges =
+            w.resizable && !w.state.maximized && !w.state.tiled && button == MouseButton::Left;
         if let Some(dir) = frame.edge(pos, border, edges) {
             // 与无边框窗口一致：缩放边落在可交互控件（按钮、输入框）上时让给控件。
             let interactive = match frame.locate(pos) {

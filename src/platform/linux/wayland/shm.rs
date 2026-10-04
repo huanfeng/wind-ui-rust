@@ -266,6 +266,34 @@ mod tests {
     }
 
     #[test]
+    fn content_is_shifted_down_below_the_titlebar_rows() {
+        // 缓冲 4×5：上 2 行是标题栏，内容 pixmap 4×3 整体下移 2 行。
+        let mut content = Pixmap::new(4, 3).unwrap();
+        content.fill(tiny_skia::Color::from_rgba8(10, 20, 30, 255));
+        let mut bar = Pixmap::new(4, 2).unwrap();
+        bar.fill(tiny_skia::Color::from_rgba8(200, 100, 50, 255));
+        let file = super::super::super::sys::memfd(c"windui-test", 4 * 5 * 4).unwrap();
+        let mut buf = Vec::new();
+        write_pixels(&file, &content, r(0, 0, 4, 3), 2, &mut buf).unwrap();
+        let mut out = vec![0u8; 80];
+        file.read_exact_at(&mut out, 0).unwrap();
+        let px =
+            |out: &[u8], x: usize, y: usize| out[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].to_vec();
+        assert_eq!(px(&out, 0, 0), [0, 0, 0, 0], "标题栏那两行没被内容写到");
+        assert_eq!(px(&out, 3, 1), [0, 0, 0, 0]);
+        assert_eq!(
+            px(&out, 0, 2),
+            [30, 20, 10, 255],
+            "内容第 0 行落在缓冲第 2 行"
+        );
+        assert_eq!(px(&out, 3, 4), [30, 20, 10, 255]);
+        write_pixels(&file, &bar, r(0, 0, 4, 2), 0, &mut buf).unwrap();
+        file.read_exact_at(&mut out, 0).unwrap();
+        assert_eq!(px(&out, 2, 1), [50, 100, 200, 255], "标题栏写在最上面");
+        assert_eq!(px(&out, 2, 2), [30, 20, 10, 255], "没盖到内容");
+    }
+
+    #[test]
     fn pixels_land_in_xrgb_layout_at_the_right_offset() {
         let mut pm = Pixmap::new(4, 3).unwrap();
         pm.fill(tiny_skia::Color::from_rgba8(10, 20, 30, 255));

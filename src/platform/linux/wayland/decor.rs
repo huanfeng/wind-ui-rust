@@ -37,6 +37,9 @@ pub(super) struct Deco {
     pub hover: bool,
     /// 在标题栏的按钮上按下、还没松开：移动与松开都归它（按钮自己捕获）。
     pub captured: bool,
+    /// 右键在拖动区按下、已弹合成器窗口菜单：配对的右键松开吞掉（不经左键的 `DragGate`，
+    /// 免得把左键那次的「吞松开」标志冲掉）。
+    pub swallow_right_up: bool,
 }
 
 impl Deco {
@@ -49,6 +52,7 @@ impl Deco {
             needs_paint: true,
             hover: false,
             captured: false,
+            swallow_right_up: false,
         };
         d.host.handler.set_scale(scale as f32);
         d
@@ -104,12 +108,13 @@ impl Dispatch<ZxdgToplevelDecorationV1, u32> for Wl {
 
 impl Wl {
     /// 标题栏高度（物理像素），不画时 0。
+    ///
+    /// 由「整窗高 − 内容高」得出而不是单独取整：分数缩放下两次独立取整之和可能比整窗多 1
+    /// 像素，缓冲就与 viewport 目标（逻辑整窗高）差一行，合成器会把整窗重采样发糊。
     pub(super) fn bar_phys(&self, i: usize) -> i32 {
         let w = &self.windows[i];
-        match w.deco.as_ref().map(Deco::height) {
-            Some(h) if h > 0 => w.scale.to_physical(h),
-            _ => 0,
-        }
+        let h = w.deco.as_ref().map_or(0, Deco::height);
+        csd::bar_physical(w.logical.1, h, |v| w.scale.to_physical(v))
     }
 
     /// 标题栏高度（逻辑像素），不画时 0。
@@ -180,10 +185,8 @@ impl Wl {
         // 尺寸约束含标题栏，跟着重设。
         if let Some(r) = &w.role {
             let bar = w.deco.as_ref().map_or(0, Deco::height);
-            if let Some(s) = w.min_size {
-                let (mw, mh) = csd::with_bar(s, bar);
-                r.top.set_min_size(mw, mh);
-            }
+            let (mw, mh) = csd::min_with_bar(w.min_size, bar).unwrap_or((0, 0));
+            r.top.set_min_size(mw, mh);
             if let Some(s) = w.max_size {
                 let (mw, mh) = csd::with_bar(s, bar);
                 r.top.set_max_size(mw, mh);
@@ -242,13 +245,19 @@ impl Wl {
         let close = d.host.handler.wants_close();
         if close {
             // 标题栏宿主的「关闭」是粘住的：先换一个新的，再把关闭请求交给窗口（窗口可能拒绝）。
+            // 换不出来（理论上不会）就干脆不画标题栏，免得粘住的关闭标志让之后每个事件都请求关闭。
             let maximizable = w.resizable;
-            if let Some(h) = w.handler.decoration(&w.title, maximizable) {
-                let mut nd = Deco::new(h, w.scale.factor);
-                nd.on = true;
-                (nd.host.set_active)(w.state.activated);
-                w.deco = Some(nd);
+            match w.handler.decoration(&w.title, maximizable) {
+                Some(h) => {
+                    let mut nd = Deco::new(h, w.scale.factor);
+                    nd.on = true;
+                    (nd.host.set_active)(w.state.activated);
+                    w.deco = Some(nd);
+                }
+                None => w.deco = None,
             }
+            w.fresh = true;
+            w.needs_paint = true;
         }
         if let Some(op) = op {
             self.apply_window_op(key, op);
@@ -319,15 +328,14 @@ impl Wl {
         }
     }
 
-    /// 窗口标题变了 / 激活态变了：同步给标题栏。
+    /// 窗口标题变了 / 激活态变了：同步给标题栏。回调不发重画通知，这里让标题栏整条重画
+    /// （含重新布局：标题宽度可能变了）；内容区不动。
     pub(super) fn deco_title(&mut self, i: usize) {
         let w = &mut self.windows[i];
         if let Some(d) = w.deco.as_mut() {
             (d.host.set_title)(&w.title);
             d.needs_paint = true;
-            if d.on {
-                w.needs_paint = true;
-            }
+            d.fresh = true;
         }
     }
 
@@ -336,8 +344,20 @@ impl Wl {
         if let Some(d) = w.deco.as_mut() {
             (d.host.set_active)(active);
             d.needs_paint = true;
-            if d.on {
-                w.needs_paint = true;
+            d.fresh = true;
+            if !active && std::mem::take(&mut d.captured) {
+                // 失活时按着的标题栏按钮：捕获收掉（配对的松开不会再来）。
+                d.host.handler.on_capture_lost();
+            }
+        }
+    }
+
+    /// 指针离开窗口时标题栏按钮还按着（合成器收走了抓取）：收掉它的捕获。
+    pub(super) fn deco_capture_lost(&mut self, i: usize) {
+        if let Some(d) = self.windows[i].deco.as_mut() {
+            if std::mem::take(&mut d.captured) {
+                d.host.handler.on_capture_lost();
+                d.needs_paint = true;
             }
         }
     }

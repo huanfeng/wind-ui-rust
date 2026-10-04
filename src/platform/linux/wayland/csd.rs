@@ -76,6 +76,31 @@ pub(super) fn with_bar((w, h): (i32, i32), bar: i32) -> (i32, i32) {
     (w, if h > 0 { h + bar } else { h })
 }
 
+/// 标题栏的物理高度：由「整窗高 − 内容高」得出（`to_physical` 是逻辑 → 物理的取整），而不是
+/// 单独取整——分数缩放下两次独立取整之和可能比整窗多 1 像素，缓冲就与 viewport 目标（逻辑整窗
+/// 高）差一行，合成器会把整窗重采样发糊。整数缩放下两种算法结果相同。
+pub(super) fn bar_physical(
+    content_logical: i32,
+    bar_logical: i32,
+    to_physical: impl Fn(i32) -> i32,
+) -> i32 {
+    if bar_logical <= 0 {
+        return 0;
+    }
+    to_physical(content_logical + bar_logical) - to_physical(content_logical)
+}
+
+/// 有客户端标题栏时的最小尺寸：内容区的下限加上标题栏；没设下限也至少留出标题栏 + 1 行
+/// 内容（否则合成器能把窗口压得比标题栏还矮，内容高度只能兜底成 1，提交的表面就比合成器
+/// 配置的尺寸高）。`bar == 0` 原样返回。
+pub(super) fn min_with_bar(min: Option<(i32, i32)>, bar: i32) -> Option<(i32, i32)> {
+    if bar == 0 {
+        return min;
+    }
+    let (w, h) = min.unwrap_or((0, 0));
+    Some((w, h.max(1) + bar))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,11 +188,38 @@ mod tests {
     }
 
     #[test]
+    fn bar_height_is_derived_so_the_whole_buffer_matches_the_viewport_target() {
+        let f = 1.5;
+        let phys = |v: i32| ((v as f64 * f).round() as i32).max(1);
+        for content in 300..700 {
+            let bar = bar_physical(content, 33, phys);
+            assert_eq!(
+                phys(content) + bar,
+                phys(content + 33),
+                "内容 {content}：缓冲高 = 整窗逻辑高换算，一像素不差"
+            );
+        }
+        // 独立取整会出错的那种：601 × 1.5 = 901.5 → 902，33 × 1.5 = 49.5 → 50，和 952 ≠ 951。
+        assert_eq!(bar_physical(601, 33, phys), 49);
+        let int2 = |v: i32| v * 2;
+        assert_eq!(bar_physical(400, 33, int2), 66, "整数缩放：就是 33 × 2");
+        assert_eq!(bar_physical(400, 0, phys), 0);
+    }
+
+    #[test]
     fn configured_size_includes_the_bar() {
         assert_eq!(content_height(433, 33), 400);
         assert_eq!(content_height(0, 33), 0, "0 = 客户端自定，交调用方回退");
         assert_eq!(content_height(20, 33), 1, "比标题栏还矮：内容至少 1");
         assert_eq!(with_bar((300, 200), 33), (300, 233));
         assert_eq!(with_bar((300, 0), 33), (300, 0), "0 = 不限，不加");
+        assert_eq!(
+            min_with_bar(None, 33),
+            Some((0, 34)),
+            "没设下限也至少留出标题栏"
+        );
+        assert_eq!(min_with_bar(Some((200, 0)), 33), Some((200, 34)));
+        assert_eq!(min_with_bar(Some((200, 100)), 33), Some((200, 133)));
+        assert_eq!(min_with_bar(None, 0), None, "没有标题栏：原样");
     }
 }
