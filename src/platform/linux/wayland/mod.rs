@@ -155,8 +155,9 @@ pub(super) fn connect() -> Result<Session, String> {
         .map_err(|e| format!("xdg_wm_base：{e}"))?;
     // v8 起有 axis_value120（高精度滚轮）；v5 起有 pointer frame。
     let seat = globals.bind(&qh, 1..=8, ()).ok();
-    // 诊断开关：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input`（逗号分隔）
-    // 假装合成器没有这些协议，在新合成器上也能走一遍回退路径（GNOME 42 就三个都没有）。
+    // 诊断开关：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input,
+    // xdg-decoration,xdg-dialog,xdg-activation`（逗号分隔）
+    // 假装合成器没有这些协议，在新合成器上也能走一遍回退路径（GNOME 42 就没有前三个）。
     let disabled = std::env::var("WINDUI_WAYLAND_DISABLE").unwrap_or_default();
     let off = |name: &str| disabled.split(',').any(|d| d.trim() == name);
     let viewporter = globals
@@ -273,7 +274,9 @@ pub(super) fn run_windowed(
     };
     wl.activation = wl.g.activation.take().map(activation::Activation::new);
     // 桌面启动器给本进程的激活令牌：用它把主窗口提到前台（合成器的防抢焦点据此放行），用完
-    // 从环境里删掉，免得泄漏给子进程（协议建议）。
+    // 从环境里删掉，免得泄漏给子进程（协议建议；GTK 也在打开显示时这样做）。改环境在已有别的
+    // 线程直接 `getenv` 时不安全——这里是应用 `App::run` 里打开显示的那一刻，与 GTK 同一前提。
+    // `start_hidden` 时用不上：令牌很快过期，等到首次显示多半已失效，照样删掉。
     let startup_token = std::env::var("XDG_ACTIVATION_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
@@ -771,18 +774,18 @@ impl Wl {
         let shown = self
             .idx(key)
             .is_some_and(|i| self.windows[i].role.is_some());
-        if shown {
-            self.activate(key, token);
-            return;
+        let (show, activate) = activation::raise_steps(shown, token.is_some());
+        if show {
+            self.show(key);
         }
-        self.show(key);
-        if token.is_some() {
+        if activate {
             self.activate(key, token);
         }
     }
 
     fn hide(&mut self, key: u32) {
         let Some(i) = self.idx(key) else { return };
+        self.activation_window_closed(key);
         let w = &mut self.windows[i];
         w.hidden = true;
         if let Some(role) = w.role.take() {

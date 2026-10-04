@@ -1,7 +1,8 @@
 //! 把已显示的窗口提到前台：`xdg-activation-v1`。
 //!
 //! Wayland 不许应用自己抢焦点，得拿「激活令牌」换：
-//! - **本进程有近期输入**（按键、点击、键盘焦点进入给的 serial）：`get_activation_token` →
+//! - **本进程有近期输入**（按下键盘键、按下鼠标键给的 serial；松开、键盘焦点进入、触摸都不算——
+//!   mutter 按「按下」那一下的 serial 校验，推断自其源码、GNOME 上待实测）：`get_activation_token` →
 //!   `set_serial(serial, seat)` + `set_surface(有焦点的那扇窗)` + `set_app_id` → `commit`，收到
 //!   `done(令牌)` 后对目标窗口 `activate(令牌, 表面)`。异步：不等，`done` 到了再激活；那之前目标
 //!   窗口关了就丢掉。同一扇窗口已有一个在路上的请求时不再发（连着两次唤出同一扇窗口只要一个令牌）。
@@ -21,6 +22,30 @@ use wayland_protocols::xdg::activation::v1::client::{
 
 use super::super::host;
 use super::Wl;
+
+/// 记下最近一次输入：只认按下（松开的 serial 合成器不认，而点击回调多在松开时触发，要是让松开
+/// 覆盖了按下，申请到的令牌就换不来焦点）；不知道落在哪扇窗口时保留旧值。
+pub(super) fn note_input(
+    prev: Option<(u32, u32)>,
+    serial: u32,
+    window: Option<u32>,
+    press: bool,
+) -> Option<(u32, u32)> {
+    match window {
+        Some(k) if press => Some((serial, k)),
+        _ => prev,
+    }
+}
+
+/// 唤出窗口的步骤：（先照常显示，再激活）。已显示的直接激活；隐藏着的照常映射（合成器一般给
+/// 新映射的窗口焦点），手里有别处给的令牌才再激活一次。
+pub(super) fn raise_steps(shown: bool, has_token: bool) -> (bool, bool) {
+    if shown {
+        (false, true)
+    } else {
+        (true, has_token)
+    }
+}
 
 /// 「哪些窗口有令牌请求在路上」的簿记（纯逻辑，有单测）。
 #[derive(Default)]
@@ -47,7 +72,7 @@ impl Pending {
         true
     }
 
-    /// 窗口关了：在路上的请求作废。
+    /// 窗口关了或隐藏了：在路上的请求作废。
     pub fn forget(&mut self, key: u32) {
         self.keys.retain(|&k| k != key);
     }
@@ -107,7 +132,7 @@ impl Wl {
     pub(super) fn activate(&mut self, key: u32, token: Option<String>) {
         if self.activation.is_none() {
             if !std::mem::replace(&mut self.activation_warned, true) {
-                eprintln!("[windui] 合成器不支持 xdg-activation-v1，无法把已显示的窗口提到前台");
+                eprintln!("[windui] xdg-activation-v1 不可用，无法把已显示的窗口提到前台");
             }
             return;
         }
@@ -122,13 +147,15 @@ impl Wl {
             return;
         }
         let req = a.obj.get_activation_token(&self.qh, key);
-        // 有近期输入就带上它的 serial 与那扇有焦点的窗口：合成器凭此认定这是用户操作的结果，
-        // 才肯把焦点交出去。
-        if let (Some((serial, from)), Some(seat)) = (self.last_input, &self.g.seat) {
+        // 有近期输入就带上它的 serial 与那扇窗口：合成器凭此认定这是用户操作的结果，才肯把焦点
+        // 交出去。没有 serial 也报上有键盘焦点的窗口（KWin 主要看申请方是不是当前活动窗口）。
+        let mut from = self.keyboard.as_ref().and_then(|k| k.focus);
+        if let (Some((serial, k)), Some(seat)) = (self.last_input, &self.g.seat) {
             req.set_serial(serial, seat);
-            if let Some(i) = self.idx(from) {
-                req.set_surface(&self.windows[i].surface);
-            }
+            from = Some(k);
+        }
+        if let Some(i) = from.and_then(|k| self.idx(k)) {
+            req.set_surface(&self.windows[i].surface);
         }
         req.set_app_id(host::exe_name());
         req.commit();
@@ -138,10 +165,13 @@ impl Wl {
         let (Some(a), Some(i)) = (self.activation.as_ref(), self.idx(key)) else {
             return;
         };
+        if self.windows[i].role.is_none() {
+            return; // 已隐藏：没有可激活的窗口（再显示时会重新申请）
+        }
         a.obj.activate(token.to_string(), &self.windows[i].surface);
     }
 
-    /// 窗口关了：在路上的令牌请求作废。
+    /// 窗口关了或隐藏了：在路上的令牌请求作废。
     pub(super) fn activation_window_closed(&mut self, key: u32) {
         if let Some(a) = self.activation.as_mut() {
             a.pending.forget(key);
@@ -152,6 +182,42 @@ impl Wl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_press_on_a_known_window_counts_as_recent_input() {
+        assert_eq!(note_input(None, 5, Some(1), true), Some((5, 1)));
+        assert_eq!(
+            note_input(Some((5, 1)), 6, Some(1), false),
+            Some((5, 1)),
+            "松开不覆盖按下"
+        );
+        assert_eq!(
+            note_input(Some((5, 1)), 7, None, true),
+            Some((5, 1)),
+            "不知道落在哪扇窗口：保留旧值"
+        );
+        assert_eq!(note_input(Some((5, 1)), 8, Some(2), true), Some((8, 2)));
+    }
+
+    #[test]
+    fn raising_a_shown_window_activates_it_and_a_hidden_one_is_shown_first() {
+        assert_eq!(
+            raise_steps(true, false),
+            (false, true),
+            "已显示：申请令牌激活"
+        );
+        assert_eq!(raise_steps(true, true), (false, true));
+        assert_eq!(
+            raise_steps(false, true),
+            (true, true),
+            "隐藏 + 令牌：显示后再激活"
+        );
+        assert_eq!(
+            raise_steps(false, false),
+            (true, false),
+            "隐藏无令牌：照常显示"
+        );
+    }
 
     #[test]
     fn one_request_per_window_until_its_token_arrives() {

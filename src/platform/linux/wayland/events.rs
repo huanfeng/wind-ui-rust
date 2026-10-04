@@ -462,12 +462,9 @@ impl Wl {
                 state: bstate,
             } => {
                 super::data::note_serial(serial);
-                self.last_input = self
-                    .pointer
-                    .as_ref()
-                    .and_then(|p| p.focus)
-                    .map(|k| (serial, k));
                 let press = bstate == WEnum::Value(wl_pointer::ButtonState::Pressed);
+                let on = self.pointer.as_ref().and_then(|p| p.focus);
+                self.last_input = super::activation::note_input(self.last_input, serial, on, press);
                 if let Some(p) = self.pointer.as_mut() {
                     p.pressed = if press {
                         p.pressed + 1
@@ -863,7 +860,6 @@ impl Wl {
                     .iter()
                     .find(|w| w.surface == surface)
                     .map(|w| w.key);
-                self.last_input = k.focus.map(|f| (serial, f));
             }
             wl_keyboard::Event::Leave { .. } => {
                 super::data::note_focus(false);
@@ -890,8 +886,9 @@ impl Wl {
                 ..
             } => {
                 super::data::note_serial(serial);
-                self.last_input = k.focus.map(|f| (serial, f));
                 let press = kstate == WEnum::Value(wl_keyboard::KeyState::Pressed);
+                self.last_input =
+                    super::activation::note_input(self.last_input, serial, k.focus, press);
                 // XKB 键码 = evdev 键码 + 8。
                 self.on_key_code(key + 8, press, false);
             }

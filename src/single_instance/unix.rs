@@ -168,10 +168,7 @@ pub(crate) fn run_pending_on_main() -> Option<Option<String>> {
         return None;
     }
     // 令牌不给应用看：先剥掉，留最后一个（最新的那次启动）。
-    let token = batch
-        .iter_mut()
-        .filter_map(super::take_activation_token)
-        .last();
+    let token = super::strip_activation_tokens(&mut batch);
     SI_CTX.with(|c| {
         // 先 take 释放借用再调回调（同 macOS 版 `on_main`）。
         let maybe_ctx = c.borrow_mut().take();

@@ -67,20 +67,23 @@ pub(crate) fn take_activation_token(argv: &mut Vec<String>) -> Option<String> {
         .iter()
         .rposition(|a| a.starts_with(ACTIVATION_TOKEN_MARK))?;
     let item = argv.remove(pos);
-    Some(item[ACTIVATION_TOKEN_MARK.len()..].to_string())
+    Some(item[ACTIVATION_TOKEN_MARK.len()..].to_string()).filter(|t| !t.is_empty())
 }
 
-/// 二次实例要转发的 argv：命令行参数，Linux 上再附激活令牌。令牌取出后从本进程环境里删掉
-/// （协议建议：别让它泄漏给子进程——本进程马上就退出，但 `claim_instance` 回退为首实例时会继续跑）。
+/// 首实例：一批转来的 argv 各自剥掉令牌，交出最后一个（最新的那次启动给的）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn strip_activation_tokens(batch: &mut [Vec<String>]) -> Option<String> {
+    batch.iter_mut().filter_map(take_activation_token).last()
+}
+
+/// 二次实例要转发的 argv：命令行参数，Linux 上再附激活令牌。只读不删：转发成功本进程随即
+/// 退出，删了没用；转发失败回退为首实例时，令牌还要留给自己的主窗口（Wayland 后端打开显示时
+/// 取用并删掉，见 `wayland::run_windowed`）。
 fn argv_to_forward() -> Vec<String> {
     let argv: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "linux")]
     {
-        let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
-        if token.is_some() {
-            std::env::remove_var("XDG_ACTIVATION_TOKEN");
-        }
-        attach_activation_token(argv, token)
+        attach_activation_token(argv, std::env::var("XDG_ACTIVATION_TOKEN").ok())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -224,7 +227,7 @@ pub(crate) fn install_listener(
 
 #[cfg(test)]
 mod tests {
-    use super::{attach_activation_token, take_activation_token};
+    use super::*;
 
     #[test]
     fn activation_token_rides_along_and_is_stripped_before_on_second() {
@@ -252,7 +255,30 @@ mod tests {
         assert_eq!(argv.len(), 2);
     }
 
-    use super::*;
+    #[test]
+    fn a_batch_hands_on_its_newest_token_and_no_argv_keeps_a_marker() {
+        let a = attach_activation_token(vec!["app".into(), "1".into()], Some("old".into()));
+        let b = attach_activation_token(vec!["app".into(), "2".into()], None);
+        let c = attach_activation_token(vec!["app".into(), "3".into()], Some("new".into()));
+        let mut batch = vec![a, b, c];
+        assert_eq!(
+            strip_activation_tokens(&mut batch),
+            Some("new".into()),
+            "取最后一次启动的"
+        );
+        for (n, argv) in batch.iter().enumerate() {
+            assert_eq!(argv, &vec!["app".to_string(), (n + 1).to_string()]);
+        }
+        let mut none = vec![vec!["app".to_string()]];
+        assert_eq!(strip_activation_tokens(&mut none), None);
+    }
+
+    #[test]
+    fn a_marker_without_a_token_yields_nothing() {
+        let mut argv = vec!["app".to_string(), ACTIVATION_TOKEN_MARK.to_string()];
+        assert_eq!(take_activation_token(&mut argv), None);
+        assert_eq!(argv, vec!["app".to_string()], "标记照样剥掉");
+    }
 
     #[test]
     fn argv_round_trip() {
