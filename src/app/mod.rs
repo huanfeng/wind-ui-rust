@@ -720,6 +720,7 @@ fn build_decoration(
         false,
     );
     host.scope = Some(scope);
+    host.decoration = true;
     crate::platform::Decoration {
         handler: Box::new(host),
         height: DECORATION_HEIGHT,
@@ -2425,6 +2426,10 @@ struct UiHost {
     /// 通道本身挂在应用上而非本宿主上：主窗关掉之后，别的窗口要能继续收后台数据。
     /// 这里只留一个序号，回答"这一帧该不该由我来排空"。
     host_id: u64,
+    /// 客户端装饰标题栏的小宿主（`build_decoration`）：不是窗口，不认领通道消费权、不排空
+    /// 通道——它的树只有 33 像素高、平台层也从不取它排的开窗请求，消息落到它身上会画进标题栏
+    /// 或干脆丢掉；它只在悬停时出帧，持有消费权时消息还会卡住。
+    decoration: bool,
     /// 定时器回调列表（与 interval_durs 下标对应）。
     interval_cbs: Vec<AppCallback>,
     /// 定时器间隔列表（平台据此注册 SetTimer/NSTimer）。
@@ -2689,6 +2694,7 @@ impl UiHost {
             title_last: cfg.title.clone(),
             swallow_up: false,
             host_id: crate::sync::next_host_id(),
+            decoration: false,
             interval_cbs,
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
@@ -2960,6 +2966,9 @@ impl UiHost {
     /// `&mut self` 才能落地，同时持有两者过不了借用检查。运行期不会有人往 `pumps` 里
     /// 追加（`App::channel` 只在建窗前可调），故直接装回去是安全的。
     fn drain_channels(&mut self) {
+        if self.decoration {
+            return;
+        }
         let Some(root) = self.tree.root else {
             return;
         };
@@ -3899,6 +3908,44 @@ mod test_support {
 mod tests {
     use super::*;
 
+    /// 标题栏宿主不是窗口：渲染它不认领通道消费权（否则消费权持有者关窗后可能落到它身上，
+    /// 消息画进标题栏、开窗请求无人取走、只在悬停时才排空）。之后出帧的内容宿主照常认领。
+    #[test]
+    fn decoration_host_never_claims_the_channel_owner() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        crate::sync::reset_pumps();
+        let theme_src = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let mut d = build_decoration(&theme_src, &ops, "标题", true);
+        d.handler.set_scale(1.0);
+        let mut pm = Pixmap::new(200, DECORATION_HEIGHT as u32).unwrap();
+        d.handler.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            Size::new(200, DECORATION_HEIGHT),
+        );
+        let probe = crate::sync::next_host_id();
+        assert!(
+            crate::sync::claim_channel_owner(probe),
+            "标题栏出过帧之后消费权仍无人持有"
+        );
+        crate::sync::release_channel_owner(probe);
+
+        let app = App::new("t", 100, 100).content(Element::col());
+        let mut content = app.into_handler_for_test();
+        content.set_scale(1.0);
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        content.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(100, 100));
+        assert!(
+            !crate::sync::claim_channel_owner(probe),
+            "内容宿主出帧后认领了消费权"
+        );
+        drop(content);
+        crate::sync::reset_pumps();
+    }
+
     /// 客户端装饰标题栏：按钮发对应窗口操作、空白处是拖动区，视觉跟主题与激活态走。
     /// 经真实宿主（指针分发、渲染）验证，而不是只看构造出来的元素树。
     #[test]
@@ -3970,7 +4017,16 @@ mod tests {
         };
         let active_ink = ink(&pm);
         assert!(active_ink > 0, "标题画出来了");
+        // 平台层在事件期外调这两个回调：不能置跨窗口脏、不能请求续帧（否则所有窗口整窗重画）。
+        crate::signal::take_cross_window_dirty();
+        crate::anim::reset_request();
         (d.set_active)(false);
+        (d.set_title)("标题"); // 同值：不写
+        assert!(
+            !crate::signal::take_cross_window_dirty(),
+            "改激活态不置跨窗口脏"
+        );
+        assert!(!crate::anim::animation_requested(), "改激活态不请求续帧");
         let h = d.handler.as_mut();
         frame(h, &mut pm);
         let inactive_ink = ink(&pm);
@@ -3988,7 +4044,13 @@ mod tests {
         );
         // 改标题：画面随之变化。
         let before = pm.data().to_vec();
+        crate::signal::take_cross_window_dirty();
+        crate::anim::reset_request();
         (d.set_title)("另一个更长的标题");
+        assert!(
+            !crate::signal::take_cross_window_dirty() && !crate::anim::animation_requested(),
+            "改标题同样不发通知"
+        );
         let h = d.handler.as_mut();
         frame(h, &mut pm);
         assert_ne!(before, pm.data(), "标题变了，画面跟着变");

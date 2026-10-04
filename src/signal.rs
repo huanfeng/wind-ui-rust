@@ -681,6 +681,19 @@ impl<T: 'static> Signal<T> {
     /// 而读它没有值可返回。这个不对称让"控件子树刚被重建、其上一次点击排队的回调才跑到"
     /// 这类竞态在 release 里退化为无害的丢弃，而不是崩溃。
     pub fn set(&self, value: T) {
+        self.write_raw(value);
+        notify_changed();
+    }
+
+    /// 写值但**不**触发任何重绘通知（不置跨窗口脏、不请求续帧）。只给平台层驱动的、自己
+    /// 负责重画的小宿主用（客户端装饰标题栏的标题 / 激活态）：普通的 `set` 在事件期外会让
+    /// 所有窗口整窗重画。失效语义同 [`Signal::set`]。
+    pub(crate) fn set_quiet(&self, value: T) {
+        self.write_raw(value);
+    }
+
+    /// 只写值、版本号自增，不发通知。[`Signal::set`] 与 [`Signal::set_quiet`] 共用。
+    fn write_raw(&self, value: T) {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
@@ -694,24 +707,6 @@ impl<T: 'static> Signal<T> {
                 slot.version = slot.version.wrapping_add(1);
             } else {
                 debug_assert!(false, "signal 句柄已失效");
-            }
-        });
-        notify_changed();
-    }
-
-    /// 写值但**不**触发任何重绘通知（不置跨窗口脏、不请求续帧）。只给平台层驱动的、自己
-    /// 负责重画的小宿主用（客户端装饰标题栏的标题 / 激活态）：普通的 `set` 在事件期外会让
-    /// 所有窗口整窗重画。
-    pub(crate) fn set_quiet(&self, value: T) {
-        RT.with(|rt| {
-            let mut rt = rt.borrow_mut();
-            if let Some(slot) = rt.slot_mut(self.key) {
-                if slot.derived.is_some() {
-                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
-                    return;
-                }
-                slot.value = Some(Box::new(value));
-                slot.version = slot.version.wrapping_add(1);
             }
         });
     }
