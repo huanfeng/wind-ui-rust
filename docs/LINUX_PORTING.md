@@ -414,11 +414,17 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   点被模态挡住的父窗时唤出模态子窗；Linux 没有系统托盘，托盘那条路不存在）：
   - 有别处给的令牌就直接 `activate`：**单实例二次启动**时桌面启动器给第二个进程设的
     `XDG_ACTIVATION_TOKEN` 随 argv 转给运行中的实例（作为一个带 `\u{1}` 前缀的标记元素附在末尾，
-    首实例在调 `on_second` 前剥掉，应用看不到；只在 Linux 上附，win32 / macOS 的转发格式不变），
-    第二个进程取走后从自己的环境里删掉。本进程自己启动时环境里的令牌用来激活主窗口，同样删掉。
-  - 没有就自己要一个：`get_activation_token` 带上最近一次输入（按键、点击、键盘焦点进入）的
+    首实例在调 `on_second` 前剥掉，应用看不到；只在 Linux 上附，win32 / macOS 的转发格式不变）。
+    第二个进程只读不删：转发成功它随即退出；转发失败回退为首实例时令牌还要留给自己。
+    本进程打开显示时取走环境里的令牌激活主窗口，并从环境里删掉免得泄漏给子进程（与 GTK 同；
+    改环境要求此时没有别的线程在直接 `getenv`，GTK 也是同一前提）。新版本的二次实例转发给仍在
+    运行的旧版本时，旧版本不认这个标记，`on_second` 会多收到一个参数——不保证新旧版本互通。
+  - 没有就自己要一个：`get_activation_token` 带上最近一次**按下**（键盘键或鼠标键）的
     serial、seat 与那扇窗口的表面，再 `set_app_id`、`commit`；`done(令牌)` 到了才
-    `activate`——异步，不阻塞事件循环；那之前目标窗口关了就丢掉；同一窗口已有请求在路上不再发。
+    `activate`——异步，不阻塞事件循环；那之前目标窗口关了或隐藏了就丢掉；同一窗口已有请求在路上
+    不再发。只认按下：mutter 按按下那一下的 serial 校验（推断自其源码，GNOME 真桌面待 §8.10
+    第 23 条确认），而点击回调多在松开时触发，让松开覆盖了按下就换不来焦点。键盘焦点进入、触摸
+    都不记（触屏上只能走下一条）。没有 serial 时仍报上有键盘焦点的窗口表面。
   - 隐藏着的窗口照常映射（合成器一般会给新映射的窗口焦点），有别处给的令牌再补一次 `activate`。
   - 既没令牌也没近期输入：照样要一个（不带 serial），合成器多半只标「需要注意」——协议预期的行为。
   - 合成器没有该协议：不提到前台，stderr 提示一次。
@@ -546,12 +552,13 @@ Stage 5（sway headless，`WINDUI_WAYLAND_DISABLE=xdg-decoration` 走客户端�
 把窗口提到前台（sway headless；令牌来源是自写的小客户端：一个只要令牌、不带 serial，一个像桌面
 启动器那样开窗、被点一下后带 serial 与表面要令牌）：
 - 单实例：首实例窗口在后、启动器窗口在前，用启动器给的令牌（`XDG_ACTIVATION_TOKEN`）二次启动 →
-  首实例 `activate(令牌, 主窗表面)`，焦点到首实例（sway 的 `focus_on_window_activation` 取
-  `urgent` / `smart` / `focus` 都一样）；`on_second` 收到的 argv 里没有令牌标记。不带 serial 的
+  首实例 `activate(令牌, 主窗表面)`，焦点到首实例（sway 1.9 上 `focus_on_window_activation` 取
+  `urgent` / `smart` / `focus` 实测结果相同）；`on_second` 收到的 argv 里没有令牌标记。不带 serial 的
   令牌、或干脆没有令牌：首实例自己要令牌并 `activate`，sway 只把窗口标成 urgent，焦点不动——
   合成器的防抢焦点，符合预期。
 - 本进程内：`multi_window` 里开出单例「设置」窗、点回主窗，再点「打开设置…」→ 带这次点击的
-  serial 与主窗表面要令牌、`done` 后 `activate`，焦点到「设置」窗。
+  serial 与主窗表面要令牌、`done` 后 `activate`，焦点到「设置」窗；`WAYLAND_DEBUG` 核对带的是
+  按下那一下的 serial（松开的 serial 比它大 1）。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 
@@ -746,6 +753,7 @@ primary selection。
 
 22. 程序开着、焦点在别的应用上，从应用菜单 / 启动器再次启动它（应用开了 `App::single_instance`）：
     已有窗口到前台并获焦，不开第二个窗口；`on_second` 收到的参数里没有多余的令牌标记。
+    首实例隐藏着（`start_hidden` 或已隐藏）时同样唤出并到前台。
 23. `multi_window`：开出「设置」窗后点回主窗，再点「打开设置…」——已开着的「设置」窗被提到前台
     （单例不开第二个）；点被模态子窗挡住的主窗时，模态子窗到前台。合成器拒绝给焦点时（比如
     没有近期输入），GNOME 至少弹「已就绪」通知。
