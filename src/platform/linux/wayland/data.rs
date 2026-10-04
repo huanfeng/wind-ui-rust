@@ -989,7 +989,11 @@ impl Wl {
     }
 
     fn drop_allowed(&self, d: &DropTarget) -> bool {
-        d.has_uris && self.blocked_by_modal(d.key).is_none()
+        // 落在客户端标题栏上的不收（系统标题栏同样不接拖放）。
+        let on_bar = self
+            .idx(d.key)
+            .is_some_and(|i| d.pos.1 < f64::from(self.bar_logical(i)));
+        d.has_uris && !on_bar && self.blocked_by_modal(d.key).is_none()
     }
 
     /// 放下：发出读取请求，读端交给事件循环（见 [`Wl::pump_drops`]），不在这里等。
@@ -1073,11 +1077,13 @@ impl Wl {
         let (Some(i), false) = (target, paths.is_empty()) else {
             return;
         };
+        let bar = self.bar_phys(i);
         let w = &mut self.windows[i];
-        // 与 X11 同一口径：落点换成物理像素（宿主再按自己的缩放换回逻辑坐标去命中）。
+        // 与 X11 同一口径：落点换成物理像素（宿主再按自己的缩放换回逻辑坐标去命中）；内容区坐标
+        // 扣掉客户端标题栏。
         let pos = Point::new(
             w.scale.pos_to_physical(d.pos.0),
-            w.scale.pos_to_physical(d.pos.1),
+            w.scale.pos_to_physical(d.pos.1) - bar,
         );
         let r = {
             let _g = crate::platform::EventDispatchGuard::enter();

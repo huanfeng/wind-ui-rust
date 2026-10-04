@@ -158,10 +158,13 @@ pub(super) fn create_buffer(
 
 /// 把 pixmap 的 `r` 区域换成 XRGB8888 写进缓冲文件（同尺寸、行距 = 宽 × 4）。
 /// 整行宽的区域按块连续写，否则逐行写。
+/// `dy`：写到缓冲里下移多少行（缓冲与 `pm` 同宽；客户端标题栏占缓冲最上面几行时，内容整体
+/// 下移标题栏高度）。
 pub(super) fn write_pixels(
     file: &File,
     pm: &Pixmap,
     r: Rect,
+    dy: i32,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<()> {
     let r = r.intersect(&Rect::new(0, 0, pm.width() as i32, pm.height() as i32));
@@ -186,7 +189,7 @@ pub(super) fn write_pixels(
             let off = row * stride + r.x as usize * 4;
             host::rgba_to_bgra(&data[off..off + row_bytes], buf);
         }
-        file.write_all_at(buf, (y * stride + r.x as usize * 4) as u64)?;
+        file.write_all_at(buf, ((y + dy as usize) * stride + r.x as usize * 4) as u64)?;
         y += n;
     }
     Ok(())
@@ -269,7 +272,7 @@ mod tests {
         let file = super::super::super::sys::memfd(c"windui-test", 4 * 3 * 4).unwrap();
         let mut buf = Vec::new();
         // 非整行：只写 (1,1) 一个像素。
-        write_pixels(&file, &pm, r(1, 1, 1, 1), &mut buf).unwrap();
+        write_pixels(&file, &pm, r(1, 1, 1, 1), 0, &mut buf).unwrap();
         let mut out = vec![0u8; 48];
         file.read_exact_at(&mut out, 0).unwrap();
         fn px(out: &[u8], x: usize, y: usize) -> &[u8] {
@@ -278,7 +281,7 @@ mod tests {
         assert_eq!(px(&out, 1, 1), [30, 20, 10, 255]);
         assert_eq!(px(&out, 0, 0), [0, 0, 0, 0], "区域外不写");
         // 整行：第 2 行整行连续写。
-        write_pixels(&file, &pm, r(0, 2, 4, 1), &mut buf).unwrap();
+        write_pixels(&file, &pm, r(0, 2, 4, 1), 0, &mut buf).unwrap();
         file.read_exact_at(&mut out, 0).unwrap();
         assert_eq!(px(&out, 3, 2), [30, 20, 10, 255]);
         assert_eq!(px(&out, 0, 1), [0, 0, 0, 0]);

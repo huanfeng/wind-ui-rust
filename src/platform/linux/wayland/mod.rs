@@ -31,8 +31,10 @@
 //! 下次变化时刻才出下一帧。窗口被遮住 / 最小化时合成器不发回调，动画自然停下（有 1 秒兜底，
 //! 见 `FRAME_CALLBACK_TIMEOUT`）。无动画时不请求回调，阻塞在 `poll`，空闲零 CPU。
 
+mod csd;
 mod cursor;
 mod data;
+mod decor;
 mod events;
 mod ime;
 mod input;
@@ -111,6 +113,10 @@ struct Globals {
     cursor_shape: Option<WpCursorShapeManagerV1>,
     /// 输入法（text-input-v3）；启动时交给 `ime::Ime`。
     text_input: Option<wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    /// 窗口装饰协商（`decor.rs`）；没有时有边框窗口自己画标题栏。
+    decoration: Option<wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    /// 模态对话框（`xdg-dialog-v1`，KDE 6.1+ 等）；没有时模态只由我们自己挡输入。
+    dialog: Option<wayland_protocols::xdg::dialog::v1::client::xdg_wm_dialog_v1::XdgWmDialogV1>,
     /// 剪贴板与拖入（`data.rs`）；启动时交给 `data::init`。
     data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     outputs: Vec<Output>,
@@ -160,6 +166,14 @@ pub(super) fn connect() -> Result<Session, String> {
         .bind(&qh, 1..=1, ())
         .ok()
         .filter(|_| !off("cursor-shape"));
+    let decoration = globals
+        .bind(&qh, 1..=1, ())
+        .ok()
+        .filter(|_| !off("xdg-decoration"));
+    let dialog = globals
+        .bind(&qh, 1..=1, ())
+        .ok()
+        .filter(|_| !off("xdg-dialog"));
     // v1：光标矩形随 commit 生效（v2 改成随下一次表面提交生效，GNOME 42 只有 v1）。
     let text_input = globals
         .bind(&qh, 1..=1, ())
@@ -191,6 +205,8 @@ pub(super) fn connect() -> Result<Session, String> {
             cursor_shape,
             text_input,
             data_manager,
+            decoration,
+            dialog,
             outputs,
         },
     })
@@ -216,8 +232,8 @@ pub(super) fn run_windowed(
         eprintln!("[windui] Renderer::Gpu 在 Linux 后端尚不可用，改用软件渲染");
     }
     if !std::mem::take(&mut cfg.hotkeys).is_empty() {
-        log::warn!(
-            "Wayland 不允许应用抓取全局按键，全局热键未注册；可在桌面设置里把快捷键绑到 \
+        eprintln!(
+            "[windui] Wayland 不允许应用抓取全局按键，全局热键未注册；可在桌面设置里把快捷键绑到 \
              `应用 --参数`，经单实例转发送达（见 docs/LINUX_PORTING.md）"
         );
     }
@@ -291,6 +307,23 @@ pub(super) fn run_windowed(
 struct Role {
     xdg: xdg_surface::XdgSurface,
     top: xdg_toplevel::XdgToplevel,
+    /// 装饰协商对象（有 `xdg-decoration` 时）：必须先于 `top` 销毁。
+    deco: Option<wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
+    /// 模态子窗的 `xdg_dialog_v1`（有协议时）：同样先于 `top` 销毁。
+    dialog: Option<wayland_protocols::xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1>,
+}
+
+impl Role {
+    fn destroy(self) {
+        if let Some(d) = self.deco {
+            d.destroy();
+        }
+        if let Some(d) = self.dialog {
+            d.destroy();
+        }
+        self.top.destroy();
+        self.xdg.destroy();
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -403,6 +436,10 @@ struct Win {
     ///
     /// 「这次按下被接管、配对松开也不下发」一并由 `host::DragGate` 管（与 X11 同一份逻辑）。
     title_drag: host::DragGate<PendingDrag>,
+    /// 客户端标题栏（`decor.rs`）；合成器给服务端装饰或无边框窗口时不画。
+    deco: Option<decor::Deco>,
+    /// 装饰协商的结果（true = 我们画），随下一个 `xdg_surface.configure` 生效。
+    pending_deco: Option<bool>,
 }
 
 impl Win {
@@ -570,6 +607,8 @@ impl Wl {
             capturing: false,
             composing: false,
             title_drag: host::DragGate::default(),
+            deco: None,
+            pending_deco: None,
         });
         if let Some(i) = self.idx(key) {
             self.ensure_viewport(i);
@@ -610,6 +649,10 @@ impl Wl {
         log::debug!("窗口 {} 缩放 {:?} → {:?}", w.key, w.scale, s);
         w.scale = s;
         w.handler.set_scale(s.factor as f32);
+        if let Some(d) = w.deco.as_mut() {
+            d.host.handler.set_scale(s.factor as f32);
+            d.needs_paint = true;
+        }
         w.w = s.to_physical(w.logical.0);
         w.h = s.to_physical(w.logical.1);
         w.needs_paint = true;
@@ -647,10 +690,26 @@ impl Wl {
         if let Some(p) = &parent {
             top.set_parent(Some(p));
         }
-        if let Some((mw, mh)) = w.min_size {
+        // 装饰：有协议就协商，没有就有边框窗口自己画（尺寸约束随之计入标题栏）。
+        let deco = self.negotiate_decoration(i, &top);
+        // 模态子窗：有 `xdg-dialog-v1` 就告诉合成器（它会把父窗置灰、子窗随父窗移动等）；
+        // 没有时（GNOME 42、sway）只有 `set_parent` 的层级关系，输入由我们自己挡。
+        let dialog = match (&self.g.dialog, self.windows[i].modal && parent.is_some()) {
+            (Some(m), true) => {
+                let d = m.get_xdg_dialog(&top, &self.qh, ());
+                d.set_modal();
+                Some(d)
+            }
+            _ => None,
+        };
+        let bar = self.bar_logical(i);
+        let w = &mut self.windows[i];
+        if let Some(s) = w.min_size {
+            let (mw, mh) = csd::with_bar(s, bar);
             top.set_min_size(mw, mh);
         }
-        if let Some((mw, mh)) = w.max_size {
+        if let Some(s) = w.max_size {
+            let (mw, mh) = csd::with_bar(s, bar);
             top.set_max_size(mw, mh);
         }
         // 无缓冲的首次提交：合成器据此回第一个 configure，之后才能挂缓冲。
@@ -663,7 +722,12 @@ impl Wl {
                 }
             }
         }
-        self.windows[i].role = Some(Role { xdg, top });
+        self.windows[i].role = Some(Role {
+            xdg,
+            top,
+            deco,
+            dialog,
+        });
     }
 
     fn hide(&mut self, key: u32) {
@@ -672,8 +736,8 @@ impl Wl {
         w.hidden = true;
         if let Some(role) = w.role.take() {
             // 销毁角色即取消映射。再建角色前表面上不能挂着缓冲（协议错误），这里一并卸下。
-            role.top.destroy();
-            role.xdg.destroy();
+            role.destroy();
+            w.pending_deco = None;
             w.surface.attach(None, 0, 0);
             w.surface.commit();
             w.configured = false;
@@ -717,8 +781,7 @@ impl Wl {
         let w = self.windows.remove(i);
         // 角色 → 表面 → 缓冲：缓冲销毁时已不挂在任何表面上。
         if let Some(role) = w.role {
-            role.top.destroy();
-            role.xdg.destroy();
+            role.destroy();
         }
         if let Some(f) = w.fractional {
             f.destroy();
@@ -792,6 +855,7 @@ impl Wl {
     fn deactivated(&mut self, key: u32) {
         let Some(i) = self.idx(key) else { return };
         self.alt_down = false;
+        self.deco_active(i, false);
         let w = &mut self.windows[i];
         let _g = crate::platform::EventDispatchGuard::enter();
         let mut r = w.handler.on_window_activated(false);
@@ -808,6 +872,14 @@ impl Wl {
     /// `xdg_surface.configure`：回 ack，把随之而来的 toplevel 尺寸 / 状态一并生效。
     fn on_configure(&mut self, key: u32, xdg: &xdg_surface::XdgSurface, serial: u32) {
         let Some(i) = self.idx(key) else { return };
+        if !self.windows[i].role.as_ref().is_some_and(|r| &r.xdg == xdg) {
+            return;
+        }
+        // 装饰协商的结果与尺寸一起生效：先定标题栏有没有，下面才知道内容区多高。
+        if let Some(on) = self.windows[i].pending_deco.take() {
+            self.set_csd(i, on);
+        }
+        let bar = self.bar_logical(i);
         let w = &mut self.windows[i];
         // 只认当前角色：隐藏再显示换过一套角色对象，旧的那套在队列里残留的事件要丢掉，
         // 拿新角色去 ack 旧 serial 是协议错误。
@@ -821,9 +893,10 @@ impl Wl {
         let Some(((lw, lh), st)) = w.pending.take() else {
             return;
         };
-        // 给了尺寸就服从；0 = 合成器不指定，由我们定——回到非最大化时的尺寸。
+        // 给了尺寸就服从（它含标题栏，内容区扣掉）；0 = 合成器不指定，由我们定——回到非最大化
+        // 时的尺寸。
         let logical = if lw > 0 && lh > 0 {
-            (lw, lh)
+            (lw, csd::content_height(lh, bar))
         } else {
             w.floating
         };
@@ -839,9 +912,12 @@ impl Wl {
         }
         if old.activated != st.activated {
             if st.activated {
-                let _g = crate::platform::EventDispatchGuard::enter();
-                // 本函数开头已置 `needs_paint`，宿主回调的「要不要重画」不必再看。
-                w.handler.on_window_activated(true);
+                {
+                    let _g = crate::platform::EventDispatchGuard::enter();
+                    // 本函数开头已置 `needs_paint`，宿主回调的「要不要重画」不必再看。
+                    w.handler.on_window_activated(true);
+                }
+                self.deco_active(i, true);
             } else {
                 self.deactivated(key);
             }
@@ -973,7 +1049,11 @@ impl Wl {
         // 动画：可见、在请求续帧、上一帧的 frame 回调已回来（或超时当丢了），且上一帧已经
         // 送上屏（缓冲都被合成器占着时再画也无处呈现，等 release）。
         for w in &mut self.windows {
-            if !w.visible() || !w.handler.wants_animation() {
+            let deco_anim = w
+                .deco
+                .as_ref()
+                .is_some_and(|d| d.on && d.host.handler.wants_animation());
+            if !w.visible() || !(w.handler.wants_animation() || deco_anim) {
                 continue;
             }
             if let Some((_, since)) = &w.frame_cb {
@@ -986,11 +1066,21 @@ impl Wl {
             if w.unpresented.is_some_and(|u| !u.is_empty()) {
                 continue;
             }
-            let due = anim_gap(w.handler.next_frame_delay_ms() as u64);
+            let ask = if deco_anim {
+                0
+            } else {
+                w.handler.next_frame_delay_ms() as u64
+            };
+            let due = anim_gap(ask);
             let elapsed = w.last_anim.elapsed();
             if elapsed >= due {
                 w.last_anim = now;
                 w.needs_paint = true;
+                if deco_anim {
+                    if let Some(d) = w.deco.as_mut() {
+                        d.needs_paint = true;
+                    }
+                }
             } else {
                 at(now + (due - elapsed));
             }
@@ -1010,13 +1100,23 @@ impl Wl {
             let painted = w.needs_paint || w.pixmap.is_none();
             if painted {
                 w.needs_paint = false;
-                if let Some(d) = host::render_frame(
+                let (cw, ch) = (w.w, w.h);
+                let drawn = host::render_frame(
                     w.handler.as_mut(),
                     &mut w.pixmap,
                     &mut w.fresh,
-                    (w.w, w.h),
+                    (cw, ch),
                     w.bg,
-                ) {
+                );
+                // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
+                let bar = self.bar_phys(i);
+                let full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
+                let mut damage = drawn.map(|d| Rect::new(d.x, d.y + bar, d.w, d.h));
+                if let Some(d) = self.paint_deco(i, full) {
+                    damage = Some(damage.map_or(d, |u| u.union(&d)));
+                }
+                let w = &mut self.windows[i];
+                if let Some(d) = damage {
                     w.unpresented = Some(w.unpresented.map_or(d, |u| u.union(&d)));
                 }
                 self.after_event(key);
@@ -1037,7 +1137,16 @@ impl Wl {
         if !w.visible() {
             return;
         }
-        let want_frame = painted && w.frame_cb.is_none() && w.handler.wants_animation();
+        let bar = match w.deco.as_ref().map(decor::Deco::height) {
+            Some(h) if h > 0 => w.scale.to_physical(h),
+            _ => 0,
+        };
+        let deco_anim = w
+            .deco
+            .as_ref()
+            .is_some_and(|d| d.on && d.host.handler.wants_animation());
+        let want_frame =
+            painted && w.frame_cb.is_none() && (w.handler.wants_animation() || deco_anim);
         let damage = match w.unpresented {
             Some(d) if !d.is_empty() => d,
             _ => {
@@ -1056,12 +1165,20 @@ impl Wl {
         let Some(pixmap) = w.pixmap.as_ref() else {
             return;
         };
-        if pixmap.width() as i32 != w.w || pixmap.height() as i32 != w.h {
+        let bar_pm = w
+            .deco
+            .as_ref()
+            .filter(|d| d.on)
+            .and_then(|d| d.pixmap.as_ref());
+        let bar_ok =
+            bar == 0 || bar_pm.is_some_and(|p| p.width() as i32 == w.w && p.height() as i32 == bar);
+        if pixmap.width() as i32 != w.w || pixmap.height() as i32 != w.h || !bar_ok {
             // 尺寸刚变、还没按新尺寸画：等下一次出帧。
             w.needs_paint = true;
             return;
         }
-        let Some(plan) = w.slots.plan(w.w, w.h, damage) else {
+        let total_h = w.h + bar;
+        let Some(plan) = w.slots.plan(w.w, total_h, damage) else {
             return; // 缓冲都在合成器手里，等 release。
         };
         if plan.recreate || w.bufs.get(plan.index).is_none_or(|b| b.is_none()) {
@@ -1071,10 +1188,10 @@ impl Wl {
             if let Some(old) = w.bufs[plan.index].take() {
                 old.destroy();
             }
-            match create_buffer(&self.g.shm, &self.qh, w.key, plan.index, w.w, w.h) {
+            match create_buffer(&self.g.shm, &self.qh, w.key, plan.index, w.w, total_h) {
                 Ok(b) => w.bufs[plan.index] = Some(b),
                 Err(e) => {
-                    log::error!("创建 wl_shm 缓冲失败（{}×{}）：{e}", w.w, w.h);
+                    log::error!("创建 wl_shm 缓冲失败（{}×{}）：{e}", w.w, total_h);
                     w.slots.fail(plan.index);
                     return;
                 }
@@ -1083,7 +1200,23 @@ impl Wl {
         let Some(buf) = w.bufs[plan.index].as_ref() else {
             return;
         };
-        if let Err(e) = write_pixels(&buf.file, pixmap, plan.write, &mut self.upload_buf) {
+        // 标题栏占缓冲的上 `bar` 行，内容在它下面。
+        let wr = plan.write;
+        let bar_rect = wr.intersect(&Rect::new(0, 0, w.w, bar));
+        let content_rect = wr.intersect(&Rect::new(0, bar, w.w, w.h));
+        let content_src = Rect::new(
+            content_rect.x,
+            content_rect.y - bar,
+            content_rect.w,
+            content_rect.h,
+        );
+        let mut res = write_pixels(&buf.file, pixmap, content_src, bar, &mut self.upload_buf);
+        if let (Ok(()), Some(bpm)) = (&res, bar_pm) {
+            if !bar_rect.is_empty() {
+                res = write_pixels(&buf.file, bpm, bar_rect, 0, &mut self.upload_buf);
+            }
+        }
+        if let Err(e) = res {
             log::error!("写 wl_shm 缓冲失败：{e}");
             w.slots.fail(plan.index);
             return;
@@ -1095,7 +1228,11 @@ impl Wl {
             w.applied_buffer_scale = bs;
         }
         if let Some(vp) = &w.viewport {
-            let dest = w.scale.viewport.then_some(w.logical);
+            let bar_l = w.deco.as_ref().map_or(0, decor::Deco::height);
+            let dest = w
+                .scale
+                .viewport
+                .then_some((w.logical.0, w.logical.1 + bar_l));
             if dest != w.applied_dest {
                 let (dw, dh) = dest.unwrap_or((-1, -1));
                 vp.set_destination(dw, dh);
@@ -1133,18 +1270,22 @@ impl Wl {
             ime_caret,
         } = Requests::take(w.handler.as_mut(), &|k| open.iter().any(|o| o == k));
         let cursor_changed = std::mem::replace(&mut w.cursor, cursor) != cursor;
+        let title_changed = title.is_some();
         if let Some(t) = title {
             if let Some(r) = &w.role {
                 r.top.set_title(t.clone());
             }
             w.title = t;
         }
+        if title_changed {
+            self.deco_title(i);
+        }
         if cursor_changed && self.pointer.as_ref().is_some_and(|p| p.focus == Some(key)) {
             self.apply_cursor();
         }
         self.ime_update(key, ime_caret);
         if !hotkey_ops.is_empty() && !std::mem::replace(&mut self.hotkey_warned, true) {
-            log::warn!("Wayland 下全局热键不可用，运行期热键增删被忽略");
+            eprintln!("[windui] Wayland 下全局热键不可用，运行期热键增删被忽略");
         }
         if let Some(op) = op {
             self.apply_window_op(key, op);
@@ -1209,11 +1350,16 @@ impl Wl {
             return;
         };
         let w = &self.windows[i];
+        // 指针在客户端标题栏上：光标归标题栏宿主（窗口按钮、空白处都是箭头）。
+        let shape = match w.deco.as_ref().filter(|d| d.on && d.hover) {
+            Some(d) => d.host.handler.cursor(),
+            None => w.cursor,
+        };
         let (compositor, qh) = (&self.g.compositor, &self.qh);
         p.cursor.apply(
             &p.obj,
             p.enter_serial,
-            w.cursor,
+            shape,
             w.scale.factor,
             &self.conn,
             &self.g.shm,

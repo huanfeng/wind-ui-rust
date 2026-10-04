@@ -244,6 +244,7 @@ impl Wl {
         }
         let Some(i) = self.idx(key) else { return };
         let caret = caret.filter(|_| self.blocked_by_modal(key).is_none());
+        let bar = self.bar_logical(i);
         let w = &self.windows[i];
         let field = caret.and(w.handler.ime_field());
         let plan = plan_update(
@@ -283,7 +284,8 @@ impl Wl {
             // 物理像素 → 表面逻辑坐标（与 X11 / win32 同样锚在光标上，候选窗贴其底边）。
             let f = w.scale.factor;
             let lg = |v: i32| (v as f64 / f).round() as i32;
-            let rect = (lg(c.0), lg(c.1), 1, lg(c.2).max(1));
+            // 宿主报的是内容区坐标；矩形要的是表面坐标，下移客户端标题栏的高度。
+            let rect = (lg(c.0), lg(c.1) + bar, 1, lg(c.2).max(1));
             let hints = field.map(|f| f.hints).unwrap_or_default();
             // 密码框不发周围文本（宿主本就给空正文，这里连空串也不发）。
             let surrounding = sel

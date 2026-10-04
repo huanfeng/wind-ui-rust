@@ -19,6 +19,7 @@ use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 use super::super::host::{self, DOUBLE_CLICK_SLOP};
+use super::csd::Region;
 use super::cursor::Cursor;
 use super::input::{self, KeyRepeat, WheelFrame};
 use super::xkb::Xkb;
@@ -373,6 +374,22 @@ impl Wl {
         ))
     }
 
+    /// 指针所在窗口与区域（客户端标题栏 / 内容区，坐标已各自换算）。按着按钮时归按下的那一边：
+    /// 内容区里拖选拖出窗口上沿照样归内容，标题栏按钮按着移出去照样归按钮。
+    fn pointer_region(&self) -> Option<(usize, Region)> {
+        let (i, pos) = self.pointer_target()?;
+        let frame = self.frame(i);
+        let w = &self.windows[i];
+        let region = if frame.bar == 0 || w.capturing {
+            Region::Content(Point::new(pos.x, pos.y - frame.bar))
+        } else if w.deco.as_ref().is_some_and(|d| d.captured) {
+            Region::Bar(pos)
+        } else {
+            frame.locate(pos)
+        };
+        Some((i, region))
+    }
+
     fn on_pointer_event(&mut self, ptr: &wl_pointer::WlPointer, event: wl_pointer::Event) {
         match event {
             wl_pointer::Event::Enter {
@@ -404,6 +421,11 @@ impl Wl {
                 };
                 let (focus, pressed) = (p.focus.take(), std::mem::take(&mut p.pressed));
                 let Some(key) = focus else { return };
+                let Some(i) = self.idx(key) else { return };
+                if let Some(d) = self.windows[i].deco.as_mut() {
+                    d.captured = false;
+                }
+                self.deco_leave(key);
                 let Some(i) = self.idx(key) else { return };
                 let w = &mut self.windows[i];
                 w.title_drag.reset();
@@ -486,7 +508,8 @@ impl Wl {
         let Some(delta) = self.pointer.as_mut().and_then(|p| p.wheel.take()) else {
             return;
         };
-        let Some((i, pos)) = self.pointer_target() else {
+        // 标题栏上的滚轮不下发（系统标题栏同样不响应滚轮）。
+        let Some((i, Region::Content(pos))) = self.pointer_region() else {
             return;
         };
         let key = self.windows[i].key;
@@ -500,12 +523,42 @@ impl Wl {
     }
 
     fn pointer_move(&mut self) {
-        let Some((i, pos)) = self.pointer_target() else {
+        let Some((i, region)) = self.pointer_region() else {
             return;
         };
         let key = self.windows[i].key;
-        let ev = PointerEvent::single_with(PointerKind::Move, pos, MouseButton::Left, self.mods());
-        self.dispatch_pointer(key, ev);
+        match region {
+            Region::Bar(p) => {
+                let entering = self.windows[i]
+                    .deco
+                    .as_mut()
+                    .is_some_and(|d| !std::mem::replace(&mut d.hover, true));
+                if entering {
+                    // 从内容区移上标题栏：清内容区的悬停（同离开窗口）。
+                    let out = PointerEvent::single(
+                        PointerKind::Move,
+                        Point::new(-1, -1),
+                        MouseButton::Left,
+                    );
+                    self.dispatch_pointer(key, out);
+                }
+                let ev =
+                    PointerEvent::single_with(PointerKind::Move, p, MouseButton::Left, self.mods());
+                self.deco_pointer(key, ev);
+                if entering {
+                    self.apply_cursor();
+                }
+            }
+            Region::Content(p) => {
+                if self.windows[i].deco.as_ref().is_some_and(|d| d.hover) {
+                    self.deco_leave(key);
+                    self.apply_cursor();
+                }
+                let ev =
+                    PointerEvent::single_with(PointerKind::Move, p, MouseButton::Left, self.mods());
+                self.dispatch_pointer(key, ev);
+            }
+        }
     }
 
     fn on_button(&mut self, serial: u32, time: u32, code: u32, press: bool) {
@@ -523,6 +576,55 @@ impl Wl {
             return;
         };
         let left = button == MouseButton::Left;
+        if self.frame(i).bar > 0 {
+            // 客户端标题栏：缩放边 / 拖动区 / 右键窗口菜单先接管，其余（窗口按钮）交给标题栏宿主。
+            if press {
+                self.windows[i].title_drag.press();
+                if let Some(pending) = self.try_csd_drag(i, serial, time, pos, button) {
+                    let w = &mut self.windows[i];
+                    w.title_drag.take_over(pending);
+                    let r = {
+                        let _g = crate::platform::EventDispatchGuard::enter();
+                        w.handler.on_dismiss_overlays()
+                    };
+                    if r {
+                        w.needs_paint = true;
+                    }
+                    self.after_event(key);
+                    return;
+                }
+            } else if self.windows[i].title_drag.release() {
+                return;
+            }
+            let on_bar = matches!(self.pointer_region(), Some((_, Region::Bar(_))));
+            if on_bar {
+                if let Some(d) = self.windows[i].deco.as_mut() {
+                    d.captured = press;
+                }
+                let ev = PointerEvent {
+                    kind: if press {
+                        PointerKind::Down
+                    } else {
+                        PointerKind::Up
+                    },
+                    pos,
+                    button,
+                    click_count: 1,
+                    mods: self.mods(),
+                };
+                self.deco_pointer(key, ev);
+                if !press {
+                    // 松开时指针可能已在内容区：悬停归回内容。
+                    self.pointer_move();
+                }
+                return;
+            }
+        }
+        // 以下是内容区：坐标减去标题栏。
+        let pos = match self.pointer_region() {
+            Some((_, Region::Content(p))) => p,
+            _ => pos,
+        };
         if left && self.windows[i].frameless {
             if press {
                 // 先作废上一次接管的残留（同 X11 后端的说明）。
@@ -569,6 +671,43 @@ impl Wl {
             mods: self.mods(),
         };
         self.dispatch_pointer(key, ev);
+    }
+
+    /// 客户端标题栏的窗口：缩放边（窗口内侧一圈，标题栏顶边也算）→ 待定缩放；标题栏空白处 →
+    /// 拖动 / 双击最大化 / 右键窗口菜单（见 `decor.rs`）。返回值同 [`Self::try_frameless_drag`]。
+    fn try_csd_drag(
+        &mut self,
+        i: usize,
+        serial: u32,
+        time: u32,
+        pos: Point,
+        button: MouseButton,
+    ) -> Option<Option<PendingDrag>> {
+        let frame = self.frame(i);
+        let w = &self.windows[i];
+        let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
+        let edges = w.resizable && !w.state.maximized && button == MouseButton::Left;
+        if let Some(dir) = frame.edge(pos, border, edges) {
+            // 与无边框窗口一致：缩放边落在可交互控件（按钮、输入框）上时让给控件。
+            let interactive = match frame.locate(pos) {
+                Region::Bar(p) => w
+                    .deco
+                    .as_ref()
+                    .is_some_and(|d| d.host.handler.interactive_at(p)),
+                Region::Content(p) => w.handler.interactive_at(p),
+            };
+            if !interactive {
+                return Some(Some(PendingDrag {
+                    edge: Some(input::resize_edge(dir)),
+                    at: (pos.x, pos.y),
+                    serial,
+                }));
+            }
+        }
+        match frame.locate(pos) {
+            Region::Bar(p) => self.deco_press(i, p, button, serial, time),
+            Region::Content(_) => None,
+        }
     }
 
     /// 无边框窗口：边缘 → 待定缩放；标题栏拖动区 → 待定移动（双击切最大化）。返回 `Some`
