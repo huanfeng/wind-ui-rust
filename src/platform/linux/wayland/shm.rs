@@ -25,7 +25,6 @@ const UPLOAD_CHUNK: usize = 256 * 1024;
 /// 每窗的 `wl_shm` 缓冲数。两块足够：一块在合成器手里，一块给下一帧写。
 const MAX_BUFFERS: usize = 2;
 
-/// 一块缓冲的簿记。
 /// 一帧的脏区，按缓冲里的两段分开记：上面的客户端标题栏、下面的内容（都是缓冲坐标）。
 ///
 /// 分开是因为两段在缓冲的两头：标题栏按钮悬停（顶上一小块）与内容里的光标闪烁（中间一小块）
@@ -96,6 +95,7 @@ impl Damage {
     }
 }
 
+/// 一块缓冲的簿记。
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SlotState {
     w: i32,
