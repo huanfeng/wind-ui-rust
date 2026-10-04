@@ -193,8 +193,10 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 - **CSD 外观**：自绘标题栏是方的、无阴影、缩放边在窗口内侧 6 像素（GNOME 原生应用在窗口外有
   不可见缩放边与圆角阴影），视觉与 GNOME 原生应用不一致；标题栏按钮不跟合成器能力
   （`wm_capabilities`）隐藏，最大化后按钮图标不变成「还原」。
-- **唤起已显示的窗口**（单实例第二次启动、托盘）要 `xdg-activation-v1`，未实现：窗口已显示时
-  不会被提到前台。
+- **唤起已显示的窗口**（单实例第二次启动、`Window::single` 同键再开、`WindowOp::Show`）经 `xdg-activation-v1`
+  拿令牌换焦点（§8.3）。合成器的防抢焦点策略决定成不成：令牌来自桌面启动器或本应用近期输入时
+  一般会给焦点；两者都没有时合成器多半只把窗口标成「需要注意」（GNOME 弹「已就绪」通知），
+  不像 XWayland 下那样直接到前台。
 - **文件拖出、primary selection（中键粘贴）、系统托盘** 在两条路上都没有，不算回退。
 - 默认后端一变，所有下游应用同时换路径：建议先在 CHANGELOG 里公告一个版本，留出
   `WINDUI_BACKEND=x11` 作为逃生口。
@@ -407,7 +409,20 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
     取整对齐，见上「分数缩放取整」），标题文字位置会随之差 1 像素。
   - **只换装饰模式不给新尺寸**（KDE / Treeland 运行期切换装饰时可能这样）：整窗尺寸照旧，
     内容区随标题栏的有无伸缩（`csd::rebar`），最大化 / 平铺时不超出合成器配置的尺寸。
-- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input,xdg-decoration,xdg-dialog`
+- **把窗口提到前台**（`activation.rs`，`xdg-activation-v1`）：Wayland 不许应用自己抢焦点，得拿
+  激活令牌换。已显示的窗口要提到前台时（单实例二次启动、`Window::single` 同键再开、`WindowOp::Show`、
+  点被模态挡住的父窗时唤出模态子窗；Linux 没有系统托盘，托盘那条路不存在）：
+  - 有别处给的令牌就直接 `activate`：**单实例二次启动**时桌面启动器给第二个进程设的
+    `XDG_ACTIVATION_TOKEN` 随 argv 转给运行中的实例（作为一个带 `\u{1}` 前缀的标记元素附在末尾，
+    首实例在调 `on_second` 前剥掉，应用看不到；只在 Linux 上附，win32 / macOS 的转发格式不变），
+    第二个进程取走后从自己的环境里删掉。本进程自己启动时环境里的令牌用来激活主窗口，同样删掉。
+  - 没有就自己要一个：`get_activation_token` 带上最近一次输入（按键、点击、键盘焦点进入）的
+    serial、seat 与那扇窗口的表面，再 `set_app_id`、`commit`；`done(令牌)` 到了才
+    `activate`——异步，不阻塞事件循环；那之前目标窗口关了就丢掉；同一窗口已有请求在路上不再发。
+  - 隐藏着的窗口照常映射（合成器一般会给新映射的窗口焦点），有别处给的令牌再补一次 `activate`。
+  - 既没令牌也没近期输入：照样要一个（不带 serial），合成器多半只标「需要注意」——协议预期的行为。
+  - 合成器没有该协议：不提到前台，stderr 提示一次。
+- **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input,xdg-decoration,xdg-dialog,xdg-activation`
   假装合成器没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径（`xdg-decoration` 关掉即在
   sway 上走客户端标题栏）。
 - **已知缺口**：启动后才出现的 `wl_seat`（启动时一个输入设备都没有）不会绑定，剪贴板与拖入
@@ -422,8 +437,8 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
 ### 8.4 协议做不到、只能文档化的
 
 应用不能设窗口坐标（`centered` 无效，由合成器摆放）；不能查询是否被最小化
-（`WindowState::minimized` 恒 false，`hide_on_minimize` 无从触发）；唤起已显示的窗口要
-`xdg-activation-v1`（未实现）。全局热键见 §8.8：不实现，启动时
+（`WindowState::minimized` 恒 false，`hide_on_minimize` 无从触发）；唤起已显示的窗口走
+`xdg-activation-v1`（§8.3「把窗口提到前台」），能否真到前台由合成器的防抢焦点策略决定。全局热键见 §8.8：不实现，启动时
 stderr 提示一次、`App::hotkey` 成为空操作；兜底是桌面设置里把快捷键绑到 `应用 --toggle` 这样
 的命令，应用开 `App::single_instance`，第二次启动的 argv 转给运行中的实例（见 API_GUIDE §5）。
 
@@ -527,6 +542,16 @@ Stage 5（sway headless，`WINDUI_WAYLAND_DISABLE=xdg-decoration` 走客户端�
   2024 KB（客户端标题栏多一个小宿主 + 一条 480×33 的像素图）。
 - 未能自动化：GNOME 下的真实外观与交互、合成器真实的最大化 / 平铺、`xdg-dialog-v1`（sway 与
   weston 都没有）。
+
+把窗口提到前台（sway headless；令牌来源是自写的小客户端：一个只要令牌、不带 serial，一个像桌面
+启动器那样开窗、被点一下后带 serial 与表面要令牌）：
+- 单实例：首实例窗口在后、启动器窗口在前，用启动器给的令牌（`XDG_ACTIVATION_TOKEN`）二次启动 →
+  首实例 `activate(令牌, 主窗表面)`，焦点到首实例（sway 的 `focus_on_window_activation` 取
+  `urgent` / `smart` / `focus` 都一样）；`on_second` 收到的 argv 里没有令牌标记。不带 serial 的
+  令牌、或干脆没有令牌：首实例自己要令牌并 `activate`，sway 只把窗口标成 urgent，焦点不动——
+  合成器的防抢焦点，符合预期。
+- 本进程内：`multi_window` 里开出单例「设置」窗、点回主窗，再点「打开设置…」→ 带这次点击的
+  serial 与主窗表面要令牌、`done` 后 `activate`，焦点到「设置」窗。
 
 ### 8.6 无桌面验证环境（weston headless，无 root）
 
@@ -642,7 +667,7 @@ AccessDenied；门户 `Screenshot`（`interactive: false`）能出图，但**每
 限制：剪贴板仅界面线程可用」。
 
 **不在这一轮范围内**：系统托盘（SNI，与 X11 共用，另立）、文件拖出、窗口模式 GPU、零窗口常驻、
-唤起已显示的窗口（`xdg-activation-v1`）、primary selection。
+primary selection。
 
 ### 8.9 真桌面验证环境
 
@@ -716,6 +741,14 @@ AccessDenied；门户 `Screenshot`（`interactive: false`）能出图，但**每
 21. 给服务端装饰的桌面（KDE / Treeland / sway）：我们**不重复画**标题栏；无边框窗口不被加边框；
     运行期切换装饰模式时（若合成器会这样做）最大化 / 平铺下窗口不超出屏幕、内容不错位；有
     `xdg-dialog-v1` 时模态子窗被识别为对话框。
+
+*提到前台*
+
+22. 程序开着、焦点在别的应用上，从应用菜单 / 启动器再次启动它（应用开了 `App::single_instance`）：
+    已有窗口到前台并获焦，不开第二个窗口；`on_second` 收到的参数里没有多余的令牌标记。
+23. `multi_window`：开出「设置」窗后点回主窗，再点「打开设置…」——已开着的「设置」窗被提到前台
+    （单例不开第二个）；点被模态子窗挡住的主窗时，模态子窗到前台。合成器拒绝给焦点时（比如
+    没有近期输入），GNOME 至少弹「已就绪」通知。
 
 *自动化覆盖的缺口*（各阶段交付时记下的偏差，回归时心里有数）：Stage 1 的像素比对用
 `weston-screenshooter` 抓屏与离屏渲染比对，不在 `cargo test` 里；Stage 2 的输入注入在 sway 上
