@@ -158,7 +158,8 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 分五个阶段落地，2026-10-04 全部完成，并在 GNOME 42 Wayland 会话（192.168.5.55，fcitx5）上过了
 真桌面回归清单（§8.10）：窗口与呈现；指针、键盘、光标、HiDPI、无边框拖动 / 缩放；剪贴板（文本）
 与文件拖入；输入法（text-input-v3）；窗口装饰（服务端装饰协商 + 客户端标题栏）与模态对话框登记。
-**未实测**：ibus、Deepin Treeland（192.168.5.50）。
+2026-10-04 又在 Deepin 25 Treeland（192.168.5.50，服务端装饰）上确认标题栏只有合成器画的一条。
+**未实测**：ibus。
 
 > ⚠ **默认不启用**：只有 `WINDUI_BACKEND=wayland` 才走它，其余情况 Wayland 会话照旧经
 > XWayland 运行。改为自动优先的条件与剩余风险见 §8.1。
@@ -180,7 +181,7 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 把未设时改成「有 `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` 就优先 Wayland、连不上回退 X11」。条件：
 
 1. 真桌面回归清单（§8.10）在 GNOME（必须 CSD 的那一类）上通过——**2026-10-04 已过**；且至少
-   一个给服务端装饰的桌面（KDE / Deepin Treeland）上确认「不重复画标题栏」——**未测**。
+   一个给服务端装饰的桌面（KDE / Deepin Treeland）上确认「不重复画标题栏」——**2026-10-04 已过**（Deepin 25 Treeland）。
 2. 下面的剩余风险逐条被接受或补上。
 
 剩余风险（自动优先后，原本经 XWayland 正常工作、换到原生后端会变差或变化的）：
@@ -657,17 +658,20 @@ AccessDenied；门户 `Screenshot`（`interactive: false`）能出图，但**每
   `/run/udev/gdm-machine-has-{virtual-gpu,hardware-gpu,hybrid-graphics}` 三个标记同时存在。该机
   已用 `sudo ln -s /dev/null /etc/udev/rules.d/61-gdm.rules` 屏蔽这套规则。
 - **192.168.5.50**：Deepin 25，Treeland 合成器。用来验「服务端装饰时不重复画标题栏」与
-  `xdg-dialog-v1` 的正向路径；截至 2026-10-04 尚未实测。
+  `xdg-dialog-v1` 的正向路径。登录管理器默认是 LightDM（只列 X11 的 deepin 会话），Treeland 要换
+  成 DDM：`sudo systemctl start replace-lightdm-with-ddm.service`（回退：`sudo systemctl disable --now
+  ddm.service && sudo systemctl enable --now lightdm.service`）。该机虚拟显卡 bochs-drm 无 3D，
+  `treeland.sh` 会自动退到 pixman 软件渲染，可用。2026-10-04 实测服务端装饰下标题栏只有一条。
 - 远程无人值守时别在这两台机器上弹界面（抓屏门户的确认框会留在对方桌面，见 §8.7 末）。
 
 ### 8.10 真桌面回归清单
 
 改动 Wayland 后端后在真桌面上逐项过一遍。运行时都加 `WINDUI_BACKEND=wayland`；有边框的示例用
-`file_drop`、`multi_window`、`settings`，无边框的用 `about`、`frameless`。
+`multi_window`、`file_drop`、`multiline`、`hotkey`，无边框的用 `about`、`frameless`、
+`fullshowcase`、`settings`。
 
 **状态**：2026-10-04 在 GNOME 42 + fcitx5 上全部通过（输入法项用 fcitx5）；**ibus 未测**（该机
-默认输入法是 fcitx5，需要时 `im-config -n ibus` 补测）；**Deepin Treeland 未测**（装饰一节的
-服务端装饰项）。
+默认输入法是 fcitx5，需要时 `im-config -n ibus` 补测）；Deepin Treeland 上第 21 项的「不重复画标题栏」已过（2026-10-04），其余项未在 Treeland 上逐项过。
 
 *窗口、输入与缩放*
 1. 点击、打字、长按重复（速率跟随系统设置）、快捷键（Ctrl+A / C / V）。
