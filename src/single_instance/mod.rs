@@ -44,6 +44,50 @@ pub(crate) fn decode_argv(bytes: &[u8]) -> Vec<String> {
     }
 }
 
+/// 随 argv 一起转发的 Wayland 激活令牌的标记前缀（见 [`attach_activation_token`]）。`\u{1}`
+/// 开头：真实命令行参数里不会出现，`on_second` 拿到的 argv 里也会先剥掉它。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const ACTIVATION_TOKEN_MARK: &str = "\u{1}windui-activation-token=";
+
+/// 二次实例：把桌面启动器给的激活令牌（`XDG_ACTIVATION_TOKEN`，GNOME / KDE 的启动器会设）作为
+/// 最后一个元素附在 argv 后面，首实例凭它把已显示的窗口提到前台（Wayland 不许应用自己抢焦点，
+/// 要拿令牌换）。只在 Linux 上附（别的平台没有这回事，转发格式不变）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn attach_activation_token(mut argv: Vec<String>, token: Option<String>) -> Vec<String> {
+    if let Some(t) = token.filter(|t| !t.is_empty() && !t.contains('\0')) {
+        argv.push(format!("{ACTIVATION_TOKEN_MARK}{t}"));
+    }
+    argv
+}
+
+/// 首实例：从转来的 argv 里剥出激活令牌（应用的 `on_second` 看不到它）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn take_activation_token(argv: &mut Vec<String>) -> Option<String> {
+    let pos = argv
+        .iter()
+        .rposition(|a| a.starts_with(ACTIVATION_TOKEN_MARK))?;
+    let item = argv.remove(pos);
+    Some(item[ACTIVATION_TOKEN_MARK.len()..].to_string())
+}
+
+/// 二次实例要转发的 argv：命令行参数，Linux 上再附激活令牌。令牌取出后从本进程环境里删掉
+/// （协议建议：别让它泄漏给子进程——本进程马上就退出，但 `claim_instance` 回退为首实例时会继续跑）。
+fn argv_to_forward() -> Vec<String> {
+    let argv: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    {
+        let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+        if token.is_some() {
+            std::env::remove_var("XDG_ACTIVATION_TOKEN");
+        }
+        attach_activation_token(argv, token)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        argv
+    }
+}
+
 // ── 平台实现分发 ──────────────────────────────────────────────
 #[cfg(not(windows))]
 mod unix;
@@ -102,7 +146,7 @@ pub fn claim_instance(app_id: &str) -> InstanceRole {
         *HELD.lock().unwrap_or_else(|e| e.into_inner()) = Some(app_id.to_string());
         return InstanceRole::First;
     }
-    let argv: Vec<String> = std::env::args().collect();
+    let argv = argv_to_forward();
     if forward(app_id, &argv) {
         InstanceRole::Handoff
     } else {
@@ -116,7 +160,7 @@ pub(crate) fn arbitrate(app_id: &str) -> bool {
     if held(app_id) || acquire(app_id) {
         return true;
     }
-    let argv: Vec<String> = std::env::args().collect();
+    let argv = argv_to_forward();
     // 送不到就回退为正常启动(见 claim_instance 文档)。
     !forward(app_id, &argv)
 }
@@ -156,8 +200,9 @@ pub(crate) fn deliver_argv(argv: Vec<String>) {
 }
 
 /// Linux 事件循环在主线程调用：执行二次实例转来的 argv（见 `unix::run_pending_on_main`）。
+/// `None` = 没有积压；`Some(令牌)` = 执行过，调用方唤出主窗口，有令牌就凭它提到前台。
 #[cfg(target_os = "linux")]
-pub(crate) fn run_pending_on_main() -> bool {
+pub(crate) fn run_pending_on_main() -> Option<Option<String>> {
     unix::run_pending_on_main()
 }
 
@@ -179,6 +224,34 @@ pub(crate) fn install_listener(
 
 #[cfg(test)]
 mod tests {
+    use super::{attach_activation_token, take_activation_token};
+
+    #[test]
+    fn activation_token_rides_along_and_is_stripped_before_on_second() {
+        let argv = vec!["app".to_string(), "--toggle".to_string()];
+        let mut sent = attach_activation_token(argv.clone(), Some("tok-123".into()));
+        assert_eq!(sent.len(), 3);
+        assert_eq!(take_activation_token(&mut sent), Some("tok-123".into()));
+        assert_eq!(sent, argv, "on_second 看到的 argv 与原来一字不差");
+        let mut plain = attach_activation_token(argv.clone(), None);
+        assert_eq!(take_activation_token(&mut plain), None);
+        assert_eq!(plain, argv);
+        let mut empty = attach_activation_token(argv.clone(), Some(String::new()));
+        assert_eq!(empty, argv, "空令牌不附");
+        assert_eq!(take_activation_token(&mut empty), None);
+    }
+
+    #[test]
+    fn a_real_argument_that_looks_similar_is_left_alone() {
+        let mut argv = vec!["app".to_string(), "windui-activation-token=x".to_string()];
+        assert_eq!(
+            take_activation_token(&mut argv),
+            None,
+            "没有控制字符前缀的不是标记"
+        );
+        assert_eq!(argv.len(), 2);
+    }
+
     use super::*;
 
     #[test]

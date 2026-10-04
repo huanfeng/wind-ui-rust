@@ -33,6 +33,7 @@
 //! 下次变化时刻才出下一帧。窗口被遮住 / 最小化时合成器不发回调，动画自然停下（有 1 秒兜底，
 //! 见 `FRAME_CALLBACK_TIMEOUT`）。无动画时不请求回调，阻塞在 `poll`，空闲零 CPU。
 
+mod activation;
 mod csd;
 mod cursor;
 mod data;
@@ -117,6 +118,8 @@ struct Globals {
     text_input: Option<wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
     /// 窗口装饰协商（`decor.rs`）；没有时有边框窗口自己画标题栏。
     decoration: Option<wayland_protocols::xdg::decoration::zv1::client::zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    /// 把已显示的窗口提到前台（`activation.rs`）。
+    activation: Option<wayland_protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1>,
     /// 模态对话框（`xdg-dialog-v1`，KDE 6.1+ 等）；没有时模态只由我们自己挡输入。
     dialog: Option<wayland_protocols::xdg::dialog::v1::client::xdg_wm_dialog_v1::XdgWmDialogV1>,
     /// 剪贴板与拖入（`data.rs`）；启动时交给 `data::init`。
@@ -176,6 +179,10 @@ pub(super) fn connect() -> Result<Session, String> {
         .bind(&qh, 1..=1, ())
         .ok()
         .filter(|_| !off("xdg-dialog"));
+    let activation = globals
+        .bind(&qh, 1..=1, ())
+        .ok()
+        .filter(|_| !off("xdg-activation"));
     // v1：光标矩形随 commit 生效（v2 改成随下一次表面提交生效，GNOME 42 只有 v1）。
     let text_input = globals
         .bind(&qh, 1..=1, ())
@@ -209,6 +216,7 @@ pub(super) fn connect() -> Result<Session, String> {
             data_manager,
             decoration,
             dialog,
+            activation,
             outputs,
         },
     })
@@ -259,7 +267,19 @@ pub(super) fn run_windowed(
         drag: None,
         drops: Vec::new(),
         ime: None,
+        activation: None,
+        activation_warned: false,
+        last_input: None,
     };
+    wl.activation = wl.g.activation.take().map(activation::Activation::new);
+    // 桌面启动器给本进程的激活令牌：用它把主窗口提到前台（合成器的防抢焦点据此放行），用完
+    // 从环境里删掉，免得泄漏给子进程（协议建议）。
+    let startup_token = std::env::var("XDG_ACTIVATION_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    if startup_token.is_some() {
+        std::env::remove_var("XDG_ACTIVATION_TOKEN");
+    }
     wl.ime = match (wl.g.text_input.as_ref(), wl.g.seat.as_ref()) {
         (Some(m), Some(seat)) => Some(ime::Ime::new(m, seat, &wl.qh)),
         _ => {
@@ -284,6 +304,9 @@ pub(super) fn run_windowed(
         }
     } else {
         wl.show(main);
+        if let Some(t) = startup_token {
+            wl.activate(main, Some(t));
+        }
     }
     if let Some(w) = &waker {
         w.bind(Box::new(LinuxWake));
@@ -511,6 +534,11 @@ struct Wl {
     drops: Vec<data::PendingDrop>,
     /// 输入法（`ime.rs`）；合成器不支持 text-input-v3 时为 `None`。
     ime: Option<ime::Ime>,
+    /// 把已显示的窗口提到前台（`activation.rs`）；合成器没有 xdg-activation 时为 `None`。
+    activation: Option<activation::Activation>,
+    activation_warned: bool,
+    /// 最近一次输入事件的（serial，所在窗口）：申请激活令牌时带上，合成器据此认定是用户操作。
+    last_input: Option<(u32, u32)>,
 }
 
 impl Wl {
@@ -681,7 +709,8 @@ impl Wl {
             w.needs_paint = true;
         }
         if w.role.is_some() {
-            log::debug!("Wayland 下唤起已显示的窗口需要 xdg-activation，尚未实现");
+            // 已显示：提到前台（`activation.rs`，异步）。
+            self.activate(key, None);
             return;
         }
         let xdg = self.g.wm_base.get_xdg_surface(&w.surface, &self.qh, key);
@@ -736,6 +765,22 @@ impl Wl {
         });
     }
 
+    /// 唤出窗口并提到前台：隐藏着就照常显示（映射时合成器一般会给焦点），再用别处给的令牌
+    /// （单实例二次启动转来的）激活；已显示的直接激活。
+    fn raise(&mut self, key: u32, token: Option<String>) {
+        let shown = self
+            .idx(key)
+            .is_some_and(|i| self.windows[i].role.is_some());
+        if shown {
+            self.activate(key, token);
+            return;
+        }
+        self.show(key);
+        if token.is_some() {
+            self.activate(key, token);
+        }
+    }
+
     fn hide(&mut self, key: u32) {
         let Some(i) = self.idx(key) else { return };
         let w = &mut self.windows[i];
@@ -776,6 +821,10 @@ impl Wl {
         }
         let Some(i) = self.idx(key) else { return };
         self.ime_window_closed(key);
+        self.activation_window_closed(key);
+        if self.last_input.is_some_and(|(_, k)| k == key) {
+            self.last_input = None;
+        }
         if let Some(p) = self.pointer.as_mut().filter(|p| p.focus == Some(key)) {
             p.focus = None;
         }
@@ -956,8 +1005,10 @@ impl Wl {
             }
             // 跨线程唤醒：后台消息、单实例转发的 argv。
             if pipe.is_some_and(|p| p.drain()) {
-                if crate::single_instance::run_pending_on_main() && self.idx(self.main).is_some() {
-                    self.show(self.main);
+                if let Some(token) = crate::single_instance::run_pending_on_main() {
+                    if self.idx(self.main).is_some() {
+                        self.raise(self.main, token);
+                    }
                 }
                 for w in &mut self.windows {
                     w.needs_paint = true;

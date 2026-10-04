@@ -628,7 +628,9 @@ impl X11 {
             }
             // 2. 跨线程唤醒：后台消息、单实例转发的 argv。
             if pipe.is_some_and(|p| p.drain()) {
-                if crate::single_instance::run_pending_on_main() && self.idx(main).is_some() {
+                if crate::single_instance::run_pending_on_main().is_some()
+                    && self.idx(main).is_some()
+                {
                     self.show(main);
                 }
                 for w in &mut self.windows {
