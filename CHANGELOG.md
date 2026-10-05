@@ -59,7 +59,9 @@
 - **Linux：从桌面启动器（应用菜单、概览）启动时鼠标一直转圈到超时**。X11 下首窗挂上
   `_NET_STARTUP_ID` 并广播 startup-notification 的 `remove`；Wayland 下启动令牌缺
   `XDG_ACTIVATION_TOKEN` 时回退 `DESKTOP_STARTUP_ID` 激活首窗。单实例二次启动把第二个进程的
-  启动 id 转给首实例，由它发出完成信号。
+  启动 id 转给首实例，由它发出完成信号（同一批转来多个时每个都发）；X11 下唤出时用 id 里的
+  `_TIME` 作激活时间戳。Wayland 路径已在 GNOME 42 真桌面验证；X11 路径只在 Xvfb + openbox 上
+  核对了消息内容，真桌面待测。
 - **在控件回调里换语言，第一下界面不变**（全平台）。`LocaleHandle::set` / `ThemeHandle::set`
   靠 `anim::request_repaint` 请求整窗，而 `render` 开头的 `reset_request` 会先清掉它，那一帧
   只按被点按钮的小脏区局部重画，别处文字停在旧语言上，要再点一次才切过去（换主题碰巧同时
