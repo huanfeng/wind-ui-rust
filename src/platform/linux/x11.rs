@@ -66,6 +66,9 @@ x11rb::atom_manager! {
         _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_WINDOW_TYPE_DIALOG,
         _NET_ACTIVE_WINDOW,
+        _NET_STARTUP_ID,
+        _NET_STARTUP_INFO_BEGIN,
+        _NET_STARTUP_INFO,
         _NET_WM_MOVERESIZE,
         _MOTIF_WM_HINTS,
         RESOURCE_MANAGER,
@@ -188,6 +191,12 @@ pub(super) fn run_windowed(
     }
     let main = x.create_window(&cfg, handler, None);
     x.main = main;
+    // 桌面启动器给的启动 id（见 `startup`）：映射前挂到主窗口上，映射后广播 remove——两者都是
+    // 启动器停止转圈的信号（WM 认前者、启动器的监视端认后者）。隐藏启动也照发 remove。
+    let startup_id = super::startup::take(false);
+    if let Some(id) = &startup_id {
+        x.set_startup_id(main, id);
+    }
     if cfg.start_hidden {
         if let Some(i) = x.idx(main) {
             x.windows[i].hidden = true;
@@ -199,6 +208,9 @@ pub(super) fn run_windowed(
     }
     if !cfg.start_hidden {
         x.show(main);
+    }
+    if let Some(id) = &startup_id {
+        x.startup_complete(main, id);
     }
 
     if let Some(w) = &waker {
@@ -534,6 +546,39 @@ impl X11 {
         );
     }
 
+    /// `_NET_STARTUP_ID`：这扇窗口属于哪次启动（WM 据此结束那次启动序列、判断焦点）。
+    fn set_startup_id(&self, id: Window, startup: &str) {
+        let a = self.atoms;
+        let _ = self.conn.change_property8(
+            PropMode::REPLACE,
+            id,
+            a._NET_STARTUP_ID,
+            a.UTF8_STRING,
+            startup.as_bytes(),
+        );
+    }
+
+    /// 广播 startup-notification 的 `remove: ID=…`：消息切 20 字节片，首片
+    /// `_NET_STARTUP_INFO_BEGIN`、其余 `_NET_STARTUP_INFO`，以 `PropertyChange` 掩码发到根窗口
+    /// （规范要求；监视端在根上选的就是它）。来源窗口用 `id`（规范只要求是本客户端建的、存在的
+    /// 窗口）。
+    fn startup_complete(&self, id: Window, startup: &str) {
+        let a = self.atoms;
+        let msg = super::startup::remove_message(startup);
+        for (n, chunk) in super::startup::chunks(&msg).into_iter().enumerate() {
+            let type_ = if n == 0 {
+                a._NET_STARTUP_INFO_BEGIN
+            } else {
+                a._NET_STARTUP_INFO
+            };
+            let ev = ClientMessageEvent::new(8, id, type_, chunk);
+            let _ = self
+                .conn
+                .send_event(false, self.root, EventMask::PROPERTY_CHANGE, ev);
+        }
+        let _ = self.conn.flush();
+    }
+
     /// 发给根窗口的 EWMH 客户端消息（WM 在根上监听）。
     fn client_message(&self, id: Window, type_: xproto::Atom, data: [u32; 5]) {
         let ev = ClientMessageEvent::new(32, id, type_, data);
@@ -628,10 +673,17 @@ impl X11 {
             }
             // 2. 跨线程唤醒：后台消息、单实例转发的 argv。
             if pipe.is_some_and(|p| p.drain()) {
-                if crate::single_instance::run_pending_on_main().is_some()
-                    && self.idx(main).is_some()
-                {
-                    self.show(main);
+                if let Some(id) = crate::single_instance::run_pending_on_main() {
+                    if self.idx(main).is_some() {
+                        // 二次启动转来的启动 id：挂上并广播 remove，启动器才不会为那次启动转圈。
+                        if let Some(id) = &id {
+                            self.set_startup_id(main, id);
+                        }
+                        self.show(main);
+                        if let Some(id) = &id {
+                            self.startup_complete(main, id);
+                        }
+                    }
                 }
                 for w in &mut self.windows {
                     w.needs_paint = true;

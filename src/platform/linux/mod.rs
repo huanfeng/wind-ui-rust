@@ -18,6 +18,8 @@
 //! - `dnd`：文件拖入（XDND 目标端）。
 //! - `clipboard`：对外的剪贴板类型；X11 下由独立线程专职拥有 / 读取 `CLIPBOARD` 选区，
 //!   原生 Wayland 下转给 `wayland::data`。
+//! - `startup`：桌面启动器给的启动 id（`XDG_ACTIVATION_TOKEN` / `DESKTOP_STARTUP_ID`），
+//!   用于结束启动器的「转圈」并把窗口提到前台。
 //! - `sys`：`poll(2)` 与跨线程唤醒管道。
 //! - 文字渲染见 `crate::text::linux`。
 //!
@@ -31,6 +33,7 @@ mod host;
 mod hotkey;
 mod ime;
 mod keys;
+pub(crate) mod startup;
 pub(crate) mod sys;
 #[cfg(feature = "wayland")]
 mod wayland;

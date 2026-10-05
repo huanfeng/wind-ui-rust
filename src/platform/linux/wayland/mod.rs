@@ -273,16 +273,11 @@ pub(super) fn run_windowed(
         last_input: None,
     };
     wl.activation = wl.g.activation.take().map(activation::Activation::new);
-    // 桌面启动器给本进程的激活令牌：用它把主窗口提到前台（合成器的防抢焦点据此放行），用完
-    // 从环境里删掉，免得泄漏给子进程（协议建议；GTK 也在打开显示时这样做）。改环境在已有别的
-    // 线程直接 `getenv` 时不安全——这里是应用 `App::run` 里打开显示的那一刻，与 GTK 同一前提。
-    // `start_hidden` 时用不上：令牌很快过期，等到首次显示多半已失效，照样删掉。
-    let startup_token = std::env::var("XDG_ACTIVATION_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty());
-    if startup_token.is_some() {
-        std::env::remove_var("XDG_ACTIVATION_TOKEN");
-    }
+    // 桌面启动器给本进程的启动 id（激活令牌，没有就 `DESKTOP_STARTUP_ID`，见 `startup`）：用它
+    // 激活主窗口——既把窗口提到前台（合成器的防抢焦点据此放行），也是启动器停止转圈的信号。
+    // 用完从环境里删掉（`startup::take`，前提同 GTK）。`start_hidden` 时用不上：令牌很快过期，
+    // 等到首次显示多半已失效，照样删掉（启动器会转到超时，见 LINUX_PORTING §8.3）。
+    let startup_token = super::startup::take(true);
     wl.ime = match (wl.g.text_input.as_ref(), wl.g.seat.as_ref()) {
         (Some(m), Some(seat)) => Some(ime::Ime::new(m, seat, &wl.qh)),
         _ => {

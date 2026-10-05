@@ -76,14 +76,15 @@ pub(crate) fn strip_activation_tokens(batch: &mut [Vec<String>]) -> Option<Strin
     batch.iter_mut().filter_map(take_activation_token).last()
 }
 
-/// 二次实例要转发的 argv：命令行参数，Linux 上再附激活令牌。只读不删：转发成功本进程随即
-/// 退出，删了没用；转发失败回退为首实例时，令牌还要留给自己的主窗口（Wayland 后端打开显示时
-/// 取用并删掉，见 `wayland::run_windowed`）。
+/// 二次实例要转发的 argv：命令行参数，Linux 上再附启动器给的启动 id（激活令牌，没有就
+/// `DESKTOP_STARTUP_ID`，见 `platform::linux::startup`）——首实例凭它把窗口提到前台、结束启动器
+/// 为这次启动转的圈。只读不删：转发成功本进程随即退出，删了没用；转发失败回退为首实例时，
+/// 它还要留给自己的主窗口（后端打开显示时取用并删掉）。
 fn argv_to_forward() -> Vec<String> {
     let argv: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "linux")]
     {
-        attach_activation_token(argv, std::env::var("XDG_ACTIVATION_TOKEN").ok())
+        attach_activation_token(argv, crate::platform::linux::startup::peek())
     }
     #[cfg(not(target_os = "linux"))]
     {
