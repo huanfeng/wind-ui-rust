@@ -18,9 +18,11 @@ pub(crate) fn pick(first: Option<String>, second: Option<String>) -> Option<Stri
         .find(|t| !t.is_empty())
 }
 
-/// 二次实例要转发的启动 id（只读不删，见 `single_instance::argv_to_forward`）：优先激活令牌。
+/// 二次实例要转发的启动 id（只读不删，见 `single_instance::argv_to_forward`）：按 Wayland 的
+/// 优先级取（二次实例不知道首实例跑哪个后端；glib 2.76+ 的启动器给两者设的是同一个值）。
 pub(crate) fn peek() -> Option<String> {
-    pick(
+    prefer(
+        true,
         std::env::var("XDG_ACTIVATION_TOKEN").ok(),
         std::env::var("DESKTOP_STARTUP_ID").ok(),
     )
@@ -32,12 +34,12 @@ pub(crate) fn peek() -> Option<String> {
 pub(crate) fn take(wayland: bool) -> Option<String> {
     let token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
     let startup = std::env::var("DESKTOP_STARTUP_ID").ok();
-    let picked = prefer(wayland, token.clone(), startup.clone());
-    if token.is_some() {
-        std::env::remove_var("XDG_ACTIVATION_TOKEN");
-    }
-    if startup.is_some() {
-        std::env::remove_var("DESKTOP_STARTUP_ID");
+    let picked = prefer(wayland, token, startup);
+    // 按「在不在」删，不按「能不能读成 UTF-8」：读不出的值也不该泄漏给子进程。
+    for var in ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"] {
+        if std::env::var_os(var).is_some() {
+            std::env::remove_var(var);
+        }
     }
     picked
 }
@@ -67,15 +69,26 @@ pub(crate) fn remove_message(id: &str) -> Vec<u8> {
 }
 
 /// 切成 ClientMessage 的 20 字节片，最后一片不足补零（NUL 已在消息里，故至少带一个零）。
-/// 第一片用 `_NET_STARTUP_INFO_BEGIN`，其余用 `_NET_STARTUP_INFO`。
-pub(crate) fn chunks(msg: &[u8]) -> Vec<[u8; 20]> {
+/// 布尔为真的（第一片）用 `_NET_STARTUP_INFO_BEGIN`，其余用 `_NET_STARTUP_INFO`。
+pub(crate) fn chunks(msg: &[u8]) -> Vec<(bool, [u8; 20])> {
     msg.chunks(20)
-        .map(|c| {
+        .enumerate()
+        .map(|(n, c)| {
             let mut out = [0u8; 20];
             out[..c.len()].copy_from_slice(c);
-            out
+            (n == 0, out)
         })
         .collect()
+}
+
+/// 启动 id 里 `_TIME<n>` 的 X 服务器时间戳：启动器记下的那次点击的时间。拿它当
+/// `_NET_ACTIVE_WINDOW` 的时间戳，WM 的防抢焦点才认这是用户操作（GTK 同样解析）。
+pub(crate) fn timestamp(id: &str) -> Option<u32> {
+    let rest = &id[id.rfind("_TIME")? + "_TIME".len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
 }
 
 #[cfg(test)]
@@ -109,6 +122,18 @@ mod tests {
     }
 
     #[test]
+    fn the_launch_time_is_read_from_the_id() {
+        assert_eq!(
+            timestamp("gnome-shell/app/1259-4-host_TIME237377473"),
+            Some(237377473)
+        );
+        assert_eq!(timestamp("a_TIME1_TIME42"), Some(42), "取最后一个");
+        assert_eq!(timestamp("kwin/x_TIME77 trailing"), Some(77));
+        assert_eq!(timestamp("no-time-here"), None);
+        assert_eq!(timestamp("x_TIME"), None);
+    }
+
+    #[test]
     fn spaces_quotes_and_backslashes_are_escaped() {
         let m = remove_message(r#"gnome-shell/windui 多窗口 "x"\y/1_TIME5"#);
         assert_eq!(
@@ -123,9 +148,14 @@ mod tests {
         assert_eq!(m.len(), 21);
         let c = chunks(&m);
         assert_eq!(c.len(), 2);
-        assert_eq!(&c[0], b"remove: ID=abcdefghi");
-        assert_eq!(c[1], [0u8; 20], "只剩结尾 NUL 也要单发一片");
-        let joined: Vec<u8> = c.concat();
+        assert_eq!(&c[0].1, b"remove: ID=abcdefghi");
+        assert_eq!(c[1].1, [0u8; 20], "只剩结尾 NUL 也要单发一片");
+        assert_eq!(
+            c.iter().map(|(b, _)| *b).collect::<Vec<_>>(),
+            [true, false],
+            "只有第一片是 BEGIN"
+        );
+        let joined: Vec<u8> = c.iter().flat_map(|(_, d)| *d).collect();
         assert_eq!(&joined[..m.len()], &m[..]);
         assert_eq!(
             chunks(&remove_message("abcdefgh")).len(),

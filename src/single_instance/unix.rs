@@ -159,16 +159,16 @@ fn dispatch_to_main(argv: Vec<String>) {
 #[cfg(target_os = "linux")]
 static PENDING_ARGV: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 
-/// 主线程：执行积压的二次实例 argv。`None` = 没有积压；`Some(令牌)` = 执行过至少一条（调用方
-/// 据此唤出主窗口），附带最后一条转来的 Wayland 激活令牌（见 `attach_activation_token`）。
+/// 主线程：执行积压的二次实例 argv。`None` = 没有积压；`Some(启动 id)` = 执行过至少一条（调用方
+/// 据此唤出主窗口），附带这批转来的全部启动 id（见 `attach_activation_token`）。
 #[cfg(target_os = "linux")]
-pub(crate) fn run_pending_on_main() -> Option<Option<String>> {
+pub(crate) fn run_pending_on_main() -> Option<Vec<String>> {
     let mut batch = std::mem::take(&mut *PENDING_ARGV.lock().unwrap_or_else(|e| e.into_inner()));
     if batch.is_empty() {
         return None;
     }
-    // 令牌不给应用看：先剥掉，留最后一个（最新的那次启动）。
-    let token = super::strip_activation_tokens(&mut batch);
+    // 启动 id 不给应用看：先剥掉。
+    let ids = super::strip_activation_tokens(&mut batch);
     SI_CTX.with(|c| {
         // 先 take 释放借用再调回调（同 macOS 版 `on_main`）。
         let maybe_ctx = c.borrow_mut().take();
@@ -183,7 +183,7 @@ pub(crate) fn run_pending_on_main() -> Option<Option<String>> {
             *guard = Some(ctx);
         }
     });
-    Some(token)
+    Some(ids)
 }
 
 /// 主线程:调 on_second 并把主窗口带到前台。

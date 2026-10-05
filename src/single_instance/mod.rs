@@ -70,10 +70,11 @@ pub(crate) fn take_activation_token(argv: &mut Vec<String>) -> Option<String> {
     Some(item[ACTIVATION_TOKEN_MARK.len()..].to_string()).filter(|t| !t.is_empty())
 }
 
-/// 首实例：一批转来的 argv 各自剥掉令牌，交出最后一个（最新的那次启动给的）。
+/// 首实例：一批转来的 argv 各自剥掉令牌，按到达顺序全部交出——每个都对应启动器里一次正在
+/// 转圈的启动，都要发完成信号；提到前台用最后一个（最新的那次启动）。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn strip_activation_tokens(batch: &mut [Vec<String>]) -> Option<String> {
-    batch.iter_mut().filter_map(take_activation_token).last()
+pub(crate) fn strip_activation_tokens(batch: &mut [Vec<String>]) -> Vec<String> {
+    batch.iter_mut().filter_map(take_activation_token).collect()
 }
 
 /// 二次实例要转发的 argv：命令行参数，Linux 上再附启动器给的启动 id（激活令牌，没有就
@@ -204,9 +205,10 @@ pub(crate) fn deliver_argv(argv: Vec<String>) {
 }
 
 /// Linux 事件循环在主线程调用：执行二次实例转来的 argv（见 `unix::run_pending_on_main`）。
-/// `None` = 没有积压；`Some(令牌)` = 执行过，调用方唤出主窗口，有令牌就凭它提到前台。
+/// `None` = 没有积压；`Some(启动 id)` = 执行过，调用方唤出主窗口，凭最后一个启动 id 提到前台、
+/// 对每一个都发完成信号（可能为空：二次实例没带）。
 #[cfg(target_os = "linux")]
-pub(crate) fn run_pending_on_main() -> Option<Option<String>> {
+pub(crate) fn run_pending_on_main() -> Option<Vec<String>> {
     unix::run_pending_on_main()
 }
 
@@ -264,14 +266,14 @@ mod tests {
         let mut batch = vec![a, b, c];
         assert_eq!(
             strip_activation_tokens(&mut batch),
-            Some("new".into()),
-            "取最后一次启动的"
+            vec!["old".to_string(), "new".to_string()],
+            "按到达顺序全部交出"
         );
         for (n, argv) in batch.iter().enumerate() {
             assert_eq!(argv, &vec!["app".to_string(), (n + 1).to_string()]);
         }
         let mut none = vec![vec!["app".to_string()]];
-        assert_eq!(strip_activation_tokens(&mut none), None);
+        assert!(strip_activation_tokens(&mut none).is_empty());
     }
 
     #[test]

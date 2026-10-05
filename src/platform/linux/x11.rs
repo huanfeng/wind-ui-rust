@@ -207,7 +207,8 @@ pub(super) fn run_windowed(
         x.hotkeys = Some(Hotkeys::install(&x.conn, x.root, &x.keymap, bindings));
     }
     if !cfg.start_hidden {
-        x.show(main);
+        let time = startup_id.as_deref().and_then(super::startup::timestamp);
+        x.show_at(main, time.unwrap_or(CURRENT_TIME));
     }
     if let Some(id) = &startup_id {
         x.startup_complete(main, id);
@@ -528,6 +529,12 @@ impl X11 {
     }
 
     fn show(&mut self, id: Window) {
+        self.show_at(id, CURRENT_TIME);
+    }
+
+    /// 映射并请求激活；`time` 是触发它的用户操作的 X 时间戳（启动 id 的 `_TIME`），WM 的
+    /// 防抢焦点按它判断，没有就 `CURRENT_TIME`。
+    fn show_at(&mut self, id: Window, time: u32) {
         if let Some(i) = self.idx(id) {
             let w = &mut self.windows[i];
             if std::mem::take(&mut w.hidden) && w.handler.on_window_shown() {
@@ -539,11 +546,7 @@ impl X11 {
             .conn
             .configure_window(id, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
         // 源 = 1（应用）：WM 可能按焦点窃取策略拒绝，但被 map 的新窗口通常照样获得焦点。
-        self.client_message(
-            id,
-            self.atoms._NET_ACTIVE_WINDOW,
-            [1, CURRENT_TIME, 0, 0, 0],
-        );
+        self.client_message(id, self.atoms._NET_ACTIVE_WINDOW, [1, time, 0, 0, 0]);
     }
 
     /// `_NET_STARTUP_ID`：这扇窗口属于哪次启动（WM 据此结束那次启动序列、判断焦点）。
@@ -561,12 +564,13 @@ impl X11 {
     /// 广播 startup-notification 的 `remove: ID=…`：消息切 20 字节片，首片
     /// `_NET_STARTUP_INFO_BEGIN`、其余 `_NET_STARTUP_INFO`，以 `PropertyChange` 掩码发到根窗口
     /// （规范要求；监视端在根上选的就是它）。来源窗口用 `id`（规范只要求是本客户端建的、存在的
-    /// 窗口）。
+    /// 窗口；GTK / libstartup-notification 每次新建一扇不映射的临时窗口，那是为了让同一进程里
+    /// 并发的多条消息按来源窗口分得开——我们只在事件循环里串行地发，借用已有窗口即可）。
     fn startup_complete(&self, id: Window, startup: &str) {
         let a = self.atoms;
         let msg = super::startup::remove_message(startup);
-        for (n, chunk) in super::startup::chunks(&msg).into_iter().enumerate() {
-            let type_ = if n == 0 {
+        for (begin, chunk) in super::startup::chunks(&msg) {
+            let type_ = if begin {
                 a._NET_STARTUP_INFO_BEGIN
             } else {
                 a._NET_STARTUP_INFO
@@ -673,15 +677,21 @@ impl X11 {
             }
             // 2. 跨线程唤醒：后台消息、单实例转发的 argv。
             if pipe.is_some_and(|p| p.drain()) {
-                if let Some(id) = crate::single_instance::run_pending_on_main() {
+                if let Some(startups) = crate::single_instance::run_pending_on_main() {
                     if self.idx(main).is_some() {
-                        // 二次启动转来的启动 id：挂上并广播 remove，启动器才不会为那次启动转圈。
-                        if let Some(id) = &id {
-                            self.set_startup_id(main, id);
+                        // 二次启动转来的启动 id：最新的挂上并带它的时间戳唤出（WM 据此放行
+                        // 焦点），每个都广播 remove，启动器才不会为那几次启动转圈。
+                        let latest = startups.last();
+                        if let Some(sid) = latest {
+                            self.set_startup_id(main, sid);
                         }
-                        self.show(main);
-                        if let Some(id) = &id {
-                            self.startup_complete(main, id);
+                        let time = latest.and_then(|sid| super::startup::timestamp(sid));
+                        self.show_at(main, time.unwrap_or(CURRENT_TIME));
+                    }
+                    // 主窗口已关也照发：remove 只需一扇本客户端的窗口当来源。
+                    if let Some(from) = self.windows.first().map(|w| w.id) {
+                        for sid in &startups {
+                            self.startup_complete(from, sid);
                         }
                     }
                 }

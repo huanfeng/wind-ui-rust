@@ -1003,9 +1003,23 @@ impl Wl {
             }
             // 跨线程唤醒：后台消息、单实例转发的 argv。
             if pipe.is_some_and(|p| p.drain()) {
-                if let Some(token) = crate::single_instance::run_pending_on_main() {
-                    if self.idx(self.main).is_some() {
-                        self.raise(self.main, token);
+                if let Some(mut ids) = crate::single_instance::run_pending_on_main() {
+                    // 更早的几次启动也各 activate 一次，GNOME 才结束它们各自的启动序列；最新的
+                    // 放最后，焦点由它定。主窗口已关就借一扇还开着的窗口，免得启动器转到超时。
+                    let latest = ids.pop();
+                    let target = if self.idx(self.main).is_some() {
+                        Some(self.main)
+                    } else {
+                        self.windows
+                            .iter()
+                            .find(|w| w.role.is_some())
+                            .map(|w| w.key)
+                    };
+                    if let Some(key) = target {
+                        for id in ids {
+                            self.activate(key, Some(id));
+                        }
+                        self.raise(key, latest);
                     }
                 }
                 for w in &mut self.windows {
