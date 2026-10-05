@@ -92,6 +92,16 @@ softbuffer（X11 下同样是 PutImage/SHM，多一层抽象）、cosmic-text / 
   xdg-desktop-portal 的 GlobalShortcuts。
 - **剪贴板**：独立线程 + 独立连接专职应答 `SelectionRequest`，与窗口生命周期脱钩；
   不支持 INCR 分段传输（超大段文本读取为空）。
+- **启动通知**（`startup.rs`）：桌面启动器（应用菜单、任务栏）在 `DESKTOP_STARTUP_ID` 里给新进程
+  一个启动 id，等「启动完成」的信号，收不到就一直转圈到超时。主窗口映射前挂上
+  `_NET_STARTUP_ID`（UTF8_STRING，WM 认它），映射后向根窗口广播 freedesktop startup-notification
+  的 `remove: ID=<id>`（值里的空格、双引号、反斜杠前加反斜杠，与 libstartup-notification / GTK
+  同；切 20 字节的 8 位 ClientMessage，首片 `_NET_STARTUP_INFO_BEGIN`、其余 `_NET_STARTUP_INFO`，
+  最后一片含结尾 NUL；`PropertyChange` 掩码发到根窗口，来源窗口用主窗口）。`start_hidden` 也照发
+  remove。用掉后 `DESKTOP_STARTUP_ID` 与 `XDG_ACTIVATION_TOKEN` 都从环境里删掉。单实例二次启动：
+  第二个进程把自己的启动 id 随 argv 转过来（同 §8.3「把窗口提到前台」的转发），首实例给主窗口
+  换上这个 `_NET_STARTUP_ID`、唤出后对它广播 remove——第二个进程很快退出，但启动器等的是这条
+  消息，不发它照样转圈。
 - **双击**：时限 400ms、漂移 4 逻辑像素，平台层自己折算（X 不报点击计数）。
 - **触摸惯性**：未接（X 核心协议无触摸事件）；触控板两指滚动经滚轮按钮 4/5 到达。
 - **输入法进程中途退出**：XIM 没有断线通知，按键仍会转给已不存在的输入法而得不到回应
@@ -412,11 +422,19 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
 - **把窗口提到前台**（`activation.rs`，`xdg-activation-v1`）：Wayland 不许应用自己抢焦点，得拿
   激活令牌换。已显示的窗口要提到前台时（单实例二次启动、`Window::single` 同键再开、`WindowOp::Show`、
   点被模态挡住的父窗时唤出模态子窗；Linux 没有系统托盘，托盘那条路不存在）：
-  - 有别处给的令牌就直接 `activate`：**单实例二次启动**时桌面启动器给第二个进程设的
-    `XDG_ACTIVATION_TOKEN` 随 argv 转给运行中的实例（作为一个带 `\u{1}` 前缀的标记元素附在末尾，
+  - **启动 id 就是令牌**：桌面启动器给新进程的 `XDG_ACTIVATION_TOKEN`，没有就取
+    `DESKTOP_STARTUP_ID`（`startup.rs`）。Ubuntu 22.04（glib 2.72）的 GNOME 在 Wayland 会话里
+    只设后者（glib 2.76 起才设前者）；mutter 把 startup id 当激活令牌收，GTK3 的 Wayland 后端也
+    这样回退。首窗映射后用它 `activate`——这也是 GNOME 结束启动序列的信号，不发就转圈到超时
+    （GNOME 42 / glib 2.72 真桌面实测，2026-10-05：只认 `XDG_ACTIVATION_TOKEN` 时从概览首次启动
+    一直转圈到超时；回退 `DESKTOP_STARTUP_ID` 后首次启动不转圈，焦点在别的应用上时从概览二次
+    启动，已有窗口直接到前台）。
+  - 有别处给的令牌就直接 `activate`：**单实例二次启动**时桌面启动器给第二个进程的启动 id
+    （同上，先 `XDG_ACTIVATION_TOKEN` 后 `DESKTOP_STARTUP_ID`）随 argv 转给运行中的实例（作为一个带 `\u{1}` 前缀的标记元素附在末尾，
     首实例在调 `on_second` 前剥掉，应用看不到；只在 Linux 上附，win32 / macOS 的转发格式不变）。
     第二个进程只读不删：转发成功它随即退出；转发失败回退为首实例时令牌还要留给自己。
-    本进程打开显示时取走环境里的令牌激活主窗口，并从环境里删掉免得泄漏给子进程（与 GTK 同；
+    第二个进程很快退出，启动器为它那次启动转的圈要靠首实例用这个 id `activate` 来结束。
+    本进程打开显示时取走环境里的启动 id 激活主窗口，两个变量都从环境里删掉免得泄漏给子进程（与 GTK 同；
     改环境要求此时没有别的线程在直接 `getenv`，GTK 也是同一前提）。新版本的二次实例转发给仍在
     运行的旧版本时，旧版本不认这个标记，`on_second` 会多收到一个参数——不保证新旧版本互通。
   - 没有就自己要一个：`get_activation_token` 带上最近一次**按下**（键盘键或鼠标键）的
@@ -428,6 +446,8 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   - 隐藏着的窗口照常映射（合成器一般会给新映射的窗口焦点），有别处给的令牌再补一次 `activate`。
   - 既没令牌也没近期输入：照样要一个（不带 serial），合成器多半只标「需要注意」——协议预期的行为。
   - 合成器没有该协议：不提到前台，stderr 提示一次。
+  - `start_hidden`：启动 id 丢弃（等到首次显示多半已过期），启动器会转到超时——托盘常驻应用
+    在 GNOME Wayland 下的已知偏差（X11 下照发 remove，不受影响）。
 - **诊断开关**：`WINDUI_WAYLAND_DISABLE=viewporter,fractional-scale,cursor-shape,text-input,xdg-decoration,xdg-dialog,xdg-activation`
   假装合成器没有这些协议，在新合成器上走一遍 GNOME 42 的回退路径（`xdg-decoration` 关掉即在
   sway 上走客户端标题栏）。
@@ -556,6 +576,15 @@ Stage 5（sway headless，`WINDUI_WAYLAND_DISABLE=xdg-decoration` 走客户端�
   `urgent` / `smart` / `focus` 实测结果相同）；`on_second` 收到的 argv 里没有令牌标记。不带 serial 的
   令牌、或干脆没有令牌：首实例自己要令牌并 `activate`，sway 只把窗口标成 urgent，焦点不动——
   合成器的防抢焦点，符合预期。
+- 启动 id 回退：只设 `DESKTOP_STARTUP_ID` 首次启动 → 首窗映射后 `activate(该 id, 主窗表面)`；
+  启动器令牌放在 `DESKTOP_STARTUP_ID` 里二次启动 → 焦点到首实例，与放在 `XDG_ACTIVATION_TOKEN`
+  里一致。对照：启动器窗口拿到令牌后一直开在前台，不带令牌二次启动时焦点留在启动器（早先的
+  测试客户端拿到令牌即退出，焦点会自己落回首实例，那组「焦点转移」不成立，已改正重测）。
+- X11 启动通知（Xvfb + openbox，自写根窗口监听端按来源窗口拼接消息）：带含空格、双引号、
+  反斜杠的 `DESKTOP_STARTUP_ID` 启动 → 主窗 `_NET_STARTUP_ID` 为原值（xprop），根窗口收到首片为
+  `_NET_STARTUP_INFO_BEGIN` 的 4 片消息，拼出 `remove: ID=` + 正确转义的 id；带另一个 id 二次
+  启动 → 主窗 `_NET_STARTUP_ID` 换成新值、再收到一条 remove；不带 id 的二次启动不发。监听端按
+  规范自写，未拿 libstartup-notification 的解析端核对。
 - 本进程内：`multi_window` 里开出单例「设置」窗、点回主窗，再点「打开设置…」→ 带这次点击的
   serial 与主窗表面要令牌、`done` 后 `activate`，焦点到「设置」窗；`WAYLAND_DEBUG` 核对带的是
   按下那一下的 serial（松开的 serial 比它大 1）。
@@ -757,6 +786,8 @@ primary selection。
 23. `multi_window`：开出「设置」窗后点回主窗，再点「打开设置…」——已开着的「设置」窗被提到前台
     （单例不开第二个）；点被模态子窗挡住的主窗时，模态子窗到前台。合成器拒绝给焦点时（比如
     没有近期输入），GNOME 至少弹「已就绪」通知。
+24. 从概览 / 应用菜单**首次**启动：鼠标与概览不转圈，窗口到前台；单实例应用**二次**启动也不
+    为第二个进程转圈到超时。Wayland 与 X11 会话各测一次（X11 下走 `_NET_STARTUP_INFO`）。
 
 *自动化覆盖的缺口*（各阶段交付时记下的偏差，回归时心里有数）：Stage 1 的像素比对用
 `weston-screenshooter` 抓屏与离屏渲染比对，不在 `cargo test` 里；Stage 2 的输入注入在 sway 上
