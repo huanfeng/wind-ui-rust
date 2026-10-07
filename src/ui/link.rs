@@ -37,6 +37,8 @@ pub struct Link {
     /// 链接色补间（hover/press 淡变）。retarget-in-paint；首帧靠 `primed` 落定。
     color_anim: Cell<Transition<Color>>,
     primed: Cell<bool>,
+    /// 折行溢出 bounds 时的裁剪判定（自带排版缓存）。
+    overflow: super::text_fit::WrapClip,
 }
 
 impl Link {
@@ -49,6 +51,7 @@ impl Link {
             on_click: None,
             color_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
             primed: Cell::new(false),
+            overflow: Default::default(),
         }
     }
     /// 设置激活时打开的 URL/路径（供 Builder 的 `.url()` 调用）。
@@ -81,7 +84,7 @@ impl Widget for Link {
 
     fn paint(
         &self,
-        _bounds: Rect,
+        bounds: Rect,
         content: Rect,
         _focused: bool,
         enabled: bool,
@@ -111,18 +114,23 @@ impl Widget for Link {
         }
         let color = anim.animate();
         self.color_anim.set(anim);
-        canvas.draw_text(
+        // 钉了宽高的链接配长文案会折行：折出 bounds 的部分裁回（与 Label 同一套判据）。
+        self.overflow.draw_text(
+            canvas,
             s.as_ref(),
             content,
+            bounds,
             color,
             style.text_align,
             &crate::text::TextStyle::of(style),
         );
         if self.underline {
-            // 下划线贴文字底缘；x 跟随文字（Start 对齐），长度取文字实测宽。
+            // 下划线贴文字底缘；x 跟随文字（Start 对齐），长度取文字实测宽——但不超出
+            // content：宽度被钉窄而折行时，单行实测宽比 content 还宽，线会画出 bounds。
             let tw = canvas
                 .measure_text(s.as_ref(), &crate::text::TextStyle::of(style))
-                .w;
+                .w
+                .min(content.w);
             let y = (content.y + content.h - 1) as f32;
             let x0 = content.x as f32;
             canvas.draw_line(x0, y, x0 + tw as f32, y, 1.0, &Paint::fill(color));
@@ -316,5 +324,38 @@ mod tests {
             !tree.node_enabled(root),
             "禁用态应被核心识别（宿主据此回退箭头光标）"
         );
+    }
+
+    // ---- 折行溢出：真实文字引擎 + 真实 layout/paint ----
+
+    use crate::ui::text_fit::ink::*;
+
+    /// 显式宽高：长文案折行后不得画出 bounds，下划线也不得伸出右沿。
+    #[test]
+    fn wrapped_link_stays_inside_bounds_explicit_width() {
+        assert_wraps_taller_than(120, 20);
+        let el = Element::col().children([
+            Element::link(LONG_TITLE)
+                .font_size(13.0)
+                .width(120)
+                .height(20),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, lb) = paint_first_child(el, 200, 100);
+        assert_eq!((lb.w, lb.h), (120, 20));
+        assert_no_ink_outside(&pm, lb, "Link 显式宽");
+    }
+
+    /// Wrap 宽：链接按单行量宽，被父宽压窄后折行，同样不得出界。
+    #[test]
+    fn wrapped_link_stays_inside_bounds_wrap_width() {
+        assert_wraps_taller_than(120, 20);
+        let el = Element::col().width_match().children([
+            Element::link(LONG_TITLE).font_size(13.0).height(20),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, lb) = paint_first_child(el, 120, 100);
+        assert!(lb.w <= 120, "Wrap 宽应受父宽约束：{lb:?}");
+        assert_no_ink_outside(&pm, lb, "Link Wrap 宽");
     }
 }

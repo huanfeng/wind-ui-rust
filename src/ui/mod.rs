@@ -24,6 +24,7 @@ pub mod sortable_table;
 pub mod split;
 pub mod stepper;
 pub mod text_content;
+mod text_fit;
 pub mod virtual_list;
 pub mod window_buttons;
 
@@ -132,11 +133,8 @@ pub struct Label {
     /// 单行截断在 paint 期精确算（还要拼省略号），多行则只做高度裁剪、不重排文本，
     /// 故它的"截没截"只能在 measure 那一刻比出来——那里恰好已经有完整排版高度与封顶值。
     multiline_overflow: Cell<bool>,
-    /// 不限行时按实际宽度排版的高度缓存：`(排版键, 多行时的折行排版高度（单行为 0）, 不折行高度)`。
-    ///
-    /// 排版键由文案、`content.w`、文字属性与 DPI 缩放散列而成——paint 每帧都会来问，
-    /// 而文本测量是一次完整排版，不缓存就是每帧重排。
-    overflow_cache: Cell<Option<(u64, i32, i32)>>,
+    /// 不限行时折行溢出 bounds 的裁剪判定（自带排版缓存）。
+    overflow: text_fit::WrapClip,
 }
 
 impl Label {
@@ -147,126 +145,8 @@ impl Label {
             truncate: Truncate::None,
             trunc_cache: RefCell::new(None),
             multiline_overflow: Cell::new(false),
-            overflow_cache: Cell::new(None),
+            overflow: text_fit::WrapClip::default(),
         }
-    }
-
-    /// 不限行的文本按 `content.w` 折行后若画出 `bounds` 下沿，返回 paint 应裁到的矩形。
-    ///
-    /// 只认**多行**溢出：单行文本在紧凑高度（如 `.height(14)` 配 13 号字）下行盒本就
-    /// 略高于分配高度，那是下伸部与字形外沿，裁掉反而切字。判多行用"折行后比不折行
-    /// 高出半行以上"或含硬换行，而不是拿 `"Ay"` 的行高去比——CJK 回退字体的单行可能
-    /// 比它高；留半行容差是因为两次测量在部分后端（d2d）是两套独立实现，单行也可能差
-    /// 一两个像素，误判成多行就会切掉下伸部。
-    ///
-    /// 裁剪下沿按整行对齐：直接裁在 bounds 下沿，下一行的字头会在 bounds 底部露出几个
-    /// 像素的碎点。至少保留一行，故首行（含下伸部）总是完整的。
-    fn overflow_clip(
-        &self,
-        s: &str,
-        canvas: &mut dyn Canvas,
-        ts: &crate::text::TextStyle,
-        bounds: Rect,
-        content: Rect,
-    ) -> Option<Rect> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut h);
-        content.w.hash(&mut h);
-        ts.family.hash(&mut h);
-        ts.size.to_bits().hash(&mut h);
-        ts.weight.hash(&mut h);
-        ts.italic.hash(&mut h);
-        ts.line_height.map(f32::to_bits).hash(&mut h);
-        canvas.dpi_scale().to_bits().hash(&mut h);
-        let key = h.finish();
-        let (multi_h, single_h) = match self.overflow_cache.get() {
-            Some((k, m, l)) if k == key => (m, l),
-            _ => {
-                let wrapped = canvas.measure_text_wrapped(s, ts, content.w as f32).h;
-                // 单行高量首个非空段：不折行测量也会把 `\n` 算成多行，拿整段去量会把
-                // 行高估成两倍，整行对齐时就多裁掉一行本来放得下的字。
-                let probe = s.split('\n').find(|l| !l.is_empty()).unwrap_or("Ay");
-                let single = canvas.measure_text(probe, ts).h.max(1);
-                let multi = s.contains('\n') || wrapped * 2 > single * 3;
-                let v = (if multi { wrapped } else { 0 }, single);
-                self.overflow_cache.set(Some((key, v.0, v.1)));
-                v
-            }
-        };
-        // 高度不进键：它只参与下面的比较，分配高度变了不必重排。
-        // 判据与裁剪同口径——都看 bounds：排版只越过 content 而仍在 padding 内时，
-        // 裁了也是白裁（软后端每次 clip 还要分配一张整窗 mask）。
-        if content.y + multi_h <= bounds.bottom() {
-            return None;
-        }
-        // single_h 是 ceil 过的（偏大至多 1px），十几行以上时行数可能估小一行、少留一行；
-        // 只在钉死高度的超长文本上出现，接受。
-        let lines = (multi_h as f32 / single_h as f32).round().max(1.0);
-        let line_h = multi_h as f32 / lines;
-        // 可保留行数也按 bounds 算（与上面的判据同口径）：按 content.h 算的话，带下
-        // padding 时文案多一行反而会把原本装得下的第二行也藏掉。
-        let avail = bounds.bottom() - content.y;
-        let keep = ((avail as f32 / line_h).floor().max(1.0) * line_h).ceil() as i32;
-        let bottom = bounds.bottom().min(content.y + keep);
-        Some(Rect::new(bounds.x, bounds.y, bounds.w, bottom - bounds.y))
-    }
-
-    /// 计算截断后显示串（含省略号）及是否实际发生了截断；结果会被 paint 缓存，通常只算一次。
-    fn compute_truncated(
-        &self,
-        s: &str,
-        canvas: &mut dyn Canvas,
-        ts: &crate::text::TextStyle,
-        avail_w: i32,
-    ) -> (String, bool) {
-        let total_w = canvas.measure_text(s, ts).w;
-        if total_w <= avail_w {
-            return (s.to_string(), false);
-        }
-        let ew = canvas.measure_text("…", ts).w;
-        let avail = (avail_w - ew).max(0);
-        let chars: Vec<char> = s.chars().collect();
-        let n = chars.len();
-        // 前缀累计宽度表（O(N) 次 measure，之后 partition_point 二分）。
-        let mut widths = vec![0i32; n + 1];
-        let mut acc = String::new();
-        for (i, &c) in chars.iter().enumerate() {
-            acc.push(c);
-            widths[i + 1] = canvas.measure_text(&acc, ts).w;
-        }
-        let out = match self.truncate {
-            Truncate::End => {
-                // partition_point 返回第一个 > avail 的下标，该位置的字符本身已超宽，
-                // 需 -1 取最后一个能放下的字符数。
-                let cut = widths
-                    .partition_point(|&w| w <= avail)
-                    .saturating_sub(1)
-                    .min(n);
-                format!("{}…", chars[..cut].iter().collect::<String>())
-            }
-            Truncate::Start => {
-                // partition_point(w < threshold) 返回第一个 >= threshold 的下标，
-                // 即从该字符起的后缀宽度 ≤ avail，此处无 off-by-one。
-                let threshold = total_w - avail;
-                let cut = widths.partition_point(|&w| w < threshold).min(n);
-                format!("…{}", chars[cut..].iter().collect::<String>())
-            }
-            Truncate::Middle => {
-                let lcut = widths
-                    .partition_point(|&w| w <= avail / 2)
-                    .saturating_sub(1)
-                    .min(n);
-                let right_avail = (avail - widths[lcut]).max(0);
-                let threshold = total_w - right_avail;
-                let rcut = widths.partition_point(|&w| w < threshold).min(n);
-                let left: String = chars[..lcut].iter().collect();
-                let right: String = chars[rcut..].iter().collect();
-                format!("{left}…{right}")
-            }
-            Truncate::None => unreachable!(),
-        };
-        (out, true)
     }
 }
 
@@ -336,7 +216,7 @@ impl Widget for Label {
         let overflow_clip = if need_clip {
             None
         } else {
-            self.overflow_clip(&s, canvas, ts, bounds, content)
+            self.overflow.clip_rect(&s, canvas, ts, content, bounds)
         };
 
         if need_clip {
@@ -364,7 +244,8 @@ impl Widget for Label {
             let (text_str, _truncated) = if let Some(hit) = cached {
                 hit
             } else {
-                let (out, t) = self.compute_truncated(&s, canvas, ts, content.w);
+                let (out, t) =
+                    text_fit::truncate_to_width(&s, canvas, ts, content.w, self.truncate);
                 *self.trunc_cache.borrow_mut() =
                     Some((s.to_string(), key_w, key_f, out.clone(), t));
                 (out, t)
@@ -6507,7 +6388,7 @@ mod tests {
             truncate: Truncate::End,
             trunc_cache: RefCell::new(None),
             multiline_overflow: Cell::new(false),
-            overflow_cache: Cell::new(None),
+            overflow: text_fit::WrapClip::default(),
         };
         let style = Style::default();
         let r = Rect::new(0, 0, 40, 20);
@@ -6847,89 +6728,7 @@ b",
 
     // ---- Label 折行溢出裁剪：真实文字引擎 + 真实 layout/paint ----
 
-    /// 白底上 `[y0, y1)` 行区间内的非白像素数（墨量）。
-    fn ink_rows(pm: &tiny_skia::Pixmap, y0: i32, y1: i32) -> usize {
-        let w = pm.width() as i32;
-        let d = pm.data();
-        let mut n = 0;
-        for y in y0.max(0)..y1.min(pm.height() as i32) {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                if d[i] != 255 || d[i + 1] != 255 || d[i + 2] != 255 {
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
-
-    /// 用平台文字引擎布局并画一帧（白底、scale 1），返回画布与 label 的绝对矩形。
-    ///
-    /// `el` 的首个子节点须是被测 label。下方兄弟节点特意不铺底色——整窗帧里后画的
-    /// 不透明兄弟会把溢出盖住，测的就不是 label 自己画没画出界了；局部重绘只重画
-    /// label 时正是这个情形。
-    fn paint_label_frame(el: Element, w: i32, h: i32) -> (tiny_skia::Pixmap, Rect) {
-        let mut eng = crate::text::PlatformTextEngine::default();
-        eng.set_scale(1.0);
-        let mut tree = Tree::new();
-        let root = el.build(&mut tree);
-        tree.root = Some(root);
-        tree.layout_root(Size::new(w, h), &mut eng);
-        let label = tree.get(root).unwrap().children[0];
-        let lb = tree.abs_bounds(label);
-        let mut pm = tiny_skia::Pixmap::new(w as u32, h as u32).unwrap();
-        pm.fill(tiny_skia::Color::WHITE);
-        let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
-        tree.paint(&mut cv);
-        drop(cv);
-        (pm, lb)
-    }
-
-    const LONG_TITLE: &str = "方案（富内容：副标题 + 徽章 + 可点击尾随图标）";
-
-    /// 断言：label 文字确实折成了多行（否则测不到溢出），且下沿以下没有墨。
-    fn assert_no_ink_below(pm: &tiny_skia::Pixmap, lb: Rect, what: &str) {
-        assert!(
-            ink_rows(pm, lb.y, lb.bottom()) > 0,
-            "{what}：正控——label 自身范围内应当有字"
-        );
-        assert_eq!(
-            ink_rows(pm, lb.bottom(), pm.height() as i32),
-            0,
-            "{what}：折行后高出分配高度的文字画到了 label 下沿 {} 以下，\
-             会压在下方兄弟上（局部重绘时露出）",
-            lb.bottom()
-        );
-    }
-
-    /// 让 `text` 排版高度超过 `min_h` 的测试宽度：从 120 往窄里试。
-    ///
-    /// 折成几行取决于机器上有什么字体——CI 的 ubuntu 镜像没有 CJK 字体，中文落到回退
-    /// 字形上、宽度不同，120 宽只折两行，写死宽度的前提在那里不成立（本机有 Noto CJK
-    /// 时成立，于是本地全绿、CI 红）。按实测选宽度，前提在任何字体下都成立。
-    fn wrap_width_exceeding(text: &str, min_h: i32) -> i32 {
-        let mut eng = crate::text::PlatformTextEngine::default();
-        eng.set_scale(1.0);
-        let ts = crate::text::TextStyle::new(13.0);
-        (40..=120)
-            .rev()
-            .step_by(8)
-            .find(|&w| eng.measure(text, &ts, Some(w as f32)).h > min_h)
-            .unwrap_or_else(|| panic!("前提不成立：40..=120 宽内排版高都不超过 {min_h}"))
-    }
-
-    /// 前提校验：这段文字在测试宽度下确实折成多行、排版高度超过 20。
-    fn assert_wraps_taller_than(width: i32, h: i32) {
-        let mut eng = crate::text::PlatformTextEngine::default();
-        eng.set_scale(1.0);
-        let ts = crate::text::TextStyle::new(13.0);
-        let sz = eng.measure(LONG_TITLE, &ts, Some(width as f32));
-        assert!(
-            sz.h > h,
-            "前提不成立：{width} 宽下排版高 {} 未超过 {h}，测不到溢出",
-            sz.h
-        );
-    }
+    use super::text_fit::ink::*;
 
     /// 显式宽（`width_match`）+ 固定高度：折行溢出须裁在 label 内。
     #[test]
@@ -6942,7 +6741,7 @@ b",
                 .width_match(),
             Element::col().height(80).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, 120, 100);
+        let (pm, lb) = paint_first_child(el, 120, 100);
         assert_eq!(lb.h, 20);
         assert_no_ink_below(&pm, lb, "显式宽");
 
@@ -6977,7 +6776,7 @@ b",
             Element::label(text).font_size(13.0).height(h).width_match(),
             Element::col().height(200).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, w, 300);
+        let (pm, lb) = paint_first_child(el, w, 300);
         assert_eq!(lb.h, h);
         assert_no_ink_below(&pm, lb, "硬换行混合");
         assert!(
@@ -7016,7 +6815,7 @@ b",
                 .width_match(),
             Element::col().height(80).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, w, 100);
+        let (pm, lb) = paint_first_child(el, w, 100);
         assert_eq!(lb.h, h);
         assert_no_ink_below(&pm, lb, "带下 padding");
         assert!(
@@ -7077,7 +6876,7 @@ b",
             Element::label(LONG_TITLE).font_size(13.0).height(20),
             Element::col().height(80).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, 120, 100);
+        let (pm, lb) = paint_first_child(el, 120, 100);
         assert_eq!(lb.h, 20);
         assert!(lb.w <= 120, "Wrap 宽应受父宽约束：{lb:?}");
         assert_no_ink_below(&pm, lb, "Wrap 宽");
@@ -7095,7 +6894,7 @@ b",
                 .width_match(),
             Element::col().height(80).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, 200, 100);
+        let (pm, lb) = paint_first_child(el, 200, 100);
         assert_eq!(lb.h, 11);
 
         // 对照：同一矩形、同一样式，绕开 Label 直接画，不加任何裁剪。
