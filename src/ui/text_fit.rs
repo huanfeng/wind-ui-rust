@@ -20,6 +20,24 @@ use crate::spec::Align;
 use crate::text::TextStyle;
 use crate::ui::Truncate;
 
+/// 文字引擎会据以断行的字符：LF、CR、VT、FF、NEL 与 Unicode 行 / 段分隔符。
+fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// 换行符压成空格（CRLF 算一个）；不含换行符返回 `None`。
+fn flatten_line_breaks(s: &str) -> Option<String> {
+    s.contains(is_line_break).then(|| {
+        s.replace("\r\n", " ")
+            .chars()
+            .map(|c| if is_line_break(c) { ' ' } else { c })
+            .collect()
+    })
+}
+
 /// 排版键：文案、排版宽度、文字属性与 DPI 缩放的散列。
 ///
 /// 64 位散列、单条缓存：碰撞的后果只是一帧该裁没裁（或该截没截），可以接受。
@@ -66,16 +84,24 @@ impl WrapClip {
         text: Rect,
         bounds: Rect,
     ) -> Option<Rect> {
+        // 文字矩形整个落在 bounds 下沿以下（上 padding 超过了高度）：一个字也不该画。
+        // 软后端与 GPU 后端对零高矩形本就跳过不画，这里是给其余后端的兜底。
+        if text.y >= bounds.bottom() {
+            return Some(Rect::new(bounds.x, bounds.y, bounds.w, 0));
+        }
         let key = layout_key(s, text.w, ts, canvas.dpi_scale());
         let (multi_h, single_h) = match self.cache.get() {
             Some((k, m, l)) if k == key => (m, l),
             _ => {
                 let wrapped = canvas.measure_text_wrapped(s, ts, text.w as f32).h;
-                // 单行高量首个非空段：不折行测量也会把 `\n` 算成多行，拿整段去量会把
+                // 单行高量首个非空段：不折行测量也会把换行符算成多行，拿整段去量会把
                 // 行高估成两倍，整行对齐时就多裁掉一行本来放得下的字。
-                let probe = s.split('\n').find(|l| !l.is_empty()).unwrap_or("Ay");
+                let probe = s
+                    .split(is_line_break)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("Ay");
                 let single = canvas.measure_text(probe, ts).h.max(1);
-                let multi = s.contains('\n') || wrapped * 2 > single * 3;
+                let multi = s.contains(is_line_break) || wrapped * 2 > single * 3;
                 let v = (if multi { wrapped } else { 0 }, single);
                 self.cache.set(Some((key, v.0, v.1)));
                 v
@@ -152,8 +178,10 @@ impl SingleLine {
         let fitted = match hit {
             Some(v) => v,
             None => {
-                // 硬换行压成空格：这类控件只有一行可画，留着 `\n` 就又折出 bounds 了。
-                let flat = s.contains('\n').then(|| s.replace('\n', " "));
+                // 硬换行压成空格：这类控件只有一行可画，留着换行符就又折出 bounds 了。
+                // 不止 `\n`——CRLF 文案（Windows 配置、剪贴板）里的 `\r` 在 DirectWrite /
+                // Core Text 下同样分段。
+                let flat = flatten_line_breaks(s);
                 let src = flat.as_deref().unwrap_or(s);
                 let (out, cut) = truncate_to_width(src, canvas, ts, rect.w.max(0), Truncate::End);
                 let v = (cut || flat.is_some()).then_some(out);
@@ -179,7 +207,11 @@ pub(crate) fn truncate_to_width(
         return (s.to_string(), false);
     }
     let ew = canvas.measure_text("…", ts).w;
-    let avail = (avail_w - ew).max(0);
+    // 连省略号都放不下：画省略号反而比矩形还宽（居中时伸出两侧），不如什么都不画。
+    if avail_w < ew {
+        return (String::new(), true);
+    }
+    let avail = avail_w - ew;
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
     // 前缀累计宽度表（O(N) 次 measure，之后 partition_point 二分）。
@@ -358,5 +390,75 @@ pub(crate) mod ink {
             0,
             "{what}：有墨画到了控件 bounds {r:?} 之外（会压在兄弟节点上，局部重绘时露出）"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ink::*;
+    use super::*;
+
+    fn white(w: u32, h: u32) -> tiny_skia::Pixmap {
+        let mut pm = tiny_skia::Pixmap::new(w, h).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        pm
+    }
+
+    /// 单行控件里的 CRLF / 裸 CR / Unicode 分隔符同样压成一行：DirectWrite 与 Core Text
+    /// 把 `\r` 当分段，只压 `\n` 的话 CRLF 文案照样画成两行。
+    #[test]
+    fn single_line_flattens_every_line_break() {
+        for text in ["短\r\n第二行", "短\r第二行", "短\u{2028}第二行"] {
+            let mut eng = engine();
+            let mut pm = white(200, 60);
+            let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            let fit = SingleLine::default();
+            let rect = Rect::new(0, 0, 200, 20);
+            fit.draw_text(
+                &mut cv,
+                text,
+                rect,
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(13.0),
+            );
+            drop(cv);
+            assert!(ink_rows(&pm, 0, 20) > 0, "{text:?}：正控——应画出字");
+            assert_eq!(
+                ink_rows(&pm, 20, 60),
+                0,
+                "{text:?}：换行没压平，画出了第二行"
+            );
+        }
+    }
+
+    /// 压平的字符集：Linux 自带排版不把 `\r`、U+2028 当断行，上面的墨量测试在 Linux
+    /// 上测不出漏压，故直接钉住字符串层面的结果。
+    #[test]
+    fn flatten_covers_crlf_and_unicode_separators() {
+        assert_eq!(flatten_line_breaks("无换行"), None);
+        assert_eq!(flatten_line_breaks("a\r\nb").as_deref(), Some("a b"));
+        for sep in [
+            '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+        ] {
+            assert_eq!(
+                flatten_line_breaks(&format!("a{sep}b")).as_deref(),
+                Some("a b"),
+                "{sep:?} 没压平"
+            );
+        }
+    }
+
+    /// 宽度连省略号都放不下：截成空串，而不是画一个比矩形还宽的 `…`。
+    #[test]
+    fn truncate_narrower_than_ellipsis_is_empty() {
+        let mut eng = engine();
+        let mut pm = white(10, 10);
+        let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        let ts = TextStyle::new(13.0);
+        let ew = cv.measure_text("…", &ts).w;
+        assert!(ew > 1, "前提：省略号有宽度");
+        let (out, cut) = truncate_to_width(LONG_TITLE, &mut cv, &ts, ew - 1, Truncate::End);
+        assert_eq!((out.as_str(), cut), ("", true));
     }
 }
