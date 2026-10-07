@@ -359,6 +359,13 @@ impl Widget for Dropdown {
                     + 2 * BADGE_PAD_X
             })
             .unwrap_or(0);
+        // 触发器窄到放不下徽章（连同两侧留白、chevron 与间距）就不画：徽章贴右沿定位，
+        // 硬画会从 bounds 左侧伸出去。文字区随之拿回整宽。
+        let (badge, badge_w) = if bounds.w < 2 * PAD_X + CHEVRON_W + badge_w + BADGE_GAP {
+            (None, 0)
+        } else {
+            (badge, badge_w)
+        };
         if let Some((text, intent)) = &badge {
             let (fill, fg) = intent.badge_colors(pal);
             let br = Rect::new(
@@ -908,6 +915,7 @@ mod overflow_tests {
 
     #[test]
     fn long_trigger_text_stays_inside_bounds_explicit_width() {
+        assert_single_line_wider_than(LONG_TITLE, 13.0, 120);
         for (what, el) in triggers() {
             let el =
                 Element::col().children([el.width(120), Element::col().height(80).width_match()]);
@@ -919,6 +927,7 @@ mod overflow_tests {
 
     #[test]
     fn long_trigger_text_stays_inside_bounds_wrap_width() {
+        assert_single_line_wider_than(LONG_TITLE, 13.0, 120);
         for (what, el) in triggers() {
             let el = Element::col()
                 .width_match()
@@ -927,5 +936,25 @@ mod overflow_tests {
             assert!(b.w <= 120, "{what}：Wrap 宽应受父宽约束：{b:?}");
             assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
         }
+    }
+
+    /// 带徽章的选项、触发器窄到放不下徽章：徽章不画，不得从 bounds 左侧伸出。
+    #[test]
+    fn narrow_trigger_drops_badge_inside_bounds() {
+        use crate::theme::Intent;
+        use crate::ui::select::DropdownItem;
+        let items = vec![DropdownItem::new("免费版").badge("当前推荐", Intent::Neutral)];
+        let el = Element::col().children([
+            Element::col().height(10).width_match(),
+            Element::row().children([
+                Element::col().width(60),
+                Element::dropdown_items(items, signal(0usize))
+                    .font_size(13.0)
+                    .width(70),
+            ]),
+        ]);
+        let (pm, b) = paint_at(el, 200, 100, &[1, 1]);
+        assert_eq!(b.w, 70);
+        assert_no_ink_outside(&pm, b, "窄触发器的徽章");
     }
 }
