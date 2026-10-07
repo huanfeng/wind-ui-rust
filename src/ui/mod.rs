@@ -560,6 +560,13 @@ impl Widget for Button {
         let total_w = ih + ICON_GAP + ts.w;
         let start_x = bounds.x + ((bounds.w - total_w) / 2).max(0);
         let icon_y = bounds.y + ((bounds.h - ih) / 2).max(0);
+        // 按钮窄于"图标 + 文字"：单字或断不开的词测出来仍是单行，WrapClip 不会裁，图标
+        // 本身也可能越界——整块内容先裁到 bounds。放得下时不裁（clip 有成本）。
+        let squeezed = total_w + 2 > bounds.w;
+        if squeezed {
+            canvas.save();
+            canvas.clip_rect(bounds);
+        }
         // 图标圆角不跟随按钮圆角（按钮圆角作用于整框）；图标默认直角，由其自身 fit 决定。
         let icon_style = Style {
             corner_radius: 0.0,
@@ -585,6 +592,9 @@ impl Widget for Button {
             Align::Start,
             &crate::text::TextStyle::of(style),
         );
+        if squeezed {
+            canvas.restore();
+        }
     }
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         // 禁用由核心层统一拦截（call_on_event 不会派发到禁用节点），此处无需判断。
@@ -6758,6 +6768,24 @@ b",
         let (pm, b) = paint_first_child(el, 200, 120);
         assert_eq!((b.w, b.h), (80, 30));
         assert_no_ink_outside(&pm, b, "Button 显式宽");
+    }
+
+    /// 带图标、短标签（断不开的单字）的按钮被钉得比内容还窄：测出来仍是单行，
+    /// WrapClip 不裁，须由整块裁剪兜住横向。
+    #[test]
+    fn squeezed_icon_button_short_label_stays_inside_bounds() {
+        let el = Element::col().children([
+            Element::button("设")
+                .outline()
+                .icon_rgba(2, 2, &[0, 0, 0, 255].repeat(4))
+                .font_size(20.0)
+                .width(40)
+                .height(30),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, b) = paint_first_child(el, 200, 120);
+        assert_eq!((b.w, b.h), (40, 30));
+        assert_no_ink_outside(&pm, b, "挤窄的带图标 Button");
     }
 
     /// Wrap 宽：按钮按单行量宽，被父宽压窄后折行，同样不得出界。
