@@ -859,6 +859,8 @@ pub struct ColorTrigger {
     hex_echo: Option<Signal<String>>,
     show_text: bool,
     hovered: bool,
+    /// HEX 文字单行截断：触发器被钉得比预留宽度还窄时不折行画出 bounds。
+    hex_fit: super::text_fit::SingleLine,
 }
 
 impl ColorTrigger {
@@ -876,6 +878,7 @@ impl ColorTrigger {
             hex_echo,
             show_text,
             hovered: false,
+            hex_fit: Default::default(),
         }
     }
 
@@ -990,7 +993,8 @@ impl Widget for ColorTrigger {
         }
         let text_color = if enabled { pal.text } else { pal.text_disabled };
         let tx = chip.right() + 8;
-        canvas.draw_text(
+        self.hex_fit.draw_text(
+            canvas,
             &c.to_hex_string(),
             Rect::new(tx, bounds.y, (bounds.right() - 20 - tx).max(0), bounds.h),
             text_color,
@@ -1739,5 +1743,32 @@ mod tests {
             (got - 280.0).abs() < 2.0,
             "选过纯黑之后色相应仍是 280°，实得 {got}"
         );
+    }
+}
+
+/// 触发器被钉得比 HEX 预留宽度还窄：HEX 文字截成单行，不折行画出 bounds。
+#[cfg(test)]
+mod hex_overflow_tests {
+    use crate::geometry::Color;
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn trigger() -> Element {
+        Element::color_picker(signal(Color::hex(0xE03131))).font_size(20.0)
+    }
+
+    #[test]
+    fn narrow_trigger_hex_stays_inside_bounds() {
+        for (what, el, win_w) in [
+            ("显式宽", trigger().width(80), 200),
+            ("Wrap 宽", trigger(), 80),
+        ] {
+            let el = Element::col()
+                .width_match()
+                .children([el, Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, win_w, 150);
+            assert_no_ink_outside(&pm, b, &format!("ColorTrigger {what}"));
+        }
     }
 }
