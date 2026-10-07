@@ -2372,22 +2372,31 @@ impl Widget for RichText {
             canvas.restore();
         }
         // 键盘焦点：给当前聚焦的折叠头描 accent 细框（Tab 聚焦后 ↑↓/Enter 可视化）。
-        // 画在裁剪之外（框外扩 2px，裁了会削掉顶边）；但被裁掉的折叠头不画框。
+        // 未裁剪时画在内容裁剪之外（框外扩 2px）；裁剪时被裁掉的折叠头不画框，部分可见的
+        // 头框高收到可见处，且整框裁回 bounds——多行头配矮高度时框会画出下沿。
         if focused && enabled && !lay.headers.is_empty() {
             let idx = self.focus_header.get().min(lay.headers.len() - 1);
             let (r, _) = &lay.headers[idx];
             if visible_h.is_some_and(|h| r.y >= h) {
                 return;
             }
+            let rh = visible_h.map_or(r.h, |h| r.h.min(h - r.y));
+            if visible_h.is_some() {
+                canvas.save();
+                canvas.clip_rect(bounds);
+            }
             canvas.stroke_round_rect(
                 (content.x + r.x) as f32 - 2.0,
                 (content.y + r.y) as f32 - 2.0,
                 (r.w + 4) as f32,
-                (r.h + 4) as f32,
+                (rh + 4) as f32,
                 4.0,
                 1.0,
                 &Paint::fill(pal.accent),
             );
+            if visible_h.is_some() {
+                canvas.restore();
+            }
         }
     }
 
@@ -2442,6 +2451,17 @@ impl Widget for RichText {
                 .as_ref()
                 .map(|l| l.headers.len())
                 .unwrap_or(0);
+            // 被裁掉的折叠头（钉了高度、内容溢出）不参与：焦点移过去看不见框，Enter
+            // 还会翻转一个看不见的分区。头按版面自上而下排列，可见的是前一段。
+            let n = match self.visible_h.get() {
+                Some(h) => self
+                    .cache
+                    .borrow()
+                    .as_ref()
+                    .map(|l| l.headers.iter().take_while(|(r, _)| r.y < h).count())
+                    .unwrap_or(0),
+                None => n,
+            };
             if n == 0 {
                 return false;
             }
@@ -2467,23 +2487,27 @@ impl Widget for RichText {
             };
         }
         let Event::Pointer(p) = ev else { return false };
-        // 被裁掉的那截（钉了高度、内容溢出）不可命中：悬停与按下都当它不存在，交还给
-        // 宿主。拖选进行中不拦——指针已被捕获，拖到裁剪区乃至界外照样延伸选区，与系统
-        // 文本控件拖出可视区的行为一致（复制会带上看不见的部分）。
-        if !self.selecting.get()
-            && self.hidden_at(p.pos)
-            && matches!(
-                p.kind,
-                PointerKind::Move | PointerKind::Enter | PointerKind::Down
-            )
-        {
-            if self.hover_span.take().is_some() {
-                ctx.mark_dirty();
+        // 被裁掉的那截（钉了高度、内容溢出）不可命中：悬停与左键按下都当它不存在。拖选
+        // 进行中不拦——指针已被捕获，拖到裁剪区乃至界外照样延伸选区，与系统文本控件拖出
+        // 可视区的行为一致（复制会带上看不见的部分）。那截仍在 bounds 内、看着就是控件
+        // 的一部分，所以左键按下照样清掉旧选区，右键照样弹复制菜单（不命中任何 span）。
+        if !self.selecting.get() && self.hidden_at(p.pos) {
+            match p.kind {
+                PointerKind::Move | PointerKind::Enter => {
+                    if self.hover_span.take().is_some() {
+                        ctx.mark_dirty();
+                    }
+                    self.hover_header.set(None);
+                    self.hover_text.set(false);
+                    self.hover_exp.set(false);
+                    return false;
+                }
+                PointerKind::Down if p.button == MouseButton::Left => {
+                    self.clear_sel(ctx);
+                    return false;
+                }
+                _ => {}
             }
-            self.hover_header.set(None);
-            self.hover_text.set(false);
-            self.hover_exp.set(false);
-            return false;
         }
         match p.kind {
             PointerKind::Move | PointerKind::Enter => {
@@ -3968,5 +3992,95 @@ mod tests {
             assert_eq!(b.h, 30, "{what}");
             assert_no_ink_outside(&pm, b, &format!("RichText {what}"));
         }
+    }
+
+    fn key(k: Key) -> crate::event::KeyEvent {
+        crate::event::KeyEvent {
+            key: k,
+            pressed: true,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    /// 键盘 ↓ 不得把焦点移到被裁掉的折叠头上，Enter 也就翻转不了看不见的分区。
+    /// 高度 200 的对照证明 ↓ + Enter 本来确实会翻转第二个头。显式宽与 Wrap 宽各一遍。
+    #[test]
+    fn keyboard_skips_clipped_headers() {
+        let second_toggled = |h: i32, width: Option<i32>| {
+            let second = signal(false);
+            let doc = RichDoc::new()
+                .section("头一", signal(true), |d| d.para("甲"))
+                .section("头二", second, |d| d.para("乙"));
+            let mut el = Element::rich(doc).height(h);
+            if let Some(w) = width {
+                el = el.width(w);
+            }
+            let (mut tree, node) = build(el, 200, 300);
+            paint_once(&mut tree, 200, 300);
+            tree.dispatch_key(key(Key::Down), Some(node));
+            tree.dispatch_key(key(Key::Enter), Some(node));
+            second.get()
+        };
+        for width in [Some(200), None] {
+            assert!(
+                second_toggled(200, width),
+                "对照（{width:?}）：↓ + Enter 应翻转第二个头"
+            );
+            assert!(
+                !second_toggled(14, width),
+                "（{width:?}）第二个头已被裁掉，键盘不应能翻转它"
+            );
+        }
+    }
+
+    /// 多行折叠头配矮高度、有焦点：焦点框收到可见处并裁回 bounds，不画出下沿。
+    #[test]
+    fn focus_ring_of_clipped_header_stays_inside_bounds() {
+        use crate::ui::text_fit::ink::*;
+        let doc = RichDoc::new().section(LONG_TITLE, signal(true), |d| d.para("体"));
+        let el = Element::col().children([
+            Element::rich(doc).width(120).height(20),
+            Element::col().height(80).width_match(),
+        ]);
+        let mut eng = engine();
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 150), &mut eng);
+        let node = tree.get(root).unwrap().children[0];
+        tree.set_focused(Some(node), None);
+        let b = tree.abs_bounds(node);
+        let mut pm = tiny_skia::Pixmap::new(200, 150).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut cv);
+        drop(cv);
+        assert_no_ink_outside(&pm, b, "聚焦的多行折叠头");
+    }
+
+    /// 被裁那截仍在 bounds 内、看着就是控件的一部分：右键照样弹复制菜单。
+    #[test]
+    fn right_click_in_clipped_band_still_shows_copy_menu() {
+        let doc = RichDoc::new().para(Para::new().text("短\n").span_id(
+            "x",
+            "链接",
+            SpanStyle::new(),
+        ));
+        let (mut tree, _) = build(Element::rich(doc).width(200).height(21), 200, 200);
+        paint_once(&mut tree, 200, 200);
+        let (mut hover, mut cap) = (None, None);
+        let res = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Down,
+                crate::geometry::Point::new(5, 17),
+                MouseButton::Right,
+            ),
+            &mut hover,
+            &mut cap,
+        );
+        assert!(res.menu.is_some(), "裁剪带内右键应弹复制菜单");
     }
 }
