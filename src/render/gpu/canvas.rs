@@ -787,7 +787,9 @@ impl Canvas for WgpuCanvas<'_> {
             (clip[2] - clip[0]) as i32,
             (clip[3] - clip[1]) as i32,
         );
-        if prect.inflate(4).intersect(&clip_rect).is_empty() {
+        // 剔除看字形可能范围而非 rect 本身：装不下时字会向下溢出 rect，见 `text_cull_rect`。
+        let cull = crate::render::text_cull_rect(rect, ts).scaled(s);
+        if cull.inflate(4).intersect(&clip_rect).is_empty() {
             return;
         }
 

@@ -794,14 +794,21 @@ impl Canvas for SkiaCanvas<'_> {
         // 局部重绘时减去 offset（逻辑），使引擎物理化后落入子 pixmap（×scale 与图元同源）。
         let off = self.offset;
         let rect = rect.offset(-off.x, -off.y);
-        // 剔除：物理矩形与（子）pixmap 边界无交集则跳过引擎排版（局部重绘省去离屏文字的 COM 开销）。
+        // 剔除：字形可能范围与（子）pixmap 边界无交集则跳过引擎排版（局部重绘省去离屏文字的
+        // COM 开销）。不能只看 rect——装不下时字会向下溢出 rect，见 `text_cull_rect`；
+        // 再留 4 物理 px 兜字形出挑与取整（GPU 后端同一余量，剔除对象是 clip 而非 pixmap）。
         let bounds = Rect::new(
             0,
             0,
             self.pixmap.width() as i32,
             self.pixmap.height() as i32,
         );
-        if rect.scaled(self.scale).intersect(&bounds).is_empty() {
+        if super::text_cull_rect(rect, ts)
+            .scaled(self.scale)
+            .inflate(4)
+            .intersect(&bounds)
+            .is_empty()
+        {
             return;
         }
         let clip = self.clips.last().map(|c| c.rect.offset(-off.x, -off.y));
@@ -2134,6 +2141,98 @@ mod tests {
         assert!(
             b > 180 && r < 140,
             "进度滑块应在裁剪带内显现，实得 ({r},{g},{b})"
+        );
+    }
+
+    /// 记 `draw` 调用次数的引擎：剔除只决定"进不进引擎"，数调用即可判定。
+    struct CountingEngine(usize);
+    impl crate::text::TextEngine for CountingEngine {
+        fn measure(
+            &mut self,
+            _: &str,
+            ts: &crate::text::TextStyle,
+            _: Option<f32>,
+        ) -> crate::geometry::Size {
+            crate::geometry::Size::new(10, ts.size.ceil() as i32)
+        }
+        fn draw(
+            &mut self,
+            _: &mut Pixmap,
+            _: &str,
+            _: Rect,
+            _: Color,
+            _: Align,
+            _: &crate::text::TextStyle,
+            _: Option<Rect>,
+        ) {
+            self.0 += 1;
+        }
+    }
+
+    /// 在局部帧（子 pixmap 原点 `origin`、尺寸 `w×h` 逻辑像素）里画一次文字，返回进没进引擎。
+    fn text_reaches_engine(origin: Point, w: u32, h: u32, rect: Rect) -> bool {
+        text_reaches_engine_at(1.0, origin, w, h, rect)
+    }
+
+    fn text_reaches_engine_at(scale: f32, origin: Point, w: u32, h: u32, rect: Rect) -> bool {
+        let mut pm = Pixmap::new((w as f32 * scale) as u32, (h as f32 * scale) as u32).unwrap();
+        let mut eng = CountingEngine(0);
+        {
+            let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, origin);
+            c.draw_text(
+                "字",
+                rect,
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &crate::text::TextStyle::new(14.0),
+            );
+        }
+        eng.0 == 1
+    }
+
+    /// ★ 回归：rect 比文本盒矮是引擎契约允许的（装不下即顶对齐、向下溢出），局部帧的
+    /// 剔除不能因此把字丢掉。
+    ///
+    /// 下游为关掉垂直居中把 rect 高写成 1：整窗帧正常，局部帧的可绘区域只是光标那条
+    /// 窄脏区，与 1px 的 rect 不相交 → 整行不进引擎 → "光标左右各半个字被底色盖住"。
+    #[test]
+    fn short_rect_text_survives_partial_frame_cull() {
+        // 文字 rect 在 y=100、高 1；脏区是它正下方 8px 起的一条（仍在第一行字形内）。
+        let rect = Rect::new(10, 100, 80, 1);
+        assert!(
+            text_reaches_engine(Point::new(0, 108), 120, 8, rect),
+            "向下溢出的字形落在脏区里，却被按 1px 的 rect 剔掉了"
+        );
+    }
+
+    /// 对照：真正远离可绘区域的文字仍然被剔除——放宽的只是一行溢出，不是取消剔除
+    /// （滚动列表的视口外行全靠它省排版）。
+    #[test]
+    fn far_away_text_is_still_culled() {
+        let rect = Rect::new(10, 100, 80, 1);
+        assert!(
+            !text_reaches_engine(Point::new(0, 200), 120, 8, rect),
+            "脏区远在下方 100px，文字不该进引擎"
+        );
+        assert!(
+            !text_reaches_engine(Point::new(0, 40), 120, 8, rect),
+            "脏区在上方（字只会向下溢出），文字不该进引擎"
+        );
+    }
+
+    /// 高 DPI 下同样成立：剔除链是"逻辑放宽 → ×scale → 物理余量"，取整只在这里出现。
+    /// 脏区紧贴两行上界之内（溢出的第二行）应进引擎，紧贴之外应被剔。
+    #[test]
+    fn short_rect_cull_holds_at_2x() {
+        let rect = Rect::new(10, 100, 80, 1);
+        // 14px 字、两行上界 28 → 字形可能范围 [100, 128)。
+        assert!(
+            text_reaches_engine_at(2.0, Point::new(0, 124), 120, 4, rect),
+            "2x 下两行上界之内的脏区应进引擎"
+        );
+        assert!(
+            !text_reaches_engine_at(2.0, Point::new(0, 140), 120, 4, rect),
+            "2x 下两行上界之外 12px 的脏区不该进引擎"
         );
     }
 }

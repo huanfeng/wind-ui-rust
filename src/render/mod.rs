@@ -109,6 +109,22 @@ impl Paint {
     }
 }
 
+/// `draw_text` 剔除用的**逻辑**矩形：字形可能落到的范围的保守上界。
+///
+/// 不能直接拿调用方的 rect：引擎的纵向契约（见 `TextEngine::draw`）允许 rect 比文本盒
+/// 矮——装不下即顶对齐、**向下**溢出，由调用方裁剪收口。按 rect 本身剔除，这类合法
+/// 调用在整窗帧上正常，到了局部帧（可绘区域只是脏区那一小块）却与 rect 不相交、整行
+/// 不进引擎：光标左右各半个字被底色盖住，不报错、不 panic。
+///
+/// 溢出只向下，故只把高度抬到「两行字高」——单行文本盒的宽松上界，不去 measure
+/// （剔除存在的意义就是省掉排版）。多行文本请给足 rect 高度。两个后端共用这一份，
+/// 再各自在物理坐标上留 4px 出挑余量。
+pub(crate) fn text_cull_rect(rect: Rect, ts: &crate::text::TextStyle) -> Rect {
+    let line = ts.size * ts.line_height.unwrap_or(1.0).max(1.0);
+    let h = rect.h.max((line * 2.0).ceil() as i32);
+    Rect::new(rect.x, rect.y, rect.w, h)
+}
+
 /// 把逻辑矩形对齐到**物理像素整数边界**。
 ///
 /// 填充与描边都必须经过它，且必须是同一份实现——两侧各自对齐（或只对齐一侧）会让同一个
@@ -237,7 +253,12 @@ pub trait Canvas {
         radius: f32,
         opacity: f32,
     );
-    /// 在 rect 内绘制文字（水平按 align、垂直居中）。无文字引擎时为空操作。
+    /// 在 rect 内绘制文字（水平按 align；纵向装得下居中、装不下顶对齐向下溢出，见
+    /// `TextEngine::draw` 的纵向契约）。无文字引擎时为空操作。
+    ///
+    /// 后端会按 rect 剔除不在可绘区域内的文字（局部重绘省排版），剔除时已把 rect 向下
+    /// 放宽到约两行字高以容纳单行溢出。**多行文本要给足 rect 高度**：超出这一放宽的
+    /// 溢出部分在局部重绘帧里可能整段被剔掉，而整窗帧上看不出来。
     fn draw_text(
         &mut self,
         text: &str,
