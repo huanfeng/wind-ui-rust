@@ -11,7 +11,7 @@
 //! - [`SingleLine`]：语义上是单行的文字（下拉触发器、列表行、导航行、分段控件……）。
 //!   放不下就截成 `text…`，不折行。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 
 use crate::geometry::{Color, Rect};
@@ -124,6 +124,47 @@ impl WrapClip {
     }
 }
 
+/// 语义上单行的文字：放不下 `rect.w` 时截成 `text…`，不折行。
+#[derive(Default)]
+pub(crate) struct SingleLine {
+    /// `(排版键, 截断串；放得下为 None)`。
+    cache: RefCell<Option<(u64, Option<String>)>>,
+}
+
+impl SingleLine {
+    /// `draw_text` 的就地替代：放得下原样画，放不下画截断串。
+    ///
+    /// 截断串按 `measure_text` 的宽度挑出 ≤ `rect.w` 的前缀，与绘制同源，故不会再折行。
+    pub(crate) fn draw_text(
+        &self,
+        canvas: &mut dyn Canvas,
+        s: &str,
+        rect: Rect,
+        color: Color,
+        align: Align,
+        ts: &TextStyle,
+    ) {
+        let key = layout_key(s, rect.w, ts, canvas.dpi_scale());
+        let hit = match self.cache.borrow().as_ref() {
+            Some((k, v)) if *k == key => Some(v.clone()),
+            _ => None,
+        };
+        let fitted = match hit {
+            Some(v) => v,
+            None => {
+                // 硬换行压成空格：这类控件只有一行可画，留着 `\n` 就又折出 bounds 了。
+                let flat = s.contains('\n').then(|| s.replace('\n', " "));
+                let src = flat.as_deref().unwrap_or(s);
+                let (out, cut) = truncate_to_width(src, canvas, ts, rect.w.max(0), Truncate::End);
+                let v = (cut || flat.is_some()).then_some(out);
+                *self.cache.borrow_mut() = Some((key, v.clone()));
+                v
+            }
+        };
+        canvas.draw_text(fitted.as_deref().unwrap_or(s), rect, color, align, ts);
+    }
+}
+
 /// 截断后的显示串（含省略号）及是否实际发生了截断。调用方负责缓存结果——前缀宽度表
 /// 要做 O(N) 次测量，不宜每帧重算。
 pub(crate) fn truncate_to_width(
@@ -219,13 +260,26 @@ pub(crate) mod ink {
     /// 不透明兄弟会把溢出盖住，测的就不是 label 自己画没画出界了；局部重绘只重画
     /// label 时正是这个情形。
     pub(crate) fn paint_first_child(el: Element, w: i32, h: i32) -> (tiny_skia::Pixmap, Rect) {
+        paint_at(el, w, h, &[0])
+    }
+
+    /// 同 [`paint_first_child`]，被测节点按子节点下标路径从根往下找。
+    pub(crate) fn paint_at(
+        el: Element,
+        w: i32,
+        h: i32,
+        path: &[usize],
+    ) -> (tiny_skia::Pixmap, Rect) {
         let mut eng = engine();
         let mut tree = Tree::new();
         let root = el.build(&mut tree);
         tree.root = Some(root);
         tree.layout_root(Size::new(w, h), &mut eng);
-        let label = tree.get(root).unwrap().children[0];
-        let lb = tree.abs_bounds(label);
+        let mut node = root;
+        for &i in path {
+            node = tree.get(node).unwrap().children[i];
+        }
+        let lb = tree.abs_bounds(node);
         let mut pm = tiny_skia::Pixmap::new(w as u32, h as u32).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
         let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);

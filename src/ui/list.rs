@@ -45,6 +45,8 @@ pub struct ListRow {
     bg_color: Cell<Color>,
     /// 选中左缘强调条补间（0..1）：淡入。
     sel: Cell<Transition<f32>>,
+    /// 标签单行截断（行高固定，放不下就 `text…`，不折行压到下一行）。
+    fit: super::text_fit::SingleLine,
 }
 
 impl ListRow {
@@ -60,6 +62,7 @@ impl ListRow {
             bg_amt: Cell::new(Transition::new(on)),
             bg_color: Cell::new(Color::TRANSPARENT),
             sel: Cell::new(Transition::new(on)),
+            fit: Default::default(),
         }
     }
     /// 前置图标（图片内容）。
@@ -206,7 +209,8 @@ impl Widget for ListRow {
         };
         let tw = (bounds.right() - PAD_X - text_x).max(0);
         let tr = Rect::new(text_x, bounds.y, tw, bounds.h);
-        canvas.draw_text(
+        self.fit.draw_text(
+            canvas,
             &self.label,
             tr,
             color,
@@ -320,5 +324,44 @@ mod tests {
         assert_eq!(selected.visual_state(), VisualState::Selected);
         let other = ListRow::new("B".into(), group, 2);
         assert_eq!(other.visual_state(), VisualState::Normal);
+    }
+}
+
+/// 行高固定的列表行配长标签：截成单行，不折行压到下一行。
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use crate::core::Layout;
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    /// 经 `Element::list` 的真实结构：第一行的字不得落进第二行（第二行标签留空、
+    /// 选中索引指向不存在的行，免得别的墨混进来）。
+    #[test]
+    fn long_list_label_stays_in_its_row() {
+        assert_wraps_taller_than(120, ROW_H);
+        // 根节点总被撑满窗口，显式宽要钉在下一层才生效。
+        let list = Element::list(vec![LONG_TITLE, ""], signal(99usize));
+        let el = Element::col().children([Element::col().width(120).height(150).children([list])]);
+        let (pm, row) = paint_at(el, 200, 200, &[0, 0, 0]);
+        assert_eq!(row.w, 120);
+        assert_eq!(row.h, ROW_H);
+        assert_no_ink_outside(&pm, row, "列表行");
+    }
+
+    /// Wrap 宽：行宽取父给的可用宽（窄窗），同样只占一行。
+    #[test]
+    fn long_list_label_stays_in_its_row_wrap_width() {
+        assert_wraps_taller_than(120, ROW_H);
+        let row = Element::base(Layout::None)
+            .widget(ListRow::new(LONG_TITLE.into(), signal(99usize), 0))
+            .height(ROW_H);
+        let el = Element::col()
+            .width_match()
+            .children([row, Element::col().height(80).width_match()]);
+        let (pm, row) = paint_first_child(el, 120, 150);
+        assert!(row.w <= 120, "Wrap 宽应受父宽约束：{row:?}");
+        assert_no_ink_outside(&pm, row, "列表行 Wrap 宽");
     }
 }
