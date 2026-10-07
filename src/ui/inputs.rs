@@ -580,6 +580,9 @@ pub struct Slider {
     dragging: bool,
     /// 是否在旋钮右侧显示当前值百分比（如 "65%"）。
     pub show_value: bool,
+    /// 值标签单行截断：标签宽固定为 `VALUE_LABEL_W`，大字号下 "100%" 放不下时不折行
+    /// 画出 bounds。
+    value_fit: super::text_fit::SingleLine,
 }
 
 impl Slider {
@@ -588,6 +591,7 @@ impl Slider {
             value,
             dragging: false,
             show_value: false,
+            value_fit: Default::default(),
         }
     }
 
@@ -677,7 +681,8 @@ impl Widget for Slider {
             let label = format!("{:.0}%", v * 100.0);
             let label_rect = Rect::new(bounds.x + track_w, bounds.y, VALUE_LABEL_W, bounds.h);
             let text_color = if enabled { pal.text } else { pal.text_disabled };
-            canvas.draw_text(
+            self.value_fit.draw_text(
+                canvas,
                 &label,
                 label_rect,
                 text_color,
@@ -3352,6 +3357,34 @@ mod overflow_tests {
             let (pm, b) = paint_first_child(el, 150, 100);
             assert!(b.w <= 150, "{what}：Wrap 宽应受父宽约束：{b:?}");
             assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
+        }
+    }
+}
+
+/// 滑块值标签宽度固定：大字号下 "100%" 放不下时截成单行，不折行画出 bounds。
+#[cfg(test)]
+mod slider_value_overflow_tests {
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn slider() -> Element {
+        Element::slider(signal(1.0f32))
+            .show_value(true)
+            .font_size(24.0)
+    }
+
+    #[test]
+    fn large_value_label_stays_inside_bounds() {
+        for (what, el, win_w) in [
+            ("显式宽", slider().width(200), 260),
+            ("Wrap 宽", slider(), 200),
+        ] {
+            let el = Element::col()
+                .width_match()
+                .children([el, Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, win_w, 150);
+            assert_no_ink_outside(&pm, b, &format!("Slider 值标签 {what}"));
         }
     }
 }
