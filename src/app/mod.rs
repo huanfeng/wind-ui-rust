@@ -4113,7 +4113,23 @@ mod tests {
         // 机器快慢决定补间走没走完，于是这条在 macOS 上时红时绿（验证机上 12 次失败 3～8 次）。
         h.request_full_frame();
         frame(h, &mut pm);
-        assert_ne!(before, pm.data(), "标题变了，画面跟着变");
+        // 只比标题所在的中段：比整帧的话，关闭键还在走的悬停补间也会让画面"变了"，
+        // 标题有没有重画就测不出来（两帧落在同一毫秒时补间不动，断言随之时好时坏）。
+        let title_band = |data: &[u8]| -> Vec<u8> {
+            (4..DECORATION_HEIGHT - 4)
+                .flat_map(|y| {
+                    let row = (y * W) as usize * 4;
+                    // 居中标题两侧各留 W/4；关闭键（右端 46 宽）落在带外。
+                    let (x0, x1) = (W as usize / 4, W as usize * 3 / 4);
+                    data[row + x0 * 4..row + x1 * 4].to_vec()
+                })
+                .collect()
+        };
+        assert_ne!(
+            title_band(&before),
+            title_band(pm.data()),
+            "标题变了，标题区跟着变"
+        );
     }
 
     /// 合成中焦点被移走（程序 / Tab）：随后的「清合成串」要清到原来那个框上，
