@@ -3338,7 +3338,7 @@ impl AppHandler for UiHost {
             // 视觉、不会主动上报 repaint——若不在此强制请求一次重绘，移出后旧提示
             // 残留不消失、移入后也要等到别的事件凑巧触发重绘才会出现（不稳定）。
             //
-            // ★ 判据必须走 `node_tooltip`（与 `TooltipState::will_show`、与浮层自己的
+            // ★ 判据必须走 `node_tooltip`（与 `TooltipState::is_overlay`、与浮层自己的
             //   `paint` 同源），不能只看节点上的静态 `n.tooltip`：那样会漏掉控件的**动态**
             //   提示（`Widget::tooltip()`），于是带动态提示的控件正好落进上面这段注释描述
             //   的坑里——时而弹得出、时而要等别的事件凑巧重绘，表现为"悬停有时没反应"。
@@ -3350,10 +3350,22 @@ impl AppHandler for UiHost {
             }
         }
         match ev.kind {
-            PointerKind::Down => self.tooltip.suppressed = true,
+            PointerKind::Down => {
+                self.tooltip.suppressed = true;
+                // 撤提示要出一帧：按下的若是不响应按下的节点（截断 Label 之类），
+                // 没人请求重绘，平台就不失效窗口，提示一直留在屏上。
+                if self.tooltip.shown.get() {
+                    res.repaint = true;
+                }
+            }
             PointerKind::Move if self.tooltip.suppressed => {
                 self.tooltip.suppressed = false;
                 self.tooltip.since_ms = now_ms;
+                // 原地移动解除抑制、悬停节点没变：上面"悬停变化"那支不会请求重绘。
+                // 节点自己没有悬停视觉时就不出帧，排"到点那一帧"的 paint 没机会跑。
+                if hover.is_some_and(|h| self.tree.node_tooltip(h).is_some()) {
+                    res.repaint = true;
+                }
             }
             _ => {}
         }

@@ -1,7 +1,9 @@
 //! 悬停提示（tooltip）浮层：延时触发、点击抑制、越界翻转定位。
 //!
-//! 状态只有三样（指针位置、悬停起始时刻、是否被抑制），绘制时按当前悬停节点
-//! 现取文案，故与控件树无耦合。
+//! 状态只有四样（指针位置、悬停起始时刻、是否被抑制、上一帧是否画了），绘制时按
+//! 当前悬停节点现取文案，故与控件树无耦合。
+
+use std::cell::Cell;
 
 use crate::core::{NodeId, Tree};
 use crate::geometry::{Point, Rect, Size};
@@ -31,12 +33,18 @@ pub(super) struct TooltipState {
     pub(super) since_ms: u64,
     /// 点击后抑制提示，直到指针再次移动（避免点完控件原地又弹出盖住它）。
     pub(super) suppressed: bool,
+    /// 上一个整窗帧**实际画出了**浮层。`paint` 每次都写它。
+    ///
+    /// 浮层画在树外、指针旁边，任何控件的脏区都盖不住它；它消失的那一帧（移开、按下
+    /// 抑制、菜单弹出）若走局部重绘，脏区外的旧浮层就原样留在画面上。"本帧会不会画"
+    /// 回答不了"上一帧画没画"，故单记一笔。`Cell`：`paint` 只拿 `&self`。
+    pub(super) shown: Cell<bool>,
 }
 
 /// 浮层左上角定位：默认落在指针右下方，放不下则依次翻转 / 贴边。
 ///
 /// 抽成纯函数是为了**可测**：`paint` 要 `Canvas` 与 `Theme`，测试里造不出来，判据
-/// 留在里面就只能靠肉眼守。同 `Tree::node_tooltip` 之于 `will_show`。
+/// 留在里面就只能靠肉眼守。同 `Tree::node_tooltip` 之于 `is_overlay`。
 ///
 /// `ws` 为窗口尺寸；任一维为 0（尺寸未知）时该维不做收边。
 fn place(pos: Point, size: Size, ws: Size) -> Point {
@@ -67,14 +75,27 @@ fn place(pos: Point, size: Size, ws: Size) -> Point {
 }
 
 impl TooltipState {
-    /// 当前悬停节点是否会弹出提示（决定本帧算不算"有浮层"，进而能否局部重绘）。
-    pub(super) fn will_show(&self, tree: &Tree, hover: Option<NodeId>) -> bool {
-        !self.suppressed && hover.and_then(|h| tree.node_tooltip(h)).is_some()
+    /// 本帧算不算"有浮层"（有则不能局部重绘）：上一帧画过（本帧要擦掉或重画），
+    /// 或悬停节点带提示（本帧可能要画、或要排下延时到点的那一帧）。
+    ///
+    /// 只看后一半是不够的：移开那一帧悬停节点已经换了，判据为假，于是放行局部重绘，
+    /// 而脏区只有控件自己那块——旧浮层两端留成残影。
+    ///
+    /// 等待延时的那段也必须算进来，尽管那时什么都不画：浮层只在整窗帧里 `paint`，
+    /// 而排"到点再来一帧"的正是它——等待期走了局部帧，就没人排那一帧，提示永远弹不
+    /// 出来。等待期的代价由截止时间压住（到点前只出一两帧，不按刷新率续帧）。
+    pub(super) fn is_overlay(&self, tree: &Tree, hover: Option<NodeId>) -> bool {
+        self.shown.get() || (!self.suppressed && hover.and_then(|h| tree.node_tooltip(h)).is_some())
+    }
+
+    /// 悬停已满延时。
+    fn due(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.since_ms) >= TOOLTIP_DELAY_MS
     }
 
     /// 悬停提示浮层绘制（菜单激活时不显示）：悬停节点带 tooltip 且停留超过延时则弹出；
-    /// 未到延时则请求下一帧——鼠标静止后无事件，需靠 anim 续帧推进计时
-    /// （与不确定进度条同源）。
+    /// 未到延时则请求**到点那一刻**的一帧——鼠标静止后无事件，需靠 anim 续帧推进计时，
+    /// 但等待期画面不变，按刷新率续帧只是空转（见 [`crate::anim::request_repaint_after`]）。
     pub(super) fn paint(
         &self,
         canvas: &mut dyn Canvas,
@@ -85,16 +106,19 @@ impl TooltipState {
         ws: Size,
         now_ms: u64,
     ) {
+        self.shown.set(false);
         if menu_open || self.suppressed {
             return;
         }
         let Some(text) = hover.and_then(|h| tree.node_tooltip(h)) else {
             return;
         };
-        if now_ms.saturating_sub(self.since_ms) < TOOLTIP_DELAY_MS {
-            crate::anim::request_repaint();
+        if !self.due(now_ms) {
+            let left = TOOLTIP_DELAY_MS - now_ms.saturating_sub(self.since_ms);
+            crate::anim::request_repaint_after(left);
             return;
         }
+        self.shown.set(true);
         let (pal, tt) = (&theme.palette, &theme.tooltip);
         let ts = canvas.measure_text_wrapped(&text, &TextStyle::new(TOOLTIP_FONT), tt.max_width());
         let size = Size::new(ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);

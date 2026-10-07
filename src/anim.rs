@@ -115,6 +115,16 @@ pub fn request_repaint_in_after(r: Rect, delay_ms: u64) {
     });
 }
 
+/// 请求 `delay_ms` 毫秒后整窗重绘一帧（截止语义同 [`request_repaint_in_after`]）。
+///
+/// 给**节点之外**、等的是一个时刻而不是连续动画的绘制者：悬停提示的延时弹出——
+/// 等待期画面不变，到点那一帧浮层才出现，而浮层不属于任何节点、给不出自报脏区。
+pub(crate) fn request_repaint_after(delay_ms: u64) {
+    REQUEST.with(|c| c.set(true));
+    note_delay(delay_ms);
+    DAMAGE_FULL.with(|c| c.set(true));
+}
+
 /// 控件请求「下一帧重排 + 重绘」（paint 内调用）。供**布局动画**（高度补间等每帧
 /// 改变几何的动画）使用：与 `request_repaint` 不同，它让宿主下一帧走
 /// `needs_relayout` 正规门——重排后按结构签名升级整窗、并执行 hover 重同步/
