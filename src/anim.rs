@@ -32,10 +32,23 @@ thread_local! {
     /// 本帧续帧请求里**最早**的那个截止（距本帧的毫秒数）。`None` = 本帧没有续帧请求。
     /// 取最小值：任何一个控件说"我马上要"，整窗就得按刷新率走。
     static NEXT_DELAY: Cell<Option<u64>> = const { Cell::new(None) };
+    /// 续帧请求的累计次数（只增不清）。见 [`wake_count`]。
+    static WAKES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// 续帧请求的累计次数：前后各取一次比对，即知"这段代码里有没有人要过一帧"。
+///
+/// 不能拿 `REQUEST` 位判：它是帧概念，上一帧有动画时本就为真，帧外读到的是残值。
+/// 用于帧外的 App 级回调（`on_interval`）——主题 / 语言 / 热键 / 托盘这些运行期
+/// 句柄不写信号、不经 `EventCtx`，唯一的唤帧手段就是 `request_repaint`。
+pub(crate) fn wake_count() -> u64 {
+    WAKES.with(|c| c.get())
 }
 
 /// 记一笔续帧截止（毫秒），与本帧已有的取较早者。
 fn note_delay(delay_ms: u64) {
+    // 所有续帧请求都经过这里，计数放在这一处即不漏。
+    WAKES.with(|c| c.set(c.get().wrapping_add(1)));
     NEXT_DELAY.with(|c| {
         c.set(Some(match c.get() {
             Some(cur) => cur.min(delay_ms),

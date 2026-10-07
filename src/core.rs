@@ -2178,6 +2178,40 @@ pub struct DispatchResult {
     pub open_windows: Vec<WindowRequest>,
 }
 
+impl DispatchResult {
+    /// 是否带有任何需要宿主落地的副作用（重绘、关窗、焦点、浮层、开窗……）。
+    ///
+    /// 供 App 级回调（`on_interval` 等）判断"这次什么都没做"，从而不凭空出帧。
+    /// 逐字段解构而非 `..`：新增字段时编译器会逼着在这里表态，不会静默漏判。
+    pub(crate) fn has_effects(&self) -> bool {
+        let DispatchResult {
+            repaint,
+            damage,
+            close,
+            close_forced,
+            focus,
+            consumed: _, // 只对事件有意义，不是副作用
+            menu,
+            open_url,
+            window_op,
+            toast,
+            dialog,
+            open_windows,
+        } = self;
+        *repaint
+            || !matches!(damage, DamageReq::None)
+            || *close
+            || *close_forced
+            || focus.is_some()
+            || menu.is_some()
+            || open_url.is_some()
+            || window_op.is_some()
+            || toast.is_some()
+            || dialog.is_some()
+            || !open_windows.is_empty()
+    }
+}
+
 /// 命中点的归属：无边框窗口的 `WM_NCHITTEST` 据此在客户区 / 拖动区之间分流。
 /// 判定见 [`Tree::hit_role`]。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -2328,6 +2328,12 @@ impl App {
     /// `ctx.bounds()` 因此是整个客户区、`ctx.mark_dirty()` 相当于整窗失效，
     /// 而 `ctx.capture()` 无效（没有指针事件可捕获，请求会被丢弃）。
     ///
+    /// **只在回调改了东西时才重绘**：写过信号（整窗重绘）、经 ctx 请求了副作用
+    /// （toast、`mark_dirty`、关窗……），或调了运行期句柄（`ThemeHandle` / 语言 /
+    /// `HotkeyHandle` / `TrayHandle`）。什么都没做的 tick 不出帧，看门狗式的轮询因此
+    /// 不破坏空闲零 CPU。经 `ctx.tree_mut()` 直接改树不在此列，须自行
+    /// `ctx.mark_layout_dirty()`。
+    ///
     /// ```no_run
     /// use std::time::Duration;
     /// use windui::prelude::*;
@@ -3638,8 +3644,27 @@ impl AppHandler for UiHost {
         let Some(cb) = self.interval_cbs.get_mut(idx) else {
             return false;
         };
+        // 空闲零 CPU：只在回调真的改了东西时才出帧。原先无条件返回 true 并置重排，
+        // 挂一个空的 `on_interval` 就按 tick 频率整窗光栅（120ms 一跳即每秒 8 帧整窗）。
+        //
+        // "改了东西"三路：
+        // - 写过信号（括号测得）。括号套在 `run_detached` **外面**——放进它里面会被理解成
+        //   本节点局部脏区（见其文档）；定时器写的多是别处读的共享状态，整窗才保守正确。
+        // - 经 ctx 请求了副作用（toast / 关窗 / mark_dirty……）。
+        // - 要过一帧（`anim` 唤醒计数测得）：主题 / 语言 / 热键 / 托盘等运行期句柄不写信号、
+        //   不经 ctx，只会 `request_repaint`，而平台在帧外不读那一位——意图（热键改绑、
+        //   托盘提示……）都在帧路径上消费，这里不返回 true 就一直搁到下次用户输入。
+        let wakes = crate::anim::wake_count();
+        crate::signal::begin_event();
         let res = self.tree.run_detached(root, |ctx| cb(ctx));
+        let touched = crate::signal::end_event() || crate::anim::wake_count() != wakes;
+        if !touched && !res.has_effects() {
+            return false;
+        }
         self.apply_app_effects(res);
+        if touched {
+            self.damage.needs_full = true;
+        }
         true
     }
 
@@ -4648,11 +4673,83 @@ mod tests {
         let mut app = app.into_handler_for_test();
         let root = app.tree.root;
 
-        assert!(app.on_interval_fired(0), "回调跑到即需重绘");
+        assert!(app.on_interval_fired(0), "回调请求了副作用即需重绘");
         assert_eq!(*seen_id.borrow(), root, "App 级回调的 self_id 是根节点");
         assert_eq!(app.toast.items.len(), 1, "ctx.toast 应经宿主上屏");
         assert!(app.wants_close(), "ctx.request_close 应落成宿主关窗意图");
         assert!(!app.on_interval_fired(9), "越界下标不该被当成跑过");
+    }
+
+    /// 空闲零 CPU：什么都没改的定时器回调**不得**出帧。
+    ///
+    /// 回归场景：看门狗类轮询挂一个 120ms 的 `on_interval`，回调大多数 tick 什么都不做，
+    /// 原先每个 tick 仍整窗重排 + 整窗光栅，任务管理器里常驻十几个点的 CPU。
+    #[test]
+    fn idle_interval_callback_requests_no_frame() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 60, 60)
+            .on_interval(Duration::from_millis(120), |_| {})
+            .content(Element::col().width(60).height(60));
+        let mut app = app.into_handler_for_test();
+        app.set_scale(1.0);
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        app.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
+
+        assert!(!app.on_interval_fired(0), "空回调不该要求重绘");
+        assert!(!app.damage.needs_full, "空回调不该置整窗");
+        assert!(!app.damage.needs_relayout, "空回调不该置重排");
+    }
+
+    /// 定时器里写信号 → 必须出帧且整窗：读这个信号的可能是窗口里任何一处，
+    /// 回调本身不属于任何控件，给不出更精确的脏区。
+    #[test]
+    fn interval_signal_write_requests_full_frame() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let n = crate::signal::signal(0u32);
+        let app = App::new("t", 60, 60)
+            .on_interval(Duration::from_millis(120), move |_| n.set(n.get() + 1))
+            .content(Element::col().width(60).height(60));
+        let mut app = app.into_handler_for_test();
+        app.set_scale(1.0);
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        app.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
+
+        // 同帧另有一块小脏区（光标闪烁之类）：没有它，无脏区本就整窗，"整窗"断言测不到
+        // 升级那一行。有了它，漏升就会按这块小脏区局部重绘，读信号的别处停在旧值。
+        app.damage.event = Some(crate::geometry::Rect::new(4, 4, 8, 8));
+        assert!(app.on_interval_fired(0), "写了信号必须出帧");
+        assert_eq!(n.get(), 1);
+        app.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(60, 60));
+        assert!(app.damage.last_frame_full, "定时器写信号的那一帧应整窗");
+    }
+
+    /// 运行期句柄（主题 / 语言 / 热键 / 托盘）不写信号、不经 ctx，只会请求一帧。
+    /// 定时器里调它们也必须出帧：平台在帧外不读续帧请求，那些意图都在帧路径上消费。
+    #[test]
+    fn interval_runtime_handle_requests_frame() {
+        let mut app = App::new("t", 60, 60);
+        let th = app.theme_handle();
+        let app = app
+            .on_interval(Duration::from_millis(120), move |_| {
+                th.set(crate::theme::Theme::dark())
+            })
+            .content(Element::col());
+        let mut app = app.into_handler_for_test();
+        assert!(app.on_interval_fired(0), "定时器里换主题应出帧");
+    }
+
+    /// 不写信号、只经 ctx 显式失效（`mark_dirty`）同样算"改了东西"。
+    #[test]
+    fn interval_explicit_mark_dirty_requests_frame() {
+        let app = App::new("t", 60, 60)
+            .on_interval(Duration::from_millis(120), |ctx| ctx.mark_dirty())
+            .content(Element::col());
+        let mut app = app.into_handler_for_test();
+        assert!(app.on_interval_fired(0), "ctx.mark_dirty 应出帧");
     }
 
     /// 通道消息的处理器拿得到 ctx，且**每条消息各一份副作用**：`DispatchResult` 的

@@ -1811,6 +1811,9 @@ std::thread::spawn(move || s.set(42));   // ❌ 编译失败：Signal 不是 Sen
 **`App::on_interval`**：注册 UI 线程定时回调
 （`on_interval(Duration, impl FnMut(&mut EventCtx) + 'static)`），
 间隔内不占 CPU（平台定时器驱动）。可多次调用注册多个定时器。
+回调**只在改了东西时才重绘**——写过信号（整窗）、经 ctx 请求了副作用（toast、`mark_dirty`、
+关窗……），或调了运行期句柄（主题 / 语言 / 热键 / 托盘）；什么都没做的 tick 不出帧，看门狗式
+轮询不会破坏空闲零 CPU。经 `ctx.tree_mut()` 直接改树不在此列，须自行 `ctx.mark_layout_dirty()`。
 
 **两个回调都收 `EventCtx`**，因为「写信号」只够表达控件自己的状态：后台任务完成要弹一条
 轻提示、定时器到点要关窗、拿到结果后要接着弹个原生对话框——toast 是宿主浮层、关窗与对话框
