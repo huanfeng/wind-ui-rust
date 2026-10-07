@@ -2375,11 +2375,15 @@ impl Widget for RichText {
         // 未裁剪时画在内容裁剪之外（框外扩 2px）；裁剪时被裁掉的折叠头不画框，部分可见的
         // 头框高收到可见处，且整框裁回 bounds——多行头配矮高度时框会画出下沿。
         if focused && enabled && !lay.headers.is_empty() {
-            let idx = self.focus_header.get().min(lay.headers.len() - 1);
-            let (r, _) = &lay.headers[idx];
-            if visible_h.is_some_and(|h| r.y >= h) {
+            // 与键盘导航同一口径：只在可见的头里钳制，框才画在 Enter 实际作用的那个头上。
+            let n_vis = visible_h.map_or(lay.headers.len(), |h| {
+                lay.headers.iter().take_while(|(r, _)| r.y < h).count()
+            });
+            if n_vis == 0 {
                 return;
             }
+            let idx = self.focus_header.get().min(n_vis - 1);
+            let (r, _) = &lay.headers[idx];
             let rh = visible_h.map_or(r.h, |h| r.h.min(h - r.y));
             if visible_h.is_some() {
                 canvas.save();
