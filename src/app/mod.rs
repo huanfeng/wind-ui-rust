@@ -4081,6 +4081,7 @@ mod tests {
         );
         assert!(!crate::anim::animation_requested(), "改激活态不请求续帧");
         let h = d.handler.as_mut();
+        h.request_full_frame(); // 同下方改标题：重画由平台安排（wayland `deco_active`）
         frame(h, &mut pm);
         let inactive_ink = ink(&pm);
         assert!(
@@ -4105,6 +4106,12 @@ mod tests {
             "改标题同样不发通知"
         );
         let h = d.handler.as_mut();
+        // 照平台层的做法先要整窗（见 linux `host::render_frame` 的 fresh 分支、wayland
+        // `deco_title`）：回调不发通知，重画与重排都由平台安排。少了这一步，本帧走哪条路
+        // 取决于上一帧残留的动画脏区——失活时标题转淡的补间若还没走完，就按那块小脏区
+        // 局部重画、不重排，新标题排不上去，像素原样；走完了则整窗重排、断言成立。
+        // 机器快慢决定补间走没走完，于是这条在 macOS 上时红时绿（验证机上 12 次失败 3～8 次）。
+        h.request_full_frame();
         frame(h, &mut pm);
         assert_ne!(before, pm.data(), "标题变了，画面跟着变");
     }
