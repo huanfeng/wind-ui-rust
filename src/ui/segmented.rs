@@ -458,6 +458,7 @@ mod overflow_tests {
 
     #[test]
     fn long_segment_stays_inside_bounds_explicit_width() {
+        assert_single_line_wider_than(LONG_TITLE, 13.0, 80);
         let el =
             Element::col().children([seg().width(160), Element::col().height(80).width_match()]);
         let (pm, b) = paint_first_child(el, 240, 150);
@@ -467,6 +468,7 @@ mod overflow_tests {
 
     #[test]
     fn long_segment_stays_inside_bounds_wrap_width() {
+        assert_single_line_wider_than(LONG_TITLE, 13.0, 80);
         let el = Element::col()
             .width_match()
             .children([seg(), Element::col().height(80).width_match()]);

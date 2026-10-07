@@ -747,6 +747,7 @@ mod overflow_tests {
 
     #[test]
     fn long_nav_titles_stay_in_their_row_wrap_width() {
+        assert_single_line_wider_than(LONG_TITLE, 14.0, 120);
         for (what, el) in rows() {
             let el = Element::col()
                 .width_match()

@@ -364,6 +364,18 @@ pub(crate) mod ink {
         );
     }
 
+    /// 前提校验：`text` 按 `size` 号字单行排版比 `w` 宽——否则"放不下才截断"的路径根本
+    /// 没走到，换了字体的平台上测试会测个空集照样绿。
+    pub(crate) fn assert_single_line_wider_than(text: &str, size: f32, w: i32) {
+        let got = engine()
+            .measure(text, &crate::text::TextStyle::new(size), None)
+            .w;
+        assert!(
+            got > w,
+            "前提不成立：{text:?} 单行宽 {got} 未超过 {w}，测不到截断"
+        );
+    }
+
     /// 矩形 `r` 内的墨量。
     pub(crate) fn ink_in(pm: &tiny_skia::Pixmap, r: Rect) -> usize {
         let w = pm.width() as i32;

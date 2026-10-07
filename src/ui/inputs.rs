@@ -3376,6 +3376,7 @@ mod slider_value_overflow_tests {
 
     #[test]
     fn large_value_label_stays_inside_bounds() {
+        assert_single_line_wider_than("100%", 24.0, super::VALUE_LABEL_W);
         for (what, el, win_w) in [
             ("显式宽", slider().width(200), 260),
             ("Wrap 宽", slider(), 200),

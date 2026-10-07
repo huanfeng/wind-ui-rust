@@ -1760,6 +1760,7 @@ mod hex_overflow_tests {
 
     #[test]
     fn narrow_trigger_hex_stays_inside_bounds() {
+        assert_single_line_wider_than("#E03131", 20.0, 80 - 50);
         for (what, el, win_w) in [
             ("显式宽", trigger().width(80), 200),
             ("Wrap 宽", trigger(), 80),
