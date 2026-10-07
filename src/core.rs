@@ -221,6 +221,16 @@ pub trait Widget {
     /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
     /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。
     fn reset_interaction(&mut self) {}
+    /// **用户**把焦点从本节点移走时调用一次：点了别处 / 点空白 / Tab 离开，或控件回调
+    /// 经 ctx 把焦点要给了别人。与该次事件同一次分发内同步调用（在该次分发自己的
+    /// 副作用落定之后）。
+    ///
+    /// 框架自己的焦点调度**不算**：节点被隐藏 / 禁用 / 删除后的焦点归一化、模态层弹出
+    /// 时的焦点移交、`autofocus` 兑现、窗口唤起时的复位、`on_update` 相位里的焦点请求
+    /// （由信号变化驱动，起因可能是定时器）、App 级回调要焦点——这些都不是"用户离开了
+    /// 这个输入框"，挂在上面的"改完即提交"若跟着触发，就会在对话框弹出时把半成品提交掉。
+    /// 默认无操作。`TextInput` 借它实现 `on_commit`。
+    fn on_blur(&mut self, _ctx: &mut EventCtx) {}
     /// 类型擦除下转钩子：供 Builder 对具体控件做类型化配置（如 TextInput 的
     /// 多行/密码开关）。默认返回 None，需要的控件返回 `Some(self)`。
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
@@ -3154,6 +3164,60 @@ impl Tree {
         };
         f(&mut ctx);
         let o = ctx.out;
+        DispatchResult {
+            repaint: o.repaint,
+            damage: o.damage,
+            close: o.close,
+            close_forced: o.close_forced,
+            focus: o.focus,
+            consumed: false,
+            menu: o.menu,
+            open_url: o.open_url,
+            window_op: o.window_op,
+            toast: o.toast,
+            dialog: o.dialog,
+            open_windows: o.open_windows,
+        }
+    }
+
+    /// 通知 `id` 用户让它失焦了（见 [`Widget::on_blur`]），返回其回调的副作用。
+    ///
+    /// 节点已删除、被禁用或不可见（含祖先）时不通知：那是结构变化顺带丢了焦点，
+    /// 不是用户离开——同一次点击里"隐藏编辑框并把焦点给别人"也算这一类。
+    ///
+    /// 回调期间写过信号即升整窗：失焦提交写的多是别处读的共享状态（改名后的标题、
+    /// 列表项），与指针 Down/Up 同一档（见 `call_on_event`）。
+    pub(crate) fn dispatch_blur(&mut self, id: NodeId) -> DispatchResult {
+        let shown = self
+            .ancestor_chain(id)
+            .iter()
+            .all(|&a| self.get(a).is_some_and(|n| n.effective_visible()));
+        if !shown || !self.node_enabled(id) {
+            return DispatchResult::default();
+        }
+        let Some(n) = self.get_mut(id) else {
+            return DispatchResult::default();
+        };
+        let mut widget = std::mem::replace(&mut n.widget, Box::new(EmptyWidget));
+        let mut ctx = EventCtx {
+            tree: self,
+            self_id: id,
+            out: EventOutcome::default(),
+        };
+        crate::signal::begin_event();
+        widget.on_blur(&mut ctx);
+        let mut o = ctx.out;
+        if crate::signal::end_event() {
+            o.damage = o.damage.merge(DamageReq::Full);
+            o.repaint = true;
+        }
+        match self.get_mut(id) {
+            Some(n) => n.widget = widget,
+            None => debug_assert!(
+                false,
+                "on_blur 回调内删除了 self 节点，违反与 call_on_event 相同的契约"
+            ),
+        }
         DispatchResult {
             repaint: o.repaint,
             damage: o.damage,
@@ -6189,6 +6253,44 @@ mod tests {
         // 行的三个子节点：[− 按钮, 数值框, + 按钮]。
         let field = tree.get(row).unwrap().children[1];
         (tree, field, v)
+    }
+
+    /// `dispatch_blur` 对已隐藏 / 已禁用（含祖先）的节点不通知：那是结构变化带走了
+    /// 焦点，不是用户离开。宿主层到不了这条（ctx 只能把焦点要给自己），故在树上直验。
+    #[test]
+    fn dispatch_blur_skips_hidden_or_disabled_nodes() {
+        let hits = Rc::new(std::cell::Cell::new(0));
+        let text = signal(String::new());
+        let vis = signal(true);
+        let en = signal(true);
+        let h = hits.clone();
+        let root = Element::col()
+            .width(200)
+            .height(40)
+            .enabled_signal(en)
+            .child(
+                Element::text_input(text, "")
+                    .width(180)
+                    .visible_signal(vis)
+                    .on_commit(move |_| h.set(h.get() + 1)),
+            );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(200, 40), &mut crate::text::NullTextEngine);
+        let field = tree.get(id).unwrap().children[0];
+        tree.dispatch_key(skey(Key::Char('x'), false), Some(field));
+
+        vis.set(false);
+        tree.dispatch_blur(field);
+        assert_eq!(hits.get(), 0, "隐藏的节点不该收到失焦通知");
+        vis.set(true);
+        en.set(false);
+        tree.dispatch_blur(field);
+        assert_eq!(hits.get(), 0, "祖先禁用的节点不该收到失焦通知");
+        en.set(true);
+        tree.dispatch_blur(field);
+        assert_eq!(hits.get(), 1, "对照：可见且启用时应通知并提交");
     }
 
     /// 重排一次——`value` ↔ `text` 的同步挂在 `on_update` 上，只在布局前跑。

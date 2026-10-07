@@ -842,6 +842,16 @@ pub struct TextInput {
     preedit: RefCell<Preedit>,
     /// 单行模式下 Enter 的出口（见 [`crate::ui::Element::on_submit`]）。
     on_submit: Option<SubmitFn>,
+    /// "改完即提交"的出口：Enter 或用户失焦时、且自上次提交后被编辑过才触发
+    /// （见 [`crate::ui::Element::on_commit`]）。
+    on_commit: Option<SubmitFn>,
+    /// 自上次提交以来用户编辑过正文。外部写信号不算——那不是用户的改动。
+    ///
+    /// 被隐藏 / 禁用时由 `reset_interaction` 作废（框架对两者都调它）。模态框接管、
+    /// App 级回调要走焦点都**不**作废：改动仍在正文里，用户日后回到这个框再离开时提交。
+    edited: bool,
+    /// 本轮编辑开始前的正文：提交时与之比较，改了又改回原样不算改动（网页 change 同此）。
+    commit_base: String,
     /// 本控件**未处理**的导航键的出口（见 [`crate::ui::Element::on_nav_key`]）。
     on_nav_key: Option<NavKeyFn>,
     /// 输入准入过滤：对**改动之后的完整正文**表态，`false` 则整次改动被丢弃。
@@ -899,6 +909,9 @@ impl TextInput {
             composing: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             on_submit: None,
+            on_commit: None,
+            edited: false,
+            commit_base: String::new(),
             on_nav_key: None,
             filter: None,
             on_click: None,
@@ -931,6 +944,11 @@ impl TextInput {
     /// 设置单行 Enter 回调（供 Builder；下游用 [`crate::ui::Element::on_submit`]）。
     pub fn set_on_submit(&mut self, f: impl FnMut(&mut EventCtx) + 'static) {
         self.on_submit = Some(Box::new(f));
+    }
+
+    /// 设置提交回调（供 Builder；下游用 [`crate::ui::Element::on_commit`]）。
+    pub fn set_on_commit(&mut self, f: impl FnMut(&mut EventCtx) + 'static) {
+        self.on_commit = Some(Box::new(f));
     }
 
     /// 设置导航键回调（供 Builder；下游用 [`crate::ui::Element::on_nav_key`]）。
@@ -978,6 +996,34 @@ impl TextInput {
                 true
             }
             None => false,
+        }
+    }
+
+    /// 触发 `on_commit`：仅当自上次提交后被编辑过。Enter 与失焦共用这一个出口，
+    /// 于是"Enter 提交后紧跟一次失焦"天然只提交一次——下游不必自己记一次性标志
+    /// （改名回调跑两遍，"无标题文档-2" 自己变成 "-3"）。
+    ///
+    /// 正文在每次按键时已同步写回信号，故回调读到的就是最终值。
+    ///
+    /// 只是旁路通知，**不影响 Enter 的消费**：Enter / Ctrl+Enter 消费与否仍只由
+    /// `on_submit` 决定，照常上达 `App::on_shortcut`（对话框默认按钮、多行框的"发布"
+    /// 快捷键）——挂了"改完即保存"就吞掉发布键，是用户看不出原因的失灵。
+    fn fire_commit(&mut self, ctx: &mut EventCtx) {
+        if !std::mem::take(&mut self.edited) {
+            return;
+        }
+        let base = std::mem::take(&mut self.commit_base); // 用完即释放
+        let changed = self.text.with(|t| *t != base);
+        if let (Some(f), true) = (&mut self.on_commit, changed) {
+            f(ctx);
+        }
+    }
+
+    /// 用户即将改动正文：一轮编辑的第一笔记下改动前的正文，供提交时比较。
+    fn mark_edited(&mut self) {
+        // 没挂 on_commit 的框不留快照：多行大文档每轮编辑多驻留一份全文，有违低内存。
+        if !std::mem::replace(&mut self.edited, true) && self.on_commit.is_some() {
+            self.commit_base = self.text.with(|t| t.clone());
         }
     }
 
@@ -1121,6 +1167,7 @@ impl TextInput {
     /// 删除选区文本，返回是否删除了。
     fn delete_selection(&mut self, ctx: &mut EventCtx) -> bool {
         if let Some((s, e)) = self.selection() {
+            self.mark_edited();
             self.text.update(|t| {
                 let bs = char_to_byte(t, s);
                 let be = char_to_byte(t, e);
@@ -1148,6 +1195,7 @@ impl TextInput {
         self.delete_selection(ctx);
         self.clamp_cursor();
         let cursor = self.cursor;
+        self.mark_edited();
         self.text.update(|s| {
             let byte = char_to_byte(s, cursor);
             s.insert(byte, c);
@@ -1163,6 +1211,7 @@ impl TextInput {
             return;
         }
         let cursor = self.cursor;
+        self.mark_edited();
         self.text.update(|s| {
             let start = char_to_byte(s, cursor - 1);
             let end = char_to_byte(s, cursor);
@@ -1179,6 +1228,7 @@ impl TextInput {
             return;
         }
         let cursor = self.cursor;
+        self.mark_edited();
         self.text.update(|s| {
             let start = char_to_byte(s, cursor);
             let end = char_to_byte(s, cursor + 1);
@@ -1459,6 +1509,7 @@ impl TextInput {
         self.delete_selection(ctx);
         self.clamp_cursor();
         let cursor = self.cursor;
+        self.mark_edited();
         self.text.update(|s| {
             let byte = char_to_byte(s, cursor);
             s.insert(byte, '\n');
@@ -1502,6 +1553,7 @@ impl TextInput {
         self.clamp_cursor();
         let cursor = self.cursor;
         let added = clean.chars().count();
+        self.mark_edited();
         self.text.update(|t| {
             let byte = char_to_byte(t, cursor);
             t.insert_str(byte, &clean);
@@ -2212,7 +2264,12 @@ impl Widget for TextInput {
                     // 放在多行守卫之后，故多行模式的**裸** Enter 走不到这里（换行、
                     // 上下移行是编辑器的固有语义，不该被应用截走）；多行的
                     // **Ctrl+Enter** 则由上面那条臂让出来，与单行 Enter 汇到同一个出口。
-                    Key::Enter => self.fire_submit(ctx),
+                    // 先提交值、再跑 Enter 动作：on_submit 里多半要用到刚提交的结果。
+                    // 提交不算消费，Enter 照常上达 on_shortcut（见 `fire_commit`）。
+                    Key::Enter => {
+                        self.fire_commit(ctx);
+                        self.fire_submit(ctx)
+                    }
                     // 上下键：单行本控件不用，交给应用。
                     //
                     // Tab：**两种模式都转发**，且默认不消费——宿主的焦点导航是兜底，
@@ -2351,7 +2408,14 @@ impl Widget for TextInput {
         }
         Some(self.text.with(|t| t.clone()))
     }
+    fn on_blur(&mut self, ctx: &mut EventCtx) {
+        self.fire_commit(ctx);
+    }
     fn reset_interaction(&mut self) {
+        // 未提交的编辑随隐藏作废：复用同一对话框切换编辑目标时，带着上一条的"改过"
+        // 进入下一次编辑，没动一个字也会在失焦时提交。
+        self.edited = false;
+        self.commit_base = String::new();
         // 复用同一对话框切换编辑目标时（隐藏→再显示），清掉上一条残留的选区/拖选状态，
         // 光标落到（新填充文本的）文末，避免带着旧选区进入下一次编辑；有预置选区的
         // 按预置再兑现一次（钳到新正文长度）。

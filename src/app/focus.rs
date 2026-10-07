@@ -31,6 +31,9 @@ pub(super) struct FocusState {
     before_modal: Option<NodeId>,
     /// 声明式初始焦点是否已兑现过。**一次性**：兑现后焦点归用户，不会每帧粘回去。
     autofocus_done: bool,
+    /// 正在落地 App 级回调（定时器 / 通道消息 / 关窗询问…）的副作用：其间的焦点转移
+    /// 不是用户离开，不通知失焦（见 `notify_blur`）。
+    pub(super) in_app_callback: bool,
 }
 
 impl UiHost {
@@ -101,6 +104,8 @@ impl UiHost {
         let old = self.focus.current;
         self.tree.set_focused(Some(id), old);
         self.focus.current = Some(id);
+        // 不通知失焦（见 `Widget::on_blur`）：on_update 相位由信号变化驱动，起因可能是
+        // 定时器 / 通道消息而非用户；且这里在 render 中途，回调写的信号赶不上本帧重排。
         // 不点亮焦点环：这条路径的触发者是鼠标点击，沿用 `:focus-visible` 的判据
         // ——环显不显示取决于用户最近一次交互用的什么设备。理由同 `honor_autofocus`。
     }
@@ -208,6 +213,42 @@ impl UiHost {
         // 用户最近一次交互用的什么。
     }
 
+    /// **用户**让 `old` 失焦（焦点去了 `new`）：通知它并落地回调的副作用。返回是否需要重绘。
+    ///
+    /// 只由用户导致的转移调用——点到别的控件、点空白、Tab、控件经 ctx 要焦点。
+    /// 框架自己的调度（`refresh_focus` 的归一化与 on_update 相位的焦点请求、
+    /// `sync_modal_focus`、`honor_autofocus`、`rearm_autofocus`）**不调**，理由见
+    /// [`Widget::on_blur`](crate::core::Widget::on_blur)。
+    ///
+    /// App 级回调（定时器 / 通道消息…）落地副作用期间也不调：那是程序行为，不是用户
+    /// 离开。判据显式记在 `in_app_callback` 上，而**不能**借焦点环（`focus.order`）判
+    /// "去向正不正常"——Tab 环 ≠ 能拿焦点的节点：纯文本 RichText、`.focusable(false)`
+    /// 的按钮都会在按下时要焦点却不在环里，借环判就把点它们引起的提交吞掉了。
+    ///
+    /// 回调可能再要焦点（校验失败留在原框），那会经 `apply_dispatch_effects` 再走一次
+    /// 本函数——深度由应用代码决定。`source` 原样下传，否则 Tab 引发的连锁会把键盘
+    /// 焦点环冲成鼠标态。
+    pub(super) fn notify_blur(
+        &mut self,
+        old: Option<NodeId>,
+        new: Option<NodeId>,
+        source: FocusSource,
+    ) -> bool {
+        let Some(o) = old else {
+            return false;
+        };
+        if Some(o) == new || self.focus.in_app_callback {
+            return false;
+        }
+        let res = self.tree.dispatch_blur(o);
+        if !res.has_effects() {
+            return false;
+        }
+        let (repaint, damage, _) = self.apply_dispatch_effects(res, source, None);
+        self.apply_damage(damage);
+        repaint
+    }
+
     /// Tab 焦点移动（forward=正向）。返回是否变化。
     pub(super) fn move_focus(&mut self, forward: bool) -> bool {
         if self.focus.order.is_empty() {
@@ -230,7 +271,10 @@ impl UiHost {
         self.focus.current = nf;
         // 新焦点可能在滚动区外（滚出视口的节点仍在焦点环里），滚过去让它露出来。
         // 调用方 Tab 分支已置 needs_full，本帧的全窗路径会重排并钳制新的 scroll_y。
-        if let Some(f) = nf {
+        self.notify_blur(old, nf, FocusSource::Keyboard);
+        // 滚向通知**之后**的焦点：提交回调可能把焦点要回原框（校验失败），视口该跟着它，
+        // 而不是停在已经不是焦点的 nf 上。
+        if let Some(f) = self.focus.current {
             self.tree.scroll_into_view(f);
         }
         true
@@ -1105,5 +1149,347 @@ mod tests {
         handler.set_scale(1.0);
         assert!(handler.on_window_activated(false), "激活态变化仍要求重绘");
         assert!(!handler.on_window_activated(false));
+    }
+
+    /// `on_commit` 测试台：两个输入框，A 挂 on_commit（记次数 + 记回调里读到的正文），
+    /// B 不挂且**不设宽**（Wrap 宽路径，见 AGENTS §5）；A 可经 `vis` 隐藏。
+    struct CommitBench {
+        h: UiHost,
+        pm: tiny_skia::Pixmap,
+        a_text: crate::signal::Signal<String>,
+        vis: crate::signal::Signal<bool>,
+        en: crate::signal::Signal<bool>,
+        /// 置真时 A 的提交回调把焦点要回自己（"校验失败留在原框"）。
+        reject: crate::signal::Signal<bool>,
+        commits: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    const A_AT: (i32, i32) = (40, 16);
+    const B_AT: (i32, i32) = (20, 48);
+    const BLANK: (i32, i32) = (250, 180);
+    const HIDE_BTN: (i32, i32) = (20, 80);
+    const TOOL_BTN: (i32, i32) = (20, 112);
+    const RICH: (i32, i32) = (20, 144);
+
+    impl CommitBench {
+        fn new() -> Self {
+            use crate::platform::AppHandler;
+            let a_text = crate::signal::signal(String::new());
+            let b_text = crate::signal::signal(String::new());
+            let vis = crate::signal::signal(true);
+            let en = crate::signal::signal(true);
+            let reject = crate::signal::signal(false);
+            let commits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let log = commits.clone();
+            let app = App::new("t", 300, 200).content(
+                Element::col()
+                    .width(300)
+                    .height(200)
+                    .child(
+                        Element::text_input(a_text, "甲")
+                            .width(180)
+                            .height(32)
+                            .visible_signal(vis)
+                            .enabled_signal(en)
+                            .on_commit(move |ctx| {
+                                log.borrow_mut().push(a_text.get());
+                                if reject.get() {
+                                    ctx.request_focus();
+                                }
+                            }),
+                    )
+                    .child(Element::text_input(b_text, "乙").height(32))
+                    // 一次点击里"隐藏编辑框 + 焦点给自己"：dispatch_blur 那道可见性检查守的就是它。
+                    .child(
+                        Element::button("藏")
+                            .height(32)
+                            .on_click(move |_| vis.set(false)),
+                    )
+                    // 能要焦点却不在 Tab 环里的两类节点：点它们同样是用户离开了输入框。
+                    .child(Element::button("工具").height(32).focusable(false))
+                    .child(
+                        Element::rich(crate::ui::RichDoc::new().para("一段纯文本预览"))
+                            .width(200)
+                            .height(32),
+                    ),
+            );
+            let mut h = app.into_handler_for_test();
+            h.set_scale(1.0);
+            let mut b = Self {
+                h,
+                pm: tiny_skia::Pixmap::new(300, 200).unwrap(),
+                a_text,
+                vis,
+                en,
+                reject,
+                commits,
+            };
+            b.frame();
+            b
+        }
+        fn frame(&mut self) {
+            use crate::platform::AppHandler;
+            use crate::render::PixmapTarget;
+            self.h.render(
+                &mut PixmapTarget {
+                    pixmap: &mut self.pm,
+                },
+                Size::new(300, 200),
+            );
+        }
+        fn click(&mut self, (x, y): (i32, i32)) {
+            use crate::event::{MouseButton, PointerEvent, PointerKind};
+            use crate::platform::AppHandler;
+            let p = crate::geometry::Point::new(x, y);
+            self.h.on_pointer(PointerEvent::single(
+                PointerKind::Down,
+                p,
+                MouseButton::Left,
+            ));
+            self.h
+                .on_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        }
+        fn key(&mut self, k: Key) {
+            use crate::platform::AppHandler;
+            self.h.on_key(key_ev()(k));
+        }
+        fn commits(&self) -> Vec<String> {
+            self.commits.borrow().clone()
+        }
+    }
+
+    /// 改完点别处：同一次分发内提交一次，回调读到的是最终正文（不差一拍）。
+    #[test]
+    fn commit_fires_on_click_away_with_final_text() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.key(Key::Char('y'));
+        b.click(B_AT);
+        // 不出帧即断言：要求"同一次分发"，不能等下一帧。
+        assert_eq!(b.commits(), vec!["xy".to_string()]);
+    }
+
+    /// Enter 提交后紧跟失焦：只提交一次（下游被"改名跑两遍"坑过）。
+    #[test]
+    fn enter_then_blur_commits_once() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.key(Key::Enter);
+        assert_eq!(b.commits().len(), 1, "Enter 应提交");
+        b.click(B_AT);
+        assert_eq!(b.commits().len(), 1, "Enter 已提交过，紧跟的失焦不该再提交");
+        // 再改一次后失焦：又算新的改动。
+        b.click(A_AT);
+        b.key(Key::End); // 点击把光标放在落点（正文开头），移到末尾再续写
+        b.key(Key::Char('z'));
+        b.click(B_AT);
+        assert_eq!(b.commits(), vec!["x".to_string(), "xz".to_string()]);
+    }
+
+    /// 没动一个字地点进点出不提交；外部写信号也不算改动。
+    #[test]
+    fn untouched_or_externally_written_text_does_not_commit() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.click(B_AT);
+        b.a_text.set("外部写入".into());
+        b.frame();
+        b.click(A_AT);
+        b.click(B_AT);
+        assert!(b.commits().is_empty(), "未编辑不该提交：{:?}", b.commits());
+    }
+
+    /// Tab 离开与点空白同样是用户失焦。
+    #[test]
+    fn commit_fires_on_tab_and_on_blank_click() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.key(Key::Tab);
+        assert_eq!(b.commits().len(), 1, "Tab 离开应提交");
+
+        b.click(A_AT);
+        b.key(Key::Char('y'));
+        b.click(BLANK);
+        assert_eq!(b.commits().len(), 2, "点空白应提交");
+    }
+
+    /// 被隐藏丢焦点不是"用户点了别处"：不提交，且未提交的改动随之作废——
+    /// 再显示后没改动地点进点出，也不该把上一轮的改动补交出去。
+    #[test]
+    fn hiding_does_not_commit_and_discards_pending_edit() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.vis.set(false);
+        b.frame();
+        b.frame();
+        assert!(b.commits().is_empty(), "隐藏不该提交：{:?}", b.commits());
+
+        b.vis.set(true);
+        b.frame();
+        b.click(A_AT);
+        b.click(B_AT);
+        assert!(
+            b.commits().is_empty(),
+            "隐藏前的改动应已作废：{:?}",
+            b.commits()
+        );
+    }
+
+    /// 点一个"会隐藏输入框"的按钮：**提交**。焦点在按钮 Down 时就转走了，那一刻
+    /// 输入框仍可见，是用户离开了它；隐藏发生在随后 Up 的 on_click 里。与网页一致
+    /// （mousedown 先 blur/change，click 才跑）。"取消编辑"该用 Escape 之类不经
+    /// 失焦的路径，而不是指望点击隐藏能吞掉提交。
+    #[test]
+    fn clicking_a_button_that_hides_the_input_still_commits() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.click(HIDE_BTN);
+        assert!(!b.vis.get(), "前提：按钮应已隐藏输入框");
+        assert_eq!(b.commits(), vec!["x".to_string()]);
+    }
+
+    /// 改了又改回原样不算改动（网页 change 同此）：误敲一个字再删掉，不该触发
+    /// "同名冲突 → 自动加后缀"之类的提交逻辑。
+    #[test]
+    fn edit_reverted_to_original_does_not_commit() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.key(Key::Backspace);
+        b.click(B_AT);
+        assert!(
+            b.commits().is_empty(),
+            "改回原样不该提交：{:?}",
+            b.commits()
+        );
+    }
+
+    /// 被禁用带走焦点：不提交，且改动作废（禁用翻转与隐藏一样调 `reset_interaction`）
+    /// ——重新启用后没改动地点进点出，不得把旧改动补交出去（届时正文可能已被外部写成
+    /// 服务端的值）。
+    #[test]
+    fn disabling_discards_pending_edit() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        b.en.set(false);
+        b.frame();
+        b.frame();
+        b.a_text.set("服务端的值".into());
+        b.en.set(true);
+        b.frame();
+        b.click(A_AT);
+        b.click(B_AT);
+        assert!(
+            b.commits().is_empty(),
+            "禁用前的改动应已作废：{:?}",
+            b.commits()
+        );
+    }
+
+    /// 提交回调把焦点要回自己（校验失败留在原框）：Tab 引发的这条连锁要沿用键盘来源，
+    /// 焦点环不能被冲成鼠标态；焦点最终留在 A。
+    #[test]
+    fn commit_callback_refocusing_keeps_keyboard_focus_ring() {
+        let mut b = CommitBench::new();
+        b.reject.set(true);
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        let a = b.h.focus.current;
+        b.key(Key::Tab);
+        assert_eq!(b.commits().len(), 1, "Tab 离开应提交");
+        assert_eq!(b.h.focus.current, a, "回调要回焦点后应留在 A");
+        assert!(b.h.focus.visible, "键盘连锁不该把焦点环冲成鼠标态");
+    }
+
+    /// 提交只是旁路通知，不改变 Enter 的消费：多行框改过字后按 Ctrl+Enter，既提交，
+    /// 也照常上达 `App::on_shortcut`（"发布"快捷键）。挂了自动保存就吞掉发布键，是
+    /// 用户看不出原因的失灵。
+    #[test]
+    fn ctrl_enter_commits_and_still_reaches_shortcut() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let body = crate::signal::signal(String::new());
+        let commits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let shortcuts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (c, sc) = (commits.clone(), shortcuts.clone());
+        let app = App::new("t", 300, 200)
+            .on_shortcut(move |_, k| {
+                let hit = k.ctrl && k.key == Key::Enter;
+                if hit {
+                    sc.set(sc.get() + 1);
+                }
+                hit
+            })
+            .content(
+                Element::col().width(300).height(200).child(
+                    Element::text_input(body, "正文")
+                        .multiline()
+                        .width(280)
+                        .height(120)
+                        .autofocus()
+                        .on_commit(move |_| c.set(c.get() + 1)),
+                ),
+            );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = tiny_skia::Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        let k = key_ev();
+        h.on_key(k(Key::Char('x')));
+        let mut ctrl_enter = k(Key::Enter);
+        ctrl_enter.ctrl = true;
+        h.on_key(ctrl_enter);
+        assert_eq!(commits.get(), 1, "Ctrl+Enter 应提交");
+        assert_eq!(shortcuts.get(), 1, "提交不该吞掉 Ctrl+Enter 快捷键");
+    }
+
+    /// 点能要焦点却不在 Tab 环里的节点（`.focusable(false)` 的按钮、纯文本 RichText）
+    /// 同样是用户离开了输入框，必须提交。Tab 环 ≠ 能拿焦点的节点：借环判"去向正不正常"
+    /// 会把这类点击引起的提交静默吞掉，改动一直挂着。
+    #[test]
+    fn clicking_focus_taking_nodes_outside_tab_ring_commits() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        let a = b.h.focus.current;
+        b.click(TOOL_BTN);
+        assert_ne!(b.h.focus.current, a, "前提：焦点应已离开 A");
+        assert_eq!(
+            b.commits(),
+            vec!["x".to_string()],
+            "点 focusable(false) 按钮应提交"
+        );
+
+        b.click(A_AT);
+        b.key(Key::End);
+        b.key(Key::Char('y'));
+        b.click(RICH);
+        assert_ne!(b.h.focus.current, a, "前提：焦点应已离开 A");
+        assert_eq!(b.commits().len(), 2, "点纯文本 RichText 应提交");
+    }
+
+    /// App 级回调（定时器）把焦点要走不是用户离开：不提交。
+    #[test]
+    fn app_callback_taking_focus_does_not_commit() {
+        let mut b = CommitBench::new();
+        b.click(A_AT);
+        b.key(Key::Char('x'));
+        let root = b.h.tree.root;
+        let res =
+            b.h.tree
+                .run_detached(root.unwrap(), |ctx| ctx.request_focus());
+        b.h.apply_app_effects(res);
+        assert_ne!(b.h.focus.current, None, "前提：焦点应已被要到根节点");
+        assert!(
+            b.commits().is_empty(),
+            "App 级回调要焦点不该提交：{:?}",
+            b.commits()
+        );
     }
 }

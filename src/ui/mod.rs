@@ -1673,6 +1673,41 @@ impl Element {
         self.config_text_input_widget(|ti| ti.set_on_submit(f), "on_submit()")
     }
 
+    /// **"改完即提交"的出口**：用户改过内容后按 Enter、或焦点离开时触发一次——网页
+    /// `<input>` 的 `change` 事件。文档改名、设置面板里一行行的输入框用它。
+    /// （`Element::stepper` 的数值框不支持：它自带"失焦即规整"的提交语义。）
+    ///
+    /// 三条保证，都是"自己拿失焦拼"时最容易踩的坑：
+    ///
+    /// - **只在改过之后触发**：用户编辑过、且正文与这轮编辑前不同才算；没动一个字地
+    ///   点进点出、改了又改回原样都不触发，外部写信号也不算改动。于是 Enter 提交后紧跟
+    ///   的那次失焦**不会再提交一遍**，不必自己记一次性标志。
+    /// - **只认用户的失焦**：点了别处 / 点空白 / Tab 离开，或控件回调经 ctx 把焦点给了
+    ///   别人。节点被隐藏、禁用、删除，对话框弹出接管焦点，`autofocus` 夺取，控件在
+    ///   `on_update` 里要走焦点，App 级回调（定时器、通道消息）要焦点——这些都不是用户
+    ///   离开了这个框，不触发。隐藏 / 禁用时未提交的改动随之作废；对话框接管则保留，
+    ///   关掉后焦点还回来，用户再离开时照常提交。窗口失活也不触发。
+    /// - **读到的就是最终值**，且与失焦的那次点击 / 按键在**同一次分发**里调用——正文
+    ///   每次按键都已写回信号，不会差一拍。
+    ///
+    /// 与 [`on_submit`](Self::on_submit) 可并用：Enter 时先 `on_commit`（若改过）再
+    /// `on_submit`。提交是旁路通知，**不改变 Enter 的消费**——消费与否仍只看 `on_submit`，
+    /// 没挂它时 Enter / Ctrl+Enter 照常上达 `App::on_shortcut`（对话框默认按钮、"发布"
+    /// 快捷键）。多行输入里 Enter 是换行，提交走 Ctrl+Enter 或失焦。
+    ///
+    /// 仅 `Element::text_input(..)` 可用（链到别处 debug 下 panic、release 下静默忽略）。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let title = signal("无标题文档".to_string());
+    /// let ui = Element::text_input(title, "文档名")
+    ///     .on_commit(move |ctx| ctx.toast_ok(format!("已改名为 {}", title.get())));
+    /// ```
+    #[track_caller]
+    pub fn on_commit(self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+        self.config_text_input_widget(|ti| ti.set_on_commit(f), "on_commit()")
+    }
+
     /// **预置选区** `[start, end)`（字符索引）：重命名框只选主名、不选扩展名——
     /// 资源管理器 / TC 的 F2 语义，改名时直接覆盖打字而扩展名原样保留。
     ///

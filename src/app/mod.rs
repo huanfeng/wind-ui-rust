@@ -2587,8 +2587,12 @@ impl UiHost {
     /// 焦点来源按 `Pointer` 记：这些回调不在键盘导航中，不该点亮焦点环。
     /// 完事置 `needs_relayout`——回调可以经 `ctx.tree_mut()` 改结构，交给 render 里的
     /// 结构签名去判本帧走局部还是整窗（与键盘路径同款保守）。
+    ///
+    /// 其间的焦点转移不通知失焦（`in_app_callback`）：定时器把焦点要走不是用户离开。
     fn apply_app_effects(&mut self, res: DispatchResult) {
+        let prev = std::mem::replace(&mut self.focus.in_app_callback, true);
         let (_, damage, _) = self.apply_dispatch_effects(res, FocusSource::Pointer, None);
+        self.focus.in_app_callback = prev;
         self.apply_damage(damage);
         self.damage.needs_relayout = true;
     }
@@ -2847,6 +2851,8 @@ impl UiHost {
             dialog,
             open_windows,
         } = res;
+        // 本次分发造成的用户失焦，推迟到本函数末尾才通知（见那里）。
+        let mut blurred = None;
         // 开窗请求排队：平台在事件分发完全返回后 `take_new_windows` 取走并建窗。
         self.pending_windows.extend(open_windows);
         if let Some(f) = focus {
@@ -2875,6 +2881,7 @@ impl UiHost {
                     self.damage.needs_full = true;
                 }
             }
+            blurred = Some((old, Some(f)));
         } else if let Some(pos) = blur_at {
             // 点在当前焦点控件之外 → 清空焦点（网页 blur 语义：焦点归属由宿主每次按下
             // 重新裁决，而不是"没人认领就维持原样"）。菜单栏例外，见
@@ -2889,6 +2896,7 @@ impl UiHost {
                     // 给足；此刻 focused 已置 false，按脏区走会残留一圈，故整窗。
                     self.damage.needs_full = true;
                     repaint = true;
+                    blurred = Some((Some(f), None));
                 }
             }
         }
@@ -2921,6 +2929,14 @@ impl UiHost {
         // 轻提示：居中浮层 + 淡入淡出 + 定时消失。
         if let Some(req) = toast {
             self.show_toast(req);
+        }
+        // 失焦通知放在最后：本次分发自己的副作用（菜单的派发对象取 `focus.current`、
+        // 关窗、toast）先按本次的焦点态落定，失焦回调里再要焦点（校验失败留在原框）
+        // 也不会把刚弹出的菜单错派给别的控件。代价：同一次分发若既转焦点又请求关窗，
+        // `on_close_request` 先于提交执行、看到的是提交前的状态。常见路径碰不到——按钮
+        // 在 Down 转焦点、在 Up 才关窗，提交早在 Down 那次分发里跑完了。
+        if let Some((old, new)) = blurred {
+            repaint |= self.notify_blur(old, new, focus_from);
         }
         (repaint, damage, consumed)
     }
