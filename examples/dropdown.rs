@@ -12,11 +12,11 @@
 
 use windui::prelude::*;
 
+/// 小标题。不钉高度：窄窗下长标题会折成两行，按内容撑高才不会压到下方控件。
 fn label(t: &str) -> Element {
     Element::label(t)
         .font_size(13.0)
         .fg_role(Role::TextMuted)
-        .height(20)
         .width_match()
 }
 

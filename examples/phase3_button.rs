@@ -51,8 +51,7 @@ fn main() {
                     )
                     .font_size(14.0)
                     .fg(Color::hex(0x636E72))
-                    .width_match()
-                    .height(22),
+                    .width_match(),
                 )
                 .child(
                     Element::row()
