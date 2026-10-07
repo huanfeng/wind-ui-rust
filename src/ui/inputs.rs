@@ -76,6 +76,8 @@ pub struct CheckBox {
     /// 语义意图色（默认 Primary=主题 accent）。运行时在 paint 解析，故 danger/自定义随主题/实例而变。
     intent: Intent,
     size: CheckBoxSize,
+    /// 标签折行溢出 bounds 时的裁剪判定（自带排版缓存）。
+    overflow: super::text_fit::WrapClip,
 }
 
 impl CheckBox {
@@ -89,6 +91,7 @@ impl CheckBox {
             on_toggle: None,
             intent: Intent::Primary,
             size: CheckBoxSize::Normal,
+            overflow: Default::default(),
         }
     }
     /// 设置语义意图色（供 Builder 的 `.intent()/.danger()/.accent()` 调用）。
@@ -222,9 +225,12 @@ impl Widget for CheckBox {
             bounds.w - bsz_i - gap_i,
             bounds.h,
         );
-        canvas.draw_text(
+        // 标签按内容折行撑高；只有钉死高度时才会折出 bounds，那时裁回。
+        self.overflow.draw_text(
+            canvas,
             self.label.resolve().as_ref(),
             text_rect,
+            bounds,
             text_color,
             Align::Start,
             &crate::text::TextStyle::of(style).with_size(self.font_size(style)),
@@ -436,6 +442,8 @@ pub struct RadioButton {
     sel: Cell<Transition<f32>>,
     /// 显隐翻转经 `reset_interaction` 复位；复显时首帧靠 `primed` 瞬时落定选中态，不回放动画。
     primed: Cell<bool>,
+    /// 标签折行溢出 bounds 时的裁剪判定（自带排版缓存）。
+    overflow: super::text_fit::WrapClip,
 }
 
 impl RadioButton {
@@ -447,6 +455,7 @@ impl RadioButton {
             index,
             sel: Cell::new(Transition::new(init)),
             primed: Cell::new(false),
+            overflow: Default::default(),
         }
     }
     fn selected(&self) -> bool {
@@ -523,9 +532,12 @@ impl Widget for RadioButton {
             bounds.w - BOX_SIZE - GAP,
             bounds.h,
         );
-        canvas.draw_text(
+        // 标签按内容折行撑高；只有钉死高度时才会折出 bounds，那时裁回。
+        self.overflow.draw_text(
+            canvas,
             self.label.resolve().as_ref(),
             text_rect,
+            bounds,
             text_color,
             Align::Start,
             &crate::text::TextStyle::of(style),
@@ -3296,5 +3308,50 @@ mod label_wrap_tests {
             single,
             "窄到放不下文字时应按单行量，而不是折成极窄的多行"
         );
+    }
+}
+
+/// 复选/单选标签在钉死高度下折行溢出：真实文字引擎 + 真实 layout/paint。
+#[cfg(test)]
+mod overflow_tests {
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn checkbox() -> Element {
+        Element::checkbox(LONG_TITLE, signal(false)).font_size(13.0)
+    }
+
+    fn radio() -> Element {
+        Element::radio(LONG_TITLE, signal(1usize), 0).font_size(13.0)
+    }
+
+    /// 显式宽高：标签折行后不得画出 bounds。
+    #[test]
+    fn wrapped_toggle_labels_stay_inside_bounds_explicit_width() {
+        assert_wraps_taller_than(120, 20);
+        for (what, el) in [("CheckBox", checkbox()), ("Radio", radio())] {
+            let el = Element::col().children([
+                el.width(150).height(20),
+                Element::col().height(80).width_match(),
+            ]);
+            let (pm, b) = paint_first_child(el, 200, 100);
+            assert_eq!((b.w, b.h), (150, 20));
+            assert_no_ink_outside(&pm, b, &format!("{what} 显式宽"));
+        }
+    }
+
+    /// Wrap 宽：测量按父宽折行撑高，但钉了高度时同样不得出界。
+    #[test]
+    fn wrapped_toggle_labels_stay_inside_bounds_wrap_width() {
+        assert_wraps_taller_than(120, 20);
+        for (what, el) in [("CheckBox", checkbox()), ("Radio", radio())] {
+            let el = Element::col()
+                .width_match()
+                .children([el.height(20), Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, 150, 100);
+            assert!(b.w <= 150, "{what}：Wrap 宽应受父宽约束：{b:?}");
+            assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
+        }
     }
 }
