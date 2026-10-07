@@ -19,6 +19,7 @@ use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::text_fit::SingleLine;
 use crate::ui::TextContent;
 
 /// 行高（逻辑 px），NavRow 与 CollapsibleHeader 共用。
@@ -58,8 +59,10 @@ fn chevron_down(canvas: &mut dyn Canvas, cx: f32, cy: f32, color: crate::geometr
 
 /// 折叠/手风琴面板头的共用绘制：可选 hover 底色 + 左标题 + 右侧三角（展开 `v` / 收起 `>`）。
 /// `CollapsibleHeader` 与 `AccordionHeader` 共用，避免重复（NavTheme 提供文字/箭头/hover 色）。
+#[allow(clippy::too_many_arguments)]
 fn paint_panel_header(
     canvas: &mut dyn Canvas,
+    fit: &SingleLine,
     bounds: Rect,
     title: &str,
     expanded: bool,
@@ -101,7 +104,9 @@ fn paint_panel_header(
         bounds.w - 2 * PAD_X - CHEVRON_W,
         bounds.h,
     );
-    canvas.draw_text(
+    // 行高固定：长标题截成单行，不折行画出 bounds。
+    fit.draw_text(
+        canvas,
         title,
         tr,
         text_color,
@@ -138,6 +143,8 @@ pub struct NavRow {
     label: TextContent,
     state: State,
     on_click: Option<ClickFn>,
+    /// 标签单行截断。
+    fit: SingleLine,
 }
 
 impl NavRow {
@@ -146,6 +153,7 @@ impl NavRow {
             label: label.into(),
             state: State::Normal,
             on_click: None,
+            fit: SingleLine::default(),
         }
     }
     fn activate(&mut self, ctx: &mut EventCtx) {
@@ -198,7 +206,9 @@ impl Widget for NavRow {
             bounds.w - 2 * PAD_X - CHEVRON_W,
             bounds.h,
         );
-        canvas.draw_text(
+        // 行高固定：长标签截成单行，不折行画出 bounds。
+        self.fit.draw_text(
+            canvas,
             self.label.resolve().as_ref(),
             tr,
             text_color,
@@ -283,6 +293,8 @@ pub struct CollapsibleHeader {
     expanded: Signal<bool>,
     hover: bool,
     hover_anim: Cell<Transition<f32>>,
+    /// 标题单行截断。
+    fit: SingleLine,
 }
 
 impl CollapsibleHeader {
@@ -292,6 +304,7 @@ impl CollapsibleHeader {
             expanded,
             hover: false,
             hover_anim: Cell::new(Transition::new(0.0)),
+            fit: SingleLine::default(),
         }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
@@ -318,6 +331,7 @@ impl Widget for CollapsibleHeader {
         let amt = hover_amount(&self.hover_anim, self.hover);
         paint_panel_header(
             canvas,
+            &self.fit,
             bounds,
             &self.title,
             self.expanded.get(),
@@ -414,6 +428,8 @@ pub struct AccordionHeader {
     state: ExpandState,
     hover: bool,
     hover_anim: Cell<Transition<f32>>,
+    /// 标题单行截断。
+    fit: SingleLine,
 }
 
 impl AccordionHeader {
@@ -423,6 +439,7 @@ impl AccordionHeader {
             state,
             hover: false,
             hover_anim: Cell::new(Transition::new(0.0)),
+            fit: SingleLine::default(),
         }
     }
     fn toggle(&self, ctx: &mut EventCtx) {
@@ -449,6 +466,7 @@ impl Widget for AccordionHeader {
         let amt = hover_amount(&self.hover_anim, self.hover);
         paint_panel_header(
             canvas,
+            &self.fit,
             bounds,
             &self.title,
             self.state.is_expanded(),
@@ -685,5 +703,57 @@ mod tests {
             Some(header0),
         );
         assert_eq!(sel.get(), Some(0), "回车应展开聚焦的面板头");
+    }
+}
+
+/// 行高固定的导航行 / 面板头配长标题：截成单行，不折行画出 bounds。
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use crate::core::Layout;
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn rows() -> Vec<(&'static str, Element)> {
+        let row = || Element::base(Layout::None).height(NAV_ROW_H);
+        vec![
+            ("NavRow", row().widget(NavRow::new(LONG_TITLE))),
+            (
+                "CollapsibleHeader",
+                row().widget(CollapsibleHeader::new(LONG_TITLE.into(), signal(false))),
+            ),
+            (
+                "AccordionHeader",
+                row().widget(AccordionHeader::new(
+                    LONG_TITLE.into(),
+                    ExpandState::Multi(signal(false)),
+                )),
+            ),
+        ]
+    }
+
+    #[test]
+    fn long_nav_titles_stay_in_their_row_explicit_width() {
+        assert_wraps_taller_than(120 - 2 * PAD_X - CHEVRON_W, NAV_ROW_H);
+        for (what, el) in rows() {
+            let el =
+                Element::col().children([el.width(120), Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, 200, 150);
+            assert_eq!(b.w, 120);
+            assert_no_ink_outside(&pm, b, &format!("{what} 显式宽"));
+        }
+    }
+
+    #[test]
+    fn long_nav_titles_stay_in_their_row_wrap_width() {
+        for (what, el) in rows() {
+            let el = Element::col()
+                .width_match()
+                .children([el, Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, 120, 150);
+            assert!(b.w <= 120, "{what}：Wrap 宽应受父宽约束：{b:?}");
+            assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
+        }
     }
 }
