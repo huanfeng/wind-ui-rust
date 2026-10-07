@@ -333,6 +333,8 @@ pub struct Button {
     size: ButtonSize,
     /// 填充变体（默认 Solid 实心；Outline 描边）。
     variant: ButtonVariant,
+    /// 折行溢出 bounds 时的裁剪判定（自带排版缓存）。
+    overflow: text_fit::WrapClip,
 }
 
 /// 按钮填充变体：实心或描边（透明底 + 意图色边框/文字）。
@@ -358,6 +360,7 @@ impl Button {
             intent: Intent::Primary,
             size: ButtonSize::Medium,
             variant: ButtonVariant::Solid,
+            overflow: Default::default(),
         }
     }
 
@@ -537,10 +540,13 @@ impl Widget for Button {
                 &Paint::fill(border),
             );
         }
-        // 无图标：文字整体居中（原行为）。
+        // 无图标：文字整体居中（原行为）。钉了尺寸的按钮配长文案会折行，折出 bounds
+        // 的部分裁回（与 Label 同一套判据）。
         let Some(icon) = self.icon.as_ref() else {
-            canvas.draw_text(
+            self.overflow.draw_text(
+                canvas,
                 label.as_ref(),
+                bounds,
                 bounds,
                 fg,
                 Align::Center,
@@ -565,11 +571,16 @@ impl Widget for Button {
             &icon_style,
             vstate,
         );
-        // 文字紧随图标右侧，垂直方向交给 draw_text 居中。
-        let text_rect = Rect::new(start_x + ih + ICON_GAP, bounds.y, ts.w + 2, bounds.h);
-        canvas.draw_text(
+        // 文字紧随图标右侧，垂直方向交给 draw_text 居中。宽度钳到按钮右沿：按钮被钉窄
+        // 时单行实测宽放不下，不钳就横向画出 bounds；钳窄后折行再由 WrapClip 兜住纵向。
+        let text_x = start_x + ih + ICON_GAP;
+        let text_w = (ts.w + 2).min(bounds.right() - text_x).max(0);
+        let text_rect = Rect::new(text_x, bounds.y, text_w, bounds.h);
+        self.overflow.draw_text(
+            canvas,
             label.as_ref(),
             text_rect,
+            bounds,
             fg,
             Align::Start,
             &crate::text::TextStyle::of(style),
@@ -6729,6 +6740,58 @@ b",
     // ---- Label 折行溢出裁剪：真实文字引擎 + 真实 layout/paint ----
 
     use super::text_fit::ink::*;
+
+    /// 钉了尺寸的无图标按钮配长文案：折行后不得画出 bounds。
+    ///
+    /// 按钮测试一律用描边变体：实心按钮的字是白色，白底上量不出墨，裁没裁都一样绿。
+    #[test]
+    fn wrapped_button_stays_inside_bounds_explicit_width() {
+        assert_wraps_taller_than(80, 30);
+        let el = Element::col().children([
+            Element::button(LONG_TITLE)
+                .outline()
+                .font_size(13.0)
+                .width(80)
+                .height(30),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, b) = paint_first_child(el, 200, 120);
+        assert_eq!((b.w, b.h), (80, 30));
+        assert_no_ink_outside(&pm, b, "Button 显式宽");
+    }
+
+    /// Wrap 宽：按钮按单行量宽，被父宽压窄后折行，同样不得出界。
+    #[test]
+    fn wrapped_button_stays_inside_bounds_wrap_width() {
+        assert_wraps_taller_than(80, 30);
+        let el = Element::col().width_match().children([
+            Element::button(LONG_TITLE)
+                .outline()
+                .font_size(13.0)
+                .height(30),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, b) = paint_first_child(el, 80, 120);
+        assert!(b.w <= 80, "Wrap 宽应受父宽约束：{b:?}");
+        assert_no_ink_outside(&pm, b, "Button Wrap 宽");
+    }
+
+    /// 带图标的按钮被钉窄：文字矩形须钳到按钮右沿，不得横向画出 bounds。
+    #[test]
+    fn icon_button_text_stays_inside_bounds() {
+        let el = Element::col().children([
+            Element::button(LONG_TITLE)
+                .outline()
+                .icon_rgba(2, 2, &[0, 0, 0, 255].repeat(4))
+                .font_size(13.0)
+                .width(80)
+                .height(30),
+            Element::col().height(80).width_match(),
+        ]);
+        let (pm, b) = paint_first_child(el, 200, 120);
+        assert_eq!((b.w, b.h), (80, 30));
+        assert_no_ink_outside(&pm, b, "带图标 Button");
+    }
 
     /// 显式宽（`width_match`）+ 固定高度：折行溢出须裁在 label 内。
     #[test]
