@@ -194,6 +194,8 @@ pub struct Dropdown {
     /// 边框色补间（hover/focus 高亮淡变）；首帧靠 `primed` 落定。
     border_anim: Cell<Transition<Color>>,
     primed: Cell<bool>,
+    /// 触发器文字单行截断（高度按单行写死，放不下截成 `text…`，不折行画出 bounds）。
+    fit: super::text_fit::SingleLine,
 }
 
 impl Dropdown {
@@ -223,6 +225,7 @@ impl Dropdown {
             hover: false,
             border_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
             primed: Cell::new(false),
+            fit: Default::default(),
         }
     }
 
@@ -390,7 +393,8 @@ impl Widget for Dropdown {
             bounds.h,
         );
         let cur = self.current();
-        canvas.draw_text(
+        self.fit.draw_text(
+            canvas,
             &cur,
             tr,
             text_color,
@@ -550,6 +554,8 @@ pub struct CheckMenu {
     /// 边框色补间（与 Dropdown 同源，见 [`paint_field_chrome`]）。
     border_anim: Cell<Transition<Color>>,
     primed: Cell<bool>,
+    /// 触发器文字单行截断（高度按单行写死，放不下截成 `text…`，不折行画出 bounds）。
+    fit: super::text_fit::SingleLine,
 }
 
 impl CheckMenu {
@@ -562,6 +568,7 @@ impl CheckMenu {
             hover: false,
             border_anim: Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))),
             primed: Cell::new(false),
+            fit: Default::default(),
         }
     }
 
@@ -684,7 +691,8 @@ impl Widget for CheckMenu {
             bounds.w - 2 * PAD_X - CHEVRON_W,
             bounds.h,
         );
-        canvas.draw_text(
+        self.fit.draw_text(
+            canvas,
             &self.display_text(),
             tr,
             text_color,
@@ -875,5 +883,49 @@ mod tests {
         // 空列表：宽度仅为左右内边距 + 箭头区（无选项文本贡献）。
         let w = dd.measure(Size::ZERO, &style, &mut te).w;
         assert_eq!(w, 2 * PAD_X + CHEVRON_W);
+    }
+}
+
+/// 触发器高度按单行写死：长选项文字截成单行，不折行画出 bounds。
+#[cfg(test)]
+mod overflow_tests {
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn triggers() -> Vec<(&'static str, Element)> {
+        vec![
+            (
+                "Dropdown",
+                Element::dropdown(vec![LONG_TITLE], signal(0usize)).font_size(13.0),
+            ),
+            (
+                "CheckMenu",
+                Element::check_menu(LONG_TITLE, vec![]).font_size(13.0),
+            ),
+        ]
+    }
+
+    #[test]
+    fn long_trigger_text_stays_inside_bounds_explicit_width() {
+        for (what, el) in triggers() {
+            let el =
+                Element::col().children([el.width(120), Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, 200, 150);
+            assert_eq!(b.w, 120);
+            assert_no_ink_outside(&pm, b, &format!("{what} 显式宽"));
+        }
+    }
+
+    #[test]
+    fn long_trigger_text_stays_inside_bounds_wrap_width() {
+        for (what, el) in triggers() {
+            let el = Element::col()
+                .width_match()
+                .children([el, Element::col().height(80).width_match()]);
+            let (pm, b) = paint_first_child(el, 120, 150);
+            assert!(b.w <= 120, "{what}：Wrap 宽应受父宽约束：{b:?}");
+            assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
+        }
     }
 }
