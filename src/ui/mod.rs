@@ -6902,6 +6902,22 @@ b",
         );
     }
 
+    /// 让 `text` 排版高度超过 `min_h` 的测试宽度：从 120 往窄里试。
+    ///
+    /// 折成几行取决于机器上有什么字体——CI 的 ubuntu 镜像没有 CJK 字体，中文落到回退
+    /// 字形上、宽度不同，120 宽只折两行，写死宽度的前提在那里不成立（本机有 Noto CJK
+    /// 时成立，于是本地全绿、CI 红）。按实测选宽度，前提在任何字体下都成立。
+    fn wrap_width_exceeding(text: &str, min_h: i32) -> i32 {
+        let mut eng = crate::text::PlatformTextEngine::default();
+        eng.set_scale(1.0);
+        let ts = crate::text::TextStyle::new(13.0);
+        (40..=120)
+            .rev()
+            .step_by(8)
+            .find(|&w| eng.measure(text, &ts, Some(w as f32)).h > min_h)
+            .unwrap_or_else(|| panic!("前提不成立：40..=120 宽内排版高都不超过 {min_h}"))
+    }
+
     /// 前提校验：这段文字在测试宽度下确实折成多行、排版高度超过 20。
     fn assert_wraps_taller_than(width: i32, h: i32) {
         let mut eng = crate::text::PlatformTextEngine::default();
@@ -6953,16 +6969,15 @@ b",
         eng.set_scale(1.0);
         let ts = crate::text::TextStyle::new(13.0);
         let line_h = eng.measure("前缀", &ts, None).h;
-        let total = eng.measure(&text, &ts, Some(120.0)).h;
         // 高度放得下 3 整行（外加半行余量），排版却超出它（4 行）。行高取的是 ceil 值，
         // 实际行距略小，故前提只要求"确实溢出"。
         let h = line_h * 3 + line_h / 2;
-        assert!(total > h, "前提不成立：排版高 {total} 未超过分配高度 {h}");
+        let w = wrap_width_exceeding(&text, h);
         let el = Element::col().children([
             Element::label(text).font_size(13.0).height(h).width_match(),
             Element::col().height(200).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, 120, 300);
+        let (pm, lb) = paint_label_frame(el, w, 300);
         assert_eq!(lb.h, h);
         assert_no_ink_below(&pm, lb, "硬换行混合");
         assert!(
@@ -6985,10 +7000,9 @@ b",
         eng.set_scale(1.0);
         let ts = crate::text::TextStyle::new(13.0);
         let line_h = eng.measure("方案", &ts, None).h;
-        let total = eng.measure(LONG_TITLE, &ts, Some(120.0)).h;
         let pad_b = line_h;
         let h = line_h * 2 + 4;
-        assert!(total > h, "前提不成立：排版高 {total} 未超过 bounds 高 {h}");
+        let w = wrap_width_exceeding(LONG_TITLE, h);
         let el = Element::col().children([
             Element::label(LONG_TITLE)
                 .font_size(13.0)
@@ -7002,7 +7016,7 @@ b",
                 .width_match(),
             Element::col().height(80).width_match(),
         ]);
-        let (pm, lb) = paint_label_frame(el, 120, 100);
+        let (pm, lb) = paint_label_frame(el, w, 100);
         assert_eq!(lb.h, h);
         assert_no_ink_below(&pm, lb, "带下 padding");
         assert!(
@@ -7015,6 +7029,8 @@ b",
     /// 仍沿用"单行不裁"的旧结论（或换回短文案后仍按旧的多行高度裁）。
     #[test]
     fn wrapped_label_overflow_follows_signal_text() {
+        // 没有这条前提，某字体下长文案在 120 宽内不折行时，"下沿以下无墨"会空洞成立。
+        assert_wraps_taller_than(120, 20);
         let caption = signal(String::from("短"));
         let el = Element::col().children([
             Element::label_signal(caption)
