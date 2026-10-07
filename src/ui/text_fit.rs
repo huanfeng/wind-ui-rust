@@ -337,6 +337,25 @@ pub(crate) mod ink {
         );
     }
 
+    /// 不依赖 CJK 字体的长文案：拉丁字体每台机器都有，折行行为比中文稳定得多（CI 的
+    /// ubuntu 镜像没有 CJK 字体，中文落到回退字形上、宽度与本机全然不同）。
+    pub(crate) const LONG_LATIN: &str =
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor";
+
+    /// 前提校验：`text` 以 `size` 号字在宽 `w` 内折行后高于 `min_h`。
+    ///
+    /// `w` 取控件宽即可——文字区只会比它窄、折得只会更高，前提照样成立。没有这条，某种
+    /// 字体下文案恰好放得下时，"不出界"会空洞成立，去掉修复也照样绿。
+    pub(crate) fn assert_wraps_taller(text: &str, size: f32, w: i32, min_h: i32) {
+        let got = engine()
+            .measure(text, &crate::text::TextStyle::new(size), Some(w as f32))
+            .h;
+        assert!(
+            got > min_h,
+            "前提不成立：{text:?} 以 {size} 号字在 {w} 宽内排版高 {got}，未超过 {min_h}"
+        );
+    }
+
     /// 让 `text` 排版高度超过 `min_h` 的测试宽度：从 120 往窄里试。
     ///
     /// 折成几行取决于机器上有什么字体——CI 的 ubuntu 镜像没有 CJK 字体，中文落到回退
@@ -420,7 +439,7 @@ mod tests {
     /// 把 `\r` 当分段，只压 `\n` 的话 CRLF 文案照样画成两行。
     #[test]
     fn single_line_flattens_every_line_break() {
-        for text in ["短\r\n第二行", "短\r第二行", "短\u{2028}第二行"] {
+        for text in ["Short\r\nSecond", "Short\rSecond", "Short\u{2028}Second"] {
             let mut eng = engine();
             let mut pm = white(200, 60);
             let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);

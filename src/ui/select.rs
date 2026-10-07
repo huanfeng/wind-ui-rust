@@ -904,18 +904,19 @@ mod overflow_tests {
         vec![
             (
                 "Dropdown",
-                Element::dropdown(vec![LONG_TITLE], signal(0usize)).font_size(13.0),
+                Element::dropdown(vec![LONG_LATIN], signal(0usize)).font_size(13.0),
             ),
             (
                 "CheckMenu",
-                Element::check_menu(LONG_TITLE, vec![]).font_size(13.0),
+                Element::check_menu(LONG_LATIN, vec![]).font_size(13.0),
             ),
         ]
     }
 
     #[test]
     fn long_trigger_text_stays_inside_bounds_explicit_width() {
-        assert_single_line_wider_than(LONG_TITLE, 13.0, 120);
+        // 触发器高 = 字号 + 16。
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 13 + 16);
         for (what, el) in triggers() {
             let el =
                 Element::col().children([el.width(120), Element::col().height(80).width_match()]);
@@ -927,7 +928,8 @@ mod overflow_tests {
 
     #[test]
     fn long_trigger_text_stays_inside_bounds_wrap_width() {
-        assert_single_line_wider_than(LONG_TITLE, 13.0, 120);
+        // 触发器高 = 字号 + 16。
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 13 + 16);
         for (what, el) in triggers() {
             let el = Element::col()
                 .width_match()
@@ -943,7 +945,10 @@ mod overflow_tests {
     fn narrow_trigger_drops_badge_inside_bounds() {
         use crate::theme::Intent;
         use crate::ui::select::DropdownItem;
-        let items = vec![DropdownItem::new("免费版").badge("当前推荐", Intent::Neutral)];
+        // 徽章文字比整个触发器还宽：不隐藏的话，贴右沿定位的徽章必然伸出左沿。
+        const BADGE: &str = "Recommended plan";
+        assert_single_line_wider_than(BADGE, 12.0, 70);
+        let items = vec![DropdownItem::new("Free").badge(BADGE, Intent::Neutral)];
         let el = Element::col().children([
             Element::col().height(10).width_match(),
             Element::row().children([

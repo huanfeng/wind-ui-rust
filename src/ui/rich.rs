@@ -3984,7 +3984,8 @@ mod tests {
     #[test]
     fn overflowing_rich_text_stays_inside_bounds() {
         use crate::ui::text_fit::ink::*;
-        let doc = || RichDoc::new().para(LONG_TITLE).para(LONG_TITLE);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, 30);
+        let doc = || RichDoc::new().para(LONG_LATIN).para(LONG_LATIN);
         for (what, el, win_w) in [
             ("显式宽", Element::rich(doc()).width(120).height(30), 200),
             ("Wrap 宽", Element::rich(doc()).height(30), 120),
@@ -4044,7 +4045,9 @@ mod tests {
     #[test]
     fn focus_ring_of_clipped_header_stays_inside_bounds() {
         use crate::ui::text_fit::ink::*;
-        let doc = RichDoc::new().section(LONG_TITLE, signal(true), |d| d.para("体"));
+        // 折叠头须折成多行、高于钉死的 20：不然焦点框本就在 bounds 内，测不到越界。
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, 20);
+        let doc = RichDoc::new().section(LONG_LATIN, signal(true), |d| d.para("body"));
         let el = Element::col().children([
             Element::rich(doc).width(120).height(20),
             Element::col().height(80).width_match(),

@@ -340,9 +340,9 @@ mod overflow_tests {
     /// 选中索引指向不存在的行，免得别的墨混进来）。
     #[test]
     fn long_list_label_stays_in_its_row() {
-        assert_wraps_taller_than(120, ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, ROW_H);
         // 根节点总被撑满窗口，显式宽要钉在下一层才生效。
-        let list = Element::list(vec![LONG_TITLE, ""], signal(99usize));
+        let list = Element::list(vec![LONG_LATIN, ""], signal(99usize));
         let el = Element::col().children([Element::col().width(120).height(150).children([list])]);
         let (pm, row) = paint_at(el, 200, 200, &[0, 0, 0]);
         assert_eq!(row.w, 120);
@@ -353,9 +353,9 @@ mod overflow_tests {
     /// Wrap 宽：行宽取父给的可用宽（窄窗），同样只占一行。
     #[test]
     fn long_list_label_stays_in_its_row_wrap_width() {
-        assert_wraps_taller_than(120, ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, ROW_H);
         let row = Element::base(Layout::None)
-            .widget(ListRow::new(LONG_TITLE.into(), signal(99usize), 0))
+            .widget(ListRow::new(LONG_LATIN.into(), signal(99usize), 0))
             .height(ROW_H);
         let el = Element::col()
             .width_match()

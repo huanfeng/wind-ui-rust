@@ -453,12 +453,13 @@ mod overflow_tests {
 
     fn seg() -> Element {
         // 长文案放在非选中段：选中段是白字，白底上量不出墨。
-        Element::segmented(vec![LONG_TITLE, "短"], signal(1usize)).font_size(13.0)
+        Element::segmented(vec![LONG_LATIN, "B"], signal(1usize)).font_size(13.0)
     }
 
     #[test]
     fn long_segment_stays_inside_bounds_explicit_width() {
-        assert_single_line_wider_than(LONG_TITLE, 13.0, 80);
+        // 每段 80 宽；段高约一行字高 + 14，取 40 作宽松上界。
+        assert_wraps_taller(LONG_LATIN, 13.0, 80, 40);
         let el =
             Element::col().children([seg().width(160), Element::col().height(80).width_match()]);
         let (pm, b) = paint_first_child(el, 240, 150);
@@ -468,7 +469,8 @@ mod overflow_tests {
 
     #[test]
     fn long_segment_stays_inside_bounds_wrap_width() {
-        assert_single_line_wider_than(LONG_TITLE, 13.0, 80);
+        // 每段 80 宽；段高约一行字高 + 14，取 40 作宽松上界。
+        assert_wraps_taller(LONG_LATIN, 13.0, 80, 40);
         let el = Element::col()
             .width_match()
             .children([seg(), Element::col().height(80).width_match()]);

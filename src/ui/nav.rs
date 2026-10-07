@@ -718,15 +718,15 @@ mod overflow_tests {
     fn rows() -> Vec<(&'static str, Element)> {
         let row = || Element::base(Layout::None).height(NAV_ROW_H);
         vec![
-            ("NavRow", row().widget(NavRow::new(LONG_TITLE))),
+            ("NavRow", row().widget(NavRow::new(LONG_LATIN))),
             (
                 "CollapsibleHeader",
-                row().widget(CollapsibleHeader::new(LONG_TITLE.into(), signal(false))),
+                row().widget(CollapsibleHeader::new(LONG_LATIN.into(), signal(false))),
             ),
             (
                 "AccordionHeader",
                 row().widget(AccordionHeader::new(
-                    LONG_TITLE.into(),
+                    LONG_LATIN.into(),
                     ExpandState::Multi(signal(false)),
                 )),
             ),
@@ -735,7 +735,7 @@ mod overflow_tests {
 
     #[test]
     fn long_nav_titles_stay_in_their_row_explicit_width() {
-        assert_wraps_taller_than(120 - 2 * PAD_X - CHEVRON_W, NAV_ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, NAV_ROW_H);
         for (what, el) in rows() {
             let el =
                 Element::col().children([el.width(120), Element::col().height(80).width_match()]);
@@ -747,7 +747,7 @@ mod overflow_tests {
 
     #[test]
     fn long_nav_titles_stay_in_their_row_wrap_width() {
-        assert_single_line_wider_than(LONG_TITLE, 14.0, 120);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, NAV_ROW_H);
         for (what, el) in rows() {
             let el = Element::col()
                 .width_match()

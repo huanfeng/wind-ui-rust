@@ -3324,17 +3324,17 @@ mod overflow_tests {
     use crate::ui::Element;
 
     fn checkbox() -> Element {
-        Element::checkbox(LONG_TITLE, signal(false)).font_size(13.0)
+        Element::checkbox(LONG_LATIN, signal(false)).font_size(13.0)
     }
 
     fn radio() -> Element {
-        Element::radio(LONG_TITLE, signal(1usize), 0).font_size(13.0)
+        Element::radio(LONG_LATIN, signal(1usize), 0).font_size(13.0)
     }
 
     /// 显式宽高：标签折行后不得画出 bounds。
     #[test]
     fn wrapped_toggle_labels_stay_inside_bounds_explicit_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 150, 20);
         for (what, el) in [("CheckBox", checkbox()), ("Radio", radio())] {
             let el = Element::col().children([
                 el.width(150).height(20),
@@ -3349,7 +3349,7 @@ mod overflow_tests {
     /// Wrap 宽：测量按父宽折行撑高，但钉了高度时同样不得出界。
     #[test]
     fn wrapped_toggle_labels_stay_inside_bounds_wrap_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 150, 20);
         for (what, el) in [("CheckBox", checkbox()), ("Radio", radio())] {
             let el = Element::col()
                 .width_match()

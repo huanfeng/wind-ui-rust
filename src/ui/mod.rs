@@ -6756,9 +6756,9 @@ b",
     /// 按钮测试一律用描边变体：实心按钮的字是白色，白底上量不出墨，裁没裁都一样绿。
     #[test]
     fn wrapped_button_stays_inside_bounds_explicit_width() {
-        assert_wraps_taller_than(80, 30);
+        assert_wraps_taller(LONG_LATIN, 13.0, 80, 30);
         let el = Element::col().children([
-            Element::button(LONG_TITLE)
+            Element::button(LONG_LATIN)
                 .outline()
                 .font_size(13.0)
                 .width(80)
@@ -6770,30 +6770,40 @@ b",
         assert_no_ink_outside(&pm, b, "Button 显式宽");
     }
 
-    /// 带图标、短标签（断不开的单字）的按钮被钉得比内容还窄：测出来仍是单行，
-    /// WrapClip 不裁，须由整块裁剪兜住横向。
+    /// 带图标、单个字形的按钮被钉得比内容还窄：文字区只剩 8px，一个字形都放不下、也
+    /// 无处可断，测出来仍是单行，WrapClip 不裁，须由整块裁剪兜住横向。
+    ///
+    /// 用单个拉丁字形而不是单词或汉字：单词会被引擎应急拆成逐字折行（纵向溢出另有
+    /// WrapClip 管），汉字则依赖本机有没有 CJK 字体。按钮宽按实测字高推出，任何字体下
+    /// 文字区都恰好 8px。
     #[test]
     fn squeezed_icon_button_short_label_stays_inside_bounds() {
+        const GLYPH: &str = "W";
+        let ih = engine()
+            .measure(GLYPH, &crate::text::TextStyle::new(20.0), None)
+            .h;
+        let w = ih + ICON_GAP + 8;
+        assert_single_line_wider_than(GLYPH, 20.0, 8 + 2);
         let el = Element::col().children([
-            Element::button("设")
+            Element::button(GLYPH)
                 .outline()
                 .icon_rgba(2, 2, &[0, 0, 0, 255].repeat(4))
                 .font_size(20.0)
-                .width(40)
+                .width(w)
                 .height(30),
             Element::col().height(80).width_match(),
         ]);
         let (pm, b) = paint_first_child(el, 200, 120);
-        assert_eq!((b.w, b.h), (40, 30));
+        assert_eq!((b.w, b.h), (w, 30));
         assert_no_ink_outside(&pm, b, "挤窄的带图标 Button");
     }
 
     /// Wrap 宽：按钮按单行量宽，被父宽压窄后折行，同样不得出界。
     #[test]
     fn wrapped_button_stays_inside_bounds_wrap_width() {
-        assert_wraps_taller_than(80, 30);
+        assert_wraps_taller(LONG_LATIN, 13.0, 80, 30);
         let el = Element::col().width_match().children([
-            Element::button(LONG_TITLE)
+            Element::button(LONG_LATIN)
                 .outline()
                 .font_size(13.0)
                 .height(30),
@@ -6807,8 +6817,9 @@ b",
     /// 带图标的按钮被钉窄：文字矩形须钳到按钮右沿，不得横向画出 bounds。
     #[test]
     fn icon_button_text_stays_inside_bounds() {
+        assert_wraps_taller(LONG_LATIN, 13.0, 80, 30);
         let el = Element::col().children([
-            Element::button(LONG_TITLE)
+            Element::button(LONG_LATIN)
                 .outline()
                 .icon_rgba(2, 2, &[0, 0, 0, 255].repeat(4))
                 .font_size(13.0)

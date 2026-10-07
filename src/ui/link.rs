@@ -333,9 +333,9 @@ mod tests {
     /// 显式宽高：长文案折行后不得画出 bounds，下划线也不得伸出右沿。
     #[test]
     fn wrapped_link_stays_inside_bounds_explicit_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 20);
         let el = Element::col().children([
-            Element::link(LONG_TITLE)
+            Element::link(LONG_LATIN)
                 .font_size(13.0)
                 .width(120)
                 .height(20),
@@ -349,9 +349,9 @@ mod tests {
     /// Wrap 宽：链接按单行量宽，被父宽压窄后折行，同样不得出界。
     #[test]
     fn wrapped_link_stays_inside_bounds_wrap_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 20);
         let el = Element::col().width_match().children([
-            Element::link(LONG_TITLE).font_size(13.0).height(20),
+            Element::link(LONG_LATIN).font_size(13.0).height(20),
             Element::col().height(80).width_match(),
         ]);
         let (pm, lb) = paint_first_child(el, 120, 100);
