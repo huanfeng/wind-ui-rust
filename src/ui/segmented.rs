@@ -30,16 +30,19 @@ pub struct SegmentedControl {
     hover: Option<usize>,
     /// 选中高亮位置补间：存动画中的选中下标(f32)，驱动胶囊跨段滑动。
     sel_pos: Cell<Transition<f32>>,
+    /// 各段文字的单行截断，一段一份缓存（共用一份会在段间来回失效，每帧重算）。
+    fits: Vec<super::text_fit::SingleLine>,
 }
 
 impl SegmentedControl {
     pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
         let init = selected.get().min(options.len().saturating_sub(1)) as f32;
         Self {
-            options,
             selected,
             hover: None,
             sel_pos: Cell::new(Transition::new(init)),
+            fits: options.iter().map(|_| Default::default()).collect(),
+            options,
         }
     }
 
@@ -172,7 +175,8 @@ impl Widget for SegmentedControl {
         } else {
             None
         };
-        // 文字两遍绘制：先全段用普通色，再裁剪到胶囊区域用选中色覆盖。
+        // 文字两遍绘制：先全段用普通色，再裁剪到胶囊区域用选中色覆盖。段高按单行写死，
+        // 窄到放不下的段截成 `text…`，不折行画出 bounds。
         // 这样文字颜色精确跟随胶囊像素位置，动画过程中不会出现颜色提前切换的问题。
         let tc_normal = if enabled {
             sg.text(pal)
@@ -188,7 +192,7 @@ impl Widget for SegmentedControl {
         for i in 0..n {
             let (x0, x1) = self.seg_x(bounds, i);
             let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-            canvas.draw_text(&self.options[i], seg, tc_normal, Align::Center, ts);
+            self.fits[i].draw_text(canvas, &self.options[i], seg, tc_normal, Align::Center, ts);
         }
         if let Some(clip) = pill_clip {
             canvas.save();
@@ -196,7 +200,14 @@ impl Widget for SegmentedControl {
             for i in 0..n {
                 let (x0, x1) = self.seg_x(bounds, i);
                 let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-                canvas.draw_text(&self.options[i], seg, tc_selected, Align::Center, ts);
+                self.fits[i].draw_text(
+                    canvas,
+                    &self.options[i],
+                    seg,
+                    tc_selected,
+                    Align::Center,
+                    ts,
+                );
             }
             canvas.restore();
         }
@@ -430,5 +441,37 @@ mod tests {
         // 越界夹紧。
         assert_eq!(sc.seg_at(b, 999), 2);
         assert_eq!(sc.seg_at(b, -5), 0);
+    }
+}
+
+/// 段高按单行写死：窄到放不下的段截成单行，不折行画出 bounds。
+#[cfg(test)]
+mod overflow_tests {
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn seg() -> Element {
+        // 长文案放在非选中段：选中段是白字，白底上量不出墨。
+        Element::segmented(vec![LONG_TITLE, "短"], signal(1usize)).font_size(13.0)
+    }
+
+    #[test]
+    fn long_segment_stays_inside_bounds_explicit_width() {
+        let el =
+            Element::col().children([seg().width(160), Element::col().height(80).width_match()]);
+        let (pm, b) = paint_first_child(el, 240, 150);
+        assert_eq!(b.w, 160);
+        assert_no_ink_outside(&pm, b, "Segmented 显式宽");
+    }
+
+    #[test]
+    fn long_segment_stays_inside_bounds_wrap_width() {
+        let el = Element::col()
+            .width_match()
+            .children([seg(), Element::col().height(80).width_match()]);
+        let (pm, b) = paint_first_child(el, 160, 150);
+        assert!(b.w <= 160, "Wrap 宽应受父宽约束：{b:?}");
+        assert_no_ink_outside(&pm, b, "Segmented Wrap 宽");
     }
 }
