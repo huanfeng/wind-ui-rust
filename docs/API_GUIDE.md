@@ -477,6 +477,17 @@ Element::button(caption).on_click(move |_| {          // 传信号，不是字�
 - **`Element::label_signal(sig)` 仍在**，等价于 `Element::label(sig)`——它比 `TextContent`
   出现得早，保留不动。新代码两种写法都行。
 
+**文字放不下时**：任何控件都不会把字画出自身 bounds（局部重绘的前提），按控件的语义分两种：
+
+- **可折行的**（`label`、`link`、`button`、`checkbox` / `radio` 的标签）：照常按宽度折行；
+  只有钉了 `height`（或被压窄）而折出 bounds 时才裁剪，下沿按整行对齐、至少留一行，
+  单行文字永不裁。想完整显示长文本，别钉高度，让它按内容撑高。
+- **语义上单行的**（列表行、`nav_row` / 折叠面板头、`dropdown` / `check_menu` 触发器、
+  `segmented` 各段、滑块值标签、取色器 HEX）：放不下截成 `text…`，不折行；文案里的换行符
+  （含 CRLF）压成空格。
+- `rich` 钉了比内容矮的高度时整块裁剪、下沿按整行对齐；被裁掉的部分不响应悬停、点击与
+  键盘焦点（拖选仍可延伸进去，复制会带上看不见的部分）。
+
 > **一个反例**：`dropdown` / `list` / `tabs` 的选项是 `Vec<impl Into<String>>`，**不**支持
 > 逐条绑信号。整组内容会变的场景用 `list_signal` / `dropdown_signal`（§6.5）——那是重建
 > 子树的问题，不是换一段文字的问题。
