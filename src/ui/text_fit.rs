@@ -171,30 +171,29 @@ impl SingleLine {
         ts: &TextStyle,
     ) {
         let key = layout_key(s, rect.w, ts, canvas.dpi_scale());
-        let hit = match self.cache.borrow().as_ref() {
-            Some((k, v)) if *k == key => Some(v.clone()),
-            _ => None,
-        };
-        let fitted = match hit {
-            Some(v) => v,
-            None => {
-                // 硬换行压成空格：这类控件只有一行可画，留着换行符就又折出 bounds 了。
-                // 不止 `\n`——CRLF 文案（Windows 配置、剪贴板）里的 `\r` 在 DirectWrite /
-                // Core Text 下同样分段。
-                let flat = flatten_line_breaks(s);
-                let src = flat.as_deref().unwrap_or(s);
-                let (out, cut) = truncate_to_width(src, canvas, ts, rect.w.max(0), Truncate::End);
-                let v = (cut || flat.is_some()).then_some(out);
-                *self.cache.borrow_mut() = Some((key, v.clone()));
-                v
-            }
-        };
-        canvas.draw_text(fitted.as_deref().unwrap_or(s), rect, color, align, ts);
+        let stale = !matches!(self.cache.borrow().as_ref(), Some((k, _)) if *k == key);
+        if stale {
+            // 硬换行压成空格：这类控件只有一行可画，留着换行符就又折出 bounds 了。
+            // 不止 `\n`——CRLF 文案（Windows 配置、剪贴板）里的 `\r` 在 DirectWrite /
+            // Core Text 下同样分段。
+            let flat = flatten_line_breaks(s);
+            let src = flat.as_deref().unwrap_or(s);
+            let (out, cut) = truncate_to_width(src, canvas, ts, rect.w.max(0), Truncate::End);
+            *self.cache.borrow_mut() = Some((key, (cut || flat.is_some()).then_some(out)));
+        }
+        // 命中时借用缓存直接画，不每帧克隆一份截断串。
+        let cache = self.cache.borrow();
+        let fitted = cache.as_ref().and_then(|(_, v)| v.as_deref());
+        canvas.draw_text(fitted.unwrap_or(s), rect, color, align, ts);
     }
 }
 
-/// 截断后的显示串（含省略号）及是否实际发生了截断。调用方负责缓存结果——前缀宽度表
-/// 要做 O(N) 次测量，不宜每帧重算。
+/// 截断后的显示串（含省略号）及是否实际发生了截断。调用方负责缓存结果——每次要做
+/// O(log N) 次整串测量，不宜每帧重算。
+///
+/// 保留多少字按**拼好的整串**（含 `…`）实测宽度二分，而不是按前缀宽度表减省略号宽度
+/// 推算：字距调整 / 连字让 `前缀 + …` 的宽度不等于两者之和，推算出的串可能多出一两个
+/// 像素又被裁掉或折行。二分依赖"保留越多越宽"的单调性，对横排文字成立。
 pub(crate) fn truncate_to_width(
     s: &str,
     canvas: &mut dyn Canvas,
@@ -202,57 +201,58 @@ pub(crate) fn truncate_to_width(
     avail_w: i32,
     mode: Truncate,
 ) -> (String, bool) {
-    let total_w = canvas.measure_text(s, ts).w;
-    if total_w <= avail_w {
+    let mut width = |t: &str| canvas.measure_text(t, ts).w;
+    if width(s) <= avail_w {
         return (s.to_string(), false);
     }
-    let ew = canvas.measure_text("…", ts).w;
+    let ew = width("…");
     // 连省略号都放不下：画省略号反而比矩形还宽（居中时伸出两侧），不如什么都不画。
-    if avail_w < ew {
+    if ew > avail_w {
         return (String::new(), true);
     }
-    let avail = avail_w - ew;
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
-    // 前缀累计宽度表（O(N) 次 measure，之后 partition_point 二分）。
-    let mut widths = vec![0i32; n + 1];
-    let mut acc = String::new();
-    for (i, &c) in chars.iter().enumerate() {
-        acc.push(c);
-        widths[i + 1] = canvas.measure_text(&acc, ts).w;
-    }
+    let take = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
     let out = match mode {
         Truncate::End => {
-            // partition_point 返回第一个 > avail 的下标，该位置的字符本身已超宽，
-            // 需 -1 取最后一个能放下的字符数。
-            let cut = widths
-                .partition_point(|&w| w <= avail)
-                .saturating_sub(1)
-                .min(n);
-            format!("{}…", chars[..cut].iter().collect::<String>())
+            let k = max_fitting(n, |k| width(&format!("{}…", take(0, k))) <= avail_w);
+            format!("{}…", take(0, k))
         }
         Truncate::Start => {
-            // partition_point(w < threshold) 返回第一个 >= threshold 的下标，
-            // 即从该字符起的后缀宽度 ≤ avail，此处无 off-by-one。
-            let threshold = total_w - avail;
-            let cut = widths.partition_point(|&w| w < threshold).min(n);
-            format!("…{}", chars[cut..].iter().collect::<String>())
+            let k = max_fitting(n, |k| width(&format!("…{}", take(n - k, n))) <= avail_w);
+            format!("…{}", take(n - k, n))
         }
         Truncate::Middle => {
-            let lcut = widths
-                .partition_point(|&w| w <= avail / 2)
-                .saturating_sub(1)
-                .min(n);
-            let right_avail = (avail - widths[lcut]).max(0);
-            let threshold = total_w - right_avail;
-            let rcut = widths.partition_point(|&w| w < threshold).min(n);
-            let left: String = chars[..lcut].iter().collect();
-            let right: String = chars[rcut..].iter().collect();
-            format!("{left}…{right}")
+            // 先给左段一半预算，右段再吃满剩下的——左右两段各自单调，分两次二分。
+            let half = (avail_w - ew) / 2;
+            // 左段按「左段 + …」实测，不推算：保留 0 个右段字时结果就是它，也得自证不超宽。
+            let left = take(
+                0,
+                max_fitting(n, |k| width(&format!("{}…", take(0, k))) <= half + ew),
+            );
+            let rest = n - left.chars().count();
+            let r = max_fitting(rest, |k| {
+                width(&format!("{left}…{}", take(n - k, n))) <= avail_w
+            });
+            format!("{left}…{}", take(n - r, n))
         }
         Truncate::None => unreachable!(),
     };
     (out, true)
+}
+
+/// `0..=n` 里满足 `ok` 的最大值；`ok(0)` 视为恒真，`ok` 须单调（真…真假…假）。
+fn max_fitting(n: usize, mut ok: impl FnMut(usize) -> bool) -> usize {
+    let (mut lo, mut hi) = (0, n);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if ok(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
 }
 
 /// 墨量类测试的共用件：真实平台文字引擎 + 真实 build/layout/paint。
@@ -371,18 +371,6 @@ pub(crate) mod ink {
             .unwrap_or_else(|| panic!("前提不成立：40..=120 宽内排版高都不超过 {min_h}"))
     }
 
-    /// 前提校验：这段文字在测试宽度下确实折成多行、排版高度超过 20。
-    pub(crate) fn assert_wraps_taller_than(width: i32, h: i32) {
-        let mut eng = engine();
-        let ts = crate::text::TextStyle::new(13.0);
-        let sz = eng.measure(LONG_TITLE, &ts, Some(width as f32));
-        assert!(
-            sz.h > h,
-            "前提不成立：{width} 宽下排版高 {} 未超过 {h}，测不到溢出",
-            sz.h
-        );
-    }
-
     /// 前提校验：`text` 按 `size` 号字单行排版比 `w` 宽——否则"放不下才截断"的路径根本
     /// 没走到，换了字体的平台上测试会测个空集照样绿。
     pub(crate) fn assert_single_line_wider_than(text: &str, size: f32, w: i32) {
@@ -477,6 +465,47 @@ mod tests {
                 Some("a b"),
                 "{sep:?} 没压平"
             );
+        }
+    }
+
+    /// 三种截断在一整段宽度上的契约：结果实测不超宽（自证，不靠推算），且再多留一个字
+    /// 就超宽（截得最长，不是保守地少留）。
+    #[test]
+    fn truncate_fits_and_keeps_as_much_as_possible() {
+        let mut eng = engine();
+        let mut pm = white(10, 10);
+        let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        let ts = TextStyle::new(13.0);
+        let text = LONG_LATIN;
+        let chars: Vec<char> = text.chars().collect();
+        let n = chars.len();
+        let full = cv.measure_text(text, &ts).w;
+        let ew = cv.measure_text("…", &ts).w;
+        let s = |a: usize, b: usize| chars[a..b].iter().collect::<String>();
+        for w in (ew..full).step_by(7) {
+            for mode in [Truncate::End, Truncate::Start, Truncate::Middle] {
+                let (out, cut) = truncate_to_width(text, &mut cv, &ts, w, mode);
+                assert!(cut, "{mode:?} @{w}：比全文窄却没截");
+                let got = cv.measure_text(&out, &ts).w;
+                assert!(got <= w, "{mode:?} @{w}：{out:?} 宽 {got}，超宽");
+                let kept = out.chars().count() - 1;
+                let (l, r) = out.split_once('…').unwrap();
+                let (l, r) = (l.chars().count(), r.chars().count());
+                assert_eq!(
+                    s(0, l) + "…" + &s(n - r, n),
+                    out,
+                    "{mode:?}：不是原文的首尾片段"
+                );
+                let longer = match mode {
+                    Truncate::End => s(0, kept + 1) + "…",
+                    Truncate::Start => "…".to_string() + &s(n - kept - 1, n),
+                    _ => s(0, l) + "…" + &s(n - r - 1, n),
+                };
+                assert!(
+                    cv.measure_text(&longer, &ts).w > w,
+                    "{mode:?} @{w}：{longer:?} 也放得下，截少了"
+                );
+            }
         }
     }
 
