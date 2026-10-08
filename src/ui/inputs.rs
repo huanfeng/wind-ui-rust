@@ -572,16 +572,32 @@ impl Widget for RadioButton {
 
 // ---------------- Slider ----------------
 
-/// 值标签额外占用的宽度（px），仅 `show_value` 开启时生效。"100%" 约 4 字符。
+/// 值标签占用的宽度（px），仅 `show_value` 开启时生效。默认字号下 "100%" 约 4 字符；
+/// 字号大到放不下时按实测的 "100%" 宽度放宽，见 `Slider::label_w`。
 pub(crate) const VALUE_LABEL_W: i32 = 44;
+/// 放宽后实测宽度两侧的留白（px 合计）。
+pub(crate) const VALUE_LABEL_PAD: i32 = 8;
+
+/// 值标签宽度：`"100%"` 实测宽 `text_w` 在 [`VALUE_LABEL_W`] 内放得下（留 2px）就用它，
+/// 默认字号下的外观不变；放不下才按实测宽加留白放宽。
+pub(crate) fn value_label_w(text_w: i32) -> i32 {
+    if text_w + 2 <= VALUE_LABEL_W {
+        VALUE_LABEL_W
+    } else {
+        text_w + VALUE_LABEL_PAD
+    }
+}
 
 pub struct Slider {
     value: Signal<f32>, // 0.0..=1.0
     dragging: bool,
     /// 是否在旋钮右侧显示当前值百分比（如 "65%"）。
     pub show_value: bool,
-    /// 值标签单行截断：标签宽固定为 `VALUE_LABEL_W`，大字号下 "100%" 放不下时不折行
-    /// 画出 bounds。
+    /// 值标签宽度：`measure` 按当前字号实测 "100%" 后写入，`paint` 与指针换算读它——
+    /// 三处同源，轨道终点与 100% 对得上。
+    label_w: Cell<i32>,
+    /// 值标签单行截断：`label_w` 已按最宽的 "100%" 留够，这里只兜底测量与绘制不同源
+    /// （字体回退等）时不折行画出 bounds。
     value_fit: super::text_fit::SingleLine,
 }
 
@@ -591,6 +607,7 @@ impl Slider {
             value,
             dragging: false,
             show_value: false,
+            label_w: Cell::new(VALUE_LABEL_W),
             value_fit: Default::default(),
         }
     }
@@ -603,7 +620,8 @@ impl Slider {
     /// 否则旋钮视觉到头后鼠标还得多拖一个标签宽才换算到 100%（#11）。
     fn track_w(&self, w: i32) -> i32 {
         if self.show_value {
-            w - VALUE_LABEL_W
+            // 窄到连标签都放不下时轨道宽钳到 0：负的轨道宽会把标签区推到 bounds 左侧之外。
+            (w - self.label_w.get()).max(0)
         } else {
             w
         }
@@ -622,8 +640,15 @@ impl Slider {
 pub(crate) const KNOB_R: i32 = 9;
 
 impl Widget for Slider {
-    fn measure(&self, _avail: Size, style: &Style, _text: &mut dyn TextEngine) -> Size {
-        let extra = if self.show_value { VALUE_LABEL_W } else { 0 };
+    fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        let extra = if self.show_value {
+            let t = text.measure("100%", &crate::text::TextStyle::of(style), None);
+            let w = value_label_w(t.w);
+            self.label_w.set(w);
+            w
+        } else {
+            0
+        };
         // 高度略高于旋钮直径，留出文字空间（show_value 时取字号与旋钮直径的较大值）。
         let h = if self.show_value {
             (2 * KNOB_R).max(style.font_size as i32 + 4)
@@ -651,7 +676,8 @@ impl Widget for Slider {
         let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
         let r = KNOB_R as f32;
         let x0 = bounds.x as f32 + r;
-        let x1 = bounds.x as f32 + track_w as f32 - r;
+        // 轨道短于旋钮直径时终点钳到起点：否则旋钮跑到 bounds 左侧之外。
+        let x1 = (bounds.x as f32 + track_w as f32 - r).max(x0);
         let knob_x = x0 + (x1 - x0) * v;
 
         // 轨道
@@ -679,7 +705,8 @@ impl Widget for Slider {
         // 值标签
         if self.show_value {
             let label = format!("{:.0}%", v * 100.0);
-            let label_rect = Rect::new(bounds.x + track_w, bounds.y, VALUE_LABEL_W, bounds.h);
+            let label_w = self.label_w.get().min(bounds.w - track_w);
+            let label_rect = Rect::new(bounds.x + track_w, bounds.y, label_w, bounds.h);
             let text_color = if enabled { pal.text } else { pal.text_disabled };
             self.value_fit.draw_text(
                 canvas,
@@ -3361,17 +3388,87 @@ mod overflow_tests {
     }
 }
 
-/// 滑块值标签宽度固定：大字号下 "100%" 放不下时截成单行，不折行画出 bounds。
+/// 滑块值标签：宽度随字号放宽，大字号下 "100%" 完整显示；兜底的单行截断保证不折行画出
+/// bounds。
 #[cfg(test)]
 mod slider_value_overflow_tests {
+    use crate::core::Widget;
+    use crate::geometry::{Color, Rect, Size};
+    use crate::render::{Canvas, SkiaCanvas};
     use crate::signal::signal;
+    use crate::style::Style;
+    use crate::text::TextStyle;
     use crate::ui::text_fit::ink::*;
     use crate::ui::Element;
+
+    /// 大字号下值标签区画的就是完整的 "100%"：与同一矩形里直接画 "100%" 逐像素一致。
+    /// 标签宽钉死 44px 时这里画的是 "10…"。
+    #[test]
+    fn large_font_value_label_shows_full_text() {
+        assert_single_line_wider_than("100%", 24.0, super::VALUE_LABEL_W);
+        let mut slider = super::Slider::new(signal(1.0f32));
+        slider.set_show_value(true);
+        let style = Style {
+            font_size: 24.0,
+            ..Style::default()
+        };
+        let mut eng = engine();
+        let size = slider.measure(Size::new(400, 100), &style, &mut eng);
+        let label_w = slider.label_w.get();
+        let label = Rect::new(size.w - label_w, 0, label_w, size.h);
+        let bounds = Rect::new(0, 0, size.w, size.h);
+
+        let mut got = tiny_skia::Pixmap::new(size.w as u32, size.h as u32).unwrap();
+        got.fill(tiny_skia::Color::WHITE);
+        let mut cv = SkiaCanvas::with_text(&mut got, &mut eng, 1.0);
+        slider.paint(bounds, bounds, false, true, &mut cv, &style);
+        drop(cv);
+
+        let mut want = tiny_skia::Pixmap::new(size.w as u32, size.h as u32).unwrap();
+        want.fill(tiny_skia::Color::WHITE);
+        let mut cv = SkiaCanvas::with_text(&mut want, &mut eng, 1.0);
+        let color: Color = crate::theme::current().palette.text;
+        cv.draw_text(
+            "100%",
+            label,
+            color,
+            crate::spec::Align::Center,
+            &TextStyle::of(&style),
+        );
+        drop(cv);
+
+        // 旋钮右缘恰在标签左缘，抗锯齿会落进首列，跳过它。
+        let inner = Rect::new(label.x + 1, label.y, label.w - 1, label.h);
+        assert!(ink_in(&want, inner) > 0, "正控：期望图里应有字");
+        let (gw, ww) = (got.width() as i32, want.width() as i32);
+        assert_eq!(gw, ww);
+        for y in inner.y..inner.bottom() {
+            for x in inner.x..inner.right() {
+                let i = ((y * gw + x) * 4) as usize;
+                assert_eq!(
+                    got.data()[i..i + 4],
+                    want.data()[i..i + 4],
+                    "({x},{y}) 与完整的 \"100%\" 不一致：值标签被截断了"
+                );
+            }
+        }
+    }
 
     fn slider() -> Element {
         Element::slider(signal(1.0f32))
             .show_value(true)
             .font_size(24.0)
+    }
+
+    /// 显式宽比值标签还窄：标签区不得被推到 bounds 左侧之外。
+    #[test]
+    fn narrow_slider_value_label_stays_inside_bounds() {
+        for w in [20, 40, 60] {
+            let el = Element::row().children([Element::col().width(80), slider().width(w)]);
+            let (pm, b) = paint_at(el, 300, 80, &[1]);
+            assert_eq!(b.w, w);
+            assert_no_ink_outside(&pm, b, &format!("宽 {w} 的 Slider"));
+        }
     }
 
     #[test]

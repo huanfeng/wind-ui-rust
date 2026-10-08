@@ -5034,15 +5034,36 @@ mod tests {
         assert!(v.get() > 0.9, "在最右端按下应使值接近 1，实际 {}", v.get());
     }
 
-    /// `show_value` 时轨道只占左侧（右侧 44px 让给百分比标签），指针换算须与绘制同一条
-    /// 轨道：按在轨道视觉右端应到 100%、视觉中点应到 50%（#11：曾按整宽换算，到头还差 44px）。
-    /// 显式宽与 Wrap 宽各测一次（AGENTS §5）。
+    /// `show_value` 时轨道只占左侧（右侧让给百分比标签），指针换算须与绘制同一条轨道：按在
+    /// 轨道视觉右端应到 100%、视觉中点应到 50%（#11：曾按整宽换算，到头还差 44px）。
+    /// 显式宽与 Wrap 宽各测一次（AGENTS §5）；大字号下标签放宽，换算须跟着变。
     #[test]
     fn slider_show_value_maps_pointer_on_visual_track() {
-        use crate::ui::inputs::{KNOB_R, VALUE_LABEL_W as LABEL_W};
-        for explicit_w in [Some(200), None] {
+        use crate::ui::inputs::{value_label_w, KNOB_R, VALUE_LABEL_W};
+        for (font, explicit_w) in [
+            (None, Some(200)),
+            (None, None),
+            (Some(24.0), Some(200)),
+            (Some(24.0), None),
+        ] {
+            let mut te = crate::text::PlatformTextEngine::default();
+            te.set_scale(1.0);
+            let label_w = match font {
+                None => VALUE_LABEL_W,
+                Some(sz) => {
+                    let tw = te.measure("100%", &crate::text::TextStyle::new(sz), None).w;
+                    assert!(
+                        tw + 2 > VALUE_LABEL_W,
+                        "前提：{sz} 号字的 100% 应放不下 44px"
+                    );
+                    value_label_w(tw)
+                }
+            };
             let v = signal(0.0f32);
             let mut sl = Element::slider(v).show_value(true);
+            if let Some(sz) = font {
+                sl = sl.font_size(sz);
+            }
             if let Some(w) = explicit_w {
                 sl = sl.width(w);
             }
@@ -5053,10 +5074,9 @@ mod tests {
                 .child(sl)
                 .build(&mut tree);
             tree.root = Some(id);
-            let mut te = crate::text::NullTextEngine;
             tree.layout_root(Size::new(300, 40), &mut te);
             let b = tree.abs_bounds(tree.get(id).unwrap().children[0]);
-            let (x0, x1) = (b.x + KNOB_R, b.x + b.w - LABEL_W - KNOB_R);
+            let (x0, x1) = (b.x + KNOB_R, b.x + b.w - label_w - KNOB_R);
             let press = |tree: &mut Tree, x: i32| {
                 let p = Point::new(x, b.y + b.h / 2);
                 let (mut h, mut cap) = (None, None);
@@ -5066,13 +5086,13 @@ mod tests {
             press(&mut tree, x1);
             assert!(
                 (v.get() - 1.0).abs() < 1e-3,
-                "宽 {explicit_w:?}：轨道视觉右端应为 100%，实际 {}",
+                "字号 {font:?} 宽 {explicit_w:?}：轨道视觉右端应为 100%，实际 {}",
                 v.get()
             );
             press(&mut tree, (x0 + x1) / 2);
             assert!(
                 (v.get() - 0.5).abs() < 0.02,
-                "宽 {explicit_w:?}：轨道视觉中点应为 50%，实际 {}",
+                "字号 {font:?} 宽 {explicit_w:?}：轨道视觉中点应为 50%，实际 {}",
                 v.get()
             );
         }
