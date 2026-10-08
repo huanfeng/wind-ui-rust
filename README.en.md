@@ -23,6 +23,7 @@
 |----------|------------------|------|
 | **Windows** | Win32 + GDI (DIB blit) | DirectWrite |
 | **macOS** | Cocoa/AppKit + CoreGraphics (CGImage blit) | Core Text |
+| **Linux** | X11 (x11rb, a pure-Rust protocol implementation) + PutImage; native Wayland (wl_shm, opt in with `WINDUI_BACKEND=wayland`; by default Wayland sessions go through XWayland) | fontconfig font matching + built-in rasterizer |
 
 The rendering layer (`tiny-skia`) and all widget/layout/event logic are platform-agnostic; each platform only implements two seams: the "window + event loop" and the "text engine".
 
@@ -52,9 +53,9 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **Imperative Builder API** — pure-Rust method chaining, type-safe, zero parsing overhead.
 - **Copy-handle state** — state is a `Signal<T>`: closures `move`-capture it directly, no `clone()` ceremony; `set()` schedules a repaint automatically. Data changes drive subtree rebuilds (`list_signal`), so dynamic lists need no hand-written diffing.
 - **Runtime theme switching** — grab a handle with `App::theme_handle()` and call `set(Theme::dark())` inside any callback to reskin the whole tree; colors expressed as a `Role` (`fg_role` / `bg_role`) follow along.
-- **One codebase, two platforms** — widget tree, layout, events, animation, theming are all platform-agnostic; switching platforms requires zero changes.
+- **One codebase, three platforms** — widget tree, layout, events, animation, theming are all platform-agnostic; switching platforms requires zero changes.
 - **Retained mode + dirty triggering** — no redraw when idle, blocks on the event loop, zero CPU usage.
-- **High-quality text** — native shaping (DirectWrite / Core Text) + grayscale anti-aliasing, crisp CJK; auto line-wrapping labels; **color emoji** (incl. ZWJ sequences and skin-tone modifiers), text fields accept emoji input.
+- **High-quality text** — native shaping (DirectWrite / Core Text; on Linux, fontconfig font matching + a built-in layout rasterizer) + grayscale anti-aliasing, crisp CJK; auto line-wrapping labels; **color emoji** (incl. ZWJ sequences and skin-tone modifiers), text fields accept emoji input.
 - **DPI / Retina aware** — widget tree in logical coordinates, paint layer uniformly scales to physical pixels, text rendered at physical font size (measure and draw share one path), staying sharp at high DPI (1.5x/2x/Retina).
 - **Clean focus ring** — the focus ring shows only during keyboard Tab navigation, never on mouse-only interaction.
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
@@ -171,15 +172,15 @@ App layer       App / UiHost (interactive host, implements AppHandler)
 Widget layer    Element Builder · Widget trait · layout algorithm
 Core layer      Arena + Node tree · Measure/Arrange/Paint phases · event dispatch
 Render layer    Canvas trait → tiny-skia backend (pure Rust, cross-platform)
-Text layer      TextEngine trait → DirectWrite (Windows) / Core Text (macOS)
-Platform layer  AppHandler trait → win32 (window/WndProc/DIB) / macos (NSWindow/NSView/CGImage)
+Text layer      TextEngine trait → DirectWrite (Windows) / Core Text (macOS) / fontconfig + ttf-parser (Linux)
+Platform layer  AppHandler trait → win32 (window/WndProc/DIB) / macos (NSWindow/NSView/CGImage) / linux (X11/PutImage or Wayland/wl_shm)
 ```
 
-Key design: nodes live in a **generational arena** (not `Rc<RefCell>`); the `Widget` trait degenerates to pure content, and layout recursion is driven by `Tree` holding `&mut self` exclusively — sidestepping Rust borrow conflicts at the root. Text is composited onto the tiny-skia premultiplied buffer with anti-aliasing by the native engine. The platform seam mapping is documented in [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md).
+Key design: nodes live in a **generational arena** (not `Rc<RefCell>`); the `Widget` trait degenerates to pure content, and layout recursion is driven by `Tree` holding `&mut self` exclusively — sidestepping Rust borrow conflicts at the root. Text is composited onto the tiny-skia premultiplied buffer with anti-aliasing by the native engine. The platform seam mapping is documented in [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) and [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md).
 
 ## Status
 
-Both Windows and macOS are supported. The MVP widget set is complete and actively being refined.
+Windows and macOS are supported. Linux is usable: the X11 backend is the default, and the native Wayland backend (text-input-v3 IME, client-side title bar, xdg-activation) has passed the real-desktop regression checklist on GNOME 42 (and on Deepin 25 Treeland it was confirmed not to draw a second title bar under server-side decorations) but must currently be enabled with `WINDUI_BACKEND=wayland`. System tray, dragging files out, zero-window resident mode and windowed GPU rendering are not implemented yet, and global hotkeys are unavailable under native Wayland — see [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) (Chinese). The MVP widget set is complete and actively being refined.
 
 ## Documentation
 
@@ -191,6 +192,7 @@ Both Windows and macOS are supported. The MVP widget set is complete and activel
 | [`docs/DESIGN.md`](docs/DESIGN.md) | Architecture and trade-offs |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Roadmap and acceptance |
 | [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) | macOS backend seam mapping |
+| [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) | Linux (X11 / Wayland) backend: dependency choices, status, headless verification |
 | [`AGENTS.md`](AGENTS.md) | Repo development conventions (process, pitfalls) |
 
 ## License

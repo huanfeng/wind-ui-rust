@@ -1728,6 +1728,10 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
 - `App::on_show(|ctx| ..)`：每次唤起时做点别的（刷新数据、清掉上次结果），触发条件同上。
   三个唤起入口里只有「控件请求」经过宿主，托盘与热键都由平台层直接执行，故这条通知由
   平台发起——应用自己推不出来。
+- `App::on_window_activated(|ctx, active| ..)` / `Window::on_window_activated`：窗口**激活态**
+  （是否在前台）变化时调用，用于「切回窗口就刷新」。与 `on_show` 互不包含：`on_show` 只管
+  隐藏→可见，这条管窗口一直可见、只是被 Alt+Tab / 点别的窗口切走再切回来。只在激活态真正
+  变化时触发，窗口初始按「已激活」计、不为初始状态触发；子窗的回调挂在子窗上，不与主窗串。
 
 > ⚠️ **按键分发不冒泡。** `Tree::dispatch_key` 只对焦点节点做一次 `call_on_event`，
 > 没有沿父链的循环（对比 `dispatch_files`，那个是真冒泡）。所以控件「不消费」某个键的
@@ -2351,7 +2355,8 @@ Windows、macOS 与 Linux（X11；Wayland 会话经 XWayland）均已支持—�
 
 Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗口与呈现、键鼠输入、剪贴板
 （文本；**仅界面线程可用**，其它线程读写当空处理，见 `LINUX_PORTING.md` §8.3）与文件拖入、
-输入法（text-input-v3）、窗口装饰（合成器不画边框时自绘标题栏），已在 GNOME 42 真桌面验证。
+输入法（text-input-v3）、窗口装饰（合成器不画边框时自绘标题栏）、窗口唤起（xdg-activation-v1），
+已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏。
 目前仍默认不启用，须运行期设 `WINDUI_BACKEND=wayland` 才走它（选择规则与改为默认的条件见
 `LINUX_PORTING.md` §8.1）。下表的 Linux 列指 X11 后端：
 

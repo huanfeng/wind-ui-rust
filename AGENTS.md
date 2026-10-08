@@ -75,7 +75,7 @@ Linux 上上述命令同样可跑（单测、截图回归都不需要 X 服务�
 | `src/render/{mod,skia}.rs` | `Canvas` trait + tiny-skia 后端 |
 | `src/text/{mod,dwrite}.rs` | `TextEngine` + DirectWrite |
 | `src/platform/{mod,win32/mod,win32/clipboard}.rs` | `AppHandler` trait + Win32 窗口/消息循环/剪贴板 |
-| `src/platform/linux/` · `src/text/linux/` | Linux（X11）平台层与自带文字栈 |
+| `src/platform/linux/` · `src/text/linux/` | Linux（X11 / Wayland）平台层与自带文字栈 |
 | `src/testing.rs` | 给下游写测试用：借 `EventCtx` 跑回调并收回副作用 |
 
 **热点文件**（改动频繁且牵一发动全身，改前务必通读相关段落）：`src/ui/inputs.rs`、`src/platform/win32/mod.rs`、`src/core.rs`。

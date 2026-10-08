@@ -13,7 +13,8 @@
 > GPU 后端。这些入口都存在且不 panic——空操作并记日志，API 形状与另两个平台一致，
 > 下游不必按平台分支。
 >
-> **原生 Wayland 后端正在分阶段落地**（`wayland` feature，默认开），现状见 §8。
+> **原生 Wayland 后端已完成**（`wayland` feature，默认编入），但运行期默认仍走 X11，须
+> `WINDUI_BACKEND=wayland` 启用；现状、实测与剩余风险见 §8。
 
 ---
 

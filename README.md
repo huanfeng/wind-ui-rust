@@ -23,7 +23,7 @@
 |------|-----------|------|
 | **Windows** | Win32 + GDI（DIB 拷屏） | DirectWrite |
 | **macOS** | Cocoa/AppKit + CoreGraphics（CGImage blit） | Core Text |
-| **Linux** | X11（x11rb，纯 Rust 协议实现；Wayland 经 XWayland）+ PutImage | fontconfig 选字 + 自带光栅 |
+| **Linux** | X11（x11rb，纯 Rust 协议实现）+ PutImage；原生 Wayland（wl_shm，`WINDUI_BACKEND=wayland` 启用，默认仍经 XWayland） | fontconfig 选字 + 自带光栅 |
 
 渲染层（`tiny-skia`）与全部控件/布局/事件逻辑平台无关；每个平台只实现「窗口+事件循环」与「文字引擎」两条缝。
 
@@ -170,14 +170,14 @@ cargo clippy --all-targets                                  # 静态检查
 核心层  Arena + Node 树 · Measure/Arrange/Paint 三阶段 · 事件分发
 渲染层  Canvas trait → tiny-skia 后端（纯 Rust，跨平台）
 文字层  TextEngine trait → DirectWrite（Windows）/ Core Text（macOS）/ fontconfig + ttf-parser（Linux）
-平台层  AppHandler trait → win32（窗口/WndProc/DIB 呈现）/ macos（NSWindow/NSView/CGImage 呈现）/ linux（X11/PutImage 呈现）
+平台层  AppHandler trait → win32（窗口/WndProc/DIB 呈现）/ macos（NSWindow/NSView/CGImage 呈现）/ linux（X11/PutImage 或 Wayland/wl_shm 呈现）
 ```
 
 关键设计：节点存于 **generational arena**（非 `Rc<RefCell>`），`Widget` trait 退化为纯内容、布局递归由 `Tree` 独占 `&mut self` 驱动 —— 从根上规避 Rust 借用冲突。文字用平台原生引擎在 tiny-skia 预乘缓冲上抗锯齿合成。平台缝合层映射见 [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) 与 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。
 
 ## 状态
 
-Windows 与 macOS 均已支持；Linux（X11）基本可用——托盘、文件拖出、零窗口常驻与窗口模式 GPU 尚未实现，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
+Windows 与 macOS 均已支持；Linux 基本可用：X11 后端为默认，原生 Wayland 后端（输入法 text-input-v3、客户端标题栏、xdg-activation）已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏，暂需 `WINDUI_BACKEND=wayland` 启用。托盘、文件拖出、零窗口常驻与窗口模式 GPU 尚未实现，原生 Wayland 下全局热键不可用，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
 
 ## 文档
 
@@ -189,7 +189,7 @@ Windows 与 macOS 均已支持；Linux（X11）基本可用——托盘、文件
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 架构设计与取舍 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 实施路线与验收 |
 | [`docs/MACOS_PORTING.md`](docs/MACOS_PORTING.md) | macOS 后端缝合层映射 |
-| [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) | Linux（X11）后端：依赖取舍、现状、无桌面验证方法 |
+| [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) | Linux（X11 / Wayland）后端：依赖取舍、现状、无桌面验证方法 |
 | [`AGENTS.md`](AGENTS.md) | 仓库开发约定（流程、陷阱速查） |
 
 ## 许可证
