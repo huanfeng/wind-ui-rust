@@ -2144,17 +2144,29 @@ impl SelectionScope {
 
 /// 内容画出 bounds 下沿时的可见高度（相对 content 顶）；不溢出返回 `None`。
 ///
-/// 按整行对齐：取不越过 bounds 下沿的最低行底；一行都放不下时退回 bounds 下沿，保证
-/// 首行至少露出能放下的部分。
+/// 按整行对齐：取不越过 bounds 下沿的最低行底（文字行与分隔线都算一"行"）；一行都放不下
+/// 时退回 bounds 下沿，保证首行至少露出能放下的部分。分隔线不参与的话，恰好落在下沿内的
+/// 分隔线会随它上面那行的行底一起被裁掉。
 fn overflow_visible_h(lay: &RichLayout, content: Rect, bounds: Rect) -> Option<i32> {
     let avail = bounds.bottom() - content.y;
     if lay.size.h <= avail {
         return None;
     }
-    let keep = lay
+    // 折叠动画期落在收拢隐藏带内的行不画（同 paint 的判断），也就不能拿来对齐下沿。
+    let hidden = |y: i32| {
+        lay.clips
+            .iter()
+            .any(|r| y >= r.y0 + r.reveal && y < r.y0 + r.full)
+    };
+    let text_rows = lay
         .frags
         .iter()
-        .map(|f| f.line_top + f.line_h)
+        .map(|f| (f.line_top, f.line_top + f.line_h));
+    let divider_rows = lay.dividers.iter().map(|&(_, y)| (y, y + 1));
+    let keep = text_rows
+        .chain(divider_rows)
+        .filter(|&(top, _)| !hidden(top))
+        .map(|(_, b)| b)
         .filter(|&b| b <= avail)
         .max()
         .unwrap_or(avail);
@@ -3996,6 +4008,43 @@ mod tests {
             let (pm, b) = paint_first_child(el, win_w, 200);
             assert_eq!(b.h, 30, "{what}");
             assert_no_ink_outside(&pm, b, &format!("RichText {what}"));
+        }
+    }
+
+    /// 下沿恰好落在分隔线下方：分隔线也算一"行"，须完整保留，不能随上一行的行底一起
+    /// 被裁掉。显式宽与 Wrap 宽各一遍。
+    #[test]
+    fn clip_keeps_divider_that_fits() {
+        use crate::geometry::Rect;
+        use crate::ui::text_fit::ink::*;
+        let doc = || RichDoc::new().para("Ab").divider().para("Cd").para("Ef");
+        for (what, w) in [("显式宽", Some(160)), ("Wrap 宽", None)] {
+            let el = |h: Option<i32>| {
+                let mut el = Element::rich(doc());
+                if let Some(w) = w {
+                    el = el.width(w);
+                }
+                if let Some(h) = h {
+                    el = el.height(h);
+                }
+                Element::col().children([el])
+            };
+            // 不钉高：找出分隔线所在的像素行（整行横贯、墨最多的那行）。
+            let (pm, b) = paint_first_child(el(None), 160, 200);
+            let row = (b.y..b.bottom())
+                .max_by_key(|&y| ink_in(&pm, Rect::new(b.x, y, b.w, 1)))
+                .unwrap();
+            assert!(
+                ink_in(&pm, Rect::new(b.x, row, b.w, 1)) > b.w as usize / 2,
+                "{what}：前提——应能找到横贯的分隔线"
+            );
+            // 钉高到分隔线下沿：比文字行底更低，按旧口径会退回上一行行底、把它裁掉。
+            let (pm, b2) = paint_first_child(el(Some(row + 1 - b.y)), 160, 200);
+            assert!(
+                ink_in(&pm, Rect::new(b2.x, row, b2.w, 1)) > b2.w as usize / 2,
+                "{what}：放得下的分隔线被裁掉了"
+            );
+            assert_no_ink_outside(&pm, b2, &format!("RichText 分隔线 {what}"));
         }
     }
 
