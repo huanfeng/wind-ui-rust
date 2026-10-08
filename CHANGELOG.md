@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`Element::bg_gradient_roles`**：线性渐变的各 stop 取主题角色色（`Brush::RoleLinear`），paint 期
+  解析，换主题自动跟随。此前 `bg_gradient` 的颜色构建期定死，应用换强调色后渐变不变。
+- **`Element::tint_role`**（`ImageContent::set_tint_role`）：图片按主题角色着色，paint 期解析。
+  与 `tint` 互斥、后设的生效。着色缓存改为连同颜色一起作键，颜色随主题变化时自动重着色。
+
 ## [0.21.0] - 2026-10-08
 
 本版的主线是 **Linux**：X11 后端达到基本可用并作为默认；原生 Wayland 后端（输入法、客户端

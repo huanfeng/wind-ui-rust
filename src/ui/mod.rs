@@ -1248,6 +1248,14 @@ impl Element {
     pub fn tint(self, color: Color) -> Self {
         self.config_image(|iv| iv.set_tint(color))
     }
+    /// 图片按主题角色着色：paint 期解析，运行期换主题（含换强调色）自动跟随。
+    ///
+    /// [`tint`](Self::tint) 的颜色构建期就定死了，换主题后图标不变色，只能按明暗建多份
+    /// 节点 `visible_when` 切换。
+    #[track_caller]
+    pub fn tint_role(self, role: crate::style::Role) -> Self {
+        self.config_image(|iv| iv.set_tint_role(role))
+    }
 
     /// 给按钮设置前置图标（嵌入字节）。链到非按钮属误用——debug panic，release 忽略。
     #[track_caller]
@@ -4127,6 +4135,28 @@ impl Element {
     /// 渐变背景（线性/径向，圆角随 `.corner()`）。
     pub fn bg_gradient(mut self, g: crate::render::Gradient) -> Self {
         self.style.bg = Some(crate::style::Brush::Gradient(g));
+        self
+    }
+    /// 主题角色线性渐变背景：各 stop 取角色色，paint 期解析、运行期换主题自动跟随。
+    ///
+    /// [`bg_gradient`](Self::bg_gradient) 收的是构建期定死的 `Color`，换主题（比如应用改了
+    /// 强调色）后渐变不变，只能按明暗建多份节点 `visible_when` 切换，强调色一多就组合爆炸。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// Element::stack().bg_gradient_roles(
+    ///     (0.0, 0.0),
+    ///     (1.0, 1.0),
+    ///     vec![(0.0, Role::AccentActive), (1.0, Role::Accent)],
+    /// );
+    /// ```
+    pub fn bg_gradient_roles(
+        mut self,
+        start: (f32, f32),
+        end: (f32, f32),
+        stops: Vec<(f32, crate::style::Role)>,
+    ) -> Self {
+        self.style.bg = Some(crate::style::Brush::RoleLinear { start, end, stops });
         self
     }
     /// 主题角色背景：运行期换主题时自动跟随刷新。

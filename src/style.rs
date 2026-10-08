@@ -95,6 +95,13 @@ pub enum Brush {
     /// 角色色 × 透明度调制（badge/chip 的"意图色 15% 淡底"模式）：
     /// paint 期解析，运行期换主题自动跟随——比为每个角色加 XxxSoft 变体正交。
     RoleAlpha(Role, f32),
+    /// 线性渐变，各 stop 取主题角色色：paint 期解析，运行期换主题（含换强调色）自动跟随。
+    /// 坐标口径同 [`Gradient::linear`]（相对绘制矩形的归一化坐标）。
+    RoleLinear {
+        start: (f32, f32),
+        end: (f32, f32),
+        stops: Vec<(f32, Role)>,
+    },
 }
 
 impl Brush {
@@ -105,6 +112,11 @@ impl Brush {
             Brush::Gradient(g) => Paint::gradient(g.clone()),
             Brush::Role(r) => Paint::fill(r.resolve(t)),
             Brush::RoleAlpha(r, a) => Paint::fill(r.resolve(t).scale_alpha(*a)),
+            Brush::RoleLinear { start, end, stops } => Paint::gradient(Gradient::linear(
+                *start,
+                *end,
+                stops.iter().map(|&(o, r)| (o, r.resolve(t))).collect(),
+            )),
         }
     }
     /// 解析出的纯色用色（Gradient 取首个 stop，用于边框 stroke）。
@@ -341,6 +353,25 @@ mod tests {
         let t = Theme::default();
         let p = Brush::Role(Role::Surface).resolve_paint(&t);
         assert_eq!(p.color, t.palette.surface);
+    }
+
+    /// 角色渐变的 stop 按传入的主题解析：同一把画刷换主题即换色，不是构建期定死。
+    #[test]
+    fn brush_role_linear_resolves_stops_per_theme() {
+        let brush = Brush::RoleLinear {
+            start: (0.0, 0.0),
+            end: (1.0, 1.0),
+            stops: vec![(0.0, Role::AccentActive), (1.0, Role::Accent)],
+        };
+        let mut t = Theme::default();
+        for accent in [Color::hex(0x2F6BED), Color::hex(0x059669)] {
+            t.palette.accent = accent;
+            let p = brush.resolve_paint(&t);
+            let stops = p.gradient.as_ref().expect("应解析成渐变").stops();
+            assert_eq!(stops[0].color, t.palette.accent_active);
+            assert_eq!(stops[1].color, accent);
+            assert_eq!((stops[0].offset, stops[1].offset), (0.0, 1.0));
+        }
     }
 
     #[test]

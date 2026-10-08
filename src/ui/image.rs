@@ -37,9 +37,12 @@ const PLACEHOLDER_BG: Role = Role::SurfaceAlt;
 const PLACEHOLDER_BORDER: Role = Role::Border;
 
 /// 一层图片：原图 + 着色结果缓存（避免每帧重着色）。
+///
+/// 缓存连同着色色一起存：按角色着色（[`ImageContent::set_tint_role`]）时颜色随主题在
+/// paint 期变化，不比对颜色就会在换主题后继续画旧色。
 struct Layer {
     raw: Image,
-    tinted: RefCell<Option<Image>>,
+    tinted: RefCell<Option<(Color, Image)>>,
 }
 
 impl Layer {
@@ -53,25 +56,32 @@ impl Layer {
     fn resolve(&self, tint: Option<Color>) -> Image {
         match tint {
             None => self.raw.clone(),
-            Some(c) => self
-                .tinted
-                .borrow_mut()
-                .get_or_insert_with(|| self.raw.tinted(c))
-                .clone(),
+            Some(c) => {
+                let mut cache = self.tinted.borrow_mut();
+                match cache.as_ref() {
+                    Some((cached, img)) if *cached == c => img.clone(),
+                    _ => {
+                        let img = self.raw.tinted(c);
+                        *cache = Some((c, img.clone()));
+                        img
+                    }
+                }
+            }
         }
     }
 }
 
 /// DPI 感知的矢量源：保留 SVG 字节，按 paint 期算出的物理宽重新光栅化。
 ///
-/// 缓存单条 `(物理宽, 结果)`：同一控件的物理宽只在 DPI 变化或布局改尺寸时才变，
-/// 单条缓存即可命中每一帧；着色结果一并存入，避免每帧重跑 `tinted`。
+/// 缓存单条 `(物理宽, 着色色, 结果)`：同一控件的物理宽只在 DPI 变化或布局改尺寸时才变，
+/// 单条缓存即可命中每一帧；着色结果一并存入，避免每帧重跑 `tinted`。着色色进键是为了
+/// 按角色着色：颜色随主题在 paint 期变化，缓存须随之失效。
 /// 整体挂在 `svg` feature 上：无该 feature 时 `Image::from_svg_bytes` 不存在，
 /// 类型留着也只会是无法构造、`bytes` 永不被读的死代码。
 #[cfg(feature = "svg")]
 struct SvgSource {
     bytes: Rc<[u8]>,
-    cache: RefCell<Option<(u32, Image)>>,
+    cache: RefCell<Option<(u32, Option<Color>, Image)>>,
 }
 
 #[cfg(feature = "svg")]
@@ -79,8 +89,8 @@ impl SvgSource {
     /// 取指定物理宽的光栅（含着色）结果；缓存未命中则重新光栅化。
     fn resolve(&self, target_w: u32, tint: Option<Color>) -> Option<Image> {
         let mut cache = self.cache.borrow_mut();
-        if let Some((w, img)) = cache.as_ref() {
-            if *w == target_w {
+        if let Some((w, c, img)) = cache.as_ref() {
+            if *w == target_w && *c == tint {
                 return Some(img.clone());
             }
         }
@@ -89,7 +99,7 @@ impl SvgSource {
             Some(c) => raw.tinted(c),
             None => raw,
         };
-        *cache = Some((target_w, img.clone()));
+        *cache = Some((target_w, tint, img.clone()));
         Some(img)
     }
 }
@@ -103,6 +113,8 @@ pub struct ImageContent {
     fit: Fit,
     /// 模板着色（单色图标随主题/状态变色）；None=按原色绘制。
     tint: Option<Color>,
+    /// 按主题角色着色：paint 期经 `theme::current()` 解析，优先于 `tint`。
+    tint_role: Option<Role>,
     /// DPI 感知矢量源（仅 `from_svg_bytes(_, None)` 持有）。`base` 保留固有尺寸
     /// 光栅作 `intrinsic_size` 的度量依据与光栅失败时的回退。
     #[cfg(feature = "svg")]
@@ -117,6 +129,7 @@ impl ImageContent {
             overrides: Vec::new(),
             fit: Fit::default(),
             tint: None,
+            tint_role: None,
             #[cfg(feature = "svg")]
             svg: None,
         }
@@ -172,6 +185,7 @@ impl ImageContent {
     /// `&mut` 版着色设置（供 Builder 的 `.tint()` 调用）。着色色变更时清缓存。
     pub fn set_tint(&mut self, color: Color) {
         self.tint = Some(color);
+        self.tint_role = None;
         #[cfg(feature = "svg")]
         if let Some(s) = &self.svg {
             *s.cache.borrow_mut() = None;
@@ -182,6 +196,18 @@ impl ImageContent {
         for (_, l) in &self.overrides {
             *l.tinted.borrow_mut() = None;
         }
+    }
+    /// 按主题角色着色：paint 期取当前主题的角色色，运行期换主题（含换强调色）自动跟随。
+    /// 与 [`set_tint`](Self::set_tint) 互斥，后设的生效。
+    pub fn set_tint_role(&mut self, role: Role) {
+        self.tint_role = Some(role);
+        self.tint = None;
+    }
+    /// 本帧实际使用的着色色：角色优先，其次固定色。
+    fn effective_tint(&self) -> Option<Color> {
+        self.tint_role
+            .map(|r| r.resolve(&crate::theme::current()))
+            .or(self.tint)
     }
     /// `&mut` 版适配模式设置。
     pub fn set_fit(&mut self, fit: Fit) {
@@ -251,19 +277,20 @@ impl ImageContent {
             return;
         }
         let radius = style.corner_radius;
+        let tint = self.effective_tint();
 
         #[cfg(feature = "svg")]
         let vector = match self.overrides.iter().any(|(s, _)| *s == state) {
             true => None,
             false => self.svg.as_ref().and_then(|s| {
                 self.svg_target_width(dst, canvas.dpi_scale())
-                    .and_then(|w| s.resolve(w, self.tint))
+                    .and_then(|w| s.resolve(w, tint))
             }),
         };
         #[cfg(not(feature = "svg"))]
         let vector: Option<Image> = None;
 
-        match vector.or_else(|| self.layer_for(state).map(|l| l.resolve(self.tint))) {
+        match vector.or_else(|| self.layer_for(state).map(|l| l.resolve(tint))) {
             Some(img) => {
                 canvas.draw_image(&img, dst, self.fit, radius, state.opacity());
             }
@@ -316,6 +343,10 @@ impl ImageView {
     /// 设置模板着色（供 Builder 的 `.tint()` 调用）。
     pub fn set_tint(&mut self, color: Color) {
         self.content.set_tint(color);
+    }
+    /// 按主题角色着色（供 Builder 的 `.tint_role()` 调用）。
+    pub fn set_tint_role(&mut self, role: Role) {
+        self.content.set_tint_role(role);
     }
 }
 
@@ -472,6 +503,62 @@ mod tests {
         assert!(
             c.svg.as_ref().unwrap().cache.borrow().is_none(),
             "改 tint 后矢量缓存应被清空"
+        );
+    }
+
+    /// 按角色着色：换主题后不重设任何东西，下一次 paint 就按新主题的角色色画。
+    /// 缓存若不把颜色算进键，这里会继续画出旧主题的红。
+    #[cfg(feature = "svg")]
+    #[test]
+    fn tint_role_follows_theme_change() {
+        use crate::render::SkiaCanvas;
+        use crate::theme::{set_current, Theme};
+        use std::rc::Rc;
+        use tiny_skia::Pixmap;
+
+        // 实心方块：整块都是图标像素，取中心点即可判色。
+        const SQUARE: &[u8] = br##"<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="20" fill="#000"/></svg>"##;
+        let mut c = ImageContent::from_svg_bytes(SQUARE, None);
+        c.set_tint_role(Role::Accent);
+
+        let paint_center = |c: &ImageContent| {
+            let mut pm = Pixmap::new(40, 40).unwrap();
+            {
+                let mut canvas = SkiaCanvas::new(&mut pm);
+                c.paint_into(
+                    Rect::new(10, 10, 20, 20),
+                    &mut canvas,
+                    &Style::default(),
+                    VisualState::Normal,
+                );
+            }
+            let p = pm.pixel(20, 20).unwrap().demultiply();
+            (p.red(), p.green(), p.blue())
+        };
+        let mut t = Theme::default();
+        t.palette.accent = Color::rgb(255, 0, 0);
+        set_current(Rc::new(t.clone()));
+        let red = paint_center(&c);
+        t.palette.accent = Color::rgb(0, 0, 255);
+        set_current(Rc::new(t));
+        let blue = paint_center(&c);
+        set_current(Rc::new(Theme::default()));
+
+        assert!(red.0 > 200 && red.2 < 50, "首帧应为红，实得 {red:?}");
+        assert!(blue.2 > 200 && blue.0 < 50, "换主题后应为蓝，实得 {blue:?}");
+    }
+
+    /// 固定色与角色色互斥，后设的生效。
+    #[test]
+    fn tint_and_tint_role_last_one_wins() {
+        let mut c = ImageContent::new(None);
+        c.set_tint_role(Role::Accent);
+        c.set_tint(Color::rgb(1, 2, 3));
+        assert_eq!(c.effective_tint(), Some(Color::rgb(1, 2, 3)));
+        c.set_tint_role(Role::Accent);
+        assert_eq!(
+            c.effective_tint(),
+            Some(Role::Accent.resolve(&crate::theme::current()))
         );
     }
 
