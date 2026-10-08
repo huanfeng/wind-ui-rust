@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-08
+
+本版的主线是 **Linux**：X11 后端达到基本可用并作为默认；原生 Wayland 后端（输入法、客户端
+标题栏、xdg-activation）已完成，须 `WINDUI_BACKEND=wayland` 显式启用。另一条线是**文字不再
+画出控件 bounds**：固定高度下折行溢出按整行裁回，语义单行的控件放不下时截成 `text…`。
+无破坏性 API 变更；行为变化见「修复」中单行控件压平换行符一条。
+
 ### 新增
 
 - **Linux（X11）平台后端**，达到基本可用。取「小依赖」路线：窗口走 `x11rb`（纯 Rust 实现
@@ -2586,7 +2593,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.17.0...v0.18.0
