@@ -143,14 +143,17 @@ fn paint_field_chrome(
     canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
     // 右侧下拉箭头 ▼（一条折线：两段独立线会在尖底裂开，高 DPI 可见）。
-    let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
-    let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
-    let p = Paint::fill(chevron);
-    canvas.draw_polyline(
-        &[(cx - 4.0, cy - 2.0), (cx, cy + 3.0), (cx + 4.0, cy - 2.0)],
-        1.6,
-        &p,
-    );
+    // 窄到连箭头区（右留白 + 箭头宽）都放不下就不画：箭头贴右沿定位，硬画会从左沿伸出去。
+    if bounds.w >= PAD_X + CHEVRON_W {
+        let cx = bounds.x as f32 + bounds.w as f32 - PAD_X as f32 - CHEVRON_W as f32 / 2.0;
+        let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
+        let p = Paint::fill(chevron);
+        canvas.draw_polyline(
+            &[(cx - 4.0, cy - 2.0), (cx, cy + 3.0), (cx + 4.0, cy - 2.0)],
+            1.6,
+            &p,
+        );
+    }
 
     text_color
 }
@@ -937,6 +940,22 @@ mod overflow_tests {
             let (pm, b) = paint_first_child(el, 120, 150);
             assert!(b.w <= 120, "{what}：Wrap 宽应受父宽约束：{b:?}");
             assert_no_ink_outside(&pm, b, &format!("{what} Wrap 宽"));
+        }
+    }
+
+    /// 触发器窄到放不下箭头区：箭头不画，不得从 bounds 左侧伸出（含刚好放得下的边界）。
+    #[test]
+    fn narrow_trigger_chevron_stays_inside_bounds() {
+        for w in 4..=super::PAD_X + super::CHEVRON_W + 4 {
+            for (what, el) in triggers() {
+                let el = Element::col().children([
+                    Element::col().height(10).width_match(),
+                    Element::row().children([Element::col().width(60), el.width(w)]),
+                ]);
+                let (pm, b) = paint_at(el, 200, 100, &[1, 1]);
+                assert_eq!(b.w, w);
+                assert_no_ink_outside(&pm, b, &format!("{what} 宽 {w} 的箭头"));
+            }
         }
     }
 
