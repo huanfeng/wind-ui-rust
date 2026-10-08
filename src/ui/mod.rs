@@ -6835,9 +6835,9 @@ b",
     /// 显式宽（`width_match`）+ 固定高度：折行溢出须裁在 label 内。
     #[test]
     fn wrapped_label_overflow_is_clipped_explicit_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 20);
         let el = Element::col().children([
-            Element::label(LONG_TITLE)
+            Element::label(LONG_LATIN)
                 .font_size(13.0)
                 .height(20)
                 .width_match(),
@@ -6851,7 +6851,7 @@ b",
         let mut eng = crate::text::PlatformTextEngine::default();
         eng.set_scale(1.0);
         let line_h = eng
-            .measure(LONG_TITLE, &crate::text::TextStyle::new(13.0), None)
+            .measure(LONG_LATIN, &crate::text::TextStyle::new(13.0), None)
             .h;
         assert!(line_h < 20, "前提不成立：单行高 {line_h} 未小于 20");
         assert_eq!(
@@ -6931,7 +6931,7 @@ b",
     #[test]
     fn wrapped_label_overflow_follows_signal_text() {
         // 没有这条前提，某字体下长文案在 120 宽内不折行时，"下沿以下无墨"会空洞成立。
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 20);
         let caption = signal(String::from("短"));
         let el = Element::col().children([
             Element::label_signal(caption)
@@ -6960,7 +6960,7 @@ b",
         let short_ink = ink_rows(&pm, 0, 100);
         assert!(ink_rows(&pm, lb.y, lb.bottom()) > 0, "短文案应画出");
 
-        caption.set(LONG_TITLE.to_string());
+        caption.set(LONG_LATIN.to_string());
         let (pm, lb) = frame(&mut tree);
         assert_no_ink_below(&pm, lb, "换成长文案后");
 
@@ -6973,9 +6973,9 @@ b",
     /// Wrap 宽（不设宽）+ 固定高度：measure 与 paint 宽度不同源的那一侧也得裁住。
     #[test]
     fn wrapped_label_overflow_is_clipped_wrap_width() {
-        assert_wraps_taller_than(120, 20);
+        assert_wraps_taller(LONG_LATIN, 13.0, 120, 20);
         let el = Element::col().width_match().children([
-            Element::label(LONG_TITLE).font_size(13.0).height(20),
+            Element::label(LONG_LATIN).font_size(13.0).height(20),
             Element::col().height(80).width_match(),
         ]);
         let (pm, lb) = paint_first_child(el, 120, 100);
