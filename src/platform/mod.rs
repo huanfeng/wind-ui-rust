@@ -644,6 +644,13 @@ pub struct WindowConfig {
     /// 落点两平台不同：Windows 是 `WM_SETICON`（标题栏/Alt-Tab/任务栏），
     /// macOS 没有窗口级图标，落到应用 Dock 图标上。
     pub icon: Option<crate::icon::IconSource>,
+    /// 窗口外框左上角的屏幕位置（`None` = 系统默认 / 按 `centered`）。设了就以它为准，
+    /// `centered` 不再生效。
+    ///
+    /// 单位与原点是**平台原生的屏幕坐标**，各平台口径见 `App::position`。
+    pub position: Option<(i32, i32)>,
+    /// 不在任务栏占按钮，各平台落地见 `App::skip_taskbar`。
+    pub skip_taskbar: bool,
 }
 
 impl Default for WindowConfig {
@@ -676,6 +683,8 @@ impl Default for WindowConfig {
             owned: false,
             modal: false,
             icon: None,
+            position: None,
+            skip_taskbar: false,
         }
     }
 }

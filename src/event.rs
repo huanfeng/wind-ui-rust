@@ -1345,6 +1345,10 @@ pub struct WindowRequest {
     /// 窗口图标（`Window::icon`）。`None` 则跟随系统默认——子窗**不会**自动继承主窗
     /// 那次 `App::icon`：那是设到主窗 HWND 上的，不是设到窗口类上的。
     pub icon: Option<crate::icon::IconSource>,
+    /// 外框左上角的屏幕位置（`Window::position`），口径见 `WindowConfig::position`。
+    pub position: Option<(i32, i32)>,
+    /// 不在任务栏占按钮（`Window::skip_taskbar`），各平台落地见 `WindowConfig::skip_taskbar`。
+    pub skip_taskbar: bool,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

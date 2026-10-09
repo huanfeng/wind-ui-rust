@@ -13,6 +13,13 @@
   与 `tint` 互斥、后设的生效。着色缓存改为连同颜色一起作键，颜色随主题变化时自动重着色。
 - **`Element::on_blur`**：用户让节点失焦时的回调，任意能拿焦点的控件可挂（口径同 `on_commit`，
   框架自己的焦点调度不算）。用于「点一下进入待命、点别处退出」的控件，如快捷键录入框。
+- **`Window::position` / `App::position`**：指定窗口外框左上角的屏幕位置（平台原生屏幕坐标：
+  Windows 物理像素、原点在主屏左上；X11 物理像素、原点在虚拟桌面左上；macOS 点、原点在主屏
+  左上），优先于 `centered`。Wayland 协议不允许应用定位窗口，忽略。
+- **`Window::skip_taskbar` / `App::skip_taskbar`**：不在任务栏占按钮。Windows 走
+  `WS_EX_TOOLWINDOW`（同时退出 Alt+Tab），X11 设 `_NET_WM_STATE_SKIP_TASKBAR` / `SKIP_PAGER`
+  （隐藏后再显示时补回），macOS 退出「窗口」菜单与 ⌘\` 轮换，Wayland 忽略。最小化后无处还原，
+  故未设 `hide_on_minimize` 时不提供最小化。
 - **`TrayHandle::set_icon_rgba`**：运行期换托盘图标（Windows / macOS），Windows 上 shell
   重启后按新图标恢复。
 

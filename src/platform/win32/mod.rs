@@ -62,16 +62,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW,
-    IDC_HAND, IDC_IBEAM, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG, MSGFLT_ALLOW,
-    MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK,
-    SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
+    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT,
+    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG,
+    MSGFLT_ALLOW, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED,
+    SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME,
+    SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE,
@@ -1299,6 +1299,8 @@ unsafe fn create_window(
     // 归属窗口（`cfg.owned` / `cfg.modal`）：`None` 就是独立顶层窗口。主窗恒为 `None`。
     owner: Option<HWND>,
 ) -> Option<HWND> {
+    // 装箱前先问：样式要据此定（见下面 `WS_MINIMIZEBOX` 那段）。
+    let hide_on_minimize = handler.hide_on_minimize();
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
     state.min_w = cfg.min_width;
@@ -1318,8 +1320,21 @@ unsafe fn create_window(
         }
     };
     let init_scale = sys_dpi as f32 / 96.0;
-    let (phys_w, phys_h) =
-        frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi, cfg.frameless);
+    // 不进任务栏：工具窗样式，同时退出 Alt+Tab。归属窗口本就不占任务栏，设不设都一样。
+    // 外框反算要用它：工具窗的标题栏更窄，按普通窗口算客户区会高出几个像素。
+    let ex_style = if cfg.skip_taskbar {
+        WS_EX_TOOLWINDOW
+    } else {
+        WINDOW_EX_STYLE::default()
+    };
+    let (phys_w, phys_h) = frame_size_for_client(
+        cfg.width,
+        cfg.height,
+        init_scale,
+        sys_dpi,
+        cfg.frameless,
+        ex_style,
+    );
 
     let mut win_style = if cfg.resizable {
         WS_OVERLAPPEDWINDOW
@@ -1331,15 +1346,24 @@ unsafe fn create_window(
         // 归属窗口随 owner 一起最小化，自己没有"单独最小化"这回事，按钮也就不该有。
         win_style = WINDOW_STYLE(win_style.0 & !WS_MINIMIZEBOX.0);
     }
+    // 不进任务栏的窗口最小化之后无处还原：工具窗没有任务栏按钮，系统按老式图标化把它
+    // 缩成桌面左下角一小截标题栏。除非应用接管成「最小化即隐藏」（托盘唤起），否则
+    // 不给最小化——能力位跟着样式走（`push_window_state`），自绘标题栏的按钮随之隐藏。
+    if cfg.skip_taskbar && !hide_on_minimize {
+        win_style = WINDOW_STYLE(win_style.0 & !WS_MINIMIZEBOX.0);
+    }
+    // 指定位置直接交给建窗：之后的 DPI 校正按 `GetDpiForWindow` 取的就是**那块**屏的 DPI，
+    // 比建在默认位置再挪过去少一次跨屏缩放。
+    let (x, y) = cfg.position.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
 
     // 顶层窗口的 hWndParent 参数就是 owner：始终浮在它上方、随它最小化、不占任务栏。
     let hwnd = match CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
+        ex_style,
         CLASS_NAME,
         PCWSTR(title.as_ptr()),
         win_style,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
+        x,
+        y,
         phys_w,
         phys_h,
         owner,
@@ -1385,7 +1409,8 @@ unsafe fn create_window(
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     // 实际 DPI 与系统估算不一致时，按真实 scale 校正窗口物理尺寸（在显示前，无 state 借用）。
     if (scale - init_scale).abs() > 0.01 {
-        let (w, h) = frame_size_for_client(cfg.width, cfg.height, scale, dpi, cfg.frameless);
+        let (w, h) =
+            frame_size_for_client(cfg.width, cfg.height, scale, dpi, cfg.frameless, ex_style);
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -1446,7 +1471,8 @@ unsafe fn create_window(
 
     // 居中窗口：有 owner 就居中在 owner 上（对话框该出现在它所属的窗口中央，而不是
     // 主屏中央——主窗在副屏时尤其明显），再钳进 owner 所在显示器的工作区；否则居中屏幕。
-    if cfg.centered {
+    // 指定了位置就以位置为准。
+    if cfg.centered && cfg.position.is_none() {
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
         let win_w = rc.right - rc.left;
@@ -1925,12 +1951,14 @@ unsafe extern "system" fn wnd_proc(
                 if state.min_w > 0 || state.min_h > 0 {
                     let dpi = GetDpiForWindow(hwnd).max(96);
                     let scale = dpi as f32 / 96.0;
+                    let ex_style = WINDOW_EX_STYLE(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32);
                     let (pw, ph) = frame_size_for_client(
                         state.min_w,
                         state.min_h,
                         scale,
                         dpi,
                         state.frameless,
+                        ex_style,
                     );
                     let mmi = lparam.0 as *mut MINMAXINFO;
                     if !mmi.is_null() {
@@ -3115,6 +3143,7 @@ unsafe fn frame_size_for_client(
     scale: f32,
     dpi: u32,
     frameless: bool,
+    ex_style: WINDOW_EX_STYLE,
 ) -> (i32, i32) {
     let cw = (logical_w as f32 * scale).round() as i32;
     let ch = (logical_h as f32 * scale).round() as i32;
@@ -3127,13 +3156,7 @@ unsafe fn frame_size_for_client(
         right: cw,
         bottom: ch,
     };
-    let _ = AdjustWindowRectExForDpi(
-        &mut rc,
-        WS_OVERLAPPEDWINDOW,
-        false,
-        WINDOW_EX_STYLE::default(),
-        dpi,
-    );
+    let _ = AdjustWindowRectExForDpi(&mut rc, WS_OVERLAPPEDWINDOW, false, ex_style, dpi);
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
@@ -4093,10 +4116,11 @@ mod tests {
                 (h as f32 * scale).round() as i32,
             );
             assert_eq!(
-                unsafe { frame_size_for_client(w, h, scale, dpi, true) },
+                unsafe { frame_size_for_client(w, h, scale, dpi, true, Default::default()) },
                 want
             );
-            let (fw, fh) = unsafe { frame_size_for_client(w, h, scale, dpi, false) };
+            let (fw, fh) =
+                unsafe { frame_size_for_client(w, h, scale, dpi, false, Default::default()) };
             assert!(fw > want.0 && fh > want.1, "带框窗口应计入标题栏与边框");
         }
     }

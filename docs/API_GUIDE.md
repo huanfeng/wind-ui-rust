@@ -2051,7 +2051,37 @@ Element::button("设置…").on_click(move |ctx| {
 ```
 
 `Window` 的构建器与 `App` 同形（`new(title, w, h)` 起手、链式配置、`content` 收尾），
-只有对子窗有意义的那几项：`resizable` / `centered` / `frameless` / `min_size` / `bg`。
+只有对子窗有意义的那几项：`resizable` / `centered` / `position` / `skip_taskbar` / `frameless` /
+`min_size` / `bg`。
+
+#### 指定位置与不进任务栏
+
+浮窗、贴图、「在用户刚点的位置弹出」的小输入框，要自己定位置、也不该在任务栏占按钮：
+
+```rust
+Window::new("批注", 240, 120)
+    .position(x, y)        // 外框左上角，优先于 centered
+    .skip_taskbar(true)    // 不在任务栏占按钮
+    .frameless(true)
+    .content(|| note_editor())
+```
+
+`App` 上同名的两项作用于主窗。各平台**能做就做、做不到就忽略**，不报错：
+
+| | Windows | X11 | macOS | Wayland |
+|---|---|---|---|---|
+| `position(x, y)` | 物理像素，原点在主屏左上（可为负） | 物理像素，原点在虚拟桌面左上 | 点，原点在主屏左上 | 忽略（协议不允许应用定位） |
+| `skip_taskbar` | `WS_EX_TOOLWINDOW`，同时退出 Alt+Tab | `SKIP_TASKBAR`，pager 里也不显示 | 退出「窗口」菜单与 ⌘\` 轮换 | 忽略 |
+
+- **坐标是平台原生的屏幕坐标**，y 都向下（macOS 由框架换算 AppKit 的左下原点）。这类坐标
+  多半来自全局钩子、系统光标位置等平台来源，原样传进来即可，不再二次换算。**框架不做钳制**——
+  落在哪块屏、允许溢出多少只有应用知道；但 macOS 会把带标题栏的窗口挪到菜单栏以下。
+- 不进任务栏的窗口最小化之后无处还原，故没设 `hide_on_minimize` 时不提供最小化（Windows
+  去掉最小化按钮、X11 报为不可最小化，自绘标题栏的按钮随之隐藏）。
+- Windows 的工具窗样式会让**带系统标题栏**的窗口换成窄标题栏（无图标），故 `skip_taskbar`
+  多与 `frameless` 一起用。归属窗口（`owned` / `modal`）本就不占任务栏，不必再设。
+- macOS 没有窗口级的任务栏按钮（Dock 图标是应用级的），`skip_taskbar` 取的是同一意图在这个
+  平台上最近的对应。
 
 **`content` 收闭包而非建好的树**，两个理由：闭包在窗口**真正创建时**才求值，与
 `open_window` 的排队语义一致（下方"时机"）；更要紧的是其间创建的 `Signal` 归这个窗口所有，

@@ -53,6 +53,7 @@ x11rb::atom_manager! {
         WM_PROTOCOLS,
         WM_DELETE_WINDOW,
         WM_CHANGE_STATE,
+        WM_STATE,
         _NET_WM_NAME,
         UTF8_STRING,
         _NET_WM_PID,
@@ -62,6 +63,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_MODAL,
+        _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_STATE_SKIP_PAGER,
         _NET_WM_WINDOW_TYPE,
         _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_WINDOW_TYPE_DIALOG,
@@ -94,6 +97,9 @@ struct Win {
     single: Option<String>,
     owner: Option<Window>,
     modal: bool,
+    /// 不在任务栏占按钮（`WindowConfig::skip_taskbar`）。映射前写进 `_NET_WM_STATE`，
+    /// 每次从隐藏（撤回）态重新映射前要补写，见 [`X11::write_initial_state`]。
+    skip_taskbar: bool,
     /// 物理像素尺寸。
     w: i32,
     h: i32,
@@ -308,8 +314,8 @@ impl X11 {
         let s = self.scale;
         let pw = ((cfg.width as f32 * s).round() as i32).max(1);
         let ph = ((cfg.height as f32 * s).round() as i32).max(1);
-        let (mut x, mut y) = (0i32, 0i32);
-        if cfg.centered {
+        let (mut x, mut y) = cfg.position.unwrap_or((0, 0));
+        if cfg.centered && cfg.position.is_none() {
             let (ox, oy, ow, oh) = owner.and_then(|o| self.frame_of(o)).unwrap_or((
                 0,
                 0,
@@ -382,7 +388,11 @@ impl X11 {
         );
         // 尺寸约束：最小客户区（逻辑 → 物理）；不可缩放即最小 = 最大 = 当前。
         let mut hints = WmSizeHints::new();
-        if cfg.centered {
+        if cfg.position.is_some() {
+            // 应用明确指定的位置按「用户指定」报：多数 WM 对 ProgramSpecified 仍会套自己的
+            // 放置策略（智能摆放、避开面板），USPosition 才被当成必须遵守的坐标。
+            hints.position = Some((WmSizeHintsSpecification::UserSpecified, x, y));
+        } else if cfg.centered {
             hints.position = Some((WmSizeHintsSpecification::ProgramSpecified, x, y));
         }
         if !cfg.resizable {
@@ -425,16 +435,8 @@ impl X11 {
                 AtomEnum::WINDOW,
                 &[o],
             );
-            if cfg.modal {
-                let _ = self.conn.change_property32(
-                    PropMode::REPLACE,
-                    id,
-                    a._NET_WM_STATE,
-                    AtomEnum::ATOM,
-                    &[a._NET_WM_STATE_MODAL],
-                );
-            }
         }
+        self.write_initial_state(id, cfg.modal && owner.is_some(), cfg.skip_taskbar);
         if let Some(src) = &cfg.icon {
             self.set_icon(id, src);
         }
@@ -450,6 +452,7 @@ impl X11 {
             single: cfg.single.clone(),
             owner,
             modal: cfg.modal && owner.is_some(),
+            skip_taskbar: cfg.skip_taskbar,
             w: pw,
             h: ph,
             pixmap: None,
@@ -537,8 +540,15 @@ impl X11 {
     fn show_at(&mut self, id: Window, time: u32) {
         if let Some(i) = self.idx(id) {
             let w = &mut self.windows[i];
-            if std::mem::take(&mut w.hidden) && w.handler.on_window_shown() {
+            let was_hidden = std::mem::take(&mut w.hidden);
+            if was_hidden && w.handler.on_window_shown() {
                 w.needs_paint = true;
+            }
+            // 我们的隐藏是 unmap（撤回），而 EWMH 让 WM 在撤回时删掉 `_NET_WM_STATE`——
+            // 不补回的话，隐藏再唤起的窗口就回到任务栏上了（模态标记同理）。
+            if was_hidden {
+                let (modal, skip) = (w.modal, w.skip_taskbar);
+                self.reassert_state(id, modal, skip);
             }
         }
         let _ = self.conn.map_window(id);
@@ -547,6 +557,67 @@ impl X11 {
             .configure_window(id, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
         // 源 = 1（应用）：WM 可能按焦点窃取策略拒绝，但被 map 的新窗口通常照样获得焦点。
         self.client_message(id, self.atoms._NET_ACTIVE_WINDOW, [1, time, 0, 0, 0]);
+    }
+
+    /// 隐藏后重新显示前补回初始状态。
+    ///
+    /// 「隐藏」不一定真撤回了窗口：`hide_on_minimize` 是在 WM 已把窗口最小化（Iconic）之后
+    /// 才 unmap 的，而 ICCCM 规定 Iconic 窗口的撤回还要客户端补发一条合成 UnmapNotify——
+    /// 我们没发，WM 便仍在管理它，`_NET_WM_STATE` 里还留着最大化等它维护的状态。这时
+    /// 直接改写属性会把那些状态整个抹掉，只能按 EWMH 发「add」客户端消息。故先看
+    /// `WM_STATE`：不存在或为 Withdrawn(0) 才算撤回，可以像建窗时那样直接写。
+    fn reassert_state(&self, id: Window, modal: bool, skip_taskbar: bool) {
+        let a = self.atoms;
+        let managed = self
+            .conn
+            .get_property(false, id, a.WM_STATE, a.WM_STATE, 0, 1)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32().and_then(|mut v| v.next()))
+            .is_some_and(|state| state != 0);
+        if !managed {
+            self.write_initial_state(id, modal, skip_taskbar);
+            return;
+        }
+        // data: [动作(1=add), 属性1, 属性2, 来源(1=应用), 0]
+        if modal {
+            self.client_message(id, a._NET_WM_STATE, [1, a._NET_WM_STATE_MODAL, 0, 1, 0]);
+        }
+        if skip_taskbar {
+            self.client_message(
+                id,
+                a._NET_WM_STATE,
+                [
+                    1,
+                    a._NET_WM_STATE_SKIP_TASKBAR,
+                    a._NET_WM_STATE_SKIP_PAGER,
+                    1,
+                    0,
+                ],
+            );
+        }
+    }
+
+    /// 映射前写入的初始 `_NET_WM_STATE`（EWMH：映射前直接写属性，映射后要改得发客户端消息）。
+    /// 两项都没有时不写——已映射过的窗口删属性也无意义，撤回时 WM 已经删了。
+    fn write_initial_state(&self, id: Window, modal: bool, skip_taskbar: bool) {
+        let a = self.atoms;
+        let mut state = Vec::new();
+        if modal {
+            state.push(a._NET_WM_STATE_MODAL);
+        }
+        if skip_taskbar {
+            state.extend([a._NET_WM_STATE_SKIP_TASKBAR, a._NET_WM_STATE_SKIP_PAGER]);
+        }
+        if !state.is_empty() {
+            let _ = self.conn.change_property32(
+                PropMode::REPLACE,
+                id,
+                a._NET_WM_STATE,
+                AtomEnum::ATOM,
+                &state,
+            );
+        }
     }
 
     /// `_NET_STARTUP_ID`：这扇窗口属于哪次启动（WM 据此结束那次启动序列、判断焦点）。
@@ -1533,7 +1604,9 @@ impl X11 {
             minimized: w.minimized,
             visible: w.mapped || w.minimized,
             maximizable: w.resizable,
-            minimizable: true,
+            // 不进任务栏的窗口最小化之后无处可还原（任务栏上没有它），除非应用接管成
+            // 最小化即隐藏（托盘唤起）。理由与 win32 去掉 `WS_MINIMIZEBOX` 相同。
+            minimizable: !w.skip_taskbar || w.handler.hide_on_minimize(),
         };
         w.handler.on_window_state(st);
         w.needs_paint = true;

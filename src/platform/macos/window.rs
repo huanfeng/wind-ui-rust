@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace, NSCursor,
     NSDragOperation, NSDraggingDestination, NSDraggingInfo, NSEvent, NSEventPhase,
     NSGraphicsContext, NSImage, NSPasteboardType, NSScreen, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowDelegate,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowButton, NSWindowCollectionBehavior,
+    NSWindowDelegate, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 // 已弃用但在现行 macOS 仍有效，且读取拖入路径列表最简。
 #[allow(deprecated)]
@@ -2430,7 +2430,7 @@ fn create_window(
         // window——随 owner 移动 / 最小化、始终在其上方。模态另记进阻断表，owner 的
         // 视图据此拒收输入。
         Some(o) => {
-            if cfg.centered {
+            if cfg.centered && cfg.position.is_none() {
                 let of = o.frame();
                 let wf = window.frame();
                 window.setFrameOrigin(NSPoint {
@@ -2447,10 +2447,30 @@ fn create_window(
             }
         }
         None => {
-            if cfg.centered {
+            if cfg.centered && cfg.position.is_none() {
                 window.center();
             }
         }
+    }
+
+    // 指定位置（`WindowConfig::position`）：接口口径是「主屏左上为原点、y 向下」的点，与
+    // win32 / X11 同向；AppKit 的屏幕坐标原点在主屏**左下**、y 向上，按主屏高度翻一下。
+    // 主屏 = `screens` 的第一项（菜单栏所在那块），不是 `mainScreen`（那是键盘焦点所在屏）。
+    if let Some((x, y)) = cfg.position {
+        if let Some(primary) = NSScreen::screens(mtm).firstObject() {
+            window.setFrameTopLeftPoint(NSPoint {
+                x: x as f64,
+                y: primary.frame().size.height - y as f64,
+            });
+        }
+    }
+    // 不进任务栏（`WindowConfig::skip_taskbar`）：macOS 没有窗口级的任务栏按钮（Dock 图标
+    // 是应用级的），同一意图在这里最近的对应是退出「窗口」菜单与 ⌘` 窗口轮换。
+    if cfg.skip_taskbar {
+        window.setExcludedFromWindowsMenu(true);
+        window.setCollectionBehavior(
+            window.collectionBehavior() | NSWindowCollectionBehavior::IgnoresCycle,
+        );
     }
 
     // 动画帧驱动改为自调度的一次性定时器（见 ContentView::schedule_next_frame）：跟随显示器

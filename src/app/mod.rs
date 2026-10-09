@@ -142,6 +142,8 @@ impl Window {
                 shortcut: None,
                 single: None,
                 icon: None,
+                position: None,
+                skip_taskbar: false,
             },
         }
     }
@@ -295,6 +297,23 @@ impl Window {
     /// 窗口居中显示：设了 [`owned`](Self::owned) 就居中在发起窗口上，否则居中在屏幕上。
     pub fn centered(mut self, on: bool) -> Self {
         self.req.centered = on;
+        self
+    }
+
+    /// 把窗口外框左上角放在屏幕坐标 `(x, y)`，优先于 [`centered`](Self::centered)。
+    ///
+    /// 用于「跟着用户刚点的位置弹出来」这类窗口。坐标是**平台原生屏幕坐标**，各平台口径
+    /// 见 [`App::position`]。
+    pub fn position(mut self, x: i32, y: i32) -> Self {
+        self.req.position = Some((x, y));
+        self
+    }
+
+    /// 不在任务栏占按钮（默认 false），用于浮窗、贴图、悬浮工具条这类不该和正经窗口
+    /// 并列的窗口。各平台落地见 [`App::skip_taskbar`]；子窗不能接管最小化，故设了它就
+    /// 不提供最小化。
+    pub fn skip_taskbar(mut self, on: bool) -> Self {
+        self.req.skip_taskbar = on;
         self
     }
 
@@ -599,6 +618,10 @@ fn build_new_window(
         owned: req.owned || req.modal,
         modal: req.modal,
         icon: req.icon,
+        // 这两项必须显式搬：下面的 `..WindowConfig::default()` 会把漏掉的字段静默填成
+        // 默认值，症状是「设了却不生效」。
+        position: req.position,
+        skip_taskbar: req.skip_taskbar,
         // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
         // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
         ..WindowConfig::default()
@@ -1133,6 +1156,8 @@ impl App {
                 owned: false,
                 modal: false,
                 icon: None,
+                position: None,
+                skip_taskbar: false,
             },
             render: None,
             content: None,
@@ -1264,6 +1289,42 @@ impl App {
     /// 窗口居中显示。
     pub fn centered(mut self) -> Self {
         self.cfg.centered = true;
+        self
+    }
+
+    /// 把主窗外框左上角放在屏幕坐标 `(x, y)`，优先于 [`centered`](Self::centered)。
+    ///
+    /// 单位与原点跟着平台走——坐标多来自全局钩子、系统光标位置这类平台来源，原样传进来
+    /// 即可，不再二次换算：
+    ///
+    /// - **Windows**：物理像素，原点在主屏左上；副屏在主屏左侧 / 上方时可为负。
+    /// - **X11**：物理像素，原点在虚拟桌面（根窗口）左上，恒非负。
+    /// - **macOS**：点，原点在主屏左上、y 向下（框架换算 AppKit 的左下原点）。带标题栏的
+    ///   窗口会被系统挪到菜单栏以下。
+    /// - **Wayland**：协议不允许应用定位顶层窗口，忽略。
+    ///
+    /// 框架不做钳制——落在哪块屏、允许溢出多少只有应用知道。
+    pub fn position(mut self, x: i32, y: i32) -> Self {
+        self.cfg.position = Some((x, y));
+        self
+    }
+
+    /// 不在任务栏占按钮（默认 false）。用于托盘常驻应用的浮窗、覆盖层、悬浮工具条——
+    /// 它们不该和正经窗口并列在任务栏上。
+    ///
+    /// - **Windows**：`WS_EX_TOOLWINDOW`，同时退出 Alt+Tab。带系统标题栏的窗口会换成工具窗
+    ///   的窄标题栏（无图标），故多与 [`frameless`](Self::frameless) 一起用。
+    /// - **X11**：`_NET_WM_STATE_SKIP_TASKBAR`，连同工作区分页器（pager）里也不显示
+    ///   （`SKIP_PAGER`）。
+    /// - **macOS**：没有窗口级的任务栏按钮（Dock 图标是应用级的），改为退出「窗口」菜单
+    ///   与 ⌘\` 窗口轮换，是同一意图在这个平台上的最近对应。
+    /// - **Wayland**：没有对应协议，忽略。
+    ///
+    /// 不进任务栏的窗口最小化之后无处还原，故没设 [`hide_on_minimize`](Self::hide_on_minimize)
+    /// 时不提供最小化：Windows 去掉最小化按钮、X11 报为不可最小化，自绘标题栏的最小化按钮
+    /// 随能力位隐藏。
+    pub fn skip_taskbar(mut self, on: bool) -> Self {
+        self.cfg.skip_taskbar = on;
         self
     }
 
@@ -4413,6 +4474,38 @@ mod tests {
             !handler.wants_close(),
             "被吃掉的 Escape 不该再落到框架的关窗兜底上——设置页按 Esc 是返回，不是关窗"
         );
+    }
+
+    /// `Window::position` / `skip_taskbar` 必须一路搬进建窗配置。
+    ///
+    /// 子窗请求转配置时其余字段由 `..WindowConfig::default()` 兜底，漏写一行就被静默填成
+    /// 默认值——症状是「设了却不生效」，平台层收到的就是 `None` / `false`，查不出错。
+    #[test]
+    fn window_position_and_skip_taskbar_reach_the_platform_config() {
+        let theme = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let req = Window::new("贴图", 120, 80)
+            .position(-1920, 40)
+            .skip_taskbar(true)
+            .content(|| Element::col().fill());
+        let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
+        else {
+            panic!("build_new_window 只会产出 Create");
+        };
+        assert_eq!(
+            cfg.position,
+            Some((-1920, 40)),
+            "副屏在左时坐标为负，原样传下去"
+        );
+        assert!(cfg.skip_taskbar);
+
+        let req = Window::new("设置", 120, 80).content(|| Element::col().fill());
+        let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
+        else {
+            panic!("build_new_window 只会产出 Create");
+        };
+        assert_eq!(cfg.position, None, "对照：不设就交给系统摆放");
+        assert!(!cfg.skip_taskbar);
     }
 
     /// 单例去重是在**开窗那一刻**按窗口登记表判的——这正是「同一个回调里对同一个键既关
