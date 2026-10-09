@@ -2725,7 +2725,7 @@ unsafe fn materialize_window(item: NewWindow) {
     }
 }
 
-/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify`）。
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify` / `set_icon_rgba`）。
 ///
 /// 队列是线程局部的（托盘是应用级单例，不属于任何窗口），故这里不需要 hwnd——
 /// 投递目标从 app 宿主上的 `TrayState` 取。**先取出目标释放借用，再调
@@ -2757,6 +2757,24 @@ unsafe fn apply_tray_ops() {
             // 气泡是一次性的，shell 重启后无需重放，故不进 `TrayState`。
             crate::platform::tray::TrayOp::Notify { title, body } => {
                 tray::notify(h, uid, &title, &body);
+            }
+            crate::platform::tray::TrayOp::SetIcon { w, h: ih, rgba } => {
+                // 像素长度已在 `TrayHandle::set_icon_rgba` 校验过，走到这里失败是 GDI 的事。
+                let Some(hicon) = tray::hicon_from_rgba(w as i32, ih as i32, &rgba) else {
+                    eprintln!("[windui] TrayHandle::set_icon_rgba：创建 {w}×{ih} 图标失败，已忽略");
+                    continue;
+                };
+                // 与 `SetTooltip` 同序：先 OS 调用，再借宿主记账（旧图标在记账时销毁）。
+                // 返回值不看，同样与 `SetTooltip` 一致：shell 此刻不接受（explorer 刚崩、
+                // 正等 TaskbarCreated）也要记下，重建时按**新**图标重放，状态才不丢。
+                let _ = tray::set_icon(h, uid, hicon);
+                match app_host().and_then(|host| host.tray.as_mut()) {
+                    Some(ts) => ts.swap_icon(hicon),
+                    // 宿主已无托盘：新句柄无人认领，就地销毁。
+                    None => {
+                        let _ = DestroyIcon(hicon);
+                    }
+                }
             }
         }
     }

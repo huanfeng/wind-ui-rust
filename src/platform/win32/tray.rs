@@ -254,6 +254,20 @@ impl TrayState {
     pub(crate) fn remember_tooltip(&mut self, tip: String) {
         self.tooltip = tip;
     }
+
+    /// 换上新图标（`set_icon` 之后调用，不论 shell 当时接不接受），并销毁被换下的那个
+    /// （若是自建的）。
+    ///
+    /// 记下它是为了 shell 重启时按现在的图标重放（`readd_target` 取的就是 `self.hicon`）。
+    /// shell 登记图标时自己拷一份，旧句柄随时销毁都不影响托盘上显示的那张。
+    pub(crate) fn swap_icon(&mut self, hicon: HICON) {
+        let old = std::mem::replace(&mut self.hicon, hicon);
+        if std::mem::replace(&mut self.owns_icon, true) {
+            unsafe {
+                let _ = DestroyIcon(old);
+            }
+        }
+    }
 }
 
 /// Shell 重启后重新登记托盘图标。
@@ -311,6 +325,19 @@ pub(crate) fn set_tooltip(hwnd: HWND, uid: u32, tip: &str) {
         nid.uFlags = NIF_TIP;
         nid.szTip = wide_buf(tip);
         let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// 换托盘图标（`NIF_ICON` + `NIM_MODIFY`），返回 shell 是否接受。
+///
+/// 只带 `NIF_ICON`：`NIM_MODIFY` 只改 `uFlags` 声明的字段，提示文字原样保留。
+/// **自由函数而非 `&TrayState` 方法，理由同 [`notify`]**。
+pub(crate) fn set_icon(hwnd: HWND, uid: u32, hicon: HICON) -> bool {
+    unsafe {
+        let mut nid = base_nid(hwnd, uid);
+        nid.uFlags = NIF_ICON;
+        nid.hIcon = hicon;
+        Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool()
     }
 }
 

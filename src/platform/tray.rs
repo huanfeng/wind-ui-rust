@@ -33,6 +33,8 @@ pub enum TrayOp {
     SetTooltip(String),
     /// 弹出系统通知。与托盘回调的 [`TrayAction::Notify`] 走同一平台实现。
     Notify { title: String, body: String },
+    /// 换图标。像素口径同 [`Tray::icon_rgba`]：非预乘 RGBA8，`rgba.len() == w*h*4`。
+    SetIcon { w: u32, h: u32, rgba: Vec<u8> },
 }
 
 thread_local! {
@@ -112,6 +114,31 @@ impl TrayHandle {
             body: body.into(),
         });
         // 踢一帧的理由同 `set_tooltip`：发起方多在后台状态回调里，之后未必再有事件。
+        crate::anim::request_repaint();
+    }
+
+    /// 换托盘图标（像素口径同 [`Tray::icon_rgba`]）。下一次事件分发之后落地。
+    ///
+    /// 用于把状态挂在图标上：录制中把圆点变红、同步出错打个角标——托盘是常驻工具
+    /// 最常被瞟一眼的地方，提示文字要悬停才看得见。尺寸为 0 或 `rgba.len() != w*h*4`
+    /// 时这次改动被丢弃（打一行警告），图标保持原样。Windows 上 shell 重启后按**新**图标恢复。
+    pub fn set_icon_rgba(&self, w: u32, h: u32, rgba: &[u8]) {
+        // 在入口校验：平台层按 i32 换算像素数，超大尺寸在那里会溢出。乘法本身也要防溢出
+        // （`u32::MAX` 见方再 ×4 连 u64 都装不下）。
+        let want = (w as u64 * h as u64).checked_mul(4);
+        if w == 0 || h == 0 || want != Some(rgba.len() as u64) {
+            eprintln!(
+                "[windui] TrayHandle::set_icon_rgba：{w}×{h} 与像素数据 {} 字节对不上，已忽略",
+                rgba.len()
+            );
+            return;
+        }
+        self.queue.borrow_mut().push(TrayOp::SetIcon {
+            w,
+            h,
+            rgba: rgba.to_vec(),
+        });
+        // 踢一帧的理由同 `set_tooltip`：换图标多由应用状态变化触发，之后未必再有事件。
         crate::anim::request_repaint();
     }
 
@@ -542,22 +569,41 @@ mod tests {
         );
     }
 
-    /// 运行期通知与改提示走同一条意图队列，按调用顺序排队（不会被合并或重排）。
+    /// 运行期通知、改提示、换图标走同一条意图队列，按调用顺序排队（不会被合并或重排）。
     #[test]
     fn runtime_handle_queues_notification_in_call_order() {
         let handle = TrayHandle::detached();
         handle.set_tooltip("同步中");
+        handle.set_icon_rgba(1, 1, &[255, 0, 0, 255]);
         handle.notify("同步完成", "已上传 3 个文件");
         assert_eq!(
             handle.pending_ops(),
             vec![
                 TrayOp::SetTooltip("同步中".into()),
+                TrayOp::SetIcon {
+                    w: 1,
+                    h: 1,
+                    rgba: vec![255, 0, 0, 255],
+                },
                 TrayOp::Notify {
                     title: "同步完成".into(),
                     body: "已上传 3 个文件".into(),
                 },
             ]
         );
+    }
+
+    /// 像素长度与尺寸对不上的换图标请求在入口就丢掉，不进队列——平台层按 i32 换算像素数，
+    /// 放进去的话超大尺寸会在那里溢出。
+    #[test]
+    fn set_icon_with_mismatched_pixels_is_dropped() {
+        let handle = TrayHandle::detached();
+        handle.set_icon_rgba(2, 2, &[0; 15]);
+        handle.set_icon_rgba(0, 4, &[]);
+        handle.set_icon_rgba(u32::MAX, u32::MAX, &[0; 4]);
+        assert!(handle.pending_ops().is_empty());
+        handle.set_icon_rgba(2, 2, &[0; 16]);
+        assert_eq!(handle.pending_ops().len(), 1, "对照：长度对得上的照常排队");
     }
 
     /// 没有回调时不该凭空产生意图（左键未绑定的托盘图标点了应当什么都不发生）。

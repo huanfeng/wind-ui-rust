@@ -57,7 +57,8 @@ thread_local! {
     static INSTALLED: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
 }
 
-/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify`），与 win32 的 `apply_tray_ops` 对齐。
+/// 落实运行期托盘意图（`TrayHandle::set_tooltip` / `notify` / `set_icon_rgba`），与 win32 的
+/// `apply_tray_ops` 对齐。
 ///
 /// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
 /// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
@@ -84,6 +85,18 @@ pub(crate) fn apply_tray_ops() {
                 }
                 crate::platform::tray::TrayOp::Notify { title, body } => {
                     deliver_notification(&title, &body);
+                }
+                crate::platform::tray::TrayOp::SetIcon { w, h, rgba } => {
+                    // 像素长度已在 `TrayHandle::set_icon_rgba` 校验过。
+                    let Some(img) = nsimage_from_rgba(w as i32, h as i32, &rgba) else {
+                        eprintln!(
+                            "[windui] TrayHandle::set_icon_rgba：创建 {w}×{h} 图标失败，已忽略"
+                        );
+                        continue;
+                    };
+                    if let Some(button) = item.button(mtm) {
+                        button.setImage(Some(&img));
+                    }
                 }
             }
         }
