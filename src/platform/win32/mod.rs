@@ -424,7 +424,29 @@ unsafe extern "system" fn app_host_proc(
                 // "后台任务完成后弹出结果窗口 / 更新托盘提示"正是这条路。
                 apply_app_effects(repaint);
             }
-            for h in windows {
+            // 正在连续动画的窗口不推：帧循环会在一个刷新间隔内给它出帧（通道随那一帧
+            // 排空），而且只失效宿主算出的脏区。这里再推一次整窗失效，`WM_PAINT` 不受帧
+            // 配速约束——后台线程高频 `send`（每条一次唤醒）时，它会把窗口推到远超刷新率的
+            // 整窗重画，帧越便宜画得越多。
+            //
+            // 只认**连续**动画（`next_frame_delay_ms() == 0`）：定时动画（闪烁光标）的下一帧
+            // 可能在几百毫秒后，不推的话通道里的消息要跟着等到那一刻才显示。
+            //
+            // 先收集再失效：`state_from` 的借用不跨进 OS 调用（铁律 6）。
+            let to_wake: Vec<HWND> = windows
+                .into_iter()
+                .filter(|&h| {
+                    let frame_loop_serves = IsWindowVisible(h).as_bool()
+                        && !IsIconic(h).as_bool()
+                        && state_from(h)
+                            .map(|s| {
+                                s.handler.wants_animation() && s.handler.next_frame_delay_ms() == 0
+                            })
+                            .unwrap_or(false);
+                    !frame_loop_serves
+                })
+                .collect();
+            for h in to_wake {
                 let _ = InvalidateRect(Some(h), None, false);
             }
             LRESULT(0)
@@ -896,10 +918,23 @@ impl WinRenderBackend for SkiaBackend {
             _ => None,
         };
         self.fresh = false;
-        // 整窗帧时先把整个客户区标失效：`BeginPaint` 返回的 DC 带着 rcPaint 的裁剪，
-        // 若失效区只是上一帧那一小块，整窗内容会被裁掉、只更新一条。
-        if drawn.is_none() {
-            let _ = InvalidateRect(Some(hwnd), None, false);
+        // 先把本帧实际画过的范围标失效：`BeginPaint` 返回的 DC 带着 rcPaint 的裁剪，
+        // 超出失效区的部分上传了也上不了屏。整窗帧时若失效区只是上一帧那一小块，整窗
+        // 内容会被裁掉、只更新一条；局部帧同理——失效区是帧前按 `pending_damage` 定的，
+        // 而帧内排空通道（`on_message` 改了别处）会让实际脏区长出去。
+        match drawn {
+            None => {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            Some(d) => {
+                let rc = RECT {
+                    left: d.x,
+                    top: d.y,
+                    right: d.right(),
+                    bottom: d.bottom(),
+                };
+                let _ = InvalidateRect(Some(hwnd), Some(&rc), false);
+            }
         }
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
