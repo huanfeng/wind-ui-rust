@@ -26,8 +26,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
     LoadIconW, RegisterWindowMessageW, SetForegroundWindow, TrackPopupMenu, HICON, HMENU, ICONINFO,
-    IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    IDI_APPLICATION, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN,
+    TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_RBUTTONUP,
 };
 
 /// 托盘回调消息（WM_APP+1）：lParam 低位为鼠标动作（legacy v0 编码）。
@@ -352,9 +353,12 @@ pub(crate) unsafe fn track_menu(hwnd: HWND, menu: PopupMenu) -> usize {
     let _ = GetCursorPos(&mut pt);
     // 必须前置窗口，否则菜单点击外部不消失（Win32 经典要求）。
     let _ = SetForegroundWindow(hwnd);
+    // 以光标为右下角朝左上展开。不给对齐标志时菜单以光标为左上角朝右下长，而托盘区多在
+    // 屏幕底部右侧——菜单下半截落到任务栏底下被遮住。任务栏在顶部或左侧时朝左上会出屏，
+    // 系统会把菜单挪回屏内，不需要按任务栏方位分支。
     let cmd = TrackPopupMenu(
         menu.0,
-        TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_BOTTOMALIGN | TPM_RIGHTALIGN,
         pt.x,
         pt.y,
         Some(0),
