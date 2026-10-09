@@ -338,6 +338,9 @@ impl ButtonTheme {
 #[serde(default)]
 pub struct InputTheme {
     pub bg: Option<Color>,
+    /// 只读输入框（[`Element::read_only`](crate::ui::Element::read_only)）的底色，
+    /// 默认 `palette.surface_alt`。正文仍用常规色，与禁用（同底、正文置灰）区分。
+    pub bg_readonly: Option<Color>,
     pub border: Option<Color>,
     pub border_focus: Option<Color>,
     /// ⚠ **当前不生效**：`TextInput` 的正文色走节点 `Style` 的 `fg` / `fg_role`
@@ -365,6 +368,9 @@ pub struct InputTheme {
 impl InputTheme {
     pub fn bg(&self, p: &Palette) -> Color {
         self.bg.unwrap_or(p.surface)
+    }
+    pub fn bg_readonly(&self, p: &Palette) -> Color {
+        self.bg_readonly.unwrap_or(p.surface_alt)
     }
     pub fn border(&self, p: &Palette) -> Color {
         self.border.unwrap_or(p.border)

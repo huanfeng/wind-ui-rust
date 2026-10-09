@@ -5896,6 +5896,265 @@ mod tests {
         assert_eq!(txt.get(), "x\ny", "多行粘贴应保留换行(\\r\\n 归一为 \\n)");
     }
 
+    /// 只读框：`width` 为 `None` 时**不设宽**（Wrap 宽，`avail.w != content.w`），
+    /// 为 `Some` 时显式设宽——选区与命中两侧都要覆盖（见 AGENTS §5）。
+    fn readonly_tree(
+        initial: &str,
+        multiline: bool,
+        width: Option<i32>,
+    ) -> (Tree, NodeId, Signal<String>, Rc<RefCell<String>>) {
+        let txt = signal(String::from(initial));
+        let mut ti = Element::text_input(txt, "ph").read_only();
+        if multiline {
+            ti = ti.multiline().wrap(true).height(100);
+        }
+        if let Some(w) = width {
+            ti = ti.width(w);
+        }
+        let root = Element::col().width(200).height(120).child(ti);
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 120), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        let clip = Rc::new(RefCell::new(String::from("seed")));
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        // 命中测试读 paint 建的视觉行缓存，先真画一帧。
+        tree.set_focused(Some(input), None);
+        let mut pm = tiny_skia::Pixmap::new(200, 120).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+        (tree, input, txt, clip)
+    }
+
+    fn ro_key(key: Key, ctrl: bool) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+            alt: false,
+            meta: false,
+        }
+    }
+
+    /// 一切键盘编辑途径都不改信号：键入、退格、Delete、剪切、粘贴、多行 Enter。
+    /// 剪切也不顺手复制（剪贴板保持原样），多行 Enter 不消费、留给宿主。
+    #[test]
+    fn readonly_rejects_keyboard_edits() {
+        for multiline in [false, true] {
+            let (mut tree, input, txt, clip) = readonly_tree("ab\ncd", multiline, None);
+            let before = txt.get();
+            tree.dispatch_key(ro_key(Key::Other(0x41), true), Some(input)); // Ctrl+A
+            tree.dispatch_key(ro_key(Key::Char('x'), false), Some(input));
+            tree.dispatch_key(ro_key(Key::Backspace, false), Some(input));
+            tree.dispatch_key(ro_key(Key::Delete, false), Some(input));
+            tree.dispatch_key(ro_key(Key::Other(0x58), true), Some(input)); // Ctrl+X
+            assert_eq!(&*clip.borrow(), "seed", "只读的 Ctrl+X 不应写剪贴板");
+            tree.dispatch_key(ro_key(Key::Other(0x56), true), Some(input)); // Ctrl+V
+            tree.dispatch_key(ro_key(Key::Home, false), Some(input));
+            tree.dispatch_key(ro_key(Key::Backspace, false), Some(input));
+            tree.dispatch_key(ro_key(Key::Delete, false), Some(input));
+            let res = tree.dispatch_key(ro_key(Key::Enter, false), Some(input));
+            assert!(
+                !res.consumed,
+                "只读框 Enter 不换行、不消费（multiline={multiline}）"
+            );
+            assert_eq!(
+                txt.get(),
+                before,
+                "只读框正文不应被改动（multiline={multiline}）"
+            );
+        }
+    }
+
+    fn ro_paint(tree: &Tree) {
+        let mut pm = tiny_skia::Pixmap::new(200, 120).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+    }
+
+    /// 输入法：合成串不内联进正文（光标不被它推后）、提交的字被拒、正文不交给输入法；
+    /// 但光标照常报给宿主——系统候选窗要有落点。
+    #[test]
+    fn readonly_rejects_ime() {
+        let (mut tree, input, txt, _clip) = readonly_tree("ab", true, Some(180));
+        let x0 = tree.caret_of(input).expect("只读框照常报光标").0.x;
+        tree.set_preedit(
+            input,
+            &crate::event::Preedit {
+                text: "hao".into(),
+                caret: 3,
+                sel: None,
+            },
+        );
+        ro_paint(&tree);
+        // 可编辑框此时光标会被合成串推到 "hao" 之后（见 app 层 ime_caret 测试）。
+        assert_eq!(tree.caret_of(input).unwrap().0.x, x0, "合成串不内联进正文");
+        assert!(
+            tree.ime_text_of(input).is_none(),
+            "不把正文交给输入法重转换"
+        );
+        tree.set_preedit(input, &crate::event::Preedit::default());
+        tree.dispatch_key(ro_key(Key::Char('好'), false), Some(input)); // 提交经 Key::Char 到达
+        assert_eq!(txt.get(), "ab");
+    }
+
+    /// 只读多行框的 Enter 不换行，改交 `on_submit`（与单行同一出口）。
+    #[test]
+    fn readonly_multiline_enter_goes_to_on_submit() {
+        let txt = signal(String::from("ab"));
+        let hits = Rc::new(std::cell::Cell::new(0));
+        let h2 = hits.clone();
+        let root = Element::col().width(200).height(120).child(
+            Element::text_input(txt, "")
+                .multiline()
+                .read_only()
+                .height(100)
+                .on_submit(move |_| h2.set(h2.get() + 1)),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(200, 120), &mut crate::text::NullTextEngine);
+        let input = tree.get(id).unwrap().children[0];
+        let res = tree.dispatch_key(ro_key(Key::Enter, false), Some(input));
+        assert!(res.consumed && hits.get() == 1, "Enter 应交 on_submit");
+        assert_eq!(txt.get(), "ab");
+    }
+
+    /// 程序把正文改短后，存着的光标先钳进新长度：第一下 Shift+Left 就从文末起扩选。
+    #[test]
+    fn readonly_keys_start_from_clamped_cursor_after_rewrite() {
+        let (mut tree, input, txt, clip) = readonly_tree("hello world", false, None);
+        tree.dispatch_key(ro_key(Key::End, false), Some(input)); // 光标 11
+        txt.set(String::from("hi"));
+        let mut shift_left = ro_key(Key::Left, false);
+        shift_left.shift = true;
+        tree.dispatch_key(shift_left, Some(input));
+        assert_eq!(tree.selection_of(input), Some((1, 2)));
+        tree.dispatch_key(ro_key(Key::Other(0x43), true), Some(input));
+        assert_eq!(&*clip.borrow(), "i");
+    }
+
+    /// 可聚焦、可双击选词、Ctrl+C 得到选中片段。Wrap 宽与显式宽各跑一遍。
+    #[test]
+    fn readonly_click_focuses_and_double_click_copies_word() {
+        for width in [None, Some(180)] {
+            let (mut tree, input, txt, clip) = readonly_tree("hello world", false, width);
+            let b = tree.abs_bounds(input);
+            let p = Point::new(b.x + 10 + 12, b.y + b.h / 2); // "hello" 内部
+            let (mut h, mut cap) = (None, None);
+            let down = |n| PointerEvent {
+                kind: PointerKind::Down,
+                pos: p,
+                button: MouseButton::Left,
+                click_count: n,
+                mods: crate::event::Mods::default(),
+            };
+            let res = tree.dispatch_pointer(down(1), &mut h, &mut cap);
+            assert_eq!(res.focus, Some(input), "只读框可聚焦（width={width:?}）");
+            tree.dispatch_pointer(
+                PointerEvent {
+                    kind: PointerKind::Up,
+                    ..down(1)
+                },
+                &mut h,
+                &mut cap,
+            );
+            tree.dispatch_pointer(down(2), &mut h, &mut cap);
+            tree.dispatch_key(ro_key(Key::Other(0x43), true), Some(input)); // Ctrl+C
+            assert_eq!(
+                &*clip.borrow(),
+                "hello",
+                "双击选词后复制（width={width:?}）"
+            );
+            assert_eq!(txt.get(), "hello world");
+        }
+    }
+
+    /// 拖选局部 + 复制得到该片段（多行，Wrap 宽与显式宽）。
+    #[test]
+    fn readonly_drag_select_copies_fragment() {
+        for width in [None, Some(180)] {
+            let (mut tree, input, _txt, clip) = readonly_tree("abcdef\nghij", true, width);
+            let b = tree.abs_bounds(input);
+            // NullTextEngine 下每字宽 14*0.6=8.4：从首行行首拖到第 3 个字符之后。
+            let y = b.y + 10 + 4;
+            let from = Point::new(b.x + 10, y);
+            let to = Point::new(b.x + 10 + 25, y);
+            let (mut h, mut cap) = (None, None);
+            let ev = |kind, pos| PointerEvent {
+                kind,
+                pos,
+                button: MouseButton::Left,
+                click_count: 1,
+                mods: crate::event::Mods::default(),
+            };
+            tree.dispatch_pointer(ev(PointerKind::Down, from), &mut h, &mut cap);
+            tree.dispatch_pointer(ev(PointerKind::Move, to), &mut h, &mut cap);
+            tree.dispatch_pointer(ev(PointerKind::Up, to), &mut h, &mut cap);
+            tree.dispatch_key(ro_key(Key::Other(0x43), true), Some(input));
+            assert_eq!(&*clip.borrow(), "abc", "拖选片段可复制（width={width:?}）");
+        }
+    }
+
+    /// 程序改写信号：显示跟着变，旧选区钳到新正文范围内，复制得到的是新内容。
+    #[test]
+    fn readonly_signal_rewrite_clamps_selection() {
+        let (mut tree, input, txt, clip) = readonly_tree("hello world", true, None);
+        tree.dispatch_key(ro_key(Key::Other(0x41), true), Some(input)); // 全选 0..11
+        txt.set(String::from("hi"));
+        assert_eq!(tree.selection_of(input), Some((0, 2)), "选区钳到新长度");
+        tree.dispatch_key(ro_key(Key::Other(0x43), true), Some(input));
+        assert_eq!(&*clip.borrow(), "hi");
+        // 再画一帧不越界（光标、选区都按新正文算）。
+        let mut pm = tiny_skia::Pixmap::new(200, 120).unwrap();
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+    }
+
+    /// 右键菜单只有「复制」「全选」，没有剪切 / 粘贴。
+    #[test]
+    fn readonly_context_menu_has_no_edit_items() {
+        let (mut tree, input, _txt, _clip) = readonly_tree("hello", false, None);
+        let b = tree.abs_bounds(input);
+        // 落在正文内部：落在选区外的右键会把光标挪过去、清掉选区（既有口径）。
+        let center = Point::new(b.x + 10 + 12, b.y + b.h / 2);
+        let labels = |tree: &mut Tree| {
+            let (mut h, mut cap) = (None, None);
+            let down = PointerEvent {
+                kind: PointerKind::Down,
+                pos: center,
+                button: MouseButton::Right,
+                click_count: 1,
+                mods: crate::event::Mods::default(),
+            };
+            let menu = tree
+                .dispatch_pointer(down, &mut h, &mut cap)
+                .menu
+                .expect("右键应请求上下文菜单");
+            menu.items
+                .iter()
+                .map(|i| (i.label.clone(), i.enabled))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&mut tree),
+            vec![("复制".to_string(), false), ("全选".to_string(), true)]
+        );
+        tree.dispatch_key(ro_key(Key::Other(0x41), true), Some(input));
+        assert_eq!(
+            labels(&mut tree),
+            vec![("复制".to_string(), true), ("全选".to_string(), true)],
+            "有选区时复制可用（右键落在选区内不清选区）"
+        );
+    }
+
     #[test]
     fn password_multiline_order_still_single_line() {
         // .password().multiline() 顺序也不能让换行进入密码底层文本。

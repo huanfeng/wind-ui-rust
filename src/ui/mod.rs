@@ -1532,7 +1532,7 @@ impl Element {
     }
 
     /// 单行文本输入（绑定 `Signal<String>`）。
-    /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` 配置行为。
+    /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` / `.read_only()` 配置行为。
     pub fn text_input(text: Signal<String>, placeholder: impl Into<String>) -> Self {
         Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
     }
@@ -1549,7 +1549,7 @@ impl Element {
             Some(ti) => f(ti.config_mut()),
             None => debug_assert!(
                 false,
-                "password()/multiline()/wrap() 只能用于 Element::text_input(..)"
+                "password()/multiline()/wrap()/read_only() 只能用于 Element::text_input(..)"
             ),
         }
         self
@@ -1571,6 +1571,30 @@ impl Element {
     #[track_caller]
     pub fn wrap(self, on: bool) -> Self {
         self.config_text_input(|c| c.wrap = on)
+    }
+    /// 只读：内容可看、可选、可复制，不可改。可与 `.multiline()` / `.wrap(..)` 组合，
+    /// 用来展示日志、诊断信息这类「要能局部复制」的长文本。
+    ///
+    /// 仍可聚焦：点击定位光标、拖选、双击选词、三击选段、Ctrl+A、Ctrl+C、右键菜单的
+    /// 「复制」「全选」、方向键（含 Shift 扩选）与滚动照常。拒绝的是一切改动正文的途径：
+    /// 键入、输入法（提交被拒、合成串不内联进正文——系统的合成窗 / 候选窗仍会出现在光标处）、
+    /// 退格 / Delete、剪切、粘贴、多行 Enter 换行（Enter 改为照常交给 `on_submit` /
+    /// 宿主快捷键）。光标照常显示——键盘扩选需要看得见起点，与 Win32 原生只读编辑框一致。
+    ///
+    /// 绑定的信号被程序改写时照常刷新显示，已有选区按新正文长度钳紧。
+    ///
+    /// 与 [`disabled`](Self::disabled) 的区别：禁用节点**不可聚焦、不可选择**，正文置灰；
+    /// 只读**可选可复制、不可改**，正文用常规色，底色取
+    /// [`InputTheme::bg_readonly`](crate::theme::InputTheme::bg_readonly)。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let log = signal(String::from("第一行\n第二行"));
+    /// let ui = Element::text_input(log, "").multiline().wrap(true).read_only();
+    /// ```
+    #[track_caller]
+    pub fn read_only(self) -> Self {
+        self.config_text_input(|c| c.read_only = true)
     }
 
     /// 前置图标字形（如放大镜 `'\u{1F50D}'`）：在输入框左侧留出图标区并绘制，

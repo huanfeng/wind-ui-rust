@@ -318,10 +318,29 @@ fn main() {
 
     let sc_4 = Element::card(
         "备注",
-        Element::text_input(notes, "输入备注")
-            .multiline()
+        Element::col()
             .width_match()
-            .height(96),
+            .spacing(6)
+            .child(
+                Element::text_input(notes, "输入备注")
+                    .multiline()
+                    .width_match()
+                    .height(96),
+            )
+            // 只读：可点选、拖选、Ctrl+C / 右键复制，不可编辑（日志、诊断信息这类场景）。
+            .child(
+                Element::text_input(
+                    signal(String::from(
+                        "只读多行框：可以拖选局部、Ctrl+C 或右键「复制」，\n但键入、粘贴、剪切都不会改动内容。",
+                    )),
+                    "",
+                )
+                .multiline()
+                .wrap(true)
+                .read_only()
+                .width_match()
+                .height(64),
+            ),
     );
 
     let cp_1 = Element::card(

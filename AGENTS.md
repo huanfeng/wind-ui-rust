@@ -181,7 +181,7 @@ Linux 上上述命令同样可跑（单测、截图回归都不需要 X 服务�
 - 文本标签统一 **`impl Into<String>`**（`button`/`label`/`dropdown`/`list`/`tabs`）。
 - 构造器=控件名（名词），布局/样式修饰符=属性名、**不加 `set_`**；getter **不加 `get_`**；`set_` 仅命令式副作用。
 - 右键**默认不激活控件**；仅需右键的控件 override `Widget::wants_right_click() -> true`。
-- text_input 专属修饰符（`password/multiline/wrap`）链到他控件 **debug 期 `panic`** 提示误用。
+- text_input 专属修饰符（`password/multiline/wrap/read_only`）链到他控件 **debug 期 `panic`** 提示误用。
 
 ---
 

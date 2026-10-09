@@ -799,6 +799,13 @@ pub struct TextConfig {
     /// 只在文本**放得下**时生效：放不下时对齐偏移恒为 0，交回水平滚动接管，
     /// 否则居中会和"滚动跟随光标"打架，长文本编辑时左右横跳。
     pub align: Align,
+    /// 只读：可聚焦、可选择、可复制，但拒绝一切改动正文的途径（键入、输入法、退格 /
+    /// Delete、剪切、粘贴、多行 Enter 换行）。程序改写绑定信号照常刷新显示。
+    ///
+    /// 与禁用（`enabled(false)`）的区别：禁用节点不可聚焦、不可选择，正文置灰；只读
+    /// 仍能点选、拖选、Ctrl+A / Ctrl+C 与右键「复制」，正文用常规色，底色换成
+    /// [`InputTheme::bg_readonly`](crate::theme::InputTheme::bg_readonly) 以示不可编辑。
+    pub read_only: bool,
 }
 
 impl Default for TextConfig {
@@ -811,6 +818,7 @@ impl Default for TextConfig {
             leading: None,
             frameless: false,
             align: Align::Start,
+            read_only: false,
         }
     }
 }
@@ -1195,6 +1203,12 @@ impl TextInput {
             self.cursor = n;
         }
     }
+    /// 光标与锚点的**存值**都钳到当前字符数（见 `on_event` 入口处的说明）。
+    fn clamp_selection(&mut self) {
+        let n = self.char_count();
+        self.cursor = self.cursor.min(n);
+        self.anchor = self.anchor.map(|a| a.min(n));
+    }
     /// 规范化选区为 [start, end)；无选区返回 None。
     /// cursor/anchor 在此夹紧到当前字符数——外部经 Rc<RefCell<String>> 改写文本后
     /// 仍保证选区范围合法，下游 delete/paint 无需各自再夹。
@@ -1210,6 +1224,9 @@ impl TextInput {
     }
     /// 删除选区文本，返回是否删除了。
     fn delete_selection(&mut self, ctx: &mut EventCtx) -> bool {
+        if self.config.read_only {
+            return false;
+        }
         if let Some((s, e)) = self.selection() {
             self.mark_edited();
             self.text.update(|t| {
@@ -1227,7 +1244,7 @@ impl TextInput {
         }
     }
     fn type_char(&mut self, ctx: &mut EventCtx, c: char) {
-        if c.is_control() {
+        if c.is_control() || self.config.read_only {
             return;
         }
         // 预检必须在 `delete_selection` **之前**：那一步已经改了正文，之后再算候选串
@@ -1251,7 +1268,7 @@ impl TextInput {
     }
     fn backspace(&mut self, ctx: &mut EventCtx) {
         self.clamp_cursor();
-        if self.cursor == 0 {
+        if self.cursor == 0 || self.config.read_only {
             return;
         }
         let cursor = self.cursor;
@@ -1268,7 +1285,7 @@ impl TextInput {
     fn delete_forward(&mut self, ctx: &mut EventCtx) {
         self.clamp_cursor();
         let len = self.char_count();
-        if self.cursor >= len {
+        if self.cursor >= len || self.config.read_only {
             return;
         }
         let cursor = self.cursor;
@@ -1324,11 +1341,19 @@ impl TextInput {
             alt: false,
             meta: false,
         };
+        // VK_C / VK_A
+        let copy = MenuItem::key(crate::tr!("windui.menu.copy"), ctrl(0x43), has_sel && !pw);
+        let select_all = MenuItem::key(crate::tr!("windui.menu.select_all"), ctrl(0x41), has_text);
+        // 只读：不列剪切 / 粘贴（而不是列出来置灰）——它们在这个框里永远不可用，
+        // 置灰会让人以为"换个状态就能用"。
+        if self.config.read_only {
+            return vec![copy, select_all];
+        }
         vec![
             MenuItem::key(crate::tr!("windui.menu.cut"), ctrl(0x58), has_sel && !pw), // VK_X
-            MenuItem::key(crate::tr!("windui.menu.copy"), ctrl(0x43), has_sel && !pw), // VK_C
-            MenuItem::key(crate::tr!("windui.menu.paste"), ctrl(0x56), true),         // VK_V
-            MenuItem::key(crate::tr!("windui.menu.select_all"), ctrl(0x41), has_text), // VK_A
+            copy,
+            MenuItem::key(crate::tr!("windui.menu.paste"), ctrl(0x56), true), // VK_V
+            select_all,
         ]
     }
     /// 选中 `idx` 所在逻辑行（两 '\n' 之间）。单行文本无 '\n' 即全选。
@@ -1550,6 +1575,9 @@ impl TextInput {
 
     /// 在光标处插入换行（多行模式）。
     fn insert_newline(&mut self, ctx: &mut EventCtx) {
+        if self.config.read_only {
+            return;
+        }
         self.delete_selection(ctx);
         self.clamp_cursor();
         let cursor = self.cursor;
@@ -1575,6 +1603,9 @@ impl TextInput {
     /// 在光标处粘贴（先删选区）。单行控件过滤所有控制字符；多行保留 '\n'
     /// （\r\n / \r 归一为 \n），仍过滤其他控制字符。
     fn paste(&mut self, ctx: &mut EventCtx, s: &str) {
+        if self.config.read_only {
+            return;
+        }
         let clean: String = if self.is_multiline() {
             let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
             normalized
@@ -1731,11 +1762,14 @@ impl Widget for TextInput {
             bounds.h as f32,
         );
         let corner = inp.corner(&th.metrics);
-        // 禁用：背景弱化、正文用 text_disabled。
-        let bg = if enabled {
-            inp.bg(pal)
-        } else {
+        // 禁用：背景弱化、正文用 text_disabled。只读：底色换只读色以示不可编辑，正文
+        // 保持常规色——内容要读得清，置灰会把"不能改"说成"不可用"。
+        let bg = if !enabled {
             pal.surface_alt
+        } else if self.config.read_only {
+            inp.bg_readonly(pal)
+        } else {
+            inp.bg(pal)
         };
         let text_color = if enabled {
             style.resolved_fg(&th)
@@ -2073,6 +2107,8 @@ impl Widget for TextInput {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Down => {
                     ctx.request_focus();
+                    // 同按键入口：右键落在选区内与否要按钳过的选区判。
+                    self.clamp_selection();
                     // 多行：滚动条命中优先于文字交互。右键跳过（不拖滚动条）。
                     if self.is_multiline() && p.button != MouseButton::Right {
                         let b = ctx.bounds();
@@ -2256,6 +2292,10 @@ impl Widget for TextInput {
                 _ => false,
             },
             Event::Key(k) if k.pressed => {
+                // 正文可能已被程序改短：先把存着的光标 / 锚点钳进去，否则第一下 Left 从
+                // 越界处起算、看着没反应，Shift 扩选也从越界处起。`selection()` 读时虽也钳，
+                // 但不改存值。
+                self.clamp_selection();
                 // 任何按键都应将视口滚回光标位置（用户开始编辑/导航）。
                 self.follow_cursor.set(true);
                 let len = self.char_count();
@@ -2290,7 +2330,9 @@ impl Widget for TextInput {
                     // 换行与提交这才各有各的键，与业界通例一致（Enter 换行 / Ctrl+Enter
                     // 发送）。未声明 `on_submit` 的多行框上 Ctrl+Enter 变成不消费，
                     // 于是能冒到 `App::on_shortcut`——那正是应用级「提交」该待的地方。
-                    Key::Enter if self.is_multiline() && !k.ctrl => {
+                    // 只读多行框没有换行可插：Enter 落到下面单行那条臂，交 `on_submit`
+                    // 或照常上达 `on_shortcut`（对话框的默认按钮）。
+                    Key::Enter if self.is_multiline() && !k.ctrl && !self.config.read_only => {
                         self.insert_newline(ctx);
                         true
                     }
@@ -2389,8 +2431,10 @@ impl Widget for TextInput {
                         true
                     }
                     // Ctrl+X 剪切（VK_X=0x58）。密码模式禁止剪切（不外泄明文）。
+                    // 只读不剪切也不顺手复制：原生只读框的 Ctrl+X 同样是空操作，
+                    // 「剪切变成复制」会让用户以为内容已被拿走。
                     Key::Other(0x58) if k.ctrl => {
-                        if !self.config.password {
+                        if !self.config.password && !self.config.read_only {
                             if let Some(sel) = self.selected_text() {
                                 ctx.clipboard_set(&sel);
                                 self.delete_selection(ctx);
@@ -2400,6 +2444,9 @@ impl Widget for TextInput {
                     }
                     // Ctrl+V 粘贴（VK_V=0x56）
                     Key::Other(0x56) if k.ctrl => {
+                        if self.config.read_only {
+                            return true;
+                        }
                         if let Some(s) = ctx.clipboard_get() {
                             self.paste(ctx, &s);
                         }
@@ -2421,12 +2468,25 @@ impl Widget for TextInput {
         Some(self)
     }
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
+        // 只读框照常报光标：系统合成窗 / 候选窗要有个落点。不报的话 win32 的合成窗停在
+        // 上一个可编辑框的光标处（看着像字打进了别的框），macOS 的候选窗跑到屏幕角落、
+        // 用户看不出自己正在组字。提交的字走 `Key::Char`，在 `type_char` 被拒。
         self.caret_local.get()
     }
     fn set_composing(&mut self, composing: bool) {
+        // 只读：不进入组合态（不藏光标——这里没有字会被打进来）；退出照常放行，
+        // 运行期切到只读时不至于把光标永远藏着。
+        if self.config.read_only && composing {
+            return;
+        }
         self.composing.set(composing);
     }
     fn set_preedit(&mut self, pe: &Preedit) {
+        // 只读：不内联显示合成串——那看起来就像字被打进去了。清空照常放行，
+        // 运行期切到只读时残留的合成串才清得掉。
+        if self.config.read_only && pe.is_active() {
+            return;
+        }
         // 合成串长度变化会改变文本宽度与换行，`rebuild_layout` 的缓存键第一项就是
         // 显示串，故这里只需换掉数据、下一帧 paint 自动重排，无需手动失效布局。
         *self.preedit.borrow_mut() = pe.clone();
@@ -2447,7 +2507,7 @@ impl Widget for TextInput {
     fn ime_text(&self) -> Option<String> {
         // 密码框不把内容交给输入法：这段文字会被 IME 读去做联想与重转换，
         // 密码不该流到那里。
-        if self.config.password {
+        if self.config.password || self.config.read_only {
             return None;
         }
         Some(self.text.with(|t| t.clone()))
