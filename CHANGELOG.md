@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-09
+
+本版的主线是**窗口与托盘的细节**：窗口可指定位置、可不进任务栏，托盘图标可在运行期更换，
+任意可聚焦控件可挂失焦回调；Windows 上无边框窗的尺寸与边缘命中、高频跨线程消息的重画、
+托盘菜单位置一并修正。部分改动参考了下游项目 CurSeen 的补丁。
+
+可能需要下游跟进的变化：
+
+- `WindowConfig` / `WindowRequest` 新增公开字段 `position`、`skip_taskbar`：用完整结构体
+  字面量构造它们的代码需补上这两项（或改用 `..Default::default()` / `Window` 构建器）。
+- `TrayOp` 新增变体 `SetIcon`：对它做穷尽 `match` 的代码需补一臂。
+- 带系统边框的窗口里，贴右缘的滚动条不再内缩 8px，改为贴边显示。
+
 ### 新增
 
 - **`Element::bg_gradient_roles`**：线性渐变的各 stop 取主题角色色（`Brush::RoleLinear`），paint 期
@@ -2636,7 +2649,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.18.0...v0.19.0

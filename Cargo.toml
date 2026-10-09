@@ -1,6 +1,6 @@
 [package]
 name = "windui"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2021"
 description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText；Linux: X11/Wayland+fontconfig）"
 authors = ["huanfeng <huanfengf@gmail.com>"]
