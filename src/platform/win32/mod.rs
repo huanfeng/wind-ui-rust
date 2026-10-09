@@ -2479,6 +2479,7 @@ unsafe fn handle_nccalcsize(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 /// 这一圈会在 `WM_NCHITTEST` 阶段就把指针事件截走，**永远进不到客户区**——任何贴着窗口
 /// 边缘绘制的可点元素都会被它吞掉。滚动条正是踩过这个坑的受害者，现由
 /// `core::scrollbar::WINDOW_EDGE_INSET`（略大于此值）整体内缩避让；两者须一同调整。
+/// 只有可缩放（`WS_THICKFRAME`）的无边框窗才有这一圈，见 `handle_nchittest`。
 const RESIZE_BORDER_LOGICAL: i32 = 8;
 
 /// 无边框窗口自定义命中：窗口边缘 N px 内返回缩放命中；否则查拖动区
@@ -2500,9 +2501,20 @@ unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     if interactive {
         return LRESULT(HTCLIENT as isize);
     }
-    // 缩放边框宽度（物理像素，按 DPI 放大；逻辑上恒为 RESIZE_BORDER_LOGICAL）。
+    // 不可缩放的窗口没有缩放边框：边缘那一圈照常归客户区（或拖动区）。
+    //
+    // 判据读样式位 `WS_THICKFRAME` 而不是缓存 `cfg.resizable`，理由同 `push_window_state`。
+    // 不判的话，`resizable(false)` 的无边框窗最外 8px 永远收不到指针——贴边起手的框选、
+    // 小尺寸浮窗的整窗拖动与双击，都会在边上莫名失灵，而系统也不会真的让它缩放。
+    // Linux 后端只在可缩放时做边缘命中（`x11.rs` 的 `w.resizable`），两边口径一致。
+    let resizable = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_THICKFRAME.0 != 0;
+    // 缩放边框宽度（物理像素，按 DPI 放大；逻辑上恒为 RESIZE_BORDER_LOGICAL）。不可缩放时为 0。
     let dpi = GetDpiForWindow(hwnd).max(96);
-    let m = ((RESIZE_BORDER_LOGICAL as f32 * dpi as f32 / 96.0) as i32).max(4);
+    let m = if resizable {
+        ((RESIZE_BORDER_LOGICAL as f32 * dpi as f32 / 96.0) as i32).max(4)
+    } else {
+        0
+    };
     let (left, right) = (pt.x < m, pt.x >= w - m);
     let (top, bottom) = (pt.y < m, pt.y >= h - m);
     let ht: i32 = if top && left {
