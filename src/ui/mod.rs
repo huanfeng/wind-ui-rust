@@ -2641,17 +2641,13 @@ impl Element {
             hsva: crate::signal::signal(Hsva::from_color(init)),
             echo: crate::signal::signal(init),
             with_alpha: alpha,
-        };
-        // HEX 文本与它的回声成对存在：少了回声就分不清"用户在打字"和"我自己刚写的"，
-        // 两边会互相覆盖（见 `ColorTrigger::on_update`）。
-        let (hex_text, hex_echo) = if hex {
-            let s = init.to_hex_string();
-            (
-                Some(crate::signal::signal(s.clone())),
-                Some(crate::signal::signal(s)),
-            )
-        } else {
-            (None, None)
+            hex: hex.then(|| {
+                let s = init.to_hex_string();
+                color_picker::HexBox {
+                    text: crate::signal::signal(s.clone()),
+                    echo: crate::signal::signal(s),
+                }
+            }),
         };
 
         // 收 Element 而不是 Box<dyn Widget>：后者要给 Element 开一个绕过
@@ -2681,7 +2677,8 @@ impl Element {
         if alpha {
             panel = panel.child(bar(Element::leaf().widget(AlphaBar::new(st))));
         }
-        if let Some(t) = hex_text {
+        if let Some(t) = st.hex.map(|hb| hb.text) {
+            let value = st.value;
             panel = panel.child(
                 Element::row()
                     .width_match()
@@ -2696,7 +2693,20 @@ impl Element {
                     // 产出的是 9 字符的 #RRGGBBAA，提示写短一截会误导。
                     .child(
                         Element::text_input(t, if alpha { "#RRGGBBAA" } else { "#RRGGBB" })
-                            .weight(1.0),
+                            .weight(1.0)
+                            // 改完（回车 / 失焦）把框里的字收成标准色码：简写 `#FFF` 补全成
+                            // `#FFFFFF`（打字途中不提交简写，见 `ColorTrigger::on_update`），
+                            // 解析不了的半截退回当前颜色——否则它会一直挂在框里，与颜色对不上。
+                            // 写回的是打完的色码，下一帧经打字那支照常提交。
+                            .on_commit(move |_| {
+                                let text = t.get();
+                                let fixed = Color::from_hex_str(&text)
+                                    .unwrap_or_else(|| value.get())
+                                    .to_hex_string();
+                                if fixed != text {
+                                    t.set(fixed);
+                                }
+                            }),
                     ),
             );
         }
@@ -2721,13 +2731,7 @@ impl Element {
         }
 
         Element::leaf()
-            .widget(ColorTrigger::new(
-                st,
-                open,
-                hex_text,
-                hex_echo,
-                trigger_text,
-            ))
+            .widget(ColorTrigger::new(st, open, trigger_text))
             // 三份状态（颜色 / HSVA / HEX 文本）的对齐挂在触发器的 on_update 上：
             // 触发器常驻，而面板只在展开时才存在——同步逻辑不能跟着面板一起消失。
             .reactive()

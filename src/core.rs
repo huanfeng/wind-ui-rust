@@ -1823,6 +1823,24 @@ impl EventCtx<'_> {
         self.out.damage.merge_with(DamageReq::Rect(r));
         self.out.repaint = true;
     }
+    /// 请求重绘本控件连同往上 `levels` 层祖先的视觉矩形（仍是局部失效，不升整窗）。
+    ///
+    /// 给「改了一个值，跟着变的东西散在同一个复合控件里」的子控件用：它知道自己在复合
+    /// 控件里的层级，却拿不到兄弟与祖先的矩形（`Widget` 不访问树）。祖先链不够 `levels`
+    /// 层时到根为止。
+    pub(crate) fn mark_dirty_with_ancestors(&mut self, levels: usize) {
+        let mut r = self.tree.visual_bounds(self.self_id);
+        let mut cur = self.self_id;
+        for _ in 0..levels {
+            let Some(p) = self.tree.get(cur).and_then(|n| n.parent) else {
+                break;
+            };
+            r = r.union(&self.tree.visual_bounds(p));
+            cur = p;
+        }
+        self.out.damage.merge_with(DamageReq::Rect(r));
+        self.out.repaint = true;
+    }
     /// 请求重绘一个比自身更大的绝对区域（投影/溢出绘制超出本框时用）。
     pub fn mark_dirty_rect(&mut self, r: Rect) {
         self.out.damage.merge_with(DamageReq::Rect(r));

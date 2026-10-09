@@ -6084,6 +6084,82 @@ mod tests {
         );
     }
 
+    /// 按住拖取色器面板（只有 `Move`）走的是局部帧，且画出来与整窗重画逐像素一致。
+    ///
+    /// 拖动通道只并上面板与触发器两层祖先做失效（`color_picker::drag_dirty`）：面板浮在
+    /// 浮层上、HEX 框与触发器色块都在拖动控件之外，漏盖一处就是"拖着不放它不动"，
+    /// 局部帧画坏浮层就是残影——两者都只有和整窗重画逐像素比才看得出来。窗口取得够大：
+    /// 脏区超过半窗时宿主本就退整窗（`decide_repaint`），小窗口测不到局部路径。
+    #[test]
+    fn color_picker_drag_frame_is_partial_and_matches_full_redraw() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let (w, h) = (800, 600);
+        let value = crate::signal::signal(Color::hex(0x336699));
+        let mut a = App::new("a", w, h)
+            .content(
+                Element::col()
+                    .fill()
+                    .padding(8)
+                    .child(Element::color_picker_opts(
+                        value,
+                        crate::ui::ColorPickerOpts::default().open(crate::signal::signal(true)),
+                    )),
+            )
+            .into_handler_for_test();
+        a.set_scale(1.0);
+        let mut pm = Pixmap::new(w as u32, h as u32).unwrap();
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+
+        let root = a.tree.root.unwrap();
+        let trigger = a.tree.get(root).unwrap().children[0];
+        let panel = a.tree.get(trigger).unwrap().children[0];
+        let sv = a.tree.get(panel).unwrap().children[0];
+        let b = a.tree.abs_bounds(sv);
+        let at = |x, y| Point::new(x, y);
+        a.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            at(b.x + 2, b.y + 2),
+            MouseButton::Left,
+        ));
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+        let before = value.get();
+        a.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            at(b.right() - 3, b.bottom() - 3),
+            MouseButton::Left,
+        ));
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+        assert_ne!(value.get(), before, "前置：Move 改了颜色");
+        assert!(!a.damage.last_frame_full, "拖动帧应走局部路径，而不是整窗");
+
+        let mut full = Pixmap::new(w as u32, h as u32).unwrap();
+        a.damage.needs_full = true;
+        a.render(&mut PixmapTarget { pixmap: &mut full }, Size::new(w, h));
+        assert!(
+            pm.data() == full.data(),
+            "局部拖动帧与整窗重画不一致（漏盖或残影）"
+        );
+
+        // 方向键走同一条提交路径（焦点在 SV 方块上，按下时拿到的），失效也得同样盖住。
+        a.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            at(b.x + 2, b.y + 2),
+            MouseButton::Left,
+        ));
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+        let before = value.get();
+        a.on_key(crate::app::test_support::key_ev()(crate::event::Key::Up));
+        a.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(w, h));
+        assert_ne!(value.get(), before, "前置：方向键改了颜色");
+        assert!(!a.damage.last_frame_full, "方向键帧应走局部路径");
+        a.damage.needs_full = true;
+        a.render(&mut PixmapTarget { pixmap: &mut full }, Size::new(w, h));
+        assert!(pm.data() == full.data(), "局部方向键帧与整窗重画不一致");
+    }
+
     /// 窗口激活态：失活后聚焦的输入框不再请求续帧（后台窗口不该按刷新率出帧），
     /// 重新激活后恢复。多窗口下各宿主各记各的，不能靠线程全局位。
     #[test]

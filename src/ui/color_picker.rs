@@ -155,6 +155,17 @@ pub(crate) struct PickerState {
     pub echo: Signal<Color>,
     /// 是否启用透明度（false 时输出恒为不透明）。
     pub with_alpha: bool,
+    /// 面板里的 HEX 输入框（未启用时为 None）。
+    pub hex: Option<HexBox>,
+}
+
+/// HEX 输入框的文本与它的回声。成对存在：少了回声就分不清"用户在打字"和"我自己刚写的"，
+/// 两边会互相覆盖（见 `ColorTrigger::on_update`）。
+#[derive(Clone, Copy)]
+pub(crate) struct HexBox {
+    pub text: Signal<String>,
+    /// 最后一次由取色器自己写进 `text` 的文本。
+    pub echo: Signal<String>,
 }
 
 impl PickerState {
@@ -169,6 +180,26 @@ impl PickerState {
         let c = hsva.to_color();
         self.echo.set(c);
         self.value.set(c);
+        // 拖拽通道（与方向键）走这里：就地把 HEX 框写好，不等触发器的 `on_update`——
+        // 那一步只在重排时跑，而宿主不为指针 `Move` 重排，拖着不放时框会纹丝不动。
+        self.write_hex();
+    }
+
+    /// 把当前颜色写进 HEX 输入框（并记进回声，免得下一帧被当成用户输入）。
+    ///
+    /// 两处写入**都**要先比一次：`Signal::set` 不做相等短路（见 `signal.rs` 的
+    /// `set`——它无条件 bump 版本并 `notify_changed`），框里已是这个值时白写一次就是
+    /// 白白标脏一帧。
+    pub fn write_hex(&self) {
+        if let Some(hb) = self.hex {
+            let s = self.value.get().to_hex_string();
+            if hb.text.get() != s {
+                hb.text.set(s.clone());
+            }
+            if hb.echo.get() != s {
+                hb.echo.set(s);
+            }
+        }
     }
 
     /// 直接写入一个 RGBA（预设色块、HEX 输入用）。
@@ -193,6 +224,17 @@ impl PickerState {
         self.hsva.set(Hsva::from_color_keeping(c, self.hsva.get()));
         true
     }
+}
+
+/// 面板里三条拖拽通道（SV 方块 / 色相条 / 透明度条）改了颜色之后的失效（拖动与方向键共用）。
+///
+/// 跟着颜色变的不止本控件：面板里的 HEX 输入框、触发器上的色块与 HEX 文字都在别处。只标
+/// 本控件的话，拖着不放时它们纹丝不动、一松手才跳到位。也不能升 `Layout`：那等于每个
+/// `Move` 出一次整窗帧，而整窗帧的代价随**窗口**而不是面板大小——200% 下一个设置窗实测
+/// 约 22ms，拖动掉到四十几帧。这里只并上两层祖先：父是面板、祖父是触发器（面板挂在它的
+/// 浮层上），正好盖住所有跟着变的东西，仍是局部帧。
+fn drag_dirty(ctx: &mut EventCtx) {
+    ctx.mark_dirty_with_ancestors(2);
 }
 
 // ---------------------------------------------------------------- 绘制小工具
@@ -298,7 +340,7 @@ impl SvArea {
         };
         let cur = self.st.hsva.get();
         self.st.commit(Hsva::new(cur.h, s, v, cur.a));
-        ctx.mark_dirty();
+        drag_dirty(ctx);
     }
 }
 
@@ -414,7 +456,7 @@ impl Widget for SvArea {
                     _ => return false,
                 };
                 self.st.commit(Hsva::new(c.h, c.s + ds, c.v + dv, c.a));
-                ctx.mark_dirty();
+                drag_dirty(ctx);
                 true
             }
             _ => false,
@@ -467,7 +509,7 @@ impl HueBar {
         };
         let c = self.st.hsva.get();
         self.st.commit(Hsva::new(t * 360.0, c.s, c.v, c.a));
-        ctx.mark_dirty();
+        drag_dirty(ctx);
     }
 }
 
@@ -555,7 +597,7 @@ impl Widget for HueBar {
                     _ => return false,
                 };
                 self.st.commit(Hsva::new(c.h + d, c.s, c.v, c.a));
-                ctx.mark_dirty();
+                drag_dirty(ctx);
                 true
             }
             _ => false,
@@ -608,7 +650,7 @@ impl AlphaBar {
         };
         let c = self.st.hsva.get();
         self.st.commit(Hsva::new(c.h, c.s, c.v, t));
-        ctx.mark_dirty();
+        drag_dirty(ctx);
     }
 }
 
@@ -693,7 +735,7 @@ impl Widget for AlphaBar {
                     _ => return false,
                 };
                 self.st.commit(Hsva::new(c.h, c.s, c.v, c.a + d));
-                ctx.mark_dirty();
+                drag_dirty(ctx);
                 true
             }
             _ => false,
@@ -819,7 +861,11 @@ impl Widget for PresetSwatch {
             Event::Key(k) if k.pressed && matches!(k.key, Key::Space | Key::Enter) => {
                 let a = self.st.value.get().a;
                 self.st.commit_color(Color { a, ..self.color });
-                ctx.mark_dirty();
+                // 键盘激活拿不到指针 Down 那次自动升级：跟着变的 SV / 色相游标、HEX 框、
+                // 触发器都在本色块之外。HEX 框就地写好；失效直接整窗——色块与面板之间还
+                // 隔着网格的行列，层数不固定，按键又低频，不值得为它算局部范围。
+                self.st.write_hex();
+                ctx.mark_layout_dirty();
                 true
             }
             _ => false,
@@ -853,10 +899,12 @@ impl Widget for PresetSwatch {
 pub struct ColorTrigger {
     st: PickerState,
     open: Signal<bool>,
-    /// HEX 输入框绑定的文本（无输入框时为 None）。
-    hex: Option<Signal<String>>,
-    /// 最后一次由本控件写进 `hex` 的文本，用来分辨"用户在打字"与"我自己刚写的"。
-    hex_echo: Option<Signal<String>>,
+    /// HEX 框当前文本对应的颜色（上一次往框里写颜色、或从框里提交颜色时记下）。
+    ///
+    /// 用来分辨「颜色变了，框该跟上」与「颜色没变，框里是用户没打完的半截」。不能借
+    /// `PickerState::echo`：拖拽走的 `commit*` 会同时写 `value` 与 `echo`，两者恒等，
+    /// 那两种情况在它眼里一模一样。
+    hex_synced: Option<Color>,
     show_text: bool,
     hovered: bool,
     /// HEX 文字单行截断：触发器被钉得比预留宽度还窄时不折行画出 bounds。
@@ -864,18 +912,11 @@ pub struct ColorTrigger {
 }
 
 impl ColorTrigger {
-    pub(crate) fn new(
-        st: PickerState,
-        open: Signal<bool>,
-        hex: Option<Signal<String>>,
-        hex_echo: Option<Signal<String>>,
-        show_text: bool,
-    ) -> Self {
+    pub(crate) fn new(st: PickerState, open: Signal<bool>, show_text: bool) -> Self {
         Self {
             st,
             open,
-            hex,
-            hex_echo,
+            hex_synced: None,
             show_text,
             hovered: false,
             hex_fit: Default::default(),
@@ -1051,28 +1092,39 @@ impl Widget for ColorTrigger {
     /// 那是**别人**改的，需要传播。
     fn on_update(&mut self, _ctx: &mut EventCtx) {
         // 先看 HEX 输入框：用户正在打字时，它的优先级最高。
-        if let (Some(hex), Some(echo)) = (self.hex, self.hex_echo) {
-            let text = hex.get();
-            if text != echo.get() {
-                echo.set(text.clone());
-                if let Some(c) = Color::from_hex_str(&text) {
+        if let Some(hb) = self.st.hex {
+            let text = hb.text.get();
+            if text != hb.echo.get() {
+                hb.echo.set(text.clone());
+                // 只有**打完**的色码才提交。`from_hex_str` 认 3 位简写，而 `#2F9` 正是敲
+                // `#2F9E44` 到第 4 个字符时的样子——在这里提交，框随即被改写成 `#22FF99`，
+                // 后三个字符就丢了。简写留给 `on_commit`（回车 / 失焦）去补全。
+                if let Some(c) = complete_hex(&text) {
                     self.st.commit_color(c);
+                    // 记的是**归一化前**的 c，刻意的：透明度关着时 `commit_color` 把 alpha
+                    // 改成 255，`value` 与 c 于是不等，下一帧框被改写成去掉透明度的标准
+                    // 色码——不支持的那两位当场丢掉，而不是留在框里假装生效。
+                    self.hex_synced = Some(c);
                 }
                 return;
             }
         }
         // 其次看颜色是否被外部改动：改了就把 HSVA 回填过来。
         self.st.sync_from_value();
-        // 最后**无条件**把当前颜色补进 HEX 框。
+        // 最后：颜色自框上次同步以来变过，才把它写进 HEX 框。
         //
-        // 这一步不能挂在「外部改动」那个条件里：拖 SV/色相/透明度条与点预设走的是
+        // 判据是「颜色变没变」，不是「外部改没改」：拖 SV/色相/透明度条与点预设走的是
         // `commit*`，它们在写 `value` 的同时也写了 `echo`，`sync_from_value` 因此恒
-        // 返回 false——HEX 框会一直停在打开面板时的旧值，而触发器上那串 HEX 是每帧
-        // 现算的、照常在变，同一个面板里两处 HEX 对不上。
+        // 返回 false——挂在那上面的话 HEX 框会一直停在打开面板时的旧值。
         //
-        // 走到这里说明没有待处理的用户输入（打字分支已提前 return），不会跟正在输入
-        // 的文本打架；`push_hex` 自带「值没变就不写」的守卫，也不会每帧弄脏。
-        self.push_hex();
+        // 颜色没变就不碰框：框里可能是用户没打完的半截（上面那支不提交它），每帧拿当前色
+        // 覆盖回去，用户敲下的第一个字符在下一帧就没了。颜色一变（拖了面板、外部改值），
+        // 半截输入作废、框让给新颜色。
+        let v = self.st.value.get();
+        if self.hex_synced != Some(v) {
+            self.st.write_hex();
+            self.hex_synced = Some(v);
+        }
     }
 
     /// 触发器自身被隐藏时（整页切走、所在对话框关闭）清掉悬停态，理由同其余控件。
@@ -1091,30 +1143,23 @@ impl Widget for ColorTrigger {
     }
 }
 
+/// 打完了的色码（6 / 8 位十六进制，`#` 可有可无）才解析；3 / 4 位简写与半截输入一律 `None`。
+fn complete_hex(text: &str) -> Option<Color> {
+    let digits = text.trim().trim_start_matches('#');
+    if matches!(digits.len(), 6 | 8) {
+        Color::from_hex_str(digits)
+    } else {
+        None
+    }
+}
+
 impl ColorTrigger {
     /// HEX 输入框绑定的文本信号（未启用 HEX 框时为 None）。
     ///
     /// 面板里的输入框由 `Element::color_picker_opts` 内部建出，调用方拿不到那个信号；
     /// 需要把 HEX 文本联动到别处（或在测试里断言它）时从触发器节点 downcast 来取。
     pub fn hex_text(&self) -> Option<Signal<String>> {
-        self.hex
-    }
-
-    /// 把当前颜色写进 HEX 文本框（并记进 echo，免得下一帧被当成用户输入）。
-    ///
-    /// 两处写入**都**要先比一次：`Signal::set` 不做相等短路（见 `signal.rs` 的
-    /// `set`——它无条件 bump 版本并 `notify_changed`），而本方法每帧都会被调用一次，
-    /// 不守卫就等于每帧把整窗标脏。
-    fn push_hex(&self) {
-        if let (Some(hex), Some(echo)) = (self.hex, self.hex_echo) {
-            let s = self.st.value.get().to_hex_string();
-            if hex.get() != s {
-                hex.set(s.clone());
-            }
-            if echo.get() != s {
-                echo.set(s);
-            }
-        }
+        self.st.hex.map(|hb| hb.text)
     }
 }
 
@@ -1529,6 +1574,168 @@ mod tests {
             Color::hex(0x2F9E44),
             "解析不出来的半截输入应原样放着，不改色"
         );
+    }
+
+    /// 逐字符敲一个色码，中途每一帧框里都得是用户敲的那一截。
+    ///
+    /// 每个前缀都跑**两**帧：第一帧走打字那支、提前返回，毛病出在第二帧——那时文本已与
+    /// 回声相等，旧实现把它当成「没人在打字」，拿当前色把半截覆盖回去。`typing_a_hex_value…`
+    /// 只跑一帧、只断言颜色，所以一直是绿的。
+    #[test]
+    fn typing_a_hex_char_by_char_is_never_rewritten() {
+        let value = signal(Color::hex(0x000000));
+        let (mut tree, id) = picker(value, ColorPickerOpts::default().open(signal(true)));
+        let text = hex_signal(&mut tree, id);
+        let full = "#2F9E44";
+        for n in 1..full.len() {
+            let typed = &full[..n];
+            text.set(typed.to_string());
+            relayout(&mut tree);
+            relayout(&mut tree);
+            assert_eq!(text.get(), typed, "敲到「{typed}」时框被改写了");
+            // `#2F9` 是合法的 3 位简写，旧实现在这里就提交成 #22FF99，后三个字符全丢。
+            assert_eq!(
+                value.get(),
+                Color::hex(0x000000),
+                "没敲完的「{typed}」不该改色"
+            );
+        }
+        text.set(full.to_string());
+        relayout(&mut tree);
+        relayout(&mut tree);
+        assert_eq!(value.get(), Color::hex(0x2F9E44), "敲完即提交");
+        assert_eq!(text.get(), full);
+    }
+
+    /// 透明度关着时敲进 8 位色码：颜色按不透明提交，框里多出的两位透明度当场去掉，
+    /// 不留在框里假装生效。
+    #[test]
+    fn typing_alpha_digits_with_alpha_disabled_is_normalized() {
+        let value = signal(Color::hex(0x000000));
+        let (mut tree, id) = picker(
+            value,
+            ColorPickerOpts::default().alpha(false).open(signal(true)),
+        );
+        let text = hex_signal(&mut tree, id);
+        text.set("#2F9E4480".to_string());
+        relayout(&mut tree);
+        relayout(&mut tree);
+        assert_eq!(value.get(), Color::hex(0x2F9E44));
+        assert_eq!(text.get(), "#2F9E44");
+    }
+
+    /// 半截输入挂在框里时颜色被别处改了（拖面板、外部写值）：框让给新颜色。
+    #[test]
+    fn a_color_change_takes_the_box_over_from_a_partial_input() {
+        let value = signal(Color::hex(0x000000));
+        let (mut tree, id) = picker(value, ColorPickerOpts::default().open(signal(true)));
+        let text = hex_signal(&mut tree, id);
+        text.set("#2F".to_string());
+        relayout(&mut tree);
+        relayout(&mut tree);
+        assert_eq!(text.get(), "#2F", "前置：半截输入留在框里");
+
+        value.set(Color::hex(0x4C8BF5));
+        relayout(&mut tree);
+        assert_eq!(text.get(), "#4C8BF5");
+    }
+
+    /// 回车 / 失焦（`on_commit`）把框收成标准色码：简写补全并生效，解析不了的退回当前色。
+    ///
+    /// 走真实按键：`on_commit` 只认用户编辑过的框，直接写信号到不了它。
+    #[test]
+    fn committing_the_hex_box_completes_shorthand_and_reverts_garbage() {
+        let value = signal(Color::hex(0x000000));
+        let (mut tree, id) = picker(value, ColorPickerOpts::default().open(signal(true)));
+        let text = hex_signal(&mut tree, id);
+        let row = parts(&tree, id)[3];
+        let input = tree.get(row).unwrap().children[1];
+        let key = |key: Key, ctrl: bool| crate::event::KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+            alt: false,
+            meta: false,
+        };
+        let type_and_enter = |tree: &mut Tree, s: &str| {
+            // 先 Ctrl+A 全选（控件层收的是虚拟键码 0x41），键入即整体替换。
+            tree.dispatch_key(key(Key::Other(0x41), true), Some(input));
+            for ch in s.chars() {
+                tree.dispatch_key(key(Key::Char(ch), false), Some(input));
+            }
+            tree.dispatch_key(key(Key::Enter, false), Some(input));
+            relayout(tree);
+            relayout(tree);
+        };
+
+        type_and_enter(&mut tree, "#FFF");
+        assert_eq!(text.get(), "#FFFFFF", "简写在提交时补全");
+        assert_eq!(value.get(), Color::hex(0xFFFFFF), "补全后照常生效");
+
+        type_and_enter(&mut tree, "#zz");
+        assert_eq!(text.get(), "#FFFFFF", "解析不了的输入退回当前颜色");
+        assert_eq!(value.get(), Color::hex(0xFFFFFF), "颜色不变");
+    }
+
+    /// 按住拖动（只有 `Move`、没有 `Up`）时 HEX 框与触发器也要跟着走，且仍是局部帧。
+    ///
+    /// 宿主不为 `Move` 重排，而触发器的 `on_update` 只在重排时跑——HEX 框必须在 `Move`
+    /// 当下就写好（**这里刻意不重排**），失效也得盖住 HEX 框与触发器，否则拖着不放时
+    /// 它们纹丝不动、一松手才跳到位。反过来又不能升 `Layout`：那是每个 `Move` 一次整窗帧。
+    #[test]
+    fn dragging_without_release_keeps_the_hex_box_in_step() {
+        let value = signal(Color::hex(0x000000));
+        let (mut tree, id) = picker(value, ColorPickerOpts::default().open(signal(true)));
+        let text = hex_signal(&mut tree, id);
+        let seg = parts(&tree, id);
+        let input = tree.get(seg[3]).unwrap().children[1];
+        let (input_box, trigger_box) = (tree.abs_bounds(input), tree.abs_bounds(id));
+        for (i, &bar) in seg[..3].iter().enumerate() {
+            let b = tree.abs_bounds(bar);
+            let (mut hover, mut capture) = (None, None);
+            tree.dispatch_pointer(
+                PointerEvent::single(
+                    PointerKind::Down,
+                    Point::new(b.x + 1, b.y + 1),
+                    MouseButton::Left,
+                ),
+                &mut hover,
+                &mut capture,
+            );
+            let before = value.get();
+            let mv = tree.dispatch_pointer(
+                PointerEvent::single(
+                    PointerKind::Move,
+                    Point::new(b.right() - 2, b.y + b.h / 2),
+                    MouseButton::Left,
+                ),
+                &mut hover,
+                &mut capture,
+            );
+            assert_ne!(value.get(), before, "前置：第 {i} 条通道的 Move 改了颜色");
+            assert_eq!(
+                text.get(),
+                value.get().to_hex_string(),
+                "第 {i} 条通道：Move 当下（未重排）HEX 框就该跟上"
+            );
+            let crate::core::DamageReq::Rect(r) = mv.damage else {
+                panic!(
+                    "第 {i} 条通道的 Move 应是局部 Rect 失效，实得 {:?}",
+                    mv.damage
+                );
+            };
+            assert!(r.union(&input_box) == r, "第 {i} 条通道：失效没盖住 HEX 框");
+            assert!(
+                r.union(&trigger_box) == r,
+                "第 {i} 条通道：失效没盖住触发器"
+            );
+            tree.dispatch_pointer(
+                PointerEvent::single(PointerKind::Up, Point::new(b.x, b.y), MouseButton::Left),
+                &mut hover,
+                &mut capture,
+            );
+        }
     }
 
     /// 拖面板之后 HEX 框必须跟着变。
