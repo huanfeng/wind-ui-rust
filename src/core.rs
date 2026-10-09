@@ -473,6 +473,9 @@ pub struct Node {
     /// 右键上下文菜单构建回调（None=不弹）。落点命中本节点或子节点时沿父链冒泡到
     /// 首个设了回调的节点触发，返回的项交宿主以级联浮层呈现。
     pub context_menu: Option<MenuFn>,
+    /// 用户让本节点失焦时的回调（`Element::on_blur`）。时机与过滤同 [`Widget::on_blur`]，
+    /// 在控件自己的 `on_blur` 之后调用——输入框的 `on_commit` 先落定，这里读到的是提交后的状态。
+    pub on_blur: Option<ClickFn>,
     /// 是否为窗口拖动区（自定义标题栏）：无边框窗口中在此区域按下可拖动窗口。
     /// 命中沿父链继承（标记容器即其内非交互区均可拖），但落在子交互控件上不拖动。
     pub window_drag: bool,
@@ -3233,6 +3236,7 @@ impl Tree {
             return DispatchResult::default();
         };
         let mut widget = std::mem::replace(&mut n.widget, Box::new(EmptyWidget));
+        let mut callback = n.on_blur.take();
         let mut ctx = EventCtx {
             tree: self,
             self_id: id,
@@ -3240,13 +3244,19 @@ impl Tree {
         };
         crate::signal::begin_event();
         widget.on_blur(&mut ctx);
+        if let Some(f) = callback.as_mut() {
+            f(&mut ctx);
+        }
         let mut o = ctx.out;
         if crate::signal::end_event() {
             o.damage = o.damage.merge(DamageReq::Full);
             o.repaint = true;
         }
         match self.get_mut(id) {
-            Some(n) => n.widget = widget,
+            Some(n) => {
+                n.widget = widget;
+                n.on_blur = callback;
+            }
             None => debug_assert!(
                 false,
                 "on_blur 回调内删除了 self 节点，违反与 call_on_event 相同的契约"

@@ -1449,6 +1449,78 @@ mod tests {
         assert_eq!(shortcuts.get(), 1, "提交不该吞掉 Ctrl+Enter 快捷键");
     }
 
+    /// `Element::on_blur` 的典型用法：点一下进入捕获态的「快捷键框」，点别处即退出。
+    ///
+    /// 回调**不判**「捕获目标是不是自己」，就是要验文档承诺的顺序：从 A 点到 B 时，
+    /// A 的失焦（按下时焦点转走）先于 B 的点击回调（松开时）。顺序反过来的话，A 的失焦
+    /// 会把 B 刚进入的捕获态清掉，这种写法就不成立。
+    #[test]
+    fn on_blur_leaves_capture_state_when_clicking_elsewhere() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let capture = crate::signal::signal(None::<usize>);
+        let blurs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let field = |i: usize| {
+            let b = blurs.clone();
+            Element::row()
+                .width(120)
+                .height(32)
+                .clickable()
+                .on_click(move |_| capture.set(Some(i)))
+                .on_blur(move |_| {
+                    b.set(b.get() + 1);
+                    capture.set(None);
+                })
+        };
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .width(300)
+                .height(200)
+                .child(field(0))
+                .child(field(1)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = tiny_skia::Pixmap::new(300, 200).unwrap();
+        let mut frame =
+            |h: &mut UiHost| h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        frame(&mut h);
+        let click = |h: &mut UiHost, (x, y): (i32, i32)| {
+            use crate::event::{MouseButton, PointerEvent, PointerKind};
+            let p = crate::geometry::Point::new(x, y);
+            h.on_pointer(PointerEvent::single(
+                PointerKind::Down,
+                p,
+                MouseButton::Left,
+            ));
+            h.on_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        };
+
+        click(&mut h, (20, 16));
+        frame(&mut h);
+        assert_eq!(capture.get(), Some(0), "点 A 进入捕获态");
+        assert_eq!(blurs.get(), 0, "拿到焦点不是失焦");
+
+        click(&mut h, (20, 48));
+        frame(&mut h);
+        assert_eq!(blurs.get(), 1, "A 失焦一次");
+        assert_eq!(
+            capture.get(),
+            Some(1),
+            "A 的失焦先于 B 的点击，B 的捕获态不被清掉"
+        );
+
+        click(&mut h, (250, 180));
+        frame(&mut h);
+        assert_eq!(blurs.get(), 2, "点空白也是用户离开");
+        assert_eq!(capture.get(), None, "点空白退出捕获态");
+
+        click(&mut h, (20, 16));
+        frame(&mut h);
+        h.on_key(crate::app::test_support::key_ev()(Key::Tab));
+        assert_eq!(blurs.get(), 3, "Tab 离开同样通知");
+    }
+
     /// 点能要焦点却不在 Tab 环里的节点（`.focusable(false)` 的按钮、纯文本 RichText）
     /// 同样是用户离开了输入框，必须提交。Tab 环 ≠ 能拿焦点的节点：借环判"去向正不正常"
     /// 会把这类点击引起的提交静默吞掉，改动一直挂着。

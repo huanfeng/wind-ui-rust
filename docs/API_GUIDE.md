@@ -1728,6 +1728,21 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
 - `App::on_show(|ctx| ..)`：每次唤起时做点别的（刷新数据、清掉上次结果），触发条件同上。
   三个唤起入口里只有「控件请求」经过宿主，托盘与热键都由平台层直接执行，故这条通知由
   平台发起——应用自己推不出来。
+- `.on_blur(|ctx| ..)`：**用户**把焦点从本节点移走时调用一次（点别处 / 点空白 / Tab 离开，
+  或别的控件回调经 ctx 要走焦点），任意能拿焦点的控件都能挂（拿不到焦点的纯布局容器上
+  永远不触发）。典型用途是「点一下进入待命、
+  点别处退出」——快捷键录入框：
+
+  ```rust
+  Element::row().clickable()
+      .on_click(move |_| capture.set(Some(field)))    // 进入捕获态，等用户按组合键
+      .on_blur(move |_| capture.set(None))            // 改主意点了别处：退出，不一直挂着
+  ```
+
+  口径与 `on_commit` 一致：节点被隐藏 / 禁用、对话框弹出接管焦点、`autofocus`、
+  `on_message` 等应用级回调要焦点，都不算失焦。从 A 点到 B 时，A 的失焦（按下时焦点就
+  转走了）先于 B 的 `on_click`（`clickable()` / 按钮在松开时触发），上例不必判「捕获目标是
+  不是自己」；按下就动作的控件顺序相反。挂在 `text_input` 上时在 `on_commit` 之后调用。
 - `App::on_window_activated(|ctx, active| ..)` / `Window::on_window_activated`：窗口**激活态**
   （是否在前台）变化时调用，用于「切回窗口就刷新」。与 `on_show` 互不包含：`on_show` 只管
   隐藏→可见，这条管窗口一直可见、只是被 Alt+Tab / 点别的窗口切走再切回来。只在激活态真正

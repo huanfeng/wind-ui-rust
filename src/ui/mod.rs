@@ -703,6 +703,7 @@ pub struct Element {
     weight_fn: Option<Box<dyn Fn() -> f32>>,
     clip_children: bool,
     click: Option<ClickFn>,
+    blur: Option<ClickFn>,
     on_drop: Option<DropFn>,
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
@@ -744,6 +745,7 @@ impl Element {
             weight_fn: None,
             clip_children: false,
             click: None,
+            blur: None,
             on_drop: None,
             context_menu: None,
             window_drag: false,
@@ -927,6 +929,25 @@ impl Element {
     /// 拖多行滚动条都不触发。
     pub fn on_click(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
         self.click = Some(Box::new(f));
+        self
+    }
+
+    /// 失焦回调：**用户**把焦点从本节点移走时调用一次（点了别处 / 点空白 / Tab 离开，
+    /// 或别的控件回调经 ctx 把焦点要走）。**适用于任意能拿焦点的控件**（`clickable()`
+    /// 面板、按钮、输入框…）；挂在拿不到焦点的节点上（没 `clickable()` 的纯布局容器）
+    /// 永远不会触发。
+    ///
+    /// 典型用途是「进入某种待命状态、点别处就退出」的控件——例如点一下进入捕获态、
+    /// 等用户按组合键的快捷键框：用户改主意点了别处，它该回到空闲，而不是一直挂着
+    /// 「请按键…」。
+    ///
+    /// 框架自己的焦点调度不算失焦（节点被隐藏 / 禁用、对话框弹出接管焦点、`autofocus`、
+    /// `on_message` 等应用级回调要焦点），与 [`on_commit`](Self::on_commit) 同一口径，详见
+    /// [`Widget::on_blur`]。焦点在**按下**时转走，所以本回调先于
+    /// 对方在**松开**时触发的 `on_click`（`clickable()`、按钮都是）——两个同类框之间点来点去，
+    /// 不必防「旧框的失焦把新框刚进入的状态清掉」。按下就动作的控件则相反。
+    pub fn on_blur(mut self, f: impl FnMut(&mut EventCtx) + 'static) -> Self {
+        self.blur = Some(Box::new(f));
         self
     }
 
@@ -4368,6 +4389,7 @@ impl Element {
             en_cond: self.en_cond,
             on_drop: self.on_drop,
             context_menu: self.context_menu,
+            on_blur: self.blur,
             window_drag: self.window_drag,
             autofocus: self.autofocus,
             autofocus_done: false,
