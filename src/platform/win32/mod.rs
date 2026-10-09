@@ -1283,7 +1283,8 @@ unsafe fn create_window(
         }
     };
     let init_scale = sys_dpi as f32 / 96.0;
-    let (phys_w, phys_h) = frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi);
+    let (phys_w, phys_h) =
+        frame_size_for_client(cfg.width, cfg.height, init_scale, sys_dpi, cfg.frameless);
 
     let mut win_style = if cfg.resizable {
         WS_OVERLAPPEDWINDOW
@@ -1326,6 +1327,15 @@ unsafe fn create_window(
     // 循环，而创建失败的那条路径上根本没有窗口需要注销。
     register_window(hwnd, cfg.single.clone());
 
+    // 无边框标记要赶在下面的 DPI 校正**之前**：那次 `SetWindowPos` 会经 `WM_GETMINMAXINFO`
+    // 按最小尺寸钳制，标记还没置时最小尺寸按带框口径算（多出标题栏与边框），`min_size`
+    // 与初始尺寸相同的无边框窗就被撑大一圈——正是 `frame_size_for_client` 要修的症状。
+    if cfg.frameless {
+        if let Some(s) = state_from(hwnd) {
+            s.frameless = true;
+        }
+    }
+
     // 自定义窗口图标，覆盖窗口类那份（`register_window_class` 从 exe 资源取的）。
     // 放在 register_window 之后：这时 WindowState 已经挂在 HWND 上，HICON 才存得进去。
     if let Some(src) = &cfg.icon {
@@ -1340,7 +1350,7 @@ unsafe fn create_window(
     let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     // 实际 DPI 与系统估算不一致时，按真实 scale 校正窗口物理尺寸（在显示前，无 state 借用）。
     if (scale - init_scale).abs() > 0.01 {
-        let (w, h) = frame_size_for_client(cfg.width, cfg.height, scale, dpi);
+        let (w, h) = frame_size_for_client(cfg.width, cfg.height, scale, dpi, cfg.frameless);
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -1471,12 +1481,9 @@ unsafe fn create_window(
         }
     }
 
-    // 无边框窗口：标记状态，扩展 DWM 边框保留窗口投影，并触发非客户区重算
-    // （SWP_FRAMECHANGED → WM_NCCALCSIZE 让客户区铺满整窗）。
+    // 无边框窗口（标记已在建窗后立即置上）：扩展 DWM 边框保留窗口投影，并触发非客户区
+    // 重算（SWP_FRAMECHANGED → WM_NCCALCSIZE 让客户区铺满整窗）。
     if cfg.frameless {
-        if let Some(s) = state_from(hwnd) {
-            s.frameless = true;
-        }
         let margins = MARGINS {
             cxLeftWidth: 0,
             cxRightWidth: 0,
@@ -1883,14 +1890,13 @@ unsafe extern "system" fn wnd_proc(
                 if state.min_w > 0 || state.min_h > 0 {
                     let dpi = GetDpiForWindow(hwnd).max(96);
                     let scale = dpi as f32 / 96.0;
-                    let (pw, ph) = if state.frameless {
-                        (
-                            (state.min_w as f32 * scale).round() as i32,
-                            (state.min_h as f32 * scale).round() as i32,
-                        )
-                    } else {
-                        frame_size_for_client(state.min_w, state.min_h, scale, dpi)
-                    };
+                    let (pw, ph) = frame_size_for_client(
+                        state.min_w,
+                        state.min_h,
+                        scale,
+                        dpi,
+                        state.frameless,
+                    );
                     let mmi = lparam.0 as *mut MINMAXINFO;
                     if !mmi.is_null() {
                         if pw > 0 {
@@ -3046,14 +3052,22 @@ pub fn system_locales() -> Vec<String> {
 }
 
 /// 由期望逻辑客户区尺寸 + scale + dpi 反算窗口外框物理尺寸（含标题栏/边框）。
+///
+/// 无边框窗口外框即客户区：它的非客户区由 `handle_nccalcsize` 整个消掉，再按带框窗口
+/// 反算加进去的标题栏与边框会**原样变成客户区**——窗口比请求的大出一圈（100% 下约
+/// 宽 +16、高 +39），布局按大的那份排，按请求尺寸画的内容右下就露出一条底色。
 unsafe fn frame_size_for_client(
     logical_w: i32,
     logical_h: i32,
     scale: f32,
     dpi: u32,
+    frameless: bool,
 ) -> (i32, i32) {
     let cw = (logical_w as f32 * scale).round() as i32;
     let ch = (logical_h as f32 * scale).round() as i32;
+    if frameless {
+        return (cw, ch);
+    }
     let mut rc = RECT {
         left: 0,
         top: 0,
@@ -4010,7 +4024,29 @@ mod live_windows_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{accumulate_char, ClickTracker};
+    use super::{accumulate_char, frame_size_for_client, ClickTracker};
+
+    /// 无边框窗外框即客户区（按缩放取整）；带框窗口外框严格更大——差值就是无边框窗曾经
+    /// 多出来的那一圈。
+    #[test]
+    fn frameless_outer_size_equals_client_size() {
+        for (w, h, scale, dpi) in [
+            (400, 300, 1.0, 96),
+            (480, 320, 1.5, 144),
+            (61, 33, 2.0, 192),
+        ] {
+            let want = (
+                (w as f32 * scale).round() as i32,
+                (h as f32 * scale).round() as i32,
+            );
+            assert_eq!(
+                unsafe { frame_size_for_client(w, h, scale, dpi, true) },
+                want
+            );
+            let (fw, fh) = unsafe { frame_size_for_client(w, h, scale, dpi, false) };
+            assert!(fw > want.0 && fh > want.1, "带框窗口应计入标题栏与边框");
+        }
+    }
 
     #[test]
     fn bmp_char_passes_through() {
