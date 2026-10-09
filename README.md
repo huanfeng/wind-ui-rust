@@ -156,7 +156,7 @@ cargo clippy --all-targets                                  # 静态检查
 | **完整应用** | `settings`（设置窗：标题栏 + 图标侧栏 + 内容 + 底部操作栏 + 两个对话框）、`about`（关于页）、`ime_settings`（输入法设置场景）、`light_titlebar`（安装器风格的浅色标题栏） |
 | **控件与能力** | `fullshowcase`（控件总览，七个分页）、`theming`（TOML 主题 + 运行期换肤）、`image`（图片/SVG）、`animation`、`emoji`（彩色 emoji）、`caret`（文本光标四风格） |
 | **数据展示** | `virtual_list`（虚拟滚动列表 + 表格）、`virtual_table_server`（服务端分页）、`table_pager`（分页操作栏）、`dyn_list`（数据驱动动态列表）、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline` |
-| **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`resident`（零窗口常驻托盘服务）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`ime` |
+| **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`resident`（零窗口常驻托盘服务）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`window_attrs`（指定位置 / 不进任务栏 / 不可缩放的无边框窗）、`ime` |
 
 另有 `phase0`–`phase5` 分阶段演示与 `perfprobe` 性能探针，供开发与回归比对使用。
 
