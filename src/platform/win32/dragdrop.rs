@@ -175,8 +175,16 @@ impl IDataObject_Impl for FileData_Impl {
 }
 
 /// 拖动源：Esc 取消、松开左键落下、其余交默认光标。
+///
+/// 松开左键时若正停在一个肯接收的目标上（最近一次 `GiveFeedback` 的效果非 NONE），
+/// 先跑 `before_drop`：它返回 false 就当这次没放下。OLE 在 `QueryContinueDrag`
+/// 返回 DROP 之后才调目标的 `Drop`，所以这是"目标拿到文件之前"的最后时机——
+/// 拖出的文件可以到这一刻才真正生成（压缩包里的条目、网络上的文件）。
 #[implement(IDropSource)]
-struct Source;
+struct Source {
+    before_drop: std::cell::RefCell<Option<Box<dyn FnOnce() -> bool>>>,
+    last_effect: std::cell::Cell<DROPEFFECT>,
+}
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for Source_Impl {
@@ -185,12 +193,27 @@ impl IDropSource_Impl for Source_Impl {
             return DRAGDROP_S_CANCEL;
         }
         if grfkeystate & MK_LBUTTON == MODIFIERKEYS_FLAGS(0) {
+            // 落在不接收的地方：OLE 自己当取消处理，不必生成文件
+            if self.last_effect.get() == DROPEFFECT_NONE {
+                return DRAGDROP_S_DROP;
+            }
+            // 只跑一次（take）：回调里弹的模态框 / 进度框不会让 OLE 再问一遍，但防个万一
+            let cb = self.before_drop.borrow_mut().take();
+            if let Some(cb) = cb {
+                if !cb() {
+                    return DRAGDROP_S_CANCEL;
+                }
+            }
             return DRAGDROP_S_DROP;
         }
         S_OK
     }
 
-    fn GiveFeedback(&self, _dweffect: DROPEFFECT) -> HRESULT {
+    fn GiveFeedback(&self, dweffect: DROPEFFECT) -> HRESULT {
+        // 去掉 SCROLL 位：自动滚动时目标可能只回报它，并不代表肯接收
+        self.last_effect.set(DROPEFFECT(
+            dweffect.0 & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK).0,
+        ));
         DRAGDROP_S_USEDEFAULTCURSORS
     }
 }
@@ -206,6 +229,27 @@ thread_local! {
 ///
 /// 必须在 UI 线程、且**不在事件回调里**调用——见模块文档。
 pub fn drag_files(paths: &[impl AsRef<Path>], allow_move: bool) -> DragEffect {
+    drag_files_with(paths, allow_move, None)
+}
+
+/// 同 [`drag_files`]，但文件可以**到放下那一刻才生成**：`paths` 先报给接收方（此时
+/// 可以还不存在），松手落在肯接收的目标上时调 `before_drop`，由它把文件写出来；
+/// 返回 false（用户取消、生成失败）就当没放下。落空、按 Esc 时不调。
+///
+/// `before_drop` 在 UI 线程上、`DoDragDrop` 的消息循环里同步执行；回调期间只有它自己
+/// 跑的消息循环（如模态框）会派发消息，纯同步的耗时操作会让窗口无响应，须自配进度提示。
+/// 模态框在 OLE 鼠标捕获下能否用鼠标点击**尚未真机验证**。
+///
+/// 注意：
+/// - 在本窗口自身上松手也算「肯接收的目标」（窗口都开了 `DragAcceptFiles`），会照常调回调。
+/// - 回调跑过不代表接收方收下了：目标仍可能在 `Drop` 里拒收，此时返回 `DragEffect::None`，
+///   生成了临时文件的调用方须自行记录并清理。
+/// - 回调里 panic 会跨 COM 边界，等同终止进程。
+pub fn drag_files_with(
+    paths: &[impl AsRef<Path>],
+    allow_move: bool,
+    before_drop: Option<Box<dyn FnOnce() -> bool>>,
+) -> DragEffect {
     if paths.is_empty() {
         return DragEffect::None;
     }
@@ -220,7 +264,11 @@ pub fn drag_files(paths: &[impl AsRef<Path>], allow_move: bool) -> DragEffect {
             bytes: hdrop_bytes(paths),
         }
         .into();
-        let source: IDropSource = Source.into();
+        let source: IDropSource = Source {
+            before_drop: std::cell::RefCell::new(before_drop),
+            last_effect: std::cell::Cell::new(DROPEFFECT_NONE),
+        }
+        .into();
         let mut allowed = DROPEFFECT_COPY | DROPEFFECT_LINK;
         if allow_move {
             allowed |= DROPEFFECT_MOVE;
@@ -264,6 +312,88 @@ mod tests {
         let s = String::from_utf16_lossy(&wide);
         assert_eq!(s, "C:\\a.txt\0C:\\b\0\0");
     }
+
+    fn source(cb: Option<Box<dyn FnOnce() -> bool>>) -> IDropSource {
+        Source {
+            before_drop: std::cell::RefCell::new(cb),
+            last_effect: std::cell::Cell::new(DROPEFFECT_NONE),
+        }
+        .into()
+    }
+
+    fn release(s: &IDropSource) -> HRESULT {
+        // SAFETY: 纯 Rust 实现的 IDropSource，无外部指针。
+        unsafe { s.QueryContinueDrag(false, MODIFIERKEYS_FLAGS(0)) }
+    }
+
+    type Counted = (
+        Option<Box<dyn FnOnce() -> bool>>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    );
+
+    fn counting(ret: bool) -> Counted {
+        let n = std::rc::Rc::new(std::cell::Cell::new(0));
+        let n2 = n.clone();
+        (
+            Some(Box::new(move || {
+                n2.set(n2.get() + 1);
+                ret
+            })),
+            n,
+        )
+    }
+
+    #[test]
+    fn 落在不接收处松手不调回调() {
+        let (cb, n) = counting(true);
+        let s = source(cb);
+        assert_eq!(release(&s), DRAGDROP_S_DROP);
+        assert_eq!(n.get(), 0);
+    }
+
+    #[test]
+    fn 落在接收处松手调一次回调() {
+        let (cb, n) = counting(true);
+        let s = source(cb);
+        unsafe { s.GiveFeedback(DROPEFFECT_COPY) }.ok().ok();
+        assert_eq!(release(&s), DRAGDROP_S_DROP);
+        assert_eq!(n.get(), 1);
+        // take 语义：再松手不再调
+        let _ = release(&s);
+        assert_eq!(n.get(), 1);
+    }
+
+    #[test]
+    fn 回调返回_false_取消() {
+        let (cb, n) = counting(false);
+        let s = source(cb);
+        unsafe { s.GiveFeedback(DROPEFFECT_MOVE) }.ok().ok();
+        assert_eq!(release(&s), DRAGDROP_S_CANCEL);
+        assert_eq!(n.get(), 1);
+    }
+
+    #[test]
+    fn esc_不调回调() {
+        let (cb, n) = counting(true);
+        let s = source(cb);
+        unsafe { s.GiveFeedback(DROPEFFECT_COPY) }.ok().ok();
+        let r = unsafe { s.QueryContinueDrag(true, MK_LBUTTON) };
+        assert_eq!(r, DRAGDROP_S_CANCEL);
+        assert_eq!(n.get(), 0);
+    }
+
+    #[test]
+    fn 仅_scroll_位不算肯接收() {
+        let (cb, n) = counting(true);
+        let s = source(cb);
+        unsafe { s.GiveFeedback(DROPEFFECT(DROPEFFECT_SCROLL_BIT)) }
+            .ok()
+            .ok();
+        assert_eq!(release(&s), DRAGDROP_S_DROP);
+        assert_eq!(n.get(), 0);
+    }
+
+    const DROPEFFECT_SCROLL_BIT: u32 = 0x8000_0000;
 
     #[test]
     fn 空列表不进入_ole() {

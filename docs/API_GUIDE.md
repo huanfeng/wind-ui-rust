@@ -2417,7 +2417,7 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 系统托盘 | ✓ | ✓ | ✗ 配置被忽略并记日志 |
 | 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） | ✓ 根窗口 `GrabKey`（Wayland 下受限，见「全局热键与启动即隐藏」） |
 | 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 | ✓ 同语义 |
-| 文件拖出（`platform::drag_files`） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
+| 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
 | 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误并退出 | ✗ 同 macOS |
 | 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |
 | 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送 |

@@ -17,7 +17,7 @@ pub mod win32;
 #[cfg(windows)]
 pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
-pub use win32::dragdrop::drag_files;
+pub use win32::dragdrop::{drag_files, drag_files_with};
 
 /// 当前活跃窗口的原生句柄（Windows：HWND；其它平台暂无，返回 `None`）。
 ///
@@ -92,13 +92,13 @@ pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::clipboard::MacClipboard as Clipboard;
 #[cfg(target_os = "macos")]
-pub use macos::drag_files;
-#[cfg(target_os = "macos")]
 pub use macos::open_url;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::run;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::system_prefers_dark;
+#[cfg(target_os = "macos")]
+pub use macos::{drag_files, drag_files_with};
 
 /// 见 Windows 版（`win32::single_window_open`）：macOS 的窗口登记表还没接上常驻模式，
 /// 这里恒为 `false`。
@@ -116,8 +116,6 @@ pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::clipboard::LinuxClipboard as Clipboard;
 #[cfg(target_os = "linux")]
-pub use linux::drag_files;
-#[cfg(target_os = "linux")]
 pub use linux::open_url;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::run;
@@ -125,6 +123,8 @@ pub(crate) use linux::run;
 pub(crate) use linux::single_window_open;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::system_prefers_dark;
+#[cfg(target_os = "linux")]
+pub use linux::{drag_files, drag_files_with};
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台");

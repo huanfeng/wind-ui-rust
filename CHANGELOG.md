@@ -22,6 +22,9 @@
   故未设 `hide_on_minimize` 时不提供最小化。
 - **`TrayHandle::set_icon_rgba`**：运行期换托盘图标（Windows / macOS），Windows 上 shell
   重启后按新图标恢复。
+- **`platform::drag_files_with`**：文件拖出支持「放下那一刻才生成」——`paths` 先报给接收方，松手落在
+  肯接收的目标上时调 `before_drop`，返回 false 即取消；落空 / Esc 不调。仅 Windows 实现，
+  macOS / Linux 同 `drag_files` 返回 `DragEffect::None`。
 
 ### 修复
 

@@ -226,6 +226,15 @@ pub fn drag_files(
     crate::platform::DragEffect::None
 }
 
+/// 见 win32 `drag_files_with`。拖出未接入，`before_drop` 不会被调。
+pub fn drag_files_with(
+    _paths: &[impl AsRef<std::path::Path>],
+    _allow_move: bool,
+    _before_drop: Option<Box<dyn FnOnce() -> bool>>,
+) -> crate::platform::DragEffect {
+    crate::platform::DragEffect::None
+}
+
 /// 见 `win32::single_window_open`。Linux 的窗口登记表还没接常驻模式，恒为 `false`
 /// （取值理由同 macOS 侧）。
 pub(crate) fn single_window_open(_key: &str) -> bool {
