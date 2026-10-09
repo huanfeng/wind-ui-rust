@@ -64,6 +64,10 @@ pub mod scrollbar {
     ///
     /// 物理侧不会反超：边框物理宽 `(8 * dpi/96) as i32` 是**向下**取整，换算回逻辑坐标
     /// 恒 ≤ 8，故任意 DPI（含非整数缩放）下这条边界都成立。
+    ///
+    /// 只有「无边框且可缩放」的窗口才内缩（宿主据此设 `Tree::scroll_edge_inset`）：带框
+    /// 窗口的缩放边在客户区外，不可缩放的无边框窗也没有这一圈，白让 8px 只会让滚动条
+    /// 看起来没贴边。
     pub const WINDOW_EDGE_INSET: i32 = 8;
 
     /// 滚动条在容器内实际占用的水平宽度（含内缩）。arrange 据此为内容让位。
@@ -555,6 +559,13 @@ pub struct Tree {
     pub focus_ring_visible: bool,
     /// 剪贴板实现（平台注入）；None 时复制粘贴为空操作。
     pub clipboard: Option<Box<dyn ClipboardProvider>>,
+    /// 贴窗口右缘的滚动条要额外内缩多少（见 `scrollbar::WINDOW_EDGE_INSET`），0 = 不内缩。
+    ///
+    /// 内缩只为避让**落在客户区里**的缩放边框，而只有「无边框且可缩放」的窗口才有这一圈：
+    /// 带框窗口的缩放边在客户区外，不可缩放的窗口压根没有。由宿主按窗口能力设置（所有
+    /// 窗口——含离屏截图——都经 `UiHost::new`）；默认取内缩值，只有直接 `Tree::new()` 的
+    /// 单测吃到它。
+    pub(crate) scroll_edge_inset: i32,
     /// 响应式节点列表：每次 `layout_root` 前广播 `on_update`，允许控件重建子节点。
     reactive_nodes: Vec<NodeId>,
     /// on_update（响应式相位）里控件请求的 toast 暂存区。该相位在 `call_on_update` 后
@@ -625,6 +636,7 @@ impl Tree {
             root: None,
             focus_ring_visible: false,
             clipboard: None,
+            scroll_edge_inset: scrollbar::WINDOW_EDGE_INSET,
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
             pending_focus: None,
@@ -1380,11 +1392,15 @@ impl Tree {
     }
 
     fn scrollbar_edge_inset(&self, abs_right: i32) -> i32 {
+        let inset = self.scroll_edge_inset;
+        if inset <= 0 {
+            return 0;
+        }
         let Some(root_w) = self.root.and_then(|r| self.get(r)).map(|n| n.bounds.w) else {
             return 0;
         };
-        if abs_right >= root_w - scrollbar::WINDOW_EDGE_INSET {
-            scrollbar::WINDOW_EDGE_INSET
+        if abs_right >= root_w - inset {
+            inset
         } else {
             0
         }

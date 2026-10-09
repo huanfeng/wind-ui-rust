@@ -2670,6 +2670,13 @@ impl UiHost {
         let window_state = crate::event::WindowState::from_config(cfg.resizable);
         crate::event::set_window_state(window_state);
         let mut tree = Tree::new();
+        // 只有无边框且可缩放的窗口，客户区边上才压着一圈缩放边框（见
+        // `scrollbar::WINDOW_EDGE_INSET`）；其余窗口的滚动条直接贴边。这里按建窗配置定一次，
+        // 而 win32 `handle_nchittest` 读的是运行期样式位——将来若能在运行期改可缩放，两处
+        // 要一起改。
+        if !(cfg.frameless && cfg.resizable) {
+            tree.scroll_edge_inset = 0;
+        }
         tree.root = Some(root.build(&mut tree));
         tree.clipboard = Some(Box::new(crate::platform::Clipboard));
         let (interval_durs, interval_cbs): (Vec<_>, Vec<_>) = intervals.into_iter().unzip();
@@ -7241,6 +7248,47 @@ mod tests {
         assert_eq!(
             rows.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(),
             vec!["还原", "最小化", "最大化", "---", "关闭"],
+        );
+    }
+
+    /// 贴窗口右缘的滚动条只在「无边框且可缩放」的窗口里内缩。
+    ///
+    /// 内缩是给客户区里那圈缩放边框让路的：带框窗口的缩放边在客户区外，不可缩放的
+    /// 无边框窗根本没有这一圈（win32 `handle_nchittest` 按 `WS_THICKFRAME` 判）。这两类
+    /// 窗口若也内缩，滚动条离窗口右缘平白空出 8px，看起来像没贴边。
+    #[test]
+    fn scrollbar_edge_inset_follows_window_capabilities() {
+        use crate::core::scrollbar::WINDOW_EDGE_INSET;
+        let hit_zone_right = |app: App| {
+            let mut host = app
+                .content({
+                    let mut sc = Element::scroll().width_match().height_match();
+                    for _ in 0..20 {
+                        sc = sc.child(Element::leaf().width_match().height(30));
+                    }
+                    sc
+                })
+                .into_handler_for_test();
+            layout_once(&mut host, 200, 120);
+            let root = host.tree.root.unwrap();
+            let abs = host.tree.abs_bounds(root);
+            assert_eq!(abs.right(), 200, "前置：滚动容器贴着窗口右缘");
+            host.tree.scrollbar_hit_zone(abs).1
+        };
+        assert_eq!(
+            hit_zone_right(App::new("t", 200, 120).frameless()),
+            200 - WINDOW_EDGE_INSET,
+            "无边框且可缩放：让出缩放边框那一圈"
+        );
+        assert_eq!(
+            hit_zone_right(App::new("t", 200, 120).frameless().resizable(false)),
+            200,
+            "无边框但不可缩放：没有缩放边框，滚动条贴边"
+        );
+        assert_eq!(
+            hit_zone_right(App::new("t", 200, 120)),
+            200,
+            "带框窗口：缩放边在客户区外，滚动条贴边"
         );
     }
 
