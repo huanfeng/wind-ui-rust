@@ -38,7 +38,10 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::CURRENT_TIME;
 
 use super::dnd::{self, DndAtoms, DragState};
-use super::host::{self, ClickTracker, Intervals, LinuxWake, Requests, DOUBLE_CLICK_SLOP};
+use super::host::{
+    self, ClickTracker, Intervals, LinuxWake, Requests, Rim, RimWant, DOUBLE_CLICK_SLOP,
+    WINDOW_CORNER,
+};
 use super::hotkey::Hotkeys;
 use super::ime::{Ime, ImeOut};
 use super::keys::{self, Keymap};
@@ -97,6 +100,8 @@ struct Win {
     single: Option<String>,
     owner: Option<Window>,
     modal: bool,
+    /// 用 ARGB 视觉建的（深度 32，可做透明圆角）。
+    argb: bool,
     /// 不在任务栏占按钮（`WindowConfig::skip_taskbar`）。映射前写进 `_NET_WM_STATE`，
     /// 每次从隐藏（撤回）态重新映射前要补写，见 [`X11::write_initial_state`]。
     skip_taskbar: bool,
@@ -123,8 +128,8 @@ struct Win {
     edge_hover: Option<u32>,
     /// 窗口上当前挂着的光标（去重用：同一个就不再发请求）。
     applied_cursor: xproto::Cursor,
-    /// 上一帧描了外框（见 `host::render_frame` 的 `outlined`）。
-    outlined: bool,
+    /// 上一帧的边缘收尾（见 `host::render_frame` 的 `last`）。
+    rim: Rim,
     click: ClickTracker,
     /// 无边框窗口：在拖动区 / 缩放边上按下、尚未移动够阈值的待定拖动（方向码 + 按下点根坐标）。
     ///
@@ -146,6 +151,16 @@ struct PixelFormat {
     lsb: bool,
 }
 
+/// 32 位 ARGB 视觉（有合成器时给无边框窗口用，圆角外的像素才能真透明）。
+struct ArgbVisual {
+    visual: xproto::Visualid,
+    colormap: xproto::Colormap,
+    /// 深度 32 的绘图上下文：`PutImage` 要求 GC 与目标窗口同深度，根窗口那个是 24 位的。
+    gc: xproto::Gcontext,
+    /// 合成器选区 `_NET_WM_CM_S<屏>`：XFixes 据此通知合成器的出现 / 消失。
+    cm: xproto::Atom,
+}
+
 struct X11 {
     conn: Rc<RustConnection>,
     /// XIM 输入法连接（没配置 / 连不上为 `None`，按键走本地）。
@@ -165,6 +180,11 @@ struct X11 {
     screen_h: i32,
     fmt: PixelFormat,
     gc: xproto::Gcontext,
+    /// 启动时有合成器、且屏幕提供 32 位真彩视觉才有；见 [`ArgbVisual`]。
+    argb: Option<ArgbVisual>,
+    /// 此刻有合成器（XFixes 跟随）。ARGB 窗口只在有合成器时做圆角：合成器中途退出后透明
+    /// 的角没人混合会成黑块，此时退回方角（像素 alpha 全 255，不重建窗口也能正常显示）。
+    composited: bool,
     scale: f32,
     /// 前 5 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
     cursors: [xproto::Cursor; CURSOR_COUNT],
@@ -268,6 +288,7 @@ impl X11 {
             .ok()?;
         let scale = detect_scale(&conn, root, &atoms);
         let cursors = create_cursors(&conn).unwrap_or([0; CURSOR_COUNT]);
+        let argb = argb_visual(&conn, screen_num);
         let conn = Rc::new(conn);
         let ime = Ime::connect(conn.clone(), screen_num);
         let mut x = X11 {
@@ -284,6 +305,8 @@ impl X11 {
             screen_h,
             fmt,
             gc,
+            composited: argb.is_some(),
+            argb,
             scale,
             cursors,
             keymap: Keymap::default(),
@@ -345,8 +368,32 @@ impl X11 {
             | EventMask::FOCUS_CHANGE
             | EventMask::PROPERTY_CHANGE;
         let bg = cfg.bg;
+        let rgb = ((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32;
+        // 无边框窗口在有合成器时用 ARGB 视觉：圆角外的像素要真透明（见 `host::paint_rim`）。
+        // 带 WM 装饰的窗口圆角归 WM 画，不需要。
+        let argb = self.argb.as_ref().filter(|_| cfg.frameless);
+        let aux = CreateWindowAux::new()
+            .event_mask(mask)
+            .bit_gravity(Gravity::NORTH_WEST)
+            .cursor(self.cursors[0]);
+        let (depth, visual, aux) = match argb {
+            // 非默认视觉必须自带 colormap 与 border_pixel，否则 BadMatch。
+            Some(v) => (
+                32,
+                v.visual,
+                aux.colormap(v.colormap)
+                    .border_pixel(0)
+                    .background_pixel(0xff00_0000 | rgb),
+            ),
+            None => (
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                x11rb::COPY_FROM_PARENT,
+                aux.background_pixel(rgb),
+            ),
+        };
+        let argb = argb.is_some();
         let _ = self.conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
+            depth,
             id,
             self.root,
             x as i16,
@@ -355,12 +402,8 @@ impl X11 {
             ph as u16,
             0,
             WindowClass::INPUT_OUTPUT,
-            x11rb::COPY_FROM_PARENT,
-            &CreateWindowAux::new()
-                .event_mask(mask)
-                .background_pixel(((bg.r as u32) << 16) | ((bg.g as u32) << 8) | bg.b as u32)
-                .bit_gravity(Gravity::NORTH_WEST)
-                .cursor(self.cursors[0]),
+            visual,
+            &aux,
         );
         let a = self.atoms;
         let _ = self.conn.change_property32(
@@ -460,6 +503,7 @@ impl X11 {
             single: cfg.single.clone(),
             owner,
             modal: cfg.modal && owner.is_some(),
+            argb,
             skip_taskbar: cfg.skip_taskbar,
             w: pw,
             h: ph,
@@ -476,7 +520,7 @@ impl X11 {
             cursor: CursorShape::Arrow,
             edge_hover: None,
             applied_cursor: self.cursors[0],
-            outlined: false,
+            rim: Rim::default(),
             click: ClickTracker::default(),
             title_drag: host::DragGate::default(),
             composing: false,
@@ -886,8 +930,15 @@ impl X11 {
             &mut w.fresh,
             (w.w, w.h),
             w.bg,
-            w.frameless && !w.maximized,
-            &mut w.outlined,
+            RimWant {
+                outline: w.frameless && !w.maximized,
+                radius: if w.argb && self.composited && !w.maximized {
+                    WINDOW_CORNER * self.scale
+                } else {
+                    0.0
+                },
+            },
+            &mut w.rim,
         ) else {
             return;
         };
@@ -917,6 +968,12 @@ impl X11 {
         let stride = pm.width() as usize * 4;
         let data = pm.data();
         let row_bytes = r.w as usize * 4;
+        // ARGB 窗口深度 32、要用同深度的 GC。像素值 = A<<24 | RGB（预乘），按服务器字节序
+        // 排列——与 24 位同一套转换，24 位时高字节被服务器忽略。
+        let (gc, depth) = match (&self.argb, w.argb) {
+            (Some(v), true) => (v.gc, 32),
+            _ => (self.gc, self.fmt.depth),
+        };
         // 按行切块：既不超过服务器的单请求上限（无 BIG-REQUESTS 时 256KB），也把转换缓冲
         // 钉在 `UPLOAD_CHUNK` 以内——整窗帧一次转完的话，200% 大窗口要多出几 MB 峰值。
         let max = self
@@ -945,13 +1002,13 @@ impl X11 {
             let _ = self.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 w.id,
-                self.gc,
+                gc,
                 r.w as u16,
                 n as u16,
                 r.x as i16,
                 y as i16,
                 0,
-                self.fmt.depth,
+                depth,
                 &buf,
             );
             y += n as i32;
@@ -969,6 +1026,19 @@ impl X11 {
             }
         }
         match ev {
+            Event::XfixesSelectionNotify(e)
+                if self.argb.as_ref().is_some_and(|v| v.cm == e.selection) =>
+            {
+                let on = e.owner != x11rb::NONE;
+                if std::mem::replace(&mut self.composited, on) != on {
+                    log::debug!(
+                        "合成器{}：无边框窗口圆角随之开关",
+                        if on { "出现" } else { "退出" }
+                    );
+                    // 圆角半径变了，`render_frame` 会按收尾变化整窗重画。
+                    self.windows.iter_mut().for_each(|w| w.needs_paint = true);
+                }
+            }
             Event::Expose(e) => {
                 if let Some(i) = self.idx(e.window) {
                     let r = Rect::new(e.x as i32, e.y as i32, e.width as i32, e.height as i32);
@@ -1770,6 +1840,88 @@ fn resize_edge_at(w: &Win, pos: Point, scale: f32) -> Option<u32> {
         (RESIZE_BORDER * scale).round() as i32,
         |p| w.handler.interactive_at(p),
     )
+}
+
+/// 有合成器时找出 32 位 ARGB 真彩视觉，并备好它的 colormap 与同深度 GC。
+///
+/// 没有合成器（`_NET_WM_CM_S<屏>` 选区无人持有）时返回 `None`：ARGB 窗口的透明像素没人
+/// 混合，圆角外会是黑块，宁可方角。只在启动时判一次——运行中开关合成器不跟随。
+fn argb_visual(conn: &RustConnection, screen_num: usize) -> Option<ArgbVisual> {
+    if std::env::var_os("WINDUI_NO_ARGB").is_some_and(|v| v != "0") {
+        log::debug!("WINDUI_NO_ARGB：无边框窗口用方角");
+        return None;
+    }
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let cm = conn
+        .intern_atom(false, name.as_bytes())
+        .ok()?
+        .reply()
+        .ok()?
+        .atom;
+    if conn.get_selection_owner(cm).ok()?.reply().ok()?.owner == x11rb::NONE {
+        log::debug!("没有合成器：无边框窗口用方角");
+        return None;
+    }
+    let screen = &conn.setup().roots[screen_num];
+    let visual = screen
+        .allowed_depths
+        .iter()
+        .filter(|d| d.depth == 32)
+        .flat_map(|d| &d.visuals)
+        .find(|v| {
+            v.class == xproto::VisualClass::TRUE_COLOR
+                && (v.red_mask, v.green_mask, v.blue_mask) == (0xff0000, 0xff00, 0xff)
+        })?
+        .visual_id;
+    // 逐个 `check`：协议错误（BadAlloc / BadMatch）是异步到达的，只看请求发没发出去的话，
+    // 失败也照样返回 Some，随后带着无效 colormap 建窗会直接 BadMatch、窗口建不出来。
+    let colormap = conn.generate_id().ok()?;
+    conn.create_colormap(xproto::ColormapAlloc::NONE, colormap, screen.root, visual)
+        .ok()?
+        .check()
+        .ok()?;
+    // GC 只认深度不认窗口：借一块 1×1 的 32 位 pixmap 建出来，随即释放 pixmap。
+    let gc = (|| {
+        let pm = conn.generate_id().ok()?;
+        conn.create_pixmap(32, pm, screen.root, 1, 1)
+            .ok()?
+            .check()
+            .ok()?;
+        let gc = conn.generate_id().ok()?;
+        let made = conn
+            .create_gc(gc, pm, &CreateGCAux::new().graphics_exposures(0))
+            .ok()
+            .and_then(|c| c.check().ok());
+        let _ = conn.free_pixmap(pm);
+        made.map(|_| gc)
+    })();
+    let Some(gc) = gc else {
+        let _ = conn.free_colormap(colormap);
+        return None;
+    };
+    // 合成器可能中途退出（xfwm4 关掉合成、picom 崩溃）：订阅选区变化，见 `X11::composited`。
+    // 订阅失败只是不跟随，不影响建窗。
+    use x11rb::protocol::xfixes::{self, ConnectionExt as _};
+    let tracked = conn
+        .xfixes_query_version(5, 0)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .and_then(|_| {
+            let mask = xfixes::SelectionEventMask::SET_SELECTION_OWNER
+                | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
+                | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
+            conn.xfixes_select_selection_input(screen.root, cm, mask)
+                .ok()
+        });
+    if tracked.is_none() {
+        log::debug!("XFixes 不可用：合成器中途退出时圆角不会退回方角");
+    }
+    Some(ArgbVisual {
+        visual,
+        colormap,
+        gc,
+        cm,
+    })
 }
 
 /// `cursors` 里缩放边光标的起始下标与总数。

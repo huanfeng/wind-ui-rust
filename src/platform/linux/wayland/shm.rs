@@ -220,13 +220,20 @@ pub(super) fn create_buffer(
     slot: usize,
     w: i32,
     h: i32,
+    alpha: bool,
 ) -> std::io::Result<ShmBuffer> {
     let stride = w * 4;
     let size = i32::try_from(stride as i64 * h as i64)
         .map_err(|_| std::io::Error::other(format!("缓冲过大（{w}×{h}）")))?;
     let file = super::super::sys::memfd(c"windui-shm", size as u64)?;
     let pool = shm.create_pool(file.as_fd(), size, qh, ());
-    let buffer = pool.create_buffer(0, w, h, stride, wl_shm::Format::Xrgb8888, qh, (key, slot));
+    // ARGB8888 按预乘解释，与 tiny-skia 缓冲一致。
+    let format = if alpha {
+        wl_shm::Format::Argb8888
+    } else {
+        wl_shm::Format::Xrgb8888
+    };
+    let buffer = pool.create_buffer(0, w, h, stride, format, qh, (key, slot));
     // 池只是建缓冲的中介：缓冲自己持有映射，销毁池不影响它。
     pool.destroy();
     Ok(ShmBuffer { file, buffer })

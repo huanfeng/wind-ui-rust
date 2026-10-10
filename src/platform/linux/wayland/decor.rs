@@ -239,9 +239,9 @@ impl Wl {
             &mut d.fresh,
             (width, bar),
             bg,
-            // 标题栏不描外框（它本身贴着窗口上沿，外框归内容区）。
-            false,
-            &mut false,
+            // 标题栏不描外框、不做圆角（它本身贴着窗口上沿，边缘收尾归内容区）。
+            host::RimWant::default(),
+            &mut host::Rim::default(),
         )
     }
 

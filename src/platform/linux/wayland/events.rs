@@ -74,6 +74,7 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Wl {
 }
 
 delegate_noop!(Wl: wl_compositor::WlCompositor);
+delegate_noop!(Wl: wayland_client::protocol::wl_region::WlRegion);
 delegate_noop!(Wl: wl_shm_pool::WlShmPool);
 // `format` 事件：XRGB8888 是协议规定必支持的格式，不必等它。
 delegate_noop!(Wl: ignore wl_shm::WlShm);

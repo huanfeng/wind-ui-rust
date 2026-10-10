@@ -90,19 +90,17 @@ impl Intervals {
 /// 尺寸变了就重建缓冲；缓冲刚重建（`fresh`）时宿主本帧必须画整窗（对照 win32 / macOS
 /// 的同名分支），否则按宿主报的脏区。尺寸非正返回 `None`。
 ///
-/// `outline`：本帧该不该描外框（无边框且未最大化），颜色取宿主的
-/// [`AppHandler::frame_outline`]，见 [`draw_outline`]。`outlined` 记上一帧描没描：开关
-/// 一变就按缓冲刚重建处理（整窗重画 + 整窗上屏）——外框画在宿主的脏区之外，只按宿主
-/// 的脏区出帧的话，最大化后旧边线留在屏上、还原后新边线传不上去。
-#[allow(clippy::too_many_arguments)]
+/// `want`：本帧窗口边缘要怎么收尾（外框、圆角），见 [`RimWant`] 与 [`paint_rim`]。`last`
+/// 记上一帧的实际收尾：一变就按缓冲刚重建处理（整窗重画 + 整窗上屏）——边缘画在宿主的
+/// 脏区之外，只按宿主的脏区出帧的话，最大化后旧边线 / 透明角留在屏上、还原后新的传不上去。
 pub(super) fn render_frame(
     handler: &mut dyn AppHandler,
     pixmap: &mut Option<Pixmap>,
     fresh: &mut bool,
     (w, h): (i32, i32),
     fallback_bg: Color,
-    outline: bool,
-    outlined: &mut bool,
+    want: RimWant,
+    last: &mut Rim,
 ) -> Option<Rect> {
     if w <= 0 || h <= 0 {
         return None;
@@ -115,12 +113,15 @@ pub(super) fn render_frame(
         *pixmap = Pixmap::new(w as u32, h as u32);
         *fresh = true;
     }
-    let color = if outline {
-        handler.frame_outline()
-    } else {
-        None
+    let rim = Rim {
+        outline: if want.outline {
+            handler.frame_outline()
+        } else {
+            None
+        },
+        radius: want.radius,
     };
-    if std::mem::replace(outlined, color.is_some()) != color.is_some() {
+    if std::mem::replace(last, rim) != rim {
         *fresh = true;
     }
     let pm = pixmap.as_mut()?;
@@ -132,16 +133,34 @@ pub(super) fn render_frame(
         let mut tgt = crate::render::PixmapTarget { pixmap: pm };
         handler.render(&mut tgt, Size::new(w, h));
     }
-    if let Some(c) = color {
-        draw_outline(pm, c);
-    }
     let full = Rect::new(0, 0, w, h);
     let drawn = match (*fresh, handler.last_frame_damage()) {
         (false, Some(d)) => d.intersect(&full),
         _ => full,
     };
+    paint_rim(pm, drawn, rim);
     *fresh = false;
     Some(drawn)
+}
+
+/// 窗口圆角半径（逻辑像素）。与 Windows 11 的 DWM 圆角同值，同一个应用在两个平台上一个样。
+pub(super) const WINDOW_CORNER: f32 = 8.0;
+
+/// 后端对本帧窗口边缘的要求。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct RimWant {
+    /// 描 1px 外框（颜色问宿主，宿主不给就不描）。无边框且未最大化时为真。
+    pub outline: bool,
+    /// 圆角半径（物理像素，0 = 方角）。只有缓冲带 alpha 且会被合成（Wayland、X11 有合成器
+    /// 时的 ARGB 窗口）、未最大化时才非零——否则透明的角是黑块。
+    pub radius: f32,
+}
+
+/// 实际收尾：外框色 + 圆角半径（物理像素）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Rim {
+    pub outline: Option<Color>,
+    pub radius: f32,
 }
 
 /// 无边框窗口的缩放边命中：`enabled`（可缩放、未最大化等由后端判）且落在边上、那里不是
@@ -162,43 +181,91 @@ pub(super) fn frameless_resize_edge(
     edge_direction(pos, w, h, border).filter(|_| !interactive(pos))
 }
 
-/// 无边框窗口的 1px 外框：沿缓冲四边按 source-over 叠 `c`（半透明的主题边框色照常混合）。
+/// 窗口边缘收尾：沿圆角矩形（`rim.radius`，0 = 方角）内侧描 1px 外框（`rim.outline`，
+/// source-over，半透明照常混合），圆角之外的像素按覆盖率淡到全透明（预乘，抗锯齿）。
 ///
-/// Windows 上无边框窗口由 DWM 给一圈细边与阴影，X11 / Wayland 的 WM 对去掉装饰的窗口
-/// 什么都不画——窗口与同色的桌面或背后的窗口连成一片，看不出边界，自然也找不到缩放边。
-/// 阴影要 ARGB 视觉 + 合成器 + 透明外扩区，这里只补最要紧的那条线。
+/// 为什么要外框：Windows 上无边框窗口由 DWM 给一圈细边、阴影与圆角，X11 / Wayland 的 WM
+/// 对去掉装饰的窗口什么都不画——窗口与同色的桌面或背后的窗口连成一片，看不出边界，自然
+/// 也找不到缩放边。阴影要透明外扩区，这里不做。
 ///
-/// 每帧画完都重描：局部帧里控件可能把脏区内的那段边线盖掉，脏区外的边线上一帧画过、
-/// 没被动过（重描半透明色不会越叠越深：脏区外的像素不重描，脏区内的先被宿主重画过）。
-/// 上屏只传脏区，故整圈重描没有额外上屏开销。开关切换时的整窗重画由 [`render_frame`] 负责。
-pub(super) fn draw_outline(pm: &mut Pixmap, c: Color) {
-    let (w, h) = (pm.width() as usize, pm.height() as usize);
-    if w == 0 || h == 0 {
+/// **只处理 `clip`（本帧重画过的矩形）之内的像素**：混合与淡出都是对现有像素的乘加，
+/// 对上一帧已收尾、本帧没重画的像素再来一遍，半透明外框会越叠越深、角会越来越淡。
+/// 调用方保证 `clip` 之内的像素是宿主刚画的（`render_frame` 的 `drawn` 正是如此）。
+///
+/// 只碰边缘一圈（宽 = 圆角半径与 2 像素中较大者），其余像素不读不写。
+pub(super) fn paint_rim(pm: &mut Pixmap, clip: Rect, rim: Rim) {
+    if rim.outline.is_none() && rim.radius <= 0.0 {
         return;
     }
-    // 缓冲是预乘 RGBA：out = src_premul + dst × (1 − a)。
-    let a = c.a as u32;
-    let src = [c.r, c.g, c.b].map(|v| (v as u32 * a + 127) / 255);
+    let (w, h) = (pm.width() as i32, pm.height() as i32);
+    let clip = clip.intersect(&Rect::new(0, 0, w, h));
+    if clip.is_empty() {
+        return;
+    }
+    let r = rim.radius.clamp(0.0, w.min(h) as f32 / 2.0);
+    let band = (r.ceil() as i32).max(2);
+    // 外框色预乘：[r, g, b, a]，0..=1。
+    let line = rim.outline.map(|c| {
+        let a = c.a as f32 / 255.0;
+        let ch = |v: u8| v as f32 / 255.0 * a;
+        [ch(c.r), ch(c.g), ch(c.b), a]
+    });
+    let stride = w as usize * 4;
     let data = pm.data_mut();
-    let mut put = |x: usize, y: usize| {
-        let o = (y * w + x) * 4;
-        let px = &mut data[o..o + 4];
-        for k in 0..3 {
-            px[k] = (src[k] + (px[k] as u32 * (255 - a) + 127) / 255) as u8;
+    let mut shade = |x: i32, y: i32| {
+        let d = rounded_rect_sdf(x as f32 + 0.5, y as f32 + 0.5, w as f32, h as f32, r);
+        if d < -1.5 {
+            return; // 在外框内侧之内：不受影响
         }
-        px[3] = (a + (px[3] as u32 * (255 - a) + 127) / 255) as u8;
+        let inside = coverage(d);
+        let o = y as usize * stride + x as usize * 4;
+        let px = &mut data[o..o + 4];
+        let mut p = [0f32; 4];
+        for k in 0..4 {
+            p[k] = px[k] as f32 / 255.0;
+        }
+        // 按面积加权：像素里 `ring` 那部分是外框叠在内容上（L + C·(1 − aL)），其余
+        // `inside − ring` 是内容本身，形状外的部分透明（仅圆角时；方角时 inside 恒为 1）。
+        // 合起来 = ring·L + C·(inside − ring·aL)。ring 本身已含 inside 因子，不能再整体乘一遍——
+        // 那样弧上的外框会比直边淡一半。
+        let inside = if r > 0.0 { inside } else { 1.0 };
+        // 外框 = 圆角矩形内侧 1px 的环带；没有外框时环带权重为 0。
+        let (lc, ring) = match line {
+            Some(c) => (c, inside - coverage(d + 1.0)),
+            None => ([0.0; 4], 0.0),
+        };
+        for i in 0..4 {
+            p[i] = lc[i] * ring + p[i] * (inside - lc[3] * ring);
+        }
+        for k in 0..4 {
+            px[k] = (p[k] * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
     };
-    // 每个边框像素只叠一次：角上（以及宽 / 高为 1 时重合的两条边）叠两次，半透明色就会变深。
-    for y in 0..h {
-        if y == 0 || y == h - 1 {
-            (0..w).for_each(|x| put(x, y));
+    for y in clip.y..clip.bottom() {
+        // 只有最外两行的中段受影响（直边外框）；其余行只碰左右各 `band` 宽，圆角方块
+        // 落在这里——整行算距离场在 200% 大窗上每帧要多算几万次。
+        if y < 2 || y >= h - 2 {
+            (clip.x..clip.right()).for_each(|x| shade(x, y));
         } else {
-            put(0, y);
-            if w > 1 {
-                put(w - 1, y);
-            }
+            let left = clip.x..clip.right().min(band);
+            let right = clip.x.max(w - band).max(band)..clip.right();
+            left.chain(right).for_each(|x| shade(x, y));
         }
     }
+}
+
+/// 点 (x, y) 到 `w × h`、圆角 `r` 的矩形（左上角在原点）边界的有符号距离：内负外正。
+fn rounded_rect_sdf(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
+    let (hx, hy) = (w / 2.0, h / 2.0);
+    let qx = (x - hx).abs() - (hx - r);
+    let qy = (y - hy).abs() - (hy - r);
+    let outer = qx.max(0.0).hypot(qy.max(0.0));
+    outer + qx.max(qy).min(0.0) - r
+}
+
+/// 像素中心到边界距离 `d` → 该像素落在形状内的覆盖率（1 像素宽的线性过渡）。
+fn coverage(d: f32) -> f32 {
+    (0.5 - d).clamp(0.0, 1.0)
 }
 
 /// 事件分发后要从宿主取走的意图，由后端逐项落到各自的协议请求上。
@@ -556,11 +623,111 @@ mod tests {
         assert!(!g.release());
     }
 
+    /// 方角整窗描外框。
+    fn outline(pm: &mut Pixmap, c: Color) {
+        let full = Rect::new(0, 0, pm.width() as i32, pm.height() as i32);
+        paint_rim(
+            pm,
+            full,
+            Rim {
+                outline: Some(c),
+                radius: 0.0,
+            },
+        );
+    }
+
+    fn white(w: u32, h: u32) -> Pixmap {
+        let mut pm = Pixmap::new(w, h).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        pm
+    }
+
+    fn alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
+        pm.pixel(x, y).unwrap().alpha()
+    }
+
+    /// 圆角之外全透明、边线中段与内部原样不动、过渡带上半透明，四角对称。
+    #[test]
+    fn rounded_corners_fade_out_with_antialiasing() {
+        let mut pm = white(40, 30);
+        let rim = Rim {
+            outline: None,
+            radius: 8.0,
+        };
+        paint_rim(&mut pm, Rect::new(0, 0, 40, 30), rim);
+        for (x, y) in [(0, 0), (39, 0), (0, 29), (39, 29), (1, 1)] {
+            assert_eq!(alpha(&pm, x, y), 0, "({x},{y}) 在圆角外应全透明");
+        }
+        for (x, y) in [(0, 15), (39, 15), (20, 0), (20, 29), (20, 15), (3, 3)] {
+            assert_eq!(alpha(&pm, x, y), 255, "({x},{y}) 在圆角内应不透明");
+        }
+        // 45° 方向圆弧经过的像素半透明（抗锯齿），且四角一致。(2,2) 的中心 (2.5, 2.5) 到
+        // 圆心 (8, 8) 约 7.78，落在半径 8 的过渡带里；(2,1) 约 8.51，已在圆外。
+        assert_eq!(alpha(&pm, 2, 1), 0);
+        let edge = alpha(&pm, 2, 2);
+        assert!(edge > 100 && edge < 255, "过渡像素 alpha = {edge}");
+        assert_eq!(edge, alpha(&pm, 37, 2));
+        assert_eq!(edge, alpha(&pm, 2, 27));
+        assert_eq!(edge, alpha(&pm, 37, 27));
+        // 预乘：颜色通道随 alpha 一起淡。
+        let px = pm.pixel(2, 2).unwrap();
+        assert_eq!(px.red(), edge);
+    }
+
+    /// 外框跟着圆角走：直边上是外框色，圆角外仍透明，内侧一像素不动。
+    #[test]
+    fn outline_follows_the_rounded_shape() {
+        let mut pm = white(40, 30);
+        let rim = Rim {
+            outline: Some(Color::rgb(0, 0, 0)),
+            radius: 8.0,
+        };
+        paint_rim(&mut pm, Rect::new(0, 0, 40, 30), rim);
+        let px = pm.pixel(20, 0).unwrap();
+        assert_eq!((px.red(), px.alpha()), (0, 255), "上边中段是外框色");
+        assert_eq!(pm.pixel(20, 1).unwrap().red(), 255, "外框只有 1px");
+        assert_eq!(alpha(&pm, 0, 0), 0, "圆角外透明");
+        // 45° 方向圆弧上的像素是外框色（黑）而不是灰：去掉预乘后颜色接近 0。弧上像素的
+        // 覆盖率约 0.72，整个可见部分都在 1px 环带里，故应是纯外框色。
+        let arc = pm.pixel(2, 2).unwrap();
+        assert!(arc.alpha() > 150, "弧上像素应大半可见：{arc:?}");
+        let unpremul = arc.red() as u32 * 255 / arc.alpha() as u32;
+        assert!(unpremul < 32, "弧上外框应与直边同色：{arc:?}");
+        // 弧内侧（中心到圆心约 6.36，离边 1.6px）在外框环带之外，原样白色。
+        assert_eq!(pm.pixel(3, 3).unwrap().red(), 255);
+    }
+
+    /// 只动 `clip` 之内：对已收尾的像素重复收尾会越叠越深 / 越淡。
+    #[test]
+    fn rim_only_touches_pixels_inside_clip() {
+        let rim = Rim {
+            outline: Some(Color::rgba(0, 0, 0, 51)),
+            radius: 8.0,
+        };
+        let mut pm = white(40, 30);
+        paint_rim(&mut pm, Rect::new(0, 0, 40, 30), rim);
+        let once = pm.clone();
+        // 第二帧只重画了中间一块（没碰边缘）：边缘像素必须原样。
+        paint_rim(&mut pm, Rect::new(10, 10, 5, 5), rim);
+        assert_eq!(pm.data(), once.data(), "clip 外的边缘被重复收尾了");
+        // 第三帧宿主重画了左上角 8×8（恢复成白），clip 只盖这块：左上角重新收尾、结果与
+        // 第一次相同（不是叠加），其余三个角原样。
+        let tl = Rect::new(0, 0, 8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let o = (y * 40 + x) * 4;
+                pm.data_mut()[o..o + 4].copy_from_slice(&[255; 4]);
+            }
+        }
+        paint_rim(&mut pm, tl, rim);
+        assert_eq!(pm.data(), once.data(), "重画后重新收尾应与首次一致");
+    }
+
     #[test]
     fn outline_covers_exactly_the_one_pixel_rim() {
         let mut pm = Pixmap::new(5, 4).unwrap();
         let c = Color::rgb(10, 20, 30);
-        draw_outline(&mut pm, c);
+        outline(&mut pm, c);
         for y in 0..4 {
             for x in 0..5 {
                 let px = pm.pixel(x, y).unwrap();
@@ -574,14 +741,14 @@ mod tests {
             }
         }
         // 1×1 的缓冲不越界。
-        draw_outline(&mut Pixmap::new(1, 1).unwrap(), c);
+        outline(&mut Pixmap::new(1, 1).unwrap(), c);
     }
 
     #[test]
     fn translucent_outline_blends_over_existing_pixels() {
         let mut pm = Pixmap::new(3, 3).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
-        draw_outline(&mut pm, Color::rgba(0, 0, 0, 51)); // 20% 黑
+        outline(&mut pm, Color::rgba(0, 0, 0, 51)); // 20% 黑
         let px = pm.pixel(0, 0).unwrap();
         assert_eq!(
             (px.red(), px.alpha()),
@@ -596,10 +763,17 @@ mod tests {
                 "({x},{y}) 只叠一次，角也一样"
             );
         }
+        // 只有一列时左右边重合，同样只叠一次。
+        let mut col = Pixmap::new(1, 4).unwrap();
+        col.fill(tiny_skia::Color::WHITE);
+        outline(&mut col, Color::rgba(0, 0, 0, 51));
+        for y in 0..4 {
+            assert_eq!(col.pixel(0, y).unwrap().red(), 204, "(0,{y})");
+        }
         // 只有一行时上下边重合，同样只叠一次。
         let mut row = Pixmap::new(4, 1).unwrap();
         row.fill(tiny_skia::Color::WHITE);
-        draw_outline(&mut row, Color::rgba(0, 0, 0, 51));
+        outline(&mut row, Color::rgba(0, 0, 0, 51));
         assert_eq!(row.pixel(0, 0).unwrap().red(), 204);
     }
 
@@ -653,24 +827,30 @@ mod tests {
     fn toggling_outline_forces_a_full_frame() {
         let small = Rect::new(10, 10, 5, 5);
         let mut h = Stub(Some(small));
-        let (mut pm, mut fresh, mut outlined) = (None, false, false);
+        let (mut pm, mut fresh, mut last) = (None, false, Rim::default());
         let full = Rect::new(0, 0, 50, 40);
-        let mut frame = |outline: bool| {
+        let mut frame = |outline: bool, radius: f32| {
+            let want = RimWant { outline, radius };
             render_frame(
                 &mut h,
                 &mut pm,
                 &mut fresh,
                 (50, 40),
                 Color::WHITE,
-                outline,
-                &mut outlined,
+                want,
+                &mut last,
             )
         };
-        assert_eq!(frame(true), Some(full), "首帧整窗");
-        assert_eq!(frame(true), Some(small), "开关不变：按宿主脏区");
-        assert_eq!(frame(false), Some(full), "关掉外框：整窗");
-        assert_eq!(frame(false), Some(small));
-        assert_eq!(frame(true), Some(full), "再打开：整窗");
+        assert_eq!(frame(true, 8.0), Some(full), "首帧整窗");
+        assert_eq!(frame(true, 8.0), Some(small), "收尾不变：按宿主脏区");
+        assert_eq!(
+            frame(false, 0.0),
+            Some(full),
+            "最大化（外框、圆角都去掉）：整窗"
+        );
+        assert_eq!(frame(false, 0.0), Some(small));
+        assert_eq!(frame(true, 0.0), Some(full), "只开外框：整窗");
+        assert_eq!(frame(true, 8.0), Some(full), "只开圆角：整窗");
     }
 
     #[test]

@@ -447,8 +447,11 @@ struct Win {
     /// 指针停在缩放边上时的方向码：光标显示该方向的缩放形状、压过控件与标题栏要的光标。
     /// 判据见 `resize_edge_at`（与按下接管同源）。
     edge_hover: Option<u32>,
-    /// 上一帧描了外框（见 `host::render_frame` 的 `outlined`）。
-    outlined: bool,
+    /// 上一帧的边缘收尾（见 `host::render_frame` 的 `last`）。
+    rim: host::Rim,
+    /// 已设的不透明区域（逻辑宽、高、圆角）：无边框窗口缓冲带 alpha，不告诉合成器哪里不透明
+    /// 的话，它每帧都得对整个表面做混合，最大化的大窗也用不上直接扫描输出。
+    opaque: Option<(i32, i32, i32)>,
     slots: ShmSlots,
     bufs: Vec<Option<ShmBuffer>>,
     // ── 指针 ──
@@ -634,7 +637,8 @@ impl Wl {
             intervals,
             cursor: CursorShape::Arrow,
             edge_hover: None,
-            outlined: false,
+            rim: host::Rim::default(),
+            opaque: None,
             slots: ShmSlots::default(),
             bufs: Vec::new(),
             click: ClickTracker::default(),
@@ -1224,9 +1228,30 @@ impl Wl {
                         &mut w.fresh,
                         (cw, ch),
                         w.bg,
-                        w.frameless && !w.state.maximized,
-                        &mut w.outlined,
+                        host::RimWant {
+                            outline: w.frameless && !w.state.maximized,
+                            // Wayland 的表面总是被合成，ARGB 缓冲的透明角直接生效；平铺时
+                            // 与最大化一样贴着屏幕边或别的窗口，圆角留缝难看。
+                            radius: if w.frameless && !w.state.maximized && !w.state.tiled {
+                                host::WINDOW_CORNER * w.scale.factor as f32
+                            } else {
+                                0.0
+                            },
+                        },
+                        &mut w.rim,
                     );
+                    if w.frameless {
+                        let corner = if w.rim.radius > 0.0 {
+                            host::WINDOW_CORNER.ceil() as i32
+                        } else {
+                            0
+                        };
+                        let want = (w.logical.0, w.logical.1, corner);
+                        if w.opaque != Some(want) {
+                            w.opaque = Some(want);
+                            set_opaque_region(&self.g.compositor, &self.qh, &w.surface, want);
+                        }
+                    }
                     full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
                     // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
                     if let Some(d) = drawn {
@@ -1306,7 +1331,17 @@ impl Wl {
             if let Some(old) = w.bufs[plan.index].take() {
                 old.destroy();
             }
-            match create_buffer(&self.g.shm, &self.qh, w.key, plan.index, w.w, total_h) {
+            // 无边框窗口要透明圆角，缓冲带 alpha；其余窗口不透明，XRGB 让合成器省掉混合。
+            let alpha = w.frameless;
+            match create_buffer(
+                &self.g.shm,
+                &self.qh,
+                w.key,
+                plan.index,
+                w.w,
+                total_h,
+                alpha,
+            ) {
                 Ok(b) => w.bufs[plan.index] = Some(b),
                 Err(e) => {
                     log::error!("创建 wl_shm 缓冲失败（{}×{}）：{e}", w.w, total_h);
@@ -1485,6 +1520,25 @@ impl Wl {
             || compositor.create_surface(qh, 0),
         );
     }
+}
+
+/// 设表面的不透明区域（表面坐标 = 逻辑像素）：方角为整面，圆角时扣掉四个角的方块
+/// （横竖两条矩形的并）。下次 commit 生效。
+fn set_opaque_region(
+    compositor: &wl_compositor::WlCompositor,
+    qh: &QueueHandle<Wl>,
+    surface: &wl_surface::WlSurface,
+    (w, h, r): (i32, i32, i32),
+) {
+    let region = compositor.create_region(qh, ());
+    if r > 0 && w > 2 * r && h > 2 * r {
+        region.add(0, r, w, h - 2 * r);
+        region.add(r, 0, w - 2 * r, h);
+    } else if r == 0 {
+        region.add(0, 0, w, h);
+    }
+    surface.set_opaque_region(Some(&region));
+    region.destroy();
 }
 
 /// `xdg_toplevel.configure` 的状态数组（原生字节序的 u32 列表）。

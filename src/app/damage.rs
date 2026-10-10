@@ -257,9 +257,11 @@ impl UiHost {
         // 子 pixmap：脏区大小，按窗口背景填底（与全窗帧平台 fill 同色，重建一致）。
         let Some(mut sub) = Pixmap::new(pdmg.w as u32, pdmg.h as u32) else {
             // 分配失败（本质是 OOM）：这一帧不动 pixmap——它仍是上一帧的完整画面，
-            // 显示正确只是没更新——并要求下一帧整窗重画。
+            // 显示正确只是没更新——并要求下一帧整窗重画。报"一个像素都没改"而不是
+            // `None`：`None` 的意思是整窗都重画了，平台据此对整窗做收尾（Linux 无边框
+            // 窗口的外框混合、圆角淡出都是乘加），对没重画的像素再做一遍会越叠越深。
             self.damage.needs_full = true;
-            self.last_present = None;
+            self.last_present = Some(Rect::default());
             return;
         };
         sub.fill(tiny_skia::Color::from_rgba8(

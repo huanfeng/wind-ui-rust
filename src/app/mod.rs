@@ -2417,6 +2417,10 @@ impl App {
 }
 
 /// 把底层渲染闭包适配为 AppHandler（不处理输入）。
+///
+/// 不报脏区（`last_frame_damage` = `None`，即"整窗都画了"），故闭包须每帧画满整个
+/// 目标——Linux 无边框窗口每帧会对整窗边缘做收尾（圆角淡出），没被闭包重画的角上像素
+/// 会一帧帧淡下去。
 struct ClosureHandler {
     f: RenderClosure,
 }

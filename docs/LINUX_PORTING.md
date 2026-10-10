@@ -90,8 +90,21 @@ softbuffer（X11 下同样是 PutImage/SHM，多一层抽象）、cosmic-text / 
   吃掉，双击最大化永远凑不齐第二下。指针停在缩放边上换成该方向的缩放光标（核心协议
   `cursor` 字体的八个边角形状，与 WM 画边框时同一组），判据与按下接管同源
   （`host::frameless_resize_edge`，两个后端共用）。未最大化时沿窗口四边描 1px 外框（宿主
-  `AppHandler::frame_outline`，即主题 `palette.border`，见 `host::draw_outline`；开关切换时
+  `AppHandler::frame_outline`，即主题 `palette.border`，见 `host::paint_rim`；收尾变化时
   整窗重画）——WM 对去掉装饰的窗口什么都不画，深色窗口在深色桌面上连边界都看不出。
+- **无边框窗口圆角**：8 逻辑像素（同 Win11 DWM），未最大化时四角按覆盖率淡到透明、外框沿弧走。
+  要透明就得 ARGB：启动时 `_NET_WM_CM_S<屏>` 选区有人持有（有合成器）且屏幕有 32 位真彩视觉，
+  无边框窗口才用深度 32 + 自带 colormap 建窗（上屏用同深度 GC，像素预乘）；否则方角——没有
+  合成器时透明像素没人混合，圆角外是黑块。合成器中途退出 / 重新出现经 XFixes 选区通知跟随：
+  退出时圆角半径归零、整窗重画成方角（ARGB 窗口不必重建，alpha 全 255 照常显示）；启动时没有
+  合成器、事后才有的情形仍是方角（窗口已按 24 位建好）。`WINDUI_NO_ARGB=1` 强制方角，留给
+  对 32 位客户端处理不好的 WM 当逃生口。
+  收尾（外框混合、角淡出）都是对现有像素的乘加，**只对本帧重画过的矩形做**，否则半透明外框
+  越叠越深、角越来越淡——故 `AppHandler::last_frame_damage` 的契约是"报的区域每个像素都重画过"，
+  底层渲染闭包（`App::render`）必须每帧画满整窗。背景色带 alpha 时 ARGB 窗口内容区会真的半透明
+  （Windows 上不会）。Xvfb + xcompmgr 上服务器里的像素经 `GetImage` 核对无误（角 alpha 0、
+  弧上半透明，合成器退出 / 重现时随之切换），但 xcompmgr 合成出的角仍是黑的，原因未查明；
+  真桌面（mutter / KWin）待人工确认。
 - **全局热键**：一个组合抓四遍（叠加 CapsLock / NumLock 的变体），否则开着数字锁就不灵。
   Wayland 会话下经 XWayland 只在 X 客户端有焦点时生效——协议限制，要走
   xdg-desktop-portal 的 GlobalShortcuts。
@@ -287,8 +300,10 @@ libwayland，编译期不要 `-dev` 包。**不用 smithay-client-toolkit**：�
   `XCURSOR_THEME` / `XCURSOR_SIZE`（默认 `default` / 24），尺寸乘缩放向上取整、光标表面
   设 buffer_scale——取不超过缩放、且整除图像宽高的最大整数（主题挑到的档未必是缩放的
   整数倍，不整除是协议错误、连接直接断开）。
-- **无边框窗口**：缩放边悬停光标与 1px 外框同 X11（光标走 `cursor::Look::Resize`，有
-  `cursor-shape-v1` 报 `nw-resize` 等形状、否则按主题名加载）。拖动区 / 缩放边（6 逻辑像素）按下后**移出阈值才**发
+- **无边框窗口**：缩放边悬停光标、1px 外框与圆角同 X11（缓冲改 `Argb8888`，表面总被合成，
+  不需要检测；平铺时同最大化取方角）（光标走 `cursor::Look::Resize`，有
+  `cursor-shape-v1` 报 `nw-resize` 等形状、否则按主题名加载）。缓冲带 alpha，故按圆角设
+  `wl_surface.set_opaque_region`（扣掉四角方块），合成器不必对整面做混合。拖动区 / 缩放边（6 逻辑像素）按下后**移出阈值才**发
   `xdg_toplevel.move` / `resize`（带按下的 serial）。Wayland 上理由换了形式：move 一发合成器
   立即接管指针，配对的松开不再送给客户端，单击标题栏也会变成一次移动、双击的第二下凑不齐；
   按下的 serial 在按住期间一直有效，晚发不影响合成器认可。双击拖动区切最大化。拖动区右键
