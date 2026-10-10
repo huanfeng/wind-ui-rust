@@ -21,8 +21,8 @@ use tiny_skia::Pixmap;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
+    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromWindow,
@@ -71,14 +71,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
     SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE,
-    WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
+    WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT,
+    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
+    WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1025,6 +1025,13 @@ struct WindowState {
     touch: Touch,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
+    /// 无边框且 DWM 不在客户区上画边框（Win10）：未最大化时由宿主自己画 1px 外框，
+    /// 见 `AppHandler::set_window_outline`。建窗时按圆角属性设没设成判定。
+    self_outline: bool,
+    /// 窗口此刻是否激活（`WM_ACTIVATE`）：激活时外框可能取强调色。
+    active: bool,
+    /// 已交给宿主的外框色（去重，变了才整窗重画）。
+    outline: Option<Color>,
     /// 是否已向系统申请鼠标离开通知（TrackMouseEvent）。离开后系统清此标志需重新申请。
     mouse_tracked: bool,
     /// WM_CHAR 暂存的高代理项：补充平面字符（emoji 等）分两条 WM_CHAR 发来 UTF-16 代理对。
@@ -1164,6 +1171,9 @@ impl WindowState {
             icons: [None, None],
             icon_src: None,
             modal_owner: None,
+            self_outline: false,
+            active: false,
+            outline: None,
         }
     }
 
@@ -1572,6 +1582,27 @@ unsafe fn create_window(
             // 日后有人改 `pref` 的类型时不会留下静默失配的尺寸参数。
             size_of_val(&pref) as u32,
         );
+        // 外框由谁画：问 DWM 认不认"可见边框厚度"这个属性。认（Win11，22000 起）就说明
+        // 它会在客户区之上给所有窗口画 1px 边框；不认（Win10，含 Server 2022、LTSC）查询
+        // 失败——那里没有任何边框：普通窗口那条边画在非客户区里，而我们把非客户区整个
+        // 消掉了，阴影又可能被「在窗口下显示阴影」关掉，窗口与桌面连成一片，故改由宿主
+        // 自己画。
+        //
+        // 只看查询成败、不看厚度值：建窗时窗口还没显示，Win11 此刻答的厚度是否可靠没有
+        // 保证，答 0 就会在 DWM 的边框上再叠一层自画的线。也不拿上面圆角属性设没设成来判、
+        // 不查版本号：问的就是"DWM 这一代画不画边框"，圆角那条哪天改了条件不受牵连。
+        let mut thickness = 0u32;
+        let dwm_border = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            &mut thickness as *mut _ as *mut c_void,
+            size_of_val(&thickness) as u32,
+        )
+        .is_ok();
+        if let Some(s) = state_from(hwnd) {
+            s.self_outline = !dwm_border;
+        }
+        push_window_state(hwnd);
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -2154,6 +2185,11 @@ unsafe extern "system" fn wnd_proc(
             handle_activate(hwnd, wparam);
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        // 强调色变了：Win10 自画外框跟着换色。
+        WM_DWMCOLORIZATIONCOLORCHANGED => {
+            sync_outline(hwnd);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         // 系统设置变更。**只认主题那一项**——字体、区域、鼠标速度、电源计划都走同一条
         // 消息，不筛就会在用户改任何系统设置时白重建一次界面。
         //
@@ -2162,6 +2198,9 @@ unsafe extern "system" fn wnd_proc(
         // `App::on_system_theme_changed` 一次都没触发过）。每个窗口通知自己的宿主，
         // 应用级那份回调随主窗的宿主一起被叫到。
         WM_SETTINGCHANGE => {
+            // 「在标题栏和窗口边框上显示强调色」的开关不一定伴随颜色变化消息，顺带重读
+            // 一次（只有自画外框的窗口才真的读注册表）。
+            sync_outline(hwnd);
             let is_theme = lparam.0 != 0 && {
                 let name = windows::core::PCWSTR(lparam.0 as *const u16);
                 name.to_string().is_ok_and(|s| s == "ImmersiveColorSet")
@@ -2520,6 +2559,65 @@ unsafe fn push_window_state(hwnd: HWND) {
     };
     if let Some(state) = state_from(hwnd) {
         state.handler.on_window_state(st);
+    }
+    sync_outline(hwnd);
+}
+
+/// Win10 无边框窗口的外框色，仿 Win11 DWM 给所有窗口画的那圈边：灰色；激活且开了
+/// 「在标题栏和窗口边框上显示强调色」时用强调色。灰色取资源管理器失活时的边（实测
+/// `#AAAAAA`）。读不到注册表按没开强调色处理。
+fn win10_outline_color(active: bool) -> Color {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let read = |name: windows::core::PCWSTR| {
+        let mut v: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let st = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Windows\\DWM"),
+                name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some(&mut v as *mut u32 as *mut c_void),
+                Some(&mut size),
+            )
+        };
+        st.is_ok().then_some(v)
+    };
+    let gray = Color::hex(0xAAAAAA);
+    if !active || read(w!("ColorPrevalence")) != Some(1) {
+        return gray;
+    }
+    // AccentColor 是 0xAABBGGRR。
+    match read(w!("AccentColor")) {
+        Some(v) => Color::rgb(v as u8, (v >> 8) as u8, (v >> 16) as u8),
+        None => gray,
+    }
+}
+
+/// 按窗口当前状态重设宿主自画外框（见 `AppHandler::set_window_outline`），变了就重画。
+///
+/// 最大化时窗口贴屏幕边，外框只会画在屏幕边缘上，去掉；最小化时不渲染，维持原状，免得
+/// "最大化 → 最小化 → 恢复"白白开关两次、多出两次整窗帧。两段式（铁律 6）：OS 查询与
+/// 注册表读取先做完，再借 state；只有自画外框的窗口才读注册表。
+unsafe fn sync_outline(hwnd: HWND) {
+    let Some((wanted, active)) = state_from(hwnd).map(|s| (s.self_outline, s.active)) else {
+        return;
+    };
+    if !wanted || IsIconic(hwnd).as_bool() {
+        return;
+    }
+    let color = (!IsZoomed(hwnd).as_bool()).then(|| win10_outline_color(active));
+    let changed = state_from(hwnd).is_some_and(|s| {
+        let changed = std::mem::replace(&mut s.outline, color) != color;
+        if changed {
+            s.handler.set_window_outline(color);
+        }
+        changed
+    });
+    if changed {
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -3598,11 +3696,14 @@ unsafe fn handle_activate(hwnd: HWND, wparam: WPARAM) {
         let Some(state) = state_from(hwnd) else {
             return;
         };
+        state.active = active;
         state.handler.on_window_activated(active)
     };
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
+    // Win10 自画外框：激活时可能换强调色。
+    sync_outline(hwnd);
 }
 
 unsafe fn handle_capture_changed(hwnd: HWND) {

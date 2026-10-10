@@ -2507,6 +2507,8 @@ struct UiHost {
     interval_durs: Vec<std::time::Duration>,
     /// 帧耗时浮层开关（环境变量 WINDUI_FPS 非空时开启）。
     show_fps: bool,
+    /// 平台要求宿主自己画的 1px 窗口外框色（见 `AppHandler::set_window_outline`）。
+    window_outline: Option<Color>,
     /// 关闭请求拦截器：返回 true 允许关闭，false 取消。None 时默认允许。
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
@@ -2780,6 +2782,7 @@ impl UiHost {
             interval_cbs,
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
+            window_outline: None,
             close_handler,
             show_handler,
             activate_handler: None,
@@ -3221,6 +3224,26 @@ fn parse_key_spec(spec: &str) -> Option<crate::event::KeyEvent> {
     })
 }
 
+/// 窗口四边 1px 外框（物理像素 1 px，见 `AppHandler::set_window_outline`）。
+///
+/// 四条边互不重叠（左右两条避开上下两行）：主题边框色半透明时，角上不会叠两层。
+/// 坐标按物理尺寸 / 缩放算，不用取整后的逻辑尺寸——分数缩放下那样会差出半像素，
+/// 右 / 下边线画到窗口外或缩进一像素。
+pub(super) fn paint_window_outline(
+    canvas: &mut dyn crate::render::Canvas,
+    color: Option<Color>,
+    size: Size,
+    s: f32,
+) {
+    let Some(c) = color else { return };
+    let (w, h, t) = (size.w as f32 / s, size.h as f32 / s, 1.0 / s);
+    let p = Paint::fill(c);
+    canvas.fill_rect(0.0, 0.0, w, t, &p);
+    canvas.fill_rect(0.0, h - t, w, t, &p);
+    canvas.fill_rect(0.0, t, t, h - 2.0 * t, &p);
+    canvas.fill_rect(w - t, t, t, h - 2.0 * t, &p);
+}
+
 /// 帧耗时浮层（WINDUI_FPS=1）：左上角显示本帧渲染耗时与估算 fps，用于排查卡顿。
 fn paint_fps(canvas: &mut dyn crate::render::Canvas, frame_t0: std::time::Instant) {
     let ms = frame_t0.elapsed().as_secs_f32() * 1000.0;
@@ -3322,6 +3345,7 @@ impl AppHandler for UiHost {
         }
         self.last_present = None;
         self.prepare_full_frame(logical, laid_out, now_ms);
+        let outline = self.window_outline_color();
         // canvas 借的是 self.engine，与下面各浮层状态是不相交字段，借用安全。
         let mut canvas = target.make_canvas(&mut self.engine, s);
         self.tree.paint(&mut *canvas);
@@ -3338,6 +3362,7 @@ impl AppHandler for UiHost {
             .paint(&mut *canvas, &self.theme, self.logical_size, now_ms);
         // 菜单画在 toast 之后，确保菜单不被 toast 遮挡。
         self.menu.paint(&mut *canvas, &self.theme);
+        paint_window_outline(&mut *canvas, outline, size, s);
         if self.show_fps {
             paint_fps(&mut *canvas, frame_t0);
         }
@@ -3709,6 +3734,13 @@ impl AppHandler for UiHost {
     /// 经 `App::bg` 显式固定过底色时不跟随主题（与 `bg_follows_theme` 的既定语义一致）。
     fn frame_outline(&self) -> Option<Color> {
         Some(self.theme_src.current().palette.border)
+    }
+
+    fn set_window_outline(&mut self, color: Option<Color>) {
+        if std::mem::replace(&mut self.window_outline, color) != color {
+            // 外框在所有节点的脏区之外：开关一变必须整窗重画。
+            self.damage.needs_full = true;
+        }
     }
 
     fn bg(&self) -> Option<Color> {
@@ -7595,5 +7627,121 @@ mod tests {
         layout_once(&mut host, 200, 120);
         press(&mut host, 60, 16, MouseButton::Right);
         assert!(menu_rows(&host).is_empty(), "macOS 不该默认接管标题栏右键");
+    }
+
+    /// 平台要求宿主画外框（Win10 无边框窗）：整窗帧画出四边，局部帧之后边线原样（子缓冲
+    /// 新铺底，不叠加），半透明边框色在角上也只叠一层，关掉后整窗重画、边线消失。
+    #[test]
+    fn window_outline_survives_partial_frames_without_stacking() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let theme = Theme::default();
+        let line = Color::rgba(0, 0, 0, 128);
+        let bg = theme.palette.bg;
+        let app = App::new("t", 200, 100).theme(theme).content(
+            Element::col()
+                .width(200)
+                .height(100)
+                .child(Element::button("按钮").width(80).height(30)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(200, 100).unwrap();
+        let size = Size::new(200, 100);
+        let red = |pm: &Pixmap, x: u32, y: u32| pm.pixel(x, y).unwrap().red() as i32;
+        // 50% 黑叠在不透明底色上 ≈ 底色一半；角上若叠两层会是四分之一。
+        let half = bg.r as i32 / 2;
+        let rim = [(100, 0), (100, 99), (0, 50), (199, 50), (0, 0), (199, 99)];
+
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+        assert_eq!(red(&pm, 0, 0), bg.r as i32, "默认不画外框");
+
+        h.set_window_outline(Some(line));
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+        for (x, y) in rim {
+            assert!(
+                (red(&pm, x, y) - half).abs() <= 2,
+                "({x},{y}) 应叠一层外框色"
+            );
+        }
+        assert_eq!(red(&pm, 100, 50), bg.r as i32, "内部不动");
+
+        // 悬停按钮出局部帧（前提：确实是局部帧，否则本段测不到叠加问题）。
+        let mv = |x, y| {
+            crate::event::PointerEvent::single(
+                PointerKind::Move,
+                Point::new(x, y),
+                MouseButton::Left,
+            )
+        };
+        for _ in 0..3 {
+            h.on_pointer(mv(10, 10));
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+            h.on_pointer(mv(150, 80));
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+        }
+        let d = h.last_frame_damage();
+        assert!(
+            d.is_some_and(|d| d.w < 200),
+            "前提：最后一帧应是局部帧，实为 {d:?}"
+        );
+        for (x, y) in rim {
+            assert!(
+                (red(&pm, x, y) - half).abs() <= 2,
+                "局部帧后 ({x},{y}) 外框不对（丢失或叠深）"
+            );
+        }
+
+        h.set_window_outline(None);
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+        for (x, y) in rim {
+            assert_eq!(red(&pm, x, y), bg.r as i32, "关掉后 ({x},{y}) 应回到底色");
+        }
+    }
+
+    /// 分数缩放下外框恰好占最外一圈物理像素：边宽按物理尺寸 / 缩放算，取整后的逻辑尺寸
+    /// 会差出零点几个像素，右 / 下边线落到窗外或缩进一像素。
+    #[test]
+    fn window_outline_hugs_the_physical_edge_at_fractional_scale() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let theme = Theme::default();
+        let bg = theme.palette.bg;
+        // 物理尺寸挑了逻辑尺寸向上、向下取整都有的几组（251/1.25 = 200.8，248/1.25 = 198.4，
+        // 247/1.5 ≈ 164.7，245/1.5 ≈ 163.3）。
+        for (s, pw, ph) in [
+            (1.25, 251, 101),
+            (1.25, 248, 99),
+            (1.5, 247, 97),
+            (1.5, 245, 95),
+        ] {
+            let app = App::new("t", 200, 80)
+                .theme(theme.clone())
+                .content(Element::col().width(150).height(60));
+            let mut h = app.into_handler_for_test();
+            h.set_scale(s);
+            h.set_window_outline(Some(Color::rgb(0, 0, 0)));
+            let mut pm = Pixmap::new(pw, ph).unwrap();
+            h.render(
+                &mut PixmapTarget { pixmap: &mut pm },
+                Size::new(pw as i32, ph as i32),
+            );
+            let red = |x: u32, y: u32| pm.pixel(x, y).unwrap().red();
+            let (mx, my) = (pw / 2, ph / 2);
+            for (x, y) in [(pw - 1, my), (mx, ph - 1), (0, my), (mx, 0)] {
+                assert_eq!(red(x, y), 0, "{s}x {pw}×{ph}：({x},{y}) 应是外框");
+            }
+            for (x, y) in [(pw - 2, my), (mx, ph - 2), (1, my), (mx, 1)] {
+                assert_eq!(
+                    red(x, y),
+                    bg.r,
+                    "{s}x {pw}×{ph}：({x},{y}) 外框只有 1 物理像素"
+                );
+            }
+        }
     }
 }

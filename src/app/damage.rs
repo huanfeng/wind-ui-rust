@@ -221,6 +221,7 @@ impl UiHost {
             return;
         }
         target.begin_damage(Some(pdmg), self.bg);
+        let outline = self.window_outline_color();
         {
             let mut canvas = target.make_canvas(&mut self.engine, s);
             // 脏区铺底要的是**替换**，不是叠加：常驻纹理里留着上一帧的像素，而软后端那条
@@ -241,8 +242,14 @@ impl UiHost {
                 &Paint::fill(opaque_bg),
             );
             self.tree.paint(&mut *canvas);
+            super::paint_window_outline(&mut *canvas, outline, size, s);
         }
         self.last_present = Some(pdmg);
+    }
+
+    /// 本帧要宿主自己画的窗口外框色（平台没要求时为 `None`），见 `paint_window_outline`。
+    pub(super) fn window_outline_color(&self) -> Option<Color> {
+        self.window_outline
     }
 
     pub(super) fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {
@@ -268,6 +275,7 @@ impl UiHost {
             self.bg.r, self.bg.g, self.bg.b, self.bg.a,
         ));
         // 以脏区左上角（逻辑）为偏移绘制整树：框外图元由 tiny-skia 廉价剔除。
+        let outline = self.window_outline_color();
         {
             let mut canvas = SkiaCanvas::with_text_offset(
                 &mut sub,
@@ -276,6 +284,8 @@ impl UiHost {
                 Point::new(dmg.x, dmg.y),
             );
             self.tree.paint(&mut canvas);
+            // 子 pixmap 每次新铺底，外框画在它上面不会越叠越深。
+            super::paint_window_outline(&mut canvas, outline, size, s);
         }
         // 直接合成进平台 pixmap（脏区物理原点）。pixmap 跨帧持久且恒为 RGBA，框外行
         // 保留着上一帧的内容——此前要经宿主的后备缓冲中转一道，是因为 win32 会把 pixmap
