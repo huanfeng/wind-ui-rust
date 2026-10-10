@@ -55,6 +55,63 @@ const BADGE_H: i32 = 20;
 /// 确保弹层滚动条不会覆盖到缩放操作区域，无需修改 WM_NCHITTEST 优先级。
 const MENU_EDGE_MARGIN: i32 = 10;
 
+/// 右键菜单与指针之间的间距（逻辑像素）。
+///
+/// 面板左上角若恰好落在指针上，指针就在面板内：误点右键后想原地左键关掉，那一下却
+/// 落在面板的上内边距里——既不命中项、也不算点外面，菜单纹丝不动，非得先挪鼠标。
+/// 错开这几像素，原地一点就是"点外面"，与主流桌面一致。
+const POINTER_GAP: i32 = 2;
+
+/// 右键菜单围绕指针 `p` 放置，返回面板矩形（高可能小于 `content_h`，此时滚动）。
+///
+/// 原则：**指针永远不落在面板里**——否则弹出瞬间就有一项被指着，原地左键关菜单变成
+/// 执行它。故放不下时是**翻到指针另一侧**（右边放不下翻到左边、下边放不下翻到上边，
+/// 面板的角贴着指针），而不是贴窗口边钳制——钳制会把面板推到指针底下。
+///
+/// 上下两侧都装不下整列时：横向已在指针旁边（面板与指针不同列）就仍按整窗高贴边，
+/// 指针碰不到它；横向也没让开（窗口太窄）才退到较大一侧滚动。较大一侧也不足两项
+/// （含上下内边距）高（极矮窗口）时只能贴边钳制——那时窗口本身就装不下菜单，顾不上指针了。
+fn place_at_pointer(ws: crate::geometry::Size, em: i32, p: Point, w: i32, content_h: i32) -> Rect {
+    let g = POINTER_GAP;
+    if ws.w <= 0 || ws.h <= 0 {
+        // 离屏 / 测试无窗口尺寸：不翻转，仍错开指针。
+        return Rect::new(
+            (p.x + g).max(em),
+            (p.y + g).max(em),
+            w,
+            content_h.min(MENU_MAX_H),
+        );
+    }
+    let x = if p.x + g + w <= ws.w - em {
+        p.x + g
+    } else if p.x - g - w >= em {
+        p.x - g - w
+    } else {
+        (ws.w - w - em).max(em)
+    };
+    // 按最终 x 判断：两侧都放不下而贴边时，面板也未必罩住指针所在列。
+    let beside = !(x <= p.x && p.x < x + w);
+    let full = (ws.h - 2 * em).max(1);
+    let below = ws.h - em - (p.y + g);
+    let above = p.y - g - em;
+    let min_side = MENU_ITEM_H * 2 + 2 * MENU_VPAD;
+    let (y, h) = if content_h <= below {
+        (p.y + g, content_h)
+    } else if content_h <= above {
+        (p.y - g - content_h, content_h)
+    } else if !beside && below.max(above) >= min_side {
+        if below >= above {
+            (p.y + g, below)
+        } else {
+            (em, above)
+        }
+    } else {
+        let h = content_h.min(full);
+        ((ws.h - h - em).max(em), h)
+    };
+    Rect::new(x, y, w, h)
+}
+
 /// 单项行高：分隔线固定细线高；带 subtitle 的项两行更高；否则单行标准高。
 fn menu_item_height(it: &MenuItem) -> i32 {
     if it.separator {
@@ -427,13 +484,15 @@ impl UiHost {
         (w, has_icons, has_checks)
     }
 
-    /// 构造一级面板：锚点 (ax, ay) 为期望左上角；越窗右缘时按 `flip_right` 左翻；
+    /// 构造一级面板。右键菜单（无 `flip_right` / `anchor_top`、非 `tall`）以 (ax, ay)
+    /// 为**指针位置**，围绕它放置，见 [`place_at_pointer`]；其余以 (ax, ay) 为期望左上角：
+    /// 越窗右缘时按 `flip_right` 左翻；
     /// 越窗下缘时：若 `anchor_top` 有值（下拉控件顶部 y），优先向上翻转（菜单底对齐控件顶），
     /// 保证控件自身不被遮挡；否则退化为向上钳制。
     ///
     /// 可视高度只在**放不下**时才滚动：`tall`（菜单栏的菜单）按锚点到窗口下缘算；
     /// 下拉（`anchor_top` 有值）按锚点上下两侧空间较大者算——面板只能落在控件一侧，
-    /// 否则会盖住控件自己；右键菜单按整窗高算。仅无窗口尺寸（离屏 / 测试）时退回
+    /// 否则会盖住控件自己；非菜单栏的子菜单按整窗高算。仅无窗口尺寸（离屏 / 测试）时退回
     /// [`MENU_MAX_H`]。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_level(
@@ -456,10 +515,60 @@ impl UiHost {
         let ws = self.logical_size;
         // MENU_EDGE_MARGIN：弹层与窗口四边保留距离，避免滚动条落入 resize 边框区。
         let em = if ws.w > 0 { MENU_EDGE_MARGIN } else { 0 };
+        // 根级、无控件锚点、非菜单栏 = 右键菜单：围绕指针放置，规则另见 `place_at_pointer`。
+        let at_pointer = flip_right.is_none() && anchor_top.is_none() && !tall;
+        let rect = if at_pointer {
+            place_at_pointer(ws, em, Point::new(ax, ay), w, content_h)
+        } else {
+            Self::place_anchored(ws, em, ax, ay, w, content_h, flip_right, anchor_top, tall)
+        };
+        let h = rect.h;
+        // 计算初始滚动偏移：使 checked 项（当前选中）居中于可视区域。
+        let initial_scroll = if content_h > h {
+            let mut offset = MENU_VPAD;
+            let mut result = 0i32;
+            for it in &items {
+                let ih = menu_item_height(it);
+                if it.checked {
+                    result = offset + ih / 2 - h / 2;
+                    break;
+                }
+                offset += ih;
+            }
+            result.clamp(0, (content_h - h).max(0))
+        } else {
+            0
+        };
+        MenuLevel {
+            items,
+            rect,
+            hover: None,
+            has_icons,
+            has_checks,
+            spawn: None,
+            content_h,
+            scroll: initial_scroll,
+            wheel: Default::default(),
+        }
+    }
+
+    /// 下拉 / 菜单栏 / 子菜单的定位：锚点 (ax, ay) 为期望左上角，返回面板矩形。
+    #[allow(clippy::too_many_arguments)]
+    fn place_anchored(
+        ws: crate::geometry::Size,
+        em: i32,
+        ax: i32,
+        ay: i32,
+        w: i32,
+        content_h: i32,
+        flip_right: Option<i32>,
+        anchor_top: Option<i32>,
+        tall: bool,
+    ) -> Rect {
         // 面板可视高度：只在**放不下**时才滚动——原生菜单也是整列铺开，二十来项就得
         // 滚的菜单操作起来很不便。菜单栏的菜单受锚点到窗口下缘限制；下拉只能占控件
-        // 上方或下方之一（取较大者），否则面板会把控件自己盖住；右键菜单受整窗高限制
-        // （放不下会翻转或贴边，见下面的 y 调整）。无窗口尺寸（离屏 / 测试）时退回
+        // 上方或下方之一（取较大者），否则面板会把控件自己盖住；非菜单栏的子菜单受整窗高限制
+        // （放不下贴边，见下面的 y 调整）。无窗口尺寸（离屏 / 测试）时退回
         // MENU_MAX_H。最低两项高，但再矮也不超过窗口本身（恢复窗口 / 换 DPI 的中间帧
         // 逻辑尺寸会短暂很小，不钳会画到窗口外）。
         let max_h = if ws.h <= 0 {
@@ -507,33 +616,7 @@ impl UiHost {
             }
         }
         y = y.max(em);
-        // 计算初始滚动偏移：使 checked 项（当前选中）居中于可视区域。
-        let initial_scroll = if content_h > h {
-            let mut offset = MENU_VPAD;
-            let mut result = 0i32;
-            for it in &items {
-                let ih = menu_item_height(it);
-                if it.checked {
-                    result = offset + ih / 2 - h / 2;
-                    break;
-                }
-                offset += ih;
-            }
-            result.clamp(0, (content_h - h).max(0))
-        } else {
-            0
-        };
-        MenuLevel {
-            items,
-            rect: Rect::new(x, y, w, h),
-            hover: None,
-            has_icons,
-            has_checks,
-            spawn: None,
-            content_h,
-            scroll: initial_scroll,
-            wheel: Default::default(),
-        }
+        Rect::new(x, y, w, h)
     }
 
     /// 打开上下文菜单（根级）。
@@ -2891,10 +2974,10 @@ mod tests {
             MouseButton::Right,
         ));
         assert!(h.menu.is_open(), "右键别处应直接换成那里的菜单");
-        assert_eq!(
-            h.menu.active.as_ref().unwrap().levels[0].rect.x,
-            other.x,
-            "新菜单应锚在新的点击处"
+        let r = h.menu.active.as_ref().unwrap().levels[0].rect;
+        assert!(
+            !r.contains(other) && r.x > other.x && r.x - other.x <= 4,
+            "新菜单 {r:?} 应紧挨新的点击处 {other:?} 右侧"
         );
     }
 
@@ -3003,5 +3086,165 @@ mod tests {
             "捕获丢失后拖拽态必须清掉，否则滑块会一直粘着指针"
         );
         assert!(repaint, "收掉拖拽属于可见变化，应请求重绘");
+    }
+
+    /// 建一个 300x300、整窗右键弹 `n` 项菜单的宿主，并渲染一帧让布局与窗口尺寸就位。
+    fn context_menu_host(n: usize) -> crate::app::UiHost {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let app =
+            App::new("t", 300, 300).content(Element::col().width(300).height(300).on_context_menu(
+                move || {
+                    (0..n)
+                        .map(|i| MenuItem::run(format!("项 {i}"), |_ctx| {}, false))
+                        .collect()
+                },
+            ));
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        h.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(300, 300),
+        );
+        h
+    }
+
+    /// 在 `p` 处右键（按下 + 松开），返回弹出的根级面板矩形。
+    fn right_click(h: &mut crate::app::UiHost, p: Point) -> Rect {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            h.on_pointer(PointerEvent::single(kind, p, MouseButton::Right));
+        }
+        assert!(h.menu.is_open(), "右键应弹出菜单");
+        h.menu.active.as_ref().unwrap().levels[0].rect
+    }
+
+    /// 误点右键后原地左键就能关掉菜单：面板不得罩住指针。此前面板左上角恰在指针上，
+    /// 那一下落在上内边距里——不命中项也不算点外面，菜单不动，必须先挪鼠标。
+    #[test]
+    fn context_menu_opens_off_the_pointer_and_closes_on_click_in_place() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+
+        let mut h = context_menu_host(3);
+        let p = Point::new(100, 100);
+        let r = right_click(&mut h, p);
+        assert!(!r.contains(p), "面板 {r:?} 罩住了指针 {p:?}");
+        assert!(
+            r.x > p.x && r.y > p.y,
+            "空间充足时面板应在指针右下方：{r:?}"
+        );
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            p,
+            MouseButton::Left,
+        ));
+        assert!(!h.menu.is_open(), "原地左键应关闭菜单");
+    }
+
+    /// 下方放不下：面板翻到指针上方（底边贴指针），指针不落在任何项上。此前是贴窗口
+    /// 底边钳制，面板被推到指针底下，弹出瞬间就有一项被指着。
+    #[test]
+    fn context_menu_flips_above_the_pointer_near_the_bottom() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+
+        let mut h = context_menu_host(4);
+        let p = Point::new(100, 270);
+        let r = right_click(&mut h, p);
+        assert!(r.bottom() <= p.y, "面板 {r:?} 应整个在指针 {p:?} 上方");
+        assert!(r.x > p.x, "横向仍在指针右侧：{r:?}");
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            p,
+            MouseButton::Left,
+        ));
+        assert_eq!(
+            h.menu.active.as_ref().unwrap().levels[0].hover,
+            None,
+            "指针不应指着任何项"
+        );
+    }
+
+    /// 右侧放不下：面板翻到指针左边（右边贴指针），而不是贴窗口右缘盖住指针。
+    #[test]
+    fn context_menu_flips_left_of_the_pointer_near_the_right_edge() {
+        let mut h = context_menu_host(3);
+        let p = Point::new(270, 100);
+        let r = right_click(&mut h, p);
+        assert!(r.right() <= p.x, "面板 {r:?} 应整个在指针 {p:?} 左侧");
+        assert!(r.y > p.y, "纵向仍在指针下方：{r:?}");
+    }
+
+    /// 上下都装不下整列时的两条退路（纯定位函数，免得为造极端窗口搭整套宿主）。
+    #[test]
+    fn context_menu_placement_when_neither_side_fits() {
+        use crate::geometry::Size;
+        let em = MENU_EDGE_MARGIN;
+        let content_h = 20 * MENU_ITEM_H + 2 * MENU_VPAD;
+
+        // 横向让开了：整窗高贴边、不滚动——面板与指针不同列，指针碰不到它。
+        let ws = Size::new(600, 300);
+        let p = Point::new(100, 150);
+        let r = place_at_pointer(ws, em, p, 160, content_h);
+        assert!(!r.contains(p), "{r:?} 罩住了指针");
+        assert_eq!(r.h, ws.h - 2 * em, "应占满整窗可用高");
+
+        // 窗口太窄横向让不开：退到较大一侧（这里是下方）滚动，面板不跨过指针所在行。
+        let ws = Size::new(180, 300);
+        let p = Point::new(90, 120);
+        let r = place_at_pointer(ws, em, p, 160, content_h);
+        assert!(!r.contains(p), "{r:?} 罩住了指针");
+        assert!(r.y > p.y && r.bottom() <= ws.h - em, "应落在下方：{r:?}");
+        assert!(r.h < content_h, "放不下时应滚动");
+
+        // 同样横向让不开、但上方空间更大：退到上方滚动，面板底在指针之上、顶贴边距。
+        let p = Point::new(90, 200);
+        let r = place_at_pointer(ws, em, p, 160, content_h);
+        assert!(r.bottom() <= p.y && r.y == em, "应落在上方并贴顶：{r:?}");
+        assert!(r.h < content_h, "放不下时应滚动");
+
+        // 横向让不开、两侧都不足两项高的极矮窗口：只能贴边钳制，但不得越出窗口。
+        let ws = Size::new(180, 80);
+        let r = place_at_pointer(ws, em, Point::new(90, 40), 160, content_h);
+        assert!(
+            r.y >= em && r.bottom() <= ws.h - em && r.h > 0,
+            "极矮窗口面板 {r:?} 越界"
+        );
+    }
+
+    /// 右下角：同时翻到指针左侧与上方，面板右下角贴着指针。
+    #[test]
+    fn context_menu_flips_both_ways_in_the_bottom_right_corner() {
+        use crate::geometry::Size;
+        let em = MENU_EDGE_MARGIN;
+        let ws = Size::new(400, 300);
+        let p = Point::new(380, 280);
+        let r = place_at_pointer(ws, em, p, 160, 5 * MENU_ITEM_H + 2 * MENU_VPAD);
+        assert!(
+            r.right() <= p.x && r.bottom() <= p.y,
+            "{r:?} 应在指针左上方"
+        );
+        assert!(r.x >= em && r.y >= em, "{r:?} 越出边距");
+    }
+
+    /// 窗口窄到两侧都放不下面板、贴边后面板仍在指针右边：按"已让开"处理，整窗高铺开
+    /// 而不是退到半边滚动（判据看最终 x，而不是"左右是否放得下"）。
+    #[test]
+    fn context_menu_beside_check_uses_final_x() {
+        use crate::geometry::Size;
+        let em = MENU_EDGE_MARGIN;
+        let ws = Size::new(200, 300);
+        let content_h = 20 * MENU_ITEM_H + 2 * MENU_VPAD;
+        // w=170：右侧放得下需 p.x≤18、左侧需 p.x≥182，p.x=19 都不成立 → 贴边 x=20，
+        // 指针仍在面板左侧 1px。
+        let p = Point::new(19, 150);
+        let r = place_at_pointer(ws, em, p, 170, content_h);
+        assert!(!r.contains(p), "{r:?} 罩住了指针");
+        assert_eq!(r.h, ws.h - 2 * em, "指针不在面板列内，应整窗高铺开");
     }
 }

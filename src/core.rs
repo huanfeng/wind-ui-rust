@@ -2041,7 +2041,11 @@ impl EventCtx<'_> {
         }
     }
     /// 请求在 `pos`（逻辑坐标）弹出浮层菜单。宿主接管渲染、命中与项激活。
-    /// `min_width`：最小宽度（0=按内容；下拉传控件宽度对齐）。
+    /// `min_width`：最小宽度（0=按内容）。
+    ///
+    /// `pos` 按**指针位置**处理：面板错开它几像素弹出，放不下时翻到它的另一侧，保证
+    /// 指针不落在面板里（见 API_GUIDE §8.2）。要贴着控件弹（下拉、按钮菜单），用
+    /// [`show_dropdown_menu`](Self::show_dropdown_menu)，它以控件矩形为锚、只做上下翻转。
     pub fn show_menu(&mut self, pos: Point, items: Vec<MenuItem>, min_width: i32) {
         self.out.menu = Some(MenuRequest {
             pos,
@@ -2148,6 +2152,7 @@ impl EventCtx<'_> {
         crate::event::window_state()
     }
     /// 在 `pos`（逻辑坐标）弹出窗口系统菜单（还原/最小化/最大化/关闭，按当前状态禁用）。
+    /// `pos` 按指针位置处理，定位规则同 [`show_menu`](Self::show_menu)。
     ///
     /// 无边框窗口的标题栏右键**默认就会弹**，无需调用本方法。它是为默认之外的入口准备的：
     /// 标题栏左端的应用图标点一下弹菜单、自定义快捷键唤起等。

@@ -1687,6 +1687,10 @@ ctx.show_context_menu(pos, vec![
     MenuItem::run("操作", |ctx| { /* ... */ }, false),
 ]);
 ```
+`pos` 按**指针位置**处理（`show_menu` / `show_system_menu` 同此）：面板错开指针 2px 弹出，
+误点右键后原地左键即可关掉（这一下照常落到下方控件）；右侧 / 下方放不下时翻到指针另一侧，
+而不是贴窗口边把面板推到指针底下。要贴着控件弹出请用 `show_dropdown_menu(bounds, items)`。
+
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
 
 ⚠ 两个构造器的**第三个参数含义不同**：`run` 收 `checked`（勾选标记），`key` 收 `enabled`（可用性）。
