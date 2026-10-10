@@ -130,7 +130,7 @@ windows = { version = "0.62", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 # 0.13 而非最新：与 xim（XIM 输入法协议）依赖的大版本对齐，两者共用同一个连接类型。
 # xfixes：监听合成器选区（`_NET_WM_CM_S<屏>`）的出现 / 消失，无边框窗口的圆角随之开关。
-x11rb = { version = "0.13", features = ["xfixes"] }
+x11rb = { version = "0.14", features = ["xfixes"] }
 # XIM 客户端：与 fcitx5 / ibus 的 XIM 前端通话（合成串回调 + 提交）。
 xim = { version = "0.5", default-features = false, features = ["x11rb-client"] }
 ttf-parser = "0.25"
