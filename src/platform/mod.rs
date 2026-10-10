@@ -853,6 +853,13 @@ pub trait AppHandler {
         None
     }
 
+    /// 无边框窗口外框色（Linux 后端在窗口四边描 1px，见 `platform::linux::host::draw_outline`）。
+    /// `None` = 不描。由宿主按**自己的**主题给出，而不是让平台层读线程局部的当前主题——
+    /// 同线程多窗口时那份是"上一个渲染的窗口"的。
+    fn frame_outline(&self) -> Option<Color> {
+        None
+    }
+
     /// 焦点文本控件的光标位置（**物理像素**，相对客户区左上角）+ 高度：`(x, y_top, height)`。
     /// 平台层据此定位输入法候选窗。无文本焦点时返回 None。
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {

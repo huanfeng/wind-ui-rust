@@ -3703,6 +3703,10 @@ impl AppHandler for UiHost {
     /// 而控件已经用新主题画了。停在这一帧就是"浅色文字画在浅色底上"。
     ///
     /// 经 `App::bg` 显式固定过底色时不跟随主题（与 `bg_follows_theme` 的既定语义一致）。
+    fn frame_outline(&self) -> Option<Color> {
+        Some(self.theme_src.current().palette.border)
+    }
+
     fn bg(&self) -> Option<Color> {
         if self.bg_follows_theme {
             Some(self.theme_src.current().palette.bg)

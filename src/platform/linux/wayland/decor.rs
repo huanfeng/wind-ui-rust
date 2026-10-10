@@ -239,6 +239,9 @@ impl Wl {
             &mut d.fresh,
             (width, bar),
             bg,
+            // 标题栏不描外框（它本身贴着窗口上沿，外框归内容区）。
+            false,
+            &mut false,
         )
     }
 

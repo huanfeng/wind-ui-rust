@@ -118,6 +118,13 @@ struct Win {
     intervals: Intervals,
     capturing: bool,
     cursor: CursorShape,
+    /// 指针停在缩放边上时的方向码（`host::edge_direction` 编号）：此时光标显示该方向的缩放
+    /// 形状、压过控件要的光标——否则用户看不出哪里能拖。判据与按下接管同源，见 [`resize_edge_at`]。
+    edge_hover: Option<u32>,
+    /// 窗口上当前挂着的光标（去重用：同一个就不再发请求）。
+    applied_cursor: xproto::Cursor,
+    /// 上一帧描了外框（见 `host::render_frame` 的 `outlined`）。
+    outlined: bool,
     click: ClickTracker,
     /// 无边框窗口：在拖动区 / 缩放边上按下、尚未移动够阈值的待定拖动（方向码 + 按下点根坐标）。
     ///
@@ -159,7 +166,8 @@ struct X11 {
     fmt: PixelFormat,
     gc: xproto::Gcontext,
     scale: f32,
-    cursors: [xproto::Cursor; 5],
+    /// 前 5 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
+    cursors: [xproto::Cursor; CURSOR_COUNT],
     keymap: Keymap,
     windows: Vec<Win>,
     last_anim_frame: Instant,
@@ -259,7 +267,7 @@ impl X11 {
         conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))
             .ok()?;
         let scale = detect_scale(&conn, root, &atoms);
-        let cursors = create_cursors(&conn).unwrap_or([0; 5]);
+        let cursors = create_cursors(&conn).unwrap_or([0; CURSOR_COUNT]);
         let conn = Rc::new(conn);
         let ime = Ime::connect(conn.clone(), screen_num);
         let mut x = X11 {
@@ -466,6 +474,9 @@ impl X11 {
             intervals,
             capturing: false,
             cursor: CursorShape::Arrow,
+            edge_hover: None,
+            applied_cursor: self.cursors[0],
+            outlined: false,
             click: ClickTracker::default(),
             title_drag: host::DragGate::default(),
             composing: false,
@@ -875,6 +886,8 @@ impl X11 {
             &mut w.fresh,
             (w.w, w.h),
             w.bg,
+            w.frameless && !w.maximized,
+            &mut w.outlined,
         ) else {
             return;
         };
@@ -1015,10 +1028,14 @@ impl X11 {
                 if self.pending_drag_motion(e.event, (e.root_x, e.root_y)) {
                     return;
                 }
+                let pos = Point::new(e.event_x as i32, e.event_y as i32);
+                // 按着按钮（拖选、拖滑块）时不换缩放光标：那一下不会被当作缩放接管。
+                let free = u16::from(e.state) & 0x1f00 == 0;
+                self.set_edge_hover(e.event, free.then_some(pos));
                 let mods = mods_of(u16::from(e.state));
                 let ev = PointerEvent {
                     kind: PointerKind::Move,
-                    pos: Point::new(e.event_x as i32, e.event_y as i32),
+                    pos,
                     button: MouseButton::Left,
                     click_count: 1,
                     mods,
@@ -1026,6 +1043,7 @@ impl X11 {
                 self.dispatch_pointer(e.event, ev);
             }
             Event::LeaveNotify(e) => {
+                self.set_edge_hover(e.event, None);
                 // 按住按钮拖出窗口时 X 仍把指针事件送给我们（隐式抓取），那时不清悬停。
                 if e.mode == xproto::NotifyMode::NORMAL && u16::from(e.state) & 0x1f00 == 0 {
                     let ev = PointerEvent::single(
@@ -1261,8 +1279,13 @@ impl X11 {
                     let o = (cfg.owned || cfg.modal)
                         .then_some(owner)
                         .filter(|o| self.idx(*o).is_some());
+                    let modal = cfg.modal;
                     let nid = self.create_window(&cfg, handler, o);
                     self.show(nid);
+                    // 模态子窗挡住了父窗：父窗上的缩放光标当场收掉。
+                    if let (true, Some(o)) = (modal, o) {
+                        self.set_edge_hover(o, None);
+                    }
                 }
             }
         }
@@ -1438,13 +1461,8 @@ impl X11 {
         pos: Point,
     ) -> Option<Option<(u32, i16, i16)>> {
         let w = &mut self.windows[i];
-        let border = (RESIZE_BORDER * self.scale).round() as i32;
-        if w.resizable && !w.maximized {
-            if let Some(dir) = host::edge_direction(pos, w.w, w.h, border) {
-                if !w.handler.interactive_at(pos) {
-                    return Some(Some((dir, e.root_x, e.root_y)));
-                }
-            }
+        if let Some(dir) = resize_edge_at(w, pos, self.scale) {
+            return Some(Some((dir, e.root_x, e.root_y)));
         }
         if w.handler.window_drag_at(pos) && !w.handler.interactive_at(pos) {
             let slop = (DOUBLE_CLICK_SLOP * self.scale).round() as i32;
@@ -1481,6 +1499,34 @@ impl X11 {
             [x0 as u32, y0 as u32, dir, 1, 1],
         );
         true
+    }
+
+    /// 按指针位置（`None` = 离开 / 按着按钮）更新缩放边悬停，变了就重挂光标。
+    fn set_edge_hover(&mut self, id: Window, pos: Option<Point>) {
+        let Some(i) = self.idx(id) else { return };
+        let blocked = self.blocked_by_modal(id).is_some();
+        let w = &mut self.windows[i];
+        let edge = pos
+            .filter(|_| !blocked)
+            .and_then(|p| resize_edge_at(w, p, self.scale));
+        if std::mem::replace(&mut w.edge_hover, edge) != edge {
+            self.sync_cursor(id);
+        }
+    }
+
+    /// 把窗口光标对齐到「缩放边方向优先，否则控件要的形状」。
+    fn sync_cursor(&mut self, id: Window) {
+        let Some(i) = self.idx(id) else { return };
+        let w = &mut self.windows[i];
+        let c = match w.edge_hover {
+            Some(dir) => self.cursors[RESIZE_CURSOR_BASE + dir as usize],
+            None => self.cursors[cursor_index(w.cursor)],
+        };
+        if std::mem::replace(&mut w.applied_cursor, c) != c {
+            let _ = self
+                .conn
+                .change_window_attributes(id, &ChangeWindowAttributesAux::new().cursor(c));
+        }
     }
 
     fn dispatch_pointer(&mut self, id: Window, ev: PointerEvent) {
@@ -1589,9 +1635,14 @@ impl X11 {
         let became_min = minimized && !w.minimized;
         w.maximized = maximized;
         w.minimized = minimized;
+        // 最大化后没有缩放边：停在边上的缩放光标要当场收掉，不等指针再动。
+        let clear_edge = maximized && w.edge_hover.is_some();
         if became_min && w.handler.hide_on_minimize() {
             w.hidden = true;
             let _ = self.conn.unmap_window(id);
+        }
+        if clear_edge {
+            self.set_edge_hover(id, None);
         }
         self.report_state(id);
     }
@@ -1631,7 +1682,6 @@ impl X11 {
             cursor: shape,
             ime_caret: caret,
         } = Requests::take(w.handler.as_mut(), &|key| open.iter().any(|k| k == key));
-        let cursor_changed = shape != w.cursor;
         w.cursor = shape;
         if let (Some(ime), Some((cx, cy, ch))) = (&mut self.ime, caret) {
             // 候选窗锚在光标底边（窗口内物理像素）。
@@ -1646,12 +1696,7 @@ impl X11 {
                 hk.apply(&self.conn, self.root, &self.keymap, hid, op);
             }
         }
-        if cursor_changed {
-            let c = self.cursors[cursor_index(shape)];
-            let _ = self
-                .conn
-                .change_window_attributes(id, &ChangeWindowAttributesAux::new().cursor(c));
-        }
+        self.sync_cursor(id);
         if let Some(op) = op {
             self.apply_window_op(id, op);
         }
@@ -1715,13 +1760,32 @@ fn cursor_index(s: CursorShape) -> usize {
     }
 }
 
+/// 无边框窗口的缩放边命中（判据见 `host::frameless_resize_edge`）：按下接管
+/// （`try_frameless_drag`）与悬停换光标共用。
+fn resize_edge_at(w: &Win, pos: Point, scale: f32) -> Option<u32> {
+    host::frameless_resize_edge(
+        w.frameless && w.resizable && !w.maximized,
+        pos,
+        (w.w, w.h),
+        (RESIZE_BORDER * scale).round() as i32,
+        |p| w.handler.interactive_at(p),
+    )
+}
+
+/// `cursors` 里缩放边光标的起始下标与总数。
+const RESIZE_CURSOR_BASE: usize = 5;
+const CURSOR_COUNT: usize = RESIZE_CURSOR_BASE + 8;
+
 /// 核心协议的 `cursor` 字体光标（不依赖 Xcursor 主题，所有 X 服务器都有）。
-fn create_cursors(conn: &RustConnection) -> Option<[xproto::Cursor; 5]> {
+fn create_cursors(conn: &RustConnection) -> Option<[xproto::Cursor; CURSOR_COUNT]> {
     let font = conn.generate_id().ok()?;
     conn.open_font(font, b"cursor").ok()?;
-    // XC_left_ptr, XC_hand2, XC_xterm, XC_sb_h_double_arrow, XC_sb_v_double_arrow
-    let glyphs = [68u16, 60, 152, 108, 116];
-    let mut out = [0u32; 5];
+    // XC_left_ptr, XC_hand2, XC_xterm, XC_sb_h_double_arrow, XC_sb_v_double_arrow，
+    // 然后按方向码 0..8（左上起顺时针）：XC_top_left_corner, XC_top_side,
+    // XC_top_right_corner, XC_right_side, XC_bottom_right_corner, XC_bottom_side,
+    // XC_bottom_left_corner, XC_left_side——与 WM 画缩放边时用的是同一组。
+    let glyphs = [68u16, 60, 152, 108, 116, 134, 138, 136, 96, 14, 16, 12, 70];
+    let mut out = [0u32; CURSOR_COUNT];
     for (i, g) in glyphs.iter().enumerate() {
         let c = conn.generate_id().ok()?;
         conn.create_glyph_cursor(c, font, font, *g, g + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff)

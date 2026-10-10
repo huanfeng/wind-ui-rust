@@ -89,12 +89,20 @@ impl Intervals {
 ///
 /// 尺寸变了就重建缓冲；缓冲刚重建（`fresh`）时宿主本帧必须画整窗（对照 win32 / macOS
 /// 的同名分支），否则按宿主报的脏区。尺寸非正返回 `None`。
+///
+/// `outline`：本帧该不该描外框（无边框且未最大化），颜色取宿主的
+/// [`AppHandler::frame_outline`]，见 [`draw_outline`]。`outlined` 记上一帧描没描：开关
+/// 一变就按缓冲刚重建处理（整窗重画 + 整窗上屏）——外框画在宿主的脏区之外，只按宿主
+/// 的脏区出帧的话，最大化后旧边线留在屏上、还原后新边线传不上去。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_frame(
     handler: &mut dyn AppHandler,
     pixmap: &mut Option<Pixmap>,
     fresh: &mut bool,
     (w, h): (i32, i32),
     fallback_bg: Color,
+    outline: bool,
+    outlined: &mut bool,
 ) -> Option<Rect> {
     if w <= 0 || h <= 0 {
         return None;
@@ -107,6 +115,14 @@ pub(super) fn render_frame(
         *pixmap = Pixmap::new(w as u32, h as u32);
         *fresh = true;
     }
+    let color = if outline {
+        handler.frame_outline()
+    } else {
+        None
+    };
+    if std::mem::replace(outlined, color.is_some()) != color.is_some() {
+        *fresh = true;
+    }
     let pm = pixmap.as_mut()?;
     if *fresh {
         handler.request_full_frame();
@@ -116,6 +132,9 @@ pub(super) fn render_frame(
         let mut tgt = crate::render::PixmapTarget { pixmap: pm };
         handler.render(&mut tgt, Size::new(w, h));
     }
+    if let Some(c) = color {
+        draw_outline(pm, c);
+    }
     let full = Rect::new(0, 0, w, h);
     let drawn = match (*fresh, handler.last_frame_damage()) {
         (false, Some(d)) => d.intersect(&full),
@@ -123,6 +142,63 @@ pub(super) fn render_frame(
     };
     *fresh = false;
     Some(drawn)
+}
+
+/// 无边框窗口的缩放边命中：`enabled`（可缩放、未最大化等由后端判）且落在边上、那里不是
+/// 可交互控件 → 方向码。
+///
+/// X11 与 Wayland 共用：按下接管与悬停换光标都经它，两个后端也经它——各写一份迟早出现
+/// 「光标说能拖、按下去却点到了控件」或两个后端口径不一。
+pub(super) fn frameless_resize_edge(
+    enabled: bool,
+    pos: Point,
+    (w, h): (i32, i32),
+    border: i32,
+    interactive: impl FnOnce(Point) -> bool,
+) -> Option<u32> {
+    if !enabled {
+        return None;
+    }
+    edge_direction(pos, w, h, border).filter(|_| !interactive(pos))
+}
+
+/// 无边框窗口的 1px 外框：沿缓冲四边按 source-over 叠 `c`（半透明的主题边框色照常混合）。
+///
+/// Windows 上无边框窗口由 DWM 给一圈细边与阴影，X11 / Wayland 的 WM 对去掉装饰的窗口
+/// 什么都不画——窗口与同色的桌面或背后的窗口连成一片，看不出边界，自然也找不到缩放边。
+/// 阴影要 ARGB 视觉 + 合成器 + 透明外扩区，这里只补最要紧的那条线。
+///
+/// 每帧画完都重描：局部帧里控件可能把脏区内的那段边线盖掉，脏区外的边线上一帧画过、
+/// 没被动过（重描半透明色不会越叠越深：脏区外的像素不重描，脏区内的先被宿主重画过）。
+/// 上屏只传脏区，故整圈重描没有额外上屏开销。开关切换时的整窗重画由 [`render_frame`] 负责。
+pub(super) fn draw_outline(pm: &mut Pixmap, c: Color) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    // 缓冲是预乘 RGBA：out = src_premul + dst × (1 − a)。
+    let a = c.a as u32;
+    let src = [c.r, c.g, c.b].map(|v| (v as u32 * a + 127) / 255);
+    let data = pm.data_mut();
+    let mut put = |x: usize, y: usize| {
+        let o = (y * w + x) * 4;
+        let px = &mut data[o..o + 4];
+        for k in 0..3 {
+            px[k] = (src[k] + (px[k] as u32 * (255 - a) + 127) / 255) as u8;
+        }
+        px[3] = (a + (px[3] as u32 * (255 - a) + 127) / 255) as u8;
+    };
+    // 每个边框像素只叠一次：角上（以及宽 / 高为 1 时重合的两条边）叠两次，半透明色就会变深。
+    for y in 0..h {
+        if y == 0 || y == h - 1 {
+            (0..w).for_each(|x| put(x, y));
+        } else {
+            put(0, y);
+            if w > 1 {
+                put(w - 1, y);
+            }
+        }
+    }
 }
 
 /// 事件分发后要从宿主取走的意图，由后端逐项落到各自的协议请求上。
@@ -478,6 +554,123 @@ mod tests {
         g.reset();
         assert_eq!(g.motion(|_| true), DragMotion::Free);
         assert!(!g.release());
+    }
+
+    #[test]
+    fn outline_covers_exactly_the_one_pixel_rim() {
+        let mut pm = Pixmap::new(5, 4).unwrap();
+        let c = Color::rgb(10, 20, 30);
+        draw_outline(&mut pm, c);
+        for y in 0..4 {
+            for x in 0..5 {
+                let px = pm.pixel(x, y).unwrap();
+                let rim = x == 0 || y == 0 || x == 4 || y == 3;
+                let got = (px.red(), px.green(), px.blue(), px.alpha());
+                if rim {
+                    assert_eq!(got, (10, 20, 30, 255), "({x},{y}) 应是外框色");
+                } else {
+                    assert_eq!(got, (0, 0, 0, 0), "({x},{y}) 内部不该被动");
+                }
+            }
+        }
+        // 1×1 的缓冲不越界。
+        draw_outline(&mut Pixmap::new(1, 1).unwrap(), c);
+    }
+
+    #[test]
+    fn translucent_outline_blends_over_existing_pixels() {
+        let mut pm = Pixmap::new(3, 3).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        draw_outline(&mut pm, Color::rgba(0, 0, 0, 51)); // 20% 黑
+        let px = pm.pixel(0, 0).unwrap();
+        assert_eq!(
+            (px.red(), px.alpha()),
+            (204, 255),
+            "白底叠 20% 黑应得 80% 灰"
+        );
+        assert_eq!(pm.pixel(1, 1).unwrap().red(), 255, "内部不动");
+        for (x, y) in [(2, 2), (0, 2), (2, 0), (1, 0), (0, 1)] {
+            assert_eq!(
+                pm.pixel(x, y).unwrap().red(),
+                204,
+                "({x},{y}) 只叠一次，角也一样"
+            );
+        }
+        // 只有一行时上下边重合，同样只叠一次。
+        let mut row = Pixmap::new(4, 1).unwrap();
+        row.fill(tiny_skia::Color::WHITE);
+        draw_outline(&mut row, Color::rgba(0, 0, 0, 51));
+        assert_eq!(row.pixel(0, 0).unwrap().red(), 204);
+    }
+
+    #[test]
+    fn frameless_resize_edge_rules() {
+        let size = (100, 80);
+        let none = |_| false;
+        assert_eq!(
+            frameless_resize_edge(true, Point::new(0, 40), size, 6, none),
+            Some(7)
+        );
+        assert_eq!(
+            frameless_resize_edge(true, Point::new(99, 79), size, 6, none),
+            Some(4)
+        );
+        assert_eq!(
+            frameless_resize_edge(true, Point::new(5, 40), size, 6, none),
+            Some(7)
+        );
+        assert_eq!(
+            frameless_resize_edge(true, Point::new(6, 40), size, 6, none),
+            None
+        );
+        assert_eq!(
+            frameless_resize_edge(false, Point::new(0, 40), size, 6, none),
+            None,
+            "不可缩放 / 最大化时没有缩放边"
+        );
+        assert_eq!(
+            frameless_resize_edge(true, Point::new(0, 40), size, 6, |_| true),
+            None,
+            "边上是可交互控件时让给控件"
+        );
+    }
+
+    /// 最小宿主桩：按调用方给的脏区出帧。
+    struct Stub(Option<Rect>);
+    impl AppHandler for Stub {
+        fn render(&mut self, _: &mut dyn crate::render::RenderTarget, _: Size) {}
+        fn last_frame_damage(&self) -> Option<Rect> {
+            self.0
+        }
+        fn frame_outline(&self) -> Option<Color> {
+            Some(Color::rgb(1, 2, 3))
+        }
+    }
+
+    /// 外框开关一变（最大化 / 还原）必须整窗出帧：外框在宿主脏区之外，按脏区出帧的话
+    /// 旧边线留在屏上或新边线传不上去。
+    #[test]
+    fn toggling_outline_forces_a_full_frame() {
+        let small = Rect::new(10, 10, 5, 5);
+        let mut h = Stub(Some(small));
+        let (mut pm, mut fresh, mut outlined) = (None, false, false);
+        let full = Rect::new(0, 0, 50, 40);
+        let mut frame = |outline: bool| {
+            render_frame(
+                &mut h,
+                &mut pm,
+                &mut fresh,
+                (50, 40),
+                Color::WHITE,
+                outline,
+                &mut outlined,
+            )
+        };
+        assert_eq!(frame(true), Some(full), "首帧整窗");
+        assert_eq!(frame(true), Some(small), "开关不变：按宿主脏区");
+        assert_eq!(frame(false), Some(full), "关掉外框：整窗");
+        assert_eq!(frame(false), Some(small));
+        assert_eq!(frame(true), Some(full), "再打开：整窗");
     }
 
     #[test]

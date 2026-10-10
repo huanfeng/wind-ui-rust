@@ -71,7 +71,7 @@ use super::host::{self, ClickTracker, Intervals, LinuxWake, Requests};
 use crate::event::{CursorShape, WindowOp};
 use crate::geometry::{Color, Rect};
 use crate::platform::{AppHandler, NewWindow, WindowConfig};
-use cursor::Cursor;
+use cursor::{Cursor, Look};
 use input::{KeyRepeat, WheelFrame};
 use scale::Scale;
 use shm::{create_buffer, write_pixels, Damage, ShmBuffer, ShmSlots};
@@ -444,6 +444,11 @@ struct Win {
     last_anim: Instant,
     intervals: Intervals,
     cursor: CursorShape,
+    /// 指针停在缩放边上时的方向码：光标显示该方向的缩放形状、压过控件与标题栏要的光标。
+    /// 判据见 `resize_edge_at`（与按下接管同源）。
+    edge_hover: Option<u32>,
+    /// 上一帧描了外框（见 `host::render_frame` 的 `outlined`）。
+    outlined: bool,
     slots: ShmSlots,
     bufs: Vec<Option<ShmBuffer>>,
     // ── 指针 ──
@@ -628,6 +633,8 @@ impl Wl {
             last_anim: Instant::now(),
             intervals,
             cursor: CursorShape::Arrow,
+            edge_hover: None,
+            outlined: false,
             slots: ShmSlots::default(),
             bufs: Vec::new(),
             click: ClickTracker::default(),
@@ -988,6 +995,11 @@ impl Wl {
                 self.deactivated(key);
             }
         }
+        // 尺寸 / 最大化变了，缩放边跟着变：指针就在这扇窗上时按新几何重判悬停，
+        // 免得最大化后还挂着缩放光标。
+        if self.pointer.as_ref().is_some_and(|p| p.focus == Some(key)) {
+            self.update_edge_hover();
+        }
         self.after_event(key);
     }
 
@@ -1212,6 +1224,8 @@ impl Wl {
                         &mut w.fresh,
                         (cw, ch),
                         w.bg,
+                        w.frameless && !w.state.maximized,
+                        &mut w.outlined,
                     );
                     full = drawn.is_some_and(|d| d == Rect::new(0, 0, cw, ch));
                     // 内容画在标题栏下面：缓冲坐标 = 内容坐标下移标题栏高度。
@@ -1414,8 +1428,13 @@ impl Wl {
                 }
                 NewWindow::Create(cfg, handler) => {
                     let owner = (cfg.owned || cfg.modal).then_some(key);
+                    let modal = cfg.modal;
                     let nk = self.create_window(&cfg, handler, owner);
                     self.show(nk);
+                    // 模态子窗挡住了本窗：指针还停在本窗缩放边上的话当场收掉缩放光标。
+                    if modal && self.pointer.as_ref().is_some_and(|p| p.focus == Some(key)) {
+                        self.update_edge_hover();
+                    }
                 }
             }
         }
@@ -1450,9 +1469,10 @@ impl Wl {
         };
         let w = &self.windows[i];
         // 指针在客户端标题栏上：光标归标题栏宿主（窗口按钮、空白处都是箭头）。
-        let shape = match w.deco.as_ref().filter(|d| d.on && d.hover) {
-            Some(d) => d.host.handler.cursor(),
-            None => w.cursor,
+        let shape = match (w.edge_hover, w.deco.as_ref().filter(|d| d.on && d.hover)) {
+            (Some(dir), _) => Look::Resize(dir),
+            (None, Some(d)) => Look::Shape(d.host.handler.cursor()),
+            (None, None) => Look::Shape(w.cursor),
         };
         let (compositor, qh) = (&self.g.compositor, &self.qh);
         p.cursor.apply(

@@ -16,25 +16,51 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 
 use crate::event::CursorShape;
 
+/// 要显示的光标：控件要的形状，或指针停在缩放边上时该方向的缩放形状。
+///
+/// 缩放边光标是平台层自己的事（控件看不到窗口边），不进公开的 `CursorShape`；方向码即
+/// `host::edge_direction` 的编号（0 = 左上，顺时针到 7 = 左）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Look {
+    Shape(CursorShape),
+    Resize(u32),
+}
+
 /// 回退路径下每种形状依次尝试的 XCursor 名（新式 CSS 名在前，老式 X 名兜底）。
-fn theme_names(s: CursorShape) -> &'static [&'static str] {
-    match s {
-        CursorShape::Arrow => &["default", "left_ptr"],
-        CursorShape::Hand => &["pointer", "hand2", "hand1"],
-        CursorShape::Text => &["text", "xterm"],
-        CursorShape::SizeWE => &["ew-resize", "sb_h_double_arrow", "h_double_arrow"],
-        CursorShape::SizeNS => &["ns-resize", "sb_v_double_arrow", "v_double_arrow"],
+fn theme_names(l: Look) -> &'static [&'static str] {
+    match l {
+        Look::Shape(CursorShape::Arrow) => &["default", "left_ptr"],
+        Look::Shape(CursorShape::Hand) => &["pointer", "hand2", "hand1"],
+        Look::Shape(CursorShape::Text) => &["text", "xterm"],
+        Look::Shape(CursorShape::SizeWE) => &["ew-resize", "sb_h_double_arrow", "h_double_arrow"],
+        Look::Shape(CursorShape::SizeNS) => &["ns-resize", "sb_v_double_arrow", "v_double_arrow"],
+        Look::Resize(0) => &["nw-resize", "top_left_corner"],
+        Look::Resize(1) => &["n-resize", "top_side"],
+        Look::Resize(2) => &["ne-resize", "top_right_corner"],
+        Look::Resize(3) => &["e-resize", "right_side"],
+        Look::Resize(4) => &["se-resize", "bottom_right_corner"],
+        Look::Resize(5) => &["s-resize", "bottom_side"],
+        Look::Resize(6) => &["sw-resize", "bottom_left_corner"],
+        Look::Resize(_) => &["w-resize", "left_side"],
     }
 }
 
-fn protocol_shape(s: CursorShape) -> wp_cursor_shape_device_v1::Shape {
+fn protocol_shape(l: Look) -> wp_cursor_shape_device_v1::Shape {
     use wp_cursor_shape_device_v1::Shape;
-    match s {
-        CursorShape::Arrow => Shape::Default,
-        CursorShape::Hand => Shape::Pointer,
-        CursorShape::Text => Shape::Text,
-        CursorShape::SizeWE => Shape::EwResize,
-        CursorShape::SizeNS => Shape::NsResize,
+    match l {
+        Look::Shape(CursorShape::Arrow) => Shape::Default,
+        Look::Shape(CursorShape::Hand) => Shape::Pointer,
+        Look::Shape(CursorShape::Text) => Shape::Text,
+        Look::Shape(CursorShape::SizeWE) => Shape::EwResize,
+        Look::Shape(CursorShape::SizeNS) => Shape::NsResize,
+        Look::Resize(0) => Shape::NwResize,
+        Look::Resize(1) => Shape::NResize,
+        Look::Resize(2) => Shape::NeResize,
+        Look::Resize(3) => Shape::EResize,
+        Look::Resize(4) => Shape::SeResize,
+        Look::Resize(5) => Shape::SResize,
+        Look::Resize(6) => Shape::SwResize,
+        Look::Resize(_) => Shape::WResize,
     }
 }
 
@@ -55,7 +81,7 @@ pub(super) struct Cursor {
     theme: Option<(CursorTheme, i32)>,
     surface: Option<wl_surface::WlSurface>,
     /// 上次挂上去的（enter serial，形状，缩放）：相同就不重发。
-    applied: Option<(u32, CursorShape, i32)>,
+    applied: Option<(u32, Look, i32)>,
     /// 两条诊断各提示一次：主题加载失败 / 主题里缺某个形状。
     warned_load: bool,
     warned_missing: bool,
@@ -80,7 +106,7 @@ impl Cursor {
         &mut self,
         pointer: &wl_pointer::WlPointer,
         serial: u32,
-        shape: CursorShape,
+        shape: Look,
         scale: f64,
         conn: &Connection,
         shm: &wl_shm::WlShm,
@@ -179,18 +205,40 @@ mod tests {
 
     #[test]
     fn every_shape_has_css_name_first_and_legacy_fallbacks() {
-        for s in [
+        let shapes = [
             CursorShape::Arrow,
             CursorShape::Hand,
             CursorShape::Text,
             CursorShape::SizeWE,
             CursorShape::SizeNS,
-        ] {
+        ]
+        .map(Look::Shape);
+        for s in shapes.into_iter().chain((0..8).map(Look::Resize)) {
             assert!(theme_names(s).len() >= 2, "{s:?} 至少一个老式名兜底");
         }
         assert_eq!(
-            protocol_shape(CursorShape::Text),
+            protocol_shape(Look::Shape(CursorShape::Text)),
             wp_cursor_shape_device_v1::Shape::Text
         );
+    }
+
+    /// 缩放边方向码与 `host::edge_direction` 同一编号：左上起顺时针。
+    #[test]
+    fn resize_looks_follow_edge_direction_numbering() {
+        use wp_cursor_shape_device_v1::Shape;
+        let want = [
+            Shape::NwResize,
+            Shape::NResize,
+            Shape::NeResize,
+            Shape::EResize,
+            Shape::SeResize,
+            Shape::SResize,
+            Shape::SwResize,
+            Shape::WResize,
+        ];
+        for (dir, s) in want.into_iter().enumerate() {
+            assert_eq!(protocol_shape(Look::Resize(dir as u32)), s, "方向 {dir}");
+        }
+        assert_eq!(theme_names(Look::Resize(3))[1], "right_side");
     }
 }

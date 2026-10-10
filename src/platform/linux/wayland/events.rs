@@ -412,6 +412,7 @@ impl Wl {
                     p.pressed = 0;
                     p.cursor.invalidate();
                 }
+                self.update_edge_hover();
                 self.apply_cursor();
                 self.pointer_move();
             }
@@ -427,6 +428,7 @@ impl Wl {
                 let Some(i) = self.idx(key) else { return };
                 let w = &mut self.windows[i];
                 w.title_drag.reset();
+                w.edge_hover = None;
                 // 按着按钮离开 = 隐式抓取被合成器收走了（开始移动 / 缩放窗口、弹出系统菜单等），
                 // 配对的松开不会再来：收掉逻辑捕获，同 X11 / win32 的「捕获被抢」。
                 if pressed > 0 && std::mem::take(&mut w.capturing) {
@@ -452,6 +454,7 @@ impl Wl {
                     p.pos = (surface_x, surface_y);
                 }
                 if !self.pending_drag_motion() {
+                    self.update_edge_hover();
                     self.pointer_move();
                 }
             }
@@ -690,6 +693,56 @@ impl Wl {
         self.dispatch_pointer(key, ev);
     }
 
+    /// 表面上 `pos`（物理像素，表面坐标）是否落在可接管的缩放边上 → 方向码。
+    ///
+    /// 无边框窗口与客户端标题栏窗口各有口径（后者平铺时也没有缩放边、标题栏上的控件归标题栏
+    /// 宿主判），但都是「可缩放、未最大化、落在边上、那里不是可交互控件」。按下接管与悬停换
+    /// 光标共用此处——各写一份迟早出现「光标说能拖、按下去却点到了控件」。服务端装饰的窗口
+    /// 缩放边归合成器，恒为 `None`。
+    pub(super) fn resize_edge_at(&self, i: usize, pos: Point) -> Option<u32> {
+        let w = &self.windows[i];
+        let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
+        if w.frameless {
+            return host::frameless_resize_edge(
+                w.resizable && !w.state.maximized,
+                pos,
+                (w.w, w.h),
+                border,
+                |p| w.handler.interactive_at(p),
+            );
+        }
+        let frame = self.frame(i);
+        if frame.bar == 0 {
+            return None;
+        }
+        let edges = w.resizable && !w.state.maximized && !w.state.tiled;
+        let dir = frame.edge(pos, border, edges)?;
+        // 与无边框窗口一致：缩放边落在可交互控件（按钮、输入框）上时让给控件。
+        let interactive = match frame.locate(pos) {
+            Region::Bar(p) => w
+                .deco
+                .as_ref()
+                .is_some_and(|d| d.host.handler.interactive_at(p)),
+            Region::Content(p) => w.handler.interactive_at(p),
+        };
+        (!interactive).then_some(dir)
+    }
+
+    /// 按指针当前位置更新缩放边悬停（按着按钮、被模态挡住时没有），变了就重挂光标。
+    pub(super) fn update_edge_hover(&mut self) {
+        let Some((i, pos)) = self.pointer_target() else {
+            return;
+        };
+        let key = self.windows[i].key;
+        let free = self.pointer.as_ref().is_some_and(|p| p.pressed == 0)
+            && !self.windows[i].capturing
+            && self.blocked_by_modal(key).is_none();
+        let edge = free.then(|| self.resize_edge_at(i, pos)).flatten();
+        if std::mem::replace(&mut self.windows[i].edge_hover, edge) != edge {
+            self.apply_cursor();
+        }
+    }
+
     /// 客户端标题栏的窗口：缩放边（窗口内侧一圈，标题栏顶边也算）→ 待定缩放；标题栏空白处 →
     /// 拖动 / 双击最大化 / 右键窗口菜单（见 `decor.rs`）。返回值同 [`Self::try_frameless_drag`]。
     fn try_csd_drag(
@@ -700,29 +753,17 @@ impl Wl {
         pos: Point,
         button: MouseButton,
     ) -> Option<Option<PendingDrag>> {
-        let frame = self.frame(i);
-        let w = &self.windows[i];
-        let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
-        let edges =
-            w.resizable && !w.state.maximized && !w.state.tiled && button == MouseButton::Left;
-        if let Some(dir) = frame.edge(pos, border, edges) {
-            // 与无边框窗口一致：缩放边落在可交互控件（按钮、输入框）上时让给控件。
-            let interactive = match frame.locate(pos) {
-                Region::Bar(p) => w
-                    .deco
-                    .as_ref()
-                    .is_some_and(|d| d.host.handler.interactive_at(p)),
-                Region::Content(p) => w.handler.interactive_at(p),
-            };
-            if !interactive {
-                return Some(Some(PendingDrag {
-                    edge: Some(input::resize_edge(dir)),
-                    at: (pos.x, pos.y),
-                    serial,
-                }));
-            }
+        let edge = (button == MouseButton::Left)
+            .then(|| self.resize_edge_at(i, pos))
+            .flatten();
+        if let Some(dir) = edge {
+            return Some(Some(PendingDrag {
+                edge: Some(input::resize_edge(dir)),
+                at: (pos.x, pos.y),
+                serial,
+            }));
         }
-        match frame.locate(pos) {
+        match self.frame(i).locate(pos) {
             Region::Bar(p) => self.deco_press(i, p, button, serial, time),
             Region::Content(_) => None,
         }
@@ -738,19 +779,14 @@ impl Wl {
         time: u32,
         pos: Point,
     ) -> Option<Option<PendingDrag>> {
-        let w = &mut self.windows[i];
-        let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
-        if w.resizable && !w.state.maximized {
-            if let Some(dir) = host::edge_direction(pos, w.w, w.h, border) {
-                if !w.handler.interactive_at(pos) {
-                    return Some(Some(PendingDrag {
-                        edge: Some(input::resize_edge(dir)),
-                        at: (pos.x, pos.y),
-                        serial,
-                    }));
-                }
-            }
+        if let Some(dir) = self.resize_edge_at(i, pos) {
+            return Some(Some(PendingDrag {
+                edge: Some(input::resize_edge(dir)),
+                at: (pos.x, pos.y),
+                serial,
+            }));
         }
+        let w = &mut self.windows[i];
         if w.handler.window_drag_at(pos) && !w.handler.interactive_at(pos) {
             let slop = (DOUBLE_CLICK_SLOP as f64 * w.scale.factor).round() as i32;
             let n = w.click.press(time, (pos.x, pos.y), 1, slop);
