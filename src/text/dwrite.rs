@@ -117,7 +117,7 @@ fn pua_runs(wide: &[u16]) -> Vec<(usize, usize)> {
 ///
 /// `Clone` 是 COM 的 AddRef，廉价；引擎创建时从注册表克隆一份持有。
 #[derive(Clone)]
-struct PrivateUseFont {
+pub(crate) struct PrivateUseFont {
     collection: IDWriteFontCollection1,
     family: Vec<u16>,
 }
@@ -160,8 +160,9 @@ fn build_private_use_font(path: &str, family: &str) -> Result<PrivateUseFont> {
 /// - `family`：字体文件**内部的家族名**（不是文件名）——双击字体文件即可在预览窗口顶部
 ///   看到。它无法从路径推断，必须显式给出；写错的表现是图标仍为方框。
 ///
-/// **须在 [`crate::app::App::run`] 之前调用**：文字引擎在窗口创建时读取本注册表。
-/// 运行期改字体请拿 [`DWriteEngine::set_private_use_font`]（它会一并清测量缓存）。
+/// **须在 [`crate::app::App::run`] 之前调用**：软渲染引擎与 GPU 后端都在窗口创建时读取
+/// 本注册表、各持一份快照，之后再注册只影响新开的窗口。已开窗口不支持运行期更换；
+/// [`DWriteEngine::set_private_use_font`] 只作用于自己构造的独立引擎。
 ///
 /// 失败返回 `Err`（文件不存在、格式不受支持等），此时保持未注册状态——图标渲染为方框，
 /// 其余文本不受影响。重复调用以最后一次为准。
@@ -169,6 +170,31 @@ pub fn register_private_use_font(path: &str, family: &str) -> Result<()> {
     let puf = build_private_use_font(path, family)?;
     PRIVATE_USE_FONT.with(|f| *f.borrow_mut() = Some(puf));
     Ok(())
+}
+
+/// 把 `layout` 中的私用区段切到 `puf`。无私用区字符时不做任何事。
+///
+/// 走**字体集 + 家族名**而非 DirectWrite 的 fallback 机制：后者按脚本/语言匹配，
+/// 私用区没有脚本归属，匹配不到。
+pub(crate) fn apply_private_use(puf: &PrivateUseFont, layout: &IDWriteTextLayout, text_w: &[u16]) {
+    for (start, len) in pua_runs(text_w) {
+        let range = DWRITE_TEXT_RANGE {
+            startPosition: start as u32,
+            length: len as u32,
+        };
+        unsafe {
+            let _ = layout.SetFontCollection(&puf.collection, range);
+            let _ = layout.SetFontFamilyName(PCWSTR(puf.family.as_ptr()), range);
+        }
+    }
+}
+
+/// 当前已注册的私用区回退字体（见 [`register_private_use_font`]）的一份快照。
+///
+/// 软引擎与 D2D 后端都在**创建时**取一次、此后持有不变——两边同一时刻取、同一语义，
+/// 违约在运行期再注册也只影响之后建的窗口，不会让同一窗口的测量与绘制各用各的字体。
+pub(crate) fn registered_private_use_font() -> Option<PrivateUseFont> {
+    PRIVATE_USE_FONT.with(|f| f.borrow().clone())
 }
 
 /// 文本测量缓存容量上限；满则整体清空（周期性重测，命中率仍极高）。
@@ -467,7 +493,7 @@ impl DWriteEngine {
                 bitmap_h: 0,
                 // 取启动时注册的回退字体（见 `register_private_use_font`）。此刻缓存尚空，
                 // 故无需失效处理；运行期改字体走 `set_private_use_font`，它自己清缓存。
-                private_use: PRIVATE_USE_FONT.with(|f| f.borrow().clone()),
+                private_use: registered_private_use_font(),
             }
         }
     }
@@ -484,23 +510,10 @@ impl DWriteEngine {
         Ok(())
     }
 
-    /// 把 `layout` 中的私用区段切到回退字体。无回退字体或无私用区字符时不做任何事。
-    ///
-    /// 走**字体集 + 家族名**而非 DirectWrite 的 fallback 机制：后者按脚本/语言匹配，
-    /// 私用区没有脚本归属，匹配不到。
+    /// 把 `layout` 中的私用区段切到本引擎的回退字体，见 [`apply_private_use`]。
     fn apply_private_use(&self, layout: &IDWriteTextLayout, text_w: &[u16]) {
-        let Some(puf) = &self.private_use else {
-            return;
-        };
-        for (start, len) in pua_runs(text_w) {
-            let range = DWRITE_TEXT_RANGE {
-                startPosition: start as u32,
-                length: len as u32,
-            };
-            unsafe {
-                let _ = layout.SetFontCollection(&puf.collection, range);
-                let _ = layout.SetFontFamilyName(PCWSTR(puf.family.as_ptr()), range);
-            }
+        if let Some(puf) = &self.private_use {
+            apply_private_use(puf, layout, text_w);
         }
     }
 

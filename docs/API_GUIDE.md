@@ -1643,7 +1643,9 @@ Element::label("\u{f015} 首页").font_size(18.0)
   写错的表现是图标仍为方框。
 - 三段私用区（BMP `U+E000..=U+F8FF`、补充私用区 A/B `U+F0000..=U+10FFFD`）全部支持，
   图标集用哪一段都行。
-- 运行期换字体用 `DWriteEngine::set_private_use_font`；`register_*` 只在引擎创建时读取一次。
+- 注册表在**窗口创建时**读取一次（软渲染与 GPU 后端同时读、各持一份），之后再注册只影响新开的窗口。
+  应用运行期**不支持**更换已开窗口的图标字体——宿主的文字引擎不对外暴露；
+  `DWriteEngine::set_private_use_font` 只作用于自己构造的那个独立引擎。
 
 > **平台状态**：**当前仅 Windows**。macOS 的 CoreText 路径尚未接入（`src/text/coretext.rs`），
 > 该函数在 macOS 与 Linux 上不存在（`#[cfg(windows)]`）——是编译期缺失而非静默失效，跨平台代码需自行

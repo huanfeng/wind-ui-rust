@@ -57,7 +57,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 use super::{AppHandler, WinRenderBackend};
 use crate::geometry::{Color, Size};
 use crate::render::{Canvas, Gradient, Paint, RenderTarget};
-use crate::text::dwrite::{font_choice, ResolvedFamily, DEFAULT_FAMILY};
+use crate::text::dwrite::{
+    apply_private_use, font_choice, registered_private_use_font, PrivateUseFont, ResolvedFamily,
+    DEFAULT_FAMILY,
+};
 
 /// GPU 呈现后端。持有 D3D11/DXGI/D2D 的 COM 对象与 swapchain。
 pub(super) struct D2DBackend {
@@ -89,6 +92,9 @@ pub(super) struct D2DBackend {
     /// device-**独立**资源（进程级系统字体缓存），设备丢失**无需**重建——
     /// 不同于 solid/渐变缓存，**别**放进 Task 11 的设备丢失重建清单。
     dwrite_factory: IDWriteFactory,
+    /// 私用区回退字体（图标字体）：创建时从注册表取的快照，与软引擎同时同源，见
+    /// [`registered_private_use_font`]。设备丢失重建时沿用，不重读。
+    private_use: Option<PrivateUseFont>,
     /// TextFormat 缓存（键 `FormatKey`），与软引擎 `DWriteEngine::format` 同构。
     /// IDWriteTextFormat 亦 device-independent，设备丢失无需清空。对齐不进 key（在 layout 上设）。
     format_cache: HashMap<FormatKey, IDWriteTextFormat>,
@@ -387,6 +393,7 @@ unsafe fn try_create_inner(hwnd: HWND, w: i32, h: i32) -> Option<D2DBackend> {
         solid,
         grad_cache: HashMap::new(),
         dwrite_factory: shared.dwrite_factory.clone(),
+        private_use: registered_private_use_font(),
         format_cache: HashMap::new(),
         layout_cache: HashMap::new(),
         image_cache: HashMap::new(),
@@ -443,7 +450,9 @@ impl D2DBackend {
         let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
         let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
         match try_create_inner(hwnd, w, h) {
-            Some(fresh) => {
+            Some(mut fresh) => {
+                // 回退字体与设备无关，沿用创建时那份：重读注册表可能与软引擎的快照分叉。
+                fresh.private_use = self.private_use.take();
                 *self = fresh;
                 true
             }
@@ -515,6 +524,7 @@ impl WinRenderBackend for D2DBackend {
                 solid: &self.solid,
                 grad_cache: &mut self.grad_cache,
                 dwrite_factory: &self.dwrite_factory,
+                private_use: self.private_use.as_ref(),
                 format_cache: &mut self.format_cache,
                 layout_cache: &mut self.layout_cache,
                 image_cache: &mut self.image_cache,
@@ -559,6 +569,7 @@ struct D2DTarget<'a> {
     solid: &'a ID2D1SolidColorBrush,
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
     dwrite_factory: &'a IDWriteFactory,
+    private_use: Option<&'a PrivateUseFont>,
     format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
@@ -588,6 +599,7 @@ impl RenderTarget for D2DTarget<'_> {
             solid: self.solid,
             grad_cache: self.grad_cache,
             dwrite_factory: self.dwrite_factory,
+            private_use: self.private_use,
             format_cache: self.format_cache,
             layout_cache: self.layout_cache,
             image_cache: self.image_cache,
@@ -616,6 +628,8 @@ struct D2DCanvas<'a> {
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
     /// DirectWrite 工厂（借入）：建 format/layout。
     dwrite_factory: &'a IDWriteFactory,
+    /// 私用区回退字体（借入）：见 `D2DBackend::private_use`。
+    private_use: Option<&'a PrivateUseFont>,
     /// TextFormat 缓存（借入，可变）：键 `FormatKey`。
     format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
@@ -679,6 +693,11 @@ impl D2DCanvas<'_> {
                 .CreateTextLayout(&text_w, &format, maxw, maxh)
         }
         .ok()?;
+        // 私用区（图标字体）与软引擎同源：布局是软引擎量的，这里不切字体就画成方框、宽度也
+        // 对不上。绘制期的测量（光标定位、命中）同样走这里，所以不能只当它是「绘制」的事。
+        if let Some(puf) = self.private_use {
+            apply_private_use(puf, &layout, &text_w);
+        }
         // 防无界增长（文本输入/计数器等动态文字）：超阈值整体清空重建。
         if self.layout_cache.len() > 512 {
             self.layout_cache.clear();
@@ -1826,6 +1845,7 @@ pub(crate) mod offscreen {
         ctx: ID2D1DeviceContext,
         bake_ctx: ID2D1DeviceContext,
         dwrite_factory: IDWriteFactory,
+        private_use: Option<PrivateUseFont>,
         solid: ID2D1SolidColorBrush,
         /// 渲染目标位图（与窗口后端的后备缓冲同格式：BGRA8 预乘、96 DPI）。
         target: ID2D1Bitmap1,
@@ -1900,6 +1920,7 @@ pub(crate) mod offscreen {
                 ctx,
                 bake_ctx,
                 dwrite_factory,
+                private_use: registered_private_use_font(),
                 solid,
                 target,
                 staging,
@@ -1943,6 +1964,7 @@ pub(crate) mod offscreen {
                         solid: &self.solid,
                         grad_cache: &mut self.grad_cache,
                         dwrite_factory: &self.dwrite_factory,
+                        private_use: self.private_use.as_ref(),
                         format_cache: &mut self.format_cache,
                         layout_cache: &mut self.layout_cache,
                         image_cache: &mut self.image_cache,
@@ -2689,6 +2711,48 @@ mod tests {
         assert!(
             rows(&both) == rows(&alone),
             "同一后端里后画的斜体应与单独画的斜体逐像素相同，而非沿用正体的缓存"
+        );
+    }
+
+    /// 注册了私用区回退字体后，D2D 画图标要与软引擎同源：宽度与软引擎量的一致。
+    ///
+    /// 修复前 D2D 不切回退字体，图标落回主字体的方框——布局却是软引擎按图标宽度排的，
+    /// 两边对不上。第一条前提断言保证「切没切字体」在宽度上分得出来。
+    #[test]
+    fn private_use_glyphs_match_the_soft_engine() {
+        use crate::text::TextEngine;
+        // Segoe MDL2 Assets：Win10 起系统自带的图标字体，字形全在 BMP 私用区。
+        const ICON_FONT: &str = r"C:\Windows\Fonts\segmdl2.ttf";
+        // 主字体对私用区多半没有字形（画方框）；拿一串图标放大宽度差。
+        const ICONS: &str = "\u{E700}\u{E721}\u{E713}\u{E8BB}";
+        assert!(
+            std::path::Path::new(ICON_FONT).exists(),
+            "测试前提：{ICON_FONT} 应随 Win10/11 自带"
+        );
+        let ts = TextStyle::new(20.0);
+        let d2d = || {
+            let mut w = 0;
+            // 同一后端量两次、取第二次：第二次命中 layout 缓存，守住「命中路径也带着图标字体」。
+            render(8, 8, 1.0, |c| {
+                c.measure_text(ICONS, &ts);
+                w = c.measure_text(ICONS, &ts).w;
+            });
+            w
+        };
+        let before = d2d();
+        crate::text::register_private_use_font(ICON_FONT, "Segoe MDL2 Assets")
+            .expect("注册系统图标字体");
+        let after = d2d();
+        let mut soft = crate::text::DWriteEngine::new();
+        soft.set_scale(1.0);
+        let soft_w = soft.measure(ICONS, &ts, None).w;
+        assert_ne!(
+            soft_w, before,
+            "前提：切到图标字体须改变宽度，否则分不出对错"
+        );
+        assert!(
+            (after - soft_w).abs() <= 1,
+            "D2D 应与软引擎同样切到图标字体：D2D {after}，软引擎 {soft_w}"
         );
     }
 }
