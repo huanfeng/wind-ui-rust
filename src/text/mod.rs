@@ -721,7 +721,7 @@ mod font_coverage_tests {
 
     #[test]
     fn missing_dedups_in_first_seen_order() {
-        let c = FontCoverage::from_ranges([0x41..=0x5A]);
+        let c = FontCoverage::from_ranges(std::iter::once(0x41..=0x5A));
         assert_eq!(c.missing("AbcAb\u{20000}c"), vec!['b', 'c', '\u{20000}']);
         assert!(c.missing("ABC").is_empty());
     }
