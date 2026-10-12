@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-12
+
 ### 新增
 
 - **`Theme::font_family` 界面默认字族**：所有没显式设 `font_family` 的文字（含框架自绘的右键菜单、
@@ -16,6 +18,8 @@
   哪些 Unicode 码位（全部平面，返回 `FontCoverage`，本地 `contains` / `missing` 查询）。名字解析与
   `font_family` 绘字同源，带字重后缀的 GDI 名（「思源宋体 SemiBold」）同样认。供应用自建字体回退栈：
   启动时每款取一次覆盖表，排版时按字选族、分段交给各自的 `font_family`。
+- **示例 `font_switch`**：按钮与粘滞右键菜单两条入口换界面字体，含钉死字族的对照行、输入法组合串与
+  字体查询；`-- --renderer gpu` 走 GPU 后端对照。
 - **`Element::read_only`**（`text_input` 专属，可与 `multiline` / `wrap` 组合）：只读文本框——可聚焦、
   点选 / 拖选 / 双击选词、Ctrl+A / Ctrl+C、右键菜单只列「复制」「全选」；键入、输入法、退格 / Delete、
   剪切、粘贴、多行 Enter 换行一律拒绝（多行 Enter 改为交 `on_submit` / 宿主快捷键）。程序改写信号
@@ -60,6 +64,8 @@
   被指着。上下都装不下整列时，若横向已在指针旁边则仍按整窗高贴边；窗口窄到横向也让不开，才退到
   较大一侧滚动。下拉、菜单栏与子菜单的定位不变。`EventCtx::show_menu` / `show_system_menu` 的 `pos`
   同样按指针处理；要以控件为锚请改用 `show_dropdown_menu`。
+- **`Theme` 新增 `font_family`、`InputTheme` 新增 `bg_readonly`**（破坏性：两者未标 `#[non_exhaustive]`，
+  穷尽字面量构造须补字段；带 `..Default::default()` 的写法与 TOML 加载不受影响）。
 
 ## [0.22.0] - 2026-10-09
 
@@ -2705,7 +2711,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.19.0...v0.20.0
