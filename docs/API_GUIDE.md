@@ -1653,6 +1653,41 @@ Element::label("\u{f015} 首页").font_size(18.0)
 
 ---
 
+### 7.5 字体查询（装没装、覆盖哪些字）
+
+`font_family` 遇到没装的字体静默回退（7.1），应用无从知道"这台机器上到底用没用上"。
+需要自己决定回退顺序时——比如给正文配一条字体栈，某个生僻字当前字体没有就换栈里下一款来画——
+先问清两件事：
+
+```rust
+use windui::text::{family_available, font_coverage};
+
+// 1. 装了没有。判据与渲染同源：DirectWrite 家族名（「思源宋体」）与带字重后缀的
+//    GDI 族名（「思源宋体 SemiBold」，字体选择界面通常列的是这种）都认，大小写不敏感。
+let stack: Vec<&str> = ["思源宋体 SemiBold", "宋体"]
+    .into_iter()
+    .filter(|f| family_available(f))
+    .collect();
+
+// 2. 覆盖哪些字。启动时每款取一次存起来，排版时只做本地查询。
+let cov = font_coverage("思源宋体 SemiBold");
+if let Some(cov) = &cov {
+    println!("缺字：{:?}", cov.missing("𠀀龘"));   // 这款字体画不出的字，去重、按首次出现顺序
+    println!("有「中」：{}", cov.contains('中'));
+}
+```
+
+- `font_coverage` 返回整款字体的覆盖区间（`FontCoverage::ranges()`，有序、合并过），**含辅助平面**——
+  CJK 扩展 B 区以后的生僻字都在那里。带字重后缀的名字取的是那一款字重的文件，同族不同字重覆盖可能不同。
+- 族名解析结果按名字缓存（线程局部，同一线程上与渲染共用）：运行期间新装的字体看不到。
+  覆盖表本身**不缓存**，每次 `font_coverage` 都完整查一遍——取一次自己存起来。
+- 覆盖表对应**名字本身指向的那一款字面**；另设 `font_weight` / 斜体会让渲染换到同族另一款，覆盖可能不同。
+- `font_coverage` 返回 `None` 也可能是系统调用失败，未必等于没装（以 `family_available` 为准）。
+- 按字切段交给不同 `font_family` 时，异体字选择符（`U+FE00..`、`U+E0100..`）要跟着前一个字走，别单独切出去。
+- 框架自绘的文字（菜单、tooltip、toast）不经过应用的分段，仍按默认字族 + 系统回退。
+
+> **平台状态**：**当前仅 Windows**（`#[cfg(windows)]`，需 Windows 8+）。`FontCoverage` 类型本身跨平台可用。
+
 ## 8. 事件与交互
 
 ### 8.1 点击回调
@@ -2441,6 +2476,7 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送 |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） | ✓ 缺字面时合成加粗 |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 | ✗ 同 macOS |
+| 字体查询（`text::family_available` / `text::font_coverage`，见 §7.5） | ✓ | ✗ 函数**不存在**（`#[cfg(windows)]`） | ✗ 同 macOS |
 | GPU 渲染后端（`App::renderer`，见 §5） | ✓ Direct2D（feature `d2d`，默认**开**） | ✓ wgpu/Metal（默认**编入**，无需 feature；运行期默认档仍是 `Software`） | ✗ 窗口模式恒走软件渲染（`Renderer::Gpu` 打印提示后回退）；`gpu` feature 可编译 |
 
 **命名一致性**

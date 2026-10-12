@@ -22,23 +22,24 @@ use std::ffi::c_void;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 use windows::core::{implement, IUnknown, Interface, Ref, Result, BOOL, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, FALSE};
+use windows::Win32::Foundation::{COLORREF, DWRITE_E_NOCOLOR, ERROR_INSUFFICIENT_BUFFER, FALSE};
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteBitmapRenderTarget, IDWriteFactory, IDWriteFactory2,
-    IDWriteFactory3, IDWriteFontCollection, IDWriteFontCollection1, IDWriteFontSetBuilder1,
-    IDWriteGdiInterop, IDWriteInlineObject, IDWriteLocalizedStrings, IDWritePixelSnapping_Impl,
-    IDWriteRenderingParams, IDWriteTextFormat, IDWriteTextLayout, IDWriteTextRenderer,
-    IDWriteTextRenderer_Impl, DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED,
+    IDWriteFactory3, IDWriteFont1, IDWriteFontCollection, IDWriteFontCollection1,
+    IDWriteFontSetBuilder1, IDWriteGdiInterop, IDWriteInlineObject, IDWriteLocalizedStrings,
+    IDWritePixelSnapping_Impl, IDWriteRenderingParams, IDWriteTextFormat, IDWriteTextLayout,
+    IDWriteTextRenderer, IDWriteTextRenderer_Impl, DWRITE_COLOR_F, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_GLYPH_RUN, DWRITE_GLYPH_RUN_DESCRIPTION,
     DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_MATRIX, DWRITE_MEASURING_MODE,
     DWRITE_STRIKETHROUGH, DWRITE_TEXT_METRICS, DWRITE_TEXT_RANGE, DWRITE_UNDERLINE,
+    DWRITE_UNICODE_RANGE,
 };
 use windows::Win32::Graphics::Gdi::{
     GetCurrentObject, GetObjectW, DEFAULT_CHARSET, DIBSECTION, LOGFONTW, OBJ_BITMAP,
 };
 
-use super::{LineMetrics, TextEngine, TextStyle};
+use super::{FontCoverage, LineMetrics, TextEngine, TextStyle};
 use crate::geometry::{Color, Rect, Size};
 use crate::spec::Align;
 
@@ -374,7 +375,10 @@ thread_local! {
     ///
     /// 不失效：一个名字解析一次，线程存续期间结果不变。D2D 的 layout 缓存以调用方原值
     /// 做键正依赖这一点——将来若加失效（如监听字体安装），须一并清空那份缓存。
-    static FAMILY_CACHE: RefCell<HashMap<String, ResolvedFamily>> = RefCell::new(HashMap::new());
+    ///
+    /// 值为 `None` 表示本机没装这个名字的字体（见 [`family_available`]）。
+    static FAMILY_CACHE: RefCell<HashMap<String, Option<ResolvedFamily>>> =
+        RefCell::new(HashMap::new());
 }
 
 /// 一段文字最终交给 `CreateTextFormat` 的字体：家族名 + 字重 + 斜体。
@@ -383,7 +387,13 @@ thread_local! {
 /// （常规）时才采用字体条目自带的字重——否则主题里写死的粗体标题会被「用户选了个
 /// Light 字体」悄悄改细。斜体同理。
 pub(crate) fn font_choice(factory: &IDWriteFactory, ts: &TextStyle) -> ResolvedFamily {
-    let resolved = resolve_family(factory, ts.family.unwrap_or(DEFAULT_FAMILY));
+    let name = ts.family.unwrap_or(DEFAULT_FAMILY);
+    // 没装的名字原样交给 DirectWrite，由它自己回退——与加解析层之前的行为一致。
+    let resolved = resolve_family(factory, name).unwrap_or_else(|| ResolvedFamily {
+        family: name.to_string(),
+        weight: crate::text::WEIGHT_NORMAL,
+        italic: false,
+    });
     ResolvedFamily {
         weight: if ts.weight == crate::text::WEIGHT_NORMAL {
             resolved.weight
@@ -397,7 +407,8 @@ pub(crate) fn font_choice(factory: &IDWriteFactory, ts: &TextStyle) -> ResolvedF
 
 /// 把配置里写的字体名解析成 DirectWrite 认得的家族名（+ 字体自带字重/斜体）。
 /// 语义与代价见 [`ResolvedFamily`]；结果按名字缓存，同一个名字只解析一次。
-fn resolve_family(factory: &IDWriteFactory, name: &str) -> ResolvedFamily {
+/// 本机没装这个名字的字体时返回 `None`。
+fn resolve_family(factory: &IDWriteFactory, name: &str) -> Option<ResolvedFamily> {
     if let Some(r) = FAMILY_CACHE.with(|c| c.borrow().get(name).cloned()) {
         return r;
     }
@@ -406,29 +417,24 @@ fn resolve_family(factory: &IDWriteFactory, name: &str) -> ResolvedFamily {
     resolved
 }
 
-fn resolve_family_uncached(factory: &IDWriteFactory, name: &str) -> ResolvedFamily {
-    // 解析不出来就原样交给 DirectWrite——行为与加这层之前完全一致，不会更差。
-    let as_is = ResolvedFamily {
-        family: name.to_string(),
-        weight: crate::text::WEIGHT_NORMAL,
-        italic: false,
-    };
+fn resolve_family_uncached(factory: &IDWriteFactory, name: &str) -> Option<ResolvedFamily> {
     unsafe {
         // 1. DirectWrite 自己就认这个家族名：原样用。绝大多数字体走这条，不碰 GDI。
         let mut coll: Option<IDWriteFontCollection> = None;
-        if factory.GetSystemFontCollection(&mut coll, false).is_ok() {
-            if let Some(coll) = coll {
-                let name_w = wide_nul(name);
-                let mut index = 0u32;
-                let mut exists = FALSE;
-                if coll
-                    .FindFamilyName(PCWSTR(name_w.as_ptr()), &mut index, &mut exists)
-                    .is_ok()
-                    && exists.as_bool()
-                {
-                    return as_is;
-                }
-            }
+        factory.GetSystemFontCollection(&mut coll, false).ok()?;
+        let name_w = wide_nul(name);
+        let mut index = 0u32;
+        let mut exists = FALSE;
+        if coll?
+            .FindFamilyName(PCWSTR(name_w.as_ptr()), &mut index, &mut exists)
+            .is_ok()
+            && exists.as_bool()
+        {
+            return Some(ResolvedFamily {
+                family: name.to_string(),
+                weight: crate::text::WEIGHT_NORMAL,
+                italic: false,
+            });
         }
         // 2. 不认：当作 GDI face name 反查。名字本就是 GDI 枚举出来的，这一步能中。
         let mut lf = LOGFONTW {
@@ -441,23 +447,101 @@ fn resolve_family_uncached(factory: &IDWriteFactory, name: &str) -> ResolvedFami
         // lfFaceName 是 32 个 u16 的定长数组且必须留 NUL：超长名字截断，不溢出。
         let name_w: Vec<u16> = name.encode_utf16().take(lf.lfFaceName.len() - 1).collect();
         lf.lfFaceName[..name_w.len()].copy_from_slice(&name_w);
-        let Ok(gdi_interop) = factory.GetGdiInterop() else {
-            return as_is;
-        };
-        let Ok(font) = gdi_interop.CreateFontFromLOGFONT(&lf) else {
-            return as_is;
-        };
-        let Ok(names) = font.GetFontFamily().and_then(|f| f.GetFamilyNames()) else {
-            return as_is;
-        };
-        let Some(family) = localized_string(&names) else {
-            return as_is;
-        };
-        ResolvedFamily {
-            family,
+        let font = factory
+            .GetGdiInterop()
+            .ok()?
+            .CreateFontFromLOGFONT(&lf)
+            .ok()?;
+        let names = font.GetFontFamily().and_then(|f| f.GetFamilyNames()).ok()?;
+        Some(ResolvedFamily {
+            family: localized_string(&names)?,
             weight: font.GetWeight().0 as u16,
             italic: font.GetStyle() != DWRITE_FONT_STYLE_NORMAL,
+        })
+    }
+}
+
+/// 本机是否装了名为 `name` 的字体。
+///
+/// 判据与渲染**同源**：走的正是 `font_family` 绘字前那一层族名解析，所以 DirectWrite
+/// 家族名（「思源宋体」）与 GDI 族名（「思源宋体 SemiBold」，字体选择界面通常列的是这种）
+/// 都认；这里说有，`.font_family(name)` 就真能用上它。大小写不敏感。
+///
+/// 结果按名字缓存（线程局部：同一线程上与渲染共用一份），运行期间新装的字体看不到。
+/// 空名字恒为 `false`。
+///
+/// **仅 Windows**（`#[cfg(windows)]`）。
+pub fn family_available(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let Ok(factory) =
+        (unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) })
+    else {
+        return false;
+    };
+    resolve_family(&factory, name).is_some()
+}
+
+/// 名为 `name` 的字体覆盖哪些 Unicode 码位；没装时返回 `None`。
+///
+/// `None` 也可能是系统太旧（无 `IDWriteFont1`）或系统调用失败——此时 [`family_available`]
+/// 可能仍为 `true`。覆盖表本身**不缓存**，每次调用都完整查一遍，请调用方存起来。
+///
+/// 一次取回整款字体的覆盖区间（全部平面，不只 BMP——CJK 扩展 B 区以后的生僻字都在辅助
+/// 平面），之后用 [`FontCoverage::contains`] / [`FontCoverage::missing`] 在本地判定，
+/// 排版热路径不再走系统调用。
+///
+/// 名字解析与 [`family_available`] 同源；带字重后缀的 GDI 名取的是**那一款**字重的
+/// 字体文件——同一族的不同字重覆盖范围可能不同（常见于只给常规体补全字符集的字体）。
+/// 覆盖表对应名字本身指向的字面，不跟调用方另设的 `font_weight` / 斜体走。
+///
+/// **仅 Windows**（`#[cfg(windows)]`）。需要 Windows 8 及以上（`IDWriteFont1`）。
+pub fn font_coverage(name: &str) -> Option<FontCoverage> {
+    let factory: IDWriteFactory =
+        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()?;
+    let r = resolve_family(&factory, name)?;
+    unsafe {
+        let mut coll: Option<IDWriteFontCollection> = None;
+        factory.GetSystemFontCollection(&mut coll, false).ok()?;
+        let coll = coll?;
+        let fam_w = wide_nul(&r.family);
+        let mut index = 0u32;
+        let mut exists = FALSE;
+        coll.FindFamilyName(PCWSTR(fam_w.as_ptr()), &mut index, &mut exists)
+            .ok()?;
+        if !exists.as_bool() {
+            return None;
         }
+        let font: IDWriteFont1 = coll
+            .GetFontFamily(index)
+            .ok()?
+            .GetFirstMatchingFont(
+                DWRITE_FONT_WEIGHT(r.weight as i32),
+                DWRITE_FONT_STRETCH_NORMAL,
+                if r.italic {
+                    DWRITE_FONT_STYLE_ITALIC
+                } else {
+                    DWRITE_FONT_STYLE_NORMAL
+                },
+            )
+            .ok()?
+            .cast()
+            .ok()?;
+        // 两段式取数：先问个数（返回 E_NOT_SUFFICIENT_BUFFER 属正常），再按个数取。
+        // 其余错误不能吞：count 停在 0 会得到一张空表，调用方会当成「装了但一个字都没有」。
+        let mut count = 0u32;
+        if let Err(e) = font.GetUnicodeRanges(None, &mut count) {
+            if e.code() != ERROR_INSUFFICIENT_BUFFER.to_hresult() {
+                return None;
+            }
+        }
+        let mut buf = vec![DWRITE_UNICODE_RANGE::default(); count as usize];
+        font.GetUnicodeRanges(Some(&mut buf), &mut count).ok()?;
+        buf.truncate(count as usize);
+        Some(FontCoverage::from_ranges(
+            buf.iter().map(|r| r.first..=r.last),
+        ))
     }
 }
 
@@ -1665,7 +1749,7 @@ mod scale_contract_tests {
 /// ——正是论坛 #144 那类字体的形态，本机不装第三方字体也能复现。
 #[cfg(test)]
 mod family_resolve_tests {
-    use super::{font_choice, resolve_family, FAMILY_CACHE};
+    use super::{family_available, font_choice, font_coverage, resolve_family, FAMILY_CACHE};
     use crate::text::{TextStyle, WEIGHT_NORMAL};
     use windows::Win32::Graphics::DirectWrite::{
         DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
@@ -1678,7 +1762,7 @@ mod family_resolve_tests {
     #[test]
     fn dwrite_family_is_kept_as_is() {
         let f = factory();
-        let r = resolve_family(&f, "Segoe UI");
+        let r = resolve_family(&f, "Segoe UI").expect("Segoe UI 随系统自带");
         assert_eq!(r.family, "Segoe UI", "DirectWrite 认得的家族名应原样保留");
         assert_eq!(
             r.weight, WEIGHT_NORMAL,
@@ -1690,7 +1774,7 @@ mod family_resolve_tests {
     #[test]
     fn gdi_face_name_maps_to_family_and_weight() {
         let f = factory();
-        let r = resolve_family(&f, "Segoe UI Semibold");
+        let r = resolve_family(&f, "Segoe UI Semibold").expect("Segoe UI Semibold 随系统自带");
         assert_eq!(
             r.family, "Segoe UI",
             "带字重后缀的 GDI 名应解析回 DirectWrite 家族名，否则渲染时静默落回默认字体"
@@ -1702,18 +1786,53 @@ mod family_resolve_tests {
         );
     }
 
+    /// 没装的名字判为没装（`CreateFontFromLOGFONT` 对它返回错误，不会像 GDI 那样换成
+    /// 替身——注册表 FontSubstitutes 里的替身名如 `MS Shell Dlg 2` 也一样，Win10 实测），
+    /// 绘字时原样交给 DirectWrite 自己回退。
     #[test]
-    fn unknown_name_does_not_panic() {
+    fn unknown_name_is_reported_missing() {
         let f = factory();
-        // GDI 字体映射对认不出的名字会替换成别的字体，取回什么名字都行——
-        // 这里守的是「不 panic、不返回空名字」，空名字会让 CreateTextFormat 失败。
-        assert!(!resolve_family(&f, "绝无此字体 ZZZ").family.is_empty());
+        assert_eq!(resolve_family(&f, "绝无此字体 ZZZ"), None);
+        let mut ts = TextStyle::new(14.0);
+        ts.family = Some("绝无此字体 ZZZ");
+        assert_eq!(
+            font_choice(&f, &ts).family,
+            "绝无此字体 ZZZ",
+            "没装的名字原样交给 DirectWrite"
+        );
+    }
+
+    #[test]
+    fn availability_follows_the_same_resolution() {
+        assert!(family_available("Segoe UI"), "DirectWrite 家族名");
+        assert!(family_available("segoe ui"), "大小写不敏感");
+        assert!(family_available("Segoe UI Semibold"), "带字重后缀的 GDI 名");
+        // 带字重后缀、且 GDI 名有中文本地化版本的字体（论坛 #144 的形态），中英两个名字都认。
+        assert!(family_available("Microsoft YaHei Light"));
+        assert!(family_available("微软雅黑 Light"));
+        assert!(!family_available("绝无此字体 ZZZ"));
+        assert!(!family_available(""), "空名字恒为没装");
+    }
+
+    #[test]
+    fn coverage_reflects_the_fonts_cmap() {
+        let latin = font_coverage("Segoe UI").expect("Segoe UI 随系统自带");
+        assert!(latin.contains('A'));
+        assert!(!latin.contains('中'), "Segoe UI 不含汉字");
+        let cjk = font_coverage("Microsoft YaHei UI").expect("微软雅黑随系统自带");
+        assert!(cjk.contains('中'));
+        // 辅助平面：只取 BMP 的实现在这里会漏。
+        let emoji = font_coverage("Segoe UI Emoji").expect("Segoe UI Emoji 随系统自带");
+        assert!(emoji.contains('\u{1F600}'), "辅助平面码位须在覆盖表里");
+        assert_eq!(latin.missing("Ab中"), vec!['中']);
+        assert!(font_coverage("绝无此字体 ZZZ").is_none());
     }
 
     #[test]
     fn resolution_is_cached() {
         let f = factory();
         let first = resolve_family(&f, "Segoe UI Semibold");
+        assert!(first.is_some());
         let len = FAMILY_CACHE.with(|c| c.borrow().len());
         assert!(
             FAMILY_CACHE.with(|c| c.borrow().contains_key("Segoe UI Semibold")),

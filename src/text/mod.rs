@@ -4,7 +4,7 @@
 #[cfg(windows)]
 pub mod dwrite;
 #[cfg(windows)]
-pub use dwrite::{register_private_use_font, DWriteEngine};
+pub use dwrite::{family_available, font_coverage, register_private_use_font, DWriteEngine};
 
 #[cfg(target_os = "macos")]
 pub mod coretext;
@@ -451,6 +451,63 @@ pub(crate) fn block_offset_y(rect_h: f32, text_h: f32) -> f32 {
     (rect_h - text_h).max(0.0) / 2.0
 }
 
+/// 一款字体覆盖的 Unicode 码位，由 `text::font_coverage` 取得（目前仅 Windows）。
+///
+/// 对应的是**名字本身指向的那一款字面**：调用方另设的 `font_weight` / 斜体会让渲染换到
+/// 同族另一款字面，其覆盖范围可能不同。
+///
+/// 内部是**有序、不重叠、不相邻**的闭区间表：查询二分，O(log 区间数)；一款完整的 CJK
+/// 字体通常几百段，整张表几 KB。取一次存起来，排版时只做本地查询。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FontCoverage {
+    ranges: Vec<std::ops::RangeInclusive<u32>>,
+}
+
+impl FontCoverage {
+    /// 由任意顺序、可重叠的区间构造；内部排序并合并。
+    pub fn from_ranges(ranges: impl IntoIterator<Item = std::ops::RangeInclusive<u32>>) -> Self {
+        let mut v: Vec<_> = ranges.into_iter().filter(|r| !r.is_empty()).collect();
+        v.sort_by_key(|r| *r.start());
+        let mut out: Vec<std::ops::RangeInclusive<u32>> = Vec::with_capacity(v.len());
+        for r in v {
+            match out.last_mut() {
+                // 重叠或首尾相接（end + 1 == start）都并成一段，保持「不相邻」的不变式。
+                Some(last) if *r.start() <= last.end().saturating_add(1) => {
+                    let end = (*last.end()).max(*r.end());
+                    *last = *last.start()..=end;
+                }
+                _ => out.push(r),
+            }
+        }
+        Self { ranges: out }
+    }
+
+    /// 覆盖区间表：有序、不重叠、不相邻。
+    pub fn ranges(&self) -> &[std::ops::RangeInclusive<u32>] {
+        &self.ranges
+    }
+
+    /// 这款字体有没有 `c` 的字形。
+    pub fn contains(&self, c: char) -> bool {
+        let c = c as u32;
+        // 第一个 end >= c 的区间；它的 start <= c 才算落在里面。
+        let i = self.ranges.partition_point(|r| *r.end() < c);
+        self.ranges.get(i).is_some_and(|r| *r.start() <= c)
+    }
+
+    /// `text` 里这款字体画不出来的字符，去重、按首次出现的顺序。
+    ///
+    /// 逐个 `char`（Unicode 标量）判定。异体字选择符（`U+FE00..`、`U+E0100..`）这类附着在
+    /// 前一个字上的码位也会被单独判定，分段时须让它们跟随基字，不要单独切出去。
+    pub fn missing(&self, text: &str) -> Vec<char> {
+        // 去重用集合：整章正文对一款西文字体查，缺的不同汉字可达几千个，线性判重是平方级。
+        let mut seen = std::collections::HashSet::new();
+        text.chars()
+            .filter(|&c| !self.contains(c) && seen.insert(c))
+            .collect()
+    }
+}
+
 /// 纵向定位契约的跨引擎测试：Windows 跑 DirectWrite、macOS 跑 Core Text，
 /// **同一份断言**。两边的实现细节可以不同，可观察的纵向行为不许不同。
 #[cfg(test)]
@@ -585,5 +642,41 @@ mod hard_break_contract {
         let one = measure("甲", None);
         assert_eq!(measure("甲\n", None).h, one.h * 2, "尾随换行也占一行");
         assert_eq!(measure("甲\n\n乙", None).h, one.h * 3, "中间空行同样占位");
+    }
+}
+
+#[cfg(test)]
+mod font_coverage_tests {
+    use super::FontCoverage;
+
+    #[test]
+    fn overlapping_and_adjacent_ranges_merge() {
+        let c = FontCoverage::from_ranges([0x60..=0x7A, 0x41..=0x5A, 0x5B..=0x60, 0x100..=0x17F]);
+        assert_eq!(c.ranges(), &[0x41..=0x7A, 0x100..=0x17F]);
+    }
+
+    #[test]
+    fn contains_checks_both_ends_and_gaps() {
+        let c = FontCoverage::from_ranges([0x41..=0x5A, 0x4E00..=0x9FFF, 0x20000..=0x2A6DF]);
+        for ch in ['A', 'Z', '中', '\u{20000}', '\u{2A6DF}'] {
+            assert!(c.contains(ch), "{ch:?} 在覆盖区间内");
+        }
+        for ch in ['@', '[', 'a', '\u{3400}', '\u{2A6E0}', '\u{1F600}'] {
+            assert!(!c.contains(ch), "{ch:?} 不在覆盖区间内");
+        }
+    }
+
+    #[test]
+    fn empty_coverage_contains_nothing() {
+        let c = FontCoverage::from_ranges([]);
+        assert!(!c.contains('A'));
+        assert_eq!(c.missing("AA"), vec!['A']);
+    }
+
+    #[test]
+    fn missing_dedups_in_first_seen_order() {
+        let c = FontCoverage::from_ranges([0x41..=0x5A]);
+        assert_eq!(c.missing("AbcAb\u{20000}c"), vec!['b', 'c', '\u{20000}']);
+        assert!(c.missing("ABC").is_empty());
     }
 }

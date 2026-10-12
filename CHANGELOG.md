@@ -7,6 +7,10 @@
 
 ### 新增
 
+- **字体查询 `text::family_available` / `text::font_coverage`**（仅 Windows）：本机装没装某个字体、它覆盖
+  哪些 Unicode 码位（全部平面，返回 `FontCoverage`，本地 `contains` / `missing` 查询）。名字解析与
+  `font_family` 绘字同源，带字重后缀的 GDI 名（「思源宋体 SemiBold」）同样认。供应用自建字体回退栈：
+  启动时每款取一次覆盖表，排版时按字选族、分段交给各自的 `font_family`。
 - **`Element::read_only`**（`text_input` 专属，可与 `multiline` / `wrap` 组合）：只读文本框——可聚焦、
   点选 / 拖选 / 双击选词、Ctrl+A / Ctrl+C、右键菜单只列「复制」「全选」；键入、输入法、退格 / Delete、
   剪切、粘贴、多行 Enter 换行一律拒绝（多行 Enter 改为交 `on_submit` / 宿主快捷键）。程序改写信号
