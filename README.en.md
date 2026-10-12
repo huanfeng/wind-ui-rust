@@ -157,7 +157,7 @@ Examples fall into four groups:
 | Group | Examples |
 |-------|----------|
 | **Complete apps** | `settings` (settings window: title bar + icon sidebar + content + action bar + two dialogs), `about` (about page), `ime_settings` (IME settings scenario), `light_titlebar` (installer-style light title bar) |
-| **Widgets & capabilities** | `fullshowcase` (widget tour, seven tabs), `theming` (TOML themes + runtime reskin), `image` (images/SVG), `animation`, `emoji` (color emoji), `caret` (four caret styles) |
+| **Widgets & capabilities** | `fullshowcase` (widget tour, seven tabs), `theming` (TOML themes + runtime reskin), `font_switch` (runtime UI font switch + font queries), `image` (images/SVG), `animation`, `emoji` (color emoji), `caret` (four caret styles) |
 | **Data display** | `virtual_list` (virtual list + table), `virtual_table_server` (server-side paging), `table_pager` (pager bar), `dyn_list` (data-driven dynamic list), `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline` |
 | **System integration** | `tray` (system tray), `hotkey` (global hotkeys + start hidden), `multi_window` (child windows + shared state), `file_drop`, `frameless` (custom title bar + system menu), `background_task` (cross-thread updates), `ime` |
 
