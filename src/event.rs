@@ -1197,7 +1197,8 @@ pub struct MenuRequest {
     /// 使勾选态/标签在菜单不关闭的前提下原地刷新。`None` 则粘滞项点击后菜单内容不变。
     ///
     /// 面板宽度与位置**不随重建变化**——项文本变化会让面板忽宽忽窄，而指针正停在
-    /// 上面准备点下一项。宽度以首次弹出的测量结果为准。
+    /// 上面准备点下一项。宽度以首次弹出的测量结果为准；例外是菜单开着时换了
+    /// [`Theme::font_family`](crate::theme::Theme::font_family)，宿主按新字体重新测宽。
     pub rebuild: Option<std::rc::Rc<dyn Fn() -> Vec<MenuItem>>>,
     /// 发起本菜单的菜单栏（[`EventCtx::show_menu_bar`](crate::core::EventCtx::show_menu_bar)
     /// 才填）：宿主据此在展开期间做栏级联动——指针滑到相邻标题即切换、←→ 在根级跨菜单、

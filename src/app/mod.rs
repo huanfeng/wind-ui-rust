@@ -3043,9 +3043,15 @@ impl UiHost {
             self.damage.needs_full = true;
             self.damage.needs_relayout = true;
         }
+        let family_changed = theme.font_family != self.theme.font_family;
         self.lang_seen = Some(lang);
         self.theme = theme;
         crate::theme::set_current(self.theme.clone());
+        // 菜单宽度只在打开时量一次；开着菜单换了默认字族（典型是粘滞的「字体」菜单项）
+        // 就按新字体重量。须在 `set_current` 之后：测量读的是线程局部的新主题。
+        if family_changed {
+            self.remeasure_menu();
+        }
         // 清屏色随主题（未经 App::bg 显式固定时）：暗色主题下窗口底色同步转暗。
         if self.bg_follows_theme {
             self.bg = self.theme.palette.bg;

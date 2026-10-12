@@ -11,6 +11,7 @@
   tooltip、toast，以及 Windows 输入法自己画的组合串）用它，`None` 时仍是平台默认。是兜底不是覆盖，
   显式设过的节点不受影响；经 `ThemeHandle` 运行期更换，下一帧全部重排重绘。三平台均生效。各引擎与
   `RichText` 的布局缓存改按「实际字族」做键——此前拿 `None` 本身做键，换默认字族后会沿用旧字体的宽度。
+  菜单开着时换字族（如粘滞的「字体」菜单项），各级面板按新字体重新测宽、子菜单重新贴边。
 - **字体查询 `text::family_available` / `text::font_coverage`**（仅 Windows）：本机装没装某个字体、它覆盖
   哪些 Unicode 码位（全部平面，返回 `FontCoverage`，本地 `contains` / `missing` 查询）。名字解析与
   `font_family` 绘字同源，带字重后缀的 GDI 名（「思源宋体 SemiBold」）同样认。供应用自建字体回退栈：
