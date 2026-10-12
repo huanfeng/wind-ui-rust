@@ -1457,6 +1457,8 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
   注意 `ThemeHandle::set(Theme::dark())` 整体替换会把它冲掉，切明暗用 `update` 改 `palette`（§7.3）。
   自定义控件若自己缓存测量结果，键里的字族请取 `TextStyle::of(style).family`（已含默认字族），
   别用字面量 `TextStyle { family: None, .. }` 的 `None` 做键——换默认字族后会命中旧字体的结果。
+  菜单开着时换字族（粘滞的「字体」菜单项）面板会按新字体重新测宽。完整示例：`examples/font_switch.rs`
+  （按钮 / 粘滞菜单换字族、输入法组合串、字体查询；`-- gpu` 走 GPU 后端）。
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
 - `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
 - 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
