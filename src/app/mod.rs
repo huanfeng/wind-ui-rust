@@ -3932,6 +3932,16 @@ impl AppHandler for UiHost {
         ))
     }
 
+    fn ime_font_family(&self) -> Option<String> {
+        let n = self.tree.get(self.focus.current?)?;
+        // 读主题源而非 `self.theme` 快照：`ThemeHandle::update` 之后、下一帧 `begin_frame`
+        // 之前，快照还是旧的，那段时间里的合成消息会拿到旧字族。
+        n.style
+            .font_family
+            .clone()
+            .or_else(|| self.theme_src.current().font_family.clone())
+    }
+
     fn set_ime_composing(&mut self, composing: bool) -> bool {
         let focus = self.focus.current;
         let mut changed = false;
@@ -6735,6 +6745,53 @@ mod tests {
             lum(handler.bg) < 300,
             "未经 App::bg 显式固定时，清屏色应随主题热切换"
         );
+    }
+
+    /// 主题默认字族运行期更换：没设字族的文字下一帧换字体重排，显式设过的不动。
+    /// 走真实宿主 + 真实 DirectWrite，字体是 Windows 自带的两款。
+    #[cfg(windows)]
+    #[test]
+    fn theme_font_family_reflows_unstyled_text() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let theme = crate::theme::Theme {
+            font_family: Some("Segoe UI".into()),
+            ..Default::default()
+        };
+        let mut app = App::new("t", 400, 80).theme(theme);
+        let handle = app.theme_handle();
+        app = app.content(
+            Element::row()
+                .child(Element::label("iiiiiiiiii"))
+                .child(Element::label("iiiiiiiiii").font_family("Segoe UI")),
+        );
+        let mut handler = app.into_handler_for_test();
+        handler.set_scale(1.0);
+        let mut pm = Pixmap::new(400, 80).unwrap();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(400, 80));
+        };
+        let widths = |h: &UiHost| {
+            // 根 → row → 两个 label。
+            let mut id = h.tree.root.expect("已构建");
+            while h.tree.get(id).unwrap().children.len() == 1 {
+                id = h.tree.get(id).unwrap().children[0];
+            }
+            let kids = h.tree.get(id).unwrap().children.clone();
+            (h.tree.abs_bounds(kids[0]).w, h.tree.abs_bounds(kids[1]).w)
+        };
+        frame(&mut handler);
+        let (plain0, fixed0) = widths(&handler);
+        assert_eq!(plain0, fixed0, "前提：默认字族与显式字族同款时同宽");
+        handle.update(|t| t.font_family = Some("Consolas".into()));
+        frame(&mut handler);
+        let (plain1, fixed1) = widths(&handler);
+        assert!(
+            plain1 > plain0,
+            "没设字族的文字应换成等宽字体、变宽：{plain0} → {plain1}"
+        );
+        assert_eq!(fixed1, fixed0, "显式设过字族的不受默认字族影响");
     }
 
     #[test]

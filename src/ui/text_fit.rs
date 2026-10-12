@@ -41,11 +41,12 @@ fn flatten_line_breaks(s: &str) -> Option<String> {
 /// 排版键：文案、排版宽度、文字属性与 DPI 缩放的散列。
 ///
 /// 64 位散列、单条缓存：碰撞的后果只是一帧该裁没裁（或该截没截），可以接受。
-fn layout_key(s: &str, w: i32, ts: &TextStyle, scale: f32) -> u64 {
+pub(crate) fn layout_key(s: &str, w: i32, ts: &TextStyle, scale: f32) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     w.hash(&mut h);
-    ts.family.hash(&mut h);
+    // 实际字族（含主题默认）：拿 `None` 本身做键，换默认字族后会命中旧字体的结果。
+    ts.family_or_default().hash(&mut h);
     ts.size.to_bits().hash(&mut h);
     ts.weight.hash(&mut h);
     ts.italic.hash(&mut h);

@@ -112,8 +112,10 @@ fn text_fg(enabled: bool, style: &Style, theme: &crate::theme::Theme) -> Color {
     }
 }
 
-/// 截断缓存键值：`(文案, content_w, fsize_bits, 截断串, 是否发生了截断)`。
-type TruncCacheEntry = (String, i32, u32, String, bool);
+/// 截断缓存键值：`(键, 截断串, 是否发生了截断)`。键是 [`text_fit::layout_key`]——文案、
+/// 宽度、实际字族、字号、字重、斜体、行高、缩放全在里面；少一项，换了那一项（比如主题
+/// 默认字族）的固定宽单行 Label 就会沿用旧字体算出的截断串。
+type TruncCacheEntry = (u64, String, bool);
 
 /// 文本叶子控件。
 ///
@@ -125,7 +127,7 @@ pub struct Label {
     pub max_lines: Option<usize>,
     /// 溢出省略方式（仅 `max_lines = Some(1)` 单行时精确截断；多行仅高度裁剪）。
     pub truncate: Truncate,
-    /// 截断结果缓存 `(文案, content_w, fsize_bits) → (截断串, 是否发生了截断)`。
+    /// 截断结果缓存，见 [`TruncCacheEntry`]。
     /// 文案进缓存键是为绑了信号的 Label：它的文案会变，不入 key 就会一直画上一次的截断串。
     trunc_cache: RefCell<Option<TruncCacheEntry>>,
     /// 多行限行下文本是否溢出（排版高度超过 `max_lines` 封顶值），measure 期记下。
@@ -192,7 +194,6 @@ impl Widget for Label {
         let s = self.text.resolve();
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
         let ts = &crate::text::TextStyle::of(style);
-        let fsize = ts.size;
         // 禁用态：文字降为 text_disabled，使整行（含标签/说明）随容器禁用统一置灰。
         let fg = text_fg(enabled, style, &crate::theme::current());
 
@@ -229,25 +230,19 @@ impl Widget for Label {
 
         // 单行省略（max_lines = 1 且配置了截断模式）。
         if self.truncate != Truncate::None && self.max_lines == Some(1) && !s.is_empty() {
-            let key_w = content.w;
-            let key_f = fsize.to_bits();
+            let key = text_fit::layout_key(&s, content.w, ts, canvas.dpi_scale());
             let cached: Option<(String, bool)> = {
                 let c = self.trunc_cache.borrow();
-                c.as_ref().and_then(|(ks, cw, cf, out, t)| {
-                    if ks.as_str() == s.as_ref() && *cw == key_w && *cf == key_f {
-                        Some((out.clone(), *t))
-                    } else {
-                        None
-                    }
-                })
+                c.as_ref()
+                    .filter(|(k, _, _)| *k == key)
+                    .map(|(_, out, t)| (out.clone(), *t))
             };
             let (text_str, _truncated) = if let Some(hit) = cached {
                 hit
             } else {
                 let (out, t) =
                     text_fit::truncate_to_width(&s, canvas, ts, content.w, self.truncate);
-                *self.trunc_cache.borrow_mut() =
-                    Some((s.to_string(), key_w, key_f, out.clone(), t));
+                *self.trunc_cache.borrow_mut() = Some((key, out.clone(), t));
                 (out, t)
             };
             canvas.draw_text(&text_str, paint_rect, fg, style.text_align, ts);
@@ -273,7 +268,7 @@ impl Widget for Label {
                 self.trunc_cache
                     .borrow()
                     .as_ref()
-                    .map(|(_, _, _, _, t)| *t)
+                    .map(|(_, _, t)| *t)
                     .unwrap_or(false),
             );
         }
@@ -6505,10 +6500,40 @@ mod tests {
         let second = label.trunc_cache.borrow().clone().unwrap();
         assert_ne!(first.0, second.0, "缓存键里的文案应随信号更新");
         assert!(
-            second.3.starts_with('B'),
+            second.1.starts_with('B'),
             "换文案后应重算截断串，实得 {}",
-            second.3
+            second.1
         );
+    }
+
+    /// 固定宽的单行截断 Label：换主题默认字族后宽度不变，缓存键必须变——否则沿用旧字体
+    /// 算出的截断串（新字体更宽则溢出、更窄则截早），`text_truncated` 也跟着错。
+    #[test]
+    fn truncation_cache_keyed_by_default_family() {
+        use crate::theme::{set_current, Theme};
+        let set = |f: &str| {
+            set_current(std::rc::Rc::new(Theme {
+                font_family: Some(f.into()),
+                ..Theme::default()
+            }))
+        };
+        let label = Label {
+            text: TextContent::from("AAAAAAAAAAAAAAAAAAAA"),
+            max_lines: Some(1),
+            truncate: Truncate::End,
+            trunc_cache: RefCell::new(None),
+            multiline_overflow: Cell::new(false),
+            overflow: text_fit::WrapClip::default(),
+        };
+        let style = Style::default();
+        let r = Rect::new(0, 0, 40, 20);
+        set("甲");
+        label.paint(r, r, false, true, &mut WidthCanvas, &style);
+        let first = label.trunc_cache.borrow().clone().unwrap();
+        set("乙");
+        label.paint(r, r, false, true, &mut WidthCanvas, &style);
+        let second = label.trunc_cache.borrow().clone().unwrap();
+        assert_ne!(first.0, second.0, "换默认字族后应重算截断串，而非命中旧键");
     }
 
     #[test]

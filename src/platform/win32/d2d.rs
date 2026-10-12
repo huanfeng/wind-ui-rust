@@ -674,7 +674,7 @@ impl D2DCanvas<'_> {
         // 键用调用方原值即可：原值到解析结果是确定映射。斜体必须进键——漏掉它，同字族
         // 同字号的正体与斜体会互相顶替，谁先进缓存就画谁。
         let key: LayoutKey = (
-            ts.family.unwrap_or(DEFAULT_FAMILY).to_string(),
+            ts.family_or_default().unwrap_or(DEFAULT_FAMILY).to_string(),
             text.to_string(),
             ts.size.to_bits(),
             ts.weight,

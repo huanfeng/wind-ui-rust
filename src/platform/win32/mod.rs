@@ -3625,8 +3625,9 @@ unsafe fn cancel_fling(hwnd: HWND) {
 /// 把输入法合成窗 + 候选窗定位到焦点文本控件的光标处。
 /// 光标位置由 handler 提供（物理像素、相对客户区），无文本焦点时不动作。
 unsafe fn handle_ime_position(hwnd: HWND) {
-    let caret = match state_from(hwnd) {
-        Some(s) => s.handler.ime_caret(),
+    // 两段式：先把要的都读出来、放掉 state 借用，再调 Imm*（可能同步回进 wnd_proc）。
+    let (caret, family) = match state_from(hwnd) {
+        Some(s) => (s.handler.ime_caret(), s.handler.ime_font_family()),
         None => return,
     };
     let Some((x, y, h)) = caret else { return };
@@ -3636,19 +3637,22 @@ unsafe fn handle_ime_position(hwnd: HWND) {
     }
     // 合成串字体：按 caret 物理高度设字高（h 已含 DPI scale），使 IME 内联绘制的
     // 合成串与我们自绘、已缩放的上屏文字大小一致。不设则 IME 用默认未缩放字体，
-    // 高 DPI 下合成串明显偏小（上屏后正常）。lfFaceName 显式指定为与正文渲染同族的
-    // "Microsoft YaHei UI"（见 text::dwrite::DEFAULT_FAMILY），否则留空时系统常回退到
-    // 陈旧的 SimSun/宋体，与我们自绘文字观感不一致。
+    // 高 DPI 下合成串明显偏小（上屏后正常）。lfFaceName 取焦点控件实际用的字族（含主题
+    // 默认字族），没有则用与正文渲染同款的平台默认；留空时系统常回退到陈旧的 SimSun/宋体，
+    // 与我们自绘文字观感不一致。lfFaceName 定长 32 且须留 NUL。
     let mut lf = LOGFONTW {
         lfHeight: h,
         lfCharSet: DEFAULT_CHARSET,
         ..Default::default()
     };
-    for (dst, src) in lf
-        .lfFaceName
-        .iter_mut()
-        .zip("Microsoft YaHei UI".encode_utf16())
-    {
+    // 超长名字不截断：截出来的半个名字匹配不到任何字体（还可能劈开代理对），GDI 会静默落回
+    // 宋体——正是这里要避免的。放不下就用平台默认。
+    let face_len = lf.lfFaceName.len() - 1;
+    let face = family
+        .as_deref()
+        .filter(|f| f.encode_utf16().count() <= face_len)
+        .unwrap_or(crate::text::dwrite::DEFAULT_FAMILY);
+    for (dst, src) in lf.lfFaceName.iter_mut().zip(face.encode_utf16()) {
         *dst = src;
     }
     let _ = ImmSetCompositionFontW(himc, &lf);

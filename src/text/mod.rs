@@ -68,7 +68,7 @@ impl<'a> TextStyle<'a> {
     /// 只指定字号，其余取默认。用于菜单、徽标等不随控件 `Style` 走的固定字号处。
     pub fn new(size: f32) -> Self {
         Self {
-            family: None,
+            family: default_family(),
             size,
             weight: WEIGHT_NORMAL,
             italic: false,
@@ -79,12 +79,22 @@ impl<'a> TextStyle<'a> {
     /// 从控件 `Style` 提取文字属性。控件绘制路径一律用它。
     pub fn of(style: &'a crate::style::Style) -> Self {
         Self {
-            family: style.font_family.as_deref(),
+            family: or_default(style.font_family.as_deref()),
             size: style.font_size,
             weight: style.font_weight,
             italic: style.font_italic,
             line_height: style.line_height,
         }
+    }
+
+    /// 实际要用的字族：自己设了用自己的，否则用主题默认字族（[`default_family`]）；
+    /// 两者都没有时为 `None`，由引擎落到平台默认。
+    ///
+    /// 引擎与缓存一律经它取字族，而不是直接读 `family`——`TextStyle` 字段公开，字面量
+    /// 构造的 `family: None` 绕过了 `new` / `of`。拿 `None` 本身做缓存键的话，换了默认字族
+    /// 键却没变，缓存会继续交出旧字体的宽度与字形，不报错也看不出来。
+    pub(crate) fn family_or_default(&self) -> Option<&'a str> {
+        or_default(self.family)
     }
 
     /// 换一个字号，其余不变。用于「比正文小两号」这类相对尺寸。
@@ -105,6 +115,42 @@ impl<'a> TextStyle<'a> {
     /// 行高解析为绝对像素；未指定行高时返回 `None`，由引擎沿用字体自带行距。
     pub fn line_height_px(&self) -> Option<f32> {
         self.line_height.map(|m| self.size * m)
+    }
+}
+
+/// 当前主题的默认字族（[`Theme::font_family`](crate::theme::Theme::font_family)），
+/// 未设时为 `None`（引擎落到平台默认）。
+///
+/// 返回 `&'static str` 是为了能直接填进任何生命周期的 `TextStyle`：名字在首次出现时
+/// 驻留（leak）一份，此后同名复用——换来换去也只是几个短字符串，不随调用次数增长。
+pub(crate) fn default_family() -> Option<&'static str> {
+    thread_local! {
+        static INTERNED: std::cell::RefCell<std::collections::HashSet<&'static str>> =
+            std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+    let theme = crate::theme::current();
+    let name = theme.font_family.as_deref()?;
+    Some(INTERNED.with(|set| {
+        let mut set = set.borrow_mut();
+        match set.get(name) {
+            Some(&s) => s,
+            None => {
+                let s: &'static str = Box::leak(name.into());
+                set.insert(s);
+                s
+            }
+        }
+    }))
+}
+
+/// `family` 有值用它，没有用主题默认字族。
+///
+/// 不写成 `family.or_else(default_family)`：函数项的返回类型 `Option<&'static str>` 不会
+/// 协变成 `Option<&'a str>`，借用检查会把 `'a` 硬推成 `'static`。
+pub(crate) fn or_default(family: Option<&str>) -> Option<&str> {
+    match family {
+        Some(f) => Some(f),
+        None => default_family(),
     }
 }
 
@@ -678,5 +724,70 @@ mod font_coverage_tests {
         let c = FontCoverage::from_ranges([0x41..=0x5A]);
         assert_eq!(c.missing("AbcAb\u{20000}c"), vec!['b', 'c', '\u{20000}']);
         assert!(c.missing("ABC").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod default_family_tests {
+    use super::{default_family, TextStyle};
+    use crate::theme::{set_current, Theme};
+    use std::rc::Rc;
+
+    /// 主题线程局部；Rust 测试各跑各的线程，互不影响。
+    fn with_default(name: Option<&str>) {
+        set_current(Rc::new(Theme {
+            font_family: name.map(str::to_string),
+            ..Theme::default()
+        }));
+    }
+
+    #[test]
+    fn unset_default_leaves_family_empty() {
+        with_default(None);
+        assert_eq!(TextStyle::new(12.0).family, None, "未设时交引擎落平台默认");
+    }
+
+    /// 框架自绘（菜单、tooltip、toast）都用 `TextStyle::new`，它跟着主题默认字族走就全跟上了。
+    #[test]
+    fn new_and_of_pick_up_the_theme_default() {
+        with_default(Some("界面字体"));
+        assert_eq!(TextStyle::new(12.0).family, Some("界面字体"));
+        let plain = crate::style::Style::default();
+        assert_eq!(TextStyle::of(&plain).family, Some("界面字体"));
+    }
+
+    /// 兜底而非覆盖：显式设过的节点照旧用自己的。
+    #[test]
+    fn explicit_family_wins_over_the_default() {
+        with_default(Some("界面字体"));
+        let style = crate::style::Style {
+            font_family: Some("正文字体".into()),
+            ..Default::default()
+        };
+        assert_eq!(TextStyle::of(&style).family, Some("正文字体"));
+    }
+
+    /// 字面量构造绕过了 `new`/`of`，引擎经 `family_or_default` 补上默认字族。
+    #[test]
+    fn literal_none_resolves_through_family_or_default() {
+        with_default(Some("界面字体"));
+        let ts = TextStyle {
+            family: None,
+            ..TextStyle::new(12.0)
+        };
+        assert_eq!(ts.family_or_default(), Some("界面字体"));
+        with_default(None);
+        assert_eq!(ts.family_or_default(), None);
+    }
+
+    /// 名字驻留：同名复用同一块内存，反复切换不随调用次数泄漏。
+    #[test]
+    fn default_family_is_interned() {
+        with_default(Some("界面字体"));
+        let a = default_family().unwrap();
+        with_default(Some("别的"));
+        with_default(Some("界面字体"));
+        let b = default_family().unwrap();
+        assert!(std::ptr::eq(a, b), "同名应复用同一份驻留字符串");
     }
 }

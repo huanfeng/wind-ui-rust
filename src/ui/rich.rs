@@ -615,7 +615,9 @@ struct FragStyle {
 impl FragStyle {
     fn ts(&self) -> TextStyle<'_> {
         TextStyle {
-            family: self.family.as_deref(),
+            // 字面量构造绕过了 `TextStyle::of`，主题默认字族得在这里补上，否则碎片按
+            // `None` 进引擎缓存，换默认字族后沿用旧宽度。
+            family: crate::text::or_default(self.family.as_deref()),
             size: self.size,
             weight: self.weight,
             italic: self.italic,
@@ -1596,7 +1598,7 @@ impl RichText {
         collect_collapsed(&self.doc.blocks, &mut collapsed);
         LayoutKey {
             wrap_w,
-            family: style.font_family.clone(),
+            family: TextStyle::of(style).family.map(str::to_string),
             size_bits: style.font_size.to_bits(),
             weight: style.font_weight,
             line_height_bits: style.line_height.map(f32::to_bits),
@@ -1625,7 +1627,9 @@ impl RichText {
                 // 每帧交替重排、把选区一并清掉。
                 && l.size.w <= want_w
                 && want_w <= l.wrap_hi
-                && k.family.as_deref() == style.font_family.as_deref()
+                // 比的是**实际字族**（含主题默认）：只比 `style.font_family` 的话，换默认字族
+                // 时两边都是 `None`，命中旧布局。
+                && k.family.as_deref() == TextStyle::of(style).family
                 && k.size_bits == style.font_size.to_bits()
                 && k.weight == style.font_weight
                 && k.line_height_bits == style.line_height.map(f32::to_bits)
@@ -3464,6 +3468,48 @@ mod tests {
         let text = rt.selected_text().unwrap();
         assert!(!text.contains("展开"), "「… 展开」标记不应进入复制文本");
         assert!(text.starts_with("汉"), "选区应为正文内容");
+    }
+
+    /// 换主题默认字族要让布局缓存失效、碎片按新字族重测——缓存键只比 `style.font_family`
+    /// 的话，两边都是 `None`，命中旧布局（旧字体的宽度）。Wrap 宽与显式宽各走一遍。
+    #[test]
+    fn theme_default_family_change_invalidates_layout() {
+        use crate::theme::{set_current, Theme};
+        struct Seen(Vec<Option<String>>);
+        impl Measurer for Seen {
+            fn size(&mut self, text: &str, ts: &TextStyle) -> Size {
+                self.0.push(ts.family.map(str::to_string));
+                crate::text::NullTextEngine.measure(text, ts, None)
+            }
+            fn metrics(&mut self, text: &str, ts: &TextStyle) -> LineMetrics {
+                crate::text::NullTextEngine.line_metrics(text, ts)
+            }
+            fn scale(&self) -> f32 {
+                1.0
+            }
+        }
+        let set = |f: &str| {
+            set_current(std::rc::Rc::new(Theme {
+                font_family: Some(f.into()),
+                ..Theme::default()
+            }))
+        };
+        for wrap in [None, Some(200)] {
+            let rt = RichText::new(RichDoc::new().para("汉汉"));
+            let style = Style::default();
+            set("甲");
+            rt.ensure_layout(wrap, &style, &mut Seen(Vec::new()));
+            rt.sel.set(Some(cjk_sel(0, 1)));
+            set("乙");
+            let mut seen = Seen(Vec::new());
+            rt.ensure_layout(wrap, &style, &mut seen);
+            assert!(rt.sel.get().is_none(), "{wrap:?}：换默认字族应重排");
+            assert!(
+                seen.0.iter().any(|f| f.as_deref() == Some("乙")),
+                "{wrap:?}：碎片应按新默认字族测量，实得 {:?}",
+                seen.0
+            );
+        }
     }
 
     #[test]

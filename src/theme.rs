@@ -1299,6 +1299,16 @@ impl ToastTheme {
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Theme {
+    /// 界面默认字族：所有**没显式设** `font_family` 的文字都用它，含框架自绘的菜单、
+    /// tooltip、toast。`None`（默认）用平台默认：Windows「Microsoft YaHei UI」、
+    /// macOS「PingFang SC」、Linux 交给 fontconfig 的 `sans-serif`。
+    ///
+    /// 是**兜底**而非覆盖：`Element::font_family` 设过的节点照旧用自己的。名字解析与
+    /// `font_family` 相同（Windows 上带字重后缀的 GDI 名也认，见 `text::family_available`）。
+    /// 经 `ThemeHandle::set` / `update` 运行期更换，下一帧全部重排重绘。
+    ///
+    /// 放在最前：TOML 里标量须写在各 `[表]` 之前。
+    pub font_family: Option<String>,
     pub palette: Palette,
     pub metrics: Metrics,
     pub button: ButtonTheme,
@@ -1360,6 +1370,22 @@ pub fn set_current(theme: Rc<Theme>) {
 
 #[cfg(test)]
 mod tests {
+    /// `font_family` 是 `Theme` 唯一的顶层标量：TOML 要求标量写在各 `[表]` 之前，字段若排在
+    /// 表后面，`to_toml` 会直接报错。往返一次钉住两头。
+    #[test]
+    fn font_family_round_trips_through_toml() {
+        let t = super::Theme {
+            font_family: Some("霞鹜文楷".into()),
+            ..Default::default()
+        };
+        let s = t.to_toml().expect("含 font_family 的主题应能序列化");
+        let back = super::Theme::from_toml(&s).expect("应能读回");
+        assert_eq!(back.font_family.as_deref(), Some("霞鹜文楷"));
+        let partial = super::Theme::from_toml("font_family = \"思源宋体\"\n").unwrap();
+        assert_eq!(partial.font_family.as_deref(), Some("思源宋体"));
+        assert_eq!(super::Theme::default().font_family, None);
+    }
+
     /// 棋盘格必须在**两套主题**下都：① 两格分得出来；② 与面板底分得开（否则透明
     /// 与不透明看着一样）；③ 不比面板底亮太多（深色面板里一块纯白会成为最扎眼的东西）。
     ///

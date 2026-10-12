@@ -884,6 +884,15 @@ pub trait AppHandler {
         None
     }
 
+    /// 焦点文本控件实际用的字族：自己设了 `font_family` 用自己的，否则用主题默认字族；
+    /// 都没有为 `None`（平台默认）。
+    ///
+    /// **仅 win32 用**：那边合成串由系统输入法自己画（`ImmSetCompositionFontW`），字族得
+    /// 由我们告诉它，否则合成串与上屏后的文字不是一款字体。自绘合成串的平台走控件自己的样式。
+    fn ime_font_family(&self) -> Option<String> {
+        None
+    }
+
     /// 输入法组合态开始/结束（拼音等未上屏文字合成中）时由平台层调用，转发给
     /// 当前焦点控件（见 `Widget::set_composing`）。返回 true 表示需要重绘。
     ///

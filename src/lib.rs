@@ -45,7 +45,7 @@ pub mod prelude {
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::{Brush, Edges, Role, Shadow, Style};
     pub use crate::sync::Sender;
-    pub use crate::theme::{Intent, Len, TableTheme, Theme};
+    pub use crate::theme::{Intent, Len, Palette, TableTheme, Theme};
     // 两个文案宏由 `#[macro_export]` 挂在 crate 根上。这里再导一次，让
     // `use windui::prelude::*;` 之后 `t!` / `tr!` 直接可用——否则下游还得单独写
     // 一行 `use windui::{t, tr};`，而 prelude 的全部意义就是省掉这种行。

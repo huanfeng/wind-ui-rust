@@ -387,7 +387,7 @@ thread_local! {
 /// （常规）时才采用字体条目自带的字重——否则主题里写死的粗体标题会被「用户选了个
 /// Light 字体」悄悄改细。斜体同理。
 pub(crate) fn font_choice(factory: &IDWriteFactory, ts: &TextStyle) -> ResolvedFamily {
-    let name = ts.family.unwrap_or(DEFAULT_FAMILY);
+    let name = ts.family_or_default().unwrap_or(DEFAULT_FAMILY);
     // 没装的名字原样交给 DirectWrite，由它自己回退——与加解析层之前的行为一致。
     let resolved = resolve_family(factory, name).unwrap_or_else(|| ResolvedFamily {
         family: name.to_string(),
@@ -729,7 +729,7 @@ impl TextEngine for DWriteEngine {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             text.hash(&mut h);
-            ts.family.hash(&mut h);
+            ts.family_or_default().hash(&mut h);
             size.to_bits().hash(&mut h);
             max_width.map(f32::to_bits).hash(&mut h);
             ts.weight.hash(&mut h);
@@ -780,7 +780,7 @@ impl TextEngine for DWriteEngine {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             text.hash(&mut h);
-            ts.family.hash(&mut h);
+            ts.family_or_default().hash(&mut h);
             ts.size.to_bits().hash(&mut h);
             ts.weight.hash(&mut h);
             ts.italic.hash(&mut h);
@@ -1860,5 +1860,41 @@ mod family_resolve_tests {
         let bold = font_choice(&f, &ts.with_weight(800));
         assert_eq!(bold.weight, 800, "显式字重应原样保留");
         assert_eq!(bold.family, "Segoe UI");
+    }
+}
+
+/// 测量 / 基线缓存按**实际字族**做键（见 `TextStyle::family_or_default`）。
+#[cfg(test)]
+mod default_family_cache_tests {
+    use super::DWriteEngine;
+    use crate::text::{TextEngine, TextStyle};
+    use crate::theme::{set_current, Theme};
+
+    fn set(f: &str) {
+        set_current(std::rc::Rc::new(Theme {
+            font_family: Some(f.into()),
+            ..Theme::default()
+        }));
+    }
+
+    /// 字面量 `family: None` 换了主题默认字族后必须重测；命中旧条目就是旧字体的宽度。
+    #[test]
+    fn caches_follow_the_theme_default_family() {
+        let mut e = DWriteEngine::new();
+        e.set_scale(1.0);
+        let literal = TextStyle {
+            family: None,
+            ..TextStyle::new(14.0)
+        };
+        set("Segoe UI");
+        let a = e.measure("iiiiiiii", &literal, None);
+        e.line_metrics("iiiiiiii", &literal);
+        let (m, l) = (e.measure_cache.len(), e.metrics_cache.len());
+        set("Consolas");
+        let b = e.measure("iiiiiiii", &literal, None);
+        e.line_metrics("iiiiiiii", &literal);
+        assert_eq!(e.measure_cache.len(), m + 1, "测量缓存应是新键");
+        assert_eq!(e.metrics_cache.len(), l + 1, "基线缓存应是新键");
+        assert_ne!(a.w, b.w, "换到等宽字体后窄字母串应变宽");
     }
 }

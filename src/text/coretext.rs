@@ -236,7 +236,7 @@ impl TextEngine for CoreTextEngine {
         }
         let s = self.scale;
         let psize = size * s;
-        let font = self.font(ts.family, psize);
+        let font = self.font(ts.family_or_default(), psize);
         // 颜色与对齐不影响测量，取占位值。
         let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
         let plh = ts.line_height_px().map(|h| h * s);
@@ -322,7 +322,7 @@ impl TextEngine for CoreTextEngine {
             None => return,
         };
 
-        let font = self.font(ts.family, psize);
+        let font = self.font(ts.family_or_default(), psize);
         let cg_color = CGColor::new_srgb(
             color.r as f64 / 255.0,
             color.g as f64 / 255.0,
@@ -462,7 +462,7 @@ impl GlyphSource for CoreTextEngine {
         }
         let s = req.scale.max(0.1);
         let psize = ts.size * s;
-        let font = self.font(ts.family, psize);
+        let font = self.font(ts.family_or_default(), psize);
         // 黑字画在不透明白底上（理由见 impl 头注释）：覆盖度 = 255 − 任一颜色通道。
         let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
         let plh = ts.line_height_px().map(|h| h * s);
@@ -596,7 +596,7 @@ impl GlyphSource for CoreTextEngine {
         }
         let s = req.scale.max(0.1);
         let psize = ts.size * s;
-        let font = self.font(ts.family, psize);
+        let font = self.font(ts.family_or_default(), psize);
         let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
         let plh = ts.line_height_px().map(|h| h * s);
         let attr = self.attributed(req.text, &font, &black, req.align, plh);

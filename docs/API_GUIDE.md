@@ -1404,11 +1404,11 @@ Element::label("标题")
 ```
 `Color` 构造：`Color::rgb(r,g,b)`、`rgba(..)`、`hex(0xRRGGBB)`、`from_hex_str("#7C5CFC")`，常量 `WHITE/BLACK/TRANSPARENT`。
 
-> **样式不沿父链继承**：`font_family` / `font_size` / `fg` 等都只作用于所设的那个节点，给容器设不会传给子节点。沿父链继承的只有 `enabled`、光标形状与 `window_drag` 三项。需要统一字体时自行封装构造函数，或走 `Theme`。
+> **样式不沿父链继承**：`font_family` / `font_size` / `fg` 等都只作用于所设的那个节点，给容器设不会传给子节点。沿父链继承的只有 `enabled`、光标形状与 `window_drag` 三项。全窗统一换字体走 `Theme::font_family`（见 §7.2，运行期可换），它是所有没设 `font_family` 的文字的兜底。
 >
 > （交叉轴对齐是另一回事：子节点未显式设 `align` 时取**其直接容器**的交叉轴对齐，这是容器对子项的排布，只有一层，不会穿透多层祖先。）
 >
-> `font_family` 指定的字体**未安装时不报错也不 panic**：Windows 的 DirectWrite 与 macOS 的 CoreText 均静默回退系统默认字体——字体是否存在取决于用户机器，调用方无从保证；需要确保效果应随程序分发字体。
+> `font_family` 指定的字体**未安装时不报错也不 panic**：Windows 的 DirectWrite 与 macOS 的 CoreText 均静默回退系统默认字体——字体是否存在取决于用户机器，调用方无从保证。要确保效果就随程序分发字体；要按本机实际情况挑字体，Windows 上先用 `text::family_available` / `text::font_coverage` 查（§7.5）。
 >
 > **斜体与字重是正交的两个轴**，不是同一个「字形变体」枚举的两档——字体里它们分开，
 > DirectWrite 的 weight 与 style 也是分开的参数；合成一个枚举就表达不了粗斜体，而那恰是
@@ -1448,7 +1448,15 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
 > 换色靠「生效角色进布局签名 → 重排后签名不等 → 升整窗」生效（同 `enabled_signal` 的置灰）。重排只在宿主置了 `needs_relayout` 的帧发生，而指针 `Move` 刻意不置（hover 高频）。故在自定义 `Widget` 的 Move 分支里改**别的**节点的颜色信号需自行 `ctx.mark_dirty()`；按键/点击/菜单/`App::channel` 都无需额外处理。
 
 ### 7.2 `Theme`（全局 + 每控件覆盖层）
-控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层：
+控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层（外加一个全局字族）：
+- `font_family`（`Option<String>`）：界面默认字族，所有**没显式设** `font_family` 的文字都用它——
+  含框架自绘的右键菜单、tooltip、toast，以及 Windows 上输入法自己画的组合串。`None`（默认）用平台默认
+  （Windows「Microsoft YaHei UI」、macOS「PingFang SC」、Linux fontconfig 的 `sans-serif`）。是兜底不是覆盖：
+  `Element::font_family` 设过的节点照旧用自己的。三平台均生效；运行期 `ThemeHandle::update(|t| t.font_family = …)`
+  下一帧全部重排。TOML 里写在最前（`font_family = "霞鹜文楷"`，须在各 `[表]` 之前）。
+  注意 `ThemeHandle::set(Theme::dark())` 整体替换会把它冲掉，切明暗用 `update` 改 `palette`（§7.3）。
+  自定义控件若自己缓存测量结果，键里的字族请取 `TextStyle::of(style).family`（已含默认字族），
+  别用字面量 `TextStyle { family: None, .. }` 的 `None` 做键——换默认字族后会命中旧字体的结果。
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
 - `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
 - 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
@@ -1516,7 +1524,8 @@ fn main() {
         Element::button("切换暗色").neutral().on_click(move |_| {
             let on = !dark.get();
             dark.set(on);
-            th.set(if on { Theme::dark() } else { Theme::default() });
+            // 只换色板：整体 `set(Theme::dark())` 会把字族等别处的设置一起冲掉。
+            th.update(|t| t.palette = if on { Palette::dark() } else { Palette::default() });
         })
     };
 
@@ -1540,6 +1549,10 @@ theme.update(|t| t.palette.accent = Color::hex(0x2E9E5B));  // 就地改一处�
 let snapshot: std::rc::Rc<Theme> = theme.current();    // 读当前主题
 ```
 
+> `set` 是**整体替换**：新主题里没带的设置一律回到默认。`Theme::dark()` 只是换了色板，
+> 拿它 `set` 会把用户选的 `font_family` 一起冲成 `None`——不报错，字体悄悄变回平台默认。
+> 只想切明暗时改色板：`theme.update(|t| t.palette = Palette::dark())`。
+
 **跟随系统亮暗**要两件东西配合：`event::system_prefers_dark()` 答「此刻是什么」，
 `App::on_system_theme_changed(..)` 负责之后的跟随。
 
@@ -1550,7 +1563,7 @@ let mut app = App::new("查词", 480, 360)
     .theme(if windui::event::system_prefers_dark() { Theme::dark() } else { Theme::default() });
 let theme = app.theme_handle();
 app.on_system_theme_changed(move |_ctx, is_dark| {          // 参数是切换之后是否为暗色
-        theme.set(if is_dark { Theme::dark() } else { Theme::default() });
+        theme.update(|t| t.palette = if is_dark { Palette::dark() } else { Palette::default() });
     })
     .content(ui)
     .run();

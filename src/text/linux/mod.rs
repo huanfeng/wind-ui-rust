@@ -130,7 +130,7 @@ impl LinuxTextEngine {
     fn layout(&mut self, text: &str, ts: &TextStyle, max_w: Option<f32>) -> Layout {
         let ppem = (ts.size * self.scale).max(1.0);
         store::with(|st| {
-            let chain = st.chain(ts.family, ts.weight, ts.italic);
+            let chain = st.chain(ts.family_or_default(), ts.weight, ts.italic);
             let (ascent, descent, gap) = match st.primary(chain) {
                 Some(id) => {
                     let f = st.face(id);
@@ -499,7 +499,7 @@ impl TextEngine for LinuxTextEngine {
     fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {
         let key = MeasureKey {
             text: text.to_string(),
-            family: ts.family.map(str::to_string),
+            family: ts.family_or_default().map(str::to_string),
             size: ts.size.to_bits(),
             weight: ts.weight,
             italic: ts.italic,
@@ -636,6 +636,34 @@ mod tests {
         let mut e = LinuxTextEngine::new();
         e.set_scale(1.0);
         e
+    }
+
+    /// 测量缓存按**实际字族**做键：字面量 `family: None` 在换了主题默认字族后必须重测，
+    /// 不能命中旧条目（那是旧字体的宽度）。只看条目数，与本机装了哪些字体无关。
+    #[test]
+    fn measure_cache_follows_the_theme_default_family() {
+        use crate::theme::{set_current, Theme};
+        let set = |f: &str| {
+            set_current(std::rc::Rc::new(Theme {
+                font_family: Some(f.into()),
+                ..Theme::default()
+            }))
+        };
+        let mut e = eng();
+        let literal = TextStyle {
+            family: None,
+            ..TextStyle::new(14.0)
+        };
+        set("DejaVu Sans");
+        e.measure("abc", &literal, None);
+        let n = e.measures.len();
+        set("DejaVu Serif");
+        e.measure("abc", &literal, None);
+        assert_eq!(
+            e.measures.len(),
+            n + 1,
+            "换默认字族后应是新键，而非命中旧宽度"
+        );
     }
 
     #[test]
