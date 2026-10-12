@@ -37,9 +37,10 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
-    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
+    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -56,6 +57,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 use super::{AppHandler, WinRenderBackend};
 use crate::geometry::{Color, Size};
 use crate::render::{Canvas, Gradient, Paint, RenderTarget};
+use crate::text::dwrite::{font_choice, ResolvedFamily, DEFAULT_FAMILY};
 
 /// GPU 呈现后端。持有 D3D11/DXGI/D2D 的 COM 对象与 swapchain。
 pub(super) struct D2DBackend {
@@ -87,9 +89,9 @@ pub(super) struct D2DBackend {
     /// device-**独立**资源（进程级系统字体缓存），设备丢失**无需**重建——
     /// 不同于 solid/渐变缓存，**别**放进 Task 11 的设备丢失重建清单。
     dwrite_factory: IDWriteFactory,
-    /// TextFormat 缓存：键 (family, 逻辑字号 bits, 字重)，与软引擎 `DWriteEngine::format` 同构。
+    /// TextFormat 缓存（键 `FormatKey`），与软引擎 `DWriteEngine::format` 同构。
     /// IDWriteTextFormat 亦 device-independent，设备丢失无需清空。对齐不进 key（在 layout 上设）。
-    format_cache: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+    format_cache: HashMap<FormatKey, IDWriteTextFormat>,
     /// 文字 layout 缓存（键 `LayoutKey`）：`IDWriteTextLayout` 是重对象（字形整形/换行排版），
     /// 每帧每文字重建会 churn 驱动内存——官方文档明确要复用。device-independent，设备丢失无需清。
     layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
@@ -131,8 +133,12 @@ pub(super) struct D2DBackend {
 /// 连续重建失败上限：超过即放弃 GPU、降级软渲染。
 const MAX_RECREATE_FAILS: u32 = 3;
 
-/// 文字 layout 缓存键：(family, text, 字号 bits, 字重, maxWidth bits, maxHeight bits)。
-type LayoutKey = (String, String, u32, u16, Option<u32>, u32, u32);
+/// TextFormat 缓存键：(解析后的家族名, 逻辑字号 bits, 字重, 斜体, 行高 bits)。
+type FormatKey = (String, u32, u16, bool, Option<u32>);
+
+/// 文字 layout 缓存键：(family 原值, text, 字号 bits, 字重, 斜体, 行高 bits, maxWidth bits,
+/// maxHeight bits)。用原值而非解析结果做键，依赖「同一名字解析结果不变」，见 `FAMILY_CACHE`。
+type LayoutKey = (String, String, u32, u16, bool, Option<u32>, u32, u32);
 
 /// 烘焙阴影缓存键：(圆角 px, 模糊 bits, 颜色 rgba, 宽 px, 高 px)。
 ///
@@ -553,7 +559,7 @@ struct D2DTarget<'a> {
     solid: &'a ID2D1SolidColorBrush,
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
     dwrite_factory: &'a IDWriteFactory,
-    format_cache: &'a mut HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+    format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
     image_bytes: &'a mut u64,
@@ -610,8 +616,8 @@ struct D2DCanvas<'a> {
     grad_cache: &'a mut HashMap<GradKey, ID2D1Brush>,
     /// DirectWrite 工厂（借入）：建 format/layout。
     dwrite_factory: &'a IDWriteFactory,
-    /// TextFormat 缓存（借入，可变）：按 (family, 逻辑字号 bits, 字重) 复用。
-    format_cache: &'a mut HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+    /// TextFormat 缓存（借入，可变）：键 `FormatKey`。
+    format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
     image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
@@ -651,13 +657,14 @@ impl D2DCanvas<'_> {
         maxw: f32,
         maxh: f32,
     ) -> Option<IDWriteTextLayout> {
-        let fam = ts.family.unwrap_or(DEFAULT_FAMILY).to_string();
-        let weight = ts.weight;
+        // 键用调用方原值即可：原值到解析结果是确定映射。斜体必须进键——漏掉它，同字族
+        // 同字号的正体与斜体会互相顶替，谁先进缓存就画谁。
         let key: LayoutKey = (
-            fam,
+            ts.family.unwrap_or(DEFAULT_FAMILY).to_string(),
             text.to_string(),
             ts.size.to_bits(),
-            weight,
+            ts.weight,
+            ts.italic,
             ts.line_height.map(f32::to_bits),
             maxw.to_bits(),
             maxh.to_bits(),
@@ -1071,16 +1078,24 @@ impl D2DCanvas<'_> {
     }
 
     /// 取/建 `IDWriteTextFormat`（逻辑字号；DPI scale 由 SetTransform 应用，**不**在此 ×scale）。
-    /// 缓存键 (family, 逻辑字号 bits, 字重, 行高 bits) 与软引擎 `DWriteEngine::format` 同构，
-    /// 保证两后端字体/字重/行距一致。family 缺省 `DEFAULT_FAMILY`、locale 固定 "zh-cn"。
+    /// 字体选择与软引擎走同一个 [`font_choice`]（族名解析 + 字重/斜体取舍），缓存键也与
+    /// 软引擎 `DWriteEngine::format` 同构，保证两后端字体/字重/斜体/行距一致。locale 固定 "zh-cn"。
     /// 对齐**不**进 key（在 layout 上设），避免污染缓存的 format。
+    ///
+    /// 族名必须解析：选字体的界面列的是 GDI 名，「思源宋体 SemiBold」这类带字重后缀的名字
+    /// DirectWrite 不认，原样交过去会静默落回默认字体——软后端正常、开 GPU 就失效。
     fn text_format(&mut self, ts: &crate::text::TextStyle) -> Option<IDWriteTextFormat> {
-        let fam = ts.family.unwrap_or(DEFAULT_FAMILY).to_string();
-        let (weight, size) = (ts.weight, ts.size);
+        let ResolvedFamily {
+            family: fam,
+            weight,
+            italic,
+        } = font_choice(self.dwrite_factory, ts);
+        let size = ts.size;
         let key = (
             fam.clone(),
             size.to_bits(),
             weight,
+            italic,
             ts.line_height.map(f32::to_bits),
         );
         if let Some(f) = self.format_cache.get(&key) {
@@ -1099,7 +1114,11 @@ impl D2DCanvas<'_> {
                     PCWSTR(fam_w.as_ptr()),
                     None,
                     dw_weight,
-                    DWRITE_FONT_STYLE_NORMAL,
+                    if italic {
+                        DWRITE_FONT_STYLE_ITALIC
+                    } else {
+                        DWRITE_FONT_STYLE_NORMAL
+                    },
                     DWRITE_FONT_STRETCH_NORMAL,
                     size, // 逻辑字号：D2D 变换会放大到物理像素，绝不在此 ×scale
                     PCWSTR(locale.as_ptr()),
@@ -1730,9 +1749,6 @@ const INFINITE_RECT: D2D_RECT_F = D2D_RECT_F {
     bottom: 1e7,
 };
 
-/// 中文友好默认字体，与软引擎 `DWriteEngine` 的 `DEFAULT_FAMILY` 同值（两后端字体一致）。
-const DEFAULT_FAMILY: &str = "Microsoft YaHei UI";
-
 /// `&str` → UTF-16（不含 NUL），供 `CreateTextLayout`（带长度，不需 NUL）。
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -1818,7 +1834,7 @@ pub(crate) mod offscreen {
         w: u32,
         h: u32,
         grad_cache: HashMap<GradKey, ID2D1Brush>,
-        format_cache: HashMap<(String, u32, u16, Option<u32>), IDWriteTextFormat>,
+        format_cache: HashMap<FormatKey, IDWriteTextFormat>,
         layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
         image_cache: HashMap<u64, ID2D1Bitmap1>,
         image_bytes: u64,
@@ -2584,5 +2600,95 @@ mod tests {
         for x in 100..180 {
             assert_eq!(px(&pm, x, y), baseline, "中段 x={x} 与基准不同：出现接缝");
         }
+    }
+
+    /// D2D 画布上量一段文字的宽（逻辑像素）。
+    fn d2d_width(ts: &TextStyle) -> i32 {
+        let mut w = 0;
+        render(8, 8, 1.0, |c| {
+            w = c.measure_text("Hamburgefonstiv 0123456789", ts).w
+        });
+        w
+    }
+
+    /// 带字重后缀的 GDI 名（「Segoe UI Semibold」，形态同「思源宋体 SemiBold」）在 GPU 后端
+    /// 必须解析成「Segoe UI」+ 自带字重，与软后端同源。
+    ///
+    /// 修复前 D2D 把名字原样交给 DirectWrite，后者不认、静默落回默认字体的常规字重——
+    /// 软后端正常、开 GPU 就失效。第二条断言正是那时的结果。
+    #[test]
+    fn gdi_face_name_resolves_like_the_soft_backend() {
+        let f: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap() };
+        let mut named = TextStyle::new(20.0);
+        named.family = Some("Segoe UI Semibold");
+        let want = font_choice(&f, &named);
+        assert_eq!(
+            want.family, "Segoe UI",
+            "前提：该名字应解析回 DirectWrite 家族名"
+        );
+        let mut explicit = TextStyle::new(20.0).with_weight(want.weight);
+        explicit.family = Some("Segoe UI");
+        let mut regular = TextStyle::new(20.0);
+        regular.family = Some("Segoe UI");
+        assert_ne!(
+            d2d_width(&explicit),
+            d2d_width(&regular),
+            "前提：字重须影响字宽，否则下面的断言分不出对错"
+        );
+        assert_eq!(
+            d2d_width(&named),
+            d2d_width(&explicit),
+            "GDI 名应画成解析出的家族 + 自带字重"
+        );
+    }
+
+    /// 斜体在 GPU 后端要真画成斜体。修复前 D2D 一律传 `DWRITE_FONT_STYLE_NORMAL`，
+    /// 两张图逐像素相同。
+    #[test]
+    fn italic_is_drawn_italic() {
+        let draw = |italic: bool| {
+            render(160, 40, 1.0, |c| {
+                c.draw_text(
+                    "Hamburg",
+                    Rect::new(4, 4, 150, 30),
+                    Color::rgb(0, 0, 0),
+                    Align::Start,
+                    &TextStyle::new(20.0).with_italic(italic),
+                )
+            })
+        };
+        // 用 assert! 而非 assert_ne!：失败时后者会把两张整图的像素全打出来。
+        // 注意每次 render 都是新后端、缓存全空，所以这条守不住「缓存键漏斜体」，见下一条。
+        assert!(
+            draw(false).data() != draw(true).data(),
+            "斜体与正体应画出不同的字形"
+        );
+    }
+
+    /// 同一个后端里先画正体、再画斜体，斜体那次不能命中正体的缓存。
+    ///
+    /// 上一条测试两次 `render` 各开一个后端、缓存都是空的，`FormatKey`/`LayoutKey` 漏了
+    /// 斜体它也照样通过——先进缓存的那套被后者复用、谁先画就是谁的毛病只有共用缓存才显形。
+    #[test]
+    fn italic_does_not_reuse_the_upright_cache_entry() {
+        let line = |c: &mut dyn Canvas, italic: bool, y: i32| {
+            c.draw_text(
+                "Hamburg",
+                Rect::new(4, y, 150, 30),
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(20.0).with_italic(italic),
+            )
+        };
+        let both = render(160, 80, 1.0, |c| {
+            line(c, false, 4);
+            line(c, true, 44);
+        });
+        let alone = render(160, 80, 1.0, |c| line(c, true, 44));
+        let rows = |pm: &Pixmap| pm.data()[(44 * 160 * 4) as usize..].to_vec();
+        assert!(
+            rows(&both) == rows(&alone),
+            "同一后端里后画的斜体应与单独画的斜体逐像素相同，而非沿用正体的缓存"
+        );
     }
 }

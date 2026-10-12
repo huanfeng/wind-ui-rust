@@ -15,6 +15,7 @@
 //! 再由我们自己做标准预乘 source-over——见 [`glyph_backdrop`] 与
 //! [`composite_glyph_over_translucent`]。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 
@@ -50,7 +51,8 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-const DEFAULT_FAMILY: &str = "Microsoft YaHei UI"; // 中文友好的默认字体
+/// 中文友好的默认字体。软引擎与 D2D 后端共用这一份，两后端字体才一致。
+pub(crate) const DEFAULT_FAMILY: &str = "Microsoft YaHei UI";
 
 /// 扫描 UTF-16 序列，返回私用区（PUA）字符的连续段 `[(起始下标, 码元长度)]`。
 /// 下标/长度均以 **UTF-16 码元** 计，可直接用作 `DWRITE_TEXT_RANGE`。
@@ -303,9 +305,6 @@ pub struct DWriteEngine {
     bitmap_h: i32,
     /// 私用区回退字体（可选）：设置后，文本里的私用区码位改用它渲染。
     private_use: Option<PrivateUseFont>,
-    /// 字体名解析缓存：配置里写的名字 → DirectWrite 家族名 + 字体自带字重/斜体。
-    /// 见 [`DWriteEngine::resolve_family`]，解析要走 GDI 字体映射，不能每次绘字都做。
-    family_cache: HashMap<String, ResolvedFamily>,
 }
 
 /// 一个字体名解析成 DirectWrite 认得的形态。
@@ -326,14 +325,114 @@ pub struct DWriteEngine {
 /// 解析把 GDI 名交给 GDI 字体映射，反查出真正的 DirectWrite 字体，取回它的家族名与
 /// **字体自带的字重**。所以选「思源宋体 SemiBold」不只是能显示了，字重也真的是
 /// SemiBold——用户想要的「能选字重」由此一并落地，不必再加一个配置项。
+///
+/// 软引擎与 D2D 后端都经 [`font_choice`] 走这一层——只有一边走的话，同一个字体名
+/// 换个渲染后端就时灵时不灵。
 #[derive(Clone, Debug, PartialEq)]
-struct ResolvedFamily {
+pub(crate) struct ResolvedFamily {
     /// DirectWrite 家族名，交给 `CreateTextFormat`。
-    family: String,
-    /// 字体条目自带的字重。仅在调用方**没有显式要求字重**时采用，见 `format`。
-    weight: u16,
+    pub(crate) family: String,
+    /// 字体条目自带的字重。仅在调用方**没有显式要求字重**时采用，见 [`font_choice`]。
+    pub(crate) weight: u16,
     /// 字体条目自带的斜体。与 `weight` 同理。
-    italic: bool,
+    pub(crate) italic: bool,
+}
+
+thread_local! {
+    /// 字体名解析缓存：配置里写的名字 → DirectWrite 家族名 + 字体自带字重/斜体。
+    /// 解析要走 GDI 字体映射，不能每次建格式都做。
+    ///
+    /// 放线程局部而非引擎字段：软引擎与 D2D 后端各持一份工厂，但
+    /// `DWRITE_FACTORY_TYPE_SHARED` 下系统字体集是同一个，解析结果两边通用。
+    /// DirectWrite 对象本就只在 UI 线程上用，线程局部正合其约束。
+    ///
+    /// 不失效：一个名字解析一次，线程存续期间结果不变。D2D 的 layout 缓存以调用方原值
+    /// 做键正依赖这一点——将来若加失效（如监听字体安装），须一并清空那份缓存。
+    static FAMILY_CACHE: RefCell<HashMap<String, ResolvedFamily>> = RefCell::new(HashMap::new());
+}
+
+/// 一段文字最终交给 `CreateTextFormat` 的字体：家族名 + 字重 + 斜体。
+///
+/// 家族名先过一层解析（理由见 [`ResolvedFamily`]）；调用方显式要的字重优先，没要求
+/// （常规）时才采用字体条目自带的字重——否则主题里写死的粗体标题会被「用户选了个
+/// Light 字体」悄悄改细。斜体同理。
+pub(crate) fn font_choice(factory: &IDWriteFactory, ts: &TextStyle) -> ResolvedFamily {
+    let resolved = resolve_family(factory, ts.family.unwrap_or(DEFAULT_FAMILY));
+    ResolvedFamily {
+        weight: if ts.weight == crate::text::WEIGHT_NORMAL {
+            resolved.weight
+        } else {
+            ts.weight
+        },
+        italic: ts.italic || resolved.italic,
+        family: resolved.family,
+    }
+}
+
+/// 把配置里写的字体名解析成 DirectWrite 认得的家族名（+ 字体自带字重/斜体）。
+/// 语义与代价见 [`ResolvedFamily`]；结果按名字缓存，同一个名字只解析一次。
+fn resolve_family(factory: &IDWriteFactory, name: &str) -> ResolvedFamily {
+    if let Some(r) = FAMILY_CACHE.with(|c| c.borrow().get(name).cloned()) {
+        return r;
+    }
+    let resolved = resolve_family_uncached(factory, name);
+    FAMILY_CACHE.with(|c| c.borrow_mut().insert(name.to_string(), resolved.clone()));
+    resolved
+}
+
+fn resolve_family_uncached(factory: &IDWriteFactory, name: &str) -> ResolvedFamily {
+    // 解析不出来就原样交给 DirectWrite——行为与加这层之前完全一致，不会更差。
+    let as_is = ResolvedFamily {
+        family: name.to_string(),
+        weight: crate::text::WEIGHT_NORMAL,
+        italic: false,
+    };
+    unsafe {
+        // 1. DirectWrite 自己就认这个家族名：原样用。绝大多数字体走这条，不碰 GDI。
+        let mut coll: Option<IDWriteFontCollection> = None;
+        if factory.GetSystemFontCollection(&mut coll, false).is_ok() {
+            if let Some(coll) = coll {
+                let name_w = wide_nul(name);
+                let mut index = 0u32;
+                let mut exists = FALSE;
+                if coll
+                    .FindFamilyName(PCWSTR(name_w.as_ptr()), &mut index, &mut exists)
+                    .is_ok()
+                    && exists.as_bool()
+                {
+                    return as_is;
+                }
+            }
+        }
+        // 2. 不认：当作 GDI face name 反查。名字本就是 GDI 枚举出来的，这一步能中。
+        let mut lf = LOGFONTW {
+            // FW_DONTCARE：让 GDI 挑该 face 的原生字重，而不是硬按常规去匹配——
+            // 「思源宋体 SemiBold」的原生字重正是我们要取回的那个值。
+            lfWeight: 0,
+            lfCharSet: DEFAULT_CHARSET,
+            ..Default::default()
+        };
+        // lfFaceName 是 32 个 u16 的定长数组且必须留 NUL：超长名字截断，不溢出。
+        let name_w: Vec<u16> = name.encode_utf16().take(lf.lfFaceName.len() - 1).collect();
+        lf.lfFaceName[..name_w.len()].copy_from_slice(&name_w);
+        let Ok(gdi_interop) = factory.GetGdiInterop() else {
+            return as_is;
+        };
+        let Ok(font) = gdi_interop.CreateFontFromLOGFONT(&lf) else {
+            return as_is;
+        };
+        let Ok(names) = font.GetFontFamily().and_then(|f| f.GetFamilyNames()) else {
+            return as_is;
+        };
+        let Some(family) = localized_string(&names) else {
+            return as_is;
+        };
+        ResolvedFamily {
+            family,
+            weight: font.GetWeight().0 as u16,
+            italic: font.GetStyle() != DWRITE_FONT_STYLE_NORMAL,
+        }
+    }
 }
 
 impl DWriteEngine {
@@ -369,74 +468,6 @@ impl DWriteEngine {
                 // 取启动时注册的回退字体（见 `register_private_use_font`）。此刻缓存尚空，
                 // 故无需失效处理；运行期改字体走 `set_private_use_font`，它自己清缓存。
                 private_use: PRIVATE_USE_FONT.with(|f| f.borrow().clone()),
-                family_cache: HashMap::new(),
-            }
-        }
-    }
-
-    /// 把配置里写的字体名解析成 DirectWrite 认得的家族名（+ 字体自带字重/斜体）。
-    /// 语义与代价见 [`ResolvedFamily`]；结果按名字缓存，同一个名字只解析一次。
-    fn resolve_family(&mut self, name: &str) -> ResolvedFamily {
-        if let Some(r) = self.family_cache.get(name) {
-            return r.clone();
-        }
-        let resolved = self.resolve_family_uncached(name);
-        self.family_cache.insert(name.to_string(), resolved.clone());
-        resolved
-    }
-
-    fn resolve_family_uncached(&self, name: &str) -> ResolvedFamily {
-        // 解析不出来就原样交给 DirectWrite——行为与加这层之前完全一致，不会更差。
-        let as_is = ResolvedFamily {
-            family: name.to_string(),
-            weight: crate::text::WEIGHT_NORMAL,
-            italic: false,
-        };
-        unsafe {
-            // 1. DirectWrite 自己就认这个家族名：原样用。绝大多数字体走这条，不碰 GDI。
-            let mut coll: Option<IDWriteFontCollection> = None;
-            if self
-                .factory
-                .GetSystemFontCollection(&mut coll, false)
-                .is_ok()
-            {
-                if let Some(coll) = coll {
-                    let name_w = wide_nul(name);
-                    let mut index = 0u32;
-                    let mut exists = FALSE;
-                    if coll
-                        .FindFamilyName(PCWSTR(name_w.as_ptr()), &mut index, &mut exists)
-                        .is_ok()
-                        && exists.as_bool()
-                    {
-                        return as_is;
-                    }
-                }
-            }
-            // 2. 不认：当作 GDI face name 反查。名字本就是 GDI 枚举出来的，这一步能中。
-            let mut lf = LOGFONTW {
-                // FW_DONTCARE：让 GDI 挑该 face 的原生字重，而不是硬按常规去匹配——
-                // 「思源宋体 SemiBold」的原生字重正是我们要取回的那个值。
-                lfWeight: 0,
-                lfCharSet: DEFAULT_CHARSET,
-                ..Default::default()
-            };
-            // lfFaceName 是 32 个 u16 的定长数组且必须留 NUL：超长名字截断，不溢出。
-            let name_w: Vec<u16> = name.encode_utf16().take(lf.lfFaceName.len() - 1).collect();
-            lf.lfFaceName[..name_w.len()].copy_from_slice(&name_w);
-            let Ok(font) = self.gdi_interop.CreateFontFromLOGFONT(&lf) else {
-                return as_is;
-            };
-            let Ok(names) = font.GetFontFamily().and_then(|f| f.GetFamilyNames()) else {
-                return as_is;
-            };
-            let Some(family) = localized_string(&names) else {
-                return as_is;
-            };
-            ResolvedFamily {
-                family,
-                weight: font.GetWeight().0 as u16,
-                italic: font.GetStyle() != DWRITE_FONT_STYLE_NORMAL,
             }
         }
     }
@@ -477,16 +508,11 @@ impl DWriteEngine {
     fn format(&mut self, ts: &TextStyle, psize: f32) -> Option<IDWriteTextFormat> {
         // 家族名先过一层解析：界面用 GDI 名列字体，这里要的是 DirectWrite 家族名，
         // 两者对不上时字体会静默失效。理由见 [`ResolvedFamily`]。
-        let resolved = self.resolve_family(ts.family.unwrap_or(DEFAULT_FAMILY));
-        let fam = resolved.family;
-        // 调用方显式要的字重优先；没要求（常规）时才采用字体条目自带的字重——否则
-        // 主题里写死的粗体标题会被「用户选了个 Light 字体」悄悄改细。斜体同理。
-        let weight = if ts.weight == crate::text::WEIGHT_NORMAL {
-            resolved.weight
-        } else {
-            ts.weight
-        };
-        let italic = ts.italic || resolved.italic;
+        let ResolvedFamily {
+            family: fam,
+            weight,
+            italic,
+        } = font_choice(&self.factory, ts);
         // 行距进缓存键：同字族同字号但行距不同，是两套格式。漏掉它会让先构造的那套
         // 被后者复用，表现为行高时灵时不灵——取决于谁先进缓存。
         let lh_key = ts.line_height.map(f32::to_bits);
@@ -1626,13 +1652,20 @@ mod scale_contract_tests {
 /// ——正是论坛 #144 那类字体的形态，本机不装第三方字体也能复现。
 #[cfg(test)]
 mod family_resolve_tests {
-    use super::DWriteEngine;
-    use crate::text::WEIGHT_NORMAL;
+    use super::{font_choice, resolve_family, FAMILY_CACHE};
+    use crate::text::{TextStyle, WEIGHT_NORMAL};
+    use windows::Win32::Graphics::DirectWrite::{
+        DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
+    };
+
+    fn factory() -> IDWriteFactory {
+        unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).expect("DWriteCreateFactory") }
+    }
 
     #[test]
     fn dwrite_family_is_kept_as_is() {
-        let mut e = DWriteEngine::new();
-        let r = e.resolve_family("Segoe UI");
+        let f = factory();
+        let r = resolve_family(&f, "Segoe UI");
         assert_eq!(r.family, "Segoe UI", "DirectWrite 认得的家族名应原样保留");
         assert_eq!(
             r.weight, WEIGHT_NORMAL,
@@ -1643,8 +1676,8 @@ mod family_resolve_tests {
 
     #[test]
     fn gdi_face_name_maps_to_family_and_weight() {
-        let mut e = DWriteEngine::new();
-        let r = e.resolve_family("Segoe UI Semibold");
+        let f = factory();
+        let r = resolve_family(&f, "Segoe UI Semibold");
         assert_eq!(
             r.family, "Segoe UI",
             "带字重后缀的 GDI 名应解析回 DirectWrite 家族名，否则渲染时静默落回默认字体"
@@ -1658,22 +1691,42 @@ mod family_resolve_tests {
 
     #[test]
     fn unknown_name_does_not_panic() {
-        let mut e = DWriteEngine::new();
+        let f = factory();
         // GDI 字体映射对认不出的名字会替换成别的字体，取回什么名字都行——
         // 这里守的是「不 panic、不返回空名字」，空名字会让 CreateTextFormat 失败。
-        assert!(!e.resolve_family("绝无此字体 ZZZ").family.is_empty());
+        assert!(!resolve_family(&f, "绝无此字体 ZZZ").family.is_empty());
     }
 
     #[test]
     fn resolution_is_cached() {
-        let mut e = DWriteEngine::new();
-        let first = e.resolve_family("Segoe UI Semibold");
-        assert_eq!(
-            e.family_cache.len(),
-            1,
-            "解析结果应进缓存，不能每次绘字都走 GDI"
+        let f = factory();
+        let first = resolve_family(&f, "Segoe UI Semibold");
+        let len = FAMILY_CACHE.with(|c| c.borrow().len());
+        assert!(
+            FAMILY_CACHE.with(|c| c.borrow().contains_key("Segoe UI Semibold")),
+            "解析结果应进缓存，不能每次建格式都走 GDI"
         );
-        assert_eq!(first, e.resolve_family("Segoe UI Semibold"));
-        assert_eq!(e.family_cache.len(), 1);
+        assert_eq!(first, resolve_family(&f, "Segoe UI Semibold"));
+        assert_eq!(
+            FAMILY_CACHE.with(|c| c.borrow().len()),
+            len,
+            "重复解析不应新增条目"
+        );
+    }
+
+    /// 调用方显式要的字重压过字体条目自带的；没要求时才采用自带的。
+    #[test]
+    fn explicit_weight_beats_the_face_weight() {
+        let f = factory();
+        let mut ts = TextStyle::new(14.0);
+        ts.family = Some("Segoe UI Semibold");
+        let implied = font_choice(&f, &ts);
+        assert!(
+            implied.weight > WEIGHT_NORMAL,
+            "未要求字重时应取 Semibold 自带的"
+        );
+        let bold = font_choice(&f, &ts.with_weight(800));
+        assert_eq!(bold.weight, 800, "显式字重应原样保留");
+        assert_eq!(bold.family, "Segoe UI");
     }
 }
