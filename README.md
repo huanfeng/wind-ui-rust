@@ -11,6 +11,10 @@
 [![docs.rs](https://docs.rs/windui/badge.svg)](https://docs.rs/windui)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#许可证)
 
+<p align="center">
+  <a href="https://atomgit.com/huanfengf/wind-ui-rust" target="_blank"><img src="https://atomgit.com/huanfengf/wind-ui-rust/star/new_badge.svg" alt="AtomGit" height="54" /></a>
+</p>
+
 > 轻量跨平台桌面 GUI 框架 — 用 Rust 构建内存友好的小工具。
 
 `平台原生窗口` · `tiny-skia 矢量渲染` · `平台原生文字排版` · 无运行时 · 无 GC。
