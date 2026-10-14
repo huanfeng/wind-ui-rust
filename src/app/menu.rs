@@ -794,6 +794,8 @@ impl UiHost {
             bar: req.bar,
             click_through: req.click_through,
         });
+        // 浮层画在控件树之外，任何节点的局部脏区都盖不住它；与 `close_menu` 对称。
+        self.damage.needs_full = true;
     }
 
     /// 这一下指针事件是否该"收起菜单并穿透"：穿透菜单、按下、落在所有面板之外、也不在

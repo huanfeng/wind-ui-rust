@@ -2986,6 +2986,12 @@ impl UiHost {
         if let Some(req) = menu {
             if let Some(target) = self.focus.current.or(self.tree.root) {
                 self.open_menu(req, target);
+                // 菜单是画在窗口里的浮层，开了就得重画——不能指望别的事件顺带。
+                // 客户区右键碰巧总有紧随的抬起 / 移动带出一帧，看不出缺这一句；自绘
+                // 标题栏的右键却是平台合成的**单个**按下（见 win32 `nc_right_click`），
+                // 后面再没有客户区事件：菜单已经开了却不上屏，等鼠标一动才冒出来，
+                // 用户看到的就是"第一次右键没反应"。
+                repaint = true;
             }
         }
         // 链接点击等：交平台用默认程序打开。
@@ -7634,6 +7640,35 @@ mod tests {
             vec!["自定义"],
             "用户菜单应完整胜出，而不是与系统菜单拼在一起"
         );
+    }
+
+    /// 右键弹菜单的那一下必须报告"要重绘"：菜单是窗口里的浮层，开了不重画就不上屏。
+    ///
+    /// 自绘标题栏的右键是平台合成的**单个**按下，后面没有任何客户区事件带出下一帧——
+    /// 漏掉这一位，用户看到的就是"标题栏第一次右键没反应"（菜单其实开着，鼠标一动才冒出）。
+    /// 这里在指针没动、悬停也没变的前提下（同一点按两次）钉住它。
+    #[test]
+    fn opening_context_menu_requests_repaint() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let ui = Element::col().fill().child(
+            Element::row()
+                .width_match()
+                .height(32)
+                .window_drag()
+                .on_context_menu(|| vec![MenuItem::run("项", |_| {}, false)]),
+        );
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        let down = PointerEvent::single(PointerKind::Down, Point::new(60, 16), MouseButton::Right);
+        assert!(host.on_pointer(down), "首次弹菜单应请求重绘");
+        host.close_menu();
+        layout_once(&mut host, 200, 120);
+        assert!(host.on_pointer(down), "同一点再弹一次也应请求重绘");
+        assert!(host.menu.is_open());
     }
 
     /// 菜单里的「关闭」走完整的关闭决策链，与自绘 × 按钮一致——否则右键菜单就成了
