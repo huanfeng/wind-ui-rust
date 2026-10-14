@@ -69,6 +69,9 @@ pub struct MenuBar {
     open: Rc<Cell<Option<usize>>>,
     /// 与宿主共享的"助记字母下划线是否显示"（见 [`MenuBarLink::mnemonics`]）。
     mnemonics: Rc<Cell<bool>>,
+    /// 应用侧想知道"菜单栏此刻是否被激活（键盘待命或有菜单展开）"时挂的信号，
+    /// 见 [`Element::menu_bar_tracked`](crate::ui::Element::menu_bar_tracked)。
+    active: Option<crate::signal::Signal<bool>>,
 }
 
 impl MenuBar {
@@ -79,7 +82,14 @@ impl MenuBar {
             hover: None,
             open: Rc::new(Cell::new(None)),
             mnemonics: Rc::new(Cell::new(false)),
+            active: None,
         }
+    }
+
+    /// 把"是否被激活"同步进 `active`（见 [`Element::menu_bar_tracked`](crate::ui::Element::menu_bar_tracked)）。
+    pub fn with_active(mut self, active: crate::signal::Signal<bool>) -> Self {
+        self.active = Some(active);
+        self
     }
 
     fn slot_at(&self, p: crate::geometry::Point) -> Option<usize> {
@@ -136,6 +146,14 @@ impl Widget for MenuBar {
         let ts = TextStyle::of(style);
         let open = self.open.get();
         let mnemonics = self.mnemonics.get();
+        // 激活态由宿主改 `open`（按 Alt / F10 / 助记键、点开、收起），控件里没有事件可接，
+        // 只能在绘制时比对一次；变了才写，写入会请求下一帧，界面随之切换。
+        if let Some(a) = self.active {
+            let on = open.is_some();
+            if a.get() != on {
+                a.set(on);
+            }
+        }
         let mut rects = Vec::with_capacity(self.entries.len());
         let mut x = bounds.x;
         for (i, e) in self.entries.iter().enumerate() {

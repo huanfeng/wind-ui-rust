@@ -2993,6 +2993,44 @@ mod tests {
         assert!(!h.menu.is_armed(), "再按 F10 退出激活态");
     }
 
+    /// `menu_bar_tracked`：单击 Alt 激活后，下一帧信号为真；再单击退出后回到假。
+    /// 紧凑标题栏靠它决定盖在菜单栏上的那层何时撤开。
+    #[test]
+    fn tracked_menu_bar_reports_active_state() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::ui::MenuBarEntry;
+        let active = crate::signal::signal(false);
+        let app = App::new("t", 400, 300).content(
+            Element::col().width(400).height(300).child(
+                Element::menu_bar_tracked(
+                    vec![MenuBarEntry::new("文件(F)", Vec::new).mnemonic('F')],
+                    active,
+                )
+                .height(28),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = tiny_skia::Pixmap::new(400, 300).unwrap();
+        let mut draw = |h: &mut UiHost| {
+            h.render(
+                &mut PixmapTarget { pixmap: &mut pm },
+                crate::geometry::Size::new(400, 300),
+            )
+        };
+        draw(&mut h);
+        assert!(!active.get());
+        h.on_key(alt_key(true));
+        h.on_key(alt_key(false));
+        draw(&mut h);
+        assert!(active.get(), "单击 Alt 后应报告激活");
+        h.on_key(alt_key(true));
+        h.on_key(alt_key(false));
+        draw(&mut h);
+        assert!(!active.get(), "再单击退出后应回到未激活");
+    }
+
     /// 单击 Alt（按下、没碰别的键、松开）切换激活态；Alt+X 这种组合不算单击。
     /// 面板展开时单击 Alt 收起面板。
     #[test]

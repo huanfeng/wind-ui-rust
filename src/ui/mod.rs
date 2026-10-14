@@ -1885,6 +1885,21 @@ impl Element {
             .width_match()
     }
 
+    /// 同 [`menu_bar`](Self::menu_bar)，并把"菜单栏此刻是否被激活"（单击 Alt / F10 待命、
+    /// Alt+助记键或点击展开了菜单）同步进 `active`。
+    ///
+    /// 给"平时把菜单栏让给别的内容、需要时才露出来"的布局用（IDE 式紧凑标题栏）：
+    /// 菜单栏本身留在树里、保持可见（宿主只认可见的菜单栏，藏起来 Alt 就失效了），
+    /// 应用拿这个信号决定盖在它上面的那层什么时候撤开。
+    pub fn menu_bar_tracked(
+        entries: Vec<MenuBarEntry>,
+        active: crate::signal::Signal<bool>,
+    ) -> Self {
+        Self::base(Layout::None)
+            .widget(MenuBar::new(entries).with_active(active))
+            .width_match()
+    }
+
     /// 复选菜单粘滞：开关项点击后菜单保持展开、可连点多个，点面板外才收起。
     /// 默认关闭——菜单的通行惯例是「点一下、做一件事、退场」，多数开关一次也只改一个。
     /// 一次要连改多个（如一组显示过滤）才值得打开。动作项不受影响，恒为点击即关。
