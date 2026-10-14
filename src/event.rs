@@ -904,6 +904,9 @@ pub struct MenuItem {
     pub checkable: bool,
     /// 前置图标（字符/emoji，None=无图标列）。
     pub icon: Option<String>,
+    /// 前置位图图标（单色模板，绘制时按本项文字色着色：禁用变灰、悬停随强调色）。
+    /// 与 [`icon`](Self::icon) 同占图标列；两者都给时用位图。
+    pub icon_image: Option<std::rc::Rc<crate::render::image::Image>>,
     /// 尾随快捷键文本（如 "⌘C"）。submenu 非空时显示右箭头优先。
     pub shortcut: Option<String>,
     /// 分隔线项（label/action 忽略，渲染为细线，不可命中）。
@@ -971,6 +974,7 @@ impl MenuItem {
             checked: false,
             checkable: false,
             icon: None,
+            icon_image: None,
             shortcut: None,
             separator: false,
             submenu: Vec::new(),
@@ -1035,6 +1039,14 @@ impl MenuItem {
     /// 设置前置图标（字符/emoji）。
     pub fn icon(mut self, icon: impl Into<String>) -> Self {
         self.icon = Some(icon.into());
+        self
+    }
+    /// 设置前置位图图标（单色模板，按本项文字色着色）。
+    ///
+    /// 给"同一组命令在工具栏是图标按钮、在菜单里是一行字"这类场景：菜单里带上同一个
+    /// 图标，两边一眼对得上。模板颜色无关紧要，只用其 alpha。
+    pub fn icon_image(mut self, img: std::rc::Rc<crate::render::image::Image>) -> Self {
+        self.icon_image = Some(img);
         self
     }
     /// 设置尾随快捷键文本。

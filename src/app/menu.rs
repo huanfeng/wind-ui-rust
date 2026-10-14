@@ -37,6 +37,57 @@ const MENU_MAX_H: i32 = 320;
 const MENU_FONT: f32 = 13.5;
 /// 图标列宽（有图标项时预留），也用作尾随可点击图标的命中/绘制列宽。
 pub(super) const MENU_ICON_W: i32 = 18;
+/// 位图图标的边长（逻辑 px），居中放在图标列里。
+const MENU_IMAGE_PX: i32 = 16;
+
+thread_local! {
+    /// 着过色的菜单位图图标：(模板地址, 颜色) → 成品。
+    ///
+    /// 不缓存的话每次重绘（悬停换行就是一次）都会着出一张新图；GPU 后端按图片对象
+    /// 缓存纹理，新图就得重新上传，还会把缓存里别的图挤出去。同一项只会有正常 /
+    /// 悬停 / 禁用两三种颜色，命中率很高；条数到顶就整表清空，菜单图标本来就不多。
+    #[allow(clippy::type_complexity)]
+    static TINTED: std::cell::RefCell<
+        std::collections::HashMap<
+            (usize, u32),
+            (std::rc::Weak<crate::render::image::Image>, crate::render::image::Image),
+        >,
+    > =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 缓存的条数上限。
+const TINTED_CAP: usize = 256;
+
+fn tinted_icon(
+    img: &Rc<crate::render::image::Image>,
+    color: crate::geometry::Color,
+) -> crate::render::image::Image {
+    let key = (
+        Rc::as_ptr(img) as usize,
+        u32::from_be_bytes([color.r, color.g, color.b, color.a]),
+    );
+    TINTED.with(|c| {
+        let mut c = c.borrow_mut();
+        // 键里的地址可能被已释放模板的后来者复用：再用 Weak 确认还是同一张
+        if let Some((src, hit)) = c.get(&key) {
+            if src.upgrade().is_some_and(|s| Rc::ptr_eq(&s, img)) {
+                return hit.clone();
+            }
+        }
+        if c.len() >= TINTED_CAP {
+            c.clear();
+        }
+        let out = img.tinted(color);
+        c.insert(key, (Rc::downgrade(img), out.clone()));
+        out
+    })
+}
+
+/// 这一项占不占图标列（字形或位图任一）。
+fn has_icon(it: &MenuItem) -> bool {
+    it.icon.is_some() || it.icon_image.is_some()
+}
 /// 勾选列的宽度（对勾画在这里，在图标列之前）。
 ///
 /// 对勾**必须**有自己的一列，不能挤在尾随区里：那里已经被子菜单箭头与快捷键占着，
@@ -367,7 +418,7 @@ impl ContextMenu {
                 normalize_separators(&mut s);
                 s
             });
-            self.levels[k].has_icons = items.iter().any(|it| it.icon.is_some());
+            self.levels[k].has_icons = items.iter().any(has_icon);
             // 只增不减：宽度是按打开时那一刻算的，这里把列收掉会让标签左移、
             // 右边多出一截空白；而万一重建后冒出了新的开关项，列还是得有。
             self.levels[k].has_checks |= items.iter().any(|it| it.checkable);
@@ -475,7 +526,7 @@ impl UiHost {
         min_width: i32,
         keep_checks: bool,
     ) -> (i32, bool, bool) {
-        let has_icons = items.iter().any(|it| it.icon.is_some());
+        let has_icons = items.iter().any(has_icon);
         let has_checks = keep_checks || items.iter().any(|it| it.checkable);
         let mut max_label = 0;
         let mut max_trail = 0;
@@ -1610,8 +1661,19 @@ impl MenuHost {
                         &TextStyle::new(MENU_FONT),
                     );
                 }
-                // 图标列。
-                if let Some(icon) = &it.icon {
+                // 图标列：位图优先（按文字色着色，禁用 / 悬停与文字同步变色），否则字形。
+                if let Some(img) = &it.icon_image {
+                    let ir = Rect::new(level.icon_x(), top, MENU_ICON_W, h);
+                    let s = MENU_IMAGE_PX.min(ir.w).min(ir.h);
+                    let dst = Rect::new(ir.x + (ir.w - s) / 2, ir.y + (ir.h - s) / 2, s, s);
+                    canvas.draw_image(
+                        &tinted_icon(img, color),
+                        dst,
+                        crate::render::image::Fit::Contain,
+                        0.0,
+                        1.0,
+                    );
+                } else if let Some(icon) = &it.icon {
                     let ir = Rect::new(level.icon_x(), top, MENU_ICON_W, h);
                     canvas.draw_text(
                         icon,
@@ -1734,6 +1796,34 @@ impl MenuHost {
 
 #[cfg(test)]
 mod tests {
+
+    fn icon_img() -> Rc<crate::render::image::Image> {
+        Rc::new(crate::render::image::Image::from_rgba(2, 2, &[0, 0, 0, 255].repeat(4)).unwrap())
+    }
+
+    /// 只给位图图标、不给字形的项，也要占图标列——否则图标画进标签里、标签不缩进。
+    #[test]
+    fn 位图图标也占图标列() {
+        let it = MenuItem::run("复制", |_| {}, false).icon_image(icon_img());
+        assert!(has_icon(&it));
+        assert!(!has_icon(&MenuItem::run("粘贴", |_| {}, false)));
+    }
+
+    /// 着色缓存：同一模板同一颜色复用成品（像素不必每帧重着），换色另算。
+    #[test]
+    fn 菜单图标着色按模板与颜色缓存() {
+        use crate::geometry::Color;
+        let n = || TINTED.with(|c| c.borrow().len());
+        let img = icon_img();
+        let red = Color::rgba(255, 0, 0, 255);
+        let before = n();
+        tinted_icon(&img, red);
+        tinted_icon(&img, red);
+        assert_eq!(n(), before + 1, "同色第二次应命中缓存");
+        tinted_icon(&img, Color::rgba(0, 0, 255, 255));
+        assert_eq!(n(), before + 2, "换色得另着一份");
+    }
+
     use super::*;
     use crate::app::test_support::{dropdown_handler, key_ev};
     use crate::app::App;
