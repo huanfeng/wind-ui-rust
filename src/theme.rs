@@ -813,9 +813,17 @@ pub struct SegmentTheme {
     /// 段间分隔线。
     pub divider: Option<Color>,
     pub corner: Option<f32>,
+    /// 选中胶囊 / 悬停浅底与外框之间的留白（px，默认 2）。
+    ///
+    /// 设为 0 则贴边：选中段铺满整段高度，只在贴着外框左右两端时带圆角（与外框圆角
+    /// 吻合），中间段是直角——像一排相连的按钮被按下了一个，而不是框里浮着一颗胶囊。
+    pub pill_inset: Option<f32>,
 }
 
 impl SegmentTheme {
+    pub fn pill_inset(&self) -> f32 {
+        self.pill_inset.unwrap_or(2.0).max(0.0)
+    }
     pub fn bg(&self, p: &Palette) -> Color {
         self.bg.unwrap_or(p.surface)
     }

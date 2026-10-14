@@ -131,16 +131,18 @@ impl Widget for SegmentedControl {
         self.sel_pos.set(sp);
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
         let ts = &crate::text::TextStyle::of(style);
+        let inset = sg.pill_inset();
         // 悬停浅底（非选中段；选中段由滑动胶囊覆盖）。
         for i in 0..n {
             if self.hover == Some(i) && enabled && i != sel {
                 let (x0, x1) = self.seg_x(bounds, i);
-                canvas.fill_round_rect(
-                    (x0 + 2) as f32,
-                    (bounds.y + 2) as f32,
-                    (x1 - x0 - 4) as f32,
-                    (bounds.h - 4) as f32,
-                    (corner - 2.0).max(0.0),
+                fill_seg_bg(
+                    canvas,
+                    bounds,
+                    x0 as f32,
+                    x1 as f32,
+                    inset,
+                    corner,
                     &Paint::fill(sg.hover_bg(pal)),
                 );
             }
@@ -162,16 +164,16 @@ impl Widget for SegmentedControl {
                 // track 在亮/暗模式下均与 surface 有明显对比度，surface_alt 几乎不可见
                 pal.track
             };
-            let (rx, ry, rw, rh) = (
-                px0 + 2.0,
-                (bounds.y + 2) as f32,
-                px1 - px0 - 4.0,
-                (bounds.h - 4) as f32,
-            );
-            let pr = (corner - 2.0).max(0.0);
-            // 选中胶囊：实心强调色（文字反色由 selected_text 提供），无投影/渐变。
-            canvas.fill_round_rect(rx, ry, rw, rh, pr, &Paint::fill(pill_bg));
-            Some(Rect::new(rx as i32, ry as i32, rw as i32, rh as i32))
+            // 选中胶囊（文字色由 selected_text 提供），无投影/渐变。
+            Some(fill_seg_bg(
+                canvas,
+                bounds,
+                px0,
+                px1,
+                inset,
+                corner,
+                &Paint::fill(pill_bg),
+            ))
         } else {
             None
         };
@@ -292,6 +294,53 @@ impl Widget for SegmentedControl {
     fn focusable(&self) -> bool {
         true
     }
+}
+
+/// 画一段的底（选中胶囊 / 悬停浅底），返回实际占的矩形（供文字裁剪）。
+///
+/// `inset > 0`：框里浮着一颗四角都圆的胶囊，四周各留 `inset`。
+///
+/// `inset == 0`：贴边。做法是先按本段矩形裁剪、再填满整个外框圆角矩形，得到两者的
+/// 交集——于是只有贴着外框两端的段带圆角，且与外框圆角严丝合缝，中间段是直角；滑动
+/// 动画停在两段之间时也自然正确。不用"圆角矩形 + 补直角块"拼：底色常是半透明的，
+/// 两块重叠处会叠两遍 alpha，留下一道深色缝。
+fn fill_seg_bg(
+    canvas: &mut dyn Canvas,
+    bounds: Rect,
+    x0: f32,
+    x1: f32,
+    inset: f32,
+    corner: f32,
+    paint: &Paint,
+) -> Rect {
+    if inset > 0.0 {
+        let (rx, ry, rw, rh) = (
+            x0 + inset,
+            bounds.y as f32 + inset,
+            x1 - x0 - inset * 2.0,
+            bounds.h as f32 - inset * 2.0,
+        );
+        canvas.fill_round_rect(rx, ry, rw, rh, (corner - inset).max(0.0), paint);
+        return Rect::new(rx as i32, ry as i32, rw as i32, rh as i32);
+    }
+    let seg = Rect::new(
+        x0.round() as i32,
+        bounds.y,
+        (x1.round() - x0.round()) as i32,
+        bounds.h,
+    );
+    canvas.save();
+    canvas.clip_rect(seg);
+    canvas.fill_round_rect(
+        bounds.x as f32,
+        bounds.y as f32,
+        bounds.w as f32,
+        bounds.h as f32,
+        corner,
+        paint,
+    );
+    canvas.restore();
+    seg
 }
 
 #[cfg(test)]
