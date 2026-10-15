@@ -170,6 +170,7 @@ Linux 上上述命令同样可跑（单测、截图回归都不需要 X 服务�
 - **Conventional commit**：`feat(scope): …` / `fix` / `refactor` / `docs` / `test` / `chore`。
 - **简体中文** subject + body，简洁说清"做了什么、为什么"。
 - **绝不含 AI 元信息**：不要 `Constraint:`/`Rejected:`/`Confidence:`/`Scope-risk:` 等 trailer，不要 `Co-Authored-By`、不要工具署名。
+- **不含个人信息**：提交信息以及进库的注释与文档里不写真实姓名、邮箱、内网地址与主机名，也不写含用户名或个人目录布局的本机路径（如 `/home/<用户名>/…`、`C:\Users\<用户名>\…`、`D:\Develop\…`）；引用文件一律写仓库相对路径。
 - **原子提交**：一组相关改动一个 commit（如"文档"与"重构"分开）。
 - 只在用户要求时提交；默认分支直接提交沿用本仓库现状。
 
