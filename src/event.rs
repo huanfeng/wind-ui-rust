@@ -1223,6 +1223,23 @@ pub struct MenuRequest {
     pub click_through: bool,
 }
 
+impl MenuRequest {
+    /// 在 `pos` 弹出的普通菜单，其余字段取 [`EventCtx::show_menu`](crate::core::EventCtx::show_menu)
+    /// 的默认值：按内容定宽、不翻转、不重建、点外面穿透。改字段后交给
+    /// [`EventCtx::show_menu_request`](crate::core::EventCtx::show_menu_request)。
+    pub fn new(pos: Point, items: Vec<MenuItem>) -> Self {
+        Self {
+            pos,
+            items,
+            min_width: 0,
+            anchor_top: None,
+            rebuild: None,
+            bar: None,
+            click_through: true,
+        }
+    }
+}
+
 /// 菜单栏交给宿主的联动信息：各标题的位置与项生成器。
 ///
 /// 菜单栏控件自己只画标题、收第一下点击；展开之后指针与键盘都归宿主浮层独占，

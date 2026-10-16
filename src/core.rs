@@ -2041,21 +2041,31 @@ impl EventCtx<'_> {
         }
     }
     /// 请求在 `pos`（逻辑坐标）弹出浮层菜单。宿主接管渲染、命中与项激活。
-    /// `min_width`：最小宽度（0=按内容）。
+    /// `min_width`：最小宽度（0=按内容，兜 140 的默认下限；大于 0 时以它为准）。
     ///
     /// `pos` 按**指针位置**处理：面板错开它几像素弹出，放不下时翻到它的另一侧，保证
     /// 指针不落在面板里（见 API_GUIDE §8.2）。要贴着控件弹（下拉、按钮菜单），用
     /// [`show_dropdown_menu`](Self::show_dropdown_menu)，它以控件矩形为锚、只做上下翻转。
     pub fn show_menu(&mut self, pos: Point, items: Vec<MenuItem>, min_width: i32) {
-        self.out.menu = Some(MenuRequest {
-            pos,
-            items,
-            min_width,
-            anchor_top: None,
-            rebuild: None,
-            bar: None,
-            click_through: true,
-        });
+        let mut req = MenuRequest::new(pos, items);
+        req.min_width = min_width;
+        self.show_menu_request(req);
+    }
+    /// 按完整请求弹出浮层菜单，用于便捷方法覆盖不到的组合。例如右键菜单开着时点别处
+    /// **只收起、不触发底下的控件**：
+    ///
+    /// ```
+    /// use windui::core::EventCtx;
+    /// use windui::prelude::*;
+    ///
+    /// fn open_tree_menu(ctx: &mut EventCtx, pos: Point, items: Vec<MenuItem>) {
+    ///     let mut req = MenuRequest::new(pos, items);
+    ///     req.click_through = false;
+    ///     ctx.show_menu_request(req);
+    /// }
+    /// ```
+    pub fn show_menu_request(&mut self, req: MenuRequest) {
+        self.out.menu = Some(req);
         self.out.repaint = true;
     }
     /// 菜单栏专用：展开 `link.current` 那个标题的菜单，面板左上角贴标题左下角，并把

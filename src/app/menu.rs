@@ -577,8 +577,8 @@ impl UiHost {
             0
         };
         let w = (MENU_PAD_X + check_w + icon_w + max_label + trail_w + MENU_PAD_X)
-            .max(MENU_MIN_W)
-            .max(min_width);
+            // 调用方给了宽度就以它为准（下拉与控件同宽，可以比 140 窄）；没给才兜默认下限。
+            .max(if min_width > 0 { min_width } else { MENU_MIN_W });
         (w, has_icons, has_checks)
     }
 
@@ -1855,6 +1855,58 @@ mod tests {
             r
         );
         assert!(level.content_h > r.h, "放不下时应滚动而不是撑满整窗");
+    }
+
+    /// 调用方给的 `min_width` 以它为准，可以比默认下限 140 窄——下拉面板要与控件同宽，
+    /// 60 宽的下拉此前会弹出 140 宽的面板；不给（0）时仍兜 140。
+    #[test]
+    fn explicit_min_width_overrides_default_floor() {
+        use crate::event::MenuItem;
+        let (mut host, _sel) = dropdown_handler();
+        let items = || -> Vec<MenuItem> {
+            ["甲", "乙"]
+                .into_iter()
+                .map(|t| MenuItem::run(t, |_ctx| {}, false))
+                .collect()
+        };
+        let content_only = host
+            .build_level(items(), 10, 20, 0, None, None, false)
+            .rect
+            .w;
+        assert_eq!(
+            content_only, MENU_MIN_W,
+            "前提：两项短标签按内容不足 140，取默认下限"
+        );
+        let narrow = host
+            .build_level(items(), 10, 20, 60, None, None, false)
+            .rect
+            .w;
+        assert!(
+            (60..MENU_MIN_W).contains(&narrow),
+            "给了 60 的面板宽 {narrow}，应不小于 60 且不再被顶到 140"
+        );
+        let wide = host
+            .build_level(items(), 10, 20, 200, None, None, false)
+            .rect
+            .w;
+        assert_eq!(wide, 200, "比内容宽的 min_width 照常生效");
+    }
+
+    /// `MenuRequest::new` 的默认值与 `show_menu(.., 0)` 相同，`show_menu_request` 原样转交。
+    #[test]
+    fn show_menu_request_forwards_click_through() {
+        use crate::event::{MenuItem, MenuRequest};
+        let pos = Point::new(5, 6);
+        let out = crate::testing::run_with_ctx(|ctx| {
+            let mut req = MenuRequest::new(pos, vec![MenuItem::run("甲", |_ctx| {}, false)]);
+            assert!(req.click_through, "默认与右键菜单一致：点外面穿透");
+            assert_eq!(req.min_width, 0);
+            req.click_through = false;
+            ctx.show_menu_request(req);
+        });
+        let req = out.menu.expect("应发出菜单请求");
+        assert_eq!(req.pos, pos);
+        assert!(!req.click_through);
     }
 
     /// 极矮窗口：非 `tall` 菜单的 60 px 下限不能让面板伸到窗口外。

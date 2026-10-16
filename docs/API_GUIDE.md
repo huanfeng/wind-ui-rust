@@ -1743,6 +1743,17 @@ ctx.show_context_menu(pos, vec![
 误点右键后原地左键即可关掉（这一下照常落到下方控件）；右侧 / 下方放不下时翻到指针另一侧，
 而不是贴窗口边把面板推到指针底下。要贴着控件弹出请用 `show_dropdown_menu(bounds, items)`。
 
+面板宽度默认按内容、且不窄于 140；`show_menu(pos, items, min_width)` 给了 `min_width`（> 0）就以它为准，
+可以比 140 窄（下拉面板就是这样与控件同宽的）。
+
+右键菜单开着时点别处，默认**穿透**：菜单收起，同一下照常落到下方控件。要"这一下只收起菜单"
+（树状图这类点错一下就会误触发动作的场景），用完整请求：
+```rust
+let mut req = MenuRequest::new(pos, items);
+req.click_through = false;
+ctx.show_menu_request(req);
+```
+
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
 
 ⚠ 两个构造器的**第三个参数含义不同**：`run` 收 `checked`（勾选标记），`key` 收 `enabled`（可用性）。
@@ -2310,7 +2321,7 @@ let dot = Element::leaf().widget(Dot { on: state });
 **何时还需要 `ctx.mark_dirty()`**：只有当控件改的是**自身持有的非信号状态**（hover/press
 标志、拖动偏移等）时才需要显式请求重绘。改 `Signal` 一律自动触发。
 
-**`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()`、`set_bg()`。
+**`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
 
 **`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`draw_text`、`measure_text`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
 
