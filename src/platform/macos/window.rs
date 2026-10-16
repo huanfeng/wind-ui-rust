@@ -2052,12 +2052,56 @@ impl ContentView {
             crate::event::CursorShape::Text => NSCursor::IBeamCursor(),
             crate::event::CursorShape::SizeWE => NSCursor::resizeLeftRightCursor(),
             crate::event::CursorShape::SizeNS => NSCursor::resizeUpDownCursor(),
-            // 四向箭头只有 macOS 15+ 的新 API 才有；张开的手是 AppKit 里「可拖动」的惯用形状。
-            crate::event::CursorShape::SizeAll => NSCursor::openHandCursor(),
+            crate::event::CursorShape::SizeAll => move_cursor(),
             crate::event::CursorShape::Arrow => NSCursor::arrowCursor(),
         };
         cursor.set();
     }
+}
+
+/// 四向移动光标（CSS `cursor: move`）。
+///
+/// AppKit 没有公开的四向箭头（`frameResizeCursorFromPosition:inDirections:` 要 macOS 15+，
+/// 私有的 `_moveCursor` 实测会抛「无法识别的选择器」），而系统自己画这个光标用的资源就在
+/// HIServices 里：`cursors/move/cursor.pdf` + `info.plist`（热点 `hotx` / `hoty`）。Chromium 与
+/// WebKit 的 `cursor: move` 也是这么取的。读不到（目录结构变了）时退回张开的手——AppKit
+/// 里「可拖动」的惯用形状。首次用到时构造，之后复用。
+fn move_cursor() -> Retained<NSCursor> {
+    thread_local! {
+        static MOVE: Option<Retained<NSCursor>> = load_hiservices_cursor("move");
+    }
+    MOVE.with(|c| c.clone())
+        .unwrap_or_else(NSCursor::openHandCursor)
+}
+
+fn load_hiservices_cursor(name: &str) -> Option<Retained<NSCursor>> {
+    const DIR: &str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/\
+Frameworks/HIServices.framework/Versions/A/Resources/cursors";
+    let pdf = NSString::from_str(&format!("{DIR}/{name}/cursor.pdf"));
+    let plist = NSString::from_str(&format!("{DIR}/{name}/info.plist"));
+    let image = NSImage::initWithContentsOfFile(NSImage::alloc(), &pdf)?;
+    // 热点按 plist 给（点为单位，左上原点）；缺项时取图像中心。
+    let size = image.size();
+    let info: Option<Retained<AnyObject>> =
+        unsafe { msg_send![objc2::class!(NSDictionary), dictionaryWithContentsOfFile: &*plist] };
+    let read = |key: &str, default: f64| -> f64 {
+        let Some(info) = info.as_deref() else {
+            return default;
+        };
+        let key = NSString::from_str(key);
+        let v: Option<Retained<AnyObject>> = unsafe { msg_send![info, objectForKey: &*key] };
+        v.map(|v| unsafe { msg_send![&*v, doubleValue] })
+            .unwrap_or(default)
+    };
+    let hot = NSPoint::new(
+        read("hotx", size.width / 2.0),
+        read("hoty", size.height / 2.0),
+    );
+    Some(NSCursor::initWithImage_hotSpot(
+        NSCursor::alloc(),
+        &image,
+        hot,
+    ))
 }
 
 /// macOS keyCode → 框架特殊键。返回 None 表示走文本/快捷键路径。
@@ -2678,5 +2722,24 @@ mod ime_tests {
         // 正常值不受影响，尤其不能被"兜底"顺手改成末尾。
         assert_eq!(utf16_to_char_index(s, 0), 0, "报 0 就是 0，不替它猜");
         assert_eq!(utf16_to_char_index(s, 3), 3);
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    /// 四向光标取自 HIServices 的系统资源：资源在、热点按 plist（当前系统为 12,12）。
+    /// 退回张开的手虽不致命，但那正是用户实测报的「四向箭头是一只大手」。
+    #[test]
+    fn move_cursor_loads_from_hiservices() {
+        let c = super::load_hiservices_cursor("move").expect("应能读到系统的 move 光标资源");
+        let hot = c.hotSpot();
+        assert!(
+            hot.x > 0.0 && hot.y > 0.0,
+            "热点应取自 plist，而非 (0,0)：{hot:?}"
+        );
+        assert!(
+            super::load_hiservices_cursor("不存在的光标").is_none(),
+            "缺资源时返回 None 走兜底"
+        );
     }
 }

@@ -519,7 +519,8 @@ pub enum CursorShape {
     /// 四向移动（✥，CSS `cursor: move`）。浮动面板的标题条、可拖动的整块内容。
     ///
     /// 与 [`SizeWE`](Self::SizeWE) / [`SizeNS`](Self::SizeNS) 说的「沿一个方向拉大小」不同，
-    /// 它说的是「按住这里，整块跟着走」。macOS 没有公开的四向箭头光标，用张开的手代替。
+    /// 它说的是「按住这里，整块跟着走」。macOS 没有公开的四向箭头 API，取系统自带的
+    /// HIServices `move` 光标资源，读不到时退回张开的手。
     SizeAll,
 }
 

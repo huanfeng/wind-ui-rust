@@ -18,7 +18,7 @@
 - **`Element::cursor(CursorShape)`**：任意元素指定悬停光标，不改变命中；`Arrow` 可压掉祖先给的手型，子控件
   自己的形状仍优先。框架按钮仍默认箭头（与原生一致），要网页手感自己挂 `Hand`。
 - **`CursorShape::SizeAll`**：四向移动光标（CSS `move`），给浮动面板标题条。Windows `IDC_SIZEALL`、X11
-  `XC_fleur`、Wayland `move`；macOS 没有公开的四向箭头，用张开的手。
+  `XC_fleur`、Wayland `move`；macOS 没有公开的四向箭头 API，取系统自带的 HIServices `move` 光标资源（读不到时退回张开的手）。
 - **主题槽 `Theme::scrollbar`（`thumb` / `thumb_active`）与 `TooltipTheme::border` / `border_width`**：滚动条
   滑块色不必再借 `palette.border`（改它会连带改掉输入框描边等）；提示浮层可描边，默认不描、宽度默认 1 物理像素。
 - **`MenuRequest::new` + `EventCtx::show_menu_request`**：按完整请求弹出菜单，覆盖便捷方法给不到的组合。

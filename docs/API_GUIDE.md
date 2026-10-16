@@ -679,7 +679,7 @@ Element::link("禁用").url("...").disabled(true)        // 核心级禁用：�
   回溯规则：沿命中节点往上，每级先看 `.cursor()`、再看控件自己声明的——子控件自己的形状（输入框的 I 形）
   先于祖先的覆盖；`.cursor(CursorShape::Arrow)` 可压掉 `clickable()` 祖先给的手型。
   形状有 `Arrow / Hand / Text / SizeWE / SizeNS / SizeAll`；`SizeAll`（四向，CSS `move`）给浮动面板
-  的标题条这类「按住整块拖走」的区域，macOS 没有公开的四向箭头，用张开的手代替。
+  的标题条这类「按住整块拖走」的区域，macOS 没有公开的四向箭头 API，取系统自带的 `move` 光标资源（读不到时退回张开的手）。
 - **`.url()` / `.underline()` 是 link 专属**修饰符（误用检测同 text_input）；打开 URL 经 `EventCtx::open_url` → 平台 `ShellExecute`，控件层不碰平台。
 
 ### 可点击容器（卡片 / 自定义行）
