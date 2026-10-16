@@ -1232,6 +1232,11 @@ pub struct TooltipTheme {
     pub corner: Option<f32>,
     /// 单行超过此宽度（逻辑 px）自动换行；未设置时用库内默认值。
     pub max_width: Option<f32>,
+    /// 描边色。`None`（默认）不描——浅色提示层浮在同样接近白的界面上时，靠它看出是个浮层。
+    pub border: Option<Color>,
+    /// 描边宽度，默认 `{ px = 1 }`：1 逻辑像素在 125% 下是 1.25 物理像素，会被抗锯齿摊成
+    /// 两行灰边。
+    pub border_width: Option<Len>,
 }
 
 impl TooltipTheme {
@@ -1247,6 +1252,31 @@ impl TooltipTheme {
     /// 换行宽度上限（逻辑 px）。默认 280，宿主可按窗口宽度/文案长度自行覆盖。
     pub fn max_width(&self) -> f32 {
         self.max_width.unwrap_or(280.0)
+    }
+    pub fn border_width(&self) -> Len {
+        self.border_width.unwrap_or(Len::Physical { px: 1.0 })
+    }
+}
+
+/// 滚动条覆盖层。`None` 回退到 palette：常态取 `border`、拖动态取 `text_muted`。
+///
+/// 单开一槽是因为那两位在宿主那边同时是全站边框色与弱化文字色——只想让滑块深一点，
+/// 改 `palette.border` 会连带改掉输入框描边、`Role::Border`、窗口外框一串不相干的东西。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScrollbarTheme {
+    /// 滑块常态色。
+    pub thumb: Option<Color>,
+    /// 滑块拖动态色（加深一档，给出"抓住了"的反馈）。
+    pub thumb_active: Option<Color>,
+}
+
+impl ScrollbarTheme {
+    pub fn thumb(&self, p: &Palette) -> Color {
+        self.thumb.unwrap_or(p.border)
+    }
+    pub fn thumb_active(&self, p: &Palette) -> Color {
+        self.thumb_active.unwrap_or(p.text_muted)
     }
 }
 
@@ -1342,6 +1372,7 @@ pub struct Theme {
     pub tooltip: TooltipTheme,
     pub toast: ToastTheme,
     pub color_picker: ColorPickerTheme,
+    pub scrollbar: ScrollbarTheme,
 }
 
 impl Theme {
@@ -1566,6 +1597,42 @@ mod tests {
             "未指定字段回退默认"
         );
         assert!(t.button.bg.is_none(), "控件覆盖默认 None");
+    }
+
+    /// 滚动条单开一槽：TOML 可配，未配的那一档回退 palette；滑块取色走主题槽而非 palette。
+    #[test]
+    fn scrollbar_slot_parses_and_drives_thumb_color() {
+        let t = Theme::from_toml("[scrollbar]\nthumb = \"#ff0000\"\n").expect("应可解析");
+        assert_eq!(t.scrollbar.thumb, Some(Color::rgb(255, 0, 0)));
+        assert_eq!(t.scrollbar.thumb_active(&t.palette), t.palette.text_muted);
+        let back = Theme::from_toml(&t.to_toml().unwrap()).unwrap();
+        assert_eq!(
+            back.scrollbar.thumb,
+            Some(Color::rgb(255, 0, 0)),
+            "回环不丢"
+        );
+        set_current(Rc::new(t.clone()));
+        assert_eq!(crate::core::scrollbar::thumb(false), Color::rgb(255, 0, 0));
+        assert_eq!(crate::core::scrollbar::thumb(true), t.palette.text_muted);
+        assert_ne!(
+            t.palette.border,
+            Color::rgb(255, 0, 0),
+            "前提：没碰 palette.border"
+        );
+        set_current(Rc::new(Theme::default()));
+    }
+
+    #[test]
+    fn tooltip_border_toml_parses() {
+        let t = Theme::from_toml("[tooltip]\nborder = \"#cccccc\"\nborder_width = { px = 2 }\n")
+            .expect("应可解析");
+        assert_eq!(t.tooltip.border, Some(Color::rgb(0xcc, 0xcc, 0xcc)));
+        assert_eq!(t.tooltip.border_width(), Len::Physical { px: 2.0 });
+        assert_eq!(Theme::default().tooltip.border, None, "默认不描");
+        assert_eq!(
+            Theme::default().tooltip.border_width(),
+            Len::Physical { px: 1.0 }
+        );
     }
 
     /// 文档（API_GUIDE「文本输入」）里给出的光标 TOML 必须真能解析：

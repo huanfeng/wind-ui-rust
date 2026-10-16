@@ -133,6 +133,17 @@ impl TooltipState {
             corner,
             &Paint::fill(tt.bg(pal)),
         );
+        if let Some(border) = tt.border {
+            canvas.stroke_round_rect(
+                x as f32,
+                y as f32,
+                w as f32,
+                h as f32,
+                corner,
+                tt.border_width().to_logical(canvas.dpi_scale()),
+                &Paint::fill(border),
+            );
+        }
         let tr = Rect::new(x + TOOLTIP_PAD_X, y, w - 2 * TOOLTIP_PAD_X, h);
         canvas.draw_text(
             &text,
@@ -147,6 +158,62 @@ impl TooltipState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 在 125% 画布上画一次提示，返回 (pixmap, 浮层逻辑矩形)。
+    fn paint_tooltip(border: Option<crate::geometry::Color>) -> (tiny_skia::Pixmap, Rect) {
+        use crate::geometry::Color;
+        use crate::render::SkiaCanvas;
+        use crate::ui::Element;
+        let mut tree = Tree::new();
+        let root = Element::leaf().tooltip("提示").build(&mut tree);
+        tree.root = Some(root);
+        let mut theme = Theme::default();
+        theme.tooltip.bg = Some(Color::WHITE);
+        theme.tooltip.border = border;
+        let st = TooltipState {
+            pos: Point::new(20, 20),
+            ..TooltipState::default()
+        };
+        let mut pm = tiny_skia::Pixmap::new(250, 125).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, 1.25);
+            st.paint(
+                &mut c,
+                &tree,
+                Some(root),
+                false,
+                &theme,
+                Size::new(200, 100),
+                10_000,
+            );
+        }
+        assert!(st.shown.get(), "前提：满延时应画出");
+        let at = Point::new(20 + TOOLTIP_CURSOR_DX, 20 + TOOLTIP_CURSOR_DY);
+        (pm, Rect::new(at.x, at.y, 0, 0))
+    }
+
+    /// 主题给了描边色才描，且默认 1 物理像素：125% 下左边沿一行只染 1 列，不被摊成两列灰。
+    #[test]
+    fn tooltip_border_follows_theme_at_one_physical_pixel() {
+        let red = crate::geometry::Color::rgb(255, 0, 0);
+        let (plain, _) = paint_tooltip(None);
+        let (pm, at) = paint_tooltip(Some(red));
+        // 浮层左边沿附近、竖直取浮层中部（避开圆角）。
+        let y = ((at.y as f32 + 10.0) * 1.25) as u32;
+        let x0 = (at.x as f32 * 1.25) as u32;
+        let reddish = |p: tiny_skia::PremultipliedColorU8| p.red() as i32 > p.green() as i32 + 40;
+        let cols: Vec<u32> = (x0.saturating_sub(3)..x0 + 4)
+            .filter(|&x| reddish(pm.pixel(x, y).unwrap()))
+            .collect();
+        assert!(!cols.is_empty(), "设了描边色应画出描边");
+        assert_eq!(cols.len(), 1, "1 物理像素描边只应染 1 列，实际 {cols:?}");
+        assert!(
+            (0..plain.width()).all(|x| !reddish(plain.pixel(x, y).unwrap())),
+            "未设描边色时不描"
+        );
+    }
 
     /// 一块 800×600 的窗口，下面各用例共用。
     const WS: Size = Size::new(800, 600);

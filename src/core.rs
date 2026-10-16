@@ -111,13 +111,13 @@ pub mod scrollbar {
     /// 滑块色。取自当前主题，**不用**固定的黑色半透明——后者在深色主题下会连滑块
     /// 一起隐没（深底叠黑等于没画）。
     ///
-    /// `active` 为拖动态，加深一档给出"抓住了"的反馈。
+    /// `active` 为拖动态，加深一档给出"抓住了"的反馈。配色见 [`ScrollbarTheme`](crate::theme::ScrollbarTheme)。
     pub fn thumb(active: bool) -> crate::geometry::Color {
-        let p = &crate::theme::current().palette;
+        let t = crate::theme::current();
         if active {
-            p.text_muted
+            t.scrollbar.thumb_active(&t.palette)
         } else {
-            p.border
+            t.scrollbar.thumb(&t.palette)
         }
     }
 }
