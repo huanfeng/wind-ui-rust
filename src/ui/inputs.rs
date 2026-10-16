@@ -2520,6 +2520,11 @@ impl Widget for TextInput {
         // 用户看不出自己正在组字。提交的字走 `Key::Char`，在 `type_char` 被拒。
         self.caret_local.get()
     }
+    fn accepts_ime(&self) -> bool {
+        // 只读框照常报光标（上面那条注释），但不接受输入法：Windows 上据此摘掉输入法上下文，
+        // 用户不会组完一串才发现被 `type_char` 吞掉。
+        !self.config.read_only && self.ime_caret().is_some()
+    }
     fn set_composing(&mut self, composing: bool) {
         // 只读：不进入组合态（不藏光标——这里没有字会被打进来）；退出照常放行，
         // 运行期切到只读时不至于把光标永远藏着。
@@ -2527,6 +2532,11 @@ impl Widget for TextInput {
             return;
         }
         self.composing.set(composing);
+        // 与 `set_preedit` 同理：开始组合时把视口拉回光标。光标先前被滚出可视区的话，
+        // 系统合成窗与候选窗会跟着它落到框外（甚至窗口外）。
+        if composing {
+            self.follow_cursor.set(true);
+        }
     }
     fn set_preedit(&mut self, pe: &Preedit) {
         // 只读：不内联显示合成串——那看起来就像字被打进去了。清空照常放行，
@@ -2917,6 +2927,28 @@ mod tests {
             caret,
             sel: None,
         }
+    }
+
+    /// win32 开始组合（`set_composing(true)`）时同样把视口拉回光标：光标先前被滚出可视区
+    /// 的话，系统合成窗与候选窗会跟着它落到框外。只读框不进入组合态，也不拉。
+    #[test]
+    fn composing_start_scrolls_caret_back_into_view() {
+        use crate::core::Widget;
+        let mut ti = dummy_input();
+        ti.follow_cursor.set(false);
+        ti.set_composing(true);
+        assert!(ti.follow_cursor.get(), "开始组合应请求跟随光标");
+        ti.follow_cursor.set(false);
+        ti.set_composing(false);
+        assert!(!ti.follow_cursor.get(), "结束组合不必再拉");
+        let mut ro = dummy_input();
+        ro.config.read_only = true;
+        ro.follow_cursor.set(false);
+        ro.set_composing(true);
+        assert!(
+            !ro.composing.get() && !ro.follow_cursor.get(),
+            "只读框不进入组合态"
+        );
     }
 
     /// 合成串插在光标处，且**不改动**正文信号本身。

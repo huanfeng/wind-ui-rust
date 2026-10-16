@@ -735,6 +735,10 @@ impl Widget for NumberField {
     fn ime_hints(&self) -> crate::event::ImeHints {
         self.inner.ime_hints()
     }
+    fn accepts_ime(&self) -> bool {
+        // 与 `ime_caret` 一并转发：只读的数值框也该关掉输入法。
+        self.inner.accepts_ime()
+    }
     fn wants_right_click(&self) -> bool {
         self.inner.wants_right_click()
     }

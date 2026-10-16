@@ -906,6 +906,14 @@ pub trait AppHandler {
         None
     }
 
+    /// 焦点文本控件的矩形（**物理像素**，相对客户区左上角）：`(x, y, w, h)`。无文本焦点返回 None。
+    ///
+    /// 输入法的「可编辑区域」：win32 填进 `COMPOSITIONFORM::rcArea`。win32 目前用 `CFS_POINT`
+    /// 定位合成窗，按文档不读这个矩形，属预留（改成 `CFS_RECT` 按矩形折行时用）。
+    fn ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+
     /// 焦点文本控件实际用的字族：自己设了 `font_family` 用自己的，否则用主题默认字族；
     /// 都没有为 `None`（平台默认）。
     ///

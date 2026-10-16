@@ -246,6 +246,15 @@ pub trait Widget {
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         None
     }
+    /// 是否接受输入法输入：焦点在本节点上时平台打开输入法（Windows 上不接受就摘掉输入法
+    /// 上下文，免得在按钮上打出无处可去的组合串）。默认 = 报了光标（[`Self::ime_caret`]）。
+    ///
+    /// 覆盖它的两种情形：自绘控件没有光标可报、却要收输入法上屏的文字（画布自己排版）——
+    /// 返回 `true`，候选窗退回输入法自己的默认位置；文本框只读——返回 `false`，不让用户组完
+    /// 一串才发现被吞。
+    fn accepts_ime(&self) -> bool {
+        self.ime_caret().is_some()
+    }
     /// 输入法组合态变化（拼音等未上屏文字开始/结束合成）时由框架通知焦点节点。
     /// 文本控件借此在组合期间暂不绘制自绘光标（系统组合浮层自带光标）。默认无操作。
     ///
@@ -2627,6 +2636,11 @@ impl Tree {
         for c in children {
             self.reset_hidden_rec(c, interactive);
         }
+    }
+
+    /// 节点是否接受输入法输入（见 `Widget::accepts_ime`）。
+    pub fn accepts_ime(&self, id: NodeId) -> bool {
+        self.get(id).is_some_and(|n| n.widget.accepts_ime())
     }
 
     /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。

@@ -4032,6 +4032,14 @@ impl AppHandler for UiHost {
         ))
     }
 
+    fn ime_area(&self) -> Option<(i32, i32, i32, i32)> {
+        let focus = self.focus.current?;
+        // 与 `ime_caret` 同一口径：焦点控件报了光标才算文本焦点。
+        self.tree.caret_of(focus)?;
+        let r = self.tree.abs_bounds(focus).scaled(self.scale);
+        Some((r.x, r.y, r.w, r.h))
+    }
+
     fn ime_font_family(&self) -> Option<String> {
         let n = self.tree.get(self.focus.current?)?;
         // 读主题源而非 `self.theme` 快照：`ThemeHandle::update` 之后、下一帧 `begin_frame`
@@ -4101,8 +4109,10 @@ impl AppHandler for UiHost {
 
     fn ime_field(&self) -> Option<crate::event::ImeField> {
         let focus = self.focus.current?;
-        // 与 `ime_caret` 同一口径：焦点控件报了光标才算文本焦点。
-        self.tree.caret_of(focus)?;
+        // 焦点控件接受输入法才算文本焦点（默认即报了光标，见 `Widget::accepts_ime`）。
+        if !self.tree.accepts_ime(focus) {
+            return None;
+        }
         Some(crate::event::ImeField {
             id: focus.as_u64(),
             hints: self.tree.ime_hints_of(focus)?,
@@ -4457,6 +4467,142 @@ mod tests {
             caret_drawn(&mut handler, &mut pm),
             "回到 a：合成态已清，光标恢复"
         );
+    }
+
+    /// `ime_area` 给焦点文本控件的矩形（物理像素，供 win32 填 `rcArea`），口径与 `ime_caret`
+    /// 一致：焦点在按钮上为 `None`。125% 下按物理像素换算，光标落在矩形内。
+    #[test]
+    fn ime_area_is_the_focused_text_inputs_physical_rect() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let text = crate::signal::signal(String::from("甲乙"));
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .spacing(8)
+                .child(Element::button("按钮"))
+                .child(Element::text_input(text, "").width(200).height(30)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.25);
+        let mut pm = Pixmap::new(375, 250).unwrap();
+        let k = key_ev();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(375, 250));
+        };
+        frame(&mut h);
+        h.on_key(k(Key::Tab));
+        frame(&mut h);
+        assert_eq!(h.ime_area(), None, "焦点在按钮上：不是文本焦点");
+        h.on_key(k(Key::Tab));
+        frame(&mut h);
+        let (x, y, w, ht) = h.ime_area().expect("文本焦点应给出矩形");
+        assert_eq!(x, 13, "左边距 10 × 1.25 = 12.5，半数往上");
+        // 30 × 1.25 = 37.5：按上下边界各自取整，落 37 还是 38 取决于控件的 y（随平台字体变）。
+        assert!(w == 250 && (37..=38).contains(&ht), "物理尺寸 {w}×{ht}");
+        let (cx, cy, _) = h.ime_caret().expect("同一口径");
+        assert!(
+            cx >= x && cx <= x + w && cy >= y && cy < y + ht,
+            "光标应落在矩形内"
+        );
+    }
+
+    /// 「是不是文本焦点」看 `Widget::accepts_ime`：只读框报光标但不接受（Windows 上据此关掉
+    /// 输入法）；自绘控件没有光标可报、覆盖为接受时照样算文本焦点（逃生口）。
+    #[test]
+    fn ime_field_follows_accepts_ime_not_just_the_caret() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        struct Canvasy;
+        impl crate::core::Widget for Canvasy {
+            fn focusable(&self) -> bool {
+                true
+            }
+            fn accepts_ime(&self) -> bool {
+                true
+            }
+        }
+        let ro = crate::signal::signal(String::from("只读"));
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .spacing(8)
+                .child(Element::text_input(ro, "").read_only().width(200))
+                .child(Element::leaf().width(100).height(40).widget(Canvasy)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let k = key_ev();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        };
+        frame(&mut h);
+        h.on_key(k(Key::Tab));
+        frame(&mut h);
+        assert!(h.ime_caret().is_some(), "前提：只读框照常报光标");
+        assert_eq!(h.ime_field(), None, "只读框不接受输入法");
+        h.on_key(k(Key::Tab));
+        frame(&mut h);
+        assert_eq!(h.ime_caret(), None, "前提：自绘控件没报光标");
+        assert!(
+            h.ime_field().is_some(),
+            "覆盖 accepts_ime 的自绘控件算文本焦点"
+        );
+    }
+
+    /// win32 开始组合（`set_ime_composing(true)`）把输入框视口拉回光标：多行框光标在末行，
+    /// 先把内容滚到顶（光标出了可视区），开始组合后下一帧光标回到框内。不设宽（Wrap 宽）。
+    #[test]
+    fn composing_start_brings_the_caret_back_into_view() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let long: String = (1..=40).map(|i| format!("第 {i} 行\n")).collect();
+        let text = crate::signal::signal(long);
+        let app = App::new("t", 300, 200).content(
+            Element::col().padding(10).child(
+                Element::text_input(text, "")
+                    .multiline()
+                    .height(80)
+                    .autofocus(),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let mut frame = |h: &mut UiHost| {
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        };
+        frame(&mut h);
+        frame(&mut h);
+        let input = h.focus.current.expect("autofocus 已兑现");
+        let r = h.tree.abs_bounds(input);
+        let inside = |h: &UiHost| {
+            h.tree
+                .caret_of(input)
+                .is_some_and(|(p, ht)| p.y >= r.y && p.y + ht <= r.bottom())
+        };
+        assert!(inside(&h), "前提：光标在末尾且已在可视区内");
+        // 滚轮把内容滚到顶：光标出了可视区。
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Wheel(120 * 50),
+            Point::new(r.x + 20, r.y + 20),
+            MouseButton::Left,
+        ));
+        frame(&mut h);
+        assert!(!inside(&h), "前提：滚到顶后光标不在可视区");
+        h.set_ime_composing(true);
+        frame(&mut h);
+        assert!(inside(&h), "开始组合后视口应回到光标处");
     }
 
     /// `ime_field` 经真实焦点路径（Tab 切换）给出：换控件身份必变，多行 / 密码取自控件

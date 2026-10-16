@@ -38,8 +38,9 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::Ime::{
-    ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW,
-    ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_POINT, COMPOSITIONFORM,
+    ImmAssociateContextEx, ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow,
+    ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE,
+    CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, HIMC, IACE_DEFAULT, NI_COMPOSITIONSTR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetActiveWindow, SetCapture,
@@ -1059,6 +1060,13 @@ struct WindowState {
     /// 还回去——若等到 `WM_DESTROY` 再恢复，系统在销毁过程中早已把激活给了别的
     /// 顶层窗口（owner 那时还是禁用的，轮不到它），可能是别的应用。
     modal_owner: Option<HWND>,
+    /// 输入法正在组合（`WM_IME_STARTCOMPOSITION` 到 `WM_IME_ENDCOMPOSITION` 之间）。
+    /// 绘制后据此重报一次位置（见 `sync_ime`）。
+    ime_composing: bool,
+    /// 上次同步时（分发后 / 绘制后）看到的焦点文本控件（`AppHandler::ime_field`），用来侦测焦点换人。
+    ime_field: Option<crate::event::ImeField>,
+    /// 当前是否给窗口挂着输入法上下文（`None` = 还没设过）。避免每帧重复关开。
+    ime_enabled: Option<bool>,
 }
 
 impl Drop for WindowState {
@@ -1165,6 +1173,9 @@ impl WindowState {
             frameless: false,
             mouse_tracked: false,
             pending_surrogate: None,
+            ime_composing: false,
+            ime_field: None,
+            ime_enabled: None,
             min_w: 0,
             min_h: 0,
             in_size_move: false,
@@ -1957,6 +1968,9 @@ unsafe extern "system" fn wnd_proc(
             if let Some(state) = state_from(hwnd) {
                 state.paint(hwnd);
             }
+            // 焦点文本控件的光标是**绘制时**才算出来的：输入法相关的同步放在绘制之后，
+            // 读到的才是本帧的值。
+            sync_ime(hwnd, true);
             // 帧路径也消费意图：`App::channel` 的 `on_message` 与 `on_interval` 的回调都
             // 拿得到 `EventCtx`，它们请求的窗口操作/对话框/关窗与热键改绑都产生在**帧内**
             // （pump 在 render 起始排空，定时器回调靠 InvalidateRect 汇到这一帧），
@@ -2038,6 +2052,8 @@ unsafe extern "system" fn wnd_proc(
                     state.paint(hwnd);
                 }
             }
+            // 同步出的这一帧同样要跟上输入法（光标随最大化 / 还原换了位置）。借用已释放。
+            sync_ime(hwnd, true);
             LRESULT(0)
         }
         // 进入/退出交互式拖拽移动/缩放模态循环：标记状态，供 WM_SIZE 分流同步/异步重绘。
@@ -2273,7 +2289,10 @@ unsafe extern "system" fn wnd_proc(
         // 自带的、随组合进度前进的光标成为唯一可见光标），再定位候选窗。
         WM_IME_STARTCOMPOSITION => {
             let repaint = state_from(hwnd)
-                .map(|s| s.handler.set_ime_composing(true))
+                .map(|s| {
+                    s.ime_composing = true;
+                    s.handler.set_ime_composing(true)
+                })
                 .unwrap_or(false);
             if repaint {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -2290,7 +2309,10 @@ unsafe extern "system" fn wnd_proc(
         // 输入法结束合成（提交上屏或取消）：通知焦点控件退出组合态，恢复自绘光标。
         WM_IME_ENDCOMPOSITION => {
             let repaint = state_from(hwnd)
-                .map(|s| s.handler.set_ime_composing(false))
+                .map(|s| {
+                    s.ime_composing = false;
+                    s.handler.set_ime_composing(false)
+                })
                 .unwrap_or(false);
             if repaint {
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -3410,6 +3432,8 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
             s.capturing = false;
         }
     }
+    // 点击可能换了焦点：输入法开关当场跟上，不等下一帧（见 `sync_ime`）。
+    sync_ime(hwnd, false);
     // 自定义标题栏按钮请求的窗口操作（最小化/最大化）；在可能的关窗之前执行。
     apply_window_op(hwnd);
     // 原生文件对话框请求：此时 OS 捕获已在上面同步完毕，才轮到这个阻塞调用。
@@ -3623,12 +3647,96 @@ unsafe fn cancel_fling(hwnd: HWND) {
     }
 }
 
+/// 同步输入法（分发之后 `reposition = false`；绘制之后 `true`）：
+///
+/// - 焦点文本控件换人且正在组合 → 取消这次组合。此时焦点已经换了，若改为提交，系统会把
+///   上屏的字经 `WM_CHAR` 送进**新**焦点，比丢掉还糟；未上屏的拼音丢掉是各应用的常见行为。
+/// - 焦点不是可输入文本（按钮、列表、无焦点）或是密码框 → 摘掉输入法上下文，回到普通文本
+///   框再挂回。否则中文输入法在按钮上照样能打出组合串、无处可去；密码框会被联想与记忆。
+/// - `reposition` 且正在组合 → 按**本帧刚算出**的光标重报位置。组合消息到达时报的是上一帧的
+///   光标：光标刚滚回可视区、还没排过版时取不到位置，候选窗就落到客户区左上角。绘制后统一
+///   重报覆盖所有「布局变了」的情形，也不必在组合消息里补帧（提交那一刻补帧会把「拼音没了、
+///   汉字还没到」的中间态画上屏）。
+///
+/// 开关只看焦点控件接不接受输入法，不依赖本帧光标，故按键 / 点击分发之后当场再同步一次：
+/// WM_PAINT 是队列空了才合成的低优先级消息，只在绘制后同步的话，Tab 之后连打的几个字母会
+/// 先按旧的开关状态交给输入法。
+///
+/// 两段式（铁律 6）：读完状态放掉借用再调 Imm*，后者可能同步回进 `wnd_proc`（取消组合会
+/// 立刻收到 `WM_IME_ENDCOMPOSITION`）。
+unsafe fn sync_ime(hwnd: HWND, reposition: bool) {
+    let Some((field, prev, composing, enabled)) = state_from(hwnd).map(|s| {
+        let field = s.handler.ime_field();
+        let prev = std::mem::replace(&mut s.ime_field, field);
+        (field, prev, s.ime_composing, s.ime_enabled)
+    }) else {
+        return;
+    };
+    let plan = ime_sync_plan(prev, field, composing, enabled);
+    if plan.cancel_composition {
+        let himc = ImmGetContext(hwnd);
+        if !himc.0.is_null() {
+            let _ = ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+            let _ = ImmReleaseContext(hwnd, himc);
+        }
+    }
+    if let Some(want) = plan.set_enabled {
+        // NULL 上下文 + 0 = 摘掉；IACE_DEFAULT = 挂回窗口的默认上下文。
+        let _ = ImmAssociateContextEx(hwnd, HIMC::default(), if want { IACE_DEFAULT } else { 0 });
+        // 摘掉时若组合态还挂着（TSF 输入法可能延后、甚至不再发 WM_IME_ENDCOMPOSITION），
+        // 主动收尾——否则控件一直藏着自绘光标。
+        let repaint = state_from(hwnd).is_some_and(|s| {
+            s.ime_enabled = Some(want);
+            let stale = !want && std::mem::replace(&mut s.ime_composing, false);
+            stale && s.handler.set_ime_composing(false)
+        });
+        if repaint {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+        }
+    }
+    if reposition && state_from(hwnd).is_some_and(|s| s.ime_composing) {
+        handle_ime_position(hwnd);
+    }
+}
+
+/// `sync_ime` 要做的事（纯函数，便于单测）。
+#[derive(Debug, PartialEq)]
+struct ImeSyncPlan {
+    /// 焦点换人时正在组合：取消这次组合。
+    cancel_composition: bool,
+    /// 要把输入法上下文挂上（`true`）还是摘掉（`false`）；`None` = 不变。
+    set_enabled: Option<bool>,
+}
+
+/// 由「上次 / 这次的焦点文本控件、是否在组合、上下文当前是否挂着」算出要做的事。
+/// 能输入的判据是焦点控件接受输入法（`ime_field` 为 `Some`，见 `Widget::accepts_ime`）且不是
+/// 密码框。
+fn ime_sync_plan(
+    prev: Option<crate::event::ImeField>,
+    now: Option<crate::event::ImeField>,
+    composing: bool,
+    enabled: Option<bool>,
+) -> ImeSyncPlan {
+    let focus_changed = prev.map(|f| f.id) != now.map(|f| f.id);
+    let want = now.is_some_and(|f| !f.hints.password);
+    ImeSyncPlan {
+        // 焦点没换、但控件变得不接受输入（运行期切成密码框 / 只读）也先取消：直接摘掉上下文
+        // 的话，未上屏的串留在默认上下文里，下次挂回时又冒出来。
+        cancel_composition: composing && (focus_changed || !want),
+        set_enabled: (enabled != Some(want)).then_some(want),
+    }
+}
+
 /// 把输入法合成窗 + 候选窗定位到焦点文本控件的光标处。
 /// 光标位置由 handler 提供（物理像素、相对客户区），无文本焦点时不动作。
 unsafe fn handle_ime_position(hwnd: HWND) {
     // 两段式：先把要的都读出来、放掉 state 借用，再调 Imm*（可能同步回进 wnd_proc）。
-    let (caret, family) = match state_from(hwnd) {
-        Some(s) => (s.handler.ime_caret(), s.handler.ime_font_family()),
+    let (caret, family, area) = match state_from(hwnd) {
+        Some(s) => (
+            s.handler.ime_caret(),
+            s.handler.ime_font_family(),
+            s.handler.ime_area(),
+        ),
         None => return,
     };
     let Some((x, y, h)) = caret else { return };
@@ -3657,21 +3765,46 @@ unsafe fn handle_ime_position(hwnd: HWND) {
         *dst = src;
     }
     let _ = ImmSetCompositionFontW(himc, &lf);
-    // 合成串定位在光标处。
+    // 合成串定位在光标处（系统自画合成串时，光标停在插入点，即合成串的起点）。
+    // `rcArea` 按文档只在 `CFS_RECT` 下才读；这里仍用 `CFS_POINT`（改成按矩形折行需要真机
+    // 逐个输入法验证），填上焦点控件矩形只是无害的预留。
+    let area = area
+        .map(|(ax, ay, aw, ah)| RECT {
+            left: ax,
+            top: ay,
+            right: ax + aw,
+            bottom: ay + ah,
+        })
+        .unwrap_or_default();
     let cf = COMPOSITIONFORM {
         dwStyle: CFS_POINT,
         ptCurrentPos: POINT { x, y },
-        rcArea: RECT::default(),
+        rcArea: area,
     };
     let _ = ImmSetCompositionWindow(himc, &cf);
-    // 候选窗放在光标行下方，避免遮住输入处。
-    let cand = CANDIDATEFORM {
+    // 候选窗设两次，与 Chromium 同：
+    // - `CFS_CANDIDATEPOS`：光标行下方的一个点。经 TSF/CUAS 的中文输入法只认这一种。
+    // - `CFS_EXCLUDE`：声明「避开光标这一段」，日韩输入法据此在下方放不下时翻到上方而不盖住
+    //   正在输入的那一行。点取光标顶端、矩形取光标那一段（主流写法）。
+    let pos = CANDIDATEFORM {
         dwIndex: 0,
         dwStyle: CFS_CANDIDATEPOS,
         ptCurrentPos: POINT { x, y: y + h },
         rcArea: RECT::default(),
     };
-    let _ = ImmSetCandidateWindow(himc, &cand);
+    let _ = ImmSetCandidateWindow(himc, &pos);
+    let exclude = CANDIDATEFORM {
+        dwIndex: 0,
+        dwStyle: CFS_EXCLUDE,
+        ptCurrentPos: POINT { x, y },
+        rcArea: RECT {
+            left: x,
+            top: y,
+            right: x + 1,
+            bottom: y + h,
+        },
+    };
+    let _ = ImmSetCandidateWindow(himc, &exclude);
     let _ = ImmReleaseContext(hwnd, himc);
 }
 
@@ -3881,6 +4014,8 @@ unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
+    // Tab 等可能换了焦点：输入法开关当场跟上（见 `sync_ime`）。
+    sync_ime(hwnd, false);
     apply_window_op(hwnd);
     apply_dialog_request(hwnd);
     if close {
@@ -4337,5 +4472,68 @@ mod tests {
         assert_eq!(t.bump(1, 30, 10, 1100, DBL, DX, DY), 1, "漂移过大不算连击");
         // 换按键 → 重新计数。
         assert_eq!(t.bump(2, 30, 10, 1150, DBL, DX, DY), 1, "换按键不算连击");
+    }
+}
+
+#[cfg(test)]
+mod ime_sync_tests {
+    use super::{ime_sync_plan, ImeSyncPlan};
+    use crate::event::{ImeField, ImeHints};
+
+    fn field(id: u64, password: bool) -> Option<ImeField> {
+        Some(ImeField {
+            id,
+            hints: ImeHints {
+                multiline: false,
+                password,
+            },
+        })
+    }
+
+    /// 输入法同步的判定：焦点换人时正在组合就取消；可输入文本框挂上下文、按钮 / 无焦点 /
+    /// 密码框摘掉；状态没变不重复调 Imm*。
+    #[test]
+    fn ime_sync_plan_cancels_and_toggles_context() {
+        let (a, b, pw) = (field(1, false), field(2, false), field(3, true));
+        // 首帧：焦点在文本框 → 挂上；无焦点 → 摘掉。
+        assert_eq!(ime_sync_plan(None, a, false, None).set_enabled, Some(true));
+        assert_eq!(
+            ime_sync_plan(None, None, false, None).set_enabled,
+            Some(false)
+        );
+        // 状态不变不再调。
+        assert_eq!(ime_sync_plan(a, a, false, Some(true)).set_enabled, None);
+        // 焦点换到另一个文本框：组合中取消、不在组合不取消；上下文保持挂着。
+        assert!(ime_sync_plan(a, b, true, Some(true)).cancel_composition);
+        assert!(!ime_sync_plan(a, b, false, Some(true)).cancel_composition);
+        assert_eq!(ime_sync_plan(a, b, true, Some(true)).set_enabled, None);
+        // 同一个框里继续组合：不取消。
+        assert!(!ime_sync_plan(a, a, true, Some(true)).cancel_composition);
+        // 焦点到按钮（无文本焦点）：摘掉，组合中顺带取消。
+        assert_eq!(
+            ime_sync_plan(a, None, true, Some(true)),
+            ImeSyncPlan {
+                cancel_composition: true,
+                set_enabled: Some(false),
+            }
+        );
+        // 密码框摘掉；回到普通文本框挂回。
+        assert_eq!(
+            ime_sync_plan(a, pw, false, Some(true)).set_enabled,
+            Some(false)
+        );
+        assert_eq!(
+            ime_sync_plan(pw, a, false, Some(false)).set_enabled,
+            Some(true)
+        );
+        // 同一个节点运行期变得不接受输入（切成密码框）：组合中也先取消，再摘掉。
+        let a_pw = field(1, true);
+        assert_eq!(
+            ime_sync_plan(a, a_pw, true, Some(true)),
+            ImeSyncPlan {
+                cancel_composition: true,
+                set_enabled: Some(false),
+            }
+        );
     }
 }
