@@ -3737,13 +3737,8 @@ impl AppHandler for UiHost {
             .collect()
     }
 
-    /// 当前清屏色。
-    ///
-    /// **当场从主题源取，不读 `self.bg`**：那个字段在 `begin_frame` 里刷新，而平台是在
-    /// `render` **之前**清屏的——读它就永远慢一帧，换主题后的那一帧仍按旧底色清屏，
-    /// 而控件已经用新主题画了。停在这一帧就是"浅色文字画在浅色底上"。
-    ///
-    /// 经 `App::bg` 显式固定过底色时不跟随主题（与 `bg_follows_theme` 的既定语义一致）。
+    /// 无边框窗口外框色，取主题的 `palette.border`。与 [`bg`](Self::bg) 同理当场从主题源取，
+    /// 换主题那一帧就跟上。
     fn frame_outline(&self) -> Option<Color> {
         Some(self.theme_src.current().palette.border)
     }
@@ -3755,6 +3750,13 @@ impl AppHandler for UiHost {
         }
     }
 
+    /// 当前清屏色。
+    ///
+    /// **当场从主题源取，不读 `self.bg`**：那个字段在 `begin_frame` 里刷新，而平台是在
+    /// `render` **之前**清屏的——读它就永远慢一帧，换主题后的那一帧仍按旧底色清屏，
+    /// 而控件已经用新主题画了。停在这一帧就是"浅色文字画在浅色底上"。
+    ///
+    /// 经 `App::bg` 显式固定过底色时不跟随主题（与 `bg_follows_theme` 的既定语义一致）。
     fn bg(&self) -> Option<Color> {
         if self.bg_follows_theme {
             Some(self.theme_src.current().palette.bg)
