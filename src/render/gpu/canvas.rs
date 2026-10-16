@@ -1273,6 +1273,31 @@ mod tests {
         );
     }
 
+    /// 多边形：GPU 后端走 trait 的逐物理行扫描兜底，软后端走路径光栅化——带洞圆环在
+    /// 125% 下，环带内部与洞内部都须与软后端一致（边缘的抗锯齿差异不在取样框内）。
+    #[test]
+    fn fill_polygon_matches_soft_backend() {
+        let ring = |r: f32, ccw: bool| -> Vec<(f32, f32)> {
+            (0..64)
+                .map(|i| {
+                    let t = i as f32 / 64.0 * std::f32::consts::TAU * if ccw { -1.0 } else { 1.0 };
+                    (50.0 + r * t.cos(), 50.0 + r * t.sin())
+                })
+                .collect()
+        };
+        let (outer, hole) = (ring(30.0, false), ring(15.0, true));
+        // 物理像素取样框：环带上方一段（逻辑 y≈24..30）与洞的中心（逻辑 ≈47..53）。
+        assert_matches_soft(
+            "polygon",
+            125,
+            125,
+            1.25,
+            WHITE,
+            &[(55, 30, 15, 8), (58, 58, 8, 8)],
+            |c| c.fill_polygon(&[&outer, &hole], &Paint::fill(RED)),
+        );
+    }
+
     /// 斜线：取样落在线段中点附近，钉住 Butt 端帽下的线宽与走向。
     #[test]
     fn draw_line_matches_soft_backend() {

@@ -561,6 +561,26 @@ impl Canvas for SkiaCanvas<'_> {
         }
     }
 
+    fn fill_polygon(&mut self, contours: &[&[(f32, f32)]], paint: &Paint) {
+        let _g = super::prof::scope(super::prof::FILL);
+        let mut pb = PathBuilder::new();
+        for c in contours.iter().filter(|c| c.len() >= 3) {
+            pb.move_to(c[0].0, c[0].1);
+            for &(x, y) in &c[1..] {
+                pb.line_to(x, y);
+            }
+            pb.close();
+        }
+        let Some(path) = pb.finish() else {
+            return;
+        };
+        // 渐变包围盒取整条路径的外接矩形（与圆、圆角矩形同一约定）。
+        let b = path.bounds();
+        let sp = Self::fill_paint(paint, b.left(), b.top(), b.width(), b.height());
+        let tf = self.tf();
+        self.fill_path_on_target(&path, &sp, tf);
+    }
+
     fn draw_shadow(
         &mut self,
         x: f32,
@@ -1124,6 +1144,121 @@ mod tests {
     fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
         let p = pm.pixel(x, y).unwrap();
         (p.red(), p.green(), p.blue())
+    }
+
+    /// 正圆近似的闭合轮廓（`ccw` 决定绕向），供多边形测试挖洞用。
+    fn circle_contour(cx: f32, cy: f32, r: f32, ccw: bool) -> Vec<(f32, f32)> {
+        (0..64)
+            .map(|i| {
+                let t = i as f32 / 64.0 * std::f32::consts::TAU * if ccw { -1.0 } else { 1.0 };
+                (cx + r * t.cos(), cy + r * t.sin())
+            })
+            .collect()
+    }
+
+    /// 白底上按 `scale` 画多边形（黑色），`rows=true` 走 trait 的逐行扫描兜底而非路径光栅化。
+    fn paint_polygon(scale: f32, contours: &[&[(f32, f32)]], rows: bool) -> Pixmap {
+        let n = (100.0 * scale) as u32;
+        let mut pm = Pixmap::new(n, n).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, scale);
+        let p = Paint::fill(Color::BLACK);
+        if rows {
+            crate::render::fill_polygon_rows(&mut c, contours, &p);
+        } else {
+            c.fill_polygon(contours, &p);
+        }
+        pm
+    }
+
+    /// 凹多边形的凹口留空；反向内圈挖出洞；同向内圈按非零环绕仍是实心——两条实现
+    /// （路径光栅化 / 逐行扫描兜底）给出同样的内外判定。
+    #[test]
+    fn fill_polygon_concave_holes_and_winding() {
+        let ell = [
+            (10.0, 10.0),
+            (90.0, 10.0),
+            (90.0, 90.0),
+            (50.0, 90.0),
+            (50.0, 50.0),
+            (10.0, 50.0),
+        ];
+        let outer = circle_contour(50.0, 50.0, 30.0, false);
+        let hole = circle_contour(50.0, 50.0, 15.0, true);
+        let same = circle_contour(50.0, 50.0, 15.0, false);
+        for rows in [false, true] {
+            for s in [1.0f32, 1.25, 1.5] {
+                let at = |pm: &Pixmap, x: f32, y: f32| px(pm, (x * s) as u32, (y * s) as u32);
+                let (ink, blank) = ((0, 0, 0), (255, 255, 255));
+                let pm = paint_polygon(s, &[&ell], rows);
+                assert_eq!(
+                    at(&pm, 70.0, 70.0),
+                    ink,
+                    "rows={rows} s={s}：L 形的竖臂要填"
+                );
+                assert_eq!(
+                    at(&pm, 30.0, 30.0),
+                    ink,
+                    "rows={rows} s={s}：L 形的横臂要填"
+                );
+                assert_eq!(at(&pm, 30.0, 70.0), blank, "rows={rows} s={s}：凹口要空");
+                let pm = paint_polygon(s, &[&outer, &hole], rows);
+                assert_eq!(
+                    at(&pm, 50.0, 50.0),
+                    blank,
+                    "rows={rows} s={s}：反向内圈是洞"
+                );
+                assert_eq!(at(&pm, 50.0, 28.0), ink, "rows={rows} s={s}：环上要填");
+                let pm = paint_polygon(s, &[&outer, &same], rows);
+                assert_eq!(
+                    at(&pm, 50.0, 50.0),
+                    ink,
+                    "rows={rows} s={s}：同向内圈按非零环绕仍实心"
+                );
+            }
+        }
+    }
+
+    /// 逐行扫描兜底在分数缩放下行与行首尾相接：内部每个物理行都是满墨，不出横纹。
+    /// 线宽恰好 1 物理像素时浮点误差会让 175% 下某一行缺一丝覆盖（实测 98.8%），这条钉住
+    /// 那 3% 的放宽。内部还要与路径光栅化逐像素一致。
+    #[test]
+    fn fill_polygon_rows_leave_no_seams_at_fractional_scale() {
+        let quad = [(10.3, 10.3), (80.7, 10.3), (80.7, 80.7), (10.3, 80.7)];
+        for s in [1.25f32, 1.5, 1.75] {
+            let rows = paint_polygon(s, &[&quad], true);
+            let path = paint_polygon(s, &[&quad], false);
+            let (y0, y1) = ((10.3 * s).ceil() as u32 + 1, (80.7 * s).floor() as u32 - 1);
+            let x = (45.0 * s) as u32;
+            for y in y0..y1 {
+                assert_eq!(px(&rows, x, y), (0, 0, 0), "s={s}：第 {y} 物理行出了缝");
+                assert_eq!(
+                    px(&rows, x, y),
+                    px(&path, x, y),
+                    "s={s}：内部与路径光栅化不一致"
+                );
+            }
+        }
+    }
+
+    /// 退化坐标不得卡死 UI 线程：顶点 y 为 1e9 时行范围钳到画布可见范围（旧写法要逐行跑
+    /// 十亿次），含 inf 的边整条跳过。可见区内照常出墨。
+    #[test]
+    fn fill_polygon_rows_survive_huge_and_infinite_coordinates() {
+        let t0 = std::time::Instant::now();
+        let tall = [(20.0, 20.0), (80.0, 20.0), (80.0, 1.0e9), (20.0, 1.0e9)];
+        let pm = paint_polygon(1.25, &[&tall], true);
+        assert_eq!(px(&pm, 60, 60), (0, 0, 0), "可见区内应出墨");
+        let inf = [(20.0, 20.0), (80.0, f32::INFINITY), (20.0, 80.0)];
+        let _ = paint_polygon(1.25, &[&inf], true);
+        let nan = [(20.0, 20.0), (f32::NAN, 50.0), (20.0, 80.0)];
+        let _ = paint_polygon(1.25, &[&nan], true);
+        assert!(
+            t0.elapsed().as_secs() < 2,
+            "行范围没钳住：{:?}",
+            t0.elapsed()
+        );
     }
 
     /// 画一个纯色矩形：`fast=true` 走特化快路，`fast=false` 走通用路径（直接调

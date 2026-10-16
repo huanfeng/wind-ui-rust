@@ -179,6 +179,76 @@ mod align_tests {
     }
 }
 
+/// [`Canvas::fill_polygon`] 的逐物理行扫描实现（trait 默认实现即此）。抽成自由函数，是让覆盖了
+/// `fill_polygon` 的后端在自己的路径失败时还能退回它。
+pub(crate) fn fill_polygon_rows<C: Canvas + ?Sized>(
+    c: &mut C,
+    contours: &[&[(f32, f32)]],
+    paint: &Paint,
+) {
+    let s = c.dpi_scale().max(0.01);
+    // 有效边一次收齐：(上端 x, 上端 y, 下端 x, 下端 y, 方向)。水平边不参与求交；端点非有限的
+    // 边跳过——NaN 会让环绕数在行尾归不了零，inf 则把下面的行范围撑到天文数字。
+    let mut edges: Vec<(f32, f32, f32, f32, i32)> = Vec::new();
+    for poly in contours.iter().filter(|p| p.len() >= 3) {
+        for (i, &(ax, ay)) in poly.iter().enumerate() {
+            let (bx, by) = poly[(i + 1) % poly.len()];
+            if ay == by || ![ax, ay, bx, by].iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            edges.push(if ay < by {
+                (ax, ay, bx, by, 1)
+            } else {
+                (bx, by, ax, ay, -1)
+            });
+        }
+    }
+    let (mut top, mut bottom) = edges
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(t, b), e| (t.min(e.1), b.max(e.3)));
+    // 行范围钳到画布能落笔的范围：坐标极大时不至于逐行跑上千万次（UI 线程卡死），局部帧
+    // 里也不为脏区外的每一行提交一次图元。画布答不上来时按一个任何窗口都够用的范围兜底。
+    let (vis_top, vis_bottom) = match c.cull_rect() {
+        Some(r) => (r.y as f32, r.bottom() as f32),
+        None => (-16384.0, 16384.0),
+    };
+    top = top.max(vis_top);
+    bottom = bottom.min(vis_bottom);
+    if top >= bottom {
+        return;
+    }
+    let line = Paint {
+        gradient: None,
+        ..paint.clone()
+    };
+    let mut hits: Vec<(f32, i32)> = Vec::new();
+    for row in (top * s).floor() as i64..(bottom * s).ceil() as i64 {
+        let y = (row as f32 + 0.5) / s;
+        hits.clear();
+        // 半开区间 [上端, 下端)：顶点恰在行中心时只算一次。
+        for &(x0, y0, x1, y1, dir) in &edges {
+            if y >= y0 && y < y1 {
+                hits.push((x0 + (y - y0) / (y1 - y0) * (x1 - x0), dir));
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (mut winding, mut start) = (0, 0.0);
+        for &(x, dir) in &hits {
+            let was = winding;
+            winding += dir;
+            if was == 0 && winding != 0 {
+                start = x;
+            } else if was != 0 && winding == 0 && x > start {
+                // 线宽放宽 3%：恰好 1 物理像素时，1/scale 的浮点误差会让行缘各缺一丝
+                // （175% 下实测内部一行只有 98.8% 覆盖），相邻行重叠这 0.03 像素即可补上。
+                // 代价是半透明色的内部像素多叠约 1.5% 的覆盖（alpha 0.5 时差 1～2 个色阶），
+                // 各行一致、不成横纹，肉眼不可见。
+                c.draw_line(start, y, x, y, 1.03 / s, &line);
+            }
+        }
+    }
+}
+
 /// 绘制接口。Phase 1 提供基础图元；裁剪/变换在 Phase 3 扩展。
 pub trait Canvas {
     /// 当前 DPI 缩放因子（物理像素 / 逻辑像素，如 150% → 1.5）。
@@ -238,6 +308,23 @@ pub trait Canvas {
         }
     }
     fn fill_circle(&mut self, cx: f32, cy: f32, r: f32, paint: &Paint);
+
+    /// 多边形填充。`contours` 每项是一个**闭合轮廓**（首尾自动相连，少于 3 个点的忽略），
+    /// 逻辑坐标；按**非零环绕**（Winding）规则填充：要挖洞，就让内圈与外圈方向相反——
+    /// 圆盘相减、带孔图标、齿轮都是一个调用。凹多边形、自交轮廓照常。
+    ///
+    /// 软件后端与 Windows D2D 后端覆盖为一次性路径光栅化（边缘双向抗锯齿，支持渐变）。
+    /// 默认实现逐物理行扫描：每行取行中心求交，按环绕数取区间，用 1 物理像素宽的
+    /// [`draw_line`](Self::draw_line) 画出——左右端点带抗锯齿、行与行首尾相接无隙无叠，但
+    /// 上下沿是物理像素台阶，渐变退为 `paint.color` 的纯色（经 `Paint::gradient`
+    /// 构造时即首个色标，与描边类图元一致）。正确但不精致，
+    /// 是兜底而非占位。
+    ///
+    /// 扫描按**物理行**而不是逻辑行：逐逻辑行（每行 1 逻辑像素）配 `fill_rect` 时，边界被
+    /// 吸附到整数物理像素，125% 下相邻两行之间会留出约 0.25 物理像素的缝，画出来是一道道横纹。
+    fn fill_polygon(&mut self, contours: &[&[(f32, f32)]], paint: &Paint) {
+        fill_polygon_rows(self, contours, paint);
+    }
     /// 绘制圆角矩形投影（drop shadow）：投影矩形 (x,y,w,h)、`radius` 圆角、
     /// `blur` 模糊半径（逻辑 px）、`color`（含 alpha）。绘制在节点背景之下；
     /// 偏移/外扩(spread)由调用方算入 (x,y,w,h)。`blur<=0` 时退化为锐利圆角矩形。

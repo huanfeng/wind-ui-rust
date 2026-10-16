@@ -16,7 +16,8 @@ use windows::core::{Interface, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER,
-    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE_WINDING, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1Shadow, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext,
@@ -1277,6 +1278,48 @@ impl Canvas for D2DCanvas<'_> {
             radiusY: r,
         };
         unsafe { self.ctx.FillEllipse(&ellipse, &brush) };
+    }
+
+    fn fill_polygon(&mut self, contours: &[&[(f32, f32)]], paint: &Paint) {
+        // D2D 路径几何：一次性光栅化，边缘双向抗锯齿，与软路径同为非零环绕规则。
+        // 建不出几何（极少见的设备状态）时退回 trait 的逐行扫描实现，不至于什么都不画。
+        let drawable: Vec<&[(f32, f32)]> =
+            contours.iter().copied().filter(|c| c.len() >= 3).collect();
+        if drawable.is_empty() {
+            return;
+        }
+        let geometry = unsafe {
+            let Ok(factory) = self.ctx.GetFactory() else {
+                return crate::render::fill_polygon_rows(self, &drawable, paint);
+            };
+            let Ok(geometry) = factory.CreatePathGeometry() else {
+                return crate::render::fill_polygon_rows(self, &drawable, paint);
+            };
+            let Ok(sink) = geometry.Open() else {
+                return crate::render::fill_polygon_rows(self, &drawable, paint);
+            };
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            for c in &drawable {
+                sink.BeginFigure(vec2(c[0].0, c[0].1), D2D1_FIGURE_BEGIN_FILLED);
+                let rest: Vec<Vector2> = c[1..].iter().map(|&(x, y)| vec2(x, y)).collect();
+                sink.AddLines(&rest);
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+            if sink.Close().is_err() {
+                return crate::render::fill_polygon_rows(self, &drawable, paint);
+            }
+            geometry
+        };
+        // 渐变包围盒取所有顶点的外接矩形（与软路径同一约定）。
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for &(x, y) in drawable.iter().flat_map(|c| c.iter()) {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+        let brush = self.fill_brush(paint, x0, y0, x1 - x0, y1 - y0);
+        unsafe {
+            self.ctx
+                .FillGeometry(&geometry, &brush, None::<&ID2D1Brush>)
+        };
     }
 
     fn draw_shadow(

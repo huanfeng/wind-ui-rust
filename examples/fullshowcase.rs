@@ -78,6 +78,97 @@ fn pos_of(order: &[String], name: &str) -> usize {
     order.iter().position(|x| x == name).unwrap_or(0)
 }
 
+/// 多边形填充演示（`Canvas::fill_polygon`）：凹多边形、反向内圈挖洞、斜边三角、带孔齿轮，
+/// 外加一块渐变填充。四个格子各 72×72，颜色取主题色。
+struct PolygonDemo;
+
+/// 正多边形近似的圆轮廓；`ccw` 反向绕——放进同一次 `fill_polygon` 里就是洞。
+fn ring_contour(cx: f32, cy: f32, r: f32, ccw: bool) -> Vec<(f32, f32)> {
+    (0..48)
+        .map(|i| {
+            let t = i as f32 / 48.0 * std::f32::consts::TAU * if ccw { -1.0 } else { 1.0 };
+            (cx + r * t.cos(), cy + r * t.sin())
+        })
+        .collect()
+}
+
+impl windui::core::Widget for PolygonDemo {
+    fn measure(
+        &self,
+        _avail: Size,
+        _style: &windui::style::Style,
+        _text: &mut dyn windui::text::TextEngine,
+    ) -> Size {
+        Size::new(4 * 72 + 3 * 16, 72)
+    }
+
+    fn paint(
+        &self,
+        _bounds: Rect,
+        content: Rect,
+        _focused: bool,
+        _enabled: bool,
+        canvas: &mut dyn windui::render::Canvas,
+        _style: &windui::style::Style,
+    ) {
+        use std::f32::consts::{FRAC_PI_2, TAU};
+        use windui::render::Paint;
+        let pal = windui::theme::current().palette.clone();
+        let cell = |i: usize| {
+            (
+                content.x as f32 + i as f32 * 88.0 + 36.0,
+                content.y as f32 + 36.0,
+            )
+        };
+
+        // ① 凹五角星（10 个顶点交替取外 / 内半径），渐变填充。
+        let (cx, cy) = cell(0);
+        let star: Vec<(f32, f32)> = (0..10)
+            .map(|i| {
+                let r = if i % 2 == 0 { 34.0 } else { 14.0 };
+                let t = i as f32 / 10.0 * TAU - FRAC_PI_2;
+                (cx + r * t.cos(), cy + r * t.sin())
+            })
+            .collect();
+        let grad = Gradient::linear(
+            (0.0, 0.0),
+            (1.0, 1.0),
+            vec![(0.0, pal.accent), (1.0, pal.text)],
+        );
+        canvas.fill_polygon(&[&star], &Paint::gradient(grad));
+
+        // ② 圆环：外圈顺时针、内圈逆时针，一次调用挖出洞。
+        let (cx, cy) = cell(1);
+        let (outer, inner) = (
+            ring_contour(cx, cy, 33.0, false),
+            ring_contour(cx, cy, 18.0, true),
+        );
+        canvas.fill_polygon(&[&outer, &inner], &Paint::fill(pal.accent));
+
+        // ③ 播放三角：斜边靠抗锯齿，分数缩放下不发锯齿。
+        let (cx, cy) = cell(2);
+        let tri = [
+            (cx - 22.0, cy - 30.0),
+            (cx + 32.0, cy),
+            (cx - 22.0, cy + 30.0),
+        ];
+        canvas.fill_polygon(&[&tri], &Paint::fill(pal.text));
+
+        // ④ 齿轮：12 个齿的外轮廓 + 反向的中心孔。
+        let (cx, cy) = cell(3);
+        let teeth = 12;
+        let gear: Vec<(f32, f32)> = (0..teeth * 4)
+            .map(|i| {
+                let r = if (i % 4) < 2 { 34.0 } else { 26.0 };
+                let t = (i as f32 + 0.5) / (teeth * 4) as f32 * TAU;
+                (cx + r * t.cos(), cy + r * t.sin())
+            })
+            .collect();
+        let hole = ring_contour(cx, cy, 10.0, true);
+        canvas.fill_polygon(&[&gear, &hole], &Paint::fill(pal.text_muted));
+    }
+}
+
 fn main() {
     let name = signal(String::from("我的设备"));
     let pwd = signal(String::from("hunter2"));
@@ -1442,13 +1533,19 @@ fn main() {
             .child(tb_7),
     );
 
+    let im_poly = Element::card(
+        "多边形填充（凹形 / 挖洞 / 斜边 / 齿轮，一次 fill_polygon）",
+        Element::leaf().widget(PolygonDemo),
+    );
+
     let pics = Element::scroll().fill().child(
         Element::col()
             .width_match()
             .spacing(14)
             .child(im_1)
             .child(im_2)
-            .child(im_3),
+            .child(im_3)
+            .child(im_poly),
     );
 
     let tab = signal(0usize);

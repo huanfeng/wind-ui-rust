@@ -235,6 +235,7 @@ pub trait Canvas {
     fn fill_round_rect(&mut self, r: Rect, radius: f32, paint: &Paint);
     fn stroke_rect(&mut self, r: Rect, radius: f32, paint: &Paint);
     fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, paint: &Paint);
+    fn fill_polygon(&mut self, contours: &[&[(f32, f32)]], paint: &Paint); // 非零环绕，内圈反向即洞
     fn draw_line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, paint: &Paint);
     fn draw_image(&mut self, img: &ImageRef, dst: Rect);
     fn draw_text(&mut self, layout: &TextLayout, x: f32, y: f32, color: Color);
