@@ -80,11 +80,15 @@ impl Rect {
     /// 空矩形恒为空。裁剪 mask、图片 dst、脏区等定位/限制类用途都用它。
     ///
     /// 需要「必须容纳得下」（物理宽高不小于 `size × scale`）的场景用 [`Rect::scaled_out`]。
+    ///
+    /// 取整用 [`round_half_up`] 而非 `f32::round`：局部重绘把世界坐标减去脏区原点再物理化，
+    /// 脏区左/上方的节点坐标是负数，`round` 的「半数远离零」在零两侧方向相反，同一条边在
+    /// 局部帧与整窗帧里会差 1 物理像素（分数缩放下光标旁的字一淡一深）。
     pub fn scaled(&self, s: f32) -> Rect {
-        let x0 = (self.x as f32 * s).round() as i32;
-        let y0 = (self.y as f32 * s).round() as i32;
-        let x1 = (self.right() as f32 * s).round() as i32;
-        let y1 = (self.bottom() as f32 * s).round() as i32;
+        let x0 = round_half_up(self.x as f32 * s);
+        let y0 = round_half_up(self.y as f32 * s);
+        let x1 = round_half_up(self.right() as f32 * s);
+        let y1 = round_half_up(self.bottom() as f32 * s);
         Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
     }
 
@@ -145,6 +149,20 @@ impl Rect {
             (self.w - i.left - i.right).max(0),
             (self.h - i.top - i.bottom).max(0),
         )
+    }
+}
+
+/// 就近取整到整数物理像素，恰在半数时**一律往 +∞**（`f32::round` 是远离零）。
+///
+/// 非负值上与 `round` 逐值相同，所以整窗渲染一个像素都不变；差别只在负的半数上，
+/// 而那正是局部重绘需要的性质：对整数平移不变，`round_half_up(v - n) == round_half_up(v) - n`。
+/// 不写成 `(v + 0.5).floor()`：`0.49999997 + 0.5` 会被 f32 进位成 1.0，与 `round` 不一致。
+pub(crate) fn round_half_up(v: f32) -> i32 {
+    let r = v.round();
+    if r - v == -0.5 {
+        (r + 1.0) as i32
+    } else {
+        r as i32
     }
 }
 
@@ -524,5 +542,61 @@ mod tests {
             Color::rgba(0x11, 0x22, 0x33, 0x44).to_hex_string(),
             "#11223344"
         );
+    }
+
+    /// 局部重绘把节点坐标减去脏区原点（逻辑，且 `原点 × scale` 为整数）再物理化；
+    /// 结果必须与整窗帧物理化后再平移同一个整数完全相同，否则脏区边界处差 1 物理像素。
+    #[test]
+    fn rect_scaled_is_invariant_under_integer_physical_shift() {
+        for s in [1.25f32, 1.5, 1.75, 2.25, 2.5] {
+            // 局部帧原点按 4 逻辑像素网格对齐（见 app/damage.rs 的 align_damage），4 × 这几档缩放都是整数。
+            for ox in [-40, -4, 4, 8, 40, 400] {
+                let shift = (ox as f32 * s) as i32;
+                assert_eq!(shift as f32, ox as f32 * s, "前提：原点物理化为整数");
+                for x in -400..=400 {
+                    for w in [1, 3, 7] {
+                        let world = Rect::new(x, x, w, w).scaled(s);
+                        let local = Rect::new(x - ox, x - ox, w, w).scaled(s);
+                        assert_eq!(
+                            (local.x, local.y, local.right(), local.bottom()),
+                            (
+                                world.x - shift,
+                                world.y - shift,
+                                world.right() - shift,
+                                world.bottom() - shift
+                            ),
+                            "s={s} ox={ox} x={x} w={w}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 反向锚定：证明上一条不是空转——`f32::round` 在这类输入上确实不满足平移不变。
+    #[test]
+    fn plain_round_is_not_shift_invariant() {
+        // 1.25 × -2 = -2.5：round → -3；而 1.25 × 2 = 2.5 → 3，平移 4 物理像素后应为 -1。
+        let (s, x, ox) = (1.25f32, 2, 4);
+        let shift = (ox as f32 * s) as i32;
+        assert_ne!(
+            ((x - ox) as f32 * s).round() as i32,
+            (x as f32 * s).round() as i32 - shift
+        );
+        assert_eq!(
+            round_half_up((x - ox) as f32 * s),
+            round_half_up(x as f32 * s) - shift
+        );
+    }
+
+    #[test]
+    fn round_half_up_matches_round_for_nonnegative_values() {
+        for i in 0..=100_000 {
+            let v = i as f32 * 0.0125;
+            assert_eq!(round_half_up(v), v.round() as i32, "v={v}");
+        }
+        assert_eq!(round_half_up(0.49999997), 0);
+        assert_eq!(round_half_up(-2.5), -2);
+        assert_eq!(round_half_up(-2.6), -3);
     }
 }

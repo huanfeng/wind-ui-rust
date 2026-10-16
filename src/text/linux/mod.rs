@@ -586,7 +586,7 @@ impl TextEngine for LinuxTextEngine {
             if line_top > bounds.bottom() as f32 || line_top + lay.line_h < bounds.y as f32 {
                 continue;
             }
-            let baseline = (line_top + lay.baseline).round() as i32;
+            let baseline = crate::geometry::round_half_up(line_top + lay.baseline);
             // 单行按含尾随空白的宽度对齐（与 Core Text 的 CTLine 一致，也与 measure 给宿主
             // 的宽度一致）；折行各行按可见宽度对齐（段落样式的惯例）。
             let lw = if single { line.full } else { line.width };

@@ -694,8 +694,9 @@ impl Canvas for SkiaCanvas<'_> {
         }
         // 在 dst 框内居中（Cover/None 的溢出由裁剪 mask 收口）。落点取整到物理像素：
         // 尺寸对上了但平移带半像素，双线性同样会把 1:1 的图糊掉。
-        let tx = (px + (pw - dw) / 2.0).round();
-        let ty = (py + (ph - dh) / 2.0).round();
+        // 半数往 +∞（见 Rect::scaled）：px/py 已减去局部帧原点，可能为负。
+        let tx = crate::geometry::round_half_up(px + (pw - dw) / 2.0) as f32;
+        let ty = crate::geometry::round_half_up(py + (ph - dh) / 2.0) as f32;
         let transform = Transform::from_scale(sx, sy).post_translate(tx, ty);
 
         // 裁剪 mask：dst 圆角矩形 ∩ 当前裁剪区。radius<=0 时退化为矩形。
