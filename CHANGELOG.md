@@ -7,6 +7,12 @@
 
 ### 新增
 
+- **`App::window_outline` / `Window::window_outline`（`WindowOutline`）**：无边框窗口自画 1px 外框的取色策略。
+  默认 `Auto` 保持原行为（Win10 仿 Win11 的灰 / 强调色，Linux 取主题边框色）；`Theme` 跟随应用主题、`Color`
+  固定色、`Off` 不画。主题色在绘制期现取，换肤当帧跟上；平台说不画（最大化）时任何策略都不画。
+- **`Canvas::fill_polygon` 多边形填充**：多个闭合轮廓、非零环绕规则（内圈反向即洞），凹形与自交照常。
+  软件后端与 Windows D2D 后端为一次性路径光栅化（双向抗锯齿、支持渐变）；trait 默认实现逐物理行扫描，
+  GPU 后端暂用它兜底（行与行首尾相接、分数缩放下无横纹，渐变退为 `paint.color` 的纯色）。`fullshowcase`「图片」页加演示卡片。
 - **浮点文字测量 `Canvas::text_advance` / `TextEngine::advance`**：单行宽度（逻辑单位、含尾随空白、不取整），
   与绘制同一次排版。`measure_text` 的整数宽逐字累加会漂，自绘排版建字宽表用这个。DirectWrite / Core Text /
   Linux 三个引擎与 D2D / GPU / 软件三个画布都已覆盖，附跨引擎契约测试。

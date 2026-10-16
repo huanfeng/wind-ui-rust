@@ -959,6 +959,12 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
   **Windows 与 Linux**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
 - 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
+- **Win10 / Linux 的 1px 外框**：Win10 的无边框窗口没有 DWM 画的边，Linux 无边框窗口也没有，windui 在
+  四边自画 1px 外框（最大化时不画）。取色由 `App::window_outline(WindowOutline::…)`（子窗
+  `Window::window_outline`）决定：默认 `Auto`——Win10 仿 Win11（失活 `#AAAAAA`、激活且系统开了「在标题栏
+  和窗口边框上显示强调色」时取强调色），Linux 取主题的 `palette.border`；`Theme` 一律取主题的
+  `palette.border`（换主题当帧跟上）；`Color(c)` 固定色；`Off` 不画（比如窗口贴着任务栏、外框压在接缝上
+  像两根线）。Win11 与 macOS 的边框是系统画的，不受影响。
 - **窗口圆角跟随系统**：Win11 上显式声明 `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND`，与系统其余窗口一致。显式声明而非依赖 DWM 默认策略——自定义 `WM_NCCALCSIZE` 之后默认行为是否仍成立并无明确保证。Win10 上 DWM 不认识该属性、返回错误码，windui 忽略该错误，故无需版本判断。圆角半径由系统决定。macOS 上 AppKit 对 `FullSizeContentView` 窗口自动保持圆角，无需额外处理。
 
 ### 渲染后端选择
@@ -2167,7 +2173,7 @@ Element::button("设置…").on_click(move |ctx| {
 ```
 
 `Window` 的构建器与 `App` 同形（`new(title, w, h)` 起手、链式配置、`content` 收尾），
-只有对子窗有意义的那几项：`resizable` / `centered` / `position` / `skip_taskbar` / `frameless` /
+只有对子窗有意义的那几项：`resizable` / `centered` / `position` / `skip_taskbar` / `frameless` / `window_outline` /
 `min_size` / `bg`。
 
 #### 指定位置与不进任务栏
@@ -2363,7 +2369,12 @@ let dot = Element::leaf().widget(Dot { on: state });
 
 **`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/release_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
 
-**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
+**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`fill_polygon`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
+
+**多边形用 `fill_polygon(contours, paint)`**：`contours` 每项是一个闭合轮廓（首尾自动相连），按非零环绕
+规则填充——要挖洞就让内圈与外圈方向相反，圆盘相减、带孔图标、齿轮都是一次调用。软件后端与 Windows D2D
+后端是真正的路径光栅化（双向抗锯齿、支持渐变）；GPU 后端走逐物理行扫描兜底，上下沿是物理像素台阶、
+渐变退为 `paint.color` 的纯色（经 `Paint::gradient` 构造时即首个色标）。演示：`fullshowcase` 的「图片」页。
 
 **自绘排版要用 `text_advance`，不要用 `measure_text().w`**：后者是向上取整的整数，每个字符串最多多出
 1 逻辑像素，逐字建宽度表时误差按一行字数累积，折行、光标、点击落位整体偏移。`text_advance` 返回
