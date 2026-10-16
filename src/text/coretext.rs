@@ -34,8 +34,8 @@ use objc2_core_text::{
 };
 
 use super::{
-    AlphaMask, GlyphBitmap, GlyphKey, GlyphSource, PlacedGlyph, RunRequest, ShapedRun, TextEngine,
-    TextStyle, SUBPIXEL_PHASES,
+    AlphaMask, GlyphBitmap, GlyphKey, GlyphSource, LineMetrics, PlacedGlyph, RunRequest, ShapedRun,
+    TextEngine, TextStyle, SUBPIXEL_PHASES,
 };
 use crate::geometry::{Color, Rect, Size};
 use crate::spec::Align;
@@ -227,6 +227,32 @@ impl TextEngine for CoreTextEngine {
 
     fn glyph_source(&mut self) -> Option<&mut dyn GlyphSource> {
         Some(self)
+    }
+
+    /// 与 `draw` 单行分支同源：块高取自然行高（ascent + descent + leading），在行盒里
+    /// 竖直居中，基线落在块顶 + ascent。设了行距时行盒更高，多出的部分上下均分，故基线
+    /// 下移 `(行高 − 自然行高) / 2`。不覆盖时 trait 默认按「行高 × 0.8」估基线，那是
+    /// DirectWrite UNIFORM 行距的约定，与这里的居中不符——插入符会比字低一截。
+    ///
+    /// 单行语义（输入框逐视觉行绘制、RichText 碎片都是单行）。行距小于自然行高时绘制退化为
+    /// 顶对齐，这里只是近似，descent 钳到非负以免把行盒算矮。
+    fn line_metrics(&mut self, text: &str, ts: &TextStyle) -> LineMetrics {
+        let s = self.scale as f64;
+        let psize = ts.size * self.scale;
+        let font = self.font(ts.family_or_default(), psize);
+        let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        let plh = ts.line_height_px().map(|h| h * self.scale);
+        let sample = if text.is_empty() { "Ay" } else { text };
+        let attr = self.attributed(sample, &font, &black, Align::Start, plh);
+        let line = unsafe { CTLine::with_attributed_string(&attr) };
+        let (_, ascent, descent, leading) = line_metrics(&line);
+        let natural = ascent + descent + leading;
+        let line_h = plh.map(|h| h as f64).unwrap_or(natural);
+        let top = ascent + (line_h - natural).max(0.0) / 2.0;
+        LineMetrics {
+            ascent: (top / s) as f32,
+            descent: ((line_h - top).max(0.0) / s) as f32,
+        }
     }
 
     fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {

@@ -779,6 +779,49 @@ const SEL_EOL_EXTRA: i32 = 6;
 /// 密码掩码字符（U+2022 BULLET）。
 const PASSWORD_MASK: char = '\u{2022}';
 
+/// 插入符的竖直范围 `(y, h)`（逻辑坐标），`ly`/`line_h` 为所在视觉行的行盒，`text` 为该行文本。
+///
+/// 未设行距时行盒就是字身，竖直只内缩 1px：再各缩 2px 会让光标明显短于字身，"矮一截"。
+///
+/// 设了行距（`line_height`）时行盒比字身高出那段行距，光标仍须是**字身**高——浏览器的
+/// `<textarea>` 也不随行距拉长插入符，否则 2.0 倍行距下就是一根比字高出一倍的竖条。
+/// 多出的行距怎么分配因引擎而异（DirectWrite 的 UNIFORM 行距把基线放在行高 0.8 处，
+/// Linux 与 Core Text 则是字身居中），这里不做假设：按**含行距**那一档的引擎度量求出
+/// 与画字同源的基线，再从基线上推字身 ascent。
+fn caret_vspan(
+    canvas: &mut dyn Canvas,
+    text: &[char],
+    ts: &crate::text::TextStyle,
+    ly: i32,
+    line_h: i32,
+) -> (i32, i32) {
+    let boxed = (ly + 1, line_h - 2);
+    if ts.line_height.is_none() {
+        return boxed;
+    }
+    let sample: String = if text.is_empty() {
+        "Ay".into()
+    } else {
+        text.iter().collect()
+    };
+    let spaced = canvas.text_line_metrics(&sample, ts);
+    let body = canvas.text_line_metrics(
+        &sample,
+        &crate::text::TextStyle {
+            line_height: None,
+            ..*ts
+        },
+    );
+    // 引擎契约：装得下时排版块在 rect 里竖直居中（见 TextEngine::draw）。
+    let baseline = ly as f32 + (line_h as f32 - spaced.height()).max(0.0) / 2.0 + spaced.ascent;
+    let top = ((baseline - body.ascent).round() as i32).max(boxed.0);
+    let bottom = ((baseline + body.descent).round() as i32).min(boxed.0 + boxed.1);
+    if bottom <= top {
+        return boxed;
+    }
+    (top, bottom - top)
+}
+
 /// TextInput 行为配置。由 Builder 的 `.password()/.multiline()/.wrap()/.leading_icon()` 设置。
 #[derive(Clone, Copy)]
 pub struct TextConfig {
@@ -2066,11 +2109,15 @@ impl Widget for TextInput {
             // ——真正的底是外层容器画的，两者在自定义主题下并不同色。拿它去反色重绘，
             // 光标处会糊上一小段不属于这里的颜色，故 frameless 直接不做反色。
             let invert_over_glyph = !self.config.frameless;
+            // 度量取本行实际文本：纯中文行经回退字体后字身 ascent 与 "Ay" 不同。
+            let line_chars = lay
+                .lines
+                .get(cl)
+                .map_or(&[][..], |ln| &chars[ln.start..ln.end]);
+            let (caret_y, caret_h) = caret_vspan(canvas, line_chars, ts, ly, line_h);
             if let Some((caret, alpha)) =
-                // 竖直只内缩 1px：行盒本就含行距，再各缩 2px 会让光标明显短于字身，
-                // 视觉上"矮一截"。
                 self.caret
-                        .paint(canvas, cxx, ly + 1, line_h - 2, inp.cursor(pal), &opts)
+                    .paint(canvas, cxx, caret_y, caret_h, inp.cursor(pal), &opts)
             {
                 if let Some(ln) = lay
                     .lines
@@ -3117,6 +3164,196 @@ mod tests {
             );
         }
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 设了行距时插入符是字身高、且按绘制的同一条基线放。期望值按无引擎画布的 0.8 基线
+    /// 约定手算：14px、2.0 倍行距 → 行盒 28、基线 22.4；字身 ascent 11.2、descent 2.8
+    /// → 光标 [11.2, 25.2] 取整为 y=11、h=14。行盒居中的写法会给出 y=7。
+    #[test]
+    fn caret_spans_font_body_not_spaced_line_box() {
+        use crate::render::SkiaCanvas;
+        use tiny_skia::Pixmap;
+        let mut pm = Pixmap::new(8, 8).unwrap();
+        let mut c = SkiaCanvas::new(&mut pm);
+        let mut ts = crate::text::TextStyle {
+            family: None,
+            size: 14.0,
+            weight: crate::text::WEIGHT_NORMAL,
+            italic: false,
+            line_height: Some(2.0),
+        };
+        assert_eq!(super::caret_vspan(&mut c, &[], &ts, 100, 28), (111, 14));
+        // 未设行距：行盒即字身，保持原来的上下各缩 1px。
+        ts.line_height = None;
+        assert_eq!(super::caret_vspan(&mut c, &[], &ts, 100, 17), (101, 15));
+        // 行距小于 1：字身比行盒高，钳回行盒内。
+        ts.line_height = Some(0.8);
+        let (y, h) = super::caret_vspan(&mut c, &[], &ts, 100, 12);
+        assert!(
+            y >= 101 && y + h <= 111,
+            "钳在行盒 [101,111) 内：y={y} h={h}"
+        );
+    }
+
+    /// 经真实 paint 路径：2.0 倍行距的多行框里，亮/灭两帧之差（只有光标）的竖直跨度
+    /// 是字身高而非行盒高，且重心落在行盒中线以下（基线在行高 0.8 处）。
+    #[test]
+    fn caret_pixels_follow_font_body_with_line_spacing() {
+        use crate::core::Widget;
+        use crate::geometry::Rect;
+        use crate::render::SkiaCanvas;
+        use crate::style::Style;
+        use tiny_skia::Pixmap;
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(true);
+        crate::ui::caret::set_window_active(true);
+        crate::ui::caret::set_blink_period_ms(Some(crate::ui::caret::BLINK_HALF_MS as u32));
+        with_caret_style(crate::ui::CaretStyle::Blink);
+        let mut ti = dummy_input();
+        ti.config.multiline = true;
+        let style = Style {
+            font_size: 14.0,
+            line_height: Some(2.0),
+            ..Style::default()
+        };
+        let frame = |ti: &TextInput, now: u64| {
+            let b = Rect::new(0, 0, 200, 80);
+            crate::anim::set_clock_ms(now);
+            let mut pm = Pixmap::new(200, 80).unwrap();
+            {
+                let mut c = SkiaCanvas::new(&mut pm);
+                ti.paint(b, b, true, true, &mut c, &style);
+            }
+            pm
+        };
+        let lit = frame(&ti, 0);
+        let out = frame(&ti, crate::ui::caret::TYPING_PAUSE_MS + 530 + 65);
+        let rows: Vec<u32> = (0..80)
+            .filter(|&y| (0..200).any(|x| lit.pixel(x, y).unwrap() != out.pixel(x, y).unwrap()))
+            .collect();
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+        let (top, bottom) = (*rows.first().expect("光标应出墨"), *rows.last().unwrap());
+        let h = bottom - top + 1;
+        assert!(h <= 15, "光标高 {h}，应为字身约 14 而非行盒 28 - 2");
+        assert_eq!(ti.layout.borrow().line_h, 28, "前提：14px × 2.0 的行盒");
+        // paint 记下的光标所在行顶（相对节点）；按 0.8 基线手算光标顶应在其下 11。
+        // 行盒居中的写法是 7，原先按行盒的写法是 1。
+        let (_, line_top, _) = ti.caret_local.get().expect("paint 应记下光标位置");
+        assert_eq!(top as i32 - line_top, 11, "光标顶相对行顶的偏移");
+    }
+
+    /// 用真实文字引擎画一帧输入框（静态光标），`origin` 为局部帧原点（逻辑）。
+    #[cfg(target_os = "linux")]
+    fn engine_frame(
+        ti: &TextInput,
+        style: &crate::style::Style,
+        b: crate::geometry::Rect,
+        focused: bool,
+        scale: f32,
+        origin: crate::geometry::Point,
+        size: (u32, u32),
+    ) -> tiny_skia::Pixmap {
+        use crate::core::Widget;
+        use crate::render::SkiaCanvas;
+        use crate::text::TextEngine;
+        let mut eng = crate::text::LinuxTextEngine::new();
+        eng.set_scale(scale);
+        let mut pm = tiny_skia::Pixmap::new(size.0, size.1).unwrap();
+        {
+            let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, origin);
+            ti.paint(b, b, focused, true, &mut c, style);
+        }
+        pm
+    }
+
+    /// 真实引擎下（度量与画字各走引擎自己的路径，不是测试里的 0.8 约定）：2.0 倍行距时
+    /// 插入符的竖直范围包住本行字形墨迹，且明显矮于行盒。拉丁字母，不依赖 CJK 字体。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn caret_covers_real_glyph_ink_with_line_spacing() {
+        use crate::geometry::Point;
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(false);
+        let style = crate::style::Style {
+            font_size: 14.0,
+            line_height: Some(2.0),
+            ..crate::style::Style::default()
+        };
+        for scale in [1.0f32, 1.25, 1.5] {
+            let (w, h) = ((220.0 * scale) as u32, (80.0 * scale) as u32);
+            let b = crate::geometry::Rect::new(0, 0, 220, 80);
+            let input = |text: &str| {
+                let mut ti = TextInput::new(signal(String::from(text)), String::new());
+                ti.config.multiline = true;
+                ti.cursor = text.chars().count();
+                ti
+            };
+            let rows_differing = |a: &tiny_skia::Pixmap, b: &tiny_skia::Pixmap| -> Vec<u32> {
+                (0..h)
+                    .filter(|&y| (0..w).any(|x| a.pixel(x, y) != b.pixel(x, y)))
+                    .collect()
+            };
+            let o = Point::new(0, 0);
+            let text = input("AyHg");
+            // 字形墨迹：同为失焦的「有字」与「空框」之差。
+            let glyphs = rows_differing(
+                &engine_frame(&text, &style, b, false, scale, o, (w, h)),
+                &engine_frame(&input(""), &style, b, false, scale, o, (w, h)),
+            );
+            // 光标：同一个框聚焦与失焦之差，只取光标那一列附近（聚焦还会换描边色）。
+            let focused = engine_frame(&text, &style, b, true, scale, o, (w, h));
+            let blurred = engine_frame(&text, &style, b, false, scale, o, (w, h));
+            let (cx, ..) = text.caret_local.get().expect("聚焦帧应记下光标位置");
+            let col = ((cx as f32 + 0.5) * scale) as u32;
+            let caret: Vec<u32> = (2..h - 2)
+                .filter(|&y| focused.pixel(col, y) != blurred.pixel(col, y))
+                .collect();
+            let (g0, g1) = (glyphs[0], *glyphs.last().unwrap());
+            let (c0, c1) = (*caret.first().expect("光标应出墨"), *caret.last().unwrap());
+            let line_px = 28.0 * scale;
+            assert!(
+                c0 <= g0 + 1 && c1 + 1 >= g1,
+                "scale={scale}：光标 {c0}..={c1} 应包住字形 {g0}..={g1}"
+            );
+            assert!(
+                ((c1 - c0 + 1) as f32) < line_px * 0.8,
+                "scale={scale}：光标高 {} 应是字身而非行盒 {line_px}",
+                c1 - c0 + 1
+            );
+        }
+    }
+
+    /// 局部重绘（子 pixmap + 原点平移）画出来的输入框必须与整窗帧对应区域逐像素相同。
+    /// 原点取在节点内部，节点与文字的左 / 上边落在负的局部坐标上——`f32::round` 在负的
+    /// 半数上取整方向相反，正是这里会差 1 物理像素。四个起点覆盖 1.25 下的全部相位。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn text_input_on_offset_subpixmap_matches_full_frame() {
+        use crate::geometry::Point;
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(false);
+        let style = crate::style::Style {
+            font_size: 13.0,
+            ..crate::style::Style::default()
+        };
+        let s = 1.25f32;
+        let origin = Point::new(20, 12); // × 1.25 为整数，同局部帧的 4 逻辑像素网格
+        let (ox, oy) = ((origin.x as f32 * s) as u32, (origin.y as f32 * s) as u32);
+        for start in 0..4 {
+            let b = crate::geometry::Rect::new(start, start, 200, 30);
+            let ti = TextInput::new(signal(String::from("Hello, windui")), String::new());
+            let full = engine_frame(&ti, &style, b, false, s, Point::new(0, 0), (300, 60));
+            let sub = engine_frame(&ti, &style, b, false, s, origin, (120, 30));
+            for y in 0..sub.height() {
+                for x in 0..sub.width() {
+                    assert_eq!(
+                        sub.pixel(x, y),
+                        full.pixel(x + ox, y + oy),
+                        "start={start} 局部帧 ({x},{y}) 与整窗帧不同"
+                    );
+                }
+            }
+        }
     }
 
     /// 光标动画关闭（截图路径、系统省电/无障碍设置）时：画面恒定，且**不请求续帧**。
