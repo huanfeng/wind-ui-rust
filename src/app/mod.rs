@@ -2918,6 +2918,7 @@ impl UiHost {
             close,
             close_forced,
             focus,
+            release,
             consumed,
             menu,
             open_url,
@@ -3016,6 +3017,17 @@ impl UiHost {
         // 也不会把刚弹出的菜单错派给别的控件。代价：同一次分发若既转焦点又请求关窗，
         // `on_close_request` 先于提交执行、看到的是提交前的状态。常见路径碰不到——按钮
         // 在 Down 转焦点、在 Up 才关窗，提交早在 Down 那次分发里跑完了。
+        // 本次分发里控件交出的焦点（`EventCtx::release_focus`）。在上面的转移之后：焦点
+        // 已转给别人时请求者不再持有焦点，这一步自然什么都不做；在菜单之后：菜单的派发
+        // 对象按交出前的焦点取。被清掉的那个照常收到失焦通知（与点空白清焦点同一口径）。
+        if let Some(f) = self.apply_release(&release) {
+            repaint = true;
+            blurred = match blurred {
+                // 同一次分发里先转来又被交出：通知最初失焦的那个，转来的没来得及"拥有"焦点。
+                Some((old, _)) => Some((old, None)),
+                None => Some((Some(f), None)),
+            };
+        }
         if let Some((old, new)) = blurred {
             repaint |= self.notify_blur(old, new, focus_from);
         }

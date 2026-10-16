@@ -52,7 +52,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 /// 运行时 slot 键：索引 + 代际（复用 core arena 的失效心智，回收后旧句柄自然失效）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct SlotKey {
     index: u32,
     generation: u32,
@@ -339,6 +339,12 @@ impl<T> PartialEq for Signal<T> {
     }
 }
 impl<T> Eq for Signal<T> {}
+/// 与 `PartialEq` 同一身份（slot + 代际），可作 `HashMap` 键。
+impl<T> std::hash::Hash for Signal<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
+}
 
 /// 打印**句柄标识**（slot + 代际）而非值——`T` 未必 `Debug`，且绝大多数调试场景
 /// 想知道的是"这两处引用的是不是同一个信号"。值请自行 `sig.get()`。

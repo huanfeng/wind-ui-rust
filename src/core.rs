@@ -394,6 +394,17 @@ pub enum Autofocus {
     TakeSelectAll,
 }
 
+/// 定向送焦点的触发器：计数信号的值一变，宿主就把焦点交给这个节点（见 `Element::focus_when`）。
+///
+/// 用计数器而非布尔：布尔为真期间用户自己点了别处，本框不该再把焦点抢回来；而"下一次
+/// 新建"要能**再**触发一次。比的是值、不是写入版本——写入同一个值不算触发。
+pub struct FocusTrigger {
+    signal: Signal<u64>,
+    /// 上次兑现时的值。建节点时取树上记的这个信号的值（见 `Tree::focus_trigger`）。
+    seen: u64,
+    select_all: bool,
+}
+
 impl Autofocus {
     /// 是否夺取已有焦点（见 [`Take`](Self::Take)）。
     pub fn takes_focus(self) -> bool {
@@ -548,6 +559,8 @@ pub struct Node {
     /// 于是**窗口生命周期内第二个**要求自动聚焦的控件永远拿不到焦点——就地编辑框
     /// 因此第二次唤出就打不进字。节点销毁时这个标志随之消失，天然不会错认复用的 id。
     pub autofocus_done: bool,
+    /// 定向送焦点的触发器（`Element::focus_when`）。
+    pub focus_when: Option<FocusTrigger>,
 }
 
 struct Slot {
@@ -585,6 +598,14 @@ pub struct Tree {
     /// 自己消费的——行没法替父容器要焦点，只能由父容器在 on_update 里替自己要。没有
     /// 这条通道，鼠标点完一行之后方向键就落不到列表上，键盘与鼠标接不起来。
     pending_focus: Option<NodeId>,
+    /// on_update 相位里请求**交出焦点**的节点（`EventCtx::release_focus`）。与 `pending_focus`
+    /// 同因同治：该相位丢弃整个 `EventOutcome`。事件路径走 `DispatchResult::release`，不经这里。
+    pending_release: Vec<NodeId>,
+    /// 各定向送焦点信号**已兑现到**的值（见 `Tree::focus_trigger`）。按信号而非按节点记：
+    /// 一次点击里既让计数加一、又让输入框所在子树重建，是很自然的写法——新节点若取当时的
+    /// 值，这次触发就被它自己吞掉了。每个触发信号一条，句柄带代际不会错认；表变大时清掉已回收的
+    /// 信号（应用在重建闭包里每次新建触发信号时，不清就只增不减）。
+    focus_seen: std::collections::HashMap<Signal<u64>, u64>,
     /// on_update 相位里控件请求的**开窗**暂存区。与 `pending_toasts` 同因同治：
     /// 该相位不经 `DispatchResult`，不暂存就会被整个丢掉——症状是
     /// "在 on_update 里 `ctx.open_window` 什么都不发生，且没有任何报错"。
@@ -646,6 +667,8 @@ impl Tree {
             reactive_nodes: Vec::new(),
             pending_toasts: Vec::new(),
             pending_focus: None,
+            pending_release: Vec::new(),
+            focus_seen: std::collections::HashMap::new(),
             pending_windows: Vec::new(),
             pending_menu: None,
             pending_dialog: None,
@@ -664,6 +687,16 @@ impl Tree {
     /// 取走 on_update 相位攒下的焦点转移请求（见 `pending_focus`）。
     pub fn take_pending_focus(&mut self) -> Option<NodeId> {
         self.pending_focus.take()
+    }
+
+    /// 取走 on_update 相位攒下的交出焦点请求（见 `pending_release`）。
+    pub(crate) fn take_pending_release(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.pending_release)
+    }
+
+    /// `node` 是否为 `ancestor` 本身或其后代。
+    pub(crate) fn is_within(&self, node: NodeId, ancestor: NodeId) -> bool {
+        self.ancestor_chain(node).contains(&ancestor)
     }
 
     /// 取走 on_update 相位攒下的开窗请求（见 `pending_windows`）。
@@ -805,6 +838,7 @@ impl Tree {
         // 等在此发的提示永不上屏，故先取出暂存（见 pending_toasts / take_pending_toasts）。
         let requested_toast = ctx.out.toast.take();
         let requested_focus = ctx.out.focus.take();
+        let requested_release = ctx.out.release.take();
         let requested_windows = std::mem::take(&mut ctx.out.open_windows);
         let requested_menu = ctx.out.menu.take();
         let requested_dialog = ctx.out.dialog.take();
@@ -819,6 +853,7 @@ impl Tree {
         if let Some(id) = requested_focus {
             self.pending_focus = Some(id);
         }
+        self.pending_release.extend(requested_release);
         // 开窗与菜单同 toast：该相位不经 DispatchResult，丢了就是"调了没反应、
         // 也没报错"。应用把「下一帧再执行这条命令」排进队列、由某个控件的 on_update
         // 兑现，是很自然的写法，而命令十有八九要开个对话框。
@@ -1792,6 +1827,8 @@ pub(crate) struct EventOutcome {
     /// 应用已决定关闭：跳过决策链直接落地。
     close_forced: bool,
     focus: Option<NodeId>,
+    /// 请求交出焦点的节点（`EventCtx::release_focus`）。
+    release: Option<NodeId>,
     /// 控件请求弹出的上下文菜单（宿主接管渲染与命中）。
     menu: Option<MenuRequest>,
     /// 控件请求宿主用系统默认程序打开的 URL/路径（链接点击等）。
@@ -1909,6 +1946,22 @@ impl EventCtx<'_> {
     /// 请求把焦点移到本节点。
     pub fn request_focus(&mut self) {
         self.out.focus = Some(self.self_id);
+    }
+    /// 交出焦点（网页的 `input.blur()`）：焦点在本节点或其子孙上时清空，否则什么都不做。
+    ///
+    /// 典型用法是提交后让输入框失焦——数字框按回车提交，插入符却还在里面闪，用户会以为
+    /// 没提交。同一轮里别处又要了焦点（`request_focus`、点了别的控件）时那边胜出。
+    /// 在 App 级回调（定时器、`on_message`、`on_show`……）里调时节点是根，等于整窗失焦，
+    /// 且不通知失焦（App 级回调里的焦点调度都不算用户离开）。菜单项动作的节点是弹出菜单
+    /// 的那个控件，按事件回调处理。
+    ///
+    /// 在事件回调里调：失去焦点的那个控件照常收到失焦通知（`on_blur` / `Element::on_blur`），
+    /// 于是祖先替子树交出焦点时，子孙输入框里没提交的编辑也会提交；输入框自己在提交回调里
+    /// 交出焦点不会提交两遍——Enter 与失焦共用一个出口，提交过就不再提交。
+    /// 在 `on_update` 里调则不通知，与那个相位里转移焦点同理：它由信号变化驱动、发生在
+    /// 渲染中途，回调写的信号赶不上本帧重排。
+    pub fn release_focus(&mut self) {
+        self.out.release = Some(self.self_id);
     }
     /// 请求打开**单文件**选择对话框；`on_result` 在对话框关闭、事件分发完全返回后
     /// 收到用户选择结果（取消为 `None`）。**不要**在回调里直接调用 `PickDialog::pick_file()`
@@ -2227,6 +2280,8 @@ pub struct DispatchResult {
     /// 应用已决定关闭，跳过决策链（见 [`EventCtx::force_close`]）。
     pub close_forced: bool,
     pub focus: Option<NodeId>,
+    /// 本次分发里请求交出焦点的节点（`EventCtx::release_focus`），按发出顺序。
+    pub release: Vec<NodeId>,
     /// 事件是否被某个控件消费（供宿主决定是否回退到默认行为，如 Escape 关窗）。
     pub consumed: bool,
     /// 控件请求弹出的上下文菜单（宿主接管）。
@@ -2255,6 +2310,7 @@ impl DispatchResult {
             close,
             close_forced,
             focus,
+            release,
             consumed: _, // 只对事件有意义，不是副作用
             menu,
             open_url,
@@ -2268,6 +2324,7 @@ impl DispatchResult {
             || *close
             || *close_forced
             || focus.is_some()
+            || !release.is_empty()
             || menu.is_some()
             || open_url.is_some()
             || window_op.is_some()
@@ -3137,6 +3194,7 @@ impl Tree {
                 if o.focus.is_some() {
                     res.focus = o.focus;
                 }
+                res.release.extend(o.release);
                 if let Some(cap) = o.capture {
                     *capture = cap;
                 }
@@ -3232,6 +3290,7 @@ impl Tree {
             close: o.close,
             close_forced: o.close_forced,
             focus: o.focus,
+            release: o.release.into_iter().collect(),
             consumed: false,
             menu: o.menu,
             open_url: o.open_url,
@@ -3293,6 +3352,7 @@ impl Tree {
             close: o.close,
             close_forced: o.close_forced,
             focus: o.focus,
+            release: o.release.into_iter().collect(),
             consumed: false,
             menu: o.menu,
             open_url: o.open_url,
@@ -3313,6 +3373,7 @@ impl Tree {
             res.close = o.close;
             res.close_forced = o.close_forced;
             res.focus = o.focus;
+            res.release.extend(o.release);
             res.consumed = consumed;
             res.menu = o.menu;
             res.open_url = o.open_url;
@@ -3358,6 +3419,7 @@ impl Tree {
             if out.focus.is_some() {
                 res.focus = out.focus;
             }
+            res.release.extend(out.release);
             if out.open_url.is_some() {
                 res.open_url = out.open_url;
             }
@@ -3394,6 +3456,44 @@ impl Tree {
             .iter()
             .find_map(|id| pending(id).filter(|(_, a)| a.takes_focus()))
             .or_else(|| order.iter().find_map(pending))
+    }
+
+    /// 为新节点建定向送焦点触发器。这个信号兑现过（或有别的节点先登记过）就沿用树上记的
+    /// 值——同一次事件里加了计数又重建了节点，新节点照样认这次触发；第一次见到才取当前值，
+    /// 故初值本身不触发。
+    pub(crate) fn focus_trigger(&mut self, signal: Signal<u64>, select_all: bool) -> FocusTrigger {
+        if self.focus_seen.len() >= 64 {
+            self.focus_seen.retain(|s, _| s.is_alive());
+        }
+        let now = signal.try_get().unwrap_or(0);
+        let seen = *self.focus_seen.entry(signal).or_insert(now);
+        FocusTrigger {
+            signal,
+            seen,
+            select_all,
+        }
+    }
+
+    /// 取出焦点环里第一个触发器已变值的节点，连同它要不要全选。环里所有已变值的触发器
+    /// 都记为已兑现（同一轮只可能满足一个，其余的不该留到下一帧再抢）；不在环里的
+    /// （隐藏、禁用、被模态遮住）不记，等它进环那一帧再兑现。
+    pub(crate) fn take_fired_focus_trigger(&mut self, order: &[NodeId]) -> Option<(NodeId, bool)> {
+        let mut fired = None;
+        for &id in order {
+            let Some(t) = self.get_mut(id).and_then(|n| n.focus_when.as_mut()) else {
+                continue;
+            };
+            let Some(v) = t.signal.try_get() else {
+                continue;
+            };
+            if v != t.seen {
+                t.seen = v;
+                let (signal, select_all) = (t.signal, t.select_all);
+                self.focus_seen.insert(signal, v);
+                fired.get_or_insert((id, select_all));
+            }
+        }
+        fired
     }
 
     /// 标记某节点的 autofocus 已兑现。
@@ -4198,6 +4298,21 @@ mod tests {
             CursorShape::Hand,
             "悬停在 clickable 卡片内的子控件上应显示手型"
         );
+    }
+
+    /// 定向送焦点的已兑现值表在变大时清掉已回收的信号，不随重建闭包里新建的触发信号无限增长。
+    #[test]
+    fn focus_seen_drops_disposed_signals() {
+        let mut tree = Tree::new();
+        for _ in 0..64 {
+            let s = crate::signal::signal(0u64);
+            tree.focus_trigger(s, false);
+            s.dispose();
+        }
+        assert_eq!(tree.focus_seen.len(), 64, "前提：未到阈值时不清");
+        let live = crate::signal::signal(0u64);
+        tree.focus_trigger(live, false);
+        assert_eq!(tree.focus_seen.len(), 1, "到阈值时清掉已回收的，只剩活着的");
     }
 
     /// `Element::cursor` 覆盖：按钮挂手型生效；挂在容器上，内部 label 继承、输入框仍是

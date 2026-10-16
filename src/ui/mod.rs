@@ -704,6 +704,8 @@ pub struct Element {
     window_drag: bool,
     /// 声明式初始焦点（见 [`Element::autofocus`]）。
     autofocus: Option<crate::core::Autofocus>,
+    /// 定向送焦点（见 [`Element::focus_when`]）：触发信号与是否全选。
+    focus_when: Option<(Signal<u64>, bool)>,
     focusable: Option<bool>,
     enabled_static: bool,
     enabled: Option<Signal<bool>>,
@@ -746,6 +748,7 @@ impl Element {
             context_menu: None,
             window_drag: false,
             autofocus: None,
+            focus_when: None,
             focusable: None,
             enabled_static: true,
             enabled: None,
@@ -1059,6 +1062,35 @@ impl Element {
     /// 别处」。配合 [`select_range`](Self::select_range) 可只选主名。
     pub fn autofocus_take(mut self) -> Self {
         self.autofocus = Some(crate::core::Autofocus::Take);
+        self
+    }
+
+    /// **定向送焦点**：`trigger` 的值每变一次，就把焦点交给本元素（夺取已有焦点）。
+    /// 给常驻的输入框用——它们的 [`autofocus`](Self::autofocus) 在开机时就用掉了，而
+    /// `ctx.request_focus()` 只能聚焦自己、应用又拿不到框架控件的 `NodeId`。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    ///
+    /// let title = signal(String::new());
+    /// let focus_title = signal(0u64);
+    /// let ui = Element::col()
+    ///     .child(Element::text_input(title, "标题").focus_select_all_when(focus_title))
+    ///     .child(Element::button("新建").on_click(move |_| focus_title.update(|n| *n += 1)));
+    /// ```
+    ///
+    /// 用**计数器**而非布尔：布尔为真期间用户自己点了别处，本框不该再把焦点抢回来；
+    /// 而下一次触发要能再生效。建节点时的初值不触发。元素此刻不在焦点环里（隐藏、禁用、
+    /// 被对话框遮住）时，等它进环那一帧再兑现。
+    pub fn focus_when(mut self, trigger: Signal<u64>) -> Self {
+        self.focus_when = Some((trigger, false));
+        self
+    }
+
+    /// [`focus_when`](Self::focus_when) + 全选已有内容：改名被拒后回到框里，接着打字
+    /// 就覆盖。
+    pub fn focus_select_all_when(mut self, trigger: Signal<u64>) -> Self {
+        self.focus_when = Some((trigger, true));
         self
     }
 
@@ -4411,6 +4443,7 @@ impl Element {
         }
         // 在 widget 被移进 Node 之前问一次：对话框遮罩要把显示信号登记到树上。
         let modal = widget.modal_signal();
+        let focus_when = self.focus_when.map(|(s, all)| tree.focus_trigger(s, all));
         let node = Node {
             parent: None,
             children: Vec::new(),
@@ -4440,6 +4473,7 @@ impl Element {
             on_blur: self.blur,
             window_drag: self.window_drag,
             autofocus: self.autofocus,
+            focus_when,
             autofocus_done: false,
             focusable: self.focusable,
             tooltip: self.tooltip,
