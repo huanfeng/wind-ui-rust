@@ -1397,6 +1397,8 @@ pub struct WindowRequest {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮（`Window::skip_taskbar`），各平台落地见 `WindowConfig::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 无边框外框取色策略（`Window::window_outline`），见 `WindowOutline`。
+    pub window_outline: crate::platform::WindowOutline,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

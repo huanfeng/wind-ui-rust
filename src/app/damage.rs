@@ -248,8 +248,19 @@ impl UiHost {
     }
 
     /// 本帧要宿主自己画的窗口外框色（平台没要求时为 `None`），见 `paint_window_outline`。
+    ///
+    /// 平台给的 `window_outline` 同时回答两件事：要不要画（最大化 / 非 Win10 时为 `None`）、
+    /// 平台建议什么颜色。策略只改颜色、或关掉，不会在平台说不画时画。主题色**绘制期现取**
+    /// 而不在 `set_window_outline` 那一刻换算好存起来——否则换肤、切夜间那一帧外框不跟。
     pub(super) fn window_outline_color(&self) -> Option<Color> {
-        self.window_outline
+        use crate::platform::WindowOutline;
+        let platform = self.window_outline?;
+        match self.outline_policy {
+            WindowOutline::Auto => Some(platform),
+            WindowOutline::Theme => Some(self.theme_src.current().palette.border),
+            WindowOutline::Color(c) => Some(c),
+            WindowOutline::Off => None,
+        }
     }
 
     pub(super) fn render_partial(&mut self, pixmap: &mut Pixmap, size: Size, s: f32, damage: Rect) {

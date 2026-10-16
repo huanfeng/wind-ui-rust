@@ -651,6 +651,27 @@ pub struct WindowConfig {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮，各平台落地见 `App::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
+    pub window_outline: WindowOutline,
+}
+
+/// 无边框窗口自画 1px 外框的取色策略（`App::window_outline` / `Window::window_outline`）。
+///
+/// 只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
+/// win32 `win10_outline_color`）与 Linux 的无边框窗口；Windows 11 与 macOS 的边框是系统画的，
+/// 不受影响。最大化时各平台本就不画。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum WindowOutline {
+    /// 各平台默认：Windows 10 仿 Windows 11（失活 `#AAAAAA`、激活且系统开了「在标题栏和
+    /// 窗口边框上显示强调色」时取强调色）；Linux 取主题的 `palette.border`。
+    #[default]
+    Auto,
+    /// 取当前主题的 `palette.border`（换主题当帧跟上），不分激活态。
+    Theme,
+    /// 固定颜色。
+    Color(Color),
+    /// 不画。
+    Off,
 }
 
 impl Default for WindowConfig {
@@ -685,6 +706,7 @@ impl Default for WindowConfig {
             icon: None,
             position: None,
             skip_taskbar: false,
+            window_outline: WindowOutline::Auto,
         }
     }
 }

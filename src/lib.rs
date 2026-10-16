@@ -38,7 +38,7 @@ pub mod prelude {
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{
-        PickDialog, Renderer, Tray, TrayCtx, TrayHandle, TrayMenuItem, TrayOp,
+        PickDialog, Renderer, Tray, TrayCtx, TrayHandle, TrayMenuItem, TrayOp, WindowOutline,
     };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixmapTarget, RenderTarget};

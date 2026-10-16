@@ -144,6 +144,7 @@ impl Window {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                window_outline: Default::default(),
             },
         }
     }
@@ -314,6 +315,12 @@ impl Window {
     /// 不提供最小化。
     pub fn skip_taskbar(mut self, on: bool) -> Self {
         self.req.skip_taskbar = on;
+        self
+    }
+
+    /// 无边框窗口自画外框的取色策略，同 [`App::window_outline`]。
+    pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
+        self.req.window_outline = o;
         self
     }
 
@@ -622,6 +629,7 @@ fn build_new_window(
         // 默认值，症状是「设了却不生效」。
         position: req.position,
         skip_taskbar: req.skip_taskbar,
+        window_outline: req.window_outline,
         // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
         // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
         ..WindowConfig::default()
@@ -1158,6 +1166,7 @@ impl App {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                window_outline: Default::default(),
             },
             render: None,
             content: None,
@@ -1325,6 +1334,25 @@ impl App {
     /// 随能力位隐藏。
     pub fn skip_taskbar(mut self, on: bool) -> Self {
         self.cfg.skip_taskbar = on;
+        self
+    }
+
+    /// 无边框窗口自画 1px 外框的取色策略（默认 [`WindowOutline::Auto`]）。
+    ///
+    /// 只对平台需要宿主自己画外框的窗口生效：Windows 10 的无边框窗口（默认仿 Windows 11，
+    /// 失活灰、激活取系统强调色）与 Linux 的无边框窗口（默认取主题边框色）。要跟着应用主题走
+    /// 用 [`WindowOutline::Theme`]，要指定颜色用 [`WindowOutline::Color`]，不要这圈线用
+    /// [`WindowOutline::Off`]——比如窗口贴着任务栏、外框压在接缝上看着像两根线。
+    ///
+    /// 常驻应用（`run_resident`）的窗口都由 [`Window`] 建，请在 [`Window::window_outline`] 上设；
+    /// 这里的设置只作用于 `App::run` 的主窗。
+    ///
+    /// [`WindowOutline::Auto`]: crate::platform::WindowOutline::Auto
+    /// [`WindowOutline::Theme`]: crate::platform::WindowOutline::Theme
+    /// [`WindowOutline::Color`]: crate::platform::WindowOutline::Color
+    /// [`WindowOutline::Off`]: crate::platform::WindowOutline::Off
+    pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
+        self.cfg.window_outline = o;
         self
     }
 
@@ -2509,6 +2537,8 @@ struct UiHost {
     show_fps: bool,
     /// 平台要求宿主自己画的 1px 窗口外框色（见 `AppHandler::set_window_outline`）。
     window_outline: Option<Color>,
+    /// 外框取色策略（`App::window_outline`）：在平台给的颜色与主题色之间裁决。
+    outline_policy: crate::platform::WindowOutline,
     /// 关闭请求拦截器：返回 true 允许关闭，false 取消。None 时默认允许。
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
@@ -2783,6 +2813,7 @@ impl UiHost {
             interval_durs,
             show_fps: std::env::var("WINDUI_FPS").is_ok_and(|v| v != "0" && !v.is_empty()),
             window_outline: None,
+            outline_policy: cfg.window_outline,
             close_handler,
             show_handler,
             activate_handler: None,
@@ -3788,7 +3819,14 @@ impl AppHandler for UiHost {
     /// 无边框窗口外框色，取主题的 `palette.border`。与 [`bg`](Self::bg) 同理当场从主题源取，
     /// 换主题那一帧就跟上。
     fn frame_outline(&self) -> Option<Color> {
-        Some(self.theme_src.current().palette.border)
+        use crate::platform::WindowOutline;
+        match self.outline_policy {
+            WindowOutline::Auto | WindowOutline::Theme => {
+                Some(self.theme_src.current().palette.border)
+            }
+            WindowOutline::Color(c) => Some(c),
+            WindowOutline::Off => None,
+        }
     }
 
     fn set_window_outline(&mut self, color: Option<Color>) {
@@ -4599,6 +4637,7 @@ mod tests {
         let req = Window::new("贴图", 120, 80)
             .position(-1920, 40)
             .skip_taskbar(true)
+            .window_outline(crate::platform::WindowOutline::Off)
             .content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
         else {
@@ -4610,6 +4649,11 @@ mod tests {
             "副屏在左时坐标为负，原样传下去"
         );
         assert!(cfg.skip_taskbar);
+        assert_eq!(
+            cfg.window_outline,
+            crate::platform::WindowOutline::Off,
+            "外框策略经 `..WindowConfig::default()` 时没搬就会被静默填成 Auto"
+        );
 
         let req = Window::new("设置", 120, 80).content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
@@ -4618,6 +4662,7 @@ mod tests {
         };
         assert_eq!(cfg.position, None, "对照：不设就交给系统摆放");
         assert!(!cfg.skip_taskbar);
+        assert_eq!(cfg.window_outline, crate::platform::WindowOutline::Auto);
     }
 
     /// 单例去重是在**开窗那一刻**按窗口登记表判的——这正是「同一个回调里对同一个键既关
@@ -7775,6 +7820,70 @@ mod tests {
         layout_once(&mut host, 200, 120);
         press(&mut host, 60, 16, MouseButton::Right);
         assert!(menu_rows(&host).is_empty(), "macOS 不该默认接管标题栏右键");
+    }
+
+    /// 外框取色策略：平台（win32）给浅灰，主题边框是深蓝——`Theme` 画深蓝且换主题当帧
+    /// 跟上；`Color` 画指定色；`Off` 不画；平台说不画（最大化）时任何策略都不画。
+    /// `frame_outline`（Linux 那条路）同一套策略。
+    #[test]
+    fn window_outline_policy_picks_color_or_turns_off() {
+        use crate::platform::{AppHandler, WindowOutline};
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let gray = Color::hex(0xAAAAAA);
+        let navy = Color::hex(0x102060);
+        let wine = Color::hex(0x802030);
+        let theme = |border: Color| {
+            let mut t = Theme::default();
+            t.palette.border = border;
+            t
+        };
+        let rim = |policy: WindowOutline, platform: Option<Color>| {
+            let mut app = App::new("t", 120, 60)
+                .theme(theme(navy))
+                .window_outline(policy)
+                .content(Element::col().width(120).height(60));
+            let src = app.theme_handle();
+            let mut h = app.into_handler_for_test();
+            h.set_scale(1.0);
+            h.set_window_outline(platform);
+            let mut pm = Pixmap::new(120, 60).unwrap();
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 60));
+            let p = pm.pixel(60, 0).unwrap();
+            (Color::rgb(p.red(), p.green(), p.blue()), h, src, pm)
+        };
+        let bg = Theme::default().palette.bg;
+
+        let (c, ..) = rim(WindowOutline::Auto, Some(gray));
+        assert_eq!(c, gray, "Auto：用平台给的颜色（Win10 仿 Win11）");
+
+        let (c, mut h, src, mut pm) = rim(WindowOutline::Theme, Some(gray));
+        assert_eq!(c, navy, "Theme：用主题的 palette.border，而不是平台的灰");
+        src.set(theme(wine));
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(120, 60));
+        let p = pm.pixel(60, 0).unwrap();
+        assert_eq!(
+            Color::rgb(p.red(), p.green(), p.blue()),
+            wine,
+            "换主题当帧跟上"
+        );
+        assert_eq!(h.frame_outline(), Some(wine), "Linux 那条路同一策略");
+
+        let (c, h, ..) = rim(WindowOutline::Color(wine), Some(gray));
+        assert_eq!(c, wine, "Color：画指定色");
+        assert_eq!(h.frame_outline(), Some(wine));
+
+        let (c, h, ..) = rim(WindowOutline::Off, Some(gray));
+        assert_eq!(c, Color::rgb(bg.r, bg.g, bg.b), "Off：不画");
+        assert_eq!(h.frame_outline(), None);
+
+        let (c, ..) = rim(WindowOutline::Theme, None);
+        assert_eq!(
+            c,
+            Color::rgb(bg.r, bg.g, bg.b),
+            "平台说不画（最大化）时策略不得自作主张"
+        );
     }
 
     /// 平台要求宿主画外框（Win10 无边框窗）：整窗帧画出四边，局部帧之后边线原样（子缓冲
