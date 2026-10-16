@@ -834,6 +834,14 @@ impl Canvas for SkiaCanvas<'_> {
         }
     }
 
+    fn text_advance(&mut self, text: &str, ts: &crate::text::TextStyle) -> f32 {
+        match self.engine.as_deref_mut() {
+            Some(engine) => engine.advance(text, ts),
+            // 无引擎：与上面 measure_text 的等宽近似同源，不取整。
+            None => text.chars().count() as f32 * ts.size * 0.6,
+        }
+    }
+
     fn text_line_metrics(
         &mut self,
         text: &str,

@@ -283,6 +283,20 @@ pub trait Canvas {
         self.measure_text(text, ts)
     }
 
+    /// `text` 单行排版的宽度（逻辑单位，含尾随空白，**不取整**）——自绘排版建字宽表用，
+    /// 见 [`TextEngine::advance`](crate::text::TextEngine::advance)。控件在 `paint` 里只拿得到
+    /// 画布、够不到文字引擎，故画布上再开一份。
+    ///
+    /// 量的是**本画布**画字用的那次排版：Windows D2D 后端按逻辑字号排版、由变换承担 DPI，
+    /// 软件 / GPU 后端按物理字号排版，两者在字体 hinting 下可差零点几像素。所以建字宽表与
+    /// 画字要用同一个画布，不要在布局期用 `TextEngine::advance`、绘制期再换画布量。
+    /// `text` 不应含换行。
+    ///
+    /// 默认由 `measure_text` 的整数宽换算，只给测试画布兜底；三个真实后端都已覆盖。
+    fn text_advance(&mut self, text: &str, ts: &crate::text::TextStyle) -> f32 {
+        self.measure_text(text, ts).w as f32
+    }
+
     /// `text` 单行排版后的基线度量（供富文本等同行混字号场景基线对齐）。
     /// 默认按「基线 = 行高 × 0.8」近似；有真实文字栈的实现应覆盖为精确值
     /// （软后端委托 `TextEngine::line_metrics`，d2d 走 GetLineMetrics）。

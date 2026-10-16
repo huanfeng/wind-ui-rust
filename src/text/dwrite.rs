@@ -320,7 +320,8 @@ pub struct DWriteEngine {
     /// 文本测量缓存：键为 (文本+字体+字号+换行宽+字重+行高+scale) 的 64 位哈希，值为逻辑尺寸。
     /// 避免每帧对稳定文本重复 CreateTextLayout/GetMetrics（DirectWrite COM 往返昂贵）。
     /// 用哈希键省去每次查表的字符串分配；64 位空间碰撞概率可忽略。
-    measure_cache: HashMap<u64, Size>,
+    /// 值的第二项是未取整的逻辑宽（含尾随空白），供 `advance`。
+    measure_cache: HashMap<u64, (Size, f32)>,
     /// 基线度量缓存：键与 measure 同要素（无 max_width），值为逻辑 LineMetrics。
     /// 富文本每个碎片都要问基线，缓存后 COM 往返只发生在首次。
     metrics_cache: HashMap<u64, LineMetrics>,
@@ -703,26 +704,17 @@ impl Default for DWriteEngine {
     }
 }
 
-impl TextEngine for DWriteEngine {
-    fn set_scale(&mut self, scale: f32) {
-        let new = scale.max(0.1);
-        if new != self.scale {
-            // scale 变更使所有缓存尺寸失效（物理字号变了）。
-            self.measure_cache.clear();
-            self.metrics_cache.clear();
-        }
-        self.scale = new;
-    }
-
-    fn scale(&self) -> f32 {
-        self.scale
-    }
-
-    fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {
+impl DWriteEngine {
+    /// `measure` 与 `advance` 的共同实现：返回 (逻辑尺寸, 未取整的逻辑宽)。两者同一次
+    /// 排版、同一份缓存，`advance` 的宽度因此就是绘制用的那个 advance。
+    fn measure_raw(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> (Size, f32) {
         let size = ts.size;
         if text.is_empty() {
             // 空串也要占一行的高度，否则空标签会把周围布局吸扁。
-            return Size::new(0, ts.line_height_px().unwrap_or(size).ceil() as i32);
+            return (
+                Size::new(0, ts.line_height_px().unwrap_or(size).ceil() as i32),
+                0.0,
+            );
         }
         // 缓存键：把所有影响排版的输入哈希成 64 位（含线程局部字重与当前 scale）。
         let key = {
@@ -746,22 +738,44 @@ impl TextEngine for DWriteEngine {
         let psize = size * s;
         let pmw = max_width.map(|w| w * s).unwrap_or(f32::MAX);
         let Some(layout) = self.layout(text, ts, psize, pmw) else {
-            return Size::new(0, size.ceil() as i32);
+            return (Size::new(0, size.ceil() as i32), 0.0);
         };
         let mut m = DWRITE_TEXT_METRICS::default();
         unsafe { layout.GetMetrics(&mut m).ok() };
         // width 不含尾随空白宽度，连续空格会被折叠为同一测量值，导致光标定位到
         // 尾随空格处时 x 坐标不再前进；改用 widthIncludingTrailingWhitespace。
-        let sz = Size::new(
-            (m.widthIncludingTrailingWhitespace / s).ceil() as i32,
-            (m.height / s).ceil() as i32,
-        );
+        let w = m.widthIncludingTrailingWhitespace / s;
+        let out = (Size::new(w.ceil() as i32, (m.height / s).ceil() as i32), w);
         // 容量上限：满则清空（稳定 UI 下命中率仍极高）。
         if self.measure_cache.len() >= MEASURE_CACHE_CAP {
             self.measure_cache.clear();
         }
-        self.measure_cache.insert(key, sz);
-        sz
+        self.measure_cache.insert(key, out);
+        out
+    }
+}
+
+impl TextEngine for DWriteEngine {
+    fn set_scale(&mut self, scale: f32) {
+        let new = scale.max(0.1);
+        if new != self.scale {
+            // scale 变更使所有缓存尺寸失效（物理字号变了）。
+            self.measure_cache.clear();
+            self.metrics_cache.clear();
+        }
+        self.scale = new;
+    }
+
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {
+        self.measure_raw(text, ts, max_width).0
+    }
+
+    fn advance(&mut self, text: &str, ts: &TextStyle) -> f32 {
+        self.measure_raw(text, ts, None).1
     }
 
     fn line_metrics(&mut self, text: &str, ts: &TextStyle) -> LineMetrics {

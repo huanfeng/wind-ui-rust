@@ -188,11 +188,24 @@ pub trait TextEngine {
     }
     /// 文字尺寸。`max_width=None` 单行不换行；`Some(w)` 在宽度 w 内换行并返回多行尺寸。
     fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size;
+    /// `text` 单行排版的宽度（逻辑单位，含尾随空白，**不取整**），与 `draw` 同一次排版。
+    ///
+    /// `measure` 的 `Size` 是向上取整的整数，每个字符串最多多出 1 逻辑像素；拿它逐字
+    /// 建宽度表，误差按一行的字数累积，折行、光标、点击落位整体偏移。自绘排版要的是
+    /// 「渲染真正用的那个 advance」，就用这个。物理宽 = 本值 × scale，不损失精度。
+    ///
+    /// `text` 不应含换行：这是单行量，各引擎对 `\n` 的处理不一致。
+    ///
+    /// 默认实现由 `measure` 的整数宽换算——**这正是它要避免的误差**，只给 Null 一类
+    /// 测试引擎兜底；有真实文字栈的引擎必须覆盖（三平台引擎都已覆盖，有契约测试）。
+    fn advance(&mut self, text: &str, ts: &TextStyle) -> f32 {
+        self.measure(text, ts, None).w as f32
+    }
     /// `text` 按 `ts` 单行排版后的基线度量。传入实际文本（而非样本串）是有意的：
     /// 字体回退可能改变行度量，按实际内容询问才与 `draw` 同源。
     ///
     /// 默认实现按「基线 = 行高 × 0.8」近似——与 DirectWrite UNIFORM 行距的基线
-    /// 约定一致，供 Null 引擎与尚未实现精确度量的引擎（Core Text 待接）使用。
+    /// 约定一致，只给 Null 一类测试引擎兜底；三平台引擎都已覆盖为精确值。
     fn line_metrics(&mut self, text: &str, ts: &TextStyle) -> LineMetrics {
         let h = self.measure(text, ts, None).h as f32;
         LineMetrics {
@@ -688,6 +701,60 @@ mod hard_break_contract {
         let one = measure("甲", None);
         assert_eq!(measure("甲\n", None).h, one.h * 2, "尾随换行也占一行");
         assert_eq!(measure("甲\n\n乙", None).h, one.h * 3, "中间空行同样占位");
+    }
+}
+
+/// `advance` 的跨引擎契约：当前平台的真实引擎跑**同一份断言**。
+///
+/// 默认实现（由 `measure` 的整数宽换算）会让它全线失败——这正是要守住的：引擎漏了覆盖，
+/// 编译照过、界面照常，只有下游拿它逐字建宽度表时才发现折行与光标整体偏移。
+#[cfg(test)]
+mod advance_contract {
+    use super::*;
+
+    #[test]
+    fn platform_engine_advance_is_unrounded_and_additive() {
+        for scale in [1.0f32, 1.25] {
+            let mut e = PlatformTextEngine::new();
+            e.set_scale(scale);
+            let ts = TextStyle::new(13.0);
+            let one_w = e.measure("i", &ts, None).w;
+            let one_a = e.advance("i", &ts);
+            let ten = "iiiiiiiiii";
+            let ten_w = e.measure(ten, &ts, None).w;
+            let ten_a = e.advance(ten, &ts);
+            // 前提：整数宽逐字累加确实会漂（否则这条测不出取整损失）。
+            assert!(
+                one_w * 10 - ten_w >= 2,
+                "scale={scale}：前提，measure 逐字累加应明显偏宽（{} vs {ten_w}）",
+                one_w * 10
+            );
+            assert!(
+                (one_a * 10.0 - ten_a).abs() < 0.5,
+                "scale={scale}：advance 逐字累加应与整串一致（{} vs {ten_a}）",
+                one_a * 10.0
+            );
+            for (a, w) in [(one_a, one_w), (ten_a, ten_w)] {
+                assert!(
+                    a <= w as f32 && a > w as f32 - 1.0,
+                    "scale={scale}：advance {a} 应落在 measure 宽 {w} 往下 1 像素内"
+                );
+            }
+            assert_eq!(e.advance("", &ts), 0.0);
+        }
+    }
+
+    /// 画布上的同名转发：控件在 paint 里只拿得到画布。
+    #[test]
+    fn skia_canvas_forwards_text_advance_to_engine() {
+        use crate::render::{Canvas, SkiaCanvas};
+        let mut e = PlatformTextEngine::new();
+        e.set_scale(1.25);
+        let ts = TextStyle::new(13.0);
+        let want = e.advance("Hello, i", &ts);
+        let mut pm = Pixmap::new(4, 4).unwrap();
+        let mut c = SkiaCanvas::with_text(&mut pm, &mut e, 1.25);
+        assert_eq!(c.text_advance("Hello, i", &ts), want);
     }
 }
 

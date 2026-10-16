@@ -1635,6 +1635,22 @@ impl Canvas for D2DCanvas<'_> {
         )
     }
 
+    fn text_advance(&mut self, text: &str, ts: &crate::text::TextStyle) -> f32 {
+        // 与 measure_text 同一次排版，只是不取整（d2d 整体工作在逻辑坐标，无需除 scale）。
+        if text.is_empty() {
+            return 0.0;
+        }
+        let fallback = text.chars().count() as f32 * ts.size * 0.6;
+        let Some(layout) = self.text_layout(text, ts, f32::MAX, f32::MAX) else {
+            return fallback;
+        };
+        let mut m = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+        if unsafe { layout.GetMetrics(&mut m) }.is_err() {
+            return fallback;
+        }
+        m.widthIncludingTrailingWhitespace
+    }
+
     fn measure_text_wrapped(
         &mut self,
         text: &str,

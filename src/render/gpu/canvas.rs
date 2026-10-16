@@ -896,6 +896,10 @@ impl Canvas for WgpuCanvas<'_> {
         self.engine.measure(text, ts, Some(max_width))
     }
 
+    fn text_advance(&mut self, text: &str, ts: &TextStyle) -> f32 {
+        self.engine.advance(text, ts)
+    }
+
     fn text_line_metrics(&mut self, text: &str, ts: &TextStyle) -> LineMetrics {
         self.engine.line_metrics(text, ts)
     }

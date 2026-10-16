@@ -255,6 +255,20 @@ impl TextEngine for CoreTextEngine {
         }
     }
 
+    /// 与 `measure` 单行分支同一次排版（CTLine 的排版宽，含尾随空白），只是不取整。
+    fn advance(&mut self, text: &str, ts: &TextStyle) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let s = self.scale;
+        let font = self.font(ts.family_or_default(), ts.size * s);
+        let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        let plh = ts.line_height_px().map(|h| h * s);
+        let attr = self.attributed(text, &font, &black, Align::Start, plh);
+        let line = unsafe { CTLine::with_attributed_string(&attr) };
+        (line_metrics(&line).0 / s as f64) as f32
+    }
+
     fn measure(&mut self, text: &str, ts: &TextStyle, max_width: Option<f32>) -> Size {
         let size = ts.size;
         if text.is_empty() {
