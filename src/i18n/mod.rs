@@ -989,7 +989,10 @@ other = "{count} files selected"
     }
 
     /// 造一个只属于本测试的临时译文目录（同进程多测试并行，目录必须互不相干）。
-    fn temp_dir(tag: &str) -> PathBuf {
+    ///
+    /// 用例结束（含断言失败的 panic 展开）时删掉：目录名带进程号，下一次运行不会复用，
+    /// 只在开头清理的话每跑一遍测试就在系统临时目录里永久留下一撮。
+    fn temp_dir(tag: &str) -> TempDir {
         let d = std::env::temp_dir().join(format!(
             "windui_i18n_{tag}_{}_{:?}",
             std::process::id(),
@@ -997,7 +1000,28 @@ other = "{count} files selected"
         ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).expect("建临时目录");
-        d
+        TempDir(d)
+    }
+
+    struct TempDir(PathBuf);
+
+    impl std::ops::Deref for TempDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl From<&TempDir> for PathBuf {
+        fn from(d: &TempDir) -> PathBuf {
+            d.0.clone()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
