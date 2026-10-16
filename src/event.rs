@@ -1244,6 +1244,18 @@ impl MenuRequest {
             click_through: true,
         }
     }
+
+    /// 贴着控件弹出：面板左上角贴 `bounds` 左下角，下方放不下时翻到控件**顶边**以上，
+    /// 不遮住控件。按钮弹菜单用它——[`new`](Self::new) 的 `pos` 按指针位置处理，放不下
+    /// 时翻到那个点的另一侧，传控件底边进去就会翻上来盖住控件本身。
+    ///
+    /// 与 [`EventCtx::show_dropdown_menu`](crate::core::EventCtx::show_dropdown_menu) 同一
+    /// 锚定语义，区别是宽度按内容、点外面穿透（可改 `click_through`）。
+    pub fn below(bounds: Rect, items: Vec<MenuItem>) -> Self {
+        let mut req = Self::new(Point::new(bounds.x, bounds.y + bounds.h), items);
+        req.anchor_top = Some(bounds.y);
+        req
+    }
 }
 
 /// 菜单栏交给宿主的联动信息：各标题的位置与项生成器。

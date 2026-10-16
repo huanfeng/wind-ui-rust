@@ -1763,6 +1763,10 @@ let mut req = MenuRequest::new(pos, items);
 req.click_through = false;
 ctx.show_menu_request(req);
 ```
+按钮弹菜单用 `MenuRequest::below(ctx.bounds(), items)`：面板贴按钮左下角，下方放不下时翻到按钮**顶边**
+以上，不遮住按钮。它默认点外面穿透（同右键菜单），按钮菜单通常要再设 `click_through = false`，
+免得点外面那一下顺带触发了别的按钮。别用 `MenuRequest::new` 传按钮底边——`new` 的 `pos` 按指针位置处理，放不下时翻到那个
+点的上方，正好盖住按钮。
 
 菜单项两种动作：`MenuItem::run(label, closure, checked)` 跑闭包；`MenuItem::key(label, key_event, enabled)` 向焦点控件合成按键。
 

@@ -2881,6 +2881,25 @@ impl UiHost {
     /// 逻辑——旧 hover 节点若被新浮层遮住会收到 Leave（清掉残留高亮），指针下的新节点收到
     /// Enter。修正"模态弹出/关闭、切页等在光标静止时改变命中节点导致 hover 卡住"。
     /// 菜单浮层有独立命中逻辑，激活时跳过。
+    /// 菜单收起后按此刻的指针位置（`tooltip.pos`）重判悬停。
+    ///
+    /// 菜单开着时指针事件全归浮层，树上的悬停还停在开菜单之前的节点上——多半就是弹出
+    /// 菜单的那个按钮，不重判它就一直亮着悬停态，直到鼠标再动一下。悬停换了人就重新计时
+    /// 悬停提示（否则 `since_ms` 是很久以前的值，提示在刚收起菜单的地方瞬间弹出）；收起
+    /// 菜单的是一次按下（`kind == Down`）则与普通按下一样抑制提示。动作改了树的话命中
+    /// 用的是旧布局，结构签名一变 `relayout_if_needed` 会再重判一次。
+    fn resync_hover_after_menu(&mut self, kind: Option<PointerKind>) {
+        let old = self.hover;
+        self.resync_hover_after_relayout();
+        if self.hover != old {
+            self.tooltip.since_ms = self.start.elapsed().as_millis() as u64;
+        }
+        if kind == Some(PointerKind::Down) {
+            self.tooltip.suppressed = true;
+        }
+        self.damage.needs_full = true;
+    }
+
     fn resync_hover_after_relayout(&mut self) {
         if self.menu.is_open() {
             return;
@@ -3420,11 +3439,23 @@ impl AppHandler for UiHost {
         // 两次；右键点别处则直接换成那里的菜单。下拉不穿透（见 `MenuRequest::click_through`）。
         let mut closed_by_click_through = false;
         if self.menu.is_open() {
+            // 菜单开着时也记下指针位置：键盘关掉菜单（Escape）时要按它重判悬停。
+            // 菜单开着不画提示，这里改写 `tooltip.pos` 没有定位上的副作用。
+            self.tooltip.pos = ev.pos;
             if self.menu_click_passes_through(ev) {
                 self.close_menu();
+                // 先重判再往下分发：树上的 Move 才重判悬停，而菜单开着期间的 Move 全被
+                // 浮层吃了——不重判的话，这次 Down 落在空白处时弹菜单的按钮一直亮着。
+                self.resync_hover_after_menu(Some(ev.kind));
                 closed_by_click_through = true;
             } else {
-                return self.handle_menu_pointer(ev);
+                let handled = self.handle_menu_pointer(ev);
+                // 点外面 / 点中项把菜单收起了：同上，按此刻位置重判悬停。
+                if !self.menu.is_open() {
+                    self.resync_hover_after_menu(Some(ev.kind));
+                    return true;
+                }
+                return handled;
             }
         }
         // 菜单栏的键盘激活态被任何按下打断（点到栏标题上的那一下照常交给栏控件展开）。
@@ -3610,7 +3641,12 @@ impl AppHandler for UiHost {
         // 菜单激活时由浮层独占键盘：↑↓ 选项、←→ 进出子菜单 / 跨菜单、回车/空格执行、
         // Escape 关闭，其余吞掉（避免打到被遮住的控件上）。
         if self.menu.is_open() {
-            return self.handle_menu_key(ev);
+            let handled = self.handle_menu_key(ev);
+            // Escape / 回车执行项把菜单收起了：按菜单开着期间最后的指针位置重判悬停。
+            if !self.menu.is_open() {
+                self.resync_hover_after_menu(None);
+            }
+            return handled;
         }
         // 菜单栏键盘激活态（F10 / 单击 Alt 之后）：←→ 换标题、↓ 展开、Esc 退出。
         if self.menu.is_armed() {

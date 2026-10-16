@@ -2120,6 +2120,9 @@ impl EventCtx<'_> {
     ///     ctx.show_menu_request(req);
     /// }
     /// ```
+    ///
+    /// 按钮弹菜单用 [`MenuRequest::below`]（不遮住按钮），而不是把按钮底边当 `pos` 传给
+    /// [`MenuRequest::new`]——后者按指针位置处理，放不下时会翻上来盖住按钮。
     pub fn show_menu_request(&mut self, req: MenuRequest) {
         self.out.menu = Some(req);
         self.out.repaint = true;

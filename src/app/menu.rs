@@ -3255,6 +3255,126 @@ mod tests {
         );
     }
 
+    /// 按钮弹出的菜单（`MenuRequest::below`，不穿透）：窗口矮、下方放不下时翻到按钮上方
+    /// 而不盖住按钮；点外面收起后，弹菜单那个按钮的悬停态立即撤掉（悬停移到指针所在处），
+    /// 不用等鼠标再动一下。
+    #[test]
+    fn button_menu_flips_above_and_releases_hover_on_dismiss() {
+        use crate::event::{MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        // 按钮贴窗口底：下方只剩 8px，菜单必须翻上去。
+        let app = App::new("t", 300, 120).content(
+            Element::col()
+                .padding_xy(10, 0)
+                .child(Element::leaf().height(82))
+                .child(
+                    Element::row()
+                        .spacing(10)
+                        .child(Element::button("弹").width(80).height(30).on_click(|ctx| {
+                            let items = vec![
+                                MenuItem::run("一", |_| {}, false),
+                                MenuItem::run("二", |_| {}, false),
+                            ];
+                            let mut req = MenuRequest::below(ctx.bounds(), items);
+                            req.click_through = false;
+                            ctx.show_menu_request(req);
+                        }))
+                        .child(Element::button("别处").width(80).height(30)),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 120).unwrap();
+        h.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(300, 120),
+        );
+        let order = h.tree.focusable_order();
+        let (b1, b2) = (h.tree.abs_bounds(order[0]), h.tree.abs_bounds(order[1]));
+        let at = |r: crate::geometry::Rect| Point::new(r.x + r.w / 2, r.y + r.h / 2);
+        let ev = |k, p| PointerEvent::single(k, p, MouseButton::Left);
+        h.on_pointer(ev(PointerKind::Move, at(b1)));
+        h.on_pointer(ev(PointerKind::Down, at(b1)));
+        h.on_pointer(ev(PointerKind::Up, at(b1)));
+        h.render(
+            &mut PixmapTarget { pixmap: &mut pm },
+            crate::geometry::Size::new(300, 120),
+        );
+        let panel = h.menu.active.as_ref().expect("前提：菜单已弹出").levels[0].rect;
+        assert!(
+            panel.intersect(&b1).is_empty(),
+            "面板 {panel:?} 不得盖住按钮 {b1:?}"
+        );
+        assert_eq!(h.hover, Some(order[0]), "前提：开菜单前悬停在按钮上");
+
+        h.on_pointer(ev(PointerKind::Move, at(b2)));
+        h.on_pointer(ev(PointerKind::Down, at(b2)));
+        assert!(!h.menu.is_open(), "前提：点外面收起了菜单");
+        assert_ne!(h.hover, Some(order[0]), "收起后弹菜单的按钮不得还挂着悬停");
+        assert_eq!(h.hover, Some(order[1]), "悬停应落到指针此刻所在的控件");
+    }
+
+    /// 穿透菜单（`below` 的默认）点空白处收起、Escape 收起：弹菜单的按钮都不得还挂着
+    /// 悬停。穿透那一下会继续往下分发，但树上只有 Move 才重判悬停，而菜单开着期间的
+    /// Move 全被浮层吃了；Escape 走键盘路径，要用菜单开着期间记下的指针位置重判。
+    #[test]
+    fn hover_released_after_click_through_and_escape_dismiss() {
+        use crate::event::{MenuItem, MenuRequest, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 300, 200).content(
+            Element::row()
+                .padding(10)
+                .spacing(10)
+                .child(Element::button("弹").width(80).height(30).on_click(|ctx| {
+                    let items = vec![MenuItem::run("一", |_| {}, false)];
+                    ctx.show_menu_request(MenuRequest::below(ctx.bounds(), items));
+                }))
+                .child(Element::button("别处").width(80).height(30)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        let size = crate::geometry::Size::new(300, 200);
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, size);
+        let order = h.tree.focusable_order();
+        let (b1, b2) = (h.tree.abs_bounds(order[0]), h.tree.abs_bounds(order[1]));
+        let at = |r: crate::geometry::Rect| Point::new(r.x + r.w / 2, r.y + r.h / 2);
+        let ev = |k, p| PointerEvent::single(k, p, MouseButton::Left);
+        let open = |h: &mut crate::app::UiHost, pm: &mut Pixmap| {
+            h.on_pointer(ev(PointerKind::Move, at(b1)));
+            h.on_pointer(ev(PointerKind::Down, at(b1)));
+            h.on_pointer(ev(PointerKind::Up, at(b1)));
+            h.render(&mut PixmapTarget { pixmap: pm }, size);
+            assert!(h.menu.is_open(), "前提：菜单已弹出");
+            assert_eq!(h.hover, Some(order[0]), "前提：悬停在弹菜单的按钮上");
+        };
+
+        // 穿透菜单，点右下角空白处收起。
+        open(&mut h, &mut pm);
+        let blank = Point::new(280, 180);
+        h.on_pointer(ev(PointerKind::Down, blank));
+        assert!(!h.menu.is_open(), "前提：点外面收起了菜单");
+        assert_ne!(h.hover, Some(order[0]), "穿透收起后按钮不得还挂着悬停");
+        h.on_pointer(ev(PointerKind::Up, blank));
+
+        // 菜单开着时指针移到「别处」上，再按 Escape 收起。
+        open(&mut h, &mut pm);
+        h.on_pointer(ev(PointerKind::Move, at(b2)));
+        h.on_key(crate::app::test_support::key_ev()(
+            crate::event::Key::Escape,
+        ));
+        assert!(!h.menu.is_open(), "前提：Escape 收起了菜单");
+        assert_eq!(
+            h.hover,
+            Some(order[1]),
+            "Escape 收起后悬停应落到指针所在的控件"
+        );
+    }
+
     /// 下拉不穿透：展开后点别处只是放弃选择，那一下不该点中别的控件（Up 也吞掉）。
     #[test]
     fn dropdown_click_outside_only_dismisses() {
