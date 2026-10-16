@@ -674,6 +674,12 @@ Element::link("禁用").url("...").disabled(true)        // 核心级禁用：�
 ```
 - **链接色 + 下划线**文本，hover/press 三态（取主题 `link` 覆盖层，回退 accent 家族），点击或回车/空格激活。
 - **悬停手型光标**：链接 `Widget::cursor()` 返回 `CursorShape::Hand`；文本输入返回 `Text`（I 形）。宿主取当前悬停控件的形状交平台应答（win32 `WM_SETCURSOR`），**禁用节点统一回退箭头**。
+- **任意元素指定光标**：`.cursor(CursorShape::Hand)`，适用于任意控件/容器，不改变命中。按钮默认是箭头
+  （Win32 / WinUI / macOS 原生按钮都如此，手型是网页惯例），要网页手感就 `Element::button("保存").cursor(CursorShape::Hand)`。
+  回溯规则：沿命中节点往上，每级先看 `.cursor()`、再看控件自己声明的——子控件自己的形状（输入框的 I 形）
+  先于祖先的覆盖；`.cursor(CursorShape::Arrow)` 可压掉 `clickable()` 祖先给的手型。
+  形状有 `Arrow / Hand / Text / SizeWE / SizeNS / SizeAll`；`SizeAll`（四向，CSS `move`）给浮动面板
+  的标题条这类「按住整块拖走」的区域，macOS 没有公开的四向箭头，用张开的手代替。
 - **`.url()` / `.underline()` 是 link 专属**修饰符（误用检测同 text_input）；打开 URL 经 `EventCtx::open_url` → 平台 `ShellExecute`，控件层不碰平台。
 
 ### 可点击容器（卡片 / 自定义行）
@@ -1461,7 +1467,11 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
   （按钮 / 粘滞菜单换字族、输入法组合串、字体查询；`-- gpu` 走 GPU 后端）。
 - `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
 - `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
-- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
+- 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / `tooltip` / `scrollbar` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
+  - `scrollbar.thumb` / `thumb_active`：滚动条滑块常态 / 拖动态色，回退 `palette.border` / `text_muted`。
+    单开一槽是为了只改滑块时不连带改掉输入框描边、`Role::Border`、窗口外框这些同样取 `border` 的东西。
+  - `tooltip.border` / `border_width`：提示浮层描边，默认不描；宽度默认 `{ px = 1 }`（1 物理像素——1 逻辑
+    像素在 125% 下会被抗锯齿摊成两行灰边）。浅色提示浮在浅色界面上时靠它看出是个浮层。
 
 其中 `form`（[表单脚手架](#表单脚手架)的行高、标签列宽、间距、标签字号字重、副标题字号）
 与 `card`（卡片圆角、内边距、标题字号）承载的是**尺寸**而非颜色。这些量刻意不进构造器签名：
@@ -1805,6 +1815,32 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
   **窗口每次从隐藏态被唤起时重新兑现一次**（托盘点击 / 全局热键 / `WindowOp::Show`）：
   唤起是一段新交互的开始，查询框该重新拿到焦点、上次的词该重新被全选。已经可见时再按
   热键不算唤起，故不会每按一次就把界面重置一遍。
+- `.focus_when(trigger)` / `.focus_select_all_when(trigger)`（`trigger: Signal<u64>`）：**定向送焦点**，
+  计数的值每变一次就把焦点交给该元素（夺取已有焦点），`_select_all` 额外全选。给**常驻**输入框用——
+  它的 `autofocus` 开机时就用掉了，`ctx.request_focus()` 只能聚焦自己，而应用拿不到框架控件的 `NodeId`：
+
+  ```rust
+  let focus_title = signal(0u64);
+  Element::text_input(title, "标题").focus_select_all_when(focus_title)
+  // 「新建」按钮里：
+  focus_title.update(|n| *n += 1);
+  ```
+
+  用计数器而非布尔：布尔为真期间用户自己点了别处，框不该再把焦点抢回来；下一次新建又要能再触发。
+  初值不触发；元素此刻不在焦点环里（隐藏、禁用、被对话框遮住）时，等它进环那一帧再兑现。同一次点击里
+  既加计数、又让输入框所在子树重建（`host_signal` 之类）也照样生效——已兑现到的值按信号记在树上，新节点沿用；
+  同理，节点被整个移除期间计数变了，它重建并进入焦点环时会兑现这次触发。
+- `ctx.release_focus()`：**交出焦点**（网页的 `input.blur()`），焦点在本节点或其子孙上时清空，否则什么都
+  不做。典型用法是提交后失焦——数字框按回车提交，插入符还在里面闪，用户会以为没提交：
+
+  ```rust
+  Element::text_input(qty, "").on_commit(|ctx| ctx.release_focus())
+  ```
+
+  事件回调与 `on_update` 里都能调；同一轮里别处又要了焦点时那边胜出；App 级回调里调（节点是根）等于整窗失焦。
+  事件回调里交出时，失去焦点的控件照常收到失焦通知——祖先替子树交出焦点，子孙输入框里没提交的编辑也会提交；
+  输入框自己在提交回调里交出不会提交两遍（Enter 与失焦共用一个出口）。`on_update` 里交出则不通知失焦，
+  与那个相位里转移焦点同理。
 - `App::on_show(|ctx| ..)`：每次唤起时做点别的（刷新数据、清掉上次结果），触发条件同上。
   三个唤起入口里只有「控件请求」经过宿主，托盘与热键都由平台层直接执行，故这条通知由
   平台发起——应用自己推不出来。
@@ -2321,9 +2357,15 @@ let dot = Element::leaf().widget(Dot { on: state });
 **何时还需要 `ctx.mark_dirty()`**：只有当控件改的是**自身持有的非信号状态**（hover/press
 标志、拖动偏移等）时才需要显式请求重绘。改 `Signal` 一律自动触发。
 
-**`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
+**`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/release_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
 
-**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`draw_text`、`measure_text`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
+**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
+
+**自绘排版要用 `text_advance`，不要用 `measure_text().w`**：后者是向上取整的整数，每个字符串最多多出
+1 逻辑像素，逐字建宽度表时误差按一行字数累积，折行、光标、点击落位整体偏移。`text_advance` 返回
+单行宽度（逻辑单位、含尾随空白、不取整），与本画布绘制同一次排版；物理宽 = 它 × `dpi_scale()`。`text` 不应含
+换行。建表与画字用同一个画布——Windows D2D 后端按逻辑字号排版，与文字引擎上的同名方法 `TextEngine::advance`
+（按物理字号排版）可差零点几像素。
 
 **持续动画**：在 `paint` 中调用 `windui::anim::request_repaint()` 即请求下一帧；框架会按显示器刷新率（≤60fps）驱动，停止请求即回到零 CPU 空闲。
 

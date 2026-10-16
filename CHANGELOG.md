@@ -7,6 +7,20 @@
 
 ### 新增
 
+- **浮点文字测量 `Canvas::text_advance` / `TextEngine::advance`**：单行宽度（逻辑单位、含尾随空白、不取整），
+  与绘制同一次排版。`measure_text` 的整数宽逐字累加会漂，自绘排版建字宽表用这个。DirectWrite / Core Text /
+  Linux 三个引擎与 D2D / GPU / 软件三个画布都已覆盖，附跨引擎契约测试。
+- **`EventCtx::release_focus`**：控件交出自己的焦点（网页的 `blur()`），典型用法是 `on_commit` 里提交后失焦。
+  事件回调与 `on_update` 里都能调；事件回调里交出时失焦通知照发（输入框不会因此提交两遍），`on_update` 里不发。
+- **`Element::focus_when` / `focus_select_all_when`**：计数信号的值每变一次，把焦点送进该元素（可选全选）。
+  给常驻输入框用——它的 `autofocus` 开机时就用掉了。隐藏期间触发的等它显示那一帧兑现；同一次点击里重建了
+  输入框也照样生效。
+- **`Element::cursor(CursorShape)`**：任意元素指定悬停光标，不改变命中；`Arrow` 可压掉祖先给的手型，子控件
+  自己的形状仍优先。框架按钮仍默认箭头（与原生一致），要网页手感自己挂 `Hand`。
+- **`CursorShape::SizeAll`**：四向移动光标（CSS `move`），给浮动面板标题条。Windows `IDC_SIZEALL`、X11
+  `XC_fleur`、Wayland `move`；macOS 没有公开的四向箭头，用张开的手。
+- **主题槽 `Theme::scrollbar`（`thumb` / `thumb_active`）与 `TooltipTheme::border` / `border_width`**：滚动条
+  滑块色不必再借 `palette.border`（改它会连带改掉输入框描边等）；提示浮层可描边，默认不描、宽度默认 1 物理像素。
 - **`MenuRequest::new` + `EventCtx::show_menu_request`**：按完整请求弹出菜单，覆盖便捷方法给不到的组合。
   典型用法是把 `click_through` 设为 `false`：右键菜单开着时点别处只收起、不触发底下的控件。
 
