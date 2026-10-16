@@ -34,6 +34,7 @@ fn theme_names(l: Look) -> &'static [&'static str] {
         Look::Shape(CursorShape::Text) => &["text", "xterm"],
         Look::Shape(CursorShape::SizeWE) => &["ew-resize", "sb_h_double_arrow", "h_double_arrow"],
         Look::Shape(CursorShape::SizeNS) => &["ns-resize", "sb_v_double_arrow", "v_double_arrow"],
+        Look::Shape(CursorShape::SizeAll) => &["move", "fleur", "size_all"],
         Look::Resize(0) => &["nw-resize", "top_left_corner"],
         Look::Resize(1) => &["n-resize", "top_side"],
         Look::Resize(2) => &["ne-resize", "top_right_corner"],
@@ -53,6 +54,7 @@ fn protocol_shape(l: Look) -> wp_cursor_shape_device_v1::Shape {
         Look::Shape(CursorShape::Text) => Shape::Text,
         Look::Shape(CursorShape::SizeWE) => Shape::EwResize,
         Look::Shape(CursorShape::SizeNS) => Shape::NsResize,
+        Look::Shape(CursorShape::SizeAll) => Shape::Move,
         Look::Resize(0) => Shape::NwResize,
         Look::Resize(1) => Shape::NResize,
         Look::Resize(2) => Shape::NeResize,
@@ -211,6 +213,7 @@ mod tests {
             CursorShape::Text,
             CursorShape::SizeWE,
             CursorShape::SizeNS,
+            CursorShape::SizeAll,
         ]
         .map(Look::Shape);
         for s in shapes.into_iter().chain((0..8).map(Look::Resize)) {

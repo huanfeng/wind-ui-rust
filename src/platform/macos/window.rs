@@ -2052,6 +2052,8 @@ impl ContentView {
             crate::event::CursorShape::Text => NSCursor::IBeamCursor(),
             crate::event::CursorShape::SizeWE => NSCursor::resizeLeftRightCursor(),
             crate::event::CursorShape::SizeNS => NSCursor::resizeUpDownCursor(),
+            // 四向箭头只有 macOS 15+ 的新 API 才有；张开的手是 AppKit 里「可拖动」的惯用形状。
+            crate::event::CursorShape::SizeAll => NSCursor::openHandCursor(),
             crate::event::CursorShape::Arrow => NSCursor::arrowCursor(),
         };
         cursor.set();

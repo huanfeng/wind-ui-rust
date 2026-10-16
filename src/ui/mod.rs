@@ -709,6 +709,7 @@ pub struct Element {
     enabled: Option<Signal<bool>>,
     en_cond: Option<Box<dyn Fn() -> bool>>,
     tooltip: Option<String>,
+    cursor: Option<crate::event::CursorShape>,
     /// 注册为响应式节点：build 后自动调用 `Tree::register_reactive`，
     /// 框架在每次 layout 前向其 widget 调用 `on_update`。
     reactive: bool,
@@ -750,6 +751,7 @@ impl Element {
             enabled: None,
             en_cond: None,
             tooltip: None,
+            cursor: None,
             reactive: false,
             overlay: None,
         }
@@ -1395,6 +1397,18 @@ impl Element {
     /// 别把整份清单塞进来。
     pub fn tooltip(mut self, text: impl Into<String>) -> Self {
         self.tooltip = Some(text.into());
+        self
+    }
+
+    /// 悬停在本元素（及其内部未自行声明光标的子控件）上时的鼠标光标形状。
+    /// **适用于任意控件/容器**，不改变命中测试。
+    ///
+    /// 框架自带的按钮悬停是箭头——Win32 / WinUI / macOS 原生按钮都是如此，手型是网页的
+    /// 惯例。想要网页手感时自己挂上：`Element::button("保存").cursor(CursorShape::Hand)`。
+    /// 设成 `Arrow` 可压掉祖先（如 `clickable()` 卡片）给的手型；子控件自己声明的形状
+    /// （输入框的 I 形）仍然优先。禁用时恒为箭头。
+    pub fn cursor(mut self, shape: crate::event::CursorShape) -> Self {
+        self.cursor = Some(shape);
         self
     }
 
@@ -4429,6 +4443,7 @@ impl Element {
             autofocus_done: false,
             focusable: self.focusable,
             tooltip: self.tooltip,
+            cursor: self.cursor,
             focused: false,
             clip_children: self.clip_children,
             scroll_y: 0,

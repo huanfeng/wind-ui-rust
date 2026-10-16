@@ -186,7 +186,7 @@ struct X11 {
     /// 的角没人混合会成黑块，此时退回方角（像素 alpha 全 255，不重建窗口也能正常显示）。
     composited: bool,
     scale: f32,
-    /// 前 5 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
+    /// 前 6 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
     cursors: [xproto::Cursor; CURSOR_COUNT],
     keymap: Keymap,
     windows: Vec<Win>,
@@ -1827,6 +1827,7 @@ fn cursor_index(s: CursorShape) -> usize {
         CursorShape::Text => 2,
         CursorShape::SizeWE => 3,
         CursorShape::SizeNS => 4,
+        CursorShape::SizeAll => 5,
     }
 }
 
@@ -1925,20 +1926,23 @@ fn argb_visual(conn: &RustConnection, screen_num: usize) -> Option<ArgbVisual> {
 }
 
 /// `cursors` 里缩放边光标的起始下标与总数。
-const RESIZE_CURSOR_BASE: usize = 5;
+const RESIZE_CURSOR_BASE: usize = 6;
 const CURSOR_COUNT: usize = RESIZE_CURSOR_BASE + 8;
+
+/// `cursor` 字体里的字形号，下标即 `cursors` 的下标（排列见 `create_cursors` 的注释）。
+const CURSOR_GLYPHS: [u16; CURSOR_COUNT] =
+    [68, 60, 152, 108, 116, 52, 134, 138, 136, 96, 14, 16, 12, 70];
 
 /// 核心协议的 `cursor` 字体光标（不依赖 Xcursor 主题，所有 X 服务器都有）。
 fn create_cursors(conn: &RustConnection) -> Option<[xproto::Cursor; CURSOR_COUNT]> {
     let font = conn.generate_id().ok()?;
     conn.open_font(font, b"cursor").ok()?;
-    // XC_left_ptr, XC_hand2, XC_xterm, XC_sb_h_double_arrow, XC_sb_v_double_arrow，
+    // XC_left_ptr, XC_hand2, XC_xterm, XC_sb_h_double_arrow, XC_sb_v_double_arrow, XC_fleur，
     // 然后按方向码 0..8（左上起顺时针）：XC_top_left_corner, XC_top_side,
     // XC_top_right_corner, XC_right_side, XC_bottom_right_corner, XC_bottom_side,
     // XC_bottom_left_corner, XC_left_side——与 WM 画缩放边时用的是同一组。
-    let glyphs = [68u16, 60, 152, 108, 116, 134, 138, 136, 96, 14, 16, 12, 70];
     let mut out = [0u32; CURSOR_COUNT];
-    for (i, g) in glyphs.iter().enumerate() {
+    for (i, g) in CURSOR_GLYPHS.iter().enumerate() {
         let c = conn.generate_id().ok()?;
         conn.create_glyph_cursor(c, font, font, *g, g + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff)
             .ok()?;
@@ -2002,6 +2006,31 @@ fn wm_class() -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 字形表靠下标对位，插一档就整体错位且编译不报错：逐形状锁住 X11 cursorfont.h 的字形号。
+    #[test]
+    fn cursor_shapes_map_to_their_cursorfont_glyphs() {
+        let expect = [
+            (CursorShape::Arrow, 68),   // XC_left_ptr
+            (CursorShape::Hand, 60),    // XC_hand2
+            (CursorShape::Text, 152),   // XC_xterm
+            (CursorShape::SizeWE, 108), // XC_sb_h_double_arrow
+            (CursorShape::SizeNS, 116), // XC_sb_v_double_arrow
+            (CursorShape::SizeAll, 52), // XC_fleur
+        ];
+        for (shape, glyph) in expect {
+            assert_eq!(CURSOR_GLYPHS[cursor_index(shape)], glyph, "{shape:?}");
+        }
+        assert_eq!(
+            CURSOR_GLYPHS[RESIZE_CURSOR_BASE], 134,
+            "缩放边从 XC_top_left_corner 起"
+        );
+        assert_eq!(
+            CURSOR_GLYPHS[RESIZE_CURSOR_BASE + 7],
+            70,
+            "XC_left_side 收尾"
+        );
+    }
 
     #[test]
     fn xft_dpi_is_parsed_from_resource_string() {

@@ -486,6 +486,9 @@ pub struct Node {
     /// 悬停提示文本（None=无）。宿主在悬停延时后于指针附近绘制浮层；
     /// 像 `enabled`/`window_drag` 一样挂在节点上，适用于任意控件/容器。
     pub tooltip: Option<String>,
+    /// 光标形状覆盖（`Element::cursor`）。`None` 按控件自己的 [`Widget::cursor`]；
+    /// 见 [`Tree::cursor_at`] 的取值顺序。
+    pub cursor: Option<CursorShape>,
     /// 当前是否持有键盘焦点（由 UiHost 维护，核心层据此绘制焦点环）。
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
@@ -2308,9 +2311,16 @@ impl Tree {
     /// 否则继承最近祖先的非默认光标（如 `clickable()` 卡片的 `Hand`）。这样悬停在卡片内的
     /// label/图标等子控件上也显示手型，而非只有落在容器 padding 间隙时才手型。
     /// 禁用回退由宿主在查询前进行处理（见 `App` 的 `cursor()`）：命中节点启用则其祖先必启用。
+    ///
+    /// 每一级先看节点上的显式覆盖（`Element::cursor`），再看控件自己声明的。显式覆盖成
+    /// `Arrow` 同样算数并就此停下——用来压掉祖先给的手型；而子控件自己声明的形状（输入框
+    /// 的 `Text`）仍先于祖先的覆盖，因为回溯是从命中节点往上走的。
     pub fn cursor_at(&self, id: NodeId) -> CursorShape {
         for nid in self.ancestor_chain(id) {
             if let Some(n) = self.get(nid) {
+                if let Some(c) = n.cursor {
+                    return c;
+                }
                 let c = n.widget.cursor();
                 if c != CursorShape::Arrow {
                     return c;
@@ -4187,6 +4197,69 @@ mod tests {
             tree.cursor_at(hit),
             CursorShape::Hand,
             "悬停在 clickable 卡片内的子控件上应显示手型"
+        );
+    }
+
+    /// `Element::cursor` 覆盖：按钮挂手型生效；挂在容器上，内部 label 继承、输入框仍是
+    /// I 形；子节点显式挂 `Arrow` 能压掉 clickable 祖先给的手型。
+    #[test]
+    fn explicit_cursor_overrides_in_ancestor_walk() {
+        let s = crate::signal::signal(String::new());
+        let tree = layout(
+            Element::col()
+                .width(200)
+                .height(120)
+                .child(
+                    Element::button("保存")
+                        .width(80)
+                        .height(30)
+                        .cursor(CursorShape::Hand),
+                )
+                .child(
+                    Element::col()
+                        .width(200)
+                        .height(60)
+                        .cursor(CursorShape::SizeAll)
+                        .child(Element::label("标题").width(60).height(20))
+                        .child(Element::text_input(s, "").width(100).height(30)),
+                )
+                .child(
+                    Element::row()
+                        .width(200)
+                        .height(30)
+                        .clickable()
+                        .child(
+                            Element::label("箭头")
+                                .width(60)
+                                .height(20)
+                                .cursor(CursorShape::Arrow),
+                        )
+                        .child(Element::label("手型").width(60).height(20)),
+                ),
+            200,
+            120,
+        );
+        let at = |x, y| tree.cursor_at(tree.hit_test(Point::new(x, y)).expect("应命中"));
+        assert_eq!(at(10, 10), CursorShape::Hand, "按钮挂了手型");
+        assert_eq!(
+            at(10, 35),
+            CursorShape::SizeAll,
+            "容器内 label 继承容器的覆盖"
+        );
+        assert_eq!(
+            at(10, 65),
+            CursorShape::Text,
+            "输入框自己的 I 形先于祖先覆盖"
+        );
+        assert_eq!(
+            at(10, 95),
+            CursorShape::Arrow,
+            "显式 Arrow 压掉 clickable 的手型"
+        );
+        assert_eq!(
+            at(70, 95),
+            CursorShape::Hand,
+            "对照：同一行未覆盖的 label 仍继承手型"
         );
     }
 
