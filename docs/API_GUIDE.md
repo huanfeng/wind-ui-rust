@@ -2415,6 +2415,13 @@ macOS 走 `set_preedit`（给整串，控件**画出来**）。控件两个都�
 绘制惯例：合成串带下划线，选中分句那段加粗；光标画在 `caret` 处且恒实心不闪烁。
 可参考 `TextInput` 的实现与 `docs/ime-preedit-design.md`。
 
+**覆盖 `ime_caret`**：返回控件内光标的位置与行高（逻辑坐标、相对节点左上角），平台据此定位
+合成窗与候选窗。它同时是 `accepts_ime()` 的默认判据——**焦点控件不接受输入法（按钮、列表、无焦点）
+或是密码框（`ime_hints().password`）时，Windows 上窗口摘掉输入法上下文**，免得中文输入法在按钮上
+打出无处可去的组合串、在密码框里联想记忆。所以自绘文本控件要么覆盖 `ime_caret`，要么在没有光标
+可报时覆盖 `fn accepts_ime(&self) -> bool { true }`（候选窗退回输入法自己的默认位置）；两者都不做的
+话在 Windows 上收不到输入法输入。只读文本框覆盖为 `false`。组合中焦点换到别的控件时，这次组合被取消。
+
 ### 9.2 测试收 `EventCtx` 的回调
 
 `EventCtx` 由宿主在真实分发路径上借出，字段私有、你造不出来。要在单元测试里跑一段收 ctx 的回调（菜单动作、`App::channel` 的 on_message、`Widget::on_event`），用 `windui::testing`：
