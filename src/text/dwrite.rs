@@ -851,7 +851,7 @@ impl TextEngine for DWriteEngine {
         let ph = pixmap.height() as i32;
         // 文本完整物理宽度——单行横向超长时可远超 pixmap 宽。
         let mw = m.width.ceil().max(1.0) as i32;
-        let th = (m.height.ceil().max(1.0) as i32).min(ph);
+        let full_th = m.height.ceil().max(1.0) as i32;
 
         // 文本原点 X（pixmap 物理坐标）：按对齐用**完整**文本宽度推算，
         // 故横向滚动后 prect.x 为负、或文本宽超窗口时定位仍正确。
@@ -875,6 +875,22 @@ impl TextEngine for DWriteEngine {
         }
         let tw = vis1 - vis0; // 可见宽度（恒 <= pixmap 宽）
         let glyph_dx = (text_x0 - vis0) as f32; // 字形横向偏移：滚动右移时为负
+
+        // 竖直同理：文本块顶按**完整**高度居中，再只为可见行分配位图。不能先把高度钳到
+        // pixmap 高再居中——局部重绘的子 pixmap 只有脏区那么高，钳过的高度会让同一行字在
+        // 局部帧里比整窗帧低 `(全高 − 子图高) / 2`（行距大、脏区只罩住光标那一小条时）。
+        let text_y0 = prect.y + (prect.h - full_th).max(0) / 2;
+        let mut visy0 = text_y0.max(0);
+        let mut visy1 = (text_y0 + full_th).min(ph);
+        if let Some(c) = pclip {
+            visy0 = visy0.max(c.y);
+            visy1 = visy1.min(c.y + c.h);
+        }
+        if visy1 <= visy0 {
+            return;
+        }
+        let th = visy1 - visy0;
+        let glyph_dy = (text_y0 - visy0) as f32; // 字形纵向偏移：块顶在可见区之上时为负
 
         // 复用的离屏位图渲染目标（按需扩容）；失败则跳过该文字。
         let Some(brt) = self.ensure_bitmap(tw, th) else {
@@ -906,7 +922,7 @@ impl TextEngine for DWriteEngine {
 
         // 文字位图在 pixmap 中的目标位置（物理坐标）：可见切片起点。
         let ox = vis0;
-        let oy = prect.y + (prect.h - th).max(0) / 2;
+        let oy = visy0;
 
         // 1. 把背景从 pixmap 拷入位图（BGRA），DirectWrite 将在其上抗锯齿混合。
         //    不透明处拷真背景（gamma 由 DirectWrite 自己正确处理）；非不透明处拷探针色，
@@ -947,7 +963,7 @@ impl TextEngine for DWriteEngine {
                     Some(&ctx as *const _ as *const c_void),
                     &self.renderer,
                     glyph_dx,
-                    0.0,
+                    glyph_dy,
                 )
                 .ok()
         };
@@ -1896,5 +1912,73 @@ mod default_family_cache_tests {
         assert_eq!(e.measure_cache.len(), m + 1, "测量缓存应是新键");
         assert_eq!(e.metrics_cache.len(), l + 1, "基线缓存应是新键");
         assert_ne!(a.w, b.w, "换到等宽字体后窄字母串应变宽");
+    }
+}
+
+/// 局部重绘的子画布只有脏区那么高，常常比一行文字的排版块还矮（行距大、脏区只罩住
+/// 光标那一小条）。同一行字画进这样的子画布，必须与整窗帧对应的那几行逐像素相同。
+///
+/// ★ 回归：曾先把排版高度钳到画布高再居中，子画布越矮，字在里面落得越低。
+#[cfg(test)]
+mod short_subpixmap_tests {
+    use super::{Color, DWriteEngine, Rect};
+    use crate::spec::Align;
+    use crate::text::{TextEngine, TextStyle};
+    use tiny_skia::Pixmap;
+
+    #[test]
+    fn text_in_short_subpixmap_matches_full_frame() {
+        let line = Rect::new(10, 4, 180, 56);
+        let ts = TextStyle {
+            line_height: Some(3.0),
+            ..TextStyle::new(14.0)
+        };
+        let white = tiny_skia::Color::WHITE;
+        for scale in [1.0f32, 1.25] {
+            let (w, h) = ((200.0 * scale) as u32, (80.0 * scale) as u32);
+            let mut eng = DWriteEngine::new();
+            eng.set_scale(scale);
+            let mut full = Pixmap::new(w, h).unwrap();
+            full.fill(white);
+            eng.draw(
+                &mut full,
+                "AyHg",
+                line,
+                Color::BLACK,
+                Align::Start,
+                &ts,
+                None,
+            );
+            // 子画布 = 世界坐标 y ∈ [36, 48) 那一条（× scale 为整数，同局部帧的对齐网格）。
+            let (oy, sub_h) = (36, 12);
+            let poy = (oy as f32 * scale) as u32;
+            let mut sub = Pixmap::new(w, (sub_h as f32 * scale) as u32).unwrap();
+            sub.fill(white);
+            eng.draw(
+                &mut sub,
+                "AyHg",
+                line.offset(0, -oy),
+                Color::BLACK,
+                Align::Start,
+                &ts,
+                None,
+            );
+            let sub_rows = poy..poy + sub.height();
+            assert!(
+                sub_rows
+                    .clone()
+                    .any(|y| (0..w).any(|x| full.pixel(x, y).unwrap().red() < 128)),
+                "前提：整窗帧的这一条里有字形（scale={scale}）"
+            );
+            for y in 0..sub.height() {
+                for x in 0..w {
+                    assert_eq!(
+                        sub.pixel(x, y),
+                        full.pixel(x, y + poy),
+                        "scale={scale} 子画布 ({x},{y}) 与整窗帧不同"
+                    );
+                }
+            }
+        }
     }
 }
