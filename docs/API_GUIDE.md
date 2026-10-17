@@ -2407,12 +2407,20 @@ fn ime_hints(&self) -> ImeHints { /* 可选：多行 / 密码，平台据此给�
 日文分节转换用）。索引单位一律是**字符**，平台层已把 UTF-16 码元换算掉。
 
 **为什么控件得自己画**：macOS 的 `NSTextInputClient` 把绘制 marked text 的责任完全交给
-客户端，系统绝不代画；Windows 的 IMM32 则是系统 IME 自己画。所以两平台走的是两条互斥的
-SPI——win32 走 `set_composing`（只给一个布尔，控件据此**藏起**自绘光标消除双光标），
-macOS 走 `set_preedit`（给整串，控件**画出来**）。控件两个都覆盖即可，框架保证只调其中一条；
+客户端，系统绝不代画；Windows 的 IMM32 则默认是系统 IME 自己画。所以走的是两条互斥的
+SPI——win32 默认走 `set_composing`（只给一个布尔，控件据此**藏起**自绘光标消除双光标），
+macOS / Linux 走 `set_preedit`（给整串，控件**画出来**）。控件两个都覆盖即可，框架保证只调其中一条；
 两边都自绘会在 Windows 上出现双份合成串。
 
-绘制惯例：合成串带下划线，选中分句那段加粗；光标画在 `caret` 处且恒实心不闪烁。
+**Windows 内联组合串（可选）**：`App::ime_inline(true)` 让 win32 也走 `set_preedit`——请输入法别画
+组合窗，组合串由控件画（跟随控件字体、颜色与主题，深色主题下不再是白底浮层），候选窗仍由输入法画。
+默认关闭：个别输入法不理会这个请求，会出现两份组合串。开启后，经 TSF 的输入法在设置里配置的
+下划线线型（点线、实线、虚线、波浪线）、粗细与颜色会照着画，见下面的 `Preedit::spans`。
+
+绘制惯例：合成串带下划线，选中分句那段加粗；光标画在 `caret` 处且恒实心不闪烁。`Preedit::spans`
+非空时（输入法指定了逐段样式，`PreeditSpan`：`underline: UnderlineStyle`、`bold`、`line` / `fg` / `bg`
+三种颜色，`None` 回退默认）按它画，此时 `sel` 不再决定粗细，没被覆盖的字不加修饰；目前只有 win32 内联
+模式会给，读不到时为空。
 可参考 `TextInput` 的实现与 `docs/ime-preedit-design.md`。
 
 **覆盖 `ime_caret`**：返回控件内光标的位置与行高（逻辑坐标、相对节点左上角），平台据此定位
