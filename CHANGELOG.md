@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-17
+
 ### 新增
 
 - **`App::ime_inline`：Windows 内联组合串（可选，默认关）**。请输入法别画组合窗，组合串由输入框自己画在框里
@@ -40,9 +42,17 @@
 - **`MenuRequest::new` + `EventCtx::show_menu_request`**：按完整请求弹出菜单，覆盖便捷方法给不到的组合。
   典型用法是把 `click_through` 设为 `false`：右键菜单开着时点别处只收起、不触发底下的控件。
   按钮弹菜单用 `MenuRequest::below(控件矩形, 项)`：下方放不下时翻到控件顶边以上，不遮住控件。
+- **`Element::menu_bar_tracked`**：同 `menu_bar`，并把菜单栏是否被激活（单击 Alt / F10 待命、Alt+助记键或点击
+  展开）同步进一个 `Signal<bool>`。给平时把菜单栏让给别的内容、需要时才露出来的紧凑标题栏用。
+- **`MenuItem::icon_image`**：菜单项用位图作图标（单色模板，只取 alpha），按本项文字色着色，禁用变灰、悬停随强调色；
+  与字形图标同占图标列。
+- **`SegmentTheme::pill_inset`**：分段控件选中段与外框的留白（默认 2，行为不变）。设为 0 时贴边铺满，只有两端的段
+  带圆角并与外框吻合。
 
 ### 变更
 
+- **`Preedit` 新增公开字段 `spans`**：用结构体字面量构造 `Preedit` 的代码需补上 `spans: Vec::new()`（或
+  `..Default::default()`）。
 - **Windows：焦点不接受输入法时关闭输入法**。新增 `Widget::accepts_ime`（默认 = 报了光标 `ime_caret`）；焦点
   控件不接受（按钮、列表、无焦点、只读文本框）或是密码框时，窗口摘掉输入法上下文，回到普通文本框再挂回——
   此前中文输入法在按钮上照样能打出无处可去的组合串，密码框会被联想记忆，只读框能组完一串才被吞。
@@ -78,6 +88,8 @@
 - **菜单收起后弹出它的按钮仍亮着悬停态**：菜单开着时指针事件全归浮层，树上的悬停停在开菜单前的
   节点上；点外面（穿透与否）/ 点中项 / Escape 收起菜单后，现在按当下指针位置重判一次悬停，不再等
   鼠标再动一下，悬停提示也随之重新计时。
+- **自绘标题栏右键要点两次才出菜单**：菜单打开时原先不请求重绘，靠紧随的抬起 / 移动事件顺带出帧；标题栏的右键是
+  平台合成的单个按下，之后没有客户区事件，菜单开了却不上屏。现在打开菜单时整窗重画。
 - 测试卫生：i18n 测试的临时目录在用例结束时删除，不再每跑一遍就在系统临时目录里留下一撮。
 
 ## [0.23.0] - 2026-10-12
@@ -2786,7 +2798,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.20.0...v0.21.0
