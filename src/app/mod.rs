@@ -1167,6 +1167,7 @@ impl App {
                 position: None,
                 skip_taskbar: false,
                 window_outline: Default::default(),
+                ime_interrupt: Default::default(),
             },
             render: None,
             content: None,
@@ -1285,6 +1286,13 @@ impl App {
     pub fn min_size(mut self, w: i32, h: i32) -> Self {
         self.cfg.min_width = w;
         self.cfg.min_height = h;
+        self
+    }
+
+    /// 输入法组合中按下鼠标时未上屏的串怎么处理，见 [`ImeInterrupt`](crate::platform::ImeInterrupt)。
+    /// 默认 `Commit`：先上屏到原位置再处理点击。应用级设置，子窗沿用。
+    pub fn ime_interrupt(mut self, p: crate::platform::ImeInterrupt) -> Self {
+        self.cfg.ime_interrupt = p;
         self
     }
 

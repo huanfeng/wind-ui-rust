@@ -653,6 +653,28 @@ pub struct WindowConfig {
     pub skip_taskbar: bool,
     /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
     pub window_outline: WindowOutline,
+    /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
+    pub ime_interrupt: ImeInterrupt,
+}
+
+/// 输入法组合中（拼音还没选词）在窗口里按下鼠标时，未上屏的串怎么办（`App::ime_interrupt`）。
+///
+/// 各家输入法自己的做法不一：微软拼音把编码原样上屏，有的输入法让组合跟着新光标走，有的直接
+/// 取消。框架默认替它们统一成 [`Commit`](Self::Commit)，与 Chrome / Firefox 一致。
+///
+/// 目前只在 Windows 生效。按下鼠标之外的焦点转移（程序里移走焦点）一律取消组合——上屏的字没有
+/// 可靠的落点。少数输入法（微软拼音）在框架收到点击之前就已自己上屏，`Cancel` / `Ime` 对它们
+/// 不起作用。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ImeInterrupt {
+    /// 先让输入法把当前的串上屏到原来的位置，再处理这次点击。
+    #[default]
+    Commit,
+    /// 丢掉未上屏的串，再处理这次点击。
+    Cancel,
+    /// 框架不干预，由输入法自己决定（上屏、取消，或让组合跟着新光标走）。点到别的控件上
+    /// 致使焦点换人时，仍取消这次组合。
+    Ime,
 }
 
 /// 无边框窗口自画 1px 外框的取色策略（`App::window_outline` / `Window::window_outline`）。
@@ -707,6 +729,7 @@ impl Default for WindowConfig {
             position: None,
             skip_taskbar: false,
             window_outline: WindowOutline::Auto,
+            ime_interrupt: ImeInterrupt::Commit,
         }
     }
 }

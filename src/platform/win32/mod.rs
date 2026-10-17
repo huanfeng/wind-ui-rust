@@ -38,9 +38,11 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::Ime::{
-    ImmAssociateContextEx, ImmGetContext, ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow,
-    ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE,
-    CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, HIMC, IACE_DEFAULT, NI_COMPOSITIONSTR,
+    ImmAssociateContextEx, ImmGetCompositionStringW, ImmGetContext, ImmNotifyIME,
+    ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL,
+    CPS_COMPLETE, GCS_RESULTCLAUSE, GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR, GCS_RESULTSTR, HIMC,
+    IACE_DEFAULT, NI_COMPOSITIONSTR, NOTIFY_IME_INDEX,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetActiveWindow, SetCapture,
@@ -271,6 +273,10 @@ thread_local! {
     /// 而这一位问的是"窗口空了要不要退出"。放 thread_local 而不是 `AppHost` 里，是因为
     /// 读它的地方（`WM_DESTROY`）正处在最不该多借一次宿主状态的时刻。
     static RESIDENT: Cell<bool> = const { Cell::new(false) };
+    /// 组合中按下鼠标的处理策略（`WindowConfig::ime_interrupt`）。应用级，`run` 时从主窗配置取一次，
+    /// 子窗沿用——子窗配置里的这一项是应用层填的默认值，不读。
+    static IME_INTERRUPT: Cell<crate::platform::ImeInterrupt> =
+        const { Cell::new(crate::platform::ImeInterrupt::Commit) };
 }
 
 /// 最后一个窗口销毁后是否该结束消息循环。
@@ -1067,6 +1073,8 @@ struct WindowState {
     ime_field: Option<crate::event::ImeField>,
     /// 当前是否给窗口挂着输入法上下文（`None` = 还没设过）。避免每帧重复关开。
     ime_enabled: Option<bool>,
+    /// 上次报给输入法的光标位置（`AppHandler::ime_caret`）。光标一动就重报，不等组合开始。
+    ime_pos: Option<(i32, i32, i32)>,
 }
 
 impl Drop for WindowState {
@@ -1176,6 +1184,7 @@ impl WindowState {
             ime_composing: false,
             ime_field: None,
             ime_enabled: None,
+            ime_pos: None,
             min_w: 0,
             min_h: 0,
             in_size_move: false,
@@ -1670,6 +1679,7 @@ unsafe fn run_windowed(
     // 常驻模式：不建主窗，直接进消息循环。窗口日后由托盘/热键回调按需建出，
     // 关掉即销毁——渲染资源随 `WindowState` 的 drop 归还，这正是本模式的全部意义。
     RESIDENT.with(|r| r.set(cfg.resident));
+    IME_INTERRUPT.with(|p| p.set(cfg.ime_interrupt));
     let hwnd = if cfg.resident {
         None
     } else {
@@ -2302,9 +2312,20 @@ unsafe extern "system" fn wnd_proc(
         }
         // 合成中：把候选窗重新定位到焦点控件的光标处，再交默认处理。重复定位到
         // 同一点是幂等的；兼顾"候选窗在合成中才出现"的输入法。
+        //
+        // 上屏的字由这里当场读出、作为 `Key::Char` 送给焦点，并从交给默认处理的标志里摘掉，
+        // 免得系统再经 `WM_IME_CHAR` → `WM_CHAR` 排队送一遍：排队的字要等当前消息处理完才到，
+        // 「组合中点击」时点击已经把光标挪走，字就插到了新位置（见 `interrupt_composition`）。
         WM_IME_COMPOSITION => {
+            let plan = composition_plan(lparam.0 as u32);
+            if plan.commit {
+                commit_ime_result(hwnd);
+            }
             handle_ime_position(hwnd);
-            DefWindowProcW(hwnd, msg, wparam, lparam)
+            match plan.forward {
+                Some(flags) => DefWindowProcW(hwnd, msg, wparam, LPARAM(flags as isize)),
+                None => LRESULT(0),
+            }
         }
         // 输入法结束合成（提交上屏或取消）：通知焦点控件退出组合态，恢复自绘光标。
         WM_IME_ENDCOMPOSITION => {
@@ -3403,6 +3424,9 @@ unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
 
 /// 指针事件分发的公共两段式实现（事件分发 + OS 捕获同步 + 关闭）。
 unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
+    if matches!(ev.kind, PointerKind::Down) {
+        interrupt_composition(hwnd);
+    }
     let (repaint, active, was_capturing, close) = {
         let Some(state) = state_from(hwnd) else {
             return;
@@ -3649,11 +3673,13 @@ unsafe fn cancel_fling(hwnd: HWND) {
 
 /// 同步输入法（分发之后 `reposition = false`；绘制之后 `true`）：
 ///
-/// - 焦点文本控件换人且正在组合 → 取消这次组合。此时焦点已经换了，若改为提交，系统会把
-///   上屏的字经 `WM_CHAR` 送进**新**焦点，比丢掉还糟；未上屏的拼音丢掉是各应用的常见行为。
+/// - 焦点文本控件换人且正在组合 → 取消这次组合。此时焦点已经换了，若改为提交，上屏的字会
+///   送进**新**焦点，比丢掉还糟；未上屏的拼音丢掉是各应用的常见行为。（点击换焦点的情形在
+///   分发之前已按 `ImeInterrupt` 处理过，见 `interrupt_composition`，走到这里的是程序移焦点。）
 /// - 焦点不是可输入文本（按钮、列表、无焦点）或是密码框 → 摘掉输入法上下文，回到普通文本
 ///   框再挂回。否则中文输入法在按钮上照样能打出组合串、无处可去；密码框会被联想与记忆。
-/// - `reposition` 且正在组合 → 按**本帧刚算出**的光标重报位置。组合消息到达时报的是上一帧的
+/// - `reposition` 且正在组合、或光标位置变了 → 按**本帧刚算出**的光标重报位置（不在组合中也报，
+///   见函数末尾）。组合消息到达时报的是上一帧的
 ///   光标：光标刚滚回可视区、还没排过版时取不到位置，候选窗就落到客户区左上角。绘制后统一
 ///   重报覆盖所有「布局变了」的情形，也不必在组合消息里补帧（提交那一刻补帧会把「拼音没了、
 ///   汉字还没到」的中间态画上屏）。
@@ -3681,12 +3707,18 @@ unsafe fn sync_ime(hwnd: HWND, reposition: bool) {
         }
     }
     if let Some(want) = plan.set_enabled {
+        // 先记下新状态再调 OS：摘上下文时输入法可能同步上屏，`commit_ime_result` → 分发按键 →
+        // 嵌套的 `sync_ime` 若读到旧值，会在这次调用里面再关开一遍。
+        if let Some(s) = state_from(hwnd) {
+            s.ime_enabled = Some(want);
+            // 摘掉期间输入法拿不到位置；挂回后当作没报过，下一帧重报。
+            s.ime_pos = None;
+        }
         // NULL 上下文 + 0 = 摘掉；IACE_DEFAULT = 挂回窗口的默认上下文。
         let _ = ImmAssociateContextEx(hwnd, HIMC::default(), if want { IACE_DEFAULT } else { 0 });
         // 摘掉时若组合态还挂着（TSF 输入法可能延后、甚至不再发 WM_IME_ENDCOMPOSITION），
         // 主动收尾——否则控件一直藏着自绘光标。
         let repaint = state_from(hwnd).is_some_and(|s| {
-            s.ime_enabled = Some(want);
             let stale = !want && std::mem::replace(&mut s.ime_composing, false);
             stale && s.handler.set_ime_composing(false)
         });
@@ -3694,9 +3726,138 @@ unsafe fn sync_ime(hwnd: HWND, reposition: bool) {
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
     }
-    if reposition && state_from(hwnd).is_some_and(|s| s.ime_composing) {
+    // 不在组合时也跟着光标报：经 TSF 的输入法（清风、Rime 等）在组合开始那一刻就按手里的位置
+    // 弹候选窗，等 `WM_IME_STARTCOMPOSITION` 再报，第一眼看到的是上一次组合的位置。
+    let report = reposition
+        && state_from(hwnd).is_some_and(|s| {
+            should_report_position(
+                s.ime_enabled,
+                s.ime_composing,
+                s.handler.ime_caret(),
+                s.ime_pos,
+            )
+        });
+    if report {
         handle_ime_position(hwnd);
     }
+}
+
+/// 绘制后要不要向输入法重报光标位置：上下文挂着、焦点有光标，且在组合中（候选窗随组合进度
+/// 移动，次次都报）或光标位置变了。光标闪烁这类不动位置的帧不碰输入法。
+fn should_report_position(
+    enabled: Option<bool>,
+    composing: bool,
+    caret: Option<(i32, i32, i32)>,
+    last: Option<(i32, i32, i32)>,
+) -> bool {
+    enabled == Some(true) && caret.is_some() && (composing || caret != last)
+}
+
+/// 组合中按下鼠标：按 [`ImeInterrupt`](crate::platform::ImeInterrupt) 先把组合收掉，再分发这次点击。
+///
+/// 必须在分发**之前**：点击会移动光标、甚至换焦点，之后才上屏的字就落到了新位置。上屏结果由
+/// `WM_IME_COMPOSITION` 当场送进控件（见那条臂），只要输入法在 `ImmNotifyIME` 内同步发出它，字就
+/// 落在原位置。输入法若改为异步上屏，字会晚到并落在新光标处——那是它自己的行为，记一行日志备查。
+unsafe fn interrupt_composition(hwnd: HWND) {
+    let composing = state_from(hwnd).is_some_and(|s| s.ime_composing);
+    log::trace!("ime: 按下鼠标，组合中={composing}");
+    let Some(action) = interrupt_action(IME_INTERRUPT.with(Cell::get), composing) else {
+        return;
+    };
+    let himc = ImmGetContext(hwnd);
+    if himc.0.is_null() {
+        return;
+    }
+    let _ = ImmNotifyIME(himc, NI_COMPOSITIONSTR, action, 0);
+    let _ = ImmReleaseContext(hwnd, himc);
+    if state_from(hwnd).is_some_and(|s| s.ime_composing) {
+        log::debug!("ime: 点击打断组合后输入法未同步结束组合（{action:?}）");
+    }
+}
+
+/// 组合中按下鼠标时要发给输入法的 `CPS_*`；`None` = 不干预。
+fn interrupt_action(
+    policy: crate::platform::ImeInterrupt,
+    composing: bool,
+) -> Option<NOTIFY_IME_INDEX> {
+    use crate::platform::ImeInterrupt;
+    if !composing {
+        return None;
+    }
+    match policy {
+        ImeInterrupt::Commit => Some(CPS_COMPLETE),
+        ImeInterrupt::Cancel => Some(CPS_CANCEL),
+        ImeInterrupt::Ime => None,
+    }
+}
+
+/// 读出这次上屏的串，逐字作为 `Key::Char` 送给焦点（与 `WM_CHAR` 同一条通路，控制字符跳过）。
+unsafe fn commit_ime_result(hwnd: HWND) {
+    let himc = ImmGetContext(hwnd);
+    if himc.0.is_null() {
+        return;
+    }
+    // 先问字节数，再取；返回值是字节数，负数是错误码。
+    let bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, None, 0);
+    let mut buf = vec![0u16; (bytes.max(0) as usize).div_ceil(2)];
+    let got = if buf.is_empty() {
+        0
+    } else {
+        ImmGetCompositionStringW(
+            himc,
+            GCS_RESULTSTR,
+            Some(buf.as_mut_ptr().cast()),
+            (buf.len() * 2) as u32,
+        )
+    };
+    let _ = ImmReleaseContext(hwnd, himc);
+    buf.truncate((got.max(0) as usize) / 2);
+    log::debug!("ime: 上屏 {} 个 UTF-16 码元", buf.len());
+    for c in char::decode_utf16(buf).filter_map(Result::ok) {
+        if c.is_control() {
+            continue;
+        }
+        dispatch_key_event(
+            hwnd,
+            KeyEvent {
+                key: Key::Char(c),
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
+        );
+    }
+}
+
+/// `WM_IME_COMPOSITION` 怎么处理（纯函数，便于单测）。
+#[derive(Debug, PartialEq)]
+struct CompositionPlan {
+    /// 带上屏结果：由我们读出并送进焦点。
+    commit: bool,
+    /// 交给 `DefWindowProc` 的标志；`None` = 不交（只有上屏、没有组合串，默认处理已无事可做）。
+    forward: Option<u32>,
+}
+
+fn composition_plan(flags: u32) -> CompositionPlan {
+    if flags & GCS_RESULTSTR.0 == 0 {
+        // 没有上屏（含 lparam 为 0 的「组合被清空」）：原样交默认处理。
+        return CompositionPlan {
+            commit: false,
+            forward: Some(flags),
+        };
+    }
+    let rest = strip_result_flags(flags);
+    CompositionPlan {
+        commit: true,
+        forward: (rest != 0).then_some(rest),
+    }
+}
+
+/// 从 `WM_IME_COMPOSITION` 的标志里摘掉上屏相关的几位（上屏已由我们处理），保留组合串的部分。
+fn strip_result_flags(flags: u32) -> u32 {
+    flags & !(GCS_RESULTSTR.0 | GCS_RESULTREADSTR.0 | GCS_RESULTCLAUSE.0 | GCS_RESULTREADCLAUSE.0)
 }
 
 /// `sync_ime` 要做的事（纯函数，便于单测）。
@@ -3740,6 +3901,10 @@ unsafe fn handle_ime_position(hwnd: HWND) {
         None => return,
     };
     let Some((x, y, h)) = caret else { return };
+    // 拿不到上下文也记下：否则此后每帧都判定「位置变了」，光标闪烁也去调 ImmGetContext。
+    if let Some(s) = state_from(hwnd) {
+        s.ime_pos = caret;
+    }
     let himc = ImmGetContext(hwnd);
     if himc.0.is_null() {
         return; // 无输入法上下文
@@ -4477,7 +4642,130 @@ mod tests {
 
 #[cfg(test)]
 mod ime_sync_tests {
-    use super::{ime_sync_plan, ImeSyncPlan};
+    use super::{
+        composition_plan, ime_sync_plan, interrupt_action, should_report_position,
+        strip_result_flags, CompositionPlan, ImeSyncPlan,
+    };
+    use crate::platform::ImeInterrupt;
+    use windows::Win32::UI::Input::Ime::{
+        CPS_CANCEL, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTCLAUSE,
+        GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR, GCS_RESULTSTR,
+    };
+
+    #[test]
+    fn position_is_reported_when_the_caret_moves_even_without_composition() {
+        let a = Some((10, 20, 18));
+        let b = Some((40, 20, 18));
+        assert!(
+            should_report_position(Some(true), false, b, a),
+            "光标挪了：不等组合就报"
+        );
+        assert!(
+            should_report_position(Some(true), false, a, None),
+            "挂回后头一帧要报"
+        );
+        assert!(
+            !should_report_position(Some(true), false, a, a),
+            "位置没变（光标闪烁）不报"
+        );
+        assert!(
+            should_report_position(Some(true), true, a, a),
+            "组合中次次都报"
+        );
+        assert!(
+            !should_report_position(Some(false), true, b, a),
+            "上下文摘掉了不报"
+        );
+        assert!(
+            !should_report_position(None, false, b, a),
+            "还没挂过上下文不报"
+        );
+        assert!(
+            !should_report_position(Some(true), true, None, a),
+            "没光标不报"
+        );
+    }
+
+    #[test]
+    fn interrupt_maps_policy_to_notify_only_while_composing() {
+        assert_eq!(
+            interrupt_action(ImeInterrupt::Commit, true),
+            Some(CPS_COMPLETE)
+        );
+        assert_eq!(
+            interrupt_action(ImeInterrupt::Cancel, true),
+            Some(CPS_CANCEL)
+        );
+        assert_eq!(interrupt_action(ImeInterrupt::Ime, true), None);
+        for p in [
+            ImeInterrupt::Commit,
+            ImeInterrupt::Cancel,
+            ImeInterrupt::Ime,
+        ] {
+            assert_eq!(
+                interrupt_action(p, false),
+                None,
+                "{p:?}：没在组合就不打扰输入法"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_result_flags_keeps_the_composition_part() {
+        let comp = GCS_COMPSTR.0 | GCS_COMPATTR.0 | GCS_CURSORPOS.0;
+        // 上屏紧接着开始下一段组合：上屏位摘掉，组合串照常交默认处理。
+        for bit in [
+            GCS_RESULTSTR,
+            GCS_RESULTREADSTR,
+            GCS_RESULTCLAUSE,
+            GCS_RESULTREADCLAUSE,
+        ] {
+            assert_eq!(
+                strip_result_flags(comp | bit.0),
+                comp,
+                "{:#x} 没摘掉",
+                bit.0
+            );
+        }
+        assert_eq!(strip_result_flags(comp), comp);
+    }
+
+    #[test]
+    fn composition_plan_never_lets_the_result_reach_def_window_proc() {
+        let comp = GCS_COMPSTR.0 | GCS_CURSORPOS.0;
+        let result = GCS_RESULTSTR.0 | GCS_RESULTCLAUSE.0;
+        // lparam 为 0（组合被清空）：照常交默认处理，好让系统浮层擦掉。
+        assert_eq!(
+            composition_plan(0),
+            CompositionPlan {
+                commit: false,
+                forward: Some(0)
+            }
+        );
+        // 只有上屏：我们送字，默认处理不收（收了会再经 WM_IME_CHAR 送一遍）。
+        assert_eq!(
+            composition_plan(result),
+            CompositionPlan {
+                commit: true,
+                forward: None
+            }
+        );
+        // 上屏紧跟新组合：组合部分照交。
+        assert_eq!(
+            composition_plan(result | comp),
+            CompositionPlan {
+                commit: true,
+                forward: Some(comp)
+            }
+        );
+        assert_eq!(
+            composition_plan(comp),
+            CompositionPlan {
+                commit: false,
+                forward: Some(comp)
+            }
+        );
+    }
     use crate::event::{ImeField, ImeHints};
 
     fn field(id: u64, password: bool) -> Option<ImeField> {
