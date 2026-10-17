@@ -2422,6 +2422,11 @@ macOS 走 `set_preedit`（给整串，控件**画出来**）。控件两个都�
 可报时覆盖 `fn accepts_ime(&self) -> bool { true }`（候选窗退回输入法自己的默认位置）；两者都不做的
 话在 Windows 上收不到输入法输入。只读文本框覆盖为 `false`。组合中焦点换到别的控件时，这次组合被取消。
 
+**组合中按下鼠标**：由 `App::ime_interrupt(ImeInterrupt)` 决定未上屏的串怎么办——默认 `Commit` 先上屏到
+原位置再处理点击（与 Chrome / Firefox 一致）；`Cancel` 丢掉；`Ime` 交给输入法自己决定（微软拼音上屏、有的输入法让
+组合跟着新光标走）。各家输入法原本行为不一，默认值把它们统一成同一种手感。目前只在 Windows 生效；
+少数输入法在框架收到点击前就已自己上屏，`Cancel` / `Ime` 对它们不起作用。
+
 ### 9.2 测试收 `EventCtx` 的回调
 
 `EventCtx` 由宿主在真实分发路径上借出，字段私有、你造不出来。要在单元测试里跑一段收 ctx 的回调（菜单动作、`App::channel` 的 on_message、`Widget::on_event`），用 `windui::testing`：
