@@ -10,6 +10,7 @@ pub(super) mod d2d;
 pub mod dragdrop;
 pub mod hotkey;
 pub mod tray;
+mod tsf;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -40,9 +41,11 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::Ime::{
     ImmAssociateContextEx, ImmGetCompositionStringW, ImmGetContext, ImmNotifyIME,
     ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow,
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL,
-    CPS_COMPLETE, GCS_RESULTCLAUSE, GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR, GCS_RESULTSTR, HIMC,
-    IACE_DEFAULT, NI_COMPOSITIONSTR, NOTIFY_IME_INDEX,
+    ATTR_TARGET_CONVERTED, ATTR_TARGET_NOTCONVERTED, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE,
+    CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPCLAUSE,
+    GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTCLAUSE, GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR,
+    GCS_RESULTSTR, HIMC, IACE_DEFAULT, IME_COMPOSITION_STRING, ISC_SHOWUICOMPOSITIONWINDOW,
+    NI_COMPOSITIONSTR, NOTIFY_IME_INDEX,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetActiveWindow, SetCapture,
@@ -75,7 +78,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
     WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
     WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT,
@@ -277,6 +280,8 @@ thread_local! {
     /// 子窗沿用——子窗配置里的这一项是应用层填的默认值，不读。
     static IME_INTERRUPT: Cell<crate::platform::ImeInterrupt> =
         const { Cell::new(crate::platform::ImeInterrupt::Commit) };
+    /// 组合串由框架内联绘制（`WindowConfig::ime_inline`）。应用级，取法同 `IME_INTERRUPT`。
+    static IME_INLINE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 最后一个窗口销毁后是否该结束消息循环。
@@ -1680,6 +1685,7 @@ unsafe fn run_windowed(
     // 关掉即销毁——渲染资源随 `WindowState` 的 drop 归还，这正是本模式的全部意义。
     RESIDENT.with(|r| r.set(cfg.resident));
     IME_INTERRUPT.with(|p| p.set(cfg.ime_interrupt));
+    IME_INLINE.with(|p| p.set(cfg.ime_inline));
     let hwnd = if cfg.resident {
         None
     } else {
@@ -2295,20 +2301,38 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // 内联模式：请输入法别画组合窗（摘掉 `ISC_SHOWUICOMPOSITIONWINDOW`），候选窗等其余部分
+        // 照旧由它画。这条消息在窗口激活 / 焦点进出时到达，早于任何组合。
+        WM_IME_SETCONTEXT => {
+            let lparam = if IME_INLINE.with(Cell::get) && wparam.0 != 0 {
+                LPARAM((lparam.0 as u32 & !ISC_SHOWUICOMPOSITIONWINDOW) as isize)
+            } else {
+                lparam
+            };
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         // 输入法开始合成：通知焦点控件进入组合态（自绘光标隐藏，让系统组合浮层
         // 自带的、随组合进度前进的光标成为唯一可见光标），再定位候选窗。
+        //
+        // 内联模式不走组合态（控件画合成串时自己画合成内光标），也不交默认处理：默认处理会
+        // 打开系统组合窗，并用它自己的位置覆盖我们刚报的候选窗位置。
         WM_IME_STARTCOMPOSITION => {
+            let inline = IME_INLINE.with(Cell::get);
             let repaint = state_from(hwnd)
                 .map(|s| {
                     s.ime_composing = true;
-                    s.handler.set_ime_composing(true)
+                    !inline && s.handler.set_ime_composing(true)
                 })
                 .unwrap_or(false);
             if repaint {
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             handle_ime_position(hwnd);
-            DefWindowProcW(hwnd, msg, wparam, lparam)
+            if inline {
+                LRESULT(0)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
         }
         // 合成中：把候选窗重新定位到焦点控件的光标处，再交默认处理。重复定位到
         // 同一点是幂等的；兼顾"候选窗在合成中才出现"的输入法。
@@ -2316,6 +2340,10 @@ unsafe extern "system" fn wnd_proc(
         // 上屏的字由这里当场读出、作为 `Key::Char` 送给焦点，并从交给默认处理的标志里摘掉，
         // 免得系统再经 `WM_IME_CHAR` → `WM_CHAR` 排队送一遍：排队的字要等当前消息处理完才到，
         // 「组合中点击」时点击已经把光标挪走，字就插到了新位置（见 `interrupt_composition`）。
+        WM_IME_COMPOSITION if IME_INLINE.with(Cell::get) => {
+            handle_inline_composition(hwnd, lparam.0 as u32);
+            LRESULT(0)
+        }
         WM_IME_COMPOSITION => {
             let plan = composition_plan(lparam.0 as u32);
             if plan.commit {
@@ -2332,7 +2360,7 @@ unsafe extern "system" fn wnd_proc(
             let repaint = state_from(hwnd)
                 .map(|s| {
                     s.ime_composing = false;
-                    s.handler.set_ime_composing(false)
+                    end_composition_ui(s)
                 })
                 .unwrap_or(false);
             if repaint {
@@ -3720,7 +3748,7 @@ unsafe fn sync_ime(hwnd: HWND, reposition: bool) {
         // 主动收尾——否则控件一直藏着自绘光标。
         let repaint = state_from(hwnd).is_some_and(|s| {
             let stale = !want && std::mem::replace(&mut s.ime_composing, false);
-            stale && s.handler.set_ime_composing(false)
+            stale && end_composition_ui(s)
         });
         if repaint {
             let _ = InvalidateRect(Some(hwnd), None, false);
@@ -3797,21 +3825,8 @@ unsafe fn commit_ime_result(hwnd: HWND) {
     if himc.0.is_null() {
         return;
     }
-    // 先问字节数，再取；返回值是字节数，负数是错误码。
-    let bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, None, 0);
-    let mut buf = vec![0u16; (bytes.max(0) as usize).div_ceil(2)];
-    let got = if buf.is_empty() {
-        0
-    } else {
-        ImmGetCompositionStringW(
-            himc,
-            GCS_RESULTSTR,
-            Some(buf.as_mut_ptr().cast()),
-            (buf.len() * 2) as u32,
-        )
-    };
+    let buf = read_comp_utf16(himc, GCS_RESULTSTR);
     let _ = ImmReleaseContext(hwnd, himc);
-    buf.truncate((got.max(0) as usize) / 2);
     log::debug!("ime: 上屏 {} 个 UTF-16 码元", buf.len());
     for c in char::decode_utf16(buf).filter_map(Result::ok) {
         if c.is_control() {
@@ -3828,6 +3843,134 @@ unsafe fn commit_ime_result(hwnd: HWND) {
                 meta: false,
             },
         );
+    }
+}
+
+/// 组合结束时撤掉控件上的组合态：内联模式清掉合成串，系统绘制模式恢复自绘光标。返回是否要重绘。
+fn end_composition_ui(s: &mut WindowState) -> bool {
+    if IME_INLINE.with(Cell::get) {
+        s.handler.set_ime_preedit(&crate::event::Preedit::default())
+    } else {
+        s.handler.set_ime_composing(false)
+    }
+}
+
+/// 读一段组合信息（`GCS_COMPSTR` / `GCS_RESULTSTR` / `GCS_COMPATTR` 等），按字节取回。
+/// 返回值单位是字节，负数是错误码，一律当空处理。
+unsafe fn read_comp_bytes(himc: HIMC, kind: IME_COMPOSITION_STRING) -> Vec<u8> {
+    let bytes = ImmGetCompositionStringW(himc, kind, None, 0);
+    if bytes <= 0 {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; bytes as usize];
+    let got = ImmGetCompositionStringW(himc, kind, Some(buf.as_mut_ptr().cast()), buf.len() as u32);
+    buf.truncate(got.max(0) as usize);
+    buf
+}
+
+/// 同 [`read_comp_bytes`]，按 UTF-16 码元取回（串类信息）。
+unsafe fn read_comp_utf16(himc: HIMC, kind: IME_COMPOSITION_STRING) -> Vec<u16> {
+    read_comp_bytes(himc, kind)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_le_bytes(*b))
+        .collect()
+}
+
+/// 内联模式的 `WM_IME_COMPOSITION`：上屏的字送进焦点，组合串交控件自己画，都不交默认处理。
+///
+/// 次序与 macOS `insertText:` 相同：先撤掉合成串再送上屏的字（字要插在合成串原来的位置，
+/// 而不是合成串之后），最后挂上同一条消息里可能带着的下一段组合串。
+unsafe fn handle_inline_composition(hwnd: HWND, flags: u32) {
+    let empty = crate::event::Preedit::default();
+    let plan = inline_plan(flags);
+    let mut repaint = false;
+    if plan.commit {
+        repaint |= state_from(hwnd).is_some_and(|s| s.handler.set_ime_preedit(&empty));
+        commit_ime_result(hwnd);
+    }
+    if plan.reread {
+        let himc = ImmGetContext(hwnd);
+        if !himc.0.is_null() {
+            let text = read_comp_utf16(himc, GCS_COMPSTR);
+            let attrs = read_comp_bytes(himc, GCS_COMPATTR);
+            let cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, None, 0);
+            let _ = ImmReleaseContext(hwnd, himc);
+            let mut pe = preedit_from_imm(&text, cursor, &attrs);
+            // 输入法配置的线型与颜色只在 TSF 里有；读不到（纯 IMM 输入法等）就留空走默认画法。
+            if pe.is_active() {
+                pe.spans = tsf::display_spans(&text);
+            }
+            repaint |= state_from(hwnd).is_some_and(|s| s.handler.set_ime_preedit(&pe));
+        }
+    } else if plan.clear {
+        repaint |= state_from(hwnd).is_some_and(|s| s.handler.set_ime_preedit(&empty));
+    }
+    if repaint {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    handle_ime_position(hwnd);
+}
+
+/// 内联模式下一条 `WM_IME_COMPOSITION` 要做的事（见 [`inline_plan`]）。
+#[derive(Debug, PartialEq, Eq)]
+struct InlinePlan {
+    /// 有上屏的字：先撤合成串，再把字送进焦点。
+    commit: bool,
+    /// 组合串、光标或分句变了：重读一遍交给控件。
+    reread: bool,
+    /// 什么标志都没有：组合串被清空了（输入法里退格删光等）。
+    clear: bool,
+}
+
+fn inline_plan(flags: u32) -> InlinePlan {
+    // 不只看 GCS_COMPSTR：日文输入法在组合串里移光标、换分句时可能只报光标或属性。
+    let comp = GCS_COMPSTR.0 | GCS_COMPATTR.0 | GCS_COMPCLAUSE.0 | GCS_CURSORPOS.0;
+    InlinePlan {
+        commit: flags & GCS_RESULTSTR.0 != 0,
+        reread: flags & comp != 0,
+        clear: flags == 0,
+    }
+}
+
+/// 把 IMM 给的组合串、光标（UTF-16 下标）与逐码元属性换成 [`Preedit`](crate::event::Preedit)
+/// （字符下标）。选中分句取属性为「目标」（`ATTR_TARGET_*`）的那一段；整串都是目标或没有目标
+/// 时不标分句（中文拼音通常如此）。光标越界退到末尾，与 macOS 同。
+fn preedit_from_imm(text: &[u16], cursor: i32, attrs: &[u8]) -> crate::event::Preedit {
+    let s: String = char::decode_utf16(text.iter().copied())
+        .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect();
+    // UTF-16 下标 → 字符下标：数下标之前有几个非低代理码元。
+    let to_char = |u: usize| {
+        text[..u.min(text.len())]
+            .iter()
+            .filter(|&&c| !(0xDC00..=0xDFFF).contains(&c))
+            .count()
+    };
+    let n = s.chars().count();
+    let caret = match usize::try_from(cursor) {
+        Ok(c) if c <= text.len() => to_char(c),
+        _ => n,
+    };
+    let is_target = |a: &u8| {
+        let a = u32::from(*a);
+        a == ATTR_TARGET_CONVERTED || a == ATTR_TARGET_NOTCONVERTED
+    };
+    let attrs = &attrs[..attrs.len().min(text.len())];
+    let sel = attrs.iter().position(is_target).and_then(|start| {
+        let end = attrs[start..]
+            .iter()
+            .position(|a| !is_target(a))
+            .map_or(attrs.len(), |k| start + k);
+        let (a, b) = (to_char(start), to_char(end));
+        (b > a && !(a == 0 && b == n)).then_some((a, b))
+    });
+    crate::event::Preedit {
+        text: s,
+        caret,
+        sel,
+        spans: Vec::new(),
     }
 }
 
@@ -4643,14 +4786,64 @@ mod tests {
 #[cfg(test)]
 mod ime_sync_tests {
     use super::{
-        composition_plan, ime_sync_plan, interrupt_action, should_report_position,
-        strip_result_flags, CompositionPlan, ImeSyncPlan,
+        composition_plan, ime_sync_plan, inline_plan, interrupt_action, preedit_from_imm,
+        should_report_position, strip_result_flags, CompositionPlan, ImeSyncPlan, InlinePlan,
     };
     use crate::platform::ImeInterrupt;
     use windows::Win32::UI::Input::Ime::{
-        CPS_CANCEL, CPS_COMPLETE, GCS_COMPATTR, GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTCLAUSE,
-        GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR, GCS_RESULTSTR,
+        ATTR_TARGET_CONVERTED, ATTR_TARGET_NOTCONVERTED, CPS_CANCEL, CPS_COMPLETE, GCS_COMPATTR,
+        GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTCLAUSE, GCS_RESULTREADCLAUSE, GCS_RESULTREADSTR,
+        GCS_RESULTSTR,
     };
+
+    fn u16s(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    /// 上屏与新一段组合串同在一条消息里时两件都做；只移光标也要重读；空标志是清空。
+    #[test]
+    fn inline_plan_covers_every_composition_shape() {
+        let plan = |commit, reread, clear| InlinePlan {
+            commit,
+            reread,
+            clear,
+        };
+        assert_eq!(
+            inline_plan(GCS_RESULTSTR.0 | GCS_COMPSTR.0 | GCS_CURSORPOS.0),
+            plan(true, true, false)
+        );
+        assert_eq!(inline_plan(GCS_RESULTSTR.0), plan(true, false, false));
+        assert_eq!(inline_plan(GCS_CURSORPOS.0), plan(false, true, false));
+        assert_eq!(inline_plan(0), plan(false, false, true));
+    }
+
+    #[test]
+    fn preedit_from_imm_maps_utf16_cursor_to_chars() {
+        let pe = preedit_from_imm(&u16s("ni'hao"), 3, &[0; 6]);
+        assert_eq!((pe.text.as_str(), pe.caret, pe.sel), ("ni'hao", 3, None));
+        // 代理对（表情）占两个 UTF-16 码元、一个字符：光标在它之后是字符下标 2。
+        let pe = preedit_from_imm(&u16s("a😀b"), 3, &[0; 4]);
+        assert_eq!(pe.caret, 2);
+        // 越界 / 负数（输入法没给光标）退到末尾。
+        assert_eq!(preedit_from_imm(&u16s("abc"), -1, &[]).caret, 3);
+        assert_eq!(preedit_from_imm(&u16s("abc"), 9, &[]).caret, 3);
+    }
+
+    #[test]
+    fn preedit_from_imm_marks_only_a_partial_target_clause() {
+        let t = ATTR_TARGET_CONVERTED as u8;
+        let n = ATTR_TARGET_NOTCONVERTED as u8;
+        // 日文分节：第二段是目标。
+        let pe = preedit_from_imm(&u16s("ABCDEF"), 0, &[2, 2, t, t, 2, 2]);
+        assert_eq!(pe.sel, Some((2, 4)));
+        let pe = preedit_from_imm(&u16s("ABCD"), 0, &[0, 0, n, n]);
+        assert_eq!(pe.sel, Some((2, 4)), "未转换的目标同样算");
+        // 整串都是目标：不标（否则整串加粗，与没有分句无从区分）。
+        assert_eq!(preedit_from_imm(&u16s("AB"), 0, &[t, t]).sel, None);
+        // 目标段后面跟着代理对：下标按字符算。
+        let pe = preedit_from_imm(&u16s("😀AB"), 0, &[2, 2, t, 2]);
+        assert_eq!(pe.sel, Some((1, 2)));
+    }
 
     #[test]
     fn position_is_reported_when_the_caret_moves_even_without_composition() {

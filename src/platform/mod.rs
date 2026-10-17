@@ -655,6 +655,8 @@ pub struct WindowConfig {
     pub window_outline: WindowOutline,
     /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
     pub ime_interrupt: ImeInterrupt,
+    /// 输入法组合串由框架内联绘制（见 `App::ime_inline`）。应用级：子窗沿用主窗的设置。
+    pub ime_inline: bool,
 }
 
 /// 输入法组合中（拼音还没选词）在窗口里按下鼠标时，未上屏的串怎么办（`App::ime_interrupt`）。
@@ -730,6 +732,7 @@ impl Default for WindowConfig {
             skip_taskbar: false,
             window_outline: WindowOutline::Auto,
             ime_interrupt: ImeInterrupt::Commit,
+            ime_inline: false,
         }
     }
 }
@@ -949,9 +952,9 @@ pub trait AppHandler {
     /// 输入法组合态开始/结束（拼音等未上屏文字合成中）时由平台层调用，转发给
     /// 当前焦点控件（见 `Widget::set_composing`）。返回 true 表示需要重绘。
     ///
-    /// **仅 win32 走这条**：那边合成串由系统 IME 自己画（`ImmSetCompositionWindow`），
+    /// **仅 win32 默认模式走这条**：那边合成串由系统 IME 自己画（`ImmSetCompositionWindow`），
     /// 上层只需知道「合成中」以便藏起自绘光标、消除双光标。需要自绘合成串的平台
-    /// （macOS、Linux）走 [`Self::set_ime_preedit`]。
+    /// （macOS、Linux，以及开了 `App::ime_inline` 的 win32）走 [`Self::set_ime_preedit`]。
     ///
     /// 契约：`true` 作用于当前焦点；`false` 要作用到**进入合成时的那个控件**——合成中焦点
     /// 可能被程序移走，宿主自己记住它（平台层不必关心）。
@@ -962,8 +965,9 @@ pub trait AppHandler {
     /// 输入法合成串变化时由平台层调用，转发给当前焦点控件（见 `Widget::set_preedit`）。
     /// 返回 true 表示需要重绘。
     ///
-    /// 与 [`Self::set_ime_composing`] 互斥：**走系统内联绘制的平台（win32）永不调用本方法**，
-    /// 否则系统画一份、控件自绘一份，屏幕上会出现双份合成串。
+    /// 与 [`Self::set_ime_composing`] 互斥：**由系统画合成串时（win32 默认模式）永不调用本方法**，
+    /// 否则系统画一份、控件自绘一份，屏幕上会出现双份合成串。win32 开了 `App::ime_inline` 后
+    /// 改走本方法、不再调 `set_ime_composing`。
     ///
     /// 契约：非空合成串作用于当前焦点；**清空**（空 `text`）要作用到合成串所在的控件——合成中
     /// 焦点可能被程序移走，宿主自己记住它，平台层照常发清空即可。

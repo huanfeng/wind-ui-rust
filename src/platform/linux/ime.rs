@@ -59,6 +59,7 @@ impl Bridge {
             text: chars.iter().collect(),
             caret: caret.min(chars.len()),
             sel: None,
+            spans: Vec::new(),
         };
         self.out.push(ImeOut::Preedit(ic, pe));
     }

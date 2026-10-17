@@ -642,7 +642,12 @@ define_class!(
                     utf16_to_char_index(&text, selected.location + selected.length),
                 )
             });
-            let pe = Preedit { text, caret, sel };
+            let pe = Preedit {
+                text,
+                caret,
+                sel,
+                spans: Vec::new(),
+            };
             ime_debug(&pe, selected, replacement, u16_len);
             self.ivars().borrow_mut().preedit = pe.clone();
             self.dispatch_preedit(&pe);

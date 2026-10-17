@@ -31,8 +31,8 @@ pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::event::{
         window_open, window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, ImeField, ImeHints,
-        Key, MenuBarLink, MenuItem, MenuRequest, Mods, Preedit, ToastKind, WindowRequest,
-        WindowState,
+        Key, MenuBarLink, MenuItem, MenuRequest, Mods, Preedit, PreeditSpan, ToastKind,
+        UnderlineStyle, WindowRequest, WindowState,
     };
     pub use crate::geometry::{Color, Insets, Point, Rect, Size};
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};

@@ -296,7 +296,12 @@ fn preedit_from_bytes(text: String, begin: i32, end: i32) -> Preedit {
         (Some(b), Some(e)) if b != e => Some((b.min(e), b.max(e))),
         _ => None,
     };
-    Preedit { text, caret, sel }
+    Preedit {
+        text,
+        caret,
+        sel,
+        spans: Vec::new(),
+    }
 }
 
 /// 从字节下标 `cursor` 往前数 `bytes` 个字节，含多少个字符（落在字符中间的按整字符算）。
@@ -593,7 +598,8 @@ mod tests {
             Preedit {
                 text: "zhong".into(),
                 caret: 5,
-                sel: None
+                sel: None,
+                spans: Vec::new(),
             }
         );
         assert_eq!(s.on_done(1), Batch::default(), "done 之后回到初值");

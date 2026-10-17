@@ -258,8 +258,8 @@ pub trait Widget {
     /// 输入法组合态变化（拼音等未上屏文字开始/结束合成）时由框架通知焦点节点。
     /// 文本控件借此在组合期间暂不绘制自绘光标（系统组合浮层自带光标）。默认无操作。
     ///
-    /// **仅 win32 这条路会调**——那边系统 IME 自己画合成串。需自绘的平台走
-    /// [`Self::set_preedit`]。
+    /// **仅 win32 默认模式会调**——那边系统 IME 自己画合成串。需自绘的平台（以及开了
+    /// `App::ime_inline` 的 win32）走 [`Self::set_preedit`]。
     fn set_composing(&mut self, _composing: bool) {}
 
     /// 输入法合成串变化时由框架通知焦点节点。文本控件借此把未提交的合成串
@@ -6209,6 +6209,7 @@ mod tests {
                 text: "hao".into(),
                 caret: 3,
                 sel: None,
+                spans: Vec::new(),
             },
         );
         ro_paint(&tree);

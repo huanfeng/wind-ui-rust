@@ -8,9 +8,10 @@ use std::cell::{Cell, RefCell};
 use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{
-    CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind, Preedit,
+    CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind, Preedit, PreeditSpan,
+    UnderlineStyle,
 };
-use crate::geometry::{Rect, Size};
+use crate::geometry::{Color, Rect, Size};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
 use crate::spec::Align;
@@ -1773,6 +1774,108 @@ fn word_run(chars: &[char], idx: usize) -> (usize, usize) {
     (s, e)
 }
 
+/// 合成串落在视觉行 `[ls, le)` 上的装饰分段，索引是**显示串**下标（合成串从 `ps` 起、到
+/// `pe_end` 止）。输入法没给样式时按默认画法切：细实线，选中分句加粗——按分句切成
+/// 「细—粗—细」，不能按整行判一个粗细，否则只要分句与本行有交集整行都加粗，分节转换
+/// 就看不出当前在转换哪一段。给了样式就照着切，没被覆盖的字不出现在结果里。
+fn preedit_pieces(
+    pe: &Preedit,
+    ps: usize,
+    pe_end: usize,
+    ls: usize,
+    le: usize,
+) -> Vec<(usize, usize, PreeditSpan)> {
+    let clip = |(s, e): (usize, usize)| {
+        let a = (ps + s).clamp(ls, le).min(pe_end);
+        let b = (ps + e).clamp(ls, le).min(pe_end);
+        (b > a).then_some((a, b))
+    };
+    if !pe.spans.is_empty() {
+        return pe
+            .spans
+            .iter()
+            .filter_map(|sp| clip(sp.range).map(|(a, b)| (a, b, *sp)))
+            .collect();
+    }
+    let n = pe_end - ps;
+    let thin = PreeditSpan::default();
+    let bold = PreeditSpan { bold: true, ..thin };
+    let parts = match pe.sel {
+        Some((ss, se)) => [(0, ss, thin), (ss, se, bold), (se, n, thin)],
+        None => [(0, n, thin), (0, 0, thin), (0, 0, thin)],
+    };
+    parts
+        .into_iter()
+        .filter_map(|(s, e, sp)| clip((s.min(n), e.min(n))).map(|(a, b)| (a, b, sp)))
+        .collect()
+}
+
+/// 一个视觉行上输入法指定了字色的横向区间 `(x1, x2, 色)`（绝对 x），按 x 排序。
+fn fg_runs(
+    pieces: &[(usize, usize, PreeditSpan)],
+    ln: &VisLine,
+    base_x: i32,
+) -> Vec<(i32, i32, Color)> {
+    let mut runs: Vec<_> = pieces
+        .iter()
+        .filter_map(|&(a, b, sp)| {
+            sp.fg
+                .map(|c| (base_x + ln.x[a - ln.start], base_x + ln.x[b - ln.start], c))
+        })
+        .collect();
+    runs.sort_by_key(|r| r.0);
+    runs
+}
+
+/// 画一段合成串下划线。`bottom` 是线的底边（逻辑坐标），`t` 是线粗，`unit` 是 1 物理像素
+/// 对应的逻辑长度下限（点、划、波浪的节距都按它算，高 DPI 下等比放大）。
+#[allow(clippy::too_many_arguments)]
+fn draw_underline(
+    canvas: &mut dyn Canvas,
+    style: UnderlineStyle,
+    x1: f32,
+    x2: f32,
+    bottom: f32,
+    t: f32,
+    unit: f32,
+    color: Color,
+) {
+    let paint = Paint::fill(color);
+    let y = bottom - t;
+    // 点、划沿用同一个循环：`on` 画、`off` 空。
+    let dashed = |canvas: &mut dyn Canvas, on: f32, off: f32| {
+        let mut x = x1;
+        while x < x2 {
+            canvas.fill_rect(x, y, on.min(x2 - x), t, &paint);
+            x += on + off;
+        }
+    };
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Solid => canvas.fill_rect(x1, y, x2 - x1, t, &paint),
+        UnderlineStyle::Dot => dashed(canvas, t, t),
+        UnderlineStyle::Dash => dashed(canvas, unit * 4.0, unit * 2.0),
+        UnderlineStyle::Squiggle => {
+            // 半周期 2 单位、振幅 2 单位的折线，谷底贴着 `bottom`。
+            let half = unit * 2.0;
+            let mut pts = Vec::new();
+            let mut x = x1;
+            let mut up = true;
+            while x < x2 {
+                pts.push((x, if up { bottom - half } else { bottom - t / 2.0 }));
+                x += half;
+                up = !up;
+            }
+            // 末段不足半周期：按比例取高度，坡度与前面一致。
+            let (lo, hi) = (bottom - t / 2.0, bottom - half);
+            let frac = (x2 - (x - half)) / half;
+            let (from, to) = if up { (lo, hi) } else { (hi, lo) };
+            pts.push((x2, from + (to - from) * frac));
+            canvas.draw_polyline(&pts, t, &paint);
+        }
+    }
+}
+
 impl Widget for TextInput {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let lh = text
@@ -1983,6 +2086,35 @@ impl Widget for TextInput {
             }
         }
 
+        // 输入法给的合成串底色（TSF 的 `crBk`）。画在文字之前，与选区高亮同为铺满行盒。
+        let pe_pieces = self.preedit_span().map(|(ps, pe_end)| {
+            let pe = self.preedit.borrow();
+            lay.lines
+                .iter()
+                .map(|ln| preedit_pieces(&pe, ps, pe_end, ln.start, ln.end))
+                .collect::<Vec<_>>()
+        });
+        let line_visible = |i: usize| {
+            let ly = first_line_y + i as i32 * line_h;
+            (ly + line_h >= inner.y && ly <= inner.y + inner.h).then_some(ly)
+        };
+        for (i, (ln, pieces)) in lay.lines.iter().zip(pe_pieces.iter().flatten()).enumerate() {
+            let Some(ly) = line_visible(i) else { continue };
+            for (a, b, sp) in pieces {
+                if let Some(bg) = sp.bg {
+                    let x1 = base_x + ln.x[a - ln.start];
+                    let x2 = base_x + ln.x[b - ln.start];
+                    canvas.fill_rect(
+                        x1 as f32,
+                        ly as f32,
+                        (x2 - x1) as f32,
+                        line_h as f32,
+                        &Paint::fill(bg),
+                    );
+                }
+            }
+        }
+
         let chars: Vec<char> = disp.chars().collect();
         if is_empty {
             // 与正文同一 base_x：占位符也吃 align_off，居中框里的占位符才真居中。
@@ -2008,66 +2140,63 @@ impl Widget for TextInput {
                 if ln.end > ln.start {
                     let s: String = chars[ln.start..ln.end].iter().collect();
                     let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
-                    canvas.draw_text(&s, tr, text_color, Align::Start, ts);
+                    let fg_runs = pe_pieces
+                        .as_ref()
+                        .and_then(|p| p.get(i))
+                        .map(|pieces| fg_runs(pieces, ln, base_x))
+                        .unwrap_or_default();
+                    if fg_runs.is_empty() {
+                        canvas.draw_text(&s, tr, text_color, Align::Start, ts);
+                    } else {
+                        // 输入法给了字色（TSF 的 `crText`）：同一次排版按横向区间裁剪分色描，
+                        // 字形位置逐像素一致。不在正文上覆盖重画——那样得先铺底盖掉旧色，
+                        // 而 frameless 框的底来自外层容器，本控件不知道是什么色。
+                        let right = inner.x + inner.w;
+                        let mut cur = inner.x;
+                        let draw = |canvas: &mut dyn Canvas, l: i32, r: i32, c: Color| {
+                            if r > l {
+                                canvas.save();
+                                canvas.clip_rect(Rect::new(l, inner.y, r - l, inner.h));
+                                canvas.draw_text(&s, tr, c, Align::Start, ts);
+                                canvas.restore();
+                            }
+                        };
+                        for (x1, x2, c) in fg_runs {
+                            draw(canvas, cur, x1, text_color);
+                            draw(canvas, x1.max(cur), x2, c);
+                            cur = cur.max(x2);
+                        }
+                        draw(canvas, cur, right, text_color);
+                    }
                 }
             }
         }
 
         // 输入法合成串的下划线：告诉用户「这段还没定下来」。逐视觉行画，长合成串
         // 折行后每段各有一条。画在文字之后、光标之前——压在字身下方，不挡字形。
-        if let Some((ps, pe_end)) = self.preedit_span() {
-            let pe = self.preedit.borrow();
+        if let Some(pe_pieces) = &pe_pieces {
             let ul_color = inp.preedit_underline(pal);
-            // 1dp 实线。`fill_rect` 收**逻辑**坐标（canvas 内部再乘 DPI），故这里就是 1.0；
+            // 1dp。`fill_rect` 收**逻辑**坐标（canvas 内部再乘 DPI），故这里就是 1.0；
             // 用 dpi_scale 算会画出 scale 倍粗。低于 1x 的缩放下兜底到 1 物理像素，
             // 否则会被舍成 0、整条下划线消失。
             let thin = 1.0f32.max(1.0 / canvas.dpi_scale());
-            // 选中分句（日文分节转换中正在转换的那一段）在**显示串**中的绝对范围。
-            let sel_abs = pe.sel.map(|(ss, se)| (ps + ss, ps + se));
-            for (i, ln) in lay.lines.iter().enumerate() {
-                let ly = first_line_y + i as i32 * line_h;
-                if ly + line_h < inner.y || ly > inner.y + inner.h {
-                    continue;
-                }
-                let a = ps.clamp(ln.start, ln.end);
-                let b = pe_end.clamp(ln.start, ln.end);
-                if b <= a {
-                    continue;
-                }
-                // 按选中分句把本行的合成段切成「细—粗—细」最多三段，各自画。
-                // 不能按整行判一个粗细：那样只要分句与本行有交集，整行都会加粗，
-                // 分节转换就完全看不出当前在转换哪一段了。
-                //
-                // 加粗而非背景高亮：背景会与选区高亮撞色，且原生 macOS 也是靠粗细区分。
-                let mut segs: [(usize, usize, bool); 3] = [(0, 0, false); 3];
-                let n_seg = match sel_abs {
-                    Some((gs, ge)) => {
-                        let (gs, ge) = (gs.clamp(a, b), ge.clamp(a, b));
-                        let mut k = 0;
-                        for seg in [(a, gs, false), (gs, ge, true), (ge, b, false)] {
-                            if seg.1 > seg.0 {
-                                segs[k] = seg;
-                                k += 1;
-                            }
-                        }
-                        k
-                    }
-                    None => {
-                        segs[0] = (a, b, false);
-                        1
-                    }
-                };
-                for &(s0, s1, bold) in segs.iter().take(n_seg) {
-                    let x1 = base_x + ln.x[s0 - ln.start];
-                    let x2 = base_x + ln.x[s1 - ln.start];
-                    let t = if bold { thin * 2.0 } else { thin };
-                    // 底边对齐行盒底（向上加粗），三段的基线因此始终齐平。
-                    canvas.fill_rect(
-                        x1 as f32,
-                        (ly + line_h - 1) as f32 - t,
-                        (x2 - x1) as f32,
+            for (i, (ln, pieces)) in lay.lines.iter().zip(pe_pieces).enumerate() {
+                let Some(ly) = line_visible(i) else { continue };
+                for &(a, b, sp) in pieces {
+                    let x1 = (base_x + ln.x[a - ln.start]) as f32;
+                    let x2 = (base_x + ln.x[b - ln.start]) as f32;
+                    let color = sp.line.or(sp.fg).unwrap_or(ul_color);
+                    let t = if sp.bold { thin * 2.0 } else { thin };
+                    // 底边对齐行盒底（向上加粗），粗细不同的段基线因此始终齐平。
+                    draw_underline(
+                        canvas,
+                        sp.underline,
+                        x1,
+                        x2,
+                        (ly + line_h - 1) as f32,
                         t,
-                        &Paint::fill(ul_color),
+                        thin,
+                        color,
                     );
                 }
             }
@@ -2606,7 +2735,10 @@ impl Widget for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{word_run, wrap_paragraph, Preedit, TextInput, TextLayout, VisLine};
+    use super::{
+        preedit_pieces, word_run, wrap_paragraph, Color, Preedit, PreeditSpan, TextInput,
+        TextLayout, UnderlineStyle, VisLine,
+    };
     use crate::signal::signal;
 
     fn run(s: &str, idx: usize) -> (usize, usize) {
@@ -2926,6 +3058,7 @@ mod tests {
             text: String::from(text),
             caret,
             sel: None,
+            spans: Vec::new(),
         }
     }
 
@@ -3096,6 +3229,196 @@ mod tests {
         assert!(
             mid < all,
             "只加粗中间一段应比整条加粗少墨：中段 {mid} vs 全粗 {all}（相等说明整行都被加粗了）"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    fn styled(text: &str, spans: &[PreeditSpan]) -> Preedit {
+        Preedit {
+            spans: spans.to_vec(),
+            ..preedit(text, 0)
+        }
+    }
+
+    fn span(range: (usize, usize), underline: UnderlineStyle) -> PreeditSpan {
+        PreeditSpan {
+            range,
+            underline,
+            ..PreeditSpan::default()
+        }
+    }
+
+    /// 输入法给了样式就照着切：越出本行的部分裁掉，没被覆盖的字不出现；没给样式时
+    /// 按分句切「细—粗—细」。
+    #[test]
+    fn preedit_pieces_follow_ime_spans_and_clip_to_the_line() {
+        let pe = styled(
+            "abcdef",
+            &[
+                span((0, 2), UnderlineStyle::Dot),
+                span((4, 6), UnderlineStyle::Dash),
+            ],
+        );
+        // 合成串在显示串 10..16，本行只到 15。
+        let got: Vec<_> = preedit_pieces(&pe, 10, 16, 0, 15)
+            .into_iter()
+            .map(|(a, b, sp)| (a, b, sp.underline))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (10, 12, UnderlineStyle::Dot),
+                (14, 15, UnderlineStyle::Dash)
+            ],
+            "2..4 没有样式，不应出现"
+        );
+
+        // 一段跨两条视觉行：每行各得自己那一截。
+        let pe = styled("abcdef", &[span((0, 6), UnderlineStyle::Dot)]);
+        let ranges = |ls, le| -> Vec<_> {
+            preedit_pieces(&pe, 10, 16, ls, le)
+                .into_iter()
+                .map(|(a, b, _)| (a, b))
+                .collect()
+        };
+        assert_eq!(ranges(0, 13), [(10, 13)]);
+        assert_eq!(ranges(13, 20), [(13, 16)]);
+
+        let mut pe = preedit("abcdef", 0);
+        pe.sel = Some((2, 4));
+        let got: Vec<_> = preedit_pieces(&pe, 0, 6, 0, 6)
+            .into_iter()
+            .map(|(a, b, sp)| (a, b, sp.bold, sp.underline))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (0, 2, false, UnderlineStyle::Solid),
+                (2, 4, true, UnderlineStyle::Solid),
+                (4, 6, false, UnderlineStyle::Solid),
+            ]
+        );
+    }
+
+    /// 线型要真的画成不同的样子：以「无下划线」为基线量墨，点线约为实线的一半，
+    /// 波浪线因为有起伏比实线多墨。
+    #[test]
+    fn preedit_underline_style_changes_the_ink() {
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let frame = |u| caret_frame(&input_with("", 0, styled("abcdef", &[span((0, 6), u)])), 0);
+        let base = frame(UnderlineStyle::None);
+        let ink = |u| frame_diff(&frame(u), &base);
+        let (solid, dot, dash, squiggle) = (
+            ink(UnderlineStyle::Solid),
+            ink(UnderlineStyle::Dot),
+            ink(UnderlineStyle::Dash),
+            ink(UnderlineStyle::Squiggle),
+        );
+        assert!(
+            dot < dash && dash < solid,
+            "虚线（4 画 2 空）应介于点线与实线之间：点 {dot} 虚 {dash} 实 {solid}"
+        );
+        assert!(solid > 0, "实线应有墨");
+        assert!(
+            dot * 10 > solid * 3 && dot * 10 < solid * 7,
+            "点线应约为实线一半：点 {dot} vs 实 {solid}"
+        );
+        // 波浪线靠起伏区分：占的像素行比实线多（墨量反而相近，斜线抗锯齿后很淡）。
+        let rows = |u| {
+            let f = frame(u);
+            f.chunks(200 * 4)
+                .zip(base.chunks(200 * 4))
+                .filter(|(a, b)| a != b)
+                .count()
+        };
+        let (solid_rows, squiggle_rows) =
+            (rows(UnderlineStyle::Solid), rows(UnderlineStyle::Squiggle));
+        assert!(squiggle > 0, "波浪线应有墨");
+        assert!(
+            squiggle_rows > solid_rows,
+            "波浪线应有起伏：波 {squiggle_rows} 行 vs 实 {solid_rows} 行"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 输入法指定的线色、字色、底色都要出现在画面上。
+    #[test]
+    fn preedit_span_colors_reach_the_pixels() {
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let red = Color::rgb(255, 0, 0);
+        // 字色要真画出字来，故带上文字引擎（`caret_frame` 的画布不画字）。拉丁字母每台机器
+        // 都有字体，CI 也稳。
+        let count = |sp: PreeditSpan| {
+            use crate::core::Widget;
+            let ti = input_with("", 0, styled("WWWWWW", &[sp]));
+            let b = crate::geometry::Rect::new(0, 0, 200, 30);
+            let mut pm = tiny_skia::Pixmap::new(200, 30).unwrap();
+            let mut eng = crate::ui::text_fit::ink::engine();
+            {
+                let mut c = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+                ti.paint(b, b, true, true, &mut c, &crate::style::Style::default());
+            }
+            pm.data()
+                .chunks(4)
+                .filter(|p| p[0] > 200 && p[1] < 60 && p[2] < 60)
+                .count()
+        };
+        let plain = span((0, 6), UnderlineStyle::None);
+        assert_eq!(count(plain), 0, "前提：默认画面里没有纯红");
+        assert!(
+            count(PreeditSpan {
+                line: Some(red),
+                ..span((0, 6), UnderlineStyle::Solid)
+            }) > 20,
+            "线色"
+        );
+        assert!(
+            count(PreeditSpan {
+                fg: Some(red),
+                ..plain
+            }) > 20,
+            "字色"
+        );
+        assert!(
+            count(PreeditSpan {
+                bg: Some(red),
+                ..plain
+            }) > 200,
+            "底色"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 字色靠裁剪分色描，不铺底：frameless 框的底来自外层容器，铺一块自己的底色会在
+    /// 合成串上糊出色块。以「不透明像素数」衡量——分色描只换字的颜色，字形覆盖不变。
+    #[test]
+    fn preedit_fg_does_not_paint_a_background_in_frameless_input() {
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let opaque = |sp: PreeditSpan| {
+            use crate::core::Widget;
+            let mut ti = input_with("", 0, styled("WWWWWW", &[sp]));
+            ti.config.frameless = true;
+            let b = crate::geometry::Rect::new(0, 0, 200, 30);
+            let mut pm = tiny_skia::Pixmap::new(200, 30).unwrap();
+            let mut eng = crate::ui::text_fit::ink::engine();
+            {
+                let mut c = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+                ti.paint(b, b, true, true, &mut c, &crate::style::Style::default());
+            }
+            pm.data().chunks(4).filter(|p| p[3] == 255).count()
+        };
+        let plain = span((0, 6), UnderlineStyle::None);
+        let base = opaque(plain);
+        let red = opaque(PreeditSpan {
+            fg: Some(Color::rgb(255, 0, 0)),
+            ..plain
+        });
+        assert!(base > 0, "前提：frameless 框里的字是不透明的");
+        // 不要求两者相等：红字与默认字色的抗锯齿覆盖不同（DirectWrite 下差得更明显）。
+        // 回归的特征是整段铺满——6 个 W 宽、整个行高，远超这点差异（实测 70 → 2520）。
+        assert!(
+            red < base * 2 + 300,
+            "换字色不应多出整块不透明底：默认 {base} vs 红字 {red}"
         );
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }

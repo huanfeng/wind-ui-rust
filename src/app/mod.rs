@@ -1168,6 +1168,7 @@ impl App {
                 skip_taskbar: false,
                 window_outline: Default::default(),
                 ime_interrupt: Default::default(),
+                ime_inline: false,
             },
             render: None,
             content: None,
@@ -1293,6 +1294,20 @@ impl App {
     /// 默认 `Commit`：先上屏到原位置再处理点击。应用级设置，子窗沿用。
     pub fn ime_interrupt(mut self, p: crate::platform::ImeInterrupt) -> Self {
         self.cfg.ime_interrupt = p;
+        self
+    }
+
+    /// 输入法组合串（拼音等未上屏的字）由框架画在文本框里，而不是系统的浮层。默认 `false`。
+    ///
+    /// 只影响 Windows：macOS / Linux 本来就是内联绘制。开启后组合串跟随控件的字体、颜色与
+    /// 主题（深色主题下不再是白底浮层），候选窗仍由输入法自己画。个别输入法不理会「不要画
+    /// 组合窗」的请求，会出现两份组合串——遇到这种输入法就保持关闭。应用级设置，子窗沿用。
+    ///
+    /// 开启后，经 TSF 的输入法配置的下划线线型、粗细与颜色会经 [`Preedit::spans`](crate::event::Preedit::spans)
+    /// 交给控件照着画；读不到时退回默认画法。读 TSF 需要 COM：应用自己没在 UI 线程上初始化
+    /// COM 的话，本库会把它初始化为单线程套间（STA，UI 线程的常规选择）。
+    pub fn ime_inline(mut self, on: bool) -> Self {
+        self.cfg.ime_inline = on;
         self
     }
 
@@ -4404,6 +4419,7 @@ mod tests {
             text: "zhong".into(),
             caret: 5,
             sel: None,
+            spans: Vec::new(),
         };
         assert!(handler.set_ime_preedit(&pe));
         frame(&mut handler);

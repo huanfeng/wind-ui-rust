@@ -1,7 +1,7 @@
 //! 输入事件类型。平台层产生物理像素坐标，但 `UiHost::on_pointer` 在分发前
 //! 已 ÷scale 转为**逻辑坐标**——控件 `on_event` 收到的 pos 是逻辑坐标。
 
-use crate::geometry::{Point, Rect};
+use crate::geometry::{Color, Point, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
@@ -813,6 +813,43 @@ pub struct Preedit {
     /// 合成串内当前「选中分句」的字符范围。日文分节转换会把长串切成几段、
     /// 高亮其中一段；中文拼音一般整段或 `None`。
     pub sel: Option<(usize, usize)>,
+    /// 输入法指定的逐段样式（下划线线型、粗细、颜色）。空 = 输入法没给，控件按默认画法
+    /// （细实线下划线，选中分句加粗）；非空时控件照着画，`sel` 只用来标位置、不再决定粗细，
+    /// 没被任何一段覆盖的字不加修饰。目前只有 win32 的 TSF 输入法会给（见 `App::ime_inline`）。
+    pub spans: Vec<PreeditSpan>,
+}
+
+/// 合成串里一段的显示样式（见 [`Preedit::spans`]），对应 TSF 的 `TF_DISPLAYATTRIBUTE`。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreeditSpan {
+    /// 字符范围 `start..end`（合成串内的字符索引）。
+    pub range: (usize, usize),
+    /// 下划线线型。
+    pub underline: UnderlineStyle,
+    /// 粗下划线（通常标当前正在转换的分句）。
+    pub bold: bool,
+    /// 下划线颜色。`None` = 跟随 `fg`，再没有就用主题的合成串下划线色。
+    pub line: Option<Color>,
+    /// 文字颜色。`None` = 正文色。
+    pub fg: Option<Color>,
+    /// 背景色。`None` = 不画背景。
+    pub bg: Option<Color>,
+}
+
+/// 合成串下划线线型。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum UnderlineStyle {
+    /// 不画下划线。
+    None,
+    /// 实线。
+    #[default]
+    Solid,
+    /// 点线。
+    Dot,
+    /// 虚线。
+    Dash,
+    /// 波浪线。
+    Squiggle,
 }
 
 impl Preedit {
