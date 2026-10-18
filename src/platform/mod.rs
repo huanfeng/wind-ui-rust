@@ -227,6 +227,15 @@ impl Offscreen {
         Offscreen::Soft(Pixmap::new(w, h).expect("分配 pixmap 失败"))
     }
 
+    /// 实际落成的后端（`new` 可能已回退软光栅）。
+    fn active(&self) -> ActiveRenderer {
+        match self {
+            Offscreen::Soft(_) => ActiveRenderer::Software,
+            #[cfg(all(windows, feature = "d2d"))]
+            Offscreen::Gpu { .. } => ActiveRenderer::Direct2D,
+        }
+    }
+
     /// 渲染一帧（清底 + 整树绘制）。
     ///
     /// `fallback_bg` 只在宿主不报底色时兜底：本函数会连渲多帧，而中间合成的交互
@@ -319,6 +328,7 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     // 截图后端随 `renderer` 走：`--screenshot --renderer gpu` 出 GPU 图，使 29 个
     // example 都能做软硬整页比对，而不必为每条差异手写单元测试。
     let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
+    handler.set_active_renderer(off.active());
     off.frame(handler, size, cfg.bg);
     // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
@@ -483,6 +493,7 @@ fn shoot_child_windows(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler>, ba
         whandler.set_scale(s);
         // 渲染后端跟主窗一致，与窗口路径下由 `AppHost.renderer` 决定子窗后端同理。
         let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
+        whandler.set_active_renderer(off.active());
         off.frame(&mut whandler, size, wcfg.bg);
         // 同主窗：收敛型动画多推几帧以捕获稳定终态。
         for _ in 0..4 {
@@ -737,6 +748,39 @@ impl Default for WindowConfig {
     }
 }
 
+/// 窗口**实际在用**的渲染后端：[`Renderer`] 是"想要什么"，这个是"落成了什么"。
+///
+/// [`Renderer::Auto`] 在 GPU 设备建不起来时回退软光栅，运行中设备丢失且重建失败也会降级，
+/// 两者都只在 stderr 留一行——应用要在「关于」页或诊断信息里如实显示，就从
+/// [`EventCtx::active_renderer`](crate::core::EventCtx::active_renderer) 读这个值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ActiveRenderer {
+    /// tiny-skia 软件光栅。
+    #[default]
+    Software,
+    /// Direct2D（Windows，`d2d` feature）。
+    Direct2D,
+    /// wgpu 跑在 Metal 上（macOS，`gpu` 后端）。
+    Metal,
+}
+
+impl ActiveRenderer {
+    /// 是否为 GPU 后端。
+    pub fn is_gpu(self) -> bool {
+        !matches!(self, ActiveRenderer::Software)
+    }
+
+    /// 供显示的简短名称（不随语言变化：是技术名词，与版本号同列）。
+    pub fn name(self) -> &'static str {
+        match self {
+            ActiveRenderer::Software => "Software (tiny-skia)",
+            ActiveRenderer::Direct2D => "Direct2D",
+            ActiveRenderer::Metal => "Metal (wgpu)",
+        }
+    }
+}
+
 /// 渲染后端的选择方式。
 ///
 /// 两条后端并非替代关系。GPU 路径各平台不同但语义一致：Windows 走 Direct2D
@@ -826,6 +870,9 @@ pub trait AppHandler {
     }
     /// 设置 DPI 缩放因子（DPI/96）。窗口创建后与 WM_DPICHANGED 时由平台调用。
     fn set_scale(&mut self, _scale: f32) {}
+    /// 平台建好（或降级替换了）呈现后端后告知宿主实际落成的后端，见 [`ActiveRenderer`]。
+    /// 未调用时宿主按 [`ActiveRenderer::Software`] 回答——平台层默认的正是软后端。
+    fn set_active_renderer(&mut self, _r: ActiveRenderer) {}
 
     /// 窗口**从隐藏态**被唤起（托盘点击 / 全局热键 / `WindowOp::Show`）后调用。
     /// 返回是否需要重绘。

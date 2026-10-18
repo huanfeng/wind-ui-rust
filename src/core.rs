@@ -628,6 +628,8 @@ pub struct Tree {
     /// 该相位不经 `DispatchResult`，不暂存就会被整个丢掉——症状是
     /// "在 on_update 里 `ctx.open_window` 什么都不发生，且没有任何报错"。
     pending_windows: Vec<crate::event::WindowRequest>,
+    /// 本窗口实际落成的渲染后端（平台经 `AppHandler::set_active_renderer` 告知）。
+    pub(crate) active_renderer: crate::platform::ActiveRenderer,
     /// 同上，`ctx.show_context_menu`。延迟弹菜单（先记下、下一帧再弹）走的正是这条路。
     pending_menu: Option<MenuRequest>,
     /// 同上，`ctx.defer_blocking` 与各 `request_pick_*`。应用「先排队、下一帧由某个控件的
@@ -688,6 +690,7 @@ impl Tree {
             pending_release: Vec::new(),
             focus_seen: std::collections::HashMap::new(),
             pending_windows: Vec::new(),
+            active_renderer: crate::platform::ActiveRenderer::Software,
             pending_menu: None,
             pending_dialog: None,
             arrange_origin: Point::new(0, 0),
@@ -2073,6 +2076,11 @@ impl EventCtx<'_> {
     /// 同一个回调里连开多个窗是合法的，按调用顺序创建。
     pub fn open_window(&mut self, req: WindowRequest) {
         self.out.open_windows.push(req);
+    }
+    /// 本窗口**实际在用**的渲染后端（[`Renderer::Auto`](crate::platform::Renderer::Auto)
+    /// 落成了 GPU 还是回退了软光栅、运行中有没有降级），供「关于」页与诊断信息显示。
+    pub fn active_renderer(&self) -> crate::platform::ActiveRenderer {
+        self.tree.active_renderer
     }
     /// 本节点绝对矩形（判断指针是否仍在控件内）。
     pub fn bounds(&self) -> Rect {

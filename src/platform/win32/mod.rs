@@ -94,7 +94,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(feature = "d2d")]
 use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 
-use super::{to_skia_color, AppHandler, NewWindow, Renderer, WindowConfig};
+use super::{to_skia_color, ActiveRenderer, AppHandler, NewWindow, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
 
@@ -1210,6 +1210,7 @@ impl WindowState {
         if downgrade {
             // 替换为软后端并请求重绘：下一帧用 Skia 呈现，进程不崩、内容继续渲染。
             self.backend = Box::new(SkiaBackend::new());
+            self.handler.set_active_renderer(ActiveRenderer::Software);
             let _ = InvalidateRect(Some(hwnd), None, false);
         }
     }
@@ -1490,6 +1491,7 @@ unsafe fn create_window(
                 Some(b) => {
                     if let Some(s) = state_from(hwnd) {
                         s.backend = Box::new(b);
+                        s.handler.set_active_renderer(ActiveRenderer::Direct2D);
                     }
                 }
                 None => {

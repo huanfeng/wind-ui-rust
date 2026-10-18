@@ -3806,6 +3806,10 @@ impl AppHandler for UiHost {
         self.capture.is_some()
     }
 
+    fn set_active_renderer(&mut self, r: crate::platform::ActiveRenderer) {
+        self.tree.active_renderer = r;
+    }
+
     fn set_scale(&mut self, scale: f32) {
         self.damage.needs_full = true;
         self.scale = scale;
@@ -4760,6 +4764,24 @@ mod tests {
     /// 常驻模式（`run_resident`）下界面全由这条路建出来，而 `App::on_shortcut` 那一份
     /// 明确不给子窗——这条断言若失守，那种应用的表现是「界面正常，所有 Ctrl+X 全部无声
     /// 失灵」，与菜单栏清焦点那次（`9aade6e`）是同一种查不出起因的故障形状。
+    /// 平台告知宿主的实际后端要能从控件回调里读到（「关于」页显示用）；没告知时答软光栅。
+    #[test]
+    fn event_ctx_reports_active_renderer_from_host() {
+        use crate::platform::{ActiveRenderer, AppHandler};
+        let mut host = App::new("t", 100, 100)
+            .content(Element::col())
+            .into_handler_for_test();
+        let root = host.tree.root.unwrap();
+        let read = |t: &mut Tree| {
+            let mut got = None;
+            crate::testing::run_with_ctx_in(t, root, |ctx| got = Some(ctx.active_renderer()));
+            got.unwrap()
+        };
+        assert_eq!(read(&mut host.tree), ActiveRenderer::Software);
+        host.set_active_renderer(ActiveRenderer::Direct2D);
+        assert_eq!(read(&mut host.tree), ActiveRenderer::Direct2D);
+    }
+
     #[test]
     fn window_shortcut_reaches_a_window_built_from_a_callback() {
         use crate::app::test_support::key_ev;

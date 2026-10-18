@@ -6,6 +6,12 @@
 // 图形绘制 API 以标量坐标传参（x,y,w,h,radius,width,paint）是有意设计，放宽该 lint。
 #![allow(clippy::too_many_arguments)]
 
+/// 本 crate 的版本号（取自 `Cargo.toml`），供应用的「关于」页显示所用框架版本。
+///
+/// 下游读不到依赖的 `Cargo.toml`，`env!("CARGO_PKG_VERSION")` 在应用里展开的是应用自己的
+/// 版本，故由框架转发。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod anim;
 pub mod app;
 pub mod core;
@@ -38,8 +44,8 @@ pub mod prelude {
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{
-        ImeInterrupt, PickDialog, Renderer, Tray, TrayCtx, TrayHandle, TrayMenuItem, TrayOp,
-        WindowOutline,
+        ActiveRenderer, ImeInterrupt, PickDialog, Renderer, Tray, TrayCtx, TrayHandle,
+        TrayMenuItem, TrayOp, WindowOutline,
     };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixmapTarget, RenderTarget};

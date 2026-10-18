@@ -49,6 +49,8 @@ use tiny_skia::Pixmap;
 use super::{AppHandler, NewWindow, WindowConfig};
 use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedit, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
+#[cfg(gpu_backend)]
+use crate::platform::ActiveRenderer;
 use crate::platform::{to_skia_color, Renderer};
 #[cfg(gpu_backend)]
 use crate::render::gpu::{
@@ -1330,6 +1332,7 @@ impl ContentView {
         let layer = {
             let mut st = self.ivars().borrow_mut();
             st.gpu = None;
+            st.handler.set_active_renderer(ActiveRenderer::Software);
             st.metal_layer.take()
         };
         if let Some(layer) = layer {
@@ -2296,6 +2299,7 @@ fn attach_gpu(view: &ContentView, window: &NSWindow, renderer: Renderer) {
         let mut st = view.ivars().borrow_mut();
         st.gpu = Some(win_gpu);
         st.metal_layer = Some(layer.clone());
+        st.handler.set_active_renderer(ActiveRenderer::Metal);
     }
     // Metal 层挂成 **AppKit 那张 backing layer 的子层**，而不是用 `makeBackingLayer` 直接
     // 顶替 backing layer 本身（`MTKView` 那种写法）。
