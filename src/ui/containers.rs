@@ -45,9 +45,9 @@ impl Default for VScrollbar {
 }
 
 impl VScrollbar {
-    /// 轨道视觉宽度（px）。
+    /// 轨道视觉宽度的默认值（px）；实际绘制取主题 `scrollbar.width`。
     pub const TRACK_W: f32 = crate::core::scrollbar::TRACK_W;
-    /// 上下及右侧边距（px）。
+    /// 上下及右侧边距的默认值（px）；实际绘制取主题 `scrollbar.margin`。
     pub const MARGIN: f32 = crate::core::scrollbar::MARGIN;
     /// 滑块最小高度（px）。
     pub const MIN_THUMB: f32 = crate::core::scrollbar::MIN_THUMB;
@@ -66,7 +66,7 @@ impl VScrollbar {
     }
 
     fn bar_h(bounds: Rect) -> f32 {
-        (bounds.h as f32 - 2.0 * Self::MARGIN).max(0.0)
+        (bounds.h as f32 - 2.0 * crate::core::scrollbar::margin()).max(0.0)
     }
 
     /// 滑块高度。这里的基准是**轨道高** `bar_h`（已扣掉上下 `MARGIN`），与 core 直接用
@@ -89,7 +89,7 @@ impl VScrollbar {
     /// 命中判断：`pos` 是否在滚动条可点击区域内。`bounds` 为宿主控件绝对矩形。
     pub fn hit_test(&self, pos: Point, bounds: Rect, content_h: i32, view_h: i32) -> bool {
         Self::has_overflow(content_h, view_h)
-            && pos.x >= bounds.right() - Self::HIT_W
+            && pos.x >= bounds.right() - crate::core::scrollbar::hit_w()
             && pos.y >= bounds.y
             && pos.y < bounds.y + bounds.h
     }
@@ -106,29 +106,26 @@ impl VScrollbar {
         if !Self::has_overflow(content_h, view_h) {
             return;
         }
-        let bx = bounds.x as f32 + bounds.w as f32 - Self::TRACK_W - Self::MARGIN;
+        let (tw, margin) = (
+            crate::core::scrollbar::track_w(),
+            crate::core::scrollbar::margin(),
+        );
+        let bx = bounds.x as f32 + bounds.w as f32 - tw - margin;
         let by = bounds.y as f32;
         let bh = Self::bar_h(bounds);
         let th = Self::thumb_h(bh, content_h, view_h);
         let max = Self::max_scroll(content_h, view_h).max(1) as f32;
         let travel = (bh - th).max(1.0);
-        let ty = by + Self::MARGIN + travel * (scroll_y as f32 / max);
-        let r = Self::TRACK_W / 2.0;
+        let ty = by + margin + travel * (scroll_y as f32 / max);
+        let r = tw / 2.0;
         // 配色取自主题（同 core 的滚动条）：写死黑色半透明会在深色主题下把滑块一起隐没。
         // 轨道默认不画，只露滑块。
         if let Some(track) = crate::core::scrollbar::track() {
-            canvas.fill_round_rect(
-                bx,
-                by + Self::MARGIN,
-                Self::TRACK_W,
-                bh,
-                r,
-                &Paint::fill(track),
-            );
+            canvas.fill_round_rect(bx, by + margin, tw, bh, r, &Paint::fill(track));
         }
         // 滑块（拖动时加深，给出"抓住了"的反馈）
         let thumb = crate::core::scrollbar::thumb(self.dragging);
-        canvas.fill_round_rect(bx, ty, Self::TRACK_W, th, r, &Paint::fill(thumb));
+        canvas.fill_round_rect(bx, ty, tw, th, r, &Paint::fill(thumb));
     }
 
     /// 按下处理：命中则开始拖动，返回 `true`。

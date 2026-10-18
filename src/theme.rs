@@ -1237,9 +1237,15 @@ pub struct TooltipTheme {
     /// 描边宽度，默认 `{ px = 1 }`：1 逻辑像素在 125% 下是 1.25 物理像素，会被抗锯齿摊成
     /// 两行灰边。
     pub border_width: Option<Len>,
+    /// 指针静止多久（ms）后弹出，默认 500。
+    pub delay_ms: Option<u64>,
 }
 
 impl TooltipTheme {
+    /// 悬停到弹出的延时（ms），默认 500。
+    pub fn delay_ms(&self) -> u64 {
+        self.delay_ms.unwrap_or(500)
+    }
     pub fn bg(&self, _p: &Palette) -> Color {
         self.bg.unwrap_or(Color::hex(0x303033))
     }
@@ -1269,14 +1275,49 @@ pub struct ScrollbarTheme {
     pub thumb: Option<Color>,
     /// 滑块拖动态色（加深一档，给出"抓住了"的反馈）。
     pub thumb_active: Option<Color>,
+    /// 轨道底衬色。`None`（默认）不画轨道，只露滑块——理由见 `core::scrollbar::track`。
+    pub track: Option<Color>,
+    /// 滑块（与轨道）的视觉宽度，逻辑 px，默认 7。
+    ///
+    /// 只改视觉：命中区不小于 `core::scrollbar::HIT_W`（16），细滚动条照样好抓。
+    pub width: Option<f32>,
+    /// 滑块距容器右缘（以及多行框上下缘）的留白，逻辑 px，默认 3。
+    pub margin: Option<f32>,
 }
 
 impl ScrollbarTheme {
+    pub fn width(&self) -> f32 {
+        self.width
+            .unwrap_or(crate::core::scrollbar::TRACK_W)
+            .max(1.0)
+    }
+    pub fn margin(&self) -> f32 {
+        self.margin
+            .unwrap_or(crate::core::scrollbar::MARGIN)
+            .max(0.0)
+    }
     pub fn thumb(&self, p: &Palette) -> Color {
         self.thumb.unwrap_or(p.border)
     }
     pub fn thumb_active(&self, p: &Palette) -> Color {
         self.thumb_active.unwrap_or(p.text_muted)
+    }
+}
+
+/// 模态对话框覆盖层（[`Element::dialog`](crate::ui::Element::dialog) 一族）。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModalTheme {
+    /// 对话框背后整窗遮罩的颜色（含 alpha）。默认 `rgba(0,0,0,120)`。
+    ///
+    /// 不从 palette 推导：遮罩要压暗的是**任意**内容，与界面底色无关；亮暗主题想用不同
+    /// 浓度时各自在主题里写一份（暗色界面上同样的黑罩显得更重，通常要更淡）。
+    pub scrim: Option<Color>,
+}
+
+impl ModalTheme {
+    pub fn scrim(&self, _p: &Palette) -> Color {
+        self.scrim.unwrap_or(Color::rgba(0, 0, 0, 120))
     }
 }
 
@@ -1371,6 +1412,7 @@ pub struct Theme {
     pub anim: AnimTheme,
     pub tooltip: TooltipTheme,
     pub toast: ToastTheme,
+    pub modal: ModalTheme,
     pub color_picker: ColorPickerTheme,
     pub scrollbar: ScrollbarTheme,
 }

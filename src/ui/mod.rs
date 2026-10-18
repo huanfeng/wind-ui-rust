@@ -2596,7 +2596,8 @@ impl Element {
         Element::stack()
             .fill()
             .widget(containers::ModalScrim::new(show))
-            .bg(Color::rgba(0, 0, 0, 120))
+            // 走角色而非构建期取色：运行期换主题（亮→暗换一档遮罩浓度）要跟得上。
+            .bg_role(crate::style::Role::Scrim)
             .visible_when(move || show.get())
             .reactive()
             .child(panel.align(Align::Center))

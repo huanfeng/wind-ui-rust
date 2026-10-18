@@ -11,9 +11,8 @@ use crate::render::{Canvas, Paint};
 use crate::text::TextStyle;
 use crate::theme::Theme;
 
-/// 悬停提示：触发延时（ms）、字号、内边距、相对指针的偏移。
-/// 换行宽度上限由宿主经 `Theme.tooltip.max_width` 配置（见 [`crate::theme::TooltipTheme::max_width`]）。
-const TOOLTIP_DELAY_MS: u64 = 500;
+/// 悬停提示：字号、内边距、相对指针的偏移。触发延时与换行宽度上限由宿主经
+/// `Theme.tooltip.delay_ms` / `max_width` 配置（见 [`crate::theme::TooltipTheme`]）。
 const TOOLTIP_FONT: f32 = 13.0;
 const TOOLTIP_PAD_X: i32 = 8;
 const TOOLTIP_PAD_Y: i32 = 4;
@@ -29,7 +28,7 @@ pub(super) struct TooltipState {
     /// 最近一次指针位置（逻辑坐标），用于悬停提示浮层定位。
     pub(super) pos: Point,
     /// 当前悬停起始时刻（ms，单调时钟）。悬停节点变化或点击时复位；
-    /// 渲染据 `now - since_ms >= TOOLTIP_DELAY_MS` 决定是否弹出提示。
+    /// 渲染据 `now - since_ms >= 主题延时` 决定是否弹出提示。
     pub(super) since_ms: u64,
     /// 点击后抑制提示，直到指针再次移动（避免点完控件原地又弹出盖住它）。
     pub(super) suppressed: bool,
@@ -89,8 +88,8 @@ impl TooltipState {
     }
 
     /// 悬停已满延时。
-    fn due(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.since_ms) >= TOOLTIP_DELAY_MS
+    fn due(&self, now_ms: u64, delay_ms: u64) -> bool {
+        now_ms.saturating_sub(self.since_ms) >= delay_ms
     }
 
     /// 悬停提示浮层绘制（菜单激活时不显示）：悬停节点带 tooltip 且停留超过延时则弹出；
@@ -113,8 +112,9 @@ impl TooltipState {
         let Some(text) = hover.and_then(|h| tree.node_tooltip(h)) else {
             return;
         };
-        if !self.due(now_ms) {
-            let left = TOOLTIP_DELAY_MS - now_ms.saturating_sub(self.since_ms);
+        let delay = theme.tooltip.delay_ms();
+        if !self.due(now_ms, delay) {
+            let left = delay - now_ms.saturating_sub(self.since_ms);
             crate::anim::request_repaint_after(left);
             return;
         }
@@ -213,6 +213,46 @@ mod tests {
             (0..plain.width()).all(|x| !reddish(plain.pixel(x, y).unwrap())),
             "未设描边色时不描"
         );
+    }
+
+    /// 延时取主题：800ms 的主题下停 600ms 不弹、并请求恰在到点时刻的一帧；满 800 才弹。
+    #[test]
+    fn delay_follows_theme() {
+        use crate::render::SkiaCanvas;
+        use crate::ui::Element;
+        let mut tree = Tree::new();
+        let root = Element::leaf().tooltip("提示").build(&mut tree);
+        tree.root = Some(root);
+        let mut theme = Theme::default();
+        theme.tooltip.delay_ms = Some(800);
+        let st = TooltipState {
+            pos: Point::new(20, 20),
+            since_ms: 1_000,
+            ..TooltipState::default()
+        };
+        let shown_at = |now: u64| {
+            let mut pm = tiny_skia::Pixmap::new(200, 100).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            crate::anim::reset_request();
+            st.paint(
+                &mut c,
+                &tree,
+                Some(root),
+                false,
+                &theme,
+                Size::new(200, 100),
+                now,
+            );
+            st.shown.get()
+        };
+        assert!(!shown_at(1_600), "600ms < 主题的 800ms，不该弹");
+        assert_eq!(
+            crate::anim::next_frame_delay_ms(),
+            Some(200),
+            "未到点时应请求恰在剩余 200ms 后的一帧"
+        );
+        assert!(shown_at(1_800), "满 800ms 应弹出");
     }
 
     /// 一块 800×600 的窗口，下面各用例共用。

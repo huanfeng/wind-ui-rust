@@ -51,6 +51,8 @@ pub enum Role {
     InputBg,
     /// 输入框类边框（含 InputTheme 覆盖层回退）。
     InputBorder,
+    /// 模态遮罩（`Theme.modal.scrim`，含 alpha）。
+    Scrim,
 }
 
 impl Role {
@@ -82,6 +84,7 @@ impl Role {
             Role::AccordionHeaderBg => t.accordion.header_bg(p),
             Role::InputBg => t.input.bg(p),
             Role::InputBorder => t.input.border(p),
+            Role::Scrim => t.modal.scrim(p),
         }
     }
 }

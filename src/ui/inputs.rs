@@ -2408,7 +2408,7 @@ impl Widget for TextInput {
                     // 普通悬停：更新滚动条命中标志（驱动光标形状切换）。
                     if self.is_multiline() {
                         let b = ctx.bounds();
-                        let in_sb = p.pos.x >= b.right() - VScrollbar::HIT_W;
+                        let in_sb = p.pos.x >= b.right() - crate::core::scrollbar::hit_w();
                         if in_sb != self.hover_in_scrollbar.get() {
                             self.hover_in_scrollbar.set(in_sb);
                             // 不需要 mark_dirty：光标形状由平台 WM_SETCURSOR 独立查询，

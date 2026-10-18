@@ -43,9 +43,9 @@ const DAMAGE_MARGIN: i32 = 2;
 /// 而 `VScrollbar` 的注释却声称"与 core paint 一致"——注释断言的一致性没有编译期约束，
 /// 抽成共享常量后才真正成立。
 pub mod scrollbar {
-    /// 轨道与滑块的视觉宽度。
+    /// 轨道与滑块视觉宽度的**默认值**；实际取 [`track_w`]（主题 `scrollbar.width` 可改）。
     pub const TRACK_W: f32 = 7.0;
-    /// 轨道距容器右缘（已计入 `WINDOW_EDGE_INSET`）的边距。
+    /// 轨道距容器右缘（已计入 `WINDOW_EDGE_INSET`）边距的**默认值**；实际取 [`margin`]。
     pub const MARGIN: f32 = 3.0;
     /// 滑块最小高度：内容极长时不至于缩成一个点而抓不住。
     pub const MIN_THUMB: f32 = 24.0;
@@ -82,7 +82,22 @@ pub mod scrollbar {
     /// 一律取父容器的最终可用量（严格让位），结果是每个带滚动条的页面右侧凭空多出一条
     /// 空道、左右留白不再对称——收益不抵代价，遂保留现行语义并在此写明。
     pub fn occupied_w(edge_inset: i32) -> i32 {
-        (TRACK_W + MARGIN) as i32 + edge_inset
+        (track_w() + margin()).ceil() as i32 + edge_inset
+    }
+
+    /// 当前主题下滑块（与轨道）的视觉宽度。
+    pub fn track_w() -> f32 {
+        crate::theme::current().scrollbar.width()
+    }
+
+    /// 当前主题下滑块距容器右缘的留白。
+    pub fn margin() -> f32 {
+        crate::theme::current().scrollbar.margin()
+    }
+
+    /// 命中区宽度：不小于 [`HIT_W`]，主题把滚动条加宽到超过它时跟着放宽，保证整条可抓。
+    pub fn hit_w() -> i32 {
+        HIT_W.max((track_w() + margin()).ceil() as i32)
     }
 
     /// 滑块高度。绘制与拖动换算必须同源——否则拖起来会"跟不上鼠标"。
@@ -104,8 +119,10 @@ pub mod scrollbar {
     /// 默认不画是有意的：滚动条是内容的轻量指示，常态下只露一截滑块即可。画满全高的
     /// 底衬要么淡到没有意义，要么与滑块明度接近、整条糊成"全高一根"反而看不出当前
     /// 位置在哪——底衬与滑块本就争同一段视觉预算，取舍下来滑块更重要。
+    ///
+    /// 想要轨道（逐值复刻某套设计稿的细滚动条）时在主题 `scrollbar.track` 里给色。
     pub fn track() -> Option<crate::geometry::Color> {
-        None
+        crate::theme::current().scrollbar.track
     }
 
     /// 滑块色。取自当前主题，**不用**固定的黑色半透明——后者在深色主题下会连滑块
@@ -1450,7 +1467,7 @@ impl Tree {
     /// 滚动条可抓取区的 x 区间 `[lo, hi)`（绝对坐标）。
     pub fn scrollbar_hit_zone(&self, abs: Rect) -> (i32, i32) {
         let hi = abs.right() - self.scrollbar_edge_inset(abs.right());
-        (hi - scrollbar::HIT_W, hi)
+        (hi - scrollbar::hit_w(), hi)
     }
 
     fn scrollbar_edge_inset(&self, abs_right: i32) -> i32 {
@@ -1727,9 +1744,9 @@ impl Tree {
         // 滚动条：内容高于视口时在右缘绘制纵向指示条。贴窗口右缘时整体内缩，避开
         // 被 WM_NCHITTEST 判为缩放边框的那一段（否则画得出来、点不着）。
         if matches!(n.layout, Layout::Scroll) && n.content_h > content.h {
-            let track_w = scrollbar::TRACK_W;
+            let track_w = scrollbar::track_w();
             let inset = self.scrollbar_edge_inset(abs.right());
-            let tx = abs.right() as f32 - track_w - scrollbar::MARGIN - inset as f32;
+            let tx = abs.right() as f32 - track_w - scrollbar::margin() - inset as f32;
             let ty = content.y as f32;
             let th = content.h as f32;
             let thumb_h = scrollbar::thumb_h(content.h, n.content_h);
@@ -5663,7 +5680,7 @@ mod tests {
         // 容器贴窗口右缘 → 滚动条内缩，命中区止于 100 - WINDOW_EDGE_INSET。
         let (lo, hi) = tree.scrollbar_hit_zone(tree.abs_bounds(id));
         let expect_hi = 100 - scrollbar::WINDOW_EDGE_INSET;
-        assert_eq!((lo, hi), (expect_hi - scrollbar::HIT_W, expect_hi));
+        assert_eq!((lo, hi), (expect_hi - scrollbar::hit_w(), expect_hi));
         let x = (lo + hi) / 2;
         let (mut h, mut cap) = (None, None);
         let down = PointerEvent::single(PointerKind::Down, Point::new(x, 10), MouseButton::Left);
@@ -5692,6 +5709,72 @@ mod tests {
         tree.layout_root(Size::new(win_w, 100), &mut te);
         let sid = tree.get(rid).unwrap().children[0];
         (tree, sid)
+    }
+
+    /// 主题改滚动条宽度/留白/轨道：绘制、让位、命中三处同源跟随；加宽超过默认命中区时
+    /// 命中区跟着放宽，整条都抓得到。
+    #[test]
+    fn scrollbar_geometry_and_track_follow_theme() {
+        use crate::theme::{set_current, Theme};
+        let mut th = Theme::default();
+        th.scrollbar.width = Some(4.0);
+        th.scrollbar.margin = Some(1.0);
+        th.scrollbar.track = Some(Color::rgb(255, 0, 0));
+        set_current(std::rc::Rc::new(th));
+        assert_eq!(scrollbar::occupied_w(0), 5, "让位 = 宽 + 留白");
+        assert_eq!(scrollbar::hit_w(), scrollbar::HIT_W, "细滚动条命中区不缩");
+        // 不贴窗口右缘（容器 100 宽放在 200 宽的行里），免掉边缘内缩。
+        let (tree, _) = scroll_tree_of_width(200, 100);
+        let mut pm = tiny_skia::Pixmap::new(200, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+        drop(canvas);
+        let red = |x: u32| {
+            let p = pm.pixel(x, 90).unwrap();
+            p.red() > 200 && p.green() < 60
+        };
+        // 轨道占 [95, 99)：底部（滑块在顶部）只剩轨道色。
+        assert!(red(96) && red(97), "主题给了轨道色就画轨道");
+        assert!(!red(93), "轨道只有 4px 宽，左侧不染");
+        let mut wide = Theme::default();
+        wide.scrollbar.width = Some(20.0);
+        set_current(std::rc::Rc::new(wide));
+        assert_eq!(scrollbar::hit_w(), 23, "加宽后命中区跟着放宽到宽 + 留白");
+        set_current(std::rc::Rc::new(Theme::default()));
+    }
+
+    /// 对话框遮罩色取主题 `modal.scrim`（经角色延迟解析，换主题跟随）。
+    #[test]
+    fn dialog_scrim_follows_theme() {
+        use crate::theme::{set_current, Theme};
+        let mut th = Theme::default();
+        th.modal.scrim = Some(Color::rgb(0, 0, 255));
+        set_current(std::rc::Rc::new(th));
+        let show = signal(true);
+        let root = Element::stack()
+            .width(200)
+            .height(100)
+            .child(Element::dialog(show, Element::leaf().size(20, 20)));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 100), &mut te);
+        let mut pm = tiny_skia::Pixmap::new(200, 100).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        tree.paint(&mut canvas);
+        drop(canvas);
+        let p = pm.pixel(5, 5).unwrap();
+        set_current(std::rc::Rc::new(Theme::default()));
+        assert_eq!(
+            (p.red(), p.green(), p.blue()),
+            (0, 0, 255),
+            "遮罩应取主题色"
+        );
     }
 
     #[test]
