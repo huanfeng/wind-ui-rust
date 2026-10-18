@@ -61,6 +61,8 @@ struct SavedStyle {
     bg: Option<Brush>,
     shadow: Option<Shadow>,
     corner: f32,
+    /// 行若设了四角半径（`Element::corners`），浮起期间让位给主题的统一圆角，结束时原样还原。
+    corners: Option<crate::geometry::Corners>,
 }
 
 /// 手柄与列表共享的拖拽状态。
@@ -490,10 +492,13 @@ impl ReorderList {
                 bg: n.style.bg.clone(),
                 shadow: n.style.shadow,
                 corner: n.style.corner_radius,
+                corners: n.style.corner_radii,
             };
             n.style.bg = Some(Brush::Solid(bg));
             n.style.shadow = Some(shadow);
             n.style.corner_radius = corner;
+            // 四角半径优先于统一半径：不清掉的话浮起样式的圆角不生效。
+            n.style.corner_radii = None;
             self.ctl.borrow_mut().saved = Some(saved);
         }
     }
@@ -521,6 +526,7 @@ impl ReorderList {
                     n.style.bg = s.bg;
                     n.style.shadow = s.shadow;
                     n.style.corner_radius = s.corner;
+                    n.style.corner_radii = s.corners;
                 }
             }
         }

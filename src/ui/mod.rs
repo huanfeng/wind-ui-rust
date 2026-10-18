@@ -35,7 +35,7 @@ use std::rc::Rc;
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, DropFn, EmptyWidget, EventCtx, Layout, Node, NodeId, Tree, Widget};
 use crate::event::{Event, Key, PointerKind};
-use crate::geometry::{Color, Insets, Point, Rect, Size};
+use crate::geometry::{Color, Corners, Insets, Point, Rect, Size};
 use crate::render::image::{Fit, Image, VisualState};
 use crate::render::{Canvas, Paint};
 use crate::signal::Signal;
@@ -4310,6 +4310,29 @@ impl Element {
     }
     pub fn corner(mut self, r: f32) -> Self {
         self.style.corner_radius = r;
+        // 统一半径与四角半径后写者胜：不清的话 `.corners(..).corner(4.0)` 里的 4 不生效。
+        self.style.corner_radii = None;
+        self
+    }
+    /// 四角各自的圆角半径（CSS `border-radius` 四值形式）：本节点的背景、边框、投影与
+    /// 焦点环按此绘制。典型用途是让一侧的角切成直角，与相邻图形无缝拼接：
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Element::col()
+    ///     .bg(Color::rgb(250, 250, 250))
+    ///     .border(Color::rgb(220, 220, 220), 1)
+    ///     .corners(Corners { bottom_left: 0.0, ..Corners::all(10.0) });
+    /// ```
+    ///
+    /// 与 [`corner`](Self::corner) 后写者胜。只作用于节点**自身**的背景层，以下几处仍按
+    /// 四角中最大的半径画统一圆角：投影（带模糊时看不出；零模糊加偏移的硬投影在直角处会
+    /// 露出一点圆角缺口）、图片控件的圆角裁剪、按钮与输入框这类自绘背景的控件。`clip`
+    /// 裁剪子节点仍是直角矩形。
+    pub fn corners(mut self, c: Corners) -> Self {
+        // 统一半径记最大值：读 `corner_radius` 做外扩估算的路径（投影、脏区余量）宁大勿小。
+        self.style.corner_radius = c.max();
+        self.style.corner_radii = Some(c);
         self
     }
     pub fn fg(mut self, c: Color) -> Self {

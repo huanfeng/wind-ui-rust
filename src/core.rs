@@ -1679,7 +1679,11 @@ impl Tree {
                 }
             }
             if let Some(bg) = &n.style.bg {
-                canvas.fill_round_rect(fx, fy, fw, fh, radius, &bg.resolve_paint(&theme));
+                let p = bg.resolve_paint(&theme);
+                match n.style.corner_radii {
+                    Some(c) => canvas.fill_round_rect_corners(fx, fy, fw, fh, c, &p),
+                    None => canvas.fill_round_rect(fx, fy, fw, fh, radius, &p),
+                }
             }
             if let Some((bc, bw)) = &n.style.border {
                 if *bw > 0 {
@@ -1687,7 +1691,14 @@ impl Tree {
                     let e = n.style.border_edges;
                     if e.is_all() {
                         // 四边齐全走圆角描边，保住 corner_radius。
-                        canvas.stroke_round_rect(fx, fy, fw, fh, radius, *bw as f32, &bp);
+                        match n.style.corner_radii {
+                            Some(c) => {
+                                canvas.stroke_round_rect_corners(fx, fy, fw, fh, c, *bw as f32, &bp)
+                            }
+                            None => {
+                                canvas.stroke_round_rect(fx, fy, fw, fh, radius, *bw as f32, &bp)
+                            }
+                        }
                     } else {
                         // 缺边时逐边画矩形段：圆角在此无意义——一条底边不存在「圆角」，
                         // 硬套圆角描边会在缺口处留下两截弧线。
@@ -1716,16 +1727,22 @@ impl Tree {
 
             // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
             if n.focused && self.focus_ring_visible {
-                let ring = crate::theme::current().palette.accent;
-                canvas.stroke_round_rect(
-                    fx - 1.0,
-                    fy - 1.0,
-                    fw + 2.0,
-                    fh + 2.0,
-                    radius + 1.0,
-                    2.0,
-                    &Paint::fill(ring),
-                );
+                let ring = Paint::fill(crate::theme::current().palette.accent);
+                let (rx, ry, rw, rh) = (fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0);
+                match n.style.corner_radii {
+                    // 直角仍保持直角：外扩 1px 只给本来就圆的角加 1。
+                    Some(c) => {
+                        let grow = |r: f32| if r > 0.0 { r + 1.0 } else { 0.0 };
+                        let c = crate::geometry::Corners::new(
+                            grow(c.top_left),
+                            grow(c.top_right),
+                            grow(c.bottom_right),
+                            grow(c.bottom_left),
+                        );
+                        canvas.stroke_round_rect_corners(rx, ry, rw, rh, c, 2.0, &ring);
+                    }
+                    None => canvas.stroke_round_rect(rx, ry, rw, rh, radius + 1.0, 2.0, &ring),
+                }
             }
         }
 
@@ -6289,6 +6306,56 @@ mod tests {
         assert_eq!(probe(&mut tree), (Some(input), true, true, false));
         tree.set_focused(Some(button), Some(input));
         assert_eq!(probe(&mut tree), (Some(button), false, false, true));
+    }
+
+    /// `Element::corners` 接到节点背景与边框：直角那个角有墨、圆角留白；后写的 `corner`
+    /// 盖掉四角设置（后写者胜）。
+    #[test]
+    fn element_corners_shape_background_and_border() {
+        use crate::geometry::Corners;
+        let paint = |el: Element| {
+            let root = Element::col().width(100).height(80).child(el);
+            let mut tree = Tree::new();
+            let id = root.build(&mut tree);
+            tree.root = Some(id);
+            let mut te = crate::text::NullTextEngine;
+            tree.layout_root(Size::new(100, 80), &mut te);
+            let mut pm = tiny_skia::Pixmap::new(100, 80).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let mut eng = crate::text::NullTextEngine;
+            let mut canvas = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            tree.paint(&mut canvas);
+            drop(canvas);
+            pm
+        };
+        let ink = |pm: &tiny_skia::Pixmap, x: u32, y: u32| pm.pixel(x, y).unwrap().red() < 128;
+        let card = || {
+            Element::col()
+                .width(100)
+                .height(80)
+                .bg(Color::BLACK)
+                .corners(Corners {
+                    bottom_left: 0.0,
+                    ..Corners::all(20.0)
+                })
+        };
+        let pm = paint(card());
+        assert!(ink(&pm, 0, 79), "左下直角顶点要有墨");
+        assert!(!ink(&pm, 0, 0), "左上圆角顶点留白");
+        assert!(!ink(&pm, 99, 79), "右下圆角顶点留白");
+        let pm = paint(card().corner(0.0));
+        assert!(ink(&pm, 0, 0), "后写的 corner(0) 应盖掉四角设置");
+        // 只有边框（无底色）：直角外顶点在边上，有墨。
+        let pm = paint(
+            Element::col()
+                .width(100)
+                .height(80)
+                .border(Color::BLACK, 2)
+                .corners(Corners::bottom(20.0)),
+        );
+        assert!(ink(&pm, 0, 0), "上面两角是直角，边框顶点有墨");
+        assert!(!ink(&pm, 0, 79), "下面两角是圆角，顶点留白");
+        assert!(!ink(&pm, 50, 40), "边框中间是空的");
     }
 
     /// 只读框：`width` 为 `None` 时**不设宽**（Wrap 宽，`avail.w != content.w`），

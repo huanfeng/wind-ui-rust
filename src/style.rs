@@ -231,6 +231,11 @@ pub struct Style {
     pub border_edges: Edges,
     /// 圆角半径 px。
     pub corner_radius: f32,
+    /// 四角各自的半径（`Some` 时取代 `corner_radius` 绘制本节点的背景、边框、投影与焦点环）。
+    ///
+    /// 自绘背景的控件（按钮、输入框等）仍按 `corner_radius` 画统一圆角——四角形状是给
+    /// 容器（卡片、面板、标签页头）用的。
+    pub corner_radii: Option<crate::geometry::Corners>,
     /// 前景/文字色（当 `fg_role` 为 None 时生效）。
     pub fg: Color,
     /// 前景主题角色（Some 时优先于 `fg`，运行期换主题跟随）。
@@ -274,6 +279,7 @@ impl Default for Style {
             border: None,
             border_edges: Edges::ALL,
             corner_radius: 0.0,
+            corner_radii: None,
             fg: Color::hex(0x1A1A1A),
             fg_role: Some(Role::Text),
             fg_role_signal: None,

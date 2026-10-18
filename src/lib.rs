@@ -40,7 +40,7 @@ pub mod prelude {
         Key, MenuBarLink, MenuItem, MenuRequest, Mods, Preedit, PreeditSpan, ToastKind,
         UnderlineStyle, WindowRequest, WindowState,
     };
-    pub use crate::geometry::{Color, Insets, Point, Rect, Size};
+    pub use crate::geometry::{Color, Corners, Insets, Point, Rect, Size};
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{

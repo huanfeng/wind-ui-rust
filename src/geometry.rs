@@ -208,6 +208,93 @@ impl Insets {
     }
 }
 
+/// 四角各自的圆角半径（逻辑 px），顺序同 CSS `border-radius`：左上、右上、右下、左下。
+///
+/// 用于「一侧的角要切成直角」这类形状——卡片与相邻图形拼接、标签页只圆上面两角：
+///
+/// ```
+/// use windui::geometry::Corners;
+/// // 四角 8，唯独左下角是直角。
+/// let c = Corners { bottom_left: 0.0, ..Corners::all(8.0) };
+/// assert_eq!(c, Corners::new(8.0, 8.0, 8.0, 0.0));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Corners {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_right: f32,
+    pub bottom_left: f32,
+}
+
+impl Corners {
+    pub const fn all(r: f32) -> Self {
+        Self::new(r, r, r, r)
+    }
+    /// 顺序：左上、右上、右下、左下（顺时针，同 CSS）。
+    pub const fn new(top_left: f32, top_right: f32, bottom_right: f32, bottom_left: f32) -> Self {
+        Self {
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left,
+        }
+    }
+    /// 只圆上面两角（标签页、贴底的面板）。
+    pub const fn top(r: f32) -> Self {
+        Self::new(r, r, 0.0, 0.0)
+    }
+    /// 只圆下面两角（贴顶的下拉面板）。
+    pub const fn bottom(r: f32) -> Self {
+        Self::new(0.0, 0.0, r, r)
+    }
+    /// 四角半径是否相同（相同时可走统一半径的快路径）。
+    pub fn is_uniform(&self) -> bool {
+        self.top_left == self.top_right
+            && self.top_right == self.bottom_right
+            && self.bottom_right == self.bottom_left
+    }
+    /// 四角中最大的半径。
+    pub fn max(&self) -> f32 {
+        self.top_left
+            .max(self.top_right)
+            .max(self.bottom_right)
+            .max(self.bottom_left)
+    }
+    /// 每角各加 `d`（负值收缩），结果不小于 0。描边内缘、焦点环外扩用。
+    pub fn offset(&self, d: f32) -> Self {
+        let f = |r: f32| (r + d).max(0.0);
+        Self::new(
+            f(self.top_left),
+            f(self.top_right),
+            f(self.bottom_right),
+            f(self.bottom_left),
+        )
+    }
+    /// 按 `w × h` 收缩到放得下：负值归零；同一条边上两角半径之和超过边长时，四角**等比**
+    /// 缩小（CSS `border-radius` 的规则），形状只变小不变形。
+    pub fn fit(&self, w: f32, h: f32) -> Self {
+        let c = self.offset(0.0);
+        let ratio = |len: f32, a: f32, b: f32| {
+            if a + b > len && a + b > 0.0 {
+                len / (a + b)
+            } else {
+                1.0
+            }
+        };
+        let k = ratio(w, c.top_left, c.top_right)
+            .min(ratio(w, c.bottom_left, c.bottom_right))
+            .min(ratio(h, c.top_left, c.bottom_left))
+            .min(ratio(h, c.top_right, c.bottom_right))
+            .max(0.0);
+        Self::new(
+            c.top_left * k,
+            c.top_right * k,
+            c.bottom_right * k,
+            c.bottom_left * k,
+        )
+    }
+}
+
 /// 非预乘 sRGB 颜色（u8 通道）。绘制时再转 tiny-skia 的预乘格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color {
@@ -334,6 +421,16 @@ impl<'de> serde::Deserialize<'de> for Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同一条边上两角之和超长时四角等比缩小（CSS 规则），形状比例不变；负值归零。
+    #[test]
+    fn corners_fit_scales_all_corners_proportionally() {
+        let c = Corners::new(30.0, 10.0, 0.0, -5.0).fit(20.0, 100.0);
+        // 上边 30+10=40 > 20 → k=0.5；其余边都放得下。
+        assert_eq!(c, Corners::new(15.0, 5.0, 0.0, 0.0));
+        let ok = Corners::all(5.0);
+        assert_eq!(ok.fit(100.0, 100.0), ok, "放得下就原样");
+    }
 
     #[test]
     fn rect_contains_and_intersect() {

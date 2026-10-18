@@ -32,7 +32,7 @@ use super::layer::LayerTexture;
 use super::prim::{PrimBatch, PrimRenderer, MAX_BATCH};
 use super::tex::{image_item, place_image, ImageItem, MAX_IMAGE_BATCH};
 use super::text::{glyph_item, text_item, RunKey, TextItem, MAX_TEXT_BATCH};
-use crate::geometry::{Color, Rect, Size};
+use crate::geometry::{Color, Corners, Rect, Size};
 use crate::render::image::{Fit, Image};
 use crate::render::{Canvas, Paint, RenderTarget};
 use crate::spec::Align;
@@ -617,6 +617,51 @@ impl Canvas for WgpuCanvas<'_> {
         let (clip, m) = (self.clip_phys(), self.aa_margin());
         self.batch.push_circle(cx, cy, r, paint, clip, m);
         self.maybe_flush();
+    }
+
+    // 四角各异：本后端的 `fill_polygon` 只有逐行兜底（弧段是物理行台阶、渐变退成纯色），
+    // 故改为按象限裁剪、每块画原生的 SDF 圆角矩形。见 `render::by_quadrants`。
+    fn fill_round_rect_corners(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corners: Corners,
+        paint: &Paint,
+    ) {
+        if corners.is_uniform() {
+            self.fill_round_rect(x, y, w, h, corners.top_left, paint);
+            return;
+        }
+        let done = crate::render::by_quadrants(self, x, y, w, h, corners, |c, r| {
+            c.fill_round_rect(x, y, w, h, r, paint)
+        });
+        if !done {
+            crate::render::fill_round_rect_corners_poly(self, x, y, w, h, corners, paint);
+        }
+    }
+
+    fn stroke_round_rect_corners(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corners: Corners,
+        width: f32,
+        paint: &Paint,
+    ) {
+        if corners.is_uniform() {
+            self.stroke_round_rect(x, y, w, h, corners.top_left, width, paint);
+            return;
+        }
+        let done = crate::render::by_quadrants(self, x, y, w, h, corners, |c, r| {
+            c.stroke_round_rect(x, y, w, h, r, width, paint)
+        });
+        if !done {
+            crate::render::stroke_round_rect_corners_poly(self, x, y, w, h, corners, width, paint);
+        }
     }
 
     fn draw_shadow(
@@ -1295,6 +1340,60 @@ mod tests {
             WHITE,
             &[(55, 30, 15, 8), (58, 58, 8, 8)],
             |c| c.fill_polygon(&[&outer, &hole], &Paint::fill(RED)),
+        );
+    }
+
+    /// 四角各异（按象限裁剪拼接）：半透明色在 125% 下，中线两侧（象限接缝）与直角那个角
+    /// 都须与软后端一致——接缝若重叠一列，半透明色会叠出一道深线；渐变须保留而非退成纯色。
+    #[test]
+    fn round_rect_corners_matches_soft_backend() {
+        use crate::geometry::Corners;
+        let c = Corners {
+            bottom_left: 0.0,
+            ..Corners::all(16.0)
+        };
+        let half_red = Color::rgba(255, 0, 0, 128);
+        // 物理取样框：横跨竖中线（逻辑 x≈50）与横中线（逻辑 y≈40）的两条带，加左下直角附近。
+        assert_matches_soft(
+            "corners_alpha",
+            125,
+            125,
+            1.25,
+            WHITE,
+            &[(55, 30, 15, 40), (20, 46, 85, 8), (14, 80, 6, 4)],
+            |cv| cv.fill_round_rect_corners(10.0, 10.0, 80.0, 60.0, c, &Paint::fill(half_red)),
+        );
+        let grad = crate::render::Gradient::linear(
+            (0.0, 0.0),
+            (1.0, 0.0),
+            vec![(0.0, Color::rgb(0, 0, 255)), (1.0, Color::rgb(255, 0, 0))],
+        );
+        assert_matches_soft(
+            "corners_gradient",
+            100,
+            100,
+            1.0,
+            WHITE,
+            &[(20, 30, 60, 20)],
+            |cv| {
+                cv.fill_round_rect_corners(
+                    10.0,
+                    10.0,
+                    80.0,
+                    60.0,
+                    c,
+                    &Paint::gradient(grad.clone()),
+                )
+            },
+        );
+        assert_matches_soft(
+            "corners_stroke",
+            100,
+            100,
+            1.0,
+            WHITE,
+            &[(30, 10, 40, 3), (10, 30, 3, 20), (40, 30, 20, 20)],
+            |cv| cv.stroke_round_rect_corners(10.0, 10.0, 80.0, 60.0, c, 3.0, &Paint::fill(RED)),
         );
     }
 

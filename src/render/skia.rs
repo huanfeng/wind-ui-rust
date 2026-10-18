@@ -2379,4 +2379,93 @@ mod tests {
             "2x 下两行上界之外 12px 的脏区不该进引擎"
         );
     }
+
+    fn paint_corners(scale: f32, stroke: Option<f32>, c: crate::geometry::Corners) -> Pixmap {
+        let n = (100.0 * scale) as u32;
+        let mut pm = Pixmap::new(n, n).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut eng = crate::text::NullTextEngine;
+        let mut cv = SkiaCanvas::with_text(&mut pm, &mut eng, scale);
+        let p = Paint::fill(Color::BLACK);
+        match stroke {
+            None => cv.fill_round_rect_corners(10.0, 10.0, 80.0, 60.0, c, &p),
+            Some(w) => cv.stroke_round_rect_corners(10.0, 10.0, 80.0, 60.0, c, w, &p),
+        }
+        pm
+    }
+
+    /// 四角各自半径：直角的那个角贴到顶点都有墨，圆的角在顶点处留白；非整数 DPI 同样成立。
+    #[test]
+    fn fill_round_rect_corners_squares_only_the_zero_corner() {
+        use crate::geometry::Corners;
+        let c = Corners {
+            bottom_left: 0.0,
+            ..Corners::all(20.0)
+        };
+        for s in [1.0f32, 1.25, 2.0] {
+            let pm = paint_corners(s, None, c);
+            let at = |x: f32, y: f32| px(&pm, (x * s) as u32, (y * s) as u32);
+            let (ink, blank) = ((0, 0, 0), (255, 255, 255));
+            assert_eq!(at(11.0, 68.5), ink, "s={s}：左下角是直角，顶点处要有墨");
+            for (x, y, which) in [
+                (11.0, 11.0, "左上"),
+                (88.5, 11.0, "右上"),
+                (88.5, 68.5, "右下"),
+            ] {
+                assert_eq!(at(x, y), blank, "s={s}：{which}角是圆的，顶点处应留白");
+            }
+            assert_eq!(at(50.0, 40.0), ink, "s={s}：中心要填");
+            assert_eq!(
+                at(18.0, 18.0),
+                ink,
+                "s={s}：圆弧内侧要填（距圆心约 17 < r=20）"
+            );
+        }
+    }
+
+    /// 四角相同时必须逐像素等同统一半径版——转过去而不是走折线，两条路径不得并存出差。
+    #[test]
+    fn uniform_corners_match_fill_round_rect_exactly() {
+        for s in [1.0f32, 1.5] {
+            let a = paint_corners(s, None, crate::geometry::Corners::all(12.0));
+            let n = (100.0 * s) as u32;
+            let mut b = Pixmap::new(n, n).unwrap();
+            b.fill(tiny_skia::Color::WHITE);
+            let mut eng = crate::text::NullTextEngine;
+            SkiaCanvas::with_text(&mut b, &mut eng, s).fill_round_rect(
+                10.0,
+                10.0,
+                80.0,
+                60.0,
+                12.0,
+                &Paint::fill(Color::BLACK),
+            );
+            assert!(
+                a.data() == b.data(),
+                "s={s}：统一半径应与 fill_round_rect 逐像素一致"
+            );
+        }
+    }
+
+    /// 描边是环带：边上有墨、里面空；直角那个角的外顶点有墨，内缘也是直角。
+    #[test]
+    fn stroke_round_rect_corners_is_a_ring() {
+        use crate::geometry::Corners;
+        let c = Corners::top(16.0);
+        for s in [1.0f32, 1.25] {
+            let pm = paint_corners(s, Some(4.0), c);
+            let at = |x: f32, y: f32| px(&pm, (x * s) as u32, (y * s) as u32);
+            let (ink, blank) = ((0, 0, 0), (255, 255, 255));
+            assert_eq!(at(50.0, 40.0), blank, "s={s}：环内应空");
+            assert_eq!(at(50.0, 12.0), ink, "s={s}：上边有墨");
+            assert_eq!(at(11.0, 40.0), ink, "s={s}：左边有墨");
+            assert_eq!(at(11.0, 68.5), ink, "s={s}：左下直角外顶点有墨");
+            assert_eq!(
+                at(15.0, 64.0),
+                blank,
+                "s={s}：直角内缘也是直角，内顶点外侧即空"
+            );
+            assert_eq!(at(11.0, 11.0), blank, "s={s}：左上是圆角，外顶点留白");
+        }
+    }
 }

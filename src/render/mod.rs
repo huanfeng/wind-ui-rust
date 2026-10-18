@@ -11,7 +11,7 @@ pub mod skia;
 pub use image::{DecodedImage, Fit, Image, ImageDecoder, ImageError, VisualState};
 pub use skia::SkiaCanvas;
 
-use crate::geometry::{Color, Rect};
+use crate::geometry::{Color, Corners, Rect};
 use crate::spec::Align;
 use crate::text::TextEngine;
 
@@ -280,6 +280,52 @@ pub trait Canvas {
     );
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint);
 
+    /// 四角半径各自独立的圆角矩形填充（CSS `border-radius` 的四值形式）。
+    ///
+    /// 四角相同时等价于 [`fill_round_rect`](Self::fill_round_rect)（直接转过去，逐像素一致）。
+    /// 不同时把轮廓按物理像素密度折线化交给 [`fill_polygon`](Self::fill_polygon)：软件与
+    /// D2D 后端那是一次路径光栅化，边缘抗锯齿与 `fill_round_rect` 同一档。GPU 后端覆盖为
+    /// 按象限裁剪、各用该角半径画原生圆角矩形（抗锯齿与渐变都与统一半径版一致），只有半径
+    /// 越过边长一半时退回折线（`fill_polygon` 在那里是逐行兜底）。半径超出边长时按
+    /// [`Corners::fit`] 等比收缩。坐标先对齐物理像素，与统一半径版同源，故同框的填充与
+    /// [`stroke_round_rect_corners`](Self::stroke_round_rect_corners) 不会错开半个像素。
+    fn fill_round_rect_corners(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corners: Corners,
+        paint: &Paint,
+    ) {
+        if corners.is_uniform() {
+            self.fill_round_rect(x, y, w, h, corners.top_left, paint);
+            return;
+        }
+        fill_round_rect_corners_poly(self, x, y, w, h, corners, paint);
+    }
+
+    /// 四角半径各自独立的圆角矩形描边：描边落在 `(x, y, w, h)` 框内，内缘半径 = 外缘半径
+    /// − 线宽（同 CSS）。四角相同时等价于 [`stroke_round_rect`](Self::stroke_round_rect)；
+    /// 不同时以「外轮廓 + 反向内轮廓」的环带交给 [`fill_polygon`](Self::fill_polygon)，
+    /// 精度说明同 [`fill_round_rect_corners`](Self::fill_round_rect_corners)。
+    fn stroke_round_rect_corners(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        corners: Corners,
+        width: f32,
+        paint: &Paint,
+    ) {
+        if corners.is_uniform() {
+            self.stroke_round_rect(x, y, w, h, corners.top_left, width, paint);
+            return;
+        }
+        stroke_round_rect_corners_poly(self, x, y, w, h, corners, width, paint);
+    }
+
     /// 折线描边：`pts` 逐点相连，**拐点处不留缺口**。
     ///
     /// 与"连着调几次 [`draw_line`](Self::draw_line)"的差别只在拐点。`draw_line` 用的是
@@ -491,6 +537,148 @@ impl RenderTarget for PixmapTarget<'_> {
     fn as_pixmap(&mut self) -> Option<&mut tiny_skia::Pixmap> {
         Some(self.pixmap)
     }
+}
+
+/// 按四个象限各自裁剪、每个象限用该角的半径画一遍**统一半径**图元，拼出四角各异的形状。
+///
+/// 给 `fill_polygon` 只有逐行兜底的后端（GPU）用：每个象限里画的就是原生的圆角矩形，
+/// 抗锯齿与统一半径版同档、渐变坐标按整个矩形算（四块拼起来是同一条渐变）。象限边界取
+/// 整数逻辑坐标，两侧经同一个 `Rect::scaled` 物理化，共享边逐像素对齐，半透明色不会在
+/// 中线叠出一道深线。
+///
+/// 某个角的半径越过所在边的一半时象限切不开（那段圆弧会伸进邻角的象限），返回 `false`
+/// 由调用方改走折线路径。`draw(canvas, 本象限半径)` 画整个矩形，裁剪负责只留一角。
+#[cfg_attr(not(gpu_backend), allow(dead_code))]
+pub(crate) fn by_quadrants<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corners: Corners,
+    mut draw: impl FnMut(&mut C, f32),
+) -> bool {
+    let k = corners.fit(w, h);
+    if k.max() > w.min(h) / 2.0 {
+        return false;
+    }
+    // 外缘多留 2 逻辑像素：裁剪只负责切中线，别切掉边缘的抗锯齿过渡带。
+    let (l, t) = (x.floor() as i32 - 2, y.floor() as i32 - 2);
+    let (r, b) = ((x + w).ceil() as i32 + 2, (y + h).ceil() as i32 + 2);
+    let (mx, my) = ((x + w / 2.0).round() as i32, (y + h / 2.0).round() as i32);
+    for (q, radius) in [
+        (Rect::new(l, t, mx - l, my - t), k.top_left),
+        (Rect::new(mx, t, r - mx, my - t), k.top_right),
+        (Rect::new(mx, my, r - mx, b - my), k.bottom_right),
+        (Rect::new(l, my, mx - l, b - my), k.bottom_left),
+    ] {
+        canvas.save();
+        canvas.clip_rect(q);
+        draw(canvas, radius);
+        canvas.restore();
+    }
+    true
+}
+
+/// [`Canvas::fill_round_rect_corners`] 的折线实现（trait 默认实现与后端兜底共用）。
+pub(crate) fn fill_round_rect_corners_poly<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corners: Corners,
+    paint: &Paint,
+) {
+    let s = canvas.dpi_scale();
+    let (x, y, w, h) = align_to_device(x, y, w, h, s);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let outer = corners_contour(x, y, w, h, corners.fit(w, h), s);
+    canvas.fill_polygon(&[&outer], paint);
+}
+
+/// [`Canvas::stroke_round_rect_corners`] 的折线实现（trait 默认实现与后端兜底共用）。
+pub(crate) fn stroke_round_rect_corners_poly<C: Canvas + ?Sized>(
+    canvas: &mut C,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corners: Corners,
+    width: f32,
+    paint: &Paint,
+) {
+    let s = canvas.dpi_scale();
+    let (x, y, w, h) = align_to_device(x, y, w, h, s);
+    let width = width.min(w / 2.0).min(h / 2.0);
+    if width <= 0.0 {
+        return;
+    }
+    let c = corners.fit(w, h);
+    let outer = corners_contour(x, y, w, h, c, s);
+    let (iw, ih) = (w - 2.0 * width, h - 2.0 * width);
+    if iw <= 0.0 || ih <= 0.0 {
+        // 线宽吃满了整个框：没有内缘，就是一块实心。
+        canvas.fill_polygon(&[&outer], paint);
+        return;
+    }
+    let mut inner = corners_contour(
+        x + width,
+        y + width,
+        iw,
+        ih,
+        c.offset(-width).fit(iw, ih),
+        s,
+    );
+    // 内圈反向：非零环绕下抵消成洞，剩下的就是环带。
+    inner.reverse();
+    canvas.fill_polygon(&[&outer, &inner], paint);
+}
+
+/// 四角各自半径的圆角矩形轮廓（逻辑坐标，屏幕坐标系下顺时针）：直边两端点 + 每段圆弧
+/// 按物理半径取样的折线。`corners` 须已 [`Corners::fit`]。
+///
+/// 取样密度按**物理**半径定：弧上每段的弦高（折线与真圆最大偏差）在 0.1 物理像素以内，
+/// 肉眼与抗锯齿都分不出它与真圆；半径为 0 的角只出一个顶点（真直角）。
+pub(crate) fn corners_contour(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corners: Corners,
+    scale: f32,
+) -> Vec<(f32, f32)> {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let mut pts = Vec::with_capacity(32);
+    let mut arc = |cx: f32, cy: f32, r: f32, a0: f32| {
+        if r <= 0.0 {
+            // 直角：顶点就是圆心本身（r = 0 时圆心落在角上）。
+            pts.push((cx, cy));
+            return;
+        }
+        // 弦高 r·(1 − cos(θ/2)) ≤ 0.1px ⇒ θ ≤ 2·acos(1 − 0.1/r)。
+        let pr = (r * scale).max(1.0);
+        let step = 2.0 * (1.0 - (0.1 / pr).min(1.0)).acos();
+        let n = ((FRAC_PI_2 / step).ceil() as usize).clamp(2, 64);
+        for i in 0..=n {
+            let a = a0 + FRAC_PI_2 * i as f32 / n as f32;
+            pts.push((cx + r * a.cos(), cy + r * a.sin()));
+        }
+    };
+    let (l, t, r, b) = (x, y, x + w, y + h);
+    let c = corners;
+    arc(r - c.top_right, t + c.top_right, c.top_right, -FRAC_PI_2);
+    arc(r - c.bottom_right, b - c.bottom_right, c.bottom_right, 0.0);
+    arc(
+        l + c.bottom_left,
+        b - c.bottom_left,
+        c.bottom_left,
+        FRAC_PI_2,
+    );
+    arc(l + c.top_left, t + c.top_left, c.top_left, PI);
+    pts
 }
 
 /// 构造圆角矩形路径（cubic 贝塞尔逼近四角）。radius<=0 退化为直角矩形。
