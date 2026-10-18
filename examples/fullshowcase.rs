@@ -1493,11 +1493,71 @@ fn main() {
         )
     };
 
+    // 自由摆放 + 四角圆角：几何由数据算出的界面（卡片板一类）。卡片框占右半幅、最窄 140，
+    // 高度存在信号里；贴着左侧"尾巴"的左下角切成直角，与尾巴无缝接上。
+    let cp_place = {
+        let card_h = signal(90);
+        let board = Element::stack()
+            .width_match()
+            .height(190)
+            .bg_role(Role::SurfaceAlt)
+            .corner(8.0)
+            // 尾巴：一段竖条接在卡片左下角外侧。
+            .child(
+                Element::leaf()
+                    .bg_role(Role::Accent)
+                    .place_fn(move |avail| {
+                        let w = (avail.w / 2 - 16).max(140);
+                        Rect::new(avail.w - w - 16 - 24, 20 + card_h.get() - 10, 24, 10)
+                    }),
+            )
+            .child(
+                Element::col()
+                    .padding(10)
+                    .spacing(4)
+                    .bg_role(Role::Surface)
+                    .border_role(Role::Accent, 1)
+                    .corners(Corners {
+                        bottom_left: 0.0,
+                        ..Corners::all(12.0)
+                    })
+                    .child(Element::label("卡片框 place_fn"))
+                    .child(Element::label("右半幅 · 左下直角").fg_role(Role::TextMuted))
+                    .place_fn(move |avail| {
+                        let w = (avail.w / 2 - 16).max(140);
+                        Rect::new(avail.w - w - 16, 20, w, card_h.get())
+                    }),
+            )
+            .child(
+                Element::label("place(16, 16)")
+                    .padding_xy(8, 4)
+                    .bg_role(Role::Surface)
+                    .corners(Corners::top(8.0))
+                    .place(16, 16),
+            );
+        Element::card(
+            "自由摆放 place / place_fn + 四角圆角 corners（几何由信号算出）",
+            Element::col().width_match().spacing(8).child(board).child(
+                Element::row()
+                    .width_match()
+                    .spacing(8)
+                    .child(Element::button("拉高").small().on_click(move |_| {
+                        card_h.update(|h| *h = (*h + 20).min(160));
+                    }))
+                    .child(Element::button("复位").small().on_click(move |_| {
+                        card_h.set(90);
+                    }))
+                    .child(Element::label("高度在 Signal<i32> 里，改信号即重排")),
+            ),
+        )
+    };
+
     let layouts = Element::scroll().fill().child(
         Element::col()
             .width_match()
             .spacing(14)
             .child(cp_split)
+            .child(cp_place)
             .child(cp_9)
             .child(cp_15)
             .child(cp_17)

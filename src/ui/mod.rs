@@ -696,6 +696,7 @@ pub struct Element {
     vis_cond: Option<Box<dyn Fn() -> bool>>,
     /// 运行期权重，见 [`Element::weight_when`]。
     weight_fn: Option<Box<dyn Fn() -> f32>>,
+    place: Option<crate::core::Placement>,
     clip_children: bool,
     click: Option<ClickFn>,
     blur: Option<ClickFn>,
@@ -741,6 +742,7 @@ impl Element {
             vis_signal: None,
             vis_cond: None,
             weight_fn: None,
+            place: None,
             clip_children: false,
             click: None,
             blur: None,
@@ -4221,6 +4223,52 @@ impl Element {
         self.align_v = Some(v);
         self
     }
+    /// **自由摆放**（仅 [`stack`](Self::stack) 的直接子节点）：左上角落在父内容区的
+    /// `(x, y)`，尺寸照常由 `width`/`height` 决定（`width_match` 取到父右缘的剩余宽）。
+    ///
+    /// 设了它，`align`/`margin` 不再参与定位；stack 不设宽高时会撑到包住所有摆放子节点
+    /// 的右下角。层叠顺序即子节点顺序，后加的在上。几何要随数据变时用
+    /// [`place_fn`](Self::place_fn)。
+    ///
+    /// 摆到 stack 矩形**之外**的部分照常绘制、但点不到（命中先判父矩形）：给 stack 定了
+    /// 尺寸时别让子节点越界，或干脆不设尺寸让它自动包住。链到非 stack 的子节点上
+    /// debug 构建下 panic 提示。
+    pub fn place(mut self, x: i32, y: i32) -> Self {
+        self.place = Some(crate::core::Placement::At(Point::new(x, y)));
+        self
+    }
+    /// **自由摆放，几何由闭包算出**（仅 [`stack`](Self::stack) 的直接子节点）：闭包收父
+    /// 内容区尺寸，返回本节点相对父内容区左上角的矩形（位置与宽高都由它定，`width`/
+    /// `height` 不再起作用）。CSS 的 `position: absolute`、Flutter 的 `Positioned`。
+    ///
+    /// 闭包每次布局在测量期调用一次（排布期复用同一矩形），**读信号即运行期可变**——拖动改高、按
+    /// 内容长高、窗口变窄时换算宽度，都是改一个信号。契约同
+    /// [`weight_when`](Self::weight_when)：纯函数、帧内值不变；在事件回调之外写信号的
+    /// 一方要记得 `ctx.mark_layout_dirty()`（事件路径宿主自会重排）。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// let card_h = signal(120);
+    /// Element::stack().width_match().child(
+    ///     Element::col()
+    ///         .bg(Color::rgb(250, 250, 250))
+    ///         // 占右半幅，最窄 140；高度随信号。
+    ///         .place_fn(move |avail| {
+    ///             let w = (avail.w / 2 - 16).max(140);
+    ///             Rect::new(avail.w - w, 24, w, card_h.get())
+    ///         }),
+    /// );
+    /// ```
+    ///
+    /// `avail` 是 stack 在测量期拿到的可用量（扣过 padding）。某一轴父尺寸不定（stack 放在
+    /// 滚动容器里、自己又没设高）时那一轴为 **0**——那种界面的尺寸本就该由子节点撑出来，
+    /// 闭包只按另一轴算即可。stack 不设宽高时它会收缩到包住子节点，此时 `avail` 是父给的
+    /// 上限而不是 stack 最终的尺寸；要「占 stack 一半宽」这种语义请给 stack 显式宽
+    /// （`width_match`/`width`）。
+    pub fn place_fn(mut self, f: impl Fn(Size) -> Rect + 'static) -> Self {
+        self.place = Some(crate::core::Placement::Rect(Box::new(f)));
+        self
+    }
     /// 线性容器主轴子间距。
     pub fn spacing(mut self, s: i32) -> Self {
         if let Layout::Linear { spacing, .. } = &mut self.layout {
@@ -4463,6 +4511,7 @@ impl Element {
             Layout::Linear { axis, .. } => Some(axis),
             _ => None,
         };
+        let is_stack = matches!(self.layout, Layout::Frame);
         let children = std::mem::take(&mut self.children);
         // 把 Builder 上的点击回调注入控件（仅交互控件接收）。
         let mut widget = self.widget;
@@ -4486,6 +4535,8 @@ impl Element {
             margin: self.margin,
             align: self.align,
             align_v: self.align_v,
+            place: self.place,
+            place_cache: None,
             layout: self.layout,
             widget,
             style: self.style,
@@ -4525,6 +4576,11 @@ impl Element {
             tree.register_modal(show);
         }
         for mut ce in children {
+            // 自由摆放只有 stack 认：row/col/scroll 按自己的流排布，静默忽略会让人以为坐标写错了。
+            debug_assert!(
+                ce.place.is_none() || is_stack,
+                "place()/place_fn() 只对 Element::stack() 的直接子节点生效"
+            );
             // 父为线性容器时，把请求的 weight 落到主轴维度
             if let (Some(axis), Some(w)) = (my_axis, ce.weight) {
                 match axis {

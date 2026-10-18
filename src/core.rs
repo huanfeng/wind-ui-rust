@@ -399,6 +399,16 @@ pub enum Layout {
     Scroll,
 }
 
+/// stack（`Layout::Frame`）子节点的**自由摆放**（[`crate::ui::Element::place`] /
+/// [`crate::ui::Element::place_fn`]）：脱离 `align` 的九宫格对齐，按坐标落位。
+pub enum Placement {
+    /// 左上角落在父内容区的 `(x, y)`，尺寸照常由自身的 `width`/`height` 决定。
+    At(Point),
+    /// 整个矩形（相对父内容区左上角）由闭包按父内容区尺寸算出——几何由数据递推的
+    /// 界面（卡片板、流程图、自由画布）。闭包读信号即可在运行期改位置与宽高。
+    Rect(Box<dyn Fn(Size) -> Rect>),
+}
+
 /// 声明式初始焦点（[`crate::ui::Element::autofocus`]）。
 ///
 /// 存在的理由：[`EventCtx::request_focus`] 只能把焦点给**自己**，且只在该控件自己的
@@ -489,6 +499,11 @@ pub struct Node {
     /// "两轴各要一个值"的问题。stack 则是唯一能把子元素摆到任意角的布局，而角落是
     /// 两轴的组合——对话框右上角的小关闭按钮正是如此。
     pub align_v: Option<Align>,
+    /// 自由摆放（仅父为 `Layout::Frame` 时生效，见 [`Placement`]）。设了它 `align`/`align_v`
+    /// 与 `margin` 都不再参与定位。
+    pub place: Option<Placement>,
+    /// `Placement::Rect` 在**测量期**算出的矩形，排布期原样复用（见 `Tree::measure_frame`）。
+    pub(crate) place_cache: Option<Rect>,
     pub layout: Layout,
     pub widget: Box<dyn Widget>,
     pub style: Style,
@@ -1387,7 +1402,65 @@ impl Tree {
         let children = self.visible_children(id);
         let mut mw = 0;
         let mut mh = 0;
+        // 父高度不定（滚动容器里）时没有可报的高度，给 0：闭包据此只按宽度算。
+        // 父尺寸不定（滚动容器里、或宽度不定的祖先下）的那一轴没有可报的值，给 0：闭包据此
+        // 只按另一轴算。不给 0 的话，未定轴的 avail 是个极大的哨兵值，按比例换算会把 stack
+        // 撑到天文数字。
+        let place_avail = Size::new(
+            if wspec.mode == MeasureMode::Unbounded {
+                0
+            } else {
+                avail_w
+            },
+            if hspec.mode == MeasureMode::Unbounded {
+                0
+            } else {
+                avail_h
+            },
+        );
         for &c in &children {
+            // 自由摆放的子：尺寸照常（At）或由闭包钉死（Rect），并按落点右下角撑开 stack——
+            // stack 不设高时放进滚动容器，内容总高因此就是最低那张卡片的底边。
+            match self.placed_rect(c, place_avail) {
+                Some((origin, Some(r))) => {
+                    // 记下这次的矩形，排布期复用而不再调闭包：stack 不设宽高时排布期的内容区
+                    // 是本次测量**包出来**的尺寸，与测量期的可用量不同——再调一次闭包，按
+                    // 比例换算的几何就会与子树按之测量的尺寸对不上（文字排版、布局缓存错位）。
+                    if let Some(n) = self.get_mut(c) {
+                        n.place_cache = Some(r);
+                    }
+                    self.measure(
+                        c,
+                        MeasureSpec::exactly(r.w.max(0)),
+                        MeasureSpec::exactly(r.h.max(0)),
+                        text,
+                    );
+                    mw = mw.max(origin.x + r.w);
+                    mh = mh.max(origin.y + r.h);
+                    continue;
+                }
+                Some((p, None)) => {
+                    let (cw, ch) = {
+                        let n = self.get(c).unwrap();
+                        (n.width, n.height)
+                    };
+                    let cwspec = child_spec(
+                        cw,
+                        (avail_w - p.x).max(0),
+                        wspec.mode == MeasureMode::Unbounded,
+                    );
+                    let chspec = child_spec(
+                        ch,
+                        (avail_h - p.y).max(0),
+                        hspec.mode == MeasureMode::Unbounded,
+                    );
+                    let s = self.measure(c, cwspec, chspec, text);
+                    mw = mw.max(p.x + s.w);
+                    mh = mh.max(p.y + s.h);
+                    continue;
+                }
+                None => {}
+            }
             let (cw, ch, cm) = {
                 let n = self.get(c).unwrap();
                 (n.width, n.height, n.margin)
@@ -1563,9 +1636,42 @@ impl Tree {
         }
     }
 
+    /// 自由摆放子节点在 `avail`（父内容区尺寸）下的落点：`None` = 未设摆放；
+    /// `Some((左上角, None))` = 只定位（尺寸用测量值）；`Some((左上角, Some(矩形)))` = 整个
+    /// 矩形由闭包给出。坐标相对父内容区左上角。
+    fn placed_rect(&self, c: NodeId, avail: Size) -> Option<(Point, Option<Rect>)> {
+        match self.get(c)?.place.as_ref()? {
+            Placement::At(p) => Some((*p, None)),
+            Placement::Rect(f) => {
+                let r = f(avail);
+                Some((Point::new(r.x, r.y), Some(r)))
+            }
+        }
+    }
+
     fn arrange_frame(&mut self, id: NodeId, inner: Rect) {
         let children = self.visible_children(id);
         for c in children {
+            // `place_cache` 只有 `Placement::Rect` 会写（测量期），有就用它，与子树测量同源。
+            let placed = match self.get(c).and_then(|n| n.place_cache) {
+                Some(r) => Some((Point::new(r.x, r.y), Some(r))),
+                None => self.placed_rect(c, Size::new(inner.w, inner.h)),
+            };
+            match placed {
+                Some((p, Some(r))) => {
+                    self.arrange(
+                        c,
+                        Rect::new(inner.x + p.x, inner.y + p.y, r.w.max(0), r.h.max(0)),
+                    );
+                    continue;
+                }
+                Some((p, None)) => {
+                    let cs = self.measured_of(c);
+                    self.arrange(c, Rect::new(inner.x + p.x, inner.y + p.y, cs.w, cs.h));
+                    continue;
+                }
+                None => {}
+            }
             let cs = self.measured_of(c);
             let cm = self.margin_of(c);
             let align = self.get(c).and_then(|n| n.align).unwrap_or(Align::Start);
@@ -5292,6 +5398,123 @@ mod tests {
             .child(Element::button("B"));
         let tree = layout(root, 200, 100);
         assert_eq!(tree.focusable_order().len(), 0, "禁用容器内按钮均不可聚焦");
+    }
+
+    /// `place(x, y)`：子节点左上角落在 stack 内容区的坐标上（含 padding 偏移），尺寸照常；
+    /// 不设尺寸的 stack 撑到包住所有子节点的右下角。
+    #[test]
+    fn place_positions_children_and_wraps_the_stack() {
+        let root = Element::col().width(300).height(200).child(
+            Element::stack()
+                .padding(4)
+                .child(Element::leaf().size(30, 40).place(10, 20))
+                .child(Element::leaf().size(20, 20).place(50, 5)),
+        );
+        let tree = layout(root, 300, 200);
+        let stack = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let kids = tree.get(stack).unwrap().children.clone();
+        assert_eq!(tree.abs_bounds(kids[0]), Rect::new(14, 24, 30, 40));
+        assert_eq!(tree.abs_bounds(kids[1]), Rect::new(54, 9, 20, 20));
+        // 内容 70×60（最右 50+20、最低 20+40）+ 四边 padding。
+        assert_eq!(tree.abs_bounds(stack), Rect::new(0, 0, 78, 68));
+    }
+
+    /// `place_fn`：几何由闭包按父内容区尺寸算，读信号即运行期可改宽高——卡片板「框宽 =
+    /// 半幅、拖动改高」正是这条。改信号后重排，新的矩形与点击命中都跟上。
+    #[test]
+    fn place_fn_geometry_follows_signal_and_stays_clickable() {
+        let card_h = signal(50);
+        let hits = signal(0u32);
+        let root = Element::col().width(400).height(300).child(
+            Element::stack().width_match().height(300).child(
+                Element::button("卡片")
+                    .on_click(move |_| hits.update(|n| *n += 1))
+                    .place_fn(move |avail| {
+                        let w = avail.w / 2;
+                        Rect::new(avail.w - w, 30, w, card_h.get())
+                    }),
+            ),
+        );
+        let mut tree = layout(root, 400, 300);
+        let stack = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let card = tree.get(stack).unwrap().children[0];
+        assert_eq!(tree.abs_bounds(card), Rect::new(200, 30, 200, 50));
+        card_h.set(120);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, 300), &mut te);
+        assert_eq!(
+            tree.abs_bounds(card),
+            Rect::new(200, 30, 200, 120),
+            "高度随信号"
+        );
+        // 点新长出来的那段（原高 50 之外）：命中必须落到卡片上。
+        let p = Point::new(300, 140);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ptr(PointerKind::Down, p), &mut h, &mut cap);
+        tree.dispatch_pointer(ptr(PointerKind::Up, p), &mut h, &mut cap);
+        assert_eq!(hits.get(), 1, "点到长高后的卡片下段应触发点击");
+    }
+
+    /// 不设宽的 stack（Wrap 宽，测量期可用量 ≠ 排布期内容区，AGENTS §5）：闭包只在测量期
+    /// 算一次，排布期复用——否则「半宽」在排布期会按 stack 包出来的宽度再折半，子节点被
+    /// 排成测量时的一半宽，按测量宽排好的文字与布局缓存全部错位。
+    #[test]
+    fn place_fn_in_wrap_width_stack_keeps_measured_geometry() {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let k = calls.clone();
+        let root = Element::col()
+            .width(400)
+            .height(100)
+            .child(
+                Element::stack().child(Element::leaf().place_fn(move |avail| {
+                    k.set(k.get() + 1);
+                    Rect::new(0, 0, avail.w / 2, 50)
+                })),
+            );
+        let tree = layout(root, 400, 100);
+        let stack = tree.get(tree.root.unwrap()).unwrap().children[0];
+        let leaf = tree.get(stack).unwrap().children[0];
+        assert_eq!(
+            tree.abs_bounds(stack).w,
+            200,
+            "stack 包住测量期的 200 宽子节点"
+        );
+        assert_eq!(
+            tree.abs_bounds(leaf),
+            Rect::new(0, 0, 200, 50),
+            "排布期须沿用测量期的矩形，而不是按包出来的 200 宽再折半"
+        );
+        assert_eq!(calls.get(), 1, "一次布局只调一次闭包");
+    }
+
+    /// 放进滚动容器的 stack 不设高：测量期闭包拿到的 `avail.h` 是 0，stack 高度由最低的
+    /// 子节点撑出，滚动容器的内容总高随之成立。
+    #[test]
+    fn placed_children_give_scroll_content_height() {
+        let seen_h = std::rc::Rc::new(std::cell::Cell::new(-1));
+        let s = seen_h.clone();
+        let root =
+            Element::scroll()
+                .width(200)
+                .height(100)
+                .child(
+                    Element::stack()
+                        .width_match()
+                        .child(Element::leaf().place_fn(move |avail| {
+                            if s.get() < 0 {
+                                s.set(avail.h);
+                            }
+                            Rect::new(0, 500, avail.w, 100)
+                        })),
+                );
+        let tree = layout(root, 200, 100);
+        let sc = tree.root.unwrap();
+        assert_eq!(seen_h.get(), 0, "父高度不定时测量期 avail.h 为 0");
+        assert_eq!(
+            tree.get(sc).unwrap().content_h,
+            600,
+            "内容总高 = 最低子节点底边"
+        );
     }
 
     fn click(tree: &mut Tree, id: NodeId) {
