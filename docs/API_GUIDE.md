@@ -550,7 +550,8 @@ let page = Element::col()
 
 ### 文本输入
 ```rust
-Element::text_input(text, "占位符")               // text: Signal<String>
+Element::text_input(text, "占位符")               // text: Signal<String>；占位符收 TextContent：
+                                                  // &str/String 固定、Signal<String> 随状态变、t!(..) 随语言
     .password()        // 密码遮蔽（仅对 text_input 有效）
     .multiline()       // 多行
     .wrap(true)        // 多行时是否自动折行（默认 true）
@@ -993,6 +994,16 @@ Windows 走 **Direct2D**（feature `d2d`，默认**开**），macOS 走 **wgpu/M
 
 上面 Direct2D 那几条（ClearType、RDP 回退、仅不透明窗口）是 **Windows 专属**的实现细节。
 
+**问实际落成了哪条**：`Renderer` 是"想要什么"，`EventCtx::active_renderer()` 返回"落成了什么"
+（`ActiveRenderer::Software` / `Direct2D` / `Metal`，带 `name()` 与 `is_gpu()`）。`Auto` 回退、
+运行中设备丢失降级都会反映在这里，「关于」页要如实显示用它；框架版本号是常量 `windui::VERSION`。
+
+```rust
+Element::button("关于").on_click(move |ctx| {
+    info.set(format!("windui {} · {}", windui::VERSION, ctx.active_renderer().name()));
+});
+```
+
 **macOS 侧**：内容视图挂一张 `CAMetalLayer`，wgpu 从该 layer 建 surface，图元走 SDF 渲染器、
 文字仍由 Core Text 光栅后交 GPU 合成（与软后端同一套字体与度量）。开启方式就是
 `.renderer(Renderer::Auto)`，或 `--renderer gpu`——**不需要 `--features gpu`**，那个 feature
@@ -1394,6 +1405,32 @@ Element::split_opts(Axis::Vertical, top, bottom, ratio, SplitOpts { thickness: 8
 `visible_when` 同一契约（纯函数、帧内值不变）。写入信号的一方要记得
 `ctx.mark_layout_dirty()`——信号本身只保证重绘。
 
+### 6.10 自由摆放（绝对定位）
+
+`stack` 的直接子节点可以脱离九宫格对齐、按坐标落位（CSS `position: absolute`、Flutter `Positioned`）：
+
+```rust
+let card_h = signal(120);
+Element::stack()
+    .width_match()
+    .child(Element::label("角标").place(16, 16))          // 只定位，尺寸照常
+    .child(
+        Element::col().bg(c).place_fn(move |avail| {      // 整个矩形由数据算出
+            let w = (avail.w / 2 - 16).max(140);          // 右半幅，最窄 140
+            Rect::new(avail.w - w, 24, w, card_h.get())   // 高度随信号
+        }),
+    )
+```
+
+- 坐标相对 stack 的**内容区**（扣过 padding）；设了摆放，`align` / `margin` 不再参与定位。层叠顺序
+  即子节点顺序。
+- stack 不设宽高时撑到包住所有子节点的右下角——放进 `scroll` 里，"内容总高"就是最低那块的底边。
+- `place_fn` 每次布局在测量期调用一次（排布期复用同一矩形），读信号即可运行期改位置与宽高：
+  拖动改高、按内容长高、窗口变窄换算宽度都是改一个信号。契约同 `weight_when`；事件回调之外写
+  信号要 `ctx.mark_layout_dirty()`。`avail` 是 stack 测量期拿到的可用量，某轴父尺寸不定时为 0；
+  stack 不设宽时它是父给的上限而非 stack 最终宽度，要「占 stack 一半宽」请给 stack 显式宽。
+- 摆到 stack 矩形**之外**的部分照画但点不到（命中先判父矩形）。链到非 stack 的子节点上 debug 期 panic。
+
 ---
 
 ## 7. 样式与主题
@@ -1415,6 +1452,15 @@ Element::label("标题")
     .text_align(Align::Center)
 ```
 `Color` 构造：`Color::rgb(r,g,b)`、`rgba(..)`、`hex(0xRRGGBB)`、`from_hex_str("#7C5CFC")`，常量 `WHITE/BLACK/TRANSPARENT`。
+
+**四角各自半径** `.corners(Corners)`（CSS `border-radius` 四值，顺序左上、右上、右下、左下）：
+`Corners { bottom_left: 0.0, ..Corners::all(10.0) }` 让一个角切成直角与相邻图形拼接，`Corners::top(r)` /
+`bottom(r)` 只圆上 / 下两角。作用于节点自身的背景、边框与焦点环；与 `.corner` 后写者胜。投影、图片的圆角
+裁剪、按钮与输入框这类自绘背景的控件仍按四角中最大的半径画统一圆角（零模糊的硬投影在直角处会露出一点圆角
+缺口）。半径超出边长时按 CSS 规则等比收缩。
+自绘控件直接用 `Canvas::fill_round_rect_corners` / `stroke_round_rect_corners`：四角相同时与统一半径版
+逐像素一致；不同时软件 / D2D 后端走 `fill_polygon` 路径光栅化，GPU 后端按象限裁剪拼接原生圆角矩形（抗锯齿
+与渐变同统一半径版）。
 
 > **样式不沿父链继承**：`font_family` / `font_size` / `fg` 等都只作用于所设的那个节点，给容器设不会传给子节点。沿父链继承的只有 `enabled`、光标形状与 `window_drag` 三项。全窗统一换字体走 `Theme::font_family`（见 §7.2，运行期可换），它是所有没设 `font_family` 的文字的兜底。
 >
@@ -1476,8 +1522,13 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
 - 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / `tooltip` / `scrollbar` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
   - `scrollbar.thumb` / `thumb_active`：滚动条滑块常态 / 拖动态色，回退 `palette.border` / `text_muted`。
     单开一槽是为了只改滑块时不连带改掉输入框描边、`Role::Border`、窗口外框这些同样取 `border` 的东西。
+  - `scrollbar.width` / `margin` / `track`：滑块视觉宽度（默认 7）、距右缘留白（默认 3）、轨道底衬色（默认
+    `None` 不画）。滚动容器的让位、绘制、命中三处同源跟随；命中区不小于 16，细滚动条照样好抓。
   - `tooltip.border` / `border_width`：提示浮层描边，默认不描；宽度默认 `{ px = 1 }`（1 物理像素——1 逻辑
     像素在 125% 下会被抗锯齿摊成两行灰边）。浅色提示浮在浅色界面上时靠它看出是个浮层。
+  - `tooltip.delay_ms`：指针静止多久后弹出提示，默认 500。
+  - `modal.scrim`：`Element::dialog` 一族背后整窗遮罩的颜色（含 alpha），默认 `rgba(0,0,0,120)`；经
+    `Role::Scrim` 绘制期解析，亮暗主题各写一份即随换肤切换。
 
 其中 `form`（[表单脚手架](#表单脚手架)的行高、标签列宽、间距、标签字号字重、副标题字号）
 与 `card`（卡片圆角、内边距、标题字号）承载的是**尺寸**而非颜色。这些量刻意不进构造器签名：
@@ -1950,11 +2001,37 @@ App::new("查词", 480, 360)
   的那个控件）。零窗口常驻（§8.8）下没有主窗，`Window::on_shortcut` 是唯一的一份。
 - 但它排在 **Tab / Escape 之前**——应用得能覆盖那两个默认行为。上例的 Escape 就是典型：
   设置页里它该退回上一页，而不是把整个窗口关掉。
-- 回调拿 `ShortcutCtx`，只有 `focus_main_input()` 与 `request_close()` 两个方法，**拿不到
-  窗口句柄**，理由同 `HotkeyCtx`：它只收集意图，由宿主在回调返回后落地。
+- 回调拿 `ShortcutCtx`：两个意图方法 `focus_main_input()` / `request_close()`，外加两个只读
+  查询 `focused_node()` / `focus_accepts_text()`（见下）。**拿不到窗口句柄**，理由同
+  `HotkeyCtx`：它只收集意图，由宿主在回调返回后落地。
 - 返回 `true` 的那一帧框架会自动请求重排与重绘。（早期版本只有 `focus_main_input` 那条路
   自己置了标志，于是「Ctrl+L 正常、Esc 切页没反应，动一下鼠标才刷出来」——这个不对称是
   最难查的一种。）
+
+**查询焦点在哪**（网页的 `document.activeElement`）：
+
+| 方法 | 回答 |
+|---|---|
+| `EventCtx::focused_node()` / `ShortcutCtx::focused_node()` | 持有键盘焦点的节点，无焦点 `None` |
+| `EventCtx::focus_accepts_text()` / `ShortcutCtx::focus_accepts_text()` | 焦点是否在**收字**的控件上（可编辑文本框；只读框、按钮不算） |
+| `EventCtx::focus_within(id)` | 焦点是否在 `id` 本身或其子孙上（「焦点在这块面板里」） |
+
+「焦点在输入框里时全局快捷键让路」就是一行判据：
+
+```rust
+App::new("…", w, h).on_shortcut(|ctx, ev| match ev.key {
+    Key::Left if !ctx.focus_accepts_text() => { prev_page(); true }
+    _ => false,
+});
+```
+
+- 能走到快捷键回调，说明焦点控件**没要**这个键；但没要不等于该抢（方向键在文本框行首没得
+  移），所以判据看的是「焦点在不在输入框里」，而不是「键有没有被消费」。
+- `EventCtx` 上的查询反映**本次分发开始时**的焦点：同一回调里先 `request_focus` 再查，拿到的
+  仍是旧值。注意按下鼠标即转移焦点——按钮的点击回调里问到的焦点通常是按钮自己（与网页
+  mousedown 先 blur 同序）。
+- 「收字」由 `Widget::accepts_text()` 回答，默认同 `accepts_ime`；自绘编辑控件若有自己的只读
+  开关，覆盖它（`TextInput` 只看 `read_only`，不依赖首帧光标）。
 
 ### 8.4 右键约定
 **右键默认不触发控件**（桌面习惯）。框架在分发层拦截非左键的 Down/Up；仅需右键的控件 override `Widget::wants_right_click() -> true`。新控件**默认即正确**。

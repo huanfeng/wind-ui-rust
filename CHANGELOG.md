@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **焦点查询 `EventCtx::focused_node` / `focus_accepts_text` / `focus_within`，`ShortcutCtx::focused_node` /
+  `focus_accepts_text`**：问「键盘焦点在哪、是不是在输入框里」（网页的 `document.activeElement`）。
+  「焦点在输入框里时全局快捷键让路」从此一行判据，不必在应用里给每个输入框套回调维护焦点镜像。
+  「收字」由新增的 `Widget::accepts_text()` 回答（默认同 `accepts_ime`；`TextInput` 只看 `read_only`，
+  不依赖首帧才有的光标）。
+- **`windui::VERSION` 与 `EventCtx::active_renderer()`（`ActiveRenderer`）**：框架版本号，以及窗口实际
+  落成的渲染后端（`Software` / `Direct2D` / `Metal`）——`Renderer::Auto` 回退、运行中设备丢失降级都如实反映，
+  供「关于」页显示。平台层经 `AppHandler::set_active_renderer` 告知宿主。
+- **自由摆放 `Element::place(x, y)` / `place_fn(|avail| Rect)`（`Placement`）**：`stack` 的直接子节点按坐标
+  落位（CSS `position: absolute`）。`place_fn` 的矩形由闭包按父内容区尺寸算出，读信号即可运行期改位置与
+  宽高；不设尺寸的 stack 撑到包住所有子节点，放进滚动容器即得内容总高。`fullshowcase`「布局」页加演示卡片。
+- **四角各自半径 `Corners`、`Element::corners`、`Canvas::fill_round_rect_corners` /
+  `stroke_round_rect_corners`**：CSS `border-radius` 四值形式，节点背景、边框、焦点环按此绘制（投影与图片裁剪
+  按最大半径近似）。四角相同时与统一半径版逐像素一致；不同时软件 / D2D 走 `fill_polygon` 路径光栅化，GPU 按
+  象限裁剪拼接原生圆角矩形（渐变与抗锯齿同统一半径版）。
+- **主题槽 `Theme::modal.scrim`（`Role::Scrim`）、`TooltipTheme::delay_ms`、`ScrollbarTheme::width` /
+  `margin` / `track`**：对话框遮罩色、提示弹出延时、滚动条宽度 / 留白 / 轨道色不再写死，默认值与原先一致。
+
+### 变更
+
+- **`Element::text_input` 与 `Element::tag_field` 的占位提示改收 `impl Into<TextContent>`**：传 `&str` /
+  `String` 照旧；传 `Signal<String>` 则提示随状态变，传 `t!(..)` 则随语言切换。`TextInput::new` 同步改签名。
+- **`Role` 新增 `Scrim` 变体**：对 `Role` 做穷尽 `match` 的代码需补一支。
+- **`Style` 新增公开字段 `corner_radii`、`ScrollbarTheme` / `TooltipTheme` 新增字段、`Theme` 新增 `modal`**：
+  用结构体字面量构造它们的代码需补上新字段（或 `..Default::default()`）。
+
 ## [0.24.0] - 2026-10-17
 
 ### 新增
