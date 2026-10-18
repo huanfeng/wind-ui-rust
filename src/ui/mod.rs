@@ -1574,8 +1574,12 @@ impl Element {
 
     /// 单行文本输入（绑定 `Signal<String>`）。
     /// 可链式 `.password()` / `.multiline()` / `.wrap(bool)` / `.read_only()` 配置行为。
-    pub fn text_input(text: Signal<String>, placeholder: impl Into<String>) -> Self {
-        Self::base(Layout::None).widget(TextInput::new(text, placeholder.into()))
+    ///
+    /// 占位提示收 [`TextContent`]，与 `label`/`button` 的文案同一套：传 `&str`/`String` 是
+    /// 固定提示；传 `Signal<String>` 则提示随信号变（"第 3 页：输入关键词"这类随状态变的
+    /// 提示，`set` 即生效）；传 `t!(..)` 则随语言切换。
+    pub fn text_input(text: Signal<String>, placeholder: impl Into<TextContent>) -> Self {
+        Self::base(Layout::None).widget(TextInput::new(text, placeholder))
     }
 
     /// 配置内含的 TextInput。`password()/multiline()/wrap()` 是 text_input 专属修饰符；
@@ -3114,7 +3118,7 @@ impl Element {
     /// 标签字段：仿输入框的带边框容器，内含一组 chip（多值展示）。`chips` 用
     /// [`Element::chip`] 生成；为空时显示 `placeholder`。新增值由 app 驱动
     /// （维护值列表 Signal，变化后重建 chips 列表）。
-    pub fn tag_field(placeholder: impl Into<String>, chips: Vec<Element>) -> Self {
+    pub fn tag_field(placeholder: impl Into<TextContent>, chips: Vec<Element>) -> Self {
         // 颜色走 InputBg/InputBorder/Placeholder 角色延迟解析（换主题自动跟随）；
         // corner 为度量，构建期取值即可（换主题不改圆角，同 accordion 先例）。
         use crate::style::Role;
@@ -6514,6 +6518,8 @@ mod tests {
             Box::new(RadioButton::new(caption, group, 0)),
             Box::new(nav::NavRow::new(caption)),
             Box::new(containers::IconButton::glyph(caption)),
+            // 空文本框画的是占位提示：随页号变的提示走的也是这条。
+            Box::new(TextInput::new(signal(String::new()), caption)),
         ];
         let painted = |w: &dyn Widget| {
             let mut cv = CaptureCanvas::default();

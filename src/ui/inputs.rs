@@ -893,7 +893,8 @@ struct TextLayout {
 
 pub struct TextInput {
     text: Signal<String>,
-    placeholder: String,
+    /// 占位提示：可绑信号（随页号变的提示）或 `t!` 消息（随语言变）。
+    placeholder: crate::ui::TextContent,
     config: TextConfig,
     cursor: usize,         // 字符索引
     anchor: Option<usize>, // 选区锚点（Some 且 != cursor 时有选区）
@@ -980,7 +981,8 @@ type NavKeyFn = Box<dyn FnMut(&mut EventCtx, KeyEvent) -> bool>;
 type FilterFn = Box<dyn Fn(&str) -> bool>;
 
 impl TextInput {
-    pub fn new(text: Signal<String>, placeholder: String) -> Self {
+    pub fn new(text: Signal<String>, placeholder: impl Into<crate::ui::TextContent>) -> Self {
+        let placeholder = placeholder.into();
         let cursor = text.with(|t| t.chars().count());
         Self {
             text,
@@ -2032,7 +2034,7 @@ impl Widget for TextInput {
             0
         } else {
             let content_w = if is_empty {
-                canvas.measure_text(&self.placeholder, ts).w
+                canvas.measure_text(&self.placeholder.resolve(), ts).w
             } else {
                 lay.lines
                     .first()
@@ -2125,7 +2127,7 @@ impl Widget for TextInput {
             let pw = if multiline { inner.w } else { NO_WRAP_W };
             let pr = Rect::new(base_x, first_line_y, pw, line_h);
             canvas.draw_text(
-                &self.placeholder,
+                &self.placeholder.resolve(),
                 pr,
                 inp.placeholder(pal),
                 Align::Start,
