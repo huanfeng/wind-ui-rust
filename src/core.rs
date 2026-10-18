@@ -255,6 +255,15 @@ pub trait Widget {
     fn accepts_ime(&self) -> bool {
         self.ime_caret().is_some()
     }
+    /// 本控件是否**收文字输入**（可编辑文本框一类）：键盘焦点查询
+    /// （[`EventCtx::focus_accepts_text`]、`ShortcutCtx::focus_accepts_text`）据此回答
+    /// 「焦点在不在输入框里」，供全局快捷键让路。
+    ///
+    /// 默认 = [`Self::accepts_ime`]；但那个依赖最近一帧 paint 记下的光标，还没画过（或
+    /// 被裁出视口）的文本框会答 `false`——自带配置能直接回答的控件应覆盖它。
+    fn accepts_text(&self) -> bool {
+        self.accepts_ime()
+    }
     /// 输入法组合态变化（拼音等未上屏文字开始/结束合成）时由框架通知焦点节点。
     /// 文本控件借此在组合期间暂不绘制自绘光标（系统组合浮层自带光标）。默认无操作。
     ///
@@ -1972,6 +1981,30 @@ impl EventCtx<'_> {
     pub fn release_focus(&mut self) {
         self.out.release = Some(self.self_id);
     }
+    /// 当前持有键盘焦点的节点（网页的 `document.activeElement`、Qt 的 `focusWidget()`）。
+    ///
+    /// 反映的是**本次事件分发开始时**的焦点：同一回调里先调 `request_focus` 再查，拿到的
+    /// 仍是旧值——请求要等分发返回后由宿主落地。
+    pub fn focused_node(&self) -> Option<NodeId> {
+        self.tree.focused_node()
+    }
+    /// 焦点是否落在**接受文字输入**的控件上（可编辑文本框、自绘的收字控件）。
+    ///
+    /// 全局快捷键让路的标准判据：焦点在输入框里时 ←/→、字母键都归它。只读文本框不算
+    /// （它不收字），判据见 [`Widget::accepts_text`]。
+    pub fn focus_accepts_text(&self) -> bool {
+        self.tree
+            .focused_node()
+            .is_some_and(|f| self.tree.accepts_text(f))
+    }
+    /// 焦点是否在 `id` 本身或其子孙上（网页的 `el.contains(document.activeElement)`）。
+    ///
+    /// 给"焦点在这块面板里时才响应"一类判据用：面板根节点 id 存进共享状态，回调里一问即可。
+    pub fn focus_within(&self, id: NodeId) -> bool {
+        self.tree
+            .focused_node()
+            .is_some_and(|f| self.tree.is_within(f, id))
+    }
     /// 请求打开**单文件**选择对话框；`on_result` 在对话框关闭、事件分发完全返回后
     /// 收到用户选择结果（取消为 `None`）。**不要**在回调里直接调用 `PickDialog::pick_file()`
     /// 等同步方法，见 [`DialogRequest`] 文档。
@@ -2641,6 +2674,11 @@ impl Tree {
     /// 节点是否接受输入法输入（见 `Widget::accepts_ime`）。
     pub fn accepts_ime(&self, id: NodeId) -> bool {
         self.get(id).is_some_and(|n| n.widget.accepts_ime())
+    }
+
+    /// 节点是否收文字输入（见 `Widget::accepts_text`）。
+    pub fn accepts_text(&self, id: NodeId) -> bool {
+        self.get(id).is_some_and(|n| n.widget.accepts_text())
     }
 
     /// 节点的文本光标绝对位置（逻辑坐标）+ 高度：`(左上角, height)`。
@@ -3527,6 +3565,20 @@ impl Tree {
                 n.autofocus_done = false;
             }
         }
+    }
+
+    /// 当前持有键盘焦点的节点（网页的 `document.activeElement`）；无焦点时为 `None`。
+    ///
+    /// 按节点上的焦点标记现扫一遍：宿主的焦点状态与节点标记由 `set_focused` 同步维护，
+    /// 另存一份就多一处可能漂移的副本，而查询是低频操作（快捷键判据、命令派发）。
+    pub fn focused_node(&self) -> Option<NodeId> {
+        self.slots.iter().enumerate().find_map(|(i, slot)| {
+            let n = slot.node.as_ref()?;
+            n.focused.then_some(NodeId {
+                index: i as u32,
+                generation: slot.generation,
+            })
+        })
     }
 
     pub fn set_focused(&mut self, id: Option<NodeId>, old: Option<NodeId>) {
@@ -6114,6 +6166,38 @@ mod tests {
             Some(input),
         );
         assert_eq!(txt.get(), "x\ny", "多行粘贴应保留换行(\\r\\n 归一为 \\n)");
+    }
+
+    /// `EventCtx` 的焦点查询：从**别的节点**的回调里问焦点在哪（按钮回调判断编辑框是否
+    /// 正在输入、面板根判断焦点是否在自己子树里）。
+    #[test]
+    fn event_ctx_reports_focus_held_elsewhere() {
+        let mut tree = Tree::new();
+        let root = Element::col()
+            .child(Element::col().child(Element::text_input(signal(String::new()), "ph")))
+            .child(Element::button("b"))
+            .build(&mut tree);
+        tree.root = Some(root);
+        let panel = tree.get(root).unwrap().children[0];
+        let input = tree.get(panel).unwrap().children[0];
+        let button = tree.get(root).unwrap().children[1];
+        let probe = |tree: &mut Tree| {
+            let mut got = None;
+            crate::testing::run_with_ctx_in(tree, button, |ctx| {
+                got = Some((
+                    ctx.focused_node(),
+                    ctx.focus_accepts_text(),
+                    ctx.focus_within(panel),
+                    ctx.focus_within(button),
+                ));
+            });
+            got.unwrap()
+        };
+        assert_eq!(probe(&mut tree), (None, false, false, false), "无焦点");
+        tree.set_focused(Some(input), None);
+        assert_eq!(probe(&mut tree), (Some(input), true, true, false));
+        tree.set_focused(Some(button), Some(input));
+        assert_eq!(probe(&mut tree), (Some(button), false, false, true));
     }
 
     /// 只读框：`width` 为 `None` 时**不设宽**（Wrap 宽，`avail.w != content.w`），

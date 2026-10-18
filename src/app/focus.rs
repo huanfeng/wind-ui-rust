@@ -1374,6 +1374,62 @@ mod tests {
         );
     }
 
+    /// 快捷键回调能问到焦点在哪、是不是文字输入框——「焦点在输入框里时快捷键让路」的判据。
+    ///
+    /// 借 Tab 驱动：Tab 先过快捷键回调（回调不要就轮到焦点导航），于是每按一次既记下
+    /// 当时的焦点，又把焦点挪到下一格，一条路径走完三种控件。
+    #[test]
+    fn shortcut_sees_focused_node_and_whether_it_takes_text() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let s = seen.clone();
+        let app = App::new("t", 300, 200)
+            .on_shortcut(move |ctx, ev| {
+                if ev.key == Key::Tab {
+                    s.borrow_mut()
+                        .push((ctx.focused_node(), ctx.focus_accepts_text()));
+                }
+                false
+            })
+            .content(
+                Element::col()
+                    .child(
+                        Element::text_input(crate::signal::signal(String::new()), "可编辑")
+                            .autofocus(),
+                    )
+                    .child(
+                        Element::text_input(crate::signal::signal("只读".to_string()), "")
+                            .read_only(),
+                    )
+                    .child(Element::button("按钮")),
+            );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = tiny_skia::Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        let order = h.focus.order.clone();
+        assert_eq!(order.len(), 3, "前提：三格都在 Tab 环里");
+        assert_eq!(
+            h.focus.current,
+            Some(order[0]),
+            "前提：autofocus 落在可编辑框"
+        );
+        let k = key_ev();
+        for _ in 0..3 {
+            h.on_key(k(Key::Tab));
+        }
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                (Some(order[0]), true),
+                (Some(order[1]), false),
+                (Some(order[2]), false),
+            ],
+            "可编辑框算文字输入；只读框不收字、按钮不是文本框，都不算"
+        );
+    }
+
     /// 应用处理了快捷键 → 宿主必须请求重绘。
     ///
     /// 缺了这一步的症状很具体：按下快捷键界面纹丝不动，晃一下鼠标才刷出来——因为要

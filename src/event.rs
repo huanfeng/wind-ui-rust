@@ -184,9 +184,39 @@ pub fn system_prefers_dark() -> bool {
 pub struct ShortcutCtx {
     pub(crate) focus_main: bool,
     pub(crate) close: bool,
+    pub(crate) focused: Option<crate::core::NodeId>,
+    pub(crate) focus_text: bool,
 }
 
 impl ShortcutCtx {
+    /// 按下这个键时持有键盘焦点的节点（网页的 `document.activeElement`），无焦点为 `None`。
+    ///
+    /// 能走到快捷键回调，说明焦点控件**没要**这个键（它先于回调拿到每一个键）；但没要
+    /// 不等于应用该抢——比如方向键落在文本框行首没得移，应用的"←翻页"仍不该触发。
+    /// 判据用 [`focus_accepts_text`](Self::focus_accepts_text) 更直接。
+    pub fn focused_node(&self) -> Option<crate::core::NodeId> {
+        self.focused
+    }
+
+    /// 焦点是否落在接受文字输入的控件上（可编辑文本框等，只读框不算）。
+    ///
+    /// 「焦点在输入框里时全局快捷键让路」的标准判据：
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # use windui::event::Key;
+    /// App::new("t", 400, 300).on_shortcut(|ctx, ev| match ev.key {
+    ///     Key::Left if !ctx.focus_accepts_text() => {
+    ///         // 翻到上一页……
+    ///         true
+    ///     }
+    ///     _ => false,
+    /// });
+    /// ```
+    pub fn focus_accepts_text(&self) -> bool {
+        self.focus_text
+    }
+
     /// 把键盘焦点交还给声明了 [`Element::autofocus`](crate::ui::Element::autofocus)
     /// 的那个控件，并按其模式处理（`autofocus_select_all` 会一并全选）。
     ///

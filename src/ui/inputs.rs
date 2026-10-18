@@ -2654,6 +2654,10 @@ impl Widget for TextInput {
         // 用户不会组完一串才发现被 `type_char` 吞掉。
         !self.config.read_only && self.ime_caret().is_some()
     }
+    fn accepts_text(&self) -> bool {
+        // 不看光标：焦点查询可能发生在首帧之前，或框被滚出视口、没画就没记光标。
+        !self.config.read_only
+    }
     fn set_composing(&mut self, composing: bool) {
         // 只读：不进入组合态（不藏光标——这里没有字会被打进来）；退出照常放行，
         // 运行期切到只读时不至于把光标永远藏着。

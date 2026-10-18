@@ -3733,7 +3733,12 @@ impl AppHandler for UiHost {
             // （`rearm_autofocus`、`resolve_close`）同样要 `&mut self`。
             let mut handled = false;
             if let Some(mut h) = self.shortcut.take() {
-                let mut sc = crate::event::ShortcutCtx::default();
+                let focused = self.tree.focused_node();
+                let mut sc = crate::event::ShortcutCtx {
+                    focused,
+                    focus_text: focused.is_some_and(|f| self.tree.accepts_text(f)),
+                    ..Default::default()
+                };
                 handled = h(&mut sc, ev);
                 self.shortcut = Some(h);
                 if sc.focus_main {
