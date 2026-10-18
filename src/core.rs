@@ -1402,7 +1402,6 @@ impl Tree {
         let children = self.visible_children(id);
         let mut mw = 0;
         let mut mh = 0;
-        // 父高度不定（滚动容器里）时没有可报的高度，给 0：闭包据此只按宽度算。
         // 父尺寸不定（滚动容器里、或宽度不定的祖先下）的那一轴没有可报的值，给 0：闭包据此
         // 只按另一轴算。不给 0 的话，未定轴的 avail 是个极大的哨兵值，按比例换算会把 stack
         // 撑到天文数字。
@@ -1419,6 +1418,11 @@ impl Tree {
             },
         );
         for &c in &children {
+            // 先清掉上一帧的缓存：只有本帧测量期走到 `Placement::Rect` 才重新写入，排布期
+            // 因此不会拿到别的摆放方式留下的旧矩形。
+            if let Some(n) = self.get_mut(c) {
+                n.place_cache = None;
+            }
             // 自由摆放的子：尺寸照常（At）或由闭包钉死（Rect），并按落点右下角撑开 stack——
             // stack 不设高时放进滚动容器，内容总高因此就是最低那张卡片的底边。
             match self.placed_rect(c, place_avail) {
@@ -2127,7 +2131,8 @@ impl EventCtx<'_> {
     /// 当前持有键盘焦点的节点（网页的 `document.activeElement`、Qt 的 `focusWidget()`）。
     ///
     /// 反映的是**本次事件分发开始时**的焦点：同一回调里先调 `request_focus` 再查，拿到的
-    /// 仍是旧值——请求要等分发返回后由宿主落地。
+    /// 仍是旧值——请求要等分发返回后由宿主落地。每次调用扫一遍节点树（O(节点数)），
+    /// 事件回调里随便用，别放进 `paint`。
     pub fn focused_node(&self) -> Option<NodeId> {
         self.tree.focused_node()
     }
@@ -3719,6 +3724,7 @@ impl Tree {
     ///
     /// 按节点上的焦点标记现扫一遍：宿主的焦点状态与节点标记由 `set_focused` 同步维护，
     /// 另存一份就多一处可能漂移的副本，而查询是低频操作（快捷键判据、命令派发）。
+    /// 代价是 O(节点数)：别在 `paint` 这类每帧都跑的路径里调。
     pub fn focused_node(&self) -> Option<NodeId> {
         self.slots.iter().enumerate().find_map(|(i, slot)| {
             let n = slot.node.as_ref()?;
