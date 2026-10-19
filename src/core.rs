@@ -699,6 +699,9 @@ pub struct Tree {
     /// 路径每帧/每次鼠标移动都要用它，全 arena 扫描会把浮层的成本摊到所有界面上，
     /// 而绝大多数界面一个浮层也没有。**顺序即层叠序**：后登记者在上层。
     overlays: Vec<NodeId>,
+    /// 回调期间被临时换成 `EmptyWidget` 的节点，连同它换出前的 `accepts_text()` 答案。
+    /// 没有它，在焦点输入框**自己**的回调里问 `focus_accepts_text` 会查到 `EmptyWidget` 答 false。
+    held_accepts_text: Option<(NodeId, bool)>,
 }
 
 impl Default for Tree {
@@ -712,6 +715,7 @@ impl Tree {
         Self {
             slots: Vec::new(),
             free: Vec::new(),
+            held_accepts_text: None,
             root: None,
             focus_ring_visible: false,
             clipboard: None,
@@ -2831,6 +2835,9 @@ impl Tree {
 
     /// 节点是否收文字输入（见 `Widget::accepts_text`）。
     pub fn accepts_text(&self, id: NodeId) -> bool {
+        if let Some((_, answer)) = self.held_accepts_text.filter(|&(held, _)| held == id) {
+            return answer;
+        }
         self.get(id).is_some_and(|n| n.widget.accepts_text())
     }
 
@@ -3267,6 +3274,7 @@ impl Tree {
             Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
             None => return (false, EventOutcome::default()),
         };
+        let prev_held = self.held_accepts_text.replace((id, widget.accepts_text()));
         let mut ctx = EventCtx {
             tree: self,
             self_id: id,
@@ -3276,6 +3284,7 @@ impl Tree {
         crate::signal::begin_event();
         let consumed = widget.on_event(&mut ctx, ev);
         let mut out = ctx.out;
+        self.held_accepts_text = prev_held;
         // 事件内写过信号但控件未显式 mark_dirty → 据事件类型选择失效强度：
         // - Move(hover)：写的是自身悬停态，局部重绘即可；
         // - Key：打字高频，保留局部重绘避免整窗卡顿；
@@ -3529,6 +3538,7 @@ impl Tree {
         };
         let mut widget = std::mem::replace(&mut n.widget, Box::new(EmptyWidget));
         let mut callback = n.on_blur.take();
+        let prev_held = self.held_accepts_text.replace((id, widget.accepts_text()));
         let mut ctx = EventCtx {
             tree: self,
             self_id: id,
@@ -3540,6 +3550,7 @@ impl Tree {
             f(&mut ctx);
         }
         let mut o = ctx.out;
+        self.held_accepts_text = prev_held;
         if crate::signal::end_event() {
             o.damage = o.damage.merge(DamageReq::Full);
             o.repaint = true;
@@ -6535,6 +6546,35 @@ mod tests {
         assert_eq!(probe(&mut tree), (Some(input), true, true, false));
         tree.set_focused(Some(button), Some(input));
         assert_eq!(probe(&mut tree), (Some(button), false, false, true));
+    }
+
+    /// 在焦点输入框**自己**的回调里问 `focus_accepts_text`：此时它的 widget 被临时换成
+    /// `EmptyWidget`，必须仍答 true（快捷键让路辅助函数常同时挂在输入框回调上）。
+    #[test]
+    fn focus_accepts_text_holds_inside_the_focused_inputs_own_callback() {
+        let seen = signal(None::<bool>);
+        let mut tree = Tree::new();
+        let root = Element::col()
+            .child(
+                Element::text_input(signal(String::new()), "ph")
+                    .on_submit(move |ctx| seen.set(Some(ctx.focus_accepts_text()))),
+            )
+            .build(&mut tree);
+        tree.root = Some(root);
+        let input = tree.get(root).unwrap().children[0];
+        tree.set_focused(Some(input), None);
+        tree.dispatch_key(
+            KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
+            Some(input),
+        );
+        assert_eq!(seen.get(), Some(true));
     }
 
     /// `Element::corners` 接到节点背景与边框：直角那个角有墨、圆角留白；后写的 `corner`

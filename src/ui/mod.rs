@@ -4362,8 +4362,8 @@ impl Element {
         self.style.corner_radii = None;
         self
     }
-    /// 四角各自的圆角半径（CSS `border-radius` 四值形式）：本节点的背景、边框、投影与
-    /// 焦点环按此绘制。典型用途是让一侧的角切成直角，与相邻图形无缝拼接：
+    /// 四角各自的圆角半径（CSS `border-radius` 四值形式）：本节点的背景、边框与
+    /// 焦点环按此绘制（投影按最大半径近似）。典型用途是让一侧的角切成直角，与相邻图形无缝拼接：
     ///
     /// ```no_run
     /// # use windui::prelude::*;

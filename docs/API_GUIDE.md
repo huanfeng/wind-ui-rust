@@ -410,7 +410,7 @@ Element::icon_button_content(image_content)            // 纯图标按钮（图�
 Element::badge("v0.0.0-alpha")                   // 胶囊徽章（不可删）：pill + 强调色淡底
 Element::badge_intent("废弃", Intent::Danger)    // 指定语义色的徽章
 Element::chip("分号(;)", |ctx| { /* 移除 */ })   // 可删标签：pill + × 删除按钮（点 × 触发回调）
-Element::tag_field("输入…", vec![chip1, chip2])  // 多值标签字段（仿输入框容器，承载一组 chip）
+Element::tag_field("输入…", vec![chip1, chip2])  // 多值标签字段（占位提示收 impl Into<TextContent>，可传 Signal / t!）（仿输入框容器，承载一组 chip）
 Element::checkbox("启用", state)                 // state: Signal<bool>
 //  .danger() / .accent(color) / .accent_role(Role::X)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
 //  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）
