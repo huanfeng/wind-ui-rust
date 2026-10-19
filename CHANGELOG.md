@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-10-19
+
 ### 新增
 
 - **焦点查询 `EventCtx::focused_node` / `focus_accepts_text` / `focus_within`，`ShortcutCtx::focused_node` /
@@ -22,6 +24,8 @@
   `stroke_round_rect_corners`**：CSS `border-radius` 四值形式，节点背景、边框、焦点环按此绘制（投影与图片裁剪
   按最大半径近似）。四角相同时与统一半径版逐像素一致；不同时软件 / D2D 走 `fill_polygon` 路径光栅化，GPU 按
   象限裁剪拼接原生圆角矩形（渐变与抗锯齿同统一半径版）。
+- **其余新增公开项**：`Tree::focused_node` / `accepts_text`、`ActiveRenderer::name` / `is_gpu`、`scrollbar::track_w` /
+  `margin` / `hit_w`；`Corners`、`ActiveRenderer` 进 `prelude`。
 - **主题槽 `Theme::modal.scrim`（`Role::Scrim`）、`TooltipTheme::delay_ms`、`ScrollbarTheme::width` /
   `margin` / `track`**：对话框遮罩色、提示弹出延时、滚动条宽度 / 留白 / 轨道色不再写死，默认值与原先一致。
 
@@ -32,6 +36,14 @@
 - **`Role` 新增 `Scrim` 变体**：对 `Role` 做穷尽 `match` 的代码需补一支。
 - **`Style` 新增公开字段 `corner_radii`、`ScrollbarTheme` / `TooltipTheme` 新增字段、`Theme` 新增 `modal`**：
   用结构体字面量构造它们的代码需补上新字段（或 `..Default::default()`）。
+- **`Node` 新增 `place` 字段及 crate 私有字段**：外部不能再用结构体字面量构造 `Node`，请经 `Element::build`。
+- **滚动条常量 `VScrollbar::TRACK_W` / `MARGIN` / `HIT_W`、`core::scrollbar::TRACK_W` / `MARGIN` 退为「默认值」**：
+  宽度现可由主题改，据此算让位或命中区的代码请改用 `scrollbar::track_w()` / `margin()` / `hit_w()`。
+  菜单浮层的滚动条暂未接主题。
+
+### 修复
+
+- **在焦点输入框自己的回调里调 `focus_accepts_text` 恒为 false**：回调期间该控件被临时换出，现记下换出前的答案。
 
 ## [0.24.0] - 2026-10-17
 
@@ -2826,7 +2838,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.21.0...v0.22.0
