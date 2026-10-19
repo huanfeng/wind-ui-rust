@@ -349,6 +349,10 @@ pub struct InputTheme {
     pub placeholder: Option<Color>,
     /// 选区高亮（含 alpha）。
     pub selection: Option<Color>,
+    /// 区间底色标记（[`Element::marks`](crate::ui::Element::marks)，查找命中涂黄）的默认底色，
+    /// 含 alpha。默认 `palette.warning` 的 40% alpha（琥珀色）：叠在明暗两种底上字都读得清，
+    /// 且与选区的强调色分得开；自定义调色板时跟着变。
+    pub mark: Option<Color>,
     pub cursor: Option<Color>,
     /// 插入光标闪烁风格（默认 [`CaretStyle::Blink`] 经典方波）。
     pub caret_style: Option<CaretStyle>,
@@ -387,6 +391,10 @@ impl InputTheme {
     pub fn selection(&self, p: &Palette) -> Color {
         self.selection
             .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x55))
+    }
+    pub fn mark(&self, p: &Palette) -> Color {
+        self.mark
+            .unwrap_or(Color::rgba(p.warning.r, p.warning.g, p.warning.b, 0x66))
     }
     pub fn cursor(&self, p: &Palette) -> Color {
         self.cursor.unwrap_or(p.text)

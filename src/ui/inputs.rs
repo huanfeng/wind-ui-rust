@@ -4,6 +4,7 @@
 //! 即写入共享单元，外部随时读取，无需回调闭包。
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 
 use crate::anim::{Easing, Lerp, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
@@ -772,7 +773,7 @@ impl Widget for Slider {
 
 // ---------------- TextInput ----------------
 
-const TEXT_PAD: i32 = 10;
+pub(crate) const TEXT_PAD: i32 = 10;
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -961,6 +962,8 @@ pub struct TextInput {
     /// 光标：节点隐藏 / 禁用时框架会调 `reset_interaction` 清掉选区，复显时要按它再
     /// 兑现一次——同一个重命名框第二次打开也得是"只选主名"。
     preset_selection: Option<(usize, usize)>,
+    /// 区间底色标记（[`crate::ui::Element::marks`]）。每帧绘制时读，不缓存。
+    marks: Option<Signal<Vec<TextMark>>>,
     /// 「本控件被点了」的通知（见 [`crate::ui::Element::on_click`]）。
     ///
     /// 与 Button 的同名回调**语义不同**：那里 on_click 就是激活本身，这里只是旁路通知，
@@ -968,6 +971,31 @@ pub struct TextInput {
     /// 例如重新展开一个被 Escape 收起的补全/结果浮层——那种状态只有宿主知道，
     /// 而在此之前它连"用户又点了一次输入框"都收不到。
     on_click: Option<ClickFn>,
+}
+
+/// 输入框正文上的一段**底色标记**（见 [`crate::ui::Element::marks`]）：查找命中的
+/// 涂黄这类「内容在框里、区间在应用手里」的标注。只画底色，不接事件、不影响命中与
+/// 选区、不改正文。
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextMark {
+    /// `[start, end)`，**字符索引**——与光标、选区、[`select_range`](crate::ui::Element::select_range)
+    /// 同一单位，不是字节下标（字节下标 `b` 换算：`text[..b].chars().count()`）。
+    /// 越界钳到正文长度，空区间不画。
+    pub range: Range<usize>,
+    /// 底色；`None` 取主题的 `input.mark`（默认半透明琥珀色，明暗主题都看得清字）。
+    pub bg: Option<Color>,
+}
+
+impl TextMark {
+    /// 用主题底色标记 `range`（字符索引）。
+    pub fn new(range: Range<usize>) -> Self {
+        Self { range, bg: None }
+    }
+    /// 指定底色（覆盖主题）。
+    pub fn bg(mut self, bg: Color) -> Self {
+        self.bg = Some(bg);
+        self
+    }
 }
 
 /// 单行 Enter 回调。与 `on_click` 同形（`ctx` 在首位）。
@@ -1014,6 +1042,7 @@ impl TextInput {
             filter: None,
             on_click: None,
             preset_selection: None,
+            marks: None,
         }
     }
 
@@ -1028,6 +1057,11 @@ impl TextInput {
     pub fn set_selection(&mut self, start: usize, end: usize) {
         self.preset_selection = Some((start, end));
         self.apply_selection(start, end);
+    }
+
+    /// 绑定区间底色标记（供 Builder；下游用 [`crate::ui::Element::marks`]）。
+    pub fn set_marks(&mut self, marks: Signal<Vec<TextMark>>) {
+        self.marks = Some(marks);
     }
 
     /// 运行期设选区（`Element::select_when` 兑现时由宿主调）：只改当前选区，不动预设——
@@ -2058,6 +2092,66 @@ impl Widget for TextInput {
 
         canvas.save();
         canvas.clip_rect(inner);
+
+        // 区间底色标记：最底层，选区与合成串底色都压在它上面——「当前这一处」（被选中
+        // 的那条命中）才认得出来。只铺到字的右缘、不像选区那样延伸到行尾：标的是字，
+        // 不是换行。密码框不画：在掩码上标出命中位置等于泄露正文结构。
+        if let Some(marks) = self.marks.filter(|_| !self.config.password) {
+            let n = self.char_count();
+            let fallback = inp.mark(pal);
+            let pe_len = {
+                let pe = self.preedit.borrow();
+                pe.is_active().then(|| pe.char_len())
+            };
+            // 只看视口里的视觉行：长文档几千条命中时，光标闪烁的局部帧也会重画本框，
+            // 逐条扫全部行是「命中数 × 行数」。行等高，可见区间直接算出来。
+            let nl = lay.lines.len();
+            let lo = ((inner.y - first_line_y) / line_h - 1).max(0) as usize;
+            let hi = ((inner.y + inner.h - first_line_y) / line_h + 2).max(0) as usize;
+            let vis = lo.min(nl)..hi.min(nl);
+            let (vis_from, vis_to) = match (lay.lines.get(vis.start), vis.end.checked_sub(1)) {
+                (Some(a), Some(b)) if b >= vis.start => (a.start, lay.lines[b].end),
+                _ => (0, 0),
+            };
+            marks.try_with(|ms| {
+                for m in ms {
+                    let (s, e) = (m.range.start.min(n), m.range.end.min(n));
+                    if s >= e {
+                        continue;
+                    }
+                    // 逻辑索引 → 显示串索引（理由同下面选区那段）。起点另算：合成串插在
+                    // 光标处、排在光标处那个字之前，起点恰在插入点的标记标的是那个字，
+                    // 该从合成串之后开始；`to_display_index` 对 `i == cursor` 不平移，
+                    // 用它会把合成串一并盖住（命中「风风」，跳到第一处后光标正停在这里）。
+                    let s = match pe_len {
+                        Some(len) if s >= self.cursor => s + len,
+                        _ => s,
+                    };
+                    let e = self.to_display_index(e);
+                    if e <= vis_from || s >= vis_to {
+                        continue;
+                    }
+                    let paint = Paint::fill(m.bg.unwrap_or(fallback));
+                    for i in vis.clone() {
+                        let ln = &lay.lines[i];
+                        let ly = first_line_y + i as i32 * line_h;
+                        let a = s.clamp(ln.start, ln.end);
+                        let b = e.clamp(ln.start, ln.end);
+                        if b > a {
+                            let x1 = ln.x[a - ln.start];
+                            let x2 = ln.x[b - ln.start];
+                            canvas.fill_rect(
+                                (base_x + x1) as f32,
+                                ly as f32,
+                                (x2 - x1) as f32,
+                                line_h as f32,
+                                &paint,
+                            );
+                        }
+                    }
+                }
+            });
+        }
 
         // 选区高亮（逐视觉行；跨行处延伸到行尾标示换行/折行被选中）。
         // `selection()` 给的是**逻辑**索引，而下面按视觉行切分用的是**显示串**索引——

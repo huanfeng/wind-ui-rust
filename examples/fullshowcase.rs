@@ -82,6 +82,20 @@ fn pos_of(order: &[String], name: &str) -> usize {
 /// 外加一块渐变填充。四个格子各 72×72，颜色取主题色。
 struct PolygonDemo;
 
+/// `q` 在 `body` 里的全部命中，按**字符**索引（`marks` / `select_when` 的单位）。
+fn find_ranges(body: &str, q: &str) -> Vec<std::ops::Range<usize>> {
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let n = q.chars().count();
+    body.match_indices(q)
+        .map(|(b, _)| {
+            let s = body[..b].chars().count();
+            s..s + n
+        })
+        .collect()
+}
+
 /// 正多边形近似的圆轮廓；`ccw` 反向绕——放进同一次 `fill_polygon` 里就是洞。
 fn ring_contour(cx: f32, cy: f32, r: f32, ccw: bool) -> Vec<(f32, f32)> {
     (0..48)
@@ -431,6 +445,63 @@ fn main() {
                 .read_only()
                 .width_match()
                 .height(64),
+            ),
+    );
+
+    // 查找命中：所有命中由框架画底色（`marks`），「下一处」把选区摆到那一段、焦点不动
+    // （`select_without_focus_when`）——叠着选区色的那一条就是当前这一处。命中表只在点「下一处」时
+    // 重算：跳转后在正文里改字，标记会错位到下次点击为止（越界有钳制，不会 panic）。
+    let find_body = signal(String::from(
+        "风起于青萍之末，浪成于微澜之间。\n风停了，浪还在；浪平了，风又起。",
+    ));
+    let find_query = signal(String::from("风"));
+    let find_marks = signal(Vec::<TextMark>::new());
+    let (find_jump, find_hit, find_k) = (signal(0u64), signal((0usize, 0usize)), signal(0usize));
+    let find_status = signal(String::from("回车或点「下一处」"));
+    let find_next = move || {
+        let hits = find_body.with(|b| find_query.with(|q| find_ranges(b, q)));
+        find_marks.set(hits.iter().cloned().map(TextMark::new).collect());
+        if hits.is_empty() {
+            find_status.set("没有命中".into());
+            return;
+        }
+        let k = find_k.get() % hits.len();
+        find_hit.set((hits[k].start, hits[k].end));
+        find_jump.update(|n| *n += 1);
+        find_k.set(k + 1);
+        find_status.set(format!("第 {} / {} 处", k + 1, hits.len()));
+    };
+    let sc_find = Element::card(
+        "查找命中（marks 区间底色 + select_without_focus_when 运行期设选区）",
+        Element::col()
+            .width_match()
+            .spacing(6)
+            .child(
+                Element::row()
+                    .width_match()
+                    .spacing(8)
+                    .child(
+                        // 焦点一直留在查询框：Enter 一次跳一处（正文框用的是不夺焦点版）。
+                        Element::text_input(find_query, "要找的字")
+                            .weight(1.0)
+                            .on_submit(move |_| find_next()),
+                    )
+                    .child(Element::button("下一处").on_click(move |_| find_next()))
+                    // 定宽：状态文字长短一变，按钮就跟着挪位置。
+                    .child(
+                        Element::label_signal(find_status)
+                            .width(120)
+                            .fg_role(Role::TextMuted),
+                    ),
+            )
+            .child(
+                Element::text_input(find_body, "")
+                    .multiline()
+                    .wrap(true)
+                    .width_match()
+                    .height(64)
+                    .marks(find_marks)
+                    .select_without_focus_when(find_jump, find_hit),
             ),
     );
 
@@ -1429,6 +1500,7 @@ fn main() {
             .child(sc_2)
             .child(sc_3)
             .child(sc_4)
+            .child(sc_find)
             .child(cp_10)
             .child(cp_11)
             .child(cp_12)

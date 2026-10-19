@@ -38,6 +38,8 @@ mod fling;
 mod focus;
 #[cfg(test)]
 mod key_damage_tests;
+#[cfg(test)]
+mod marks_tests;
 mod menu;
 mod toast;
 mod tooltip;

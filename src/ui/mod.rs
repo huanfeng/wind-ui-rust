@@ -50,7 +50,9 @@ pub use caret::{CaretOpts, CaretState, CaretStyle};
 // 面板内那四个 widget 的构造器要 crate 私有的 `PickerState`，外部拿到类型名也无事可做。
 pub use color_picker::{default_presets, ColorPickerOpts, ColorTrigger, Hsva};
 pub use image::{ImageContent, ImageView};
-pub use inputs::{CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput};
+pub use inputs::{
+    CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput, TextMark,
+};
 pub use link::Link;
 pub use list::ListRow;
 pub use menubar::{MenuBar, MenuBarEntry};
@@ -1760,6 +1762,28 @@ impl Element {
              后者会合成 Ctrl+A 覆盖预置选区"
         );
         self.config_text_input_widget(|ti| ti.set_selection(start, end), "select_range()")
+    }
+
+    /// **按区间挂底色**：查找替换把整框里所有命中涂黄。区间是字符索引（与
+    /// [`select_range`](Self::select_range) / [`select_when`](Self::select_when) 同一单位，
+    /// 见 [`TextMark::range`]），越界钳到正文长度——命中表比正文旧一拍也不会 panic。
+    ///
+    /// 画在文字与选区**下面**：被 `select_when` 选中的那一处叠着选区色，一眼看出是
+    /// 「当前这一处」。不接事件、不影响命中与选区；空表不画任何东西。改表即重绘，
+    /// 不重排。密码框不画（掩码上标出命中位置等于泄露正文结构）。
+    /// 正在输入合成串时，跨过插入点的标记会把合成串一并盖住。
+    ///
+    /// 仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let body = signal("甲乙甲丙甲".to_string());
+    /// let hits = signal(vec![TextMark::new(0..1), TextMark::new(2..3), TextMark::new(4..5)]);
+    /// let ui = Element::text_input(body, "").multiline().marks(hits);
+    /// ```
+    #[track_caller]
+    pub fn marks(self, marks: Signal<Vec<TextMark>>) -> Self {
+        self.config_text_input_widget(|ti| ti.set_marks(marks), "marks()")
     }
 
     /// **运行期设选区**：`trigger` 计数一变值，就把焦点送进本框并选中 `range` 当时的

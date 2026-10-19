@@ -564,6 +564,7 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .select_range(0, stem)      // 建树时预置选区（字符索引）
     .select_when(jump, range)   // 运行期设选区：jump 计数一变就聚焦并选中 range（见 8.3）
     .select_without_focus_when(jump, range)  // 同上但焦点不动（查找栏：焦点留在查询框）
+    .marks(hits)                // 按区间挂底色：hits: Signal<Vec<TextMark>>（查找命中涂黄）
 ```
 > `on_submit` / `on_nav_key` 不是便捷糖而是**唯一出口**：按键分发不冒泡，没有它们
 > 这两类键就地消失，详见 [8.3 焦点与键盘](#83-焦点与键盘)。
@@ -578,6 +579,23 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
 > `on_submit` 时 Enter / Ctrl+Enter 照常上达 `App::on_shortcut`。点一个「会隐藏输入框」的
 > 按钮仍会提交：焦点在按下时就转走了，与网页 mousedown 先 blur 同序。自定义控件经
 > `Widget::on_blur` 接同一个时机。
+
+> **区间底色 `marks`**：查找替换要让整框里**所有**命中都看得见，命中表在应用手里、
+> 正文在框里——`TextMark { range, bg }` 交给框架画在文字与选区**下面**，不接事件、不影响
+> 命中与选区、不改正文。单位是**字符索引**，与光标、`select_range`、`select_when` 一致
+> （不是字节下标，应用侧的字节命中表换算：`text[..b].chars().count()`）。越界钳到正文
+> 长度、空区间不画，命中表比正文旧一拍也不会 panic；空表不画任何东西。`bg: None` 取主题
+> `[input] mark`（默认 `palette.warning` 的 40% alpha，明暗主题都读得清字）。改表即重绘、不重排
+（写表的是按钮、键盘激活、定时器还是输入框的 `on_submit`，读者都会刷新）。密码框不画；
+> 正在输入合成串时，跨过插入点的标记会把合成串一并盖住。配合 `select_when` 做「跳到第 k 处」：
+> 被选中的那一处叠着选区色，就是「当前这一处」（查找栏让焦点留在查询框，用 `select_without_focus_when`）。示例见 `fullshowcase`「表单」页「查找命中」。
+>
+> ```rust
+> let hits = signal(Vec::<TextMark>::new());
+> let (jump, cur) = (signal(0u64), signal((0usize, 0usize)));
+> Element::text_input(body, "").multiline().marks(hits).select_when(jump, cur)
+> // 「下一处」：hits.set(全部命中); cur.set(第 k 处); jump.update(|n| *n += 1);
+> ```
 
 > `on_click` 用在 text_input 上是**旁路通知**，不是激活：输入框照常聚焦、定位光标、
 > 起拖选，回调只是让宿主知道用户点了它。典型用途是重新展开一个被 Escape 收起的

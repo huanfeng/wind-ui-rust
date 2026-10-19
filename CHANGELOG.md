@@ -7,9 +7,13 @@
 
 ### 新增
 
+- **`Element::marks(Signal<Vec<TextMark>>)`：输入框按区间挂底色**（Qt `setExtraSelections` 的最小形）。查找替换把
+  整框里所有命中涂黄，画在文字与选区下面，不接事件、不改正文。区间是字符索引（与光标 / `select_range` 同一单位），
+  越界钳制；`bg: None` 取新主题槽 `InputTheme::mark`（`[input] mark`，默认 `palette.warning` 的 40% alpha）。`TextMark` 进 `prelude`。
 - **`Element::select_when(trigger, range)`：运行期设选区**。复用 `focus_when` 的计数器触发，兑现时聚焦并选中
   `range` 当时的区间——「跳到第 k 处」不必再靠重建元素或「读走即清」的一次性请求。另有不夺焦点版
   `Element::select_without_focus_when`：焦点留在查询框，Enter 一次跳一处，正文框只亮出当前这一处。
+  `fullshowcase`「表单」页加「查找命中」卡片演示。
 
 ### 修复
 

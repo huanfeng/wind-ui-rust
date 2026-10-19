@@ -67,7 +67,7 @@ pub mod prelude {
         default_presets, CaretStyle, CheckMenuItem, ColorPickerOpts, CommitMode, DropdownItem,
         Element, Hsva, ImageContent, ImageView, Link, MenuBarEntry, Para, RichColor, RichDoc,
         RowRequest, RowSource, SelectionScope, SortKey, SortOrder, SortStyle, SpanStyle,
-        TextContent, Truncate, WindowButton, WindowButtonKind, ROW_CACHE_SEGMENTS, ROW_CHUNK,
-        TABLE_ROW_H,
+        TextContent, TextMark, Truncate, WindowButton, WindowButtonKind, ROW_CACHE_SEGMENTS,
+        ROW_CHUNK, TABLE_ROW_H,
     };
 }
