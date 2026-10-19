@@ -5,12 +5,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`Element::select_when(trigger, range)`：运行期设选区**。复用 `focus_when` 的计数器触发，兑现时聚焦并选中
+  `range` 当时的区间——「跳到第 k 处」不必再靠重建元素或「读走即清」的一次性请求。另有不夺焦点版
+  `Element::select_without_focus_when`：焦点留在查询框，Enter 一次跳一处，正文框只亮出当前这一处。
+
 ### 修复
 
 - **键盘路径上写信号，别的控件不刷新**：按键事件里写信号原先一律只重绘发起者自己。于是 Tab 到按钮按空格、
   空格切换复选框，回调改的状态文案停在旧值；`text_input` 的 `on_submit` / `on_commit` / `on_nav_key` 回调写的
   命中计数、另一个框的标记也一样，直到下一次碰巧整窗重画。现在非文本控件的按键写信号按整窗重绘（与鼠标点同一
   控件同口径），文本框打字仍走局部重绘，它转交给应用的回调里写过信号则升整窗。
+- **同一元素挂两个定向送焦点触发器（`focus_when` / `focus_select_all_when` / `select_when` / `select_without_focus_when` 任意两次）时后挂的
+  静默顶掉先挂的**：现在 debug 构建下断言。
 
 ### 变更
 

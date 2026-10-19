@@ -561,6 +561,9 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .on_commit(|ctx| ..)        // 「改完即提交」：改过之后 Enter 或用户失焦时触发一次
     .on_nav_key(|ctx, key| ..)  // 本控件未处理的 上/下 键（候选列表游标用）
     .on_click(|ctx| ..)         // 「这个框被点了」的旁路通知（仅左键）
+    .select_range(0, stem)      // 建树时预置选区（字符索引）
+    .select_when(jump, range)   // 运行期设选区：jump 计数一变就聚焦并选中 range（见 8.3）
+    .select_without_focus_when(jump, range)  // 同上但焦点不动（查找栏：焦点留在查询框）
 ```
 > `on_submit` / `on_nav_key` 不是便捷糖而是**唯一出口**：按键分发不冒泡，没有它们
 > 这两类键就地消失，详见 [8.3 焦点与键盘](#83-焦点与键盘)。
@@ -1892,6 +1895,16 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
   初值不触发；元素此刻不在焦点环里（隐藏、禁用、被对话框遮住）时，等它进环那一帧再兑现。同一次点击里
   既加计数、又让输入框所在子树重建（`host_signal` 之类）也照样生效——已兑现到的值按信号记在树上，新节点沿用；
   同理，节点被整个移除期间计数变了，它重建并进入焦点环时会兑现这次触发。
+- `.select_when(trigger, range)`（`range: Signal<(usize, usize)>`，仅 `text_input`）：**运行期设选区**，
+  触发语义与 `focus_when` 完全相同（计数器、初值不触发、不抢回、等进环、重建不丢不重），兑现时聚焦并选中
+  `range` **当时**的 `[start, end)`（字符索引，越界钳制；多行框滚到选区末端）。「跳到第 k 处」先写 `range`
+  再加计数。它是 `select_range` 的运行期版本——后者是建树时的一次性预设，只在隐藏后复显时再兑现。
+  与 `focus_when` / `focus_select_all_when` 共用一个触发器槽，同一元素挂两个 debug 下断言。
+- `.select_without_focus_when(trigger, range)`：`select_when` 的**不夺焦点**版——选中并滚过去，焦点留在原处。
+  查找栏的惯例：焦点一直在查询框，Enter 一次跳一处，正文框只亮出「当前这一处」（选区不看焦点照常画）。
+  若用 `select_when`，焦点进了多行正文框，用户以为还在查询框里再按 Enter，选中的命中字就被换成换行。
+  同一轮里多个本修饰符可同时兑现（同一个计数驱动多个框）。目标框同样要在焦点环里才兑现（`.focusable(false)`、
+  禁用、被对话框遮住期间推迟到它回到环里那一帧）。
 - `ctx.release_focus()`：**交出焦点**（网页的 `input.blur()`），焦点在本节点或其子孙上时清空，否则什么都
   不做。典型用法是提交后失焦——数字框按回车提交，插入符还在里面闪，用户会以为没提交：
 

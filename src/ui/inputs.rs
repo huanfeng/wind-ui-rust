@@ -1030,6 +1030,12 @@ impl TextInput {
         self.apply_selection(start, end);
     }
 
+    /// 运行期设选区（`Element::select_when` 兑现时由宿主调）：只改当前选区，不动预设——
+    /// 隐藏再显示时照旧按 [`set_selection`](Self::set_selection) 的预设复位。
+    pub(crate) fn select_now(&mut self, start: usize, end: usize) {
+        self.apply_selection(start, end);
+    }
+
     fn apply_selection(&mut self, start: usize, end: usize) {
         let n = self.char_count();
         let s = start.min(n);

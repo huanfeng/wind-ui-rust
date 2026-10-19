@@ -705,8 +705,9 @@ pub struct Element {
     window_drag: bool,
     /// 声明式初始焦点（见 [`Element::autofocus`]）。
     autofocus: Option<crate::core::Autofocus>,
-    /// 定向送焦点（见 [`Element::focus_when`]）：触发信号与是否全选。
-    focus_when: Option<(Signal<u64>, bool)>,
+    /// 定向送焦点（见 [`Element::focus_when`] / [`Element::select_when`]）：触发信号与
+    /// 兑现时对选区做什么。
+    focus_when: Option<(Signal<u64>, crate::core::FocusSelect)>,
     focusable: Option<bool>,
     enabled_static: bool,
     enabled: Option<Signal<bool>>,
@@ -1084,15 +1085,37 @@ impl Element {
     /// 用**计数器**而非布尔：布尔为真期间用户自己点了别处，本框不该再把焦点抢回来；
     /// 而下一次触发要能再生效。建节点时的初值不触发。元素此刻不在焦点环里（隐藏、禁用、
     /// 被对话框遮住）时，等它进环那一帧再兑现。
-    pub fn focus_when(mut self, trigger: Signal<u64>) -> Self {
-        self.focus_when = Some((trigger, false));
-        self
+    #[track_caller]
+    pub fn focus_when(self, trigger: Signal<u64>) -> Self {
+        self.set_focus_when(trigger, crate::core::FocusSelect::Keep, "focus_when()")
     }
 
     /// [`focus_when`](Self::focus_when) + 全选已有内容：改名被拒后回到框里，接着打字
     /// 就覆盖。
-    pub fn focus_select_all_when(mut self, trigger: Signal<u64>) -> Self {
-        self.focus_when = Some((trigger, true));
+    #[track_caller]
+    pub fn focus_select_all_when(self, trigger: Signal<u64>) -> Self {
+        self.set_focus_when(
+            trigger,
+            crate::core::FocusSelect::All,
+            "focus_select_all_when()",
+        )
+    }
+
+    /// 三种定向送焦点共用一个槽：后挂的会顶掉先挂的，debug 构建下断言提示。
+    #[track_caller]
+    fn set_focus_when(
+        mut self,
+        trigger: Signal<u64>,
+        select: crate::core::FocusSelect,
+        what: &str,
+    ) -> Self {
+        debug_assert!(
+            self.focus_when.is_none(),
+            "{what} 与 focus_when() / focus_select_all_when() / select_when() / \
+             select_without_focus_when() 互斥：\
+             同一元素只能挂一个定向送焦点触发器，后挂的会顶掉先挂的"
+        );
+        self.focus_when = Some((trigger, select));
         self
     }
 
@@ -1737,6 +1760,74 @@ impl Element {
              后者会合成 Ctrl+A 覆盖预置选区"
         );
         self.config_text_input_widget(|ti| ti.set_selection(start, end), "select_range()")
+    }
+
+    /// **运行期设选区**：`trigger` 计数一变值，就把焦点送进本框并选中 `range` 当时的
+    /// `[start, end)`（字符索引，与 [`select_range`](Self::select_range) 同一单位）。
+    /// 查找替换的「跳到第 k 处」：先写 `range`、再给 `trigger` 加一。
+    ///
+    /// 触发语义与 [`focus_when`](Self::focus_when) 完全相同——计数器而非布尔、初值不触发、
+    /// 用户点走后不抢回、元素不在焦点环里时等它进环再兑现、同一次事件里重建了节点也
+    /// 不丢不重。区间在**兑现那一刻**才读，越界钳到正文长度，`start == end` 只放光标；
+    /// 多行框会滚到选区末端。
+    ///
+    /// 与 `focus_when` / `focus_select_all_when` 互斥（同一个触发器槽，debug 构建下断言）。
+    /// 仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let body = signal("甲乙甲丙甲".to_string());
+    /// let (jump, hit) = (signal(0u64), signal((0usize, 0usize)));
+    /// let ui = Element::col()
+    ///     .child(Element::text_input(body, "").multiline().select_when(jump, hit))
+    ///     .child(Element::button("下一处").on_click(move |_| {
+    ///         hit.set((2, 3));
+    ///         jump.update(|n| *n += 1);
+    ///     }));
+    /// ```
+    #[track_caller]
+    pub fn select_when(self, trigger: Signal<u64>, range: Signal<(usize, usize)>) -> Self {
+        self.config_text_input_widget(|_| {}, "select_when()")
+            .set_focus_when(
+                trigger,
+                crate::core::FocusSelect::Range(range),
+                "select_when()",
+            )
+    }
+
+    /// [`select_when`](Self::select_when) 的**不夺焦点**版：计数一变，就在本框里选中 `range`
+    /// 当时的区间并滚过去，焦点留在原处。查找栏的惯例——焦点一直在查询框里，Enter 一次
+    /// 跳一处，正文框只负责亮出「当前这一处」（选区不看焦点照常画）。若焦点也在正文框，
+    /// 用 `select_when`：用户以为还在查询框里再按 Enter，选中的命中字会被换成换行。
+    ///
+    /// 触发语义、单位、钳制与 `select_when` 相同；同一轮里多个本修饰符可同时兑现（不抢
+    /// 焦点，互不冲突）。目标框同样要**在焦点环里**才兑现：`.focusable(false)`、禁用、被
+    /// 对话框遮住期间不兑现，等它回到环里那一帧再兑现（模态查找框高亮背后的正文，要等
+    /// 对话框关掉）。与 `focus_when` 一族共用一个触发器槽。仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let (body, query) = (signal("甲乙甲".to_string()), signal("甲".to_string()));
+    /// let (jump, hit) = (signal(0u64), signal((0usize, 0usize)));
+    /// let ui = Element::col()
+    ///     .child(Element::text_input(query, "查找").on_submit(move |_| {
+    ///         hit.set((2, 3));
+    ///         jump.update(|n| *n += 1);
+    ///     }))
+    ///     .child(Element::text_input(body, "").multiline().select_without_focus_when(jump, hit));
+    /// ```
+    #[track_caller]
+    pub fn select_without_focus_when(
+        self,
+        trigger: Signal<u64>,
+        range: Signal<(usize, usize)>,
+    ) -> Self {
+        self.config_text_input_widget(|_| {}, "select_without_focus_when()")
+            .set_focus_when(
+                trigger,
+                crate::core::FocusSelect::RangeNoFocus(range),
+                "select_without_focus_when()",
+            )
     }
 
     /// **本控件未处理的导航键的出口**：候选列表游标用（↑↓ 在候选间移动，配合
@@ -4520,7 +4611,9 @@ impl Element {
         }
         // 在 widget 被移进 Node 之前问一次：对话框遮罩要把显示信号登记到树上。
         let modal = widget.modal_signal();
-        let focus_when = self.focus_when.map(|(s, all)| tree.focus_trigger(s, all));
+        let focus_when = self
+            .focus_when
+            .map(|(s, select)| tree.focus_trigger(s, select));
         let node = Node {
             parent: None,
             children: Vec::new(),

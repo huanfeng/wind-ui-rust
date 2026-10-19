@@ -462,7 +462,28 @@ pub struct FocusTrigger {
     signal: Signal<u64>,
     /// 上次兑现时的值。建节点时取树上记的这个信号的值（见 `Tree::focus_trigger`）。
     seen: u64,
-    select_all: bool,
+    select: FocusSelect,
+}
+
+/// 定向送焦点兑现时顺带对选区做什么（见 `Element::focus_when` / `select_when`）。
+#[derive(Clone, Copy)]
+pub(crate) enum FocusSelect {
+    /// 只送焦点，选区不动。
+    Keep,
+    /// 全选正文。
+    All,
+    /// 选中信号里的 `[start, end)`（字符索引），兑现那一刻才读。
+    Range(Signal<(usize, usize)>),
+    /// 同 [`Range`](Self::Range)，但**不送焦点**（`Element::select_without_focus_when`）：
+    /// 查找栏「焦点留在查询框、正文里亮出当前这一处」。
+    RangeNoFocus(Signal<(usize, usize)>),
+}
+
+impl FocusSelect {
+    /// 兑现时是否夺取焦点。
+    pub(crate) fn takes_focus(self) -> bool {
+        !matches!(self, FocusSelect::RangeNoFocus(_))
+    }
 }
 
 impl Autofocus {
@@ -3715,7 +3736,11 @@ impl Tree {
     /// 为新节点建定向送焦点触发器。这个信号兑现过（或有别的节点先登记过）就沿用树上记的
     /// 值——同一次事件里加了计数又重建了节点，新节点照样认这次触发；第一次见到才取当前值，
     /// 故初值本身不触发。
-    pub(crate) fn focus_trigger(&mut self, signal: Signal<u64>, select_all: bool) -> FocusTrigger {
+    pub(crate) fn focus_trigger(
+        &mut self,
+        signal: Signal<u64>,
+        select: FocusSelect,
+    ) -> FocusTrigger {
         if self.focus_seen.len() >= 64 {
             self.focus_seen.retain(|s, _| s.is_alive());
         }
@@ -3724,15 +3749,20 @@ impl Tree {
         FocusTrigger {
             signal,
             seen,
-            select_all,
+            select,
         }
     }
 
-    /// 取出焦点环里第一个触发器已变值的节点，连同它要不要全选。环里所有已变值的触发器
-    /// 都记为已兑现（同一轮只可能满足一个，其余的不该留到下一帧再抢）；不在环里的
-    /// （隐藏、禁用、被模态遮住）不记，等它进环那一帧再兑现。
-    pub(crate) fn take_fired_focus_trigger(&mut self, order: &[NodeId]) -> Option<(NodeId, bool)> {
-        let mut fired = None;
+    /// 取出焦点环里触发器已变值的节点，连同兑现时对选区做什么。环里所有已变值的触发器
+    /// 都记为已兑现；不在环里的（隐藏、禁用、被模态遮住）不记，等它进环那一帧再兑现。
+    ///
+    /// 返回的列表里**要焦点的只留第一个**（同一轮只可能满足一个，其余的不该留到下一帧
+    /// 再抢）；不要焦点的（`RangeNoFocus`）互不冲突，全部保留。
+    pub(crate) fn take_fired_focus_triggers(
+        &mut self,
+        order: &[NodeId],
+    ) -> Vec<(NodeId, FocusSelect)> {
+        let mut fired: Vec<(NodeId, FocusSelect)> = Vec::new();
         for &id in order {
             let Some(t) = self.get_mut(id).and_then(|n| n.focus_when.as_mut()) else {
                 continue;
@@ -3742,9 +3772,12 @@ impl Tree {
             };
             if v != t.seen {
                 t.seen = v;
-                let (signal, select_all) = (t.signal, t.select_all);
+                let (signal, select) = (t.signal, t.select);
                 self.focus_seen.insert(signal, v);
-                fired.get_or_insert((id, select_all));
+                let focus_taken = fired.iter().any(|(_, f)| f.takes_focus());
+                if !(select.takes_focus() && focus_taken) {
+                    fired.push((id, select));
+                }
             }
         }
         fired
@@ -4575,12 +4608,12 @@ mod tests {
         let mut tree = Tree::new();
         for _ in 0..64 {
             let s = crate::signal::signal(0u64);
-            tree.focus_trigger(s, false);
+            tree.focus_trigger(s, FocusSelect::Keep);
             s.dispose();
         }
         assert_eq!(tree.focus_seen.len(), 64, "前提：未到阈值时不清");
         let live = crate::signal::signal(0u64);
-        tree.focus_trigger(live, false);
+        tree.focus_trigger(live, FocusSelect::Keep);
         assert_eq!(tree.focus_seen.len(), 1, "到阈值时清掉已回收的，只剩活着的");
     }
 
