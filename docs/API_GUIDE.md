@@ -2445,6 +2445,12 @@ let dot = Element::leaf().widget(Dot { on: state });
 **何时还需要 `ctx.mark_dirty()`**：只有当控件改的是**自身持有的非信号状态**（hover/press
 标志、拖动偏移等）时才需要显式请求重绘。改 `Signal` 一律自动触发。
 
+**写信号重绘多大一块**：指针按下 / 抬起与键盘事件里写了信号，宿主整窗重绘——信号可能被任何
+节点读，读者不在脏区里就停在旧值；悬停（Move）只重绘本控件。**收字的文本控件**打字频率高、
+写的是自己的正文，值得只重绘自己：覆盖 `Widget::keys_damage_self_only() -> true`（默认等于
+`accepts_text()`），同时把转交给应用的回调（提交、导航键之类）放进 `ctx.app_callback(|ctx| ..)`
+里跑——回调写了信号它就升整窗，否则那些回调改的命中计数、别处的标记都不会刷新。
+
 **`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/release_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
 
 **`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`fill_polygon`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。

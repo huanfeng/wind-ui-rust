@@ -472,6 +472,10 @@ impl Widget for SvArea {
     fn focusable(&self) -> bool {
         true
     }
+    /// 方向键与拖动同口径：`drag_dirty` 已盖住面板与触发器，不必整窗。
+    fn keys_damage_self_only(&self) -> bool {
+        true
+    }
     fn cursor(&self) -> CursorShape {
         CursorShape::Hand
     }
@@ -613,6 +617,10 @@ impl Widget for HueBar {
     fn focusable(&self) -> bool {
         true
     }
+    /// 方向键与拖动同口径：`drag_dirty` 已盖住面板与触发器，不必整窗。
+    fn keys_damage_self_only(&self) -> bool {
+        true
+    }
     fn cursor(&self) -> CursorShape {
         CursorShape::Hand
     }
@@ -749,6 +757,10 @@ impl Widget for AlphaBar {
         self.dragging = false;
     }
     fn focusable(&self) -> bool {
+        true
+    }
+    /// 方向键与拖动同口径：`drag_dirty` 已盖住面板与触发器，不必整窗。
+    fn keys_damage_self_only(&self) -> bool {
         true
     }
     fn cursor(&self) -> CursorShape {

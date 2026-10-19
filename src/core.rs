@@ -281,6 +281,21 @@ pub trait Widget {
     fn accepts_text(&self) -> bool {
         self.accepts_ime()
     }
+    /// 按键处理里写的信号**只影响本控件自己的画面**（或控件已自行声明了覆盖全部读者的
+    /// 脏区）——为真时宿主对这次按键只重绘本控件，否则整窗。
+    ///
+    /// 默认 = [`Self::accepts_text`]：文本框打字写的是自己的正文、频率又高，值得局部帧；
+    /// 而按钮 / 复选框 / 列表的键盘激活写的多是别处读的共享状态（状态文案、`enabled_signal`
+    /// 门控），局部帧会让那些读者停在旧值——与鼠标点同一个控件的失效口径不该分叉。
+    /// 覆盖为 `true` 的前提：控件转交给应用的回调经 [`EventCtx::app_callback`] 跑，
+    /// 自己写的共享状态由显式脏区或布局签名兜住。内置控件里有两处只兜住了框架控件：
+    /// stepper 中部的数字框（继承 `TextInput` 的 `true`，方向键步进写共享的 `value`；启用态
+    /// 门控经布局签名升整窗、别的框架控件在下次重排同步）与取色器三块面板（`drag_dirty`
+    /// 只盖面板与触发器，与拖动同口径）——**自定义控件在 `paint` 里直接读它们的值信号**时，
+    /// 键盘操作后会停在旧值，直到下一次整窗重画。
+    fn keys_damage_self_only(&self) -> bool {
+        self.accepts_text()
+    }
     /// 输入法组合态变化（拼音等未上屏文字开始/结束合成）时由框架通知焦点节点。
     /// 文本控件借此在组合期间暂不绘制自绘光标（系统组合浮层自带光标）。默认无操作。
     ///
@@ -2071,6 +2086,22 @@ impl EventCtx<'_> {
         self.out.damage.merge_with(DamageReq::Full);
         self.out.repaint = true;
     }
+
+    /// 跑一个控件转交的**应用回调**：回调里写过信号就升整窗重绘。
+    ///
+    /// 没有它时错在哪：按键事件里写信号默认只重绘发起者自己（打字高频，见
+    /// `call_on_event`），这对「控件改自己的正文」是对的；可应用回调写的多是**别处**读
+    /// 的共享状态——查找框 Enter 后更新命中计数、给另一个框挂底色标记——读者不在脏区
+    /// 里，画面就停在旧值，直到下一次碰巧整窗重画。指针点击与定时器回调本就按整窗
+    /// 处理，这里让按键路径上的应用回调与它们同一口径。回调是 Enter / 导航键这类
+    /// 低频动作，不是每次打字都跑，局部帧的收益不受影响。
+    pub fn app_callback<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let (r, wrote) = crate::signal::track_writes(|| f(self));
+        if wrote {
+            self.mark_dirty_all();
+        }
+        r
+    }
     /// 修改本节点背景色并重绘（交互态切换常用）。
     pub fn set_bg(&mut self, c: Color) {
         if let Some(n) = self.tree.get_mut(self.self_id) {
@@ -3274,6 +3305,7 @@ impl Tree {
             Some(n) => std::mem::replace(&mut n.widget, Box::new(EmptyWidget)),
             None => return (false, EventOutcome::default()),
         };
+        let key_local = widget.keys_damage_self_only();
         let prev_held = self.held_accepts_text.replace((id, widget.accepts_text()));
         let mut ctx = EventCtx {
             tree: self,
@@ -3287,16 +3319,19 @@ impl Tree {
         self.held_accepts_text = prev_held;
         // 事件内写过信号但控件未显式 mark_dirty → 据事件类型选择失效强度：
         // - Move(hover)：写的是自身悬停态，局部重绘即可；
-        // - Key：打字高频，保留局部重绘避免整窗卡顿；
-        // - 其余指针事件(Down/Up/Click 等)：可能写跨控件共享状态（计数器、enabled_when 门控），
-        //   升 Layout 使 apply_damage 直接置 needs_full，覆盖所有读者（含绑信号的文案/en_cond）。
+        // - `keys_damage_self_only` 控件的 Key：文本框打字高频、写的是自己的正文，保留局部
+        //   重绘避免整窗卡顿（它转交给应用的回调另经 `EventCtx::app_callback` 升整窗）；
+        // - 其余（指针 Down/Up/Click、按钮 / 开关 / 列表的键盘激活与导航）：可能写跨控件
+        //   共享状态（计数器、状态文案、enabled_when 门控），升 Layout 使 apply_damage
+        //   直接置 needs_full，覆盖所有读者。键盘激活按钮与鼠标点它是同一件事，失效口径
+        //   不该因输入设备不同而分叉——曾经分叉过：Tab 到按钮按空格，回调改的文案不刷新。
         if crate::signal::end_event() {
             let r = self.visual_bounds(id);
-            let is_hover_or_key = matches!(
-                ev,
-                Event::Pointer(ref pe) if pe.kind == crate::event::PointerKind::Move
-            ) || matches!(ev, Event::Key(_));
-            let d = if is_hover_or_key {
+            let local = match ev {
+                Event::Pointer(ref pe) => pe.kind == crate::event::PointerKind::Move,
+                Event::Key(_) => key_local,
+            };
+            let d = if local {
                 DamageReq::Rect(r)
             } else {
                 DamageReq::Layout(r)

@@ -279,6 +279,16 @@ pub(crate) fn begin_event() {
     TOUCHED.with(|c| c.set(false));
 }
 
+/// 跑一段代码并报告它是否写过信号，**不吞掉**外层事件期已记下的写入（返回后外层照样
+/// 看得到这次的写）。只在事件期内有意义；事件期外的写自己会请求整窗重绘，这里报 `false`。
+pub(crate) fn track_writes<R>(f: impl FnOnce() -> R) -> (R, bool) {
+    let outer = TOUCHED.with(|c| c.replace(false));
+    let r = f();
+    let inner = TOUCHED.with(|c| c.get());
+    TOUCHED.with(|c| c.set(outer || inner));
+    (r, inner)
+}
+
 /// 核心：退出节点事件处理后调用——结束事件期，返回这期间是否写过信号。
 pub(crate) fn end_event() -> bool {
     EVENT_ACTIVE.with(|c| c.set(false));

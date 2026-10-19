@@ -1090,7 +1090,7 @@ impl TextInput {
     fn fire_submit(&mut self, ctx: &mut EventCtx) -> bool {
         match &mut self.on_submit {
             Some(f) => {
-                f(ctx);
+                ctx.app_callback(|ctx| f(ctx));
                 true
             }
             None => false,
@@ -1113,7 +1113,7 @@ impl TextInput {
         let base = std::mem::take(&mut self.commit_base); // 用完即释放
         let changed = self.text.with(|t| *t != base);
         if let (Some(f), true) = (&mut self.on_commit, changed) {
-            f(ctx);
+            ctx.app_callback(|ctx| f(ctx));
         }
     }
 
@@ -1132,7 +1132,7 @@ impl TextInput {
     /// 让用户失去离开该控件的唯一键盘途径。
     fn fire_nav_key(&mut self, ctx: &mut EventCtx, ev: KeyEvent) -> bool {
         match &mut self.on_nav_key {
-            Some(f) => f(ctx, ev),
+            Some(f) => ctx.app_callback(|ctx| f(ctx, ev)),
             None => false,
         }
     }
@@ -2659,6 +2659,11 @@ impl Widget for TextInput {
     fn accepts_text(&self) -> bool {
         // 不看光标：焦点查询可能发生在首帧之前，或框被滚出视口、没画就没记光标。
         !self.config.read_only
+    }
+    /// 打字、移光标、扩选写的都是自己的状态（只读框同样只动选区与滚动）；转交给应用的
+    /// 回调经 `app_callback` 自行升整窗。
+    fn keys_damage_self_only(&self) -> bool {
+        true
     }
     fn set_composing(&mut self, composing: bool) {
         // 只读：不进入组合态（不藏光标——这里没有字会被打进来）；退出照常放行，
