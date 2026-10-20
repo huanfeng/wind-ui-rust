@@ -242,6 +242,13 @@ pub trait Widget {
     /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
     /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。
     fn reset_interaction(&mut self) {}
+    /// 节点不在绘制路径上（被隐藏、或在被隐藏的祖先之下）时，每次结构变化后调用：把
+    /// 跟随状态的补间就地落定到**当前**状态。
+    ///
+    /// 与 [`reset_interaction`](Self::reset_interaction) 的区别：那个只在"变为不可见"
+    /// 的那一刻调一次，之后隐藏期间状态再被程序改过（标签页切走时改了选中项），它管不到——
+    /// 补间只在 paint 里改向，露出来时就会补播一段过渡。默认无操作。
+    fn settle_offscreen(&mut self) {}
     /// **用户**把焦点从本节点移走时调用一次：点了别处 / 点空白 / Tab 离开，或控件回调
     /// 经 ctx 把焦点要给了别人。与该次事件同一次分发内同步调用（在该次分发自己的
     /// 副作用落定之后）。
@@ -688,6 +695,8 @@ pub struct Node {
     pub overlay: Option<Signal<bool>>,
     /// 进出场过渡状态（`Element::transition`）。只有声明了过渡的节点才分配。
     pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
+    /// 高度过渡状态（`Element::animate_height`）。只有声明了的节点才分配。
+    pub(crate) height_anim: Option<Box<crate::ui::presence::HeightAnim>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -1340,11 +1349,46 @@ impl Tree {
         if max_height > 0 {
             resolved_h = resolved_h.min(max_height);
         }
+        let resolved_h = self.animated_height(id, resolved_h);
         let size = Size::new(resolved_w, resolved_h);
         if let Some(n) = self.get_mut(id) {
             n.measured = size;
         }
         size
+    }
+
+    /// 高度过渡与展开类进出场作用于占位高度：子树已按自然尺寸测完，这里只改本节点报给
+    /// 父级的高度——同级据此平滑让位，子树在绘制时裁到这个高度。
+    fn animated_height(&self, id: NodeId, natural: i32) -> i32 {
+        let Some(n) = self.get(id) else {
+            return natural;
+        };
+        if n.height_anim.is_none() && n.presence.is_none() {
+            return natural;
+        }
+        let mut h = match &n.height_anim {
+            Some(a) => a.measure(
+                natural,
+                n.children.iter().any(|&c| self.subtree_revealing(c)),
+                &crate::theme::current(),
+            ),
+            None => natural as f32,
+        };
+        if let Some(f) = n.presence.as_ref().and_then(|p| p.height_factor()) {
+            h *= f;
+        }
+        h.round().max(0.0) as i32
+    }
+
+    /// 子树（含 `id` 自己）里是否有展开类进出场或高度过渡正在进行——这些会让外层的自然
+    /// 高度逐帧变化。只看仍参与布局的节点。
+    fn subtree_revealing(&self, id: NodeId) -> bool {
+        let Some(n) = self.get(id).filter(|n| n.layout_visible()) else {
+            return false;
+        };
+        n.presence.as_ref().is_some_and(|p| p.expanding())
+            || n.height_anim.as_ref().is_some_and(|a| a.is_active())
+            || n.children.iter().any(|&c| self.subtree_revealing(c))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1872,6 +1916,13 @@ impl Tree {
                 (p.opacity(progress), p.offset(progress))
             }
         };
+        // 高度过渡 / 展开类进出场：过渡期每帧重排一次，高度才跟得上进度。须在下面的
+        // 空矩形检查之前请求——展开正是从高度 0 起步的。
+        let revealing = n.presence.as_ref().is_some_and(|p| p.expanding())
+            || n.height_anim.as_ref().is_some_and(|a| a.is_active());
+        if revealing {
+            crate::anim::request_relayout();
+        }
         // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
         let enabled = parent_enabled && n.own_enabled();
         // 绘制偏移叠加在布局位置之上（见 `Node::offset`）。子节点以 abs 为原点递归，
@@ -1911,6 +1962,17 @@ impl Tree {
         let use_layer = opacity < 1.0;
         if use_layer {
             canvas.push_layer(opacity);
+        }
+        // 卷帘：占位高度小于自然高度（高度过渡 / 展开类进出场）时，本节点的自绘连同子树
+        // 一起裁到本节点矩形。只裁子树不够——叶子控件（label 当折叠内容）自己就会画出界。
+        let reveal_clip = revealing
+            || n.presence
+                .as_ref()
+                .and_then(|p| p.height_factor())
+                .is_some_and(|f| f < 1.0);
+        if reveal_clip {
+            canvas.save();
+            canvas.clip_rect(abs);
         }
 
         let theme = crate::theme::current();
@@ -2013,7 +2075,8 @@ impl Tree {
 
         // 滚动条：内容高于视口时在右缘绘制纵向指示条。贴窗口右缘时整体内缩，避开
         // 被 WM_NCHITTEST 判为缩放边框的那一段（否则画得出来、点不着）。
-        if matches!(n.layout, Layout::Scroll) && n.content_h > content.h {
+        // 卷帘过渡中视口小于自然内容是暂时的，不是"内容放不下"，不画滚动条。
+        if matches!(n.layout, Layout::Scroll) && n.content_h > content.h && !reveal_clip {
             let track_w = scrollbar::track_w();
             let inset = self.scrollbar_edge_inset(abs.right());
             let tx = abs.right() as f32 - track_w - scrollbar::margin() - inset as f32;
@@ -2036,6 +2099,9 @@ impl Tree {
             );
         }
 
+        if reveal_clip {
+            canvas.restore();
+        }
         if use_layer {
             canvas.pop_layer();
         }
@@ -2967,10 +3033,16 @@ impl Tree {
     }
 
     fn reset_hidden_rec(&mut self, id: NodeId, parent_interactive: bool, pf: PresenceFlags) {
-        let (interactive, children, transitioned, child_pf) = match self.get(id) {
+        let (interactive, children, transitioned, child_pf, offscreen) = match self.get(id) {
             Some(n) => {
                 let v = parent_interactive && n.effective_visible() && n.own_enabled();
                 let prev = n.prev_visible.replace(v);
+                if let Some(a) = &n.height_anim {
+                    // 不在绘制路径上也就不被测量：期间内容变了，露出来时直接落定。
+                    if !pf.painted || !n.layout_visible() {
+                        a.unprime();
+                    }
+                }
                 if let Some(p) = &n.presence {
                     if n.overlay.is_some() {
                         // 浮层不走普通绘制递归，由 `Tree::paint` 末尾单独画：锚点链不在绘制
@@ -2984,13 +3056,19 @@ impl Tree {
                         p.settle(pf.shown && n.effective_visible());
                     }
                 }
-                (v, n.children.clone(), prev && !v, pf.child(n))
+                let offscreen = !pf.painted || !n.layout_visible();
+                (v, n.children.clone(), prev && !v, pf.child(n), offscreen)
             }
             None => return,
         };
-        if transitioned {
+        if transitioned || offscreen {
             if let Some(n) = self.get_mut(id) {
-                n.widget.reset_interaction();
+                if transitioned {
+                    n.widget.reset_interaction();
+                }
+                if offscreen {
+                    n.widget.settle_offscreen();
+                }
             }
         }
         for c in children {

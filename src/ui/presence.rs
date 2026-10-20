@@ -29,6 +29,7 @@ use crate::theme::Theme;
 pub struct Presence {
     fade: bool,
     slide: (i32, i32),
+    expand: bool,
     enter_ms: Option<u32>,
     exit_ms: Option<u32>,
 }
@@ -52,6 +53,24 @@ impl Presence {
         Self::fade().slide(0, 12)
     }
 
+    /// 折叠内容（折叠面板、手风琴的 body）：淡入，同时高度从 0 展开。
+    pub fn reveal() -> Self {
+        Self::fade().expand()
+    }
+
+    /// 展开：显示时占位高度从 0 长到自然高度，隐藏时收回 0；子树按自然尺寸排布、裁到
+    /// 当前高度（像卷帘），同级随之平滑让位。属位移类动效，减弱动效档位下不展开。
+    ///
+    /// 过渡期每帧重排一次（高度在变）——用在面板、分组这类子树上，别挂在长列表的每一行。
+    ///
+    /// 边角：过渡期本节点自己的焦点环与投影（画在矩形外）一并被裁掉；放在设了
+    /// `spacing` 的线性容器里，高度为 0 时仍计一个间距（起止各跳一个 spacing）；子树里高度随父的（`height_match` / 权重）子节点会按过渡中的高度排、
+    /// 表现为被压扁而非被裁。过渡期按 Tab 可能停到被裁掉的子节点上（约 0.2 秒窗口）。
+    pub fn expand(mut self) -> Self {
+        self.expand = true;
+        self
+    }
+
     /// 滑动：显示时从 `(dx, dy)`（逻辑像素，相对最终位置）滑到原位，隐藏时反向滑回。
     /// 属位移类动效，减弱动效档位下不滑动（淡入淡出保留）。
     pub fn slide(mut self, dx: i32, dy: i32) -> Self {
@@ -69,7 +88,7 @@ impl Presence {
 
     /// 按当前动效档位，这个过渡还有没有看得见的效果。
     fn visible_effect(&self) -> bool {
-        self.fade || (self.slide != (0, 0) && anim::movement_enabled())
+        self.fade || ((self.slide != (0, 0) || self.expand) && anim::movement_enabled())
     }
 }
 
@@ -172,8 +191,81 @@ impl PresenceState {
         )
     }
 
+    /// 展开类过渡在当前进度下的高度系数；不展开（或减弱动效）时为 `None`。
+    pub(crate) fn height_factor(&self) -> Option<f32> {
+        (self.spec.expand && anim::movement_enabled())
+            .then(|| self.tr.get().value().clamp(0.0, 1.0))
+    }
+
+    /// 是否为展开类过渡且仍在进行：过渡期每帧都要重排（高度在变）、子树要裁到当前高度。
+    pub(crate) fn expanding(&self) -> bool {
+        self.height_factor().is_some() && self.is_active()
+    }
+
     /// 滑动的最大幅度：过渡期的脏区要按它外扩，盖住上一帧与这一帧两处位置。
     pub(crate) fn slide_extent(&self) -> i32 {
         self.spec.slide.0.abs().max(self.spec.slide.1.abs())
+    }
+}
+
+/// 高度过渡状态（`Element::animate_height`）：自然高度变化时，占位高度平滑跟过去。
+pub(crate) struct HeightAnim {
+    tr: Cell<Transition<f32>>,
+    /// 上一次测量处于"跟随子树"状态（见 [`measure`](Self::measure)）。
+    following: Cell<bool>,
+    /// 已见过第一次自然高度。首次测量（以及重新露出时）直接落定，不从 0 长出来。
+    primed: Cell<bool>,
+}
+
+impl HeightAnim {
+    pub(crate) fn new() -> Self {
+        Self {
+            tr: Cell::new(Transition::new(0.0).movement()),
+            following: Cell::new(false),
+            primed: Cell::new(false),
+        }
+    }
+
+    /// 测量期调用：据自然高度改向，返回本帧的占位高度。
+    ///
+    /// 改向放在测量而非 paint：要的正是"布局一算出新高度就开始过渡"，而宿主在布局前
+    /// 已刷新帧时钟（每帧只布局一次）。
+    ///
+    /// `inner_moving`：子树里有展开 / 高度过渡正在进行。这时自然高度每帧都在变，而变化
+    /// 本身已经是平滑的——外层直接跟随，不再自己起一段过渡。否则外层每帧改向去追一个移动的
+    /// 目标，必然远远落后，里面的内容大半时间被裁掉。内层停下那一帧剩下的零头也直接落定
+    /// （`following`），不为最后一两像素再起一段 200ms 的过渡。
+    pub(crate) fn measure(&self, natural: i32, inner_moving: bool, th: &Theme) -> f32 {
+        let target = natural as f32;
+        let mut tr = self.tr.get();
+        let changed = (tr.target() - target).abs() >= 0.5;
+        if !self.primed.get() {
+            tr.settle(target);
+            self.primed.set(true);
+        } else if inner_moving || (self.following.get() && changed) {
+            tr.settle(target);
+            self.following.set(true);
+        } else if changed {
+            if tr.is_active() {
+                tr.retarget_spring(target, th.anim.spring());
+            } else {
+                tr.retarget(target, th.anim.normal(), th.anim.easing());
+            }
+        }
+        // 只延续一帧：内层停下那一帧剩下的零头靠上一帧留下的 `true` 落定，此后即清。
+        // 不能等"某一帧没变化"再清——树一空闲就不再布局，标志会一直留到下一次无关的
+        // 高度变化，让它一帧跳到位。
+        self.following.set(inner_moving);
+        self.tr.set(tr);
+        tr.value()
+    }
+
+    /// 下次测量直接落定（节点不在绘制路径上期间内容变了，露出来时不补播）。
+    pub(crate) fn unprime(&self) {
+        self.primed.set(false);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.tr.get().is_active()
     }
 }

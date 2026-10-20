@@ -17,6 +17,7 @@
 //! - RadioButton：环加粗 + 中心点放大        - 分段控制器：选中胶囊跨段滑动
 //! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
+//! - 手风琴 / 折叠面板：高度卷帘展开 + 淡入、箭头旋转；`animate_height`：内容变高变矮时平滑过渡
 //! - 进出场（`Element::transition`）：提示条淡入下落/淡出上收、对话框遮罩淡入 + 面板升起、
 //!   颜色选择浮层淡入轻落、下拉菜单与悬停提示淡入
 
@@ -139,6 +140,7 @@ fn main() {
 
     // 进出场：提示条显隐（离场期间继续占位，播完才让出空间）、对话框、锚定浮层。
     let hint_on = signal(false);
+    let more = signal(false);
     let show_dialog = signal(false);
     let color = signal(Color::hex(0x4C8BF5));
     let presence = Element::card(
@@ -171,6 +173,30 @@ fn main() {
                     .font_size(12.0)
                     .fg_role(Role::TextMuted)
                     .height(18),
+            )
+            .child(
+                Element::button("展开/收起详情（animate_height）")
+                    .outline()
+                    .on_click(move |_| more.set(!more.get())),
+            )
+            .child(
+                // 内容的自然高度变化时，占位高度平滑跟过去。
+                Element::col()
+                    .width_match()
+                    .spacing(4)
+                    .padding_xy(12, 8)
+                    .bg_role(Role::SurfaceAlt)
+                    .corner(6.0)
+                    .animate_height()
+                    .child(Element::label("摘要：本卡片的高度随内容平滑变化。").height(22))
+                    .child(
+                        Element::col()
+                            .visible_signal(more)
+                            .spacing(4)
+                            .child(Element::label("详情第一行……").height(22))
+                            .child(Element::label("详情第二行……").height(22))
+                            .child(Element::label("详情第三行……").height(22)),
+                    ),
             ),
     );
 
@@ -187,7 +213,7 @@ fn main() {
     );
 
     let accordion = Element::card(
-        "手风琴（展开仍为瞬时，属 Phase C 待做）",
+        "手风琴（展开：高度卷帘 + 淡入，箭头旋转）",
         Element::accordion(
             acc,
             vec![

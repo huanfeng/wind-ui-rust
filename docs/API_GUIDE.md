@@ -2523,6 +2523,9 @@ let x = tr.animate();
 self.knob.set(tr);
 ```
 
+- **隐藏期间的状态变化**：补间只在 `paint` 里改向，控件被隐藏（或在隐藏的祖先之下）期间状态被程序改过，
+  露出来时会补播一段过渡。需要避免时实现 `Widget::settle_offscreen(&mut self)`，在里面用
+  `Transition::settle(当前状态对应的值)` 落定——框架在节点不在绘制路径上时，每次结构变化后调用它。
 - **曲线**：`Easing::{Linear, EaseIn, EaseOut, EaseInOut}`、`Easing::CubicBezier(x1, y1, x2, y2)`
   （同 CSS），以及预置 `Easing::STANDARD`（进场/展开/状态切换）、`DECELERATE`（进场）、`ACCELERATE`（离场）。
 - **弹簧**：`Spring { response_ms, damping }`，预置 `SMOOTH`（不过冲，默认）/ `SNAPPY` / `BOUNCY`。
@@ -2566,9 +2569,21 @@ Element::label("已保存")
 - 减弱动效档位下只淡不滑；动画关闭时与不声明过渡逐帧一致。
 - 滑动期间命中按**终位**算（进场那一两百毫秒里点击落在最终位置）。
 - 不在绘制路径上时发生的显隐（切走的标签页里、被对话框收起的浮层）就地落定，露出来时不补播。
+- **展开**：`Presence::expand()`（预置 `Presence::reveal()` = 淡入 + 展开）让占位高度随进度从 0 长到
+  自然高度，子树按自然尺寸排、裁到当前高度，同级平滑让位。`collapsible` / `accordion` 的内容默认就是
+  `reveal()`，标题头箭头随之旋转。
 - 内置接入：`dialog` / `dialog_panel`（遮罩淡入 + 面板自下 12px 升起）、`popup` 浮层（默认
   `Presence::popover()`：淡入 + 自上 4px 落下；要瞬显就给内容声明 `.transition(Presence::default())`）、
   下拉 / 右键 / 菜单栏菜单与悬停提示（只淡入，收起瞬时）。
+
+**高度过渡**（`Element::animate_height()`）：内容的自然高度变化时（换了文字、子项显隐），占位高度平滑
+跟过去，而不是一帧跳变。只管高度；过渡期每帧重排一次，用在面板、卡片上，别挂在长列表的每一行。
+
+```rust
+Element::col().animate_height()
+    .child(summary)
+    .child(details.visible_signal(more))   // more 一变，卡片高度平滑伸缩
+```
 
 运行期用 `anim::set_motion_level(..)` 切换。调试曲线时设环境变量 `WINDUI_ANIM_SCALE=5` 把所有补间
 放慢 5 倍（只影响补间，双击/长按等时长判定仍按真实时间）。截图默认等过渡收尾；要截中间帧加

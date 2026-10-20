@@ -724,6 +724,7 @@ pub struct Element {
     /// 锚定浮层的展开信号（见 [`Node::overlay`]）。由 [`Element::popup`] 设置。
     overlay: Option<Signal<bool>>,
     presence: Option<presence::Presence>,
+    animate_height: bool,
 }
 
 impl Element {
@@ -766,6 +767,7 @@ impl Element {
             reactive: false,
             overlay: None,
             presence: None,
+            animate_height: false,
         }
     }
 
@@ -1964,6 +1966,20 @@ impl Element {
         self
     }
 
+    /// 高度过渡：内容的自然高度变化（换了一段文字、子项增删、内部展开）时，占位高度
+    /// 平滑跟过去，同级随之让位，而不是一帧跳变（Compose `animateContentSize` 的高度版）。
+    /// 过渡期子树按新的自然尺寸排布、裁到当前高度。
+    ///
+    /// 只管高度：宽度一动，子树里的文字就重新折行、反过来改变自然高度。过渡期每帧重排一次，
+    /// 用在面板、卡片这类子树上，别挂在长列表的每一行。减弱动效档位下瞬时到位。
+    ///
+    /// 高度由父级决定（`height_match` / 权重）的节点别用：拖动窗口改尺寸时它也会被当成
+    /// "自然高度变了"而滞后跟随，像橡皮筋。
+    pub fn animate_height(mut self) -> Self {
+        self.animate_height = true;
+        self
+    }
+
     /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。
     ///
     /// 契约：闭包**必须是纯函数**（仅读状态、无副作用）。它在每帧的
@@ -2445,7 +2461,13 @@ impl Element {
         Element::col()
             .width_match()
             .child(header)
-            .child(body.visible_when(move || show.get()))
+            .child(Self::reveal_body(body).visible_when(move || show.get()))
+    }
+
+    /// 折叠内容的默认进出场：未自带过渡时淡入 + 高度展开（`Presence::reveal()`）。
+    fn reveal_body(body: Element) -> Element {
+        let p = body.presence.unwrap_or(presence::Presence::reveal());
+        body.transition(p)
     }
 
     /// 手风琴（多面板折叠卡片）：带边框/圆角的卡片，逐面板「标题头 + 可折叠内容」，
@@ -2507,7 +2529,7 @@ impl Element {
             let show = state.clone();
             card = card
                 .child(header)
-                .child(body.visible_when(move || show.is_expanded()));
+                .child(Self::reveal_body(body).visible_when(move || show.is_expanded()));
         }
         card
     }
@@ -4726,6 +4748,9 @@ impl Element {
             raised: false,
             overlay: self.overlay,
             presence: None,
+            height_anim: self
+                .animate_height
+                .then(|| Box::new(presence::HeightAnim::new())),
         };
         let shown = pf.shown && node.effective_visible();
         node.presence = self
