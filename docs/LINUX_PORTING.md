@@ -45,7 +45,7 @@
 | `xim` 0.5 | XIM 输入法协议 | fcitx5 / ibus 都提供 XIM 前端；比 D-Bus 路线（要拉进 zbus 整套异步栈）轻得多 |
 | `ttf-parser` | 字体解析 | 零依赖；读 cmap / hmtx / kern / 轮廓 |
 | `ab_glyph_rasterizer` | 轮廓 → 覆盖度 | 零依赖、单文件，精确面积覆盖 |
-| `rfd`（`xdg-portal` 特性） | 文件对话框 | 走 D-Bus 门户、无门户时回退 zenity；不用 `gtk3` 特性——那会把整套 GTK 拉进进程 |
+| `rfd`（`xdg-portal` 特性） | 文件对话框 | 走 D-Bus 门户、无门户时回退 zenity，都弹不出时 windui 再试 kdialog（`PickDialog::last_pick_failed` 报失败）；不用 `gtk3` 特性——那会把整套 GTK 拉进进程 |
 
 **fontconfig 在运行期 `dlopen`**（`text/linux/fontconfig.rs`），不在编译期链接：构建机不必
 装 `libfontconfig1-dev`，运行期拿不到时退回扫字体目录（`/usr/share/fonts` 等，按内置

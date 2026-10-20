@@ -15,6 +15,10 @@
   `Element::select_without_focus_when`：焦点留在查询框，Enter 一次跳一处，正文框只亮出当前这一处。
   `fullshowcase`「表单」页加「查找命中」卡片演示。
 
+- **`PickDialog::last_pick_failed()`：分清「文件选择框没弹出来」与「用户取消」**。两者原先都只回 `None`，
+  应用无从提示。目前仅 Linux 会判出失败：rfd 的门户与 zenity 都不可用时秒回 `None`（耗时 < 300ms 即判失败），
+  windui 先试 kdialog（rfd 不支持它），仍不行才置位并记 `warn`。其它平台恒 `false`、行为不变。
+
 ### 修复
 
 - **键盘路径上写信号，别的控件不刷新**：按键事件里写信号原先一律只重绘发起者自己。于是 Tab 到按钮按空格、

@@ -29,6 +29,7 @@
 
 pub mod clipboard;
 mod dnd;
+pub(crate) mod file_dialog;
 mod host;
 mod hotkey;
 mod ime;
