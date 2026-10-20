@@ -48,7 +48,7 @@ pub mod prelude {
         TrayMenuItem, TrayOp, WindowOutline,
     };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
-    pub use crate::render::{Gradient, PixmapTarget, RenderTarget};
+    pub use crate::render::{Gradient, PixelSnap, PixmapTarget, RenderTarget};
     pub use crate::signal::{signal, Signal};
     pub use crate::spec::{Align, Axis, Dimension};
     pub use crate::style::{Brush, Edges, Role, Shadow, Style};

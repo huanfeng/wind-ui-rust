@@ -1211,11 +1211,15 @@ impl Canvas for D2DCanvas<'_> {
     }
 
     fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, paint: &Paint) {
+        // 对齐物理像素，与软 / wgpu 后端及本后端的描边同一份公式（见 `align_to_device`）。
+        // 缺了它，150% 下选中底、悬停高亮的上下边落在半像素上，各糊出一行。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
         let brush = self.fill_brush(paint, x, y, w, h);
         unsafe { self.ctx.FillRectangle(&rect_f(x, y, w, h), &brush) };
     }
 
     fn fill_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, paint: &Paint) {
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
         let brush = self.fill_brush(paint, x, y, w, h);
         let r = radius.min(w / 2.0).min(h / 2.0).max(0.0);
         let rr = D2D1_ROUNDED_RECT {
@@ -1239,13 +1243,10 @@ impl Canvas for D2DCanvas<'_> {
         // 对齐物理像素整数坐标：矩形四边乘以 scale 取整后还原，
         // 使描边中心（边 + half_width）在物理坐标上落在半像素（n+0.5），
         // 从而描边两侧各 0.5px 恰好覆盖完整一列物理像素，消除 125%/150% 等
-        // 非整数 DPI 下的亚像素抗锯齿模糊。
-        let s = self.scale;
-        let x0 = (x * s).round() / s;
-        let y0 = (y * s).round() / s;
-        let x1 = ((x + w) * s).round() / s;
-        let y1 = ((y + h) * s).round() / s;
-        let (x, y, w, h) = (x0, y0, x1 - x0, y1 - y0);
+        // 非整数 DPI 下的亚像素抗锯齿模糊。与填充同一份公式，否则底色与边框会错开。
+        let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
+        // 线宽也取整数个物理像素，否则 150% 下 1px 边框是一实一虚两行
+        let width = crate::render::align_stroke_width(width, self.scale);
 
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
@@ -1262,6 +1263,7 @@ impl Canvas for D2DCanvas<'_> {
     }
 
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
+        let (x0, y0, x1, y1, width) = crate::render::align_line(x0, y0, x1, y1, width, self.scale);
         let brush = self.stroke_brush(paint);
         unsafe {
             self.ctx
@@ -1809,7 +1811,16 @@ impl Canvas for D2DCanvas<'_> {
         // PushAxisAlignedClip 自动与现有 clip 栈求交，无需手算交集。
         // 逻辑坐标：当前 SetTransform(scale) 会对 clip rect 施加缩放（仅缩放不旋转，
         // axis-aligned 仍成立）。ALIASED 与软后端的整数矩形 mask 边缘语义一致。
-        let rect = rect_f(r.x as f32, r.y as f32, r.w as f32, r.h as f32);
+        // 边界按物理像素取整后再还原成逻辑值（与软后端 mask 的 `Rect::scaled` 同源）：
+        // ALIASED 裁剪按像素中心判定，边落在半像素上时会和对齐过的底色差出一列。
+        let (x, y, w, h) = crate::render::align_to_device(
+            r.x as f32,
+            r.y as f32,
+            r.w as f32,
+            r.h as f32,
+            self.scale,
+        );
+        let rect = rect_f(x, y, w, h);
         unsafe {
             self.ctx
                 .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED)
@@ -2273,6 +2284,35 @@ mod tests {
             [255, 255, 255, 255],
             "物理 (15,15) 应在矩形外"
         );
+    }
+
+    /// 150% 下奇数逻辑坐标的填充边落在半物理像素上：对齐后只有整行纯色与纯白，
+    /// 不能有半透明的过渡行（选中底、悬停高亮"发糊"的根因）。横线同理。
+    #[test]
+    fn fills_and_lines_snap_to_physical_pixels_at_150_percent() {
+        let blue = Paint::fill(Color::rgb(0, 0, 255));
+        let pm = render(60, 90, 1.5, |c| {
+            // 逻辑 y 11..21 → 物理 16.5..31.5
+            c.fill_rect(3.0, 11.0, 20.0, 10.0, &blue);
+            c.fill_round_rect(3.0, 25.0, 20.0, 9.0, 2.0, &blue);
+            // 1 逻辑像素的横线：物理 1.5 宽，不对齐时是一实一虚两行
+            c.draw_line(0.0, 37.0, 30.0, 37.0, 1.0, &blue);
+            // 1 逻辑像素的边框：位置与线宽都要对齐，不然内侧多出半行
+            c.stroke_round_rect(3.0, 41.0, 20.0, 15.0, 2.0, 1.0, &blue);
+        });
+        let x = 15;
+        let mut blue_rows = 0;
+        for y in 0..90 {
+            let p = px(&pm, x, y);
+            assert!(
+                p == [0, 0, 255, 255] || p == [255, 255, 255, 255],
+                "物理行 {y} 是半透明过渡色 {p:?}，边没对齐到像素"
+            );
+            if (62..84).contains(&y) && p == [0, 0, 255, 255] {
+                blue_rows += 1;
+            }
+        }
+        assert_eq!(blue_rows, 2, "边框上下各 1 物理像素（1 逻辑像素在 150% 下取 1）");
     }
 
     /// 纵向定位契约的 D2D 版，与 `text::text_block_contract` 同构：

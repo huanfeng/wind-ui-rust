@@ -488,6 +488,8 @@ impl Canvas for SkiaCanvas<'_> {
         // 抗锯齿模糊。tf() 的局部重绘 offset 已按 4 逻辑像素网格对齐（offset×scale 为整数），
         // 故此处对齐逻辑坐标后经变换仍落在物理整数。
         let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
+        // 线宽也取整数个物理像素，否则 150% 下 1px 边框是一实一虚两行
+        let width = crate::render::align_stroke_width(width, self.scale);
 
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
@@ -510,6 +512,8 @@ impl Canvas for SkiaCanvas<'_> {
 
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
         let _g = super::prof::scope(super::prof::STROKE);
+        // 横竖线对齐物理像素（三个后端同一份公式，见 `align_line`）
+        let (x0, y0, x1, y1, width) = crate::render::align_line(x0, y0, x1, y1, width, self.scale);
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0);
         pb.line_to(x1, y1);

@@ -1399,6 +1399,14 @@ impl App {
         self
     }
 
+    /// 像素对齐策略（默认 [`PixelSnap::Edges`](crate::render::PixelSnap)）：非整数缩放下
+    /// 矩形、线、裁剪区的边是否吸到物理像素上。进程级设置，所有窗口、所有后端共用，
+    /// 当场生效（同 [`crate::render::set_pixel_snap`]）。
+    pub fn pixel_snap(self, mode: crate::render::PixelSnap) -> Self {
+        crate::render::set_pixel_snap(mode);
+        self
+    }
+
     /// 设置主题（默认使用内置默认主题）。窗口背景未显式设置时随主题 palette.bg。
     ///
     /// 主题会**当场**装进当前线程，而不是等到 `run()`。因为一部分组合子

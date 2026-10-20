@@ -136,12 +136,158 @@ pub(crate) fn text_cull_rect(rect: Rect, ts: &crate::text::TextStyle) -> Rect {
 ///
 /// 局部重绘的 offset 已按 4 逻辑像素网格对齐（`offset × scale` 为整数），故先对齐逻辑坐标
 /// 再经变换，结果仍落在物理整数上。
+///
+/// 受全局策略 [`PixelSnap`] 控制：`Off` 时原样返回。
 pub(crate) fn align_to_device(x: f32, y: f32, w: f32, h: f32, scale: f32) -> (f32, f32, f32, f32) {
-    let x0 = (x * scale).round() / scale;
-    let y0 = (y * scale).round() / scale;
-    let x1 = ((x + w) * scale).round() / scale;
-    let y1 = ((y + h) * scale).round() / scale;
+    align_rect_with(pixel_snap(), x, y, w, h, scale)
+}
+
+/// 像素对齐策略：几何图元的边要不要吸到**物理像素**整数边界上。
+///
+/// 控件树用逻辑坐标（整数）排版，125% / 150% / 175% 这类非整数缩放下，奇数逻辑坐标
+/// 乘出来正好是 `n.5` 物理像素——矩形的边落在像素中间，抗锯齿把它画成一行半透明，
+/// 高亮、选中底、分隔线看起来就是糊的。对齐后边界都落在整数像素上，代价是同一尺寸的
+/// 元素在不同位置可能差 1 物理像素（肉眼几乎不可见，远好于糊边）。
+///
+/// 只影响矩形 / 圆角矩形的填充与描边、横竖直线、裁剪区；文字、斜线、圆、多边形不动
+/// （它们本来就该抗锯齿）。用 [`set_pixel_snap`] 或 `App::pixel_snap` 设置，环境变量
+/// `WINDUI_PIXEL_SNAP=off` 可在不改代码的情况下关掉，方便对比。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PixelSnap {
+    /// 对齐到物理像素（默认）。
+    #[default]
+    Edges,
+    /// 不对齐，按逻辑坐标 × 缩放原样绘制（亚像素位置，边缘抗锯齿）。
+    Off,
+}
+
+/// 0 = 还没定（第一次读时看环境变量），1 = Edges，2 = Off。
+static PIXEL_SNAP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 设置全局像素对齐策略。对此后绘制的帧生效，所有窗口、所有后端共用。
+pub fn set_pixel_snap(mode: PixelSnap) {
+    let v = match mode {
+        PixelSnap::Edges => 1,
+        PixelSnap::Off => 2,
+    };
+    PIXEL_SNAP.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 当前的全局像素对齐策略。没设置过时看环境变量 `WINDUI_PIXEL_SNAP`（`off` / `0` 关闭）。
+pub fn pixel_snap() -> PixelSnap {
+    match PIXEL_SNAP.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => PixelSnap::Edges,
+        2 => PixelSnap::Off,
+        _ => {
+            let off = std::env::var("WINDUI_PIXEL_SNAP")
+                .is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0");
+            let mode = if off { PixelSnap::Off } else { PixelSnap::Edges };
+            // 只在仍未设置时写入：与并发的 set_pixel_snap 竞争时以显式设置为准
+            let v = if off { 2 } else { 1 };
+            let _ = PIXEL_SNAP.compare_exchange(
+                0,
+                v,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            mode
+        }
+    }
+}
+
+/// 物理坐标取整，`.5` 一律向上（与 [`Rect::scaled`] 的裁剪取整同源）。
+///
+/// 不用 `f32::round`：它对 `.5` 是「远离零」，局部重绘里脏区左上方的节点坐标为负，
+/// 同一条边在局部帧与整窗帧里会差 1 物理像素；填充与裁剪若取整方向不同，也会差出一列。
+fn snap_phys(v: f32) -> f32 {
+    let r = v.round();
+    if r - v == -0.5 {
+        r + 1.0
+    } else {
+        r
+    }
+}
+
+fn align_rect_with(
+    mode: PixelSnap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    scale: f32,
+) -> (f32, f32, f32, f32) {
+    if mode == PixelSnap::Off || scale <= 0.0 {
+        return (x, y, w, h);
+    }
+    let x0 = snap_phys(x * scale) / scale;
+    let y0 = snap_phys(y * scale) / scale;
+    let x1 = snap_phys((x + w) * scale) / scale;
+    let y1 = snap_phys((y + h) * scale) / scale;
     (x0, y0, x1 - x0, y1 - y0)
+}
+
+/// 线宽（物理像素）取整：向下取整、至少 1。1 逻辑像素的线在 150% 下是 1.5 物理像素，
+/// 向上取整成 2 会显得粗，保持 1.5 则是一实一虚两行；取 1 最接近系统自己控件的观感。
+/// 加一点容差：浮点乘出来的 2.9999 应当算 3。
+fn phys_line_width(raw: f32) -> f32 {
+    (raw + 1e-3).floor().max(1.0)
+}
+
+/// 描边线宽对齐到整数个物理像素（见 [`phys_line_width`]），返回逻辑值。三个后端的
+/// `stroke_round_rect` 都经过它：框的位置早已对齐，线宽不对齐的话，内侧还是会多出
+/// 半行半透明。受 [`PixelSnap`] 控制。
+pub(crate) fn align_stroke_width(width: f32, scale: f32) -> f32 {
+    if pixel_snap() == PixelSnap::Off || scale <= 0.0 || width <= 0.0 {
+        return width;
+    }
+    phys_line_width(width * scale) / scale
+}
+
+/// 把横线 / 竖线在**横截面方向**对齐到物理像素：线宽取整数个物理像素（至少 1），线的两条
+/// 长边落在像素边界上。斜线原样返回。返回 `(x0, y0, x1, y1, width)`（逻辑坐标）。
+///
+/// 1 逻辑像素的分隔线在 150% 下是 1.5 物理像素宽，不对齐时画出来是一实一虚两行。
+///
+/// 两端**不**对齐：多边形的逐行扫描填充（[`fill_polygon_rows`]）借横线画每一行，行两端
+/// 的亚像素位置正是多边形斜边的抗锯齿。同理，略宽于整像素（不到 0.1）的线保留原宽、
+/// 只对齐位置——扫描填充特意把 1 像素的行放宽 3% 来消行间缝，取整会把缝放回来。
+pub(crate) fn align_line(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    scale: f32,
+) -> (f32, f32, f32, f32, f32) {
+    align_line_with(pixel_snap(), x0, y0, x1, y1, width, scale)
+}
+
+fn align_line_with(
+    mode: PixelSnap,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    width: f32,
+    scale: f32,
+) -> (f32, f32, f32, f32, f32) {
+    let horizontal = y0 == y1;
+    let vertical = x0 == x1;
+    if mode == PixelSnap::Off || scale <= 0.0 || horizontal == vertical || width <= 0.0 {
+        return (x0, y0, x1, y1, width);
+    }
+    let raw = width * scale;
+    let pw = phys_line_width(raw);
+    // 线的一条长边（中心减半宽）吸到整数像素，中心随之落在 n 或 n.5 上
+    let center = |c: f32| (snap_phys(c * scale - pw / 2.0) + pw / 2.0) / scale;
+    let w = if raw > pw && raw - pw < 0.1 { raw } else { pw } / scale;
+    if horizontal {
+        let y = center(y0);
+        (x0, y, x1, y, w)
+    } else {
+        let x = center(x0);
+        (x, y0, x, y1, w)
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +322,75 @@ mod align_tests {
             let b = align_to_device(10.3, 20.7, 22.0, 22.0, s);
             assert_eq!(a, b, "scale={s} 下两条路径必须给出同一边界");
         }
+    }
+
+    use super::{align_line_with, align_rect_with, PixelSnap};
+
+    /// 关闭策略时一个像素都不动。
+    #[test]
+    fn off_mode_passes_through() {
+        assert_eq!(
+            align_rect_with(PixelSnap::Off, 11.0, 11.0, 20.0, 1.0, 1.5),
+            (11.0, 11.0, 20.0, 1.0)
+        );
+        assert_eq!(
+            align_line_with(PixelSnap::Off, 0.0, 11.0, 50.0, 11.0, 1.0, 1.5),
+            (0.0, 11.0, 50.0, 11.0, 1.0)
+        );
+    }
+
+    /// `.5` 向上取整，且负坐标与正坐标同一方向：局部重绘里节点坐标可能为负，
+    /// 「远离零」的取整会让同一条边在局部帧和整窗帧里差 1 物理像素。
+    #[test]
+    fn half_rounds_up_on_both_sides_of_zero() {
+        let (x, ..) = align_rect_with(PixelSnap::Edges, 1.0, 0.0, 2.0, 2.0, 1.5);
+        assert_eq!(x * 1.5, 2.0, "1.5 → 2");
+        let (x, ..) = align_rect_with(PixelSnap::Edges, -1.0, 0.0, 2.0, 2.0, 1.5);
+        assert_eq!(x * 1.5, -1.0, "-1.5 → -1（不是 -2）");
+    }
+
+    /// 150% 下 1 逻辑像素的横线：线宽取 2 物理像素，上下两条边都落在整数像素上。
+    #[test]
+    fn horizontal_line_covers_whole_physical_rows() {
+        let s = 1.5;
+        let (x0, y0, x1, y1, w) = align_line_with(PixelSnap::Edges, 0.3, 11.0, 50.0, 11.0, 1.0, s);
+        assert_eq!(y0, y1);
+        assert_eq!((x0, x1), (0.3, 50.0), "两端不动");
+        let pw = w * s;
+        assert!((pw - pw.round()).abs() < 1e-4 && pw >= 1.0, "线宽 {pw} 物理像素应为整数");
+        for v in [y0 * s - pw / 2.0, y0 * s + pw / 2.0] {
+            assert!((v - v.round()).abs() < 1e-4, "{v} 应落在物理整数上");
+        }
+    }
+
+    /// 扫描填充特意放宽 3% 的行：保留宽度，只对齐位置，否则行间缝会回来。
+    #[test]
+    fn slightly_wider_line_keeps_its_width() {
+        let s = 1.75;
+        let y = 58.5 / s;
+        let (_, y0, _, _, w) = align_line_with(PixelSnap::Edges, 1.0, y, 9.0, y, 1.03 / s, s);
+        assert!((w * s - 1.03).abs() < 1e-4);
+        assert!((y0 * s - 58.5).abs() < 1e-3, "行中心不动");
+    }
+
+    /// 竖线同理；细到不足 1 物理像素的线也至少占满 1 列。
+    #[test]
+    fn thin_vertical_line_keeps_at_least_one_pixel() {
+        let s = 1.25;
+        let (x0, _, x1, _, w) = align_line_with(PixelSnap::Edges, 7.0, 0.0, 7.0, 30.0, 0.5, s);
+        assert_eq!(x0, x1);
+        assert!((w * s - 1.0).abs() < 1e-4);
+        let left = x0 * s - 0.5;
+        assert!((left - left.round()).abs() < 1e-4);
+    }
+
+    /// 斜线不碰：它本来就该抗锯齿。
+    #[test]
+    fn diagonal_line_untouched() {
+        assert_eq!(
+            align_line_with(PixelSnap::Edges, 0.0, 0.0, 10.0, 7.0, 1.0, 1.5),
+            (0.0, 0.0, 10.0, 7.0, 1.0)
+        );
     }
 }
 
