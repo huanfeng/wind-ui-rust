@@ -26,6 +26,12 @@ pub(crate) fn looks_failed(elapsed: Duration) -> bool {
     elapsed < FAIL_FAST
 }
 
+/// 空列表当 `None`：rfd 多选在门户回非 0 response 时给 `Some(vec![])`，取消也是它，
+/// 不折成 `None` 的话多选入口永远判不出「没弹出来」。
+pub(crate) fn non_empty(r: Option<Vec<PathBuf>>) -> Option<Vec<PathBuf>> {
+    r.filter(|v| !v.is_empty())
+}
+
 /// `PickDialog` 链式配置的副本：rfd 的配置不对外可读，kdialog 兜底要自己留一份。
 #[derive(Clone, Default)]
 pub(crate) struct Spec {
@@ -206,6 +212,14 @@ mod tests {
         s.filters = vec![("空".into(), vec![])];
         let a = strs(kdialog_args(&s, PickKind::File, Some(Path::new("/h"))));
         assert_eq!(a.len(), 4, "无可用过滤项时不传过滤串：{a:?}");
+    }
+
+    #[test]
+    fn empty_multi_pick_counts_as_none() {
+        assert_eq!(non_empty(Some(vec![])), None);
+        assert_eq!(non_empty(None), None);
+        let one = vec![PathBuf::from("/a")];
+        assert_eq!(non_empty(Some(one.clone())), Some(one));
     }
 
     #[test]

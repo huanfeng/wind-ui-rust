@@ -1408,28 +1408,29 @@ impl PickDialog {
         self
     }
 
-    /// 弹框并记下「没弹出来」与否。`via_rfd` 走 rfd；`from_paths` 把 kdialog 兜底选到的
-    /// 路径折成本方法的返回形态。
+    /// 弹框并记下「没弹出来」与否。`via_rfd` 走 rfd，结果统一成路径列表（单选包成一项），
+    /// 这样单选的 `None` 与多选的 `Some(vec![])`（rfd 在门户回非 0 response 时给的就是它）
+    /// 走同一条判定；`from_paths` 再把路径折成本方法的返回形态。
     fn run<T>(
         self,
         kind: PickKind,
-        via_rfd: impl FnOnce(rfd::FileDialog) -> Option<T>,
+        via_rfd: impl FnOnce(rfd::FileDialog) -> Option<Vec<PathBuf>>,
         from_paths: impl FnOnce(Vec<PathBuf>) -> Option<T>,
     ) -> Option<T> {
         LAST_PICK_FAILED.with(|f| f.set(false));
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (kind, from_paths);
-            via_rfd(self.into_dialog())
+            let _ = kind;
+            via_rfd(self.into_dialog()).and_then(from_paths)
         }
         #[cfg(target_os = "linux")]
         {
             use linux::file_dialog::{self as fd, Outcome};
             let spec = self.spec.clone();
             let start = std::time::Instant::now();
-            let r = via_rfd(self.into_dialog());
+            let r = fd::non_empty(via_rfd(self.into_dialog()));
             if r.is_some() || !fd::looks_failed(start.elapsed()) {
-                return r;
+                return r.and_then(from_paths);
             }
             log::warn!(
                 "文件选择框 {kind:?} 在 {:?} 内返回空，判为没弹出来（门户不可用且无 zenity？），改试 kdialog",
@@ -1461,7 +1462,7 @@ impl PickDialog {
 
     /// 打开**单文件**选择对话框；用户取消返回 `None`。
     pub fn pick_file(self) -> Option<PathBuf> {
-        self.run(PickKind::File, |d| d.pick_file(), |p| p.into_iter().next())
+        self.run(PickKind::File, |d| d.pick_file().map(|p| vec![p]), first)
     }
 
     /// 打开**多文件**选择对话框；用户取消返回 `None`。
@@ -1473,8 +1474,8 @@ impl PickDialog {
     pub fn pick_folder(self) -> Option<PathBuf> {
         self.run(
             PickKind::Folder,
-            |d| d.pick_folder(),
-            |p| p.into_iter().next(),
+            |d| d.pick_folder().map(|p| vec![p]),
+            first,
         )
     }
 
@@ -1485,8 +1486,13 @@ impl PickDialog {
 
     /// 打开**保存文件**对话框；用户取消返回 `None`。
     pub fn save_file(self) -> Option<PathBuf> {
-        self.run(PickKind::Save, |d| d.save_file(), |p| p.into_iter().next())
+        self.run(PickKind::Save, |d| d.save_file().map(|p| vec![p]), first)
     }
+}
+
+/// 单选入口取路径列表的第一项。
+fn first(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().next()
 }
 
 /// 由 `EventCtx::request_pick_file` 等方法产生，经 `DispatchResult` 上交宿主。
