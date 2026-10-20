@@ -382,6 +382,49 @@ impl Widget for EmptyWidget {
     }
 }
 
+/// 自上而下传递的进出场判据。
+///
+/// - `painted`：祖先链都在绘制路径上（逻辑可见，或带过渡而离场未完）。为假时本节点
+///   不会被画到，其进度也不会在 paint 里改向——须就地落定。
+/// - `shown`：只看**带过渡的**祖先是否逻辑可见。落定值取它与自身可见之积：藏在未弹出的
+///   对话框里的面板落定为"隐藏"（弹出时照常进场）；普通隐藏的祖先（切走的标签页）不算，
+///   切回来时不补播进场——与构建时的初值同一条规则（见 `Element::build_in`）。
+#[derive(Clone, Copy)]
+pub(crate) struct PresenceFlags {
+    pub(crate) painted: bool,
+    pub(crate) shown: bool,
+}
+
+impl PresenceFlags {
+    pub(crate) const ROOT: Self = Self {
+        painted: true,
+        shown: true,
+    };
+
+    /// 传给 `n` 的子节点的判据。
+    pub(crate) fn child(self, n: &Node) -> Self {
+        let own = n.effective_visible();
+        Self {
+            painted: self.painted && n.layout_visible(),
+            shown: match n.presence {
+                Some(_) => self.shown && own,
+                None if !own => true,
+                None => self.shown,
+            },
+        }
+    }
+}
+
+/// 节点投影伸出边框之外的最大距离（逻辑像素）；无投影为 0。脏区与剪枝都要按它外扩。
+fn shadow_extent(n: &Node) -> i32 {
+    match &n.style.shadow {
+        Some(sh) if sh.color.a > 0 => {
+            (sh.spread + sh.blur).ceil() as i32 + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32
+        }
+        _ => 0,
+    }
+}
+
 impl Node {
     /// 该帧是否有效可见：静态标志、可见信号、可见条件闭包三者取与
     /// （对应 `Element::visible` / `visible_signal` / `visible_when`）。
@@ -390,6 +433,14 @@ impl Node {
             && self.vis_signal.as_ref().is_none_or(|s| s.get())
             && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
+    /// 是否参与布局与绘制：逻辑可见，或带进出场过渡且离场未播完。
+    ///
+    /// 与 [`effective_visible`](Self::effective_visible) 的分工：布局、绘制看它；命中、焦点、
+    /// 模态等一切"能不能交互"的判断看 `effective_visible`——离场中的残影点不到。
+    pub fn layout_visible(&self) -> bool {
+        self.effective_visible() || self.presence.as_ref().is_some_and(|p| p.alive())
+    }
+
     /// 本节点自身启用态（不含父链继承）：静态标志、启用信号、启用条件闭包三者取与
     /// （对应 `Element::enabled` / `enabled_signal` / `enabled_when`）。与
     /// [`effective_visible`](Self::effective_visible) 三形态一一对应。
@@ -635,6 +686,8 @@ pub struct Node {
     /// 字段登记**。事后直接给已建好的节点赋值，会得到一个既被排除出父容器布局流、
     /// 又从不被排布/绘制/命中的幽灵节点——彻底消失，且没有任何提示。
     pub overlay: Option<Signal<bool>>,
+    /// 进出场过渡状态（`Element::transition`）。只有声明了过渡的节点才分配。
+    pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -1010,7 +1063,7 @@ impl Tree {
                 .copied()
                 .filter(|c| {
                     self.get(*c)
-                        .map(|n| n.effective_visible() && n.overlay.is_none())
+                        .map(|n| n.layout_visible() && n.overlay.is_none())
                         .unwrap_or(false)
                 })
                 .collect(),
@@ -1072,11 +1125,7 @@ impl Tree {
             // 那会让一个用户早已忘记的面板在关闭对话框后凭空重现。写入有 `get()`
             // 守卫，是一次性的，不会每帧弄脏。
             if !self.overlay_in_modal_scope(id) {
-                if let Some(sig) = self.get(id).and_then(|n| n.overlay) {
-                    if sig.get() {
-                        sig.set(false);
-                    }
-                }
+                self.shut_overlay_now(id);
                 continue;
             }
             if !self.overlay_showing(id) {
@@ -1089,11 +1138,7 @@ impl Tree {
             // 位置又被下面的 clamp 钳在窗口边缘，就成了一块与任何东西都无关的浮块。
             // 滚轮不触发轻量关闭（那只挂在 Down 上），故必须在这里兜住。
             if self.anchor_scrolled_out(parent, win) {
-                if let Some(sig) = self.get(id).and_then(|n| n.overlay) {
-                    if sig.get() {
-                        sig.set(false);
-                    }
-                }
+                self.shut_overlay_now(id);
                 continue;
             }
             // 尺寸维度要走 `child_spec` 翻译成 MeasureSpec，跟普通父容器给子节点定规格
@@ -1157,6 +1202,25 @@ impl Tree {
     /// 祖先链要自己走，是因为浮层的绘制与命中都从根级直接进入、不经过父节点那趟
     /// 递归——而正是那趟递归在替普通节点做「父不可见则整棵子树不画」。少了这一步，
     /// 切到另一个 Tab 页之后，上一页里展开着的下拉面板会继续浮在新页面上。
+    /// 由框架（而非用户）收起浮层：置展开信号为 false，且**不留离场残影**。
+    ///
+    /// 被对话框挡住而收起的，残影会在对话框关闭后以旧状态冒出来——正是收起它要防的
+    /// "用户早已忘记的面板凭空重现"；锚点滚出视口的，残影会画在视口之外。写入有 `get()`
+    /// 守卫，是一次性的，不会每帧弄脏。
+    fn shut_overlay_now(&self, id: NodeId) {
+        let Some(n) = self.get(id) else {
+            return;
+        };
+        if let Some(sig) = n.overlay {
+            if sig.get() {
+                sig.set(false);
+            }
+        }
+        if let Some(p) = &n.presence {
+            p.settle(false);
+        }
+    }
+
     fn overlay_showing(&self, id: NodeId) -> bool {
         let mut cur = Some(id);
         while let Some(c) = cur {
@@ -1222,10 +1286,14 @@ impl Tree {
                 n.min_width,
                 n.max_width,
                 n.max_height,
-                n.effective_visible(),
+                n.layout_visible(),
             ),
             None => return Size::ZERO,
         };
+        if let Some(p) = self.get(id).and_then(|n| n.presence.as_ref()) {
+            p.laid_exiting
+                .set(visible && !self.get(id).is_some_and(|n| n.effective_visible()));
+        }
         if !visible {
             if let Some(n) = self.get_mut(id) {
                 n.measured = Size::ZERO;
@@ -1535,7 +1603,7 @@ impl Tree {
 
     fn arrange(&mut self, id: NodeId, bounds: Rect) {
         let (layout, padding, visible) = match self.get(id) {
-            Some(n) => (n.layout, n.padding, n.effective_visible()),
+            Some(n) => (n.layout, n.padding, n.layout_visible()),
             None => return,
         };
         if let Some(n) = self.get_mut(id) {
@@ -1745,12 +1813,23 @@ impl Tree {
     /// 从根递归绘制到 canvas。
     pub fn paint(&self, canvas: &mut dyn Canvas) {
         if let Some(root) = self.root {
-            self.paint_node(canvas, root, Point::new(0, 0), true);
+            self.paint_node(canvas, root, Point::new(0, 0), true, true);
         }
         // 锚定浮层最后画，且从根级重新进入——不带任何祖先的裁剪栈，故能盖住滚动
         // 容器的边界与其后的一切兄弟。登记序即层叠序，后登记者压在上面。
+        //
+        // 收起的浮层若带进出场过渡且离场未完，照画残影：位置沿用最后一次排布（离场期
+        // 它已不再参与布局），`paint_node` 据逻辑可见把它往 0 推。
         for &id in &self.overlays {
-            if !self.overlay_showing(id) {
+            let showing = self.overlay_showing(id);
+            // 被模态层挡住而收起的不留残影：那是"对话框盖上来了"，残影会画在对话框之上。
+            let exiting = !showing
+                && self.overlay_in_modal_scope(id)
+                && self
+                    .get(id)
+                    .and_then(|n| n.presence.as_ref())
+                    .is_some_and(|p| p.alive());
+            if !showing && !exiting {
                 continue;
             }
             let (Some(origin), Some(parent)) =
@@ -1758,27 +1837,57 @@ impl Tree {
             else {
                 continue;
             };
-            self.paint_node(canvas, id, origin, self.node_enabled(parent));
+            self.paint_node(canvas, id, origin, self.node_enabled(parent), showing);
         }
     }
 
-    fn paint_node(&self, canvas: &mut dyn Canvas, id: NodeId, origin: Point, parent_enabled: bool) {
-        let n = match self.get(id) {
-            Some(n) if n.effective_visible() => n,
-            _ => return,
+    /// `parent_shown`：祖先链是否全部**逻辑可见**。祖先在离场时它为假，子孙照画（祖先
+    /// 还活着），但其中声明了进出场过渡的节点会据此一起离场。
+    fn paint_node(
+        &self,
+        canvas: &mut dyn Canvas,
+        id: NodeId,
+        origin: Point,
+        parent_enabled: bool,
+        parent_shown: bool,
+    ) {
+        let Some(n) = self.get(id) else {
+            return;
+        };
+        let shown = parent_shown && n.effective_visible();
+        // 进出场：进度乘进不透明度、换算成滑动偏移。没声明过渡的节点只看自身可见
+        // （祖先离场时它跟着祖先的层一起淡出，不必自己动）。
+        let (presence_alpha, slide) = match &n.presence {
+            None if !n.effective_visible() => return,
+            None => (1.0, Point::new(0, 0)),
+            Some(p) => {
+                let progress = p.advance(shown, &crate::theme::current());
+                if progress <= 0.0 && !shown {
+                    // 离场播完：布局还为它留着位置的话，补一次重排让出来。
+                    if p.laid_exiting.get() {
+                        crate::anim::request_relayout();
+                    }
+                    return;
+                }
+                (p.opacity(progress), p.offset(progress))
+            }
         };
         // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
         let enabled = parent_enabled && n.own_enabled();
         // 绘制偏移叠加在布局位置之上（见 `Node::offset`）。子节点以 abs 为原点递归，
         // 故父节点的位移自动带着整棵子树走。
         let abs = Rect::new(
-            origin.x + n.bounds.x + n.offset.x,
-            origin.y + n.bounds.y + n.offset.y,
+            origin.x + n.bounds.x + n.offset.x + slide.x,
+            origin.y + n.bounds.y + n.offset.y + slide.y,
             n.bounds.w,
             n.bounds.h,
         );
         if abs.is_empty() {
             return;
+        }
+        if let Some(p) = n.presence.as_ref().filter(|p| p.is_active()) {
+            // 过渡中：脏区取整棵子树的视觉范围，再按滑动幅度外扩，盖住上一帧与这一帧两处位置。
+            crate::anim::request_repaint_in(self.subtree_visual(n, abs).inflate(p.slide_extent()));
         }
         let (fx, fy, fw, fh) = (abs.x as f32, abs.y as f32, abs.w as f32, abs.h as f32);
         let radius = n.style.corner_radius;
@@ -1792,22 +1901,16 @@ impl Tree {
         // 按父矩形剪整棵子树会真的丢内容。遍历本身几乎不要钱，图元与排版才是成本。
         let self_visible = canvas.cull_rect().is_none_or(|cull| {
             // 与 `visual_bounds` 同一套余量：焦点环在框外、投影更远，报窄了会被切掉。
-            let mut pad = if n.focused { 3 } else { DAMAGE_MARGIN };
-            if let Some(sh) = &n.style.shadow {
-                if sh.color.a > 0 {
-                    let ext = (sh.spread + sh.blur).ceil() as i32
-                        + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32;
-                    pad = pad.max(ext);
-                }
-            }
+            let pad = if n.focused { 3 } else { DAMAGE_MARGIN }.max(shadow_extent(n));
             !abs.inflate(pad).intersect(&cull).is_empty()
         });
 
         // 子树整体不透明度：<1 时入离屏层，绘完整棵子树后按 opacity 合成回父层。
         // 与自绘剪枝无关——层的 push/pop 必须成对，且子树可能有内容要画。
-        let use_layer = n.style.opacity < 1.0;
+        let opacity = n.style.opacity * presence_alpha;
+        let use_layer = opacity < 1.0;
         if use_layer {
-            canvas.push_layer(n.style.opacity);
+            canvas.push_layer(opacity);
         }
 
         let theme = crate::theme::current();
@@ -1902,10 +2005,10 @@ impl Tree {
         if n.clip_children {
             canvas.save();
             canvas.clip_rect(content);
-            self.paint_children(canvas, n, child_origin, enabled);
+            self.paint_children(canvas, n, child_origin, enabled, shown);
             canvas.restore();
         } else {
-            self.paint_children(canvas, n, child_origin, enabled);
+            self.paint_children(canvas, n, child_origin, enabled, shown);
         }
 
         // 滚动条：内容高于视口时在右缘绘制纵向指示条。贴窗口右缘时整体内缩，避开
@@ -1941,7 +2044,14 @@ impl Tree {
     /// 绘制子节点：先非 `raised`、后 `raised`，各自保持原有相对顺序（稳定分区）。
     /// 与 [`Tree::hit_node`] 的倒序遍历互为镜像——那边先测 `raised`，两者对"谁在上层"
     /// 的判断必须一致，否则会出现"画在上面却点不到"。
-    fn paint_children(&self, canvas: &mut dyn Canvas, n: &Node, origin: Point, enabled: bool) {
+    fn paint_children(
+        &self,
+        canvas: &mut dyn Canvas,
+        n: &Node,
+        origin: Point,
+        enabled: bool,
+        shown: bool,
+    ) {
         // 锚定浮层不在此列：它由 `Tree::paint` 在整棵树之后单独绘制。留在这里画的话
         // 它照样会被后续兄弟盖住，「浮层」二字就落空了。
         let ordinary = |c: NodeId| {
@@ -1956,12 +2066,12 @@ impl Tree {
         };
         for &c in &n.children {
             if ordinary(c) {
-                self.paint_node(canvas, c, origin, enabled);
+                self.paint_node(canvas, c, origin, enabled, shown);
             }
         }
         for &c in &n.children {
             if raised(c) {
-                self.paint_node(canvas, c, origin, enabled);
+                self.paint_node(canvas, c, origin, enabled, shown);
             }
         }
     }
@@ -2794,14 +2904,7 @@ impl Tree {
             None => return abs,
         };
         // 焦点环在框外 1px、线宽 2px → 至少 3px 余量；否则 AA 余量 2px。
-        let mut pad = if n.focused { 3 } else { DAMAGE_MARGIN };
-        if let Some(sh) = &n.style.shadow {
-            if sh.color.a > 0 {
-                let ext = (sh.spread + sh.blur).ceil() as i32
-                    + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32;
-                pad = pad.max(ext);
-            }
-        }
+        let pad = if n.focused { 3 } else { DAMAGE_MARGIN }.max(shadow_extent(n));
         abs.inflate(pad)
     }
 
@@ -2855,18 +2958,33 @@ impl Tree {
     /// 同样会触发这条路径。对齐 Flutter MouseTracker / Qt 模态弹出补发 leave 的做法。
     ///
     /// ⚠️ 新增分页器一类"到边界即禁用"的控件时，这条通路就是它们不残留高亮的依据。
+    ///
+    /// 同一趟遍历顺带落定**不在绘制路径上**的进出场过渡（见 [`PresenceFlags`]）。
     pub fn reset_hidden_interactions(&mut self) {
         if let Some(root) = self.root {
-            self.reset_hidden_rec(root, true);
+            self.reset_hidden_rec(root, true, PresenceFlags::ROOT);
         }
     }
 
-    fn reset_hidden_rec(&mut self, id: NodeId, parent_interactive: bool) {
-        let (interactive, children, transitioned) = match self.get(id) {
+    fn reset_hidden_rec(&mut self, id: NodeId, parent_interactive: bool, pf: PresenceFlags) {
+        let (interactive, children, transitioned, child_pf) = match self.get(id) {
             Some(n) => {
                 let v = parent_interactive && n.effective_visible() && n.own_enabled();
                 let prev = n.prev_visible.replace(v);
-                (v, n.children.clone(), prev && !v)
+                if let Some(p) = &n.presence {
+                    if n.overlay.is_some() {
+                        // 浮层不走普通绘制递归，由 `Tree::paint` 末尾单独画：锚点链不在绘制
+                        // 路径上（切走的标签页）或被模态挡住时，它画出来的只会是"离场残影"——
+                        // 落定为隐藏。不能套下面的规则：普通隐藏的祖先把 `shown` 重置为真、
+                        // 展开信号又还开着，会落定成"显示"，每次结构变化都整块闪一下。
+                        if !pf.painted || !self.overlay_in_modal_scope(id) {
+                            p.settle(false);
+                        }
+                    } else if !pf.painted {
+                        p.settle(pf.shown && n.effective_visible());
+                    }
+                }
+                (v, n.children.clone(), prev && !v, pf.child(n))
             }
             None => return,
         };
@@ -2876,8 +2994,32 @@ impl Tree {
             }
         }
         for c in children {
-            self.reset_hidden_rec(c, interactive);
+            self.reset_hidden_rec(c, interactive, child_pf);
         }
+    }
+
+    /// 子树的视觉范围（本节点矩形 + 投影 / 焦点环余量，并上所有仍在画的子孙，含其
+    /// `offset`）。`abs` 为本节点当前的绘制矩形。进出场过渡期间的脏区按它报：子孙的投影、
+    /// 偏移都可能伸出本节点矩形，只按本节点报，局部帧里伸出去的那部分就成了残影。
+    fn subtree_visual(&self, n: &Node, abs: Rect) -> Rect {
+        let pad = if n.focused { 3 } else { DAMAGE_MARGIN }.max(shadow_extent(n));
+        let mut r = abs.inflate(pad);
+        for &c in &n.children {
+            let Some(cn) = self
+                .get(c)
+                .filter(|cn| cn.layout_visible() && cn.overlay.is_none())
+            else {
+                continue;
+            };
+            let ca = Rect::new(
+                abs.x + cn.bounds.x + cn.offset.x,
+                abs.y + cn.bounds.y + cn.offset.y,
+                cn.bounds.w,
+                cn.bounds.h,
+            );
+            r = r.union(&self.subtree_visual(cn, ca));
+        }
+        r
     }
 
     /// 节点是否接受输入法输入（见 `Widget::accepts_ime`）。

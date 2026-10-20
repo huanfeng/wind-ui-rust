@@ -40,6 +40,15 @@ pub(super) struct TooltipState {
     pub(super) shown: Cell<bool>,
 }
 
+/// 到点后第 `elapsed_ms` 毫秒的淡入不透明度。动画关闭时恒为 1；随 `WINDUI_ANIM_SCALE` 放慢。
+fn fade_in(elapsed_ms: u64, duration_ms: u32) -> f32 {
+    if !crate::anim::enabled() || duration_ms == 0 {
+        return 1.0;
+    }
+    let d = duration_ms as f32 * crate::anim::time_scale();
+    crate::anim::Easing::DECELERATE.apply(elapsed_ms as f32 / d)
+}
+
 /// 浮层左上角定位：默认落在指针右下方，放不下则依次翻转 / 贴边。
 ///
 /// 抽成纯函数是为了**可测**：`paint` 要 `Canvas` 与 `Theme`，测试里造不出来，判据
@@ -119,11 +128,30 @@ impl TooltipState {
             return;
         }
         self.shown.set(true);
-        let (pal, tt) = (&theme.palette, &theme.tooltip);
+        let tt = &theme.tooltip;
         let ts = canvas.measure_text_wrapped(&text, &TextStyle::new(TOOLTIP_FONT), tt.max_width());
         let size = Size::new(ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);
         let (w, h) = (size.w, size.h);
         let Point { x, y } = place(self.pos, size, ws);
+        // 到点后淡入（只淡入：指针移开即消失，残影会挡住用户正要看的东西）。按"距到点
+        // 时刻"算而不存状态：到点那帧未必恰好落在延时边界上，起点仍是同一刻。
+        let alpha = fade_in(
+            now_ms.saturating_sub(self.since_ms + delay),
+            theme.anim.fast(),
+        );
+        if alpha < 1.0 {
+            crate::anim::request_repaint_in(Rect::new(x, y, w, h).inflate(2));
+            canvas.push_layer(alpha);
+        }
+        self.paint_body(canvas, &text, Rect::new(x, y, w, h), theme);
+        if alpha < 1.0 {
+            canvas.pop_layer();
+        }
+    }
+
+    fn paint_body(&self, canvas: &mut dyn Canvas, text: &str, r: Rect, theme: &Theme) {
+        let (pal, tt) = (&theme.palette, &theme.tooltip);
+        let Rect { x, y, w, h } = r;
         let corner = tt.corner(&theme.metrics);
         canvas.fill_round_rect(
             x as f32,
@@ -146,7 +174,7 @@ impl TooltipState {
         }
         let tr = Rect::new(x + TOOLTIP_PAD_X, y, w - 2 * TOOLTIP_PAD_X, h);
         canvas.draw_text(
-            &text,
+            text,
             tr,
             tt.text(pal),
             crate::spec::Align::Start,
@@ -161,6 +189,14 @@ mod tests {
 
     /// 在 125% 画布上画一次提示，返回 (pixmap, 浮层逻辑矩形)。
     fn paint_tooltip(border: Option<crate::geometry::Color>) -> (tiny_skia::Pixmap, Rect) {
+        paint_tooltip_at(border, 10_000)
+    }
+
+    /// 同上，指定绘制时刻（悬停起点为 0）。
+    fn paint_tooltip_at(
+        border: Option<crate::geometry::Color>,
+        now_ms: u64,
+    ) -> (tiny_skia::Pixmap, Rect) {
         use crate::geometry::Color;
         use crate::render::SkiaCanvas;
         use crate::ui::Element;
@@ -186,12 +222,39 @@ mod tests {
                 false,
                 &theme,
                 Size::new(200, 100),
-                10_000,
+                now_ms,
             );
         }
         assert!(st.shown.get(), "前提：满延时应画出");
         let at = Point::new(20 + TOOLTIP_CURSOR_DX, 20 + TOOLTIP_CURSOR_DY);
         (pm, Rect::new(at.x, at.y, 0, 0))
+    }
+
+    /// 到点后淡入：刚到点几乎看不见、过一会儿变实、淡入结束与"早就显示着"逐像素一致。
+    /// 描边用红色作墨量读数（白底白板上量不出浅灰文字的墨）。
+    #[test]
+    fn tooltip_fades_in_after_the_delay() {
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
+        let red = crate::geometry::Color::rgb(255, 0, 0);
+        let delay = Theme::default().tooltip.delay_ms();
+        let ink = |pm: &tiny_skia::Pixmap| {
+            pm.pixels()
+                .iter()
+                .map(|p| 255 - p.green() as u32)
+                .sum::<u32>()
+        };
+        let at = |dt: u64| ink(&paint_tooltip_at(Some(red), delay + dt).0);
+        let (just, mid, done) = (at(0), at(40), at(10_000));
+        assert!(done > 0, "前提：显示着的提示有墨");
+        assert!(just < done / 10, "刚到点几乎透明：{just} / {done}");
+        assert!(
+            mid > just && mid < done,
+            "淡入中途：{just} < {mid} < {done}"
+        );
+        assert_eq!(at(1_000), done, "淡入结束后与长期显示一致");
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Off);
+        assert_eq!(at(0), done, "动画关闭时到点即完整显示");
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
     }
 
     /// 主题给了描边色才描，且默认 1 物理像素：125% 下左边沿一行只染 1 列，不被摊成两列灰。

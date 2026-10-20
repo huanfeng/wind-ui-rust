@@ -41,6 +41,8 @@ mod key_damage_tests;
 #[cfg(test)]
 mod marks_tests;
 mod menu;
+#[cfg(test)]
+mod presence_tests;
 mod toast;
 mod tooltip;
 
@@ -1674,8 +1676,6 @@ impl App {
                 self.cfg.screenshot_hover = Some((x, y));
             }
         }
-        // --size W H：覆盖 App::new 的窗口尺寸，**并把 min_size 的下限一并放开**——
-        // 要测的正是下限处的表现，若还受 min_size 钳制就永远截不到"最小尺寸下布局
         // --anim-at N：合成交互之后不等动画收尾，而是截"过渡开始后第 N 毫秒"那一帧。
         // 真实时钟下中间帧不可复现（取决于机器快慢），钉住时钟才进得了视觉回归。
         // 只作用于主窗；合成交互开出的子窗照旧截终态。
@@ -1689,6 +1689,8 @@ impl App {
                 ),
             }
         }
+        // --size W H：覆盖 App::new 的窗口尺寸，**并把 min_size 的下限一并放开**——
+        // 要测的正是下限处的表现，若还受 min_size 钳制就永远截不到"最小尺寸下布局
         // 是否还成立"这张图。此前尺寸写死在代码里，这类验证只能改代码重编译。
         if let Some(i) = args.iter().position(|a| a == "--size") {
             let n = |k: usize| args.get(i + k).and_then(|v| v.parse::<i32>().ok());
@@ -3258,9 +3260,25 @@ impl UiHost {
             return false;
         }
         self.tree.layout_root(logical, &mut self.engine);
+        self.note_layout_signature(true);
+        self.damage.needs_relayout = false;
+        true
+    }
+
+    /// 刚布局完：签名与上次比，变了就升整窗并做结构变化后的交互态修正，再记下新签名。
+    ///
+    /// 两条布局路径（重排请求 / 整窗帧补布局）都必须经过这里：只在一条上比较的话，
+    /// 另一条直接覆盖 `last_layout_sig`，那次显隐变化就被它"吞掉"，再也触发不了修正——
+    /// 多窗口下别的窗口写了共享信号、本窗只收到一次整窗失效时就是这样。
+    ///
+    /// `upgrade_full`：签名变了是否升整窗。整窗帧里调用时传 false——本帧已判为整窗、
+    /// 标记已清，再置一次会留到下一帧，让本可局部的那帧白白整窗。
+    fn note_layout_signature(&mut self, upgrade_full: bool) {
         let sig = self.tree.layout_signature();
         if self.damage.sig_valid && sig != self.damage.last_layout_sig {
-            self.damage.needs_full = true;
+            if upgrade_full {
+                self.damage.needs_full = true;
+            }
             // 结构变化（模态弹出/关闭、切页等）的两类交互态修正（对齐 Flutter MouseTracker /
             // Qt 模态弹出补发 leave 的做法）：
             // 1) 被隐藏的控件（如关闭它所在的对话框）重置其 hover/press 与补间，避免下次
@@ -3271,8 +3289,6 @@ impl UiHost {
         }
         self.damage.last_layout_sig = sig;
         self.damage.sig_valid = true;
-        self.damage.needs_relayout = false;
-        true
     }
 
     /// 全窗帧的绘制前准备：补齐布局、上屏响应式 toast、刷新焦点、清除过期 toast。
@@ -3280,8 +3296,7 @@ impl UiHost {
         // 重排块已布局过则跳过，避免重复 layout_root。
         if !laid_out {
             self.tree.layout_root(logical, &mut self.engine);
-            self.damage.last_layout_sig = self.tree.layout_signature();
-            self.damage.sig_valid = true;
+            self.note_layout_signature(false);
         }
         // 全窗路径的这次 layout 也可能有响应式 toast（上面 needs_relayout 未触发时）；
         // 本就走全窗重绘，取走后随本帧 paint 上屏即可。

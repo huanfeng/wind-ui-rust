@@ -14,6 +14,7 @@ pub mod list;
 pub mod menubar;
 pub mod nav;
 pub mod pager;
+pub mod presence;
 pub mod progress;
 pub mod reorder;
 pub mod rich;
@@ -58,6 +59,7 @@ pub use list::ListRow;
 pub use menubar::{MenuBar, MenuBarEntry};
 pub use nav::{AccordionHeader, CollapsibleHeader, ExpandState, NavRow};
 pub use pager::page_count;
+pub use presence::Presence;
 pub use progress::ProgressBar;
 pub use reorder::{CommitMode, DragHandle, ReorderList};
 pub use rich::{Para, RichColor, RichDoc, RichText, SelectionScope, SpanStyle};
@@ -721,6 +723,7 @@ pub struct Element {
     reactive: bool,
     /// 锚定浮层的展开信号（见 [`Node::overlay`]）。由 [`Element::popup`] 设置。
     overlay: Option<Signal<bool>>,
+    presence: Option<presence::Presence>,
 }
 
 impl Element {
@@ -762,6 +765,7 @@ impl Element {
             cursor: None,
             reactive: false,
             overlay: None,
+            presence: None,
         }
     }
 
@@ -1942,6 +1946,24 @@ impl Element {
         self
     }
 
+    /// 进出场过渡：本节点（经 `visible_*` 或 `popup`）显示时淡入/滑入，隐藏时先淡出/滑出
+    /// 再消失。离场期间继续占位、但已点不到也拿不到焦点；播完才把空间让给同级。
+    ///
+    /// 祖先离场时，子孙里声明了过渡的节点会一起离场——对话框可以"遮罩淡出、面板同时下沉"。
+    /// 首次出现不回放进场（构建时已可见的节点直接落定）。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let saved = signal(false);
+    /// let toast = Element::label("已保存")
+    ///     .visible_signal(saved)
+    ///     .transition(Presence::fade().slide(0, -6));
+    /// ```
+    pub fn transition(mut self, presence: presence::Presence) -> Self {
+        self.presence = Some(presence);
+        self
+    }
+
     /// 运行期可见条件：闭包返回 false 时该节点本帧不显示/不命中。
     ///
     /// 契约：闭包**必须是纯函数**（仅读状态、无副作用）。它在每帧的
@@ -2710,14 +2732,24 @@ impl Element {
         //
         // `reactive()` 是拖动位移的复位钩子：每次 layout 前调 `ModalScrim::on_update`，
         // 在那里识别"重新弹出"并把位移清零。
+        //
+        // 进出场：遮罩连同面板整体淡入淡出，面板另外升起/下沉（只滑不再淡，否则透明度相乘）。
+        // 面板的过渡初值按"遮罩未弹出"落定（见 `build_in`），故第一次弹出也会进场。
         Element::stack()
             .fill()
             .widget(containers::ModalScrim::new(show))
             // 走角色而非构建期取色：运行期换主题（亮→暗换一档遮罩浓度）要跟得上。
             .bg_role(crate::style::Role::Scrim)
             .visible_when(move || show.get())
+            .transition(presence::Presence::fade())
             .reactive()
-            .child(panel.align(Align::Center))
+            .child({
+                // 面板自己声明了过渡就尊重它（与 `popup` 同口径）。
+                let p = panel
+                    .presence
+                    .unwrap_or(presence::Presence::default().slide(0, 12));
+                panel.align(Align::Center).transition(p)
+            })
     }
 
     /// 带标题栏 + 关闭按钮 + 底栏的对话框面板（在 `dialog` 遮罩之上居中）。
@@ -2800,8 +2832,12 @@ impl Element {
     pub fn popup(self, open: Signal<bool>, content: Element) -> Self {
         // 可见性直接绑 `open`：浮层的「展开」与「可见」是同一件事，分成两个开关只会
         // 制造出「登记为浮层却看不见」和「看得见却关不掉」两种半开状态。
+        // 未声明过渡的浮层默认淡入 + 轻落（与菜单、下拉同一观感）；要瞬显瞬隐就自己声明
+        // `.transition(Presence::default())`。
+        let presence = content.presence.or(Some(presence::Presence::popover()));
         let content = Element {
             overlay: Some(open),
+            presence,
             ..content
         }
         .visible_signal(open);
@@ -4620,7 +4656,13 @@ impl Element {
     }
 
     /// 递归落入 arena，返回根 NodeId。
-    pub fn build(mut self, tree: &mut Tree) -> NodeId {
+    pub fn build(self, tree: &mut Tree) -> NodeId {
+        self.build_in(tree, crate::core::PresenceFlags::ROOT)
+    }
+
+    /// `parent_shown`：祖先链是否全部逻辑可见。进出场过渡据此落定初值——藏在未弹出的
+    /// 对话框里的面板，初值得是"隐藏"，否则对话框第一次弹出时它不会进场。
+    fn build_in(mut self, tree: &mut Tree, pf: crate::core::PresenceFlags) -> NodeId {
         let is_reactive = self.reactive;
         let my_axis = match self.layout {
             Layout::Linear { axis, .. } => Some(axis),
@@ -4638,7 +4680,7 @@ impl Element {
         let focus_when = self
             .focus_when
             .map(|(s, select)| tree.focus_trigger(s, select));
-        let node = Node {
+        let mut node = Node {
             parent: None,
             children: Vec::new(),
             bounds: Default::default(),
@@ -4683,7 +4725,13 @@ impl Element {
             offset: Point::new(0, 0),
             raised: false,
             overlay: self.overlay,
+            presence: None,
         };
+        let shown = pf.shown && node.effective_visible();
+        node.presence = self
+            .presence
+            .map(|p| Box::new(presence::PresenceState::new(p, shown)));
+        let child_pf = pf.child(&node);
         let id = tree.insert(node);
         if is_reactive {
             tree.register_reactive(id);
@@ -4705,7 +4753,7 @@ impl Element {
                     Axis::Vertical => ce.height = Dimension::Weight(w),
                 }
             }
-            let cid = ce.build(tree);
+            let cid = ce.build_in(tree, child_pf);
             tree.add_child(id, cid);
         }
         id

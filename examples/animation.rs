@@ -17,6 +17,8 @@
 //! - RadioButton：环加粗 + 中心点放大        - 分段控制器：选中胶囊跨段滑动
 //! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
+//! - 进出场（`Element::transition`）：提示条淡入下落/淡出上收、对话框遮罩淡入 + 面板升起、
+//!   颜色选择浮层淡入轻落、下拉菜单与悬停提示淡入
 
 use windui::prelude::*;
 
@@ -29,13 +31,13 @@ fn main() {
             anim_label.set(format!("当前：{text}"));
         })
     };
-
-    // 各控件状态绑定。
     let toggle = Element::row()
         .spacing(6)
         .child(level_button("全开", MotionLevel::Full))
         .child(level_button("减弱", MotionLevel::Reduced))
         .child(level_button("关闭", MotionLevel::Off));
+
+    // 各控件状态绑定。
     let sw1 = signal(true);
     let sw2 = signal(false);
     let chk1 = signal(true);
@@ -135,6 +137,55 @@ fn main() {
             .corner(8.0),
     );
 
+    // 进出场：提示条显隐（离场期间继续占位，播完才让出空间）、对话框、锚定浮层。
+    let hint_on = signal(false);
+    let show_dialog = signal(false);
+    let color = signal(Color::hex(0x4C8BF5));
+    let presence = Element::card(
+        "进出场（Element::transition）",
+        Element::col()
+            .width_match()
+            .spacing(8)
+            .child(
+                Element::row()
+                    .spacing(8)
+                    .child(
+                        Element::button("显示/隐藏提示")
+                            .on_click(move |_| hint_on.set(!hint_on.get())),
+                    )
+                    .child(Element::button("打开对话框").on_click(move |_| show_dialog.set(true)))
+                    .child(Element::color_picker(color).tooltip("点开是锚定浮层：默认淡入轻落")),
+            )
+            .child(
+                Element::label("✓ 设置已保存（离场时继续占位，播完才让出空间）")
+                    .width_match()
+                    .height(32)
+                    .padding_xy(12, 0)
+                    .bg_role(Role::SurfaceAlt)
+                    .corner(6.0)
+                    .visible_signal(hint_on)
+                    .transition(Presence::fade().slide(0, -6)),
+            )
+            .child(
+                Element::label("↑ 提示条下面的这行会在它让出空间时上移")
+                    .font_size(12.0)
+                    .fg_role(Role::TextMuted)
+                    .height(18),
+            ),
+    );
+
+    let dialog = Element::dialog_panel(
+        show_dialog,
+        "对话框",
+        320,
+        move |_| show_dialog.set(false),
+        Element::label("遮罩淡入，面板自下方升起；关闭时反向。减弱档下只淡不升。").width_match(),
+        Element::row()
+            .width_match()
+            .child(Element::flex_spacer())
+            .child(Element::button("关闭").on_click(move |_| show_dialog.set(false))),
+    );
+
     let accordion = Element::card(
         "手风琴（展开仍为瞬时，属 Phase C 待做）",
         Element::accordion(
@@ -175,7 +226,7 @@ fn main() {
                 .font_size(13.0)
                 .fg_role(Role::TextMuted)
                 .height(18)
-                .width(150),
+                .width(90),
         );
 
     let body = Element::col()
@@ -187,14 +238,19 @@ fn main() {
         .child(buttons)
         .child(tabs)
         .child(list)
+        .child(presence)
         .child(accordion);
 
-    let ui = Element::stack().fill().bg_role(Role::Bg).child(
-        Element::col()
-            .fill()
-            .padding(18)
-            .child(Element::scroll().fill().child(body)),
-    );
+    let ui = Element::stack()
+        .fill()
+        .bg_role(Role::Bg)
+        .child(
+            Element::col()
+                .fill()
+                .padding(18)
+                .child(Element::scroll().fill().child(body)),
+        )
+        .child(dialog);
 
     App::new("windui — 动画总览", 520, 820)
         .icon(brand_icon())

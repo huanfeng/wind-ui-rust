@@ -482,6 +482,9 @@ pub(super) struct MenuHost {
     pub(super) armed: Option<MenuBarLink>,
     /// 单击 Alt 的判定：按下之后没碰别的键。松开时它还是 true 才算"单击"。
     alt_pending: bool,
+    /// 展开淡入进度（0→1）。挂在宿主而非 `ContextMenu` 上：菜单栏滑到相邻标题是换一个
+    /// `ContextMenu`，那一下不该重新淡入。
+    fade: std::cell::Cell<crate::anim::Transition<f32>>,
 }
 
 impl MenuHost {
@@ -787,6 +790,17 @@ impl UiHost {
             }
         );
         self.menu_bar_disarm();
+        // 菜单栏在标题间切换时已有面板展开，换面板不再淡入（与系统菜单栏一致）。
+        // 只认菜单栏到菜单栏：开着右键菜单再右键别处，是一个新菜单，照常淡入。
+        let switching =
+            req.bar.is_some() && self.menu.active.as_ref().is_some_and(|m| m.bar.is_some());
+        self.menu
+            .fade
+            .set(crate::anim::Transition::new(if switching {
+                1.0
+            } else {
+                0.0
+            }));
         self.menu.active = Some(ContextMenu {
             levels: vec![level],
             target,
@@ -1581,6 +1595,37 @@ impl MenuHost {
         let Some(menu) = self.active.as_ref() else {
             return;
         };
+        // 展开淡入。收起是瞬时的（选中即消失，与系统菜单一致）：淡出的残影只会挡住
+        // 用户刚选完要看的结果。菜单不滑动——宿主层画布没有平移，且菜单要的是"快"。
+        let mut fade = self.fade.get();
+        if fade.target() != 1.0 {
+            fade.retarget(1.0, theme.anim.fast(), crate::anim::Easing::DECELERATE);
+            self.fade.set(fade);
+        }
+        let alpha = fade.value();
+        if fade.is_active() {
+            // 脏区按投影外扩（投影参数走主题，见 `MenuTheme::shadow`）。
+            let sh = theme.menu.shadow();
+            let pad = (sh.blur + sh.dx.abs().max(sh.dy.abs())).ceil() as i32 + 2;
+            let area = menu
+                .levels
+                .iter()
+                .map(|l| l.rect)
+                .reduce(|a, b| a.union(&b));
+            if let Some(r) = area {
+                crate::anim::request_repaint_in(r.inflate(pad));
+            }
+        }
+        if alpha < 1.0 {
+            canvas.push_layer(alpha);
+        }
+        self.paint_levels(menu, canvas, theme);
+        if alpha < 1.0 {
+            canvas.pop_layer();
+        }
+    }
+
+    fn paint_levels(&self, menu: &ContextMenu, canvas: &mut dyn Canvas, theme: &Theme) {
         let (pal, mt) = (&theme.palette, &theme.menu);
         for (li, level) in menu.levels.iter().enumerate() {
             let r = level.rect;

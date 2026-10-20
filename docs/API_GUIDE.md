@@ -2549,6 +2549,27 @@ App::new("t", 400, 300)
     // .motion(MotionLevel::Full)       // 或强制档位，无视系统（.animations(bool) 是它的简写）
 ```
 
+**进出场**（`Element::transition(Presence)`）：节点经 `visible_*` / `popup` 显示时淡入、滑入，隐藏时先
+淡出、滑出再消失——不必写控件：
+
+```rust
+Element::label("已保存")
+    .visible_signal(saved)
+    .transition(Presence::fade().slide(0, -6))   // 也可 .duration(enter_ms, exit_ms)
+```
+
+- 离场期间**继续占位**（同级不会在第一帧就补位、与残影叠在一起），但已**点不到、拿不到焦点**；
+  播完才把空间让出来。
+- 祖先离场时，子孙里声明了过渡的节点一起离场——`dialog` 就是"遮罩连同面板淡出、面板同时下沉"。
+- 首次出现不回放进场；藏在未弹出的对话框里的节点，第一次弹出时照常进场。
+- 时长默认取主题：进场 `anim.normal()` + `anim.easing()`，离场 `anim.fast()` + `Easing::ACCELERATE`。
+- 减弱动效档位下只淡不滑；动画关闭时与不声明过渡逐帧一致。
+- 滑动期间命中按**终位**算（进场那一两百毫秒里点击落在最终位置）。
+- 不在绘制路径上时发生的显隐（切走的标签页里、被对话框收起的浮层）就地落定，露出来时不补播。
+- 内置接入：`dialog` / `dialog_panel`（遮罩淡入 + 面板自下 12px 升起）、`popup` 浮层（默认
+  `Presence::popover()`：淡入 + 自上 4px 落下；要瞬显就给内容声明 `.transition(Presence::default())`）、
+  下拉 / 右键 / 菜单栏菜单与悬停提示（只淡入，收起瞬时）。
+
 运行期用 `anim::set_motion_level(..)` 切换。调试曲线时设环境变量 `WINDUI_ANIM_SCALE=5` 把所有补间
 放慢 5 倍（只影响补间，双击/长按等时长判定仍按真实时间）。截图默认等过渡收尾；要截中间帧加
 `--anim-at <ms>`，截的是最后一次合成交互之后第 ms 毫秒那一帧（时钟被钉住，结果与机器快慢无关）：
