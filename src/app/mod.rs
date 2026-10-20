@@ -1082,7 +1082,8 @@ fn merge_screenshot_cfg(mut win: WindowConfig, app: &WindowConfig) -> WindowConf
     // 覆盖」——否则应用那份默认的 `Auto` 会静默压过窗口自己写的选择，而截图比对正是
     // 为了区分软硬渲染才带上 `--renderer` 的。
     win.renderer = app.renderer;
-    win.animations = app.animations;
+    win.motion = app.motion;
+    win.reduced_motion = app.reduced_motion;
     // `--size` 压过窗口自己的尺寸，并一并放开下限——语义与非常驻路径上那条完全一致
     // （见 `screenshot_args`）。判据是"应用那份尺寸非零"：常驻应用的 `App::resident`
     // 给的是 0×0，只有 `--size` 会把它写成正数。
@@ -1157,7 +1158,9 @@ impl App {
                 resident: false,
                 frameless: false,
                 system_menu: true,
-                animations: None,
+                motion: None,
+                reduced_motion: crate::anim::MotionLevel::Reduced,
+                screenshot_anim_at: None,
                 renderer: Renderer::default(),
                 min_width: 0,
                 min_height: 0,
@@ -1315,10 +1318,42 @@ impl App {
         self
     }
 
-    /// 强制动画全局开关。默认（不调用）随系统"显示动画"设置；`true`/`false` 强制开/关。
-    /// 关闭时所有补间瞬时收敛到终态（运行期也可改用 `anim::set_enabled`）。
-    pub fn animations(mut self, on: bool) -> Self {
-        self.cfg.animations = Some(on);
+    /// 强制动画全局开关：`true` = [`MotionLevel::Full`]、`false` = [`MotionLevel::Off`]，
+    /// 无视系统设置。不调用时随系统（见 [`reduced_motion`](Self::reduced_motion)）。
+    /// 关闭时所有补间瞬时收敛到终态、光标也不再闪（运行期也可改用 `anim::set_motion_level`）。
+    ///
+    /// [`MotionLevel::Full`]: crate::anim::MotionLevel::Full
+    /// [`MotionLevel::Off`]: crate::anim::MotionLevel::Off
+    pub fn animations(self, on: bool) -> Self {
+        self.motion(if on {
+            crate::anim::MotionLevel::Full
+        } else {
+            crate::anim::MotionLevel::Off
+        })
+    }
+
+    /// 强制动效档位，无视系统设置。
+    pub fn motion(mut self, level: crate::anim::MotionLevel) -> Self {
+        self.cfg.motion = Some(level);
+        self
+    }
+
+    /// 系统要求减弱动效时（Windows「显示动画」关、macOS「减弱动态效果」开、GNOME
+    /// `enable-animations` 关）落到哪一档。默认 [`MotionLevel::Reduced`]：位移类过渡
+    /// 瞬时到位，颜色与透明度渐变保留；想在这种情况下彻底静止就传 [`MotionLevel::Off`]，
+    /// 想无视这项系统设置就传 [`MotionLevel::Full`]。
+    ///
+    /// 各平台"要求减弱"的来源不同，含义也略有出入：macOS 的「减弱动态效果」是纯无障碍
+    /// 选项；Windows 的「显示动画」还会被「调整为最佳性能」一并关掉——这类用户要的往往是
+    /// 安静而不只是不晃，面向他们的应用可以传 `Off`。
+    ///
+    /// 被 [`motion`](Self::motion) / [`animations`](Self::animations) 的强制档位覆盖。
+    ///
+    /// [`MotionLevel::Reduced`]: crate::anim::MotionLevel::Reduced
+    /// [`MotionLevel::Off`]: crate::anim::MotionLevel::Off
+    /// [`MotionLevel::Full`]: crate::anim::MotionLevel::Full
+    pub fn reduced_motion(mut self, level: crate::anim::MotionLevel) -> Self {
+        self.cfg.reduced_motion = level;
         self
     }
 
@@ -1579,7 +1614,7 @@ impl App {
     /// 支持：`--screenshot <path>`、`--scale <f>`（高 DPI）、`--size W H`、
     /// `--renderer <auto|software|gpu>`，以及截屏前合成的交互
     /// `--click X Y` / `--rclick X Y` / `--drag X0 Y0 X1 Y1` / `--hover X Y` /
-    /// `--type <text>` / `--key <name>`。
+    /// `--type <text>` / `--key <name>`，以及取过渡中间帧的 `--anim-at <ms>`。
     pub fn screenshot_from_args(self) -> Self {
         let args: Vec<String> = std::env::args().collect();
         self.screenshot_args(&args)
@@ -1641,6 +1676,19 @@ impl App {
         }
         // --size W H：覆盖 App::new 的窗口尺寸，**并把 min_size 的下限一并放开**——
         // 要测的正是下限处的表现，若还受 min_size 钳制就永远截不到"最小尺寸下布局
+        // --anim-at N：合成交互之后不等动画收尾，而是截"过渡开始后第 N 毫秒"那一帧。
+        // 真实时钟下中间帧不可复现（取决于机器快慢），钉住时钟才进得了视觉回归。
+        // 只作用于主窗；合成交互开出的子窗照旧截终态。
+        if let Some(i) = args.iter().position(|a| a == "--anim-at") {
+            match args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                Some(v) => self.cfg.screenshot_anim_at = Some(v),
+                // 解析不出就截终态——与没加这个参数一模一样，不说一声就分不出来。
+                None => eprintln!(
+                    "[windui] --anim-at 需要一个毫秒整数（如 --anim-at 80），已忽略：{:?}",
+                    args.get(i + 1)
+                ),
+            }
+        }
         // 是否还成立"这张图。此前尺寸写死在代码里，这类验证只能改代码重编译。
         if let Some(i) = args.iter().position(|a| a == "--size") {
             let n = |k: usize| args.get(i + k).and_then(|v| v.parse::<i32>().ok());

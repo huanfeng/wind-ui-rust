@@ -49,11 +49,11 @@ pub(crate) fn run(
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
 ) {
-    let os_default = true;
-    crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
-    crate::ui::caret::set_blink_period_ms(match cfg.animations {
-        Some(false) => None,
-        _ => Some(crate::ui::caret::BLINK_HALF_MS as u32),
+    super::apply_motion_level(&cfg, system_reduces_motion);
+    crate::ui::caret::set_blink_period_ms(if super::motion_forced_off(&cfg) {
+        None
+    } else {
+        Some(crate::ui::caret::BLINK_HALF_MS as u32)
     });
 
     if let Some(path) = cfg.screenshot.clone() {
@@ -157,6 +157,18 @@ pub(crate) fn system_prefers_dark() -> bool {
         .ok()
         .filter(|o| o.status.success())
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("dark"))
+}
+
+/// 系统是否要求减弱动效：GNOME 系（含 Cinnamon / Budgie 等沿用其 schema 的桌面）的
+/// `enable-animations` 关掉即是。读不到（非 GNOME 系、没装 `gsettings`）按不要求处理。
+fn system_reduces_motion() -> bool {
+    std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "false")
 }
 
 /// 用户偏好的界面语言（BCP-47，按优先级）。

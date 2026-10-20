@@ -34,6 +34,7 @@ pub mod theme;
 pub mod ui;
 
 pub mod prelude {
+    pub use crate::anim::MotionLevel;
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::event::{
         window_open, window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp, ImeField, ImeHints,

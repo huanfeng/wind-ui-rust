@@ -473,7 +473,7 @@ impl ReorderList {
             let mut c = self.ctl.borrow_mut();
             c.phase = Phase::Dragging;
             c.cur_y = y;
-            c.tweens = vec![Transition::new(0.0); slots.len()];
+            c.tweens = vec![Transition::new(0.0).movement(); slots.len()];
             c.slots = slots;
             c.to = from;
             c.row_id = Some(row_id);
@@ -619,7 +619,7 @@ impl Widget for ReorderList {
                         c.phase = Phase::Settling;
                         let (from, dy) = (c.from, c.drag_dy());
                         if let Some(t) = c.tweens.get_mut(from) {
-                            *t = Transition::new(dy as f32);
+                            t.settle(dy as f32);
                         }
                         drop(c);
                         ctx.release_capture();
@@ -659,7 +659,7 @@ impl Widget for ReorderList {
             if c.phase == Phase::Dragging {
                 let (from, dy) = (c.from, c.drag_dy());
                 if let Some(t) = c.tweens.get_mut(from) {
-                    *t = Transition::new(dy as f32);
+                    t.settle(dy as f32);
                 }
             }
             c.phase = Phase::Settling;
@@ -717,7 +717,7 @@ impl Widget for ReorderList {
                 };
                 if dragging && i == from {
                     // 被拖行直接跟指针：补间会产生橡皮筋般的滞后感。
-                    *t = Transition::new(drag_dy);
+                    t.settle(drag_dy);
                     drag_dy
                 } else {
                     let dur = if i == from { fast } else { normal };

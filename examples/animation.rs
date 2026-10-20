@@ -2,9 +2,15 @@
 //!
 //! 运行：cargo run --release --example animation
 //!
-//! 说明：本示例用 `App::animations(true)` **强制开启**动画——无视系统「显示动画」设置，
-//! 故即使你在 Windows 里关掉了动画，这里也能看到效果。点顶部「切换动画」按钮可运行期
-//! 开/关（调 `windui::anim::set_enabled`）对照：关闭后所有过渡瞬时收敛、开启后平滑过渡。
+//! 说明：本示例用 `App::animations(true)` **强制开启**动画——无视系统「显示动画」/「减弱
+//! 动态效果」设置，故即使系统里关掉了动画，这里也能看到效果。顶部三个按钮运行期切换动效
+//! 档位（调 `windui::anim::set_motion_level`）对照：
+//! - 全开：所有过渡平滑；
+//! - 减弱：位移类（开关滑块、分段胶囊、标签页指示条、光标滑行）瞬时到位，颜色渐变保留
+//!   （开关的轨道色由滑块位置推出，随滑块一起瞬变）；
+//! - 关闭：所有过渡瞬时收敛。
+//!
+//! 想看清曲线，可用 `WINDUI_ANIM_SCALE=5` 把所有补间放慢 5 倍。
 //!
 //! 动画是交互触发的（hover / 点击 / 切换 / 选中），**截图看不到**，请实跑后用鼠标交互：
 //! - 开关 Switch：滑块平移 + 轨道色渐变      - CheckBox：方框填充 + 对勾淡入
@@ -15,25 +21,21 @@
 use windui::prelude::*;
 
 fn main() {
-    // 运行期动画开关：Button 点击翻转并调 anim::set_enabled，状态写入动态标签。
-    let anim_on = signal(true);
-    let anim_label = signal(String::from("动画：开（点击关闭）"));
-
-    let toggle = {
-        let (flag, lbl) = (anim_on, anim_label);
-        Element::button("切换动画").on_click(move |_| {
-            let v = !flag.get();
-            flag.set(v);
-            windui::anim::set_enabled(v);
-            lbl.set(if v {
-                "动画：开（点击关闭）".into()
-            } else {
-                "动画：关（点击开启）".into()
-            });
+    // 运行期动效档位：三个按钮各设一档，当前档写入动态标签。
+    let anim_label = signal(String::from("当前：全开"));
+    let level_button = |text: &'static str, level: MotionLevel| {
+        Element::button(text).on_click(move |_| {
+            windui::anim::set_motion_level(level);
+            anim_label.set(format!("当前：{text}"));
         })
     };
 
     // 各控件状态绑定。
+    let toggle = Element::row()
+        .spacing(6)
+        .child(level_button("全开", MotionLevel::Full))
+        .child(level_button("减弱", MotionLevel::Reduced))
+        .child(level_button("关闭", MotionLevel::Off));
     let sw1 = signal(true);
     let sw2 = signal(false);
     let chk1 = signal(true);

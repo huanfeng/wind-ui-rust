@@ -789,18 +789,14 @@ pub(crate) fn run(
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
 ) {
-    // 全局动画开关：显式配置优先；否则截屏路径恒开（保证终态稳定）、窗口路径随系统设置。
-    let os_default = if cfg.screenshot.is_some() {
-        true
-    } else {
-        unsafe { os_animations_enabled() }
-    };
-    crate::anim::set_enabled(cfg.animations.unwrap_or(os_default));
+    // 系统「显示动画」关掉即视为要求减弱动效（UWP 的 `UISettings.AnimationsEnabled` 读的也是它）。
+    super::apply_motion_level(&cfg, || unsafe { !os_animations_enabled() });
     // 光标闪烁走**插入符**设置，不跟客户区动画走（见 `os_caret_blink_half_ms`）。
-    // 应用显式 `animations(false)` 时连它一起关：那是"我要一个完全静止的界面"。
-    crate::ui::caret::set_blink_period_ms(match cfg.animations {
-        Some(false) => None,
-        _ => unsafe { os_caret_blink_half_ms() },
+    // 应用把动效强制关死时连它一起关：那是"我要一个完全静止的界面"。
+    crate::ui::caret::set_blink_period_ms(if super::motion_forced_off(&cfg) {
+        None
+    } else {
+        unsafe { os_caret_blink_half_ms() }
     });
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 macOS 后端共用）。

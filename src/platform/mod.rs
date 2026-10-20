@@ -310,6 +310,33 @@ fn report_hit(handler: &dyn AppHandler, logical: (i32, i32), trace: bool) {
     }
 }
 
+/// 启动时定下全局动效档位：显式配置优先；截屏路径恒全开（保证终态稳定、可取中间帧）；
+/// 否则系统要求减弱时取应用的减弱策略，不要求时全开。
+///
+/// `system_reduces` 只在需要时才查——Linux 上它要起一个 `gsettings` 子进程。
+pub(crate) fn apply_motion_level(cfg: &WindowConfig, system_reduces: impl FnOnce() -> bool) {
+    crate::anim::set_motion_level(resolve_motion_level(cfg, system_reduces));
+}
+
+fn resolve_motion_level(
+    cfg: &WindowConfig,
+    system_reduces: impl FnOnce() -> bool,
+) -> crate::anim::MotionLevel {
+    use crate::anim::MotionLevel;
+    if let Some(level) = cfg.motion {
+        return level;
+    }
+    if cfg.screenshot.is_some() || !system_reduces() {
+        return MotionLevel::Full;
+    }
+    cfg.reduced_motion
+}
+
+/// 应用是否把动效强制关死：此时连光标闪烁也一并停掉（"我要一个完全静止的界面"）。
+pub(crate) fn motion_forced_off(cfg: &WindowConfig) -> bool {
+    cfg.motion == Some(crate::anim::MotionLevel::Off)
+}
+
 /// 离屏渲染一帧并保存 PNG——**平台无关**逻辑，Windows 与 macOS 的 `run` 在
 /// `cfg.screenshot.is_some()` 时共用。无需窗口，适合自动化视觉回归。
 ///
@@ -428,15 +455,23 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
         std::thread::sleep(std::time::Duration::from_millis(650));
         off.frame(handler, size, cfg.bg);
     }
-    // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
-    // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
-    // 避免无限循环——末帧相位非零即可在截图显现。
-    for _ in 0..4 {
-        if !handler.wants_animation() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(ms) = cfg.screenshot_anim_at {
+        // 取中间帧：把时钟钉在最后一次交互那帧之后第 `ms` 毫秒。过渡都在那帧的 paint 里
+        // 以当时的时钟起步，故这一帧画出的正是"过渡开始后 ms 毫秒"——与机器快慢无关。
+        crate::anim::pin_clock(Some(crate::anim::clock_ms() + ms));
         off.frame(handler, size, cfg.bg);
+        crate::anim::pin_clock(None);
+    } else {
+        // 有动画时推进帧：收敛型（开关/按钮等补间）循环到不再请求动画即停（捕获稳定终态，
+        // 不依赖单帧 300ms ≥ 所有时长）；永续型（不确定进度等永远请求动画）由迭代上限兜底，
+        // 避免无限循环——末帧相位非零即可在截图显现。
+        for _ in 0..4 {
+            if !handler.wants_animation() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            off.frame(handler, size, cfg.bg);
+        }
     }
     // 性能基准（WINDUI_BENCH=N）：首帧已暖（字体/阴影缓存已建），再渲染 N 帧打印稳态帧耗时。
     if let Ok(spec) = std::env::var("WINDUI_BENCH") {
@@ -631,8 +666,13 @@ pub struct WindowConfig {
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     /// 非 `frameless` 窗口上无意义——那时系统标题栏自己带原生菜单。
     pub system_menu: bool,
-    /// 动画全局开关：None=随系统“显示动画”设置；Some(b)=强制开/关。
-    pub animations: Option<bool>,
+    /// 强制动效档位：None=随系统（见 [`reduced_motion`](Self::reduced_motion)）；Some=强制。
+    pub motion: Option<crate::anim::MotionLevel>,
+    /// 系统要求减弱动效（"显示动画"关 / "减弱动态效果"开）时落到的档位，默认
+    /// [`MotionLevel::Reduced`](crate::anim::MotionLevel::Reduced)。
+    pub reduced_motion: crate::anim::MotionLevel,
+    /// 截屏取中间帧：合成交互之后把帧时钟拨到其后第 N 毫秒再截（`--anim-at N`）。
+    pub screenshot_anim_at: Option<u64>,
     /// 渲染后端选择。默认 [`Renderer::Software`]。
     pub renderer: Renderer,
     /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
@@ -731,7 +771,9 @@ impl Default for WindowConfig {
             resident: false,
             frameless: false,
             system_menu: true,
-            animations: None,
+            motion: None,
+            reduced_motion: crate::anim::MotionLevel::Reduced,
+            screenshot_anim_at: None,
             renderer: Renderer::default(),
             min_width: 0,
             min_height: 0,
@@ -1523,5 +1565,64 @@ mod dispatch_guard_tests {
         let _guard = EventDispatchGuard::enter();
         // debug_assert! 在 into_dialog() 里先触发 panic，不会真正调用阻塞的 rfd 接口。
         let _ = PickDialog::new().pick_folder();
+    }
+}
+
+#[cfg(test)]
+mod motion_level_tests {
+    use super::*;
+    use crate::anim::MotionLevel;
+
+    fn cfg(motion: Option<MotionLevel>, reduced: MotionLevel, screenshot: bool) -> WindowConfig {
+        WindowConfig {
+            motion,
+            reduced_motion: reduced,
+            screenshot: screenshot.then(|| std::path::PathBuf::from("x.png")),
+            ..WindowConfig::default()
+        }
+    }
+
+    /// 默认随系统：系统不要求减弱时全开，要求时落到应用的减弱策略（默认 Reduced）。
+    #[test]
+    fn follows_system_through_the_reduce_policy() {
+        let d = WindowConfig::default();
+        assert_eq!(
+            d.reduced_motion,
+            MotionLevel::Reduced,
+            "默认策略应为 Reduced"
+        );
+        assert_eq!(resolve_motion_level(&d, || false), MotionLevel::Full);
+        assert_eq!(resolve_motion_level(&d, || true), MotionLevel::Reduced);
+        let off = cfg(None, MotionLevel::Off, false);
+        assert_eq!(resolve_motion_level(&off, || true), MotionLevel::Off);
+        assert_eq!(resolve_motion_level(&off, || false), MotionLevel::Full);
+    }
+
+    /// 强制档位压过系统，且不必去查系统（Linux 上查一次是一个子进程）。
+    #[test]
+    fn forced_level_wins_without_querying_system() {
+        for level in [MotionLevel::Full, MotionLevel::Reduced, MotionLevel::Off] {
+            let c = cfg(Some(level), MotionLevel::Reduced, false);
+            assert_eq!(
+                resolve_motion_level(&c, || panic!("强制档位下不应查询系统")),
+                level
+            );
+        }
+        assert!(motion_forced_off(&cfg(
+            Some(MotionLevel::Off),
+            MotionLevel::Reduced,
+            false
+        )));
+        assert!(
+            !motion_forced_off(&cfg(None, MotionLevel::Off, false)),
+            "随系统落到 Off 不算应用强制关死：光标闪烁仍走系统插入符设置"
+        );
+    }
+
+    /// 截屏路径恒全开：终态稳定，且 `--anim-at` 取得到位移类过渡的中间帧。
+    #[test]
+    fn screenshot_runs_full_motion() {
+        let c = cfg(None, MotionLevel::Off, true);
+        assert_eq!(resolve_motion_level(&c, || true), MotionLevel::Full);
     }
 }

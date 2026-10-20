@@ -1261,7 +1261,7 @@ impl Walker<'_> {
                         None => {
                             self.anims.push(SectAnim {
                                 sig: sec.collapsed,
-                                h: Transition::new(f32::NAN),
+                                h: Transition::new(f32::NAN).movement(),
                             });
                             self.anims.len() - 1
                         }
@@ -1283,13 +1283,13 @@ impl Walker<'_> {
                     let target = if collapsed { 0.0 } else { full };
                     if !anim.value().is_finite() {
                         // 首次遇到：静止落定，首帧不动画。
-                        anim = Transition::new(target);
+                        anim.settle(target);
                     } else if (anim.target() <= 0.5) != (target <= 0.5) {
                         // 折叠态翻转：起卷帘动画。
                         anim.retarget(target, self.th.anim.normal(), Easing::EaseInOut);
                     } else if (anim.target() - target).abs() > 0.5 && !anim.is_active() {
                         // 内容/宽度变化导致全高漂移（非折叠切换）：静止跟随，不动画。
-                        anim = Transition::new(target);
+                        anim.settle(target);
                     }
                     // 布局期只读取值（无副作用）：下一帧的请求由 paint 经
                     // anim::request_relayout 走宿主 needs_relayout 正规门发出，

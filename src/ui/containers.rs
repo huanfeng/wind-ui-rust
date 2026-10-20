@@ -895,8 +895,8 @@ impl TabBar {
             style: TabStyle::default(),
             group,
             hover: None,
-            ind_x: Cell::new(Transition::new(0.0)),
-            ind_w: Cell::new(Transition::new(0.0)),
+            ind_x: Cell::new(Transition::new(0.0).movement()),
+            ind_w: Cell::new(Transition::new(0.0).movement()),
             text_anim: (0..n)
                 .map(|_| Cell::new(Transition::new(Color::rgba(0, 0, 0, 0))))
                 .collect(),
@@ -1075,8 +1075,8 @@ impl Widget for TabBar {
             let (tx, tw) = (sel_x as f32, sel_w as f32);
             let (mut ax, mut aw) = (self.ind_x.get(), self.ind_w.get());
             if first {
-                ax = Transition::new(tx);
-                aw = Transition::new(tw);
+                ax.settle(tx);
+                aw.settle(tw);
             } else {
                 if ax.target() != tx {
                     ax.retarget(tx, th.anim.normal(), Easing::EaseOut);

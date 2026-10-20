@@ -320,7 +320,7 @@ impl Switch {
         let init = if state.get() { 1.0 } else { 0.0 };
         Self {
             state,
-            pos: Cell::new(Transition::new(init)),
+            pos: Cell::new(Transition::new(init).movement()),
             primed: Cell::new(false),
             size: SwitchSize::Normal,
             on_change: RefCell::new(None),
@@ -378,7 +378,7 @@ impl Widget for Switch {
         let target = if on { 1.0 } else { 0.0 };
         if !self.primed.get() {
             // 首帧/对话框复显：瞬时落定到当前状态，不回放动画。
-            pos = Transition::new(target);
+            pos.settle(target);
             self.primed.set(true);
         } else if pos.target() != target {
             pos.retarget(target, th.anim.normal(), Easing::EaseInOut);
@@ -3564,6 +3564,45 @@ mod tests {
             ti.paint(b, b, true, true, &mut c, &Style::default());
         }
         pm.data().to_vec()
+    }
+
+    /// 开关切换后第 `at_ms` 毫秒时滑块所处的进度（0=关、1=开），走真实 paint。
+    fn switch_progress_after_toggle(level: crate::anim::MotionLevel, at_ms: u64) -> f32 {
+        use crate::core::Widget;
+        use crate::geometry::Rect;
+        use crate::render::SkiaCanvas;
+        use crate::style::Style;
+        use tiny_skia::Pixmap;
+        crate::anim::set_motion_level(level);
+        let state = crate::signal::signal(false);
+        let sw = super::Switch::new(state);
+        let b = Rect::new(0, 0, 60, 30);
+        let mut pm = Pixmap::new(60, 30).unwrap();
+        let mut frame = |ms: u64| {
+            crate::anim::set_clock_ms(ms);
+            let mut c = SkiaCanvas::new(&mut pm);
+            sw.paint(b, b, false, false, &mut c, &Style::default());
+        };
+        frame(1_000); // 首帧落定
+        state.set(true);
+        frame(1_000); // 本帧改向
+        frame(1_000 + at_ms);
+        let v = sw.pos.get().value();
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
+        v
+    }
+
+    /// 开关滑块是位移：减弱档下瞬时到位，全开档下中途确在半路。两档对照，
+    /// 免得"本来就没动画"也被当成"减弱生效"。
+    #[test]
+    fn switch_knob_snaps_under_reduced_motion() {
+        let full = switch_progress_after_toggle(crate::anim::MotionLevel::Full, 60);
+        assert!(
+            full > 0.05 && full < 0.95,
+            "全开档 60ms 时应在半路，实得 {full}"
+        );
+        let reduced = switch_progress_after_toggle(crate::anim::MotionLevel::Reduced, 60);
+        assert_eq!(reduced, 1.0, "减弱档下滑块应瞬时到位");
     }
 
     /// 两帧间的墨量差（逐通道绝对差之和）。

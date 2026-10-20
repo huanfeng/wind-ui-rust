@@ -40,7 +40,7 @@ impl SegmentedControl {
         Self {
             selected,
             hover: None,
-            sel_pos: Cell::new(Transition::new(init)),
+            sel_pos: Cell::new(Transition::new(init).movement()),
             fits: options.iter().map(|_| Default::default()).collect(),
             options,
         }

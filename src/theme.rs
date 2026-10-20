@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::anim::{Easing, Spring};
 use crate::geometry::Color;
 use crate::style::Shadow;
 use crate::ui::caret::{self, CaretStyle};
@@ -929,7 +930,7 @@ impl NavTheme {
     }
 }
 
-/// 动画时长覆盖层（毫秒）。控件按语义档位取时长，回退 120/200/300ms。
+/// 动效覆盖层：时长（毫秒，按语义档位取，回退 120/200/300ms）+ 标准曲线 + 标准弹簧。
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimTheme {
@@ -939,6 +940,10 @@ pub struct AnimTheme {
     pub normal: Option<u32>,
     /// 慢档（大块过渡）。
     pub slow: Option<u32>,
+    /// 标准缓动曲线（进场、展开、状态切换），回退 [`Easing::STANDARD`]。
+    pub easing: Option<Easing>,
+    /// 标准弹簧（高频打断的反馈：hover、开关、滑块），回退 [`Spring::SMOOTH`]。
+    pub spring: Option<Spring>,
 }
 
 impl AnimTheme {
@@ -950,6 +955,12 @@ impl AnimTheme {
     }
     pub fn slow(&self) -> u32 {
         self.slow.unwrap_or(300)
+    }
+    pub fn easing(&self) -> Easing {
+        self.easing.unwrap_or(Easing::STANDARD)
+    }
+    pub fn spring(&self) -> Spring {
+        self.spring.unwrap_or(Spring::SMOOTH)
     }
 }
 
@@ -1670,6 +1681,36 @@ mod tests {
             "前提：没碰 palette.border"
         );
         set_current(Rc::new(Theme::default()));
+    }
+
+    /// 动效 token 的 TOML 写法（API_GUIDE 里给的就是这两种）：命名曲线走 snake_case，
+    /// 贝塞尔是四元数组，弹簧是两个字段的表。
+    #[test]
+    fn anim_tokens_toml_parse() {
+        let t = Theme::from_toml(
+            "[anim]
+fast = 90
+easing = { cubic_bezier = [0.4, 0.0, 0.2, 1.0] }
+spring = { response_ms = 260.0, damping = 0.9 }
+",
+        )
+        .expect("应可解析");
+        assert_eq!(t.anim.fast(), 90);
+        assert_eq!(t.anim.easing(), Easing::CubicBezier(0.4, 0.0, 0.2, 1.0));
+        assert_eq!(
+            t.anim.spring(),
+            Spring {
+                response_ms: 260.0,
+                damping: 0.9
+            }
+        );
+        let named = Theme::from_toml("[anim]\neasing = \"ease_out\"\n").expect("应可解析");
+        assert_eq!(named.anim.easing(), Easing::EaseOut);
+        let d = Theme::default();
+        assert_eq!(
+            (d.anim.easing(), d.anim.spring()),
+            (Easing::STANDARD, Spring::SMOOTH)
+        );
     }
 
     #[test]

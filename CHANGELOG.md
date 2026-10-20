@@ -7,6 +7,20 @@
 
 ### 新增
 
+- **动效档位 `MotionLevel { Full, Reduced, Off }` 与减弱策略**：`Reduced` 只让位移类补间（`Transition::movement()`
+  标记的：开关滑块、分段胶囊、标签页指示条、拖动排序、富文本卷帘、光标滑行）瞬时到位，颜色与透明度渐变保留。
+  默认随系统：系统要求减弱动效时落到 `App::reduced_motion(level)` 指定的档位（默认 `Reduced`），不要求时 `Full`；
+  `App::motion(level)` 强制档位，`App::animations(bool)` 是它的简写。运行期 `anim::set_motion_level`。
+  `MotionLevel` 进 `prelude`。
+- **弹簧 `anim::Spring { response_ms, damping }`**（预置 `SMOOTH` / `SNAPPY` / `BOUNCY`）与 `Transition::retarget_spring`：
+  解析解、只依赖帧时钟（截图可复现）；中途改向**继承当前速度**，不再有"速度突然归零"的折角。
+- **`Easing::CubicBezier(x1, y1, x2, y2)`**（同 CSS）与预置 `Easing::STANDARD` / `DECELERATE` / `ACCELERATE`。
+- **`Transition::settle(v)`**：瞬时落定且保留 `movement` 标记（用 `Transition::new` 重建会丢标记）。
+- **`Lerp` 扩到 `Point` / `Size` / `Rect` / `Insets`**；新增可选方法 `Lerp::delta_ratio` 供弹簧改向换算速度。
+- **主题动效 token**：`[anim] easing` / `spring`（`AnimTheme::easing()` / `spring()`，回退 `STANDARD` / `SMOOTH`）。
+- **调试与截图**：环境变量 `WINDUI_ANIM_SCALE=<倍数>` 把所有补间放慢；截图参数 `--anim-at <ms>` 截"最后一次
+  合成交互之后第 ms 毫秒"那一帧（钉住时钟，结果与机器快慢无关），用于过渡中间帧的视觉回归。
+
 - **`Element::marks(Signal<Vec<TextMark>>)`：输入框按区间挂底色**（Qt `setExtraSelections` 的最小形）。查找替换把
   整框里所有命中涂黄，画在文字与选区下面，不接事件、不改正文。区间是字符索引（与光标 / `select_range` 同一单位），
   越界钳制；`bg: None` 取新主题槽 `InputTheme::mark`（`[input] mark`，默认 `palette.warning` 的 40% alpha）。`TextMark` 进 `prelude`。
@@ -26,6 +40,12 @@
 
 ### 变更
 
+- **系统"减弱动效"的默认处理变了**：Windows 关掉「显示动画」以前是全关，现在落到 `Reduced`（颜色渐变照常，
+  只在交互时短暂播放，空闲仍零 CPU）；要旧行为写 `.reduced_motion(MotionLevel::Off)`。macOS 以前不读系统设置
+  （恒全开），现在读「减弱动态效果」；Linux 现在读 GNOME `org.gnome.desktop.interface enable-animations`。
+- **破坏性**：`WindowConfig.animations: Option<bool>` 换成 `motion: Option<MotionLevel>` + `reduced_motion` +
+  `screenshot_anim_at`；`Easing` 因新增带 `f32` 的 `CubicBezier` 不再实现 `Eq`；`Lerp` 的约定放宽为 `t` 可越出
+  `[0,1]`（弹簧与回弹曲线会过冲，整数型四舍五入）。
 - **`Widget::keys_damage_self_only()`（新增，默认 = `accepts_text()`）与 `EventCtx::app_callback`**：自定义控件的
   按键写信号默认整窗重绘；收字控件可覆盖为 `true` 保留局部帧，并把转交给应用的回调放进 `ctx.app_callback` 里跑。
   自定义的非文本控件若依赖「按键只重绘自己」的旧行为做性能优化，需覆盖它并自行声明覆盖全部读者的脏区。

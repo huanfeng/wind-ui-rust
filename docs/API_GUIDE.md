@@ -631,8 +631,8 @@ caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行
 > **闪烁跟随系统的「插入符」设置**（Windows `GetCaretBlinkTime`、macOS
 > `NSTextInsertionPointBlinkPeriod*`）：周期随它走，用户在辅助功能里关掉闪烁则恒实心、
 > 不续帧。它**不受**「客户区动画 / 减弱动态效果」开关影响——那个管的是窗口与控件过渡，
-> 系统自带输入框在关掉它之后插入符照样闪。受它影响的是**平滑移动**（`anim::set_enabled(false)`
-> 即瞬移）。应用可用 `App::animations(false)` 一并关掉闪烁与滑行。
+> 系统自带输入框在关掉它之后插入符照样闪。受它影响的是**平滑移动**（位移类过渡，动效档位为
+> `Reduced` 或 `Off` 时即瞬移）。应用可用 `App::animations(false)` 一并关掉闪烁与滑行。
 
 > 闪烁只重绘光标那一条（自报脏区），不是整个输入框；局部帧还会跳过落在脏区外的节点自绘、
 > 只把脏区那几行呈现到窗口。**方波闪烁还会报出下一次翻面的时刻**，帧驱动据此一直睡到那时
@@ -2506,6 +2506,57 @@ let dot = Element::leaf().widget(Dot { on: state });
 连续动画，你报的截止就被压回满帧配速，不存在"某个控件把整窗睡过去"。
 **报早了只是白付几帧，报晚了会让动画卡在旧画面上**——拿不准就传 0。
 
+**补间**：自绘控件的状态过渡用 `anim::Transition<T>`（`T` 为 `f32` / `Color` / `Point` / `Size` /
+`Rect` / `Insets`），存进 `Cell`，在 `paint` 里据当前状态改向、取值——取值时仍在过渡中会自动请求下一帧：
+
+```rust
+use windui::anim::{Easing, Transition};
+// 字段：knob: Cell<Transition<f32>>，构造时 Cell::new(Transition::new(0.0).movement())
+let th = windui::theme::current();
+let mut tr = self.knob.get();
+let target = if on { 1.0 } else { 0.0 };
+if tr.target() != target {
+    tr.retarget(target, th.anim.normal(), th.anim.easing());   // 时间曲线
+    // 或 tr.retarget_spring(target, th.anim.spring());          // 弹簧：中途改向继承速度
+}
+let x = tr.animate();
+self.knob.set(tr);
+```
+
+- **曲线**：`Easing::{Linear, EaseIn, EaseOut, EaseInOut}`、`Easing::CubicBezier(x1, y1, x2, y2)`
+  （同 CSS），以及预置 `Easing::STANDARD`（进场/展开/状态切换）、`DECELERATE`（进场）、`ACCELERATE`（离场）。
+- **弹簧**：`Spring { response_ms, damping }`，预置 `SMOOTH`（不过冲，默认）/ `SNAPPY` / `BOUNCY`。
+  时长由参数决定；中途改向**继承当前速度**，悬停快速进出、开关连点时不会有"速度突然归零"的折角——
+  高频打断的反馈优先用它。
+- **主题 token**：`theme.anim` 的 `fast()/normal()/slow()`（120/200/300ms）、`easing()`、`spring()`，
+  TOML 可配：
+
+  ```toml
+  [anim]
+  normal = 180
+  easing = { cubic_bezier = [0.4, 0.0, 0.2, 1.0] }   # 或 easing = "ease_out"
+  spring = { response_ms = 260.0, damping = 0.9 }
+  ```
+
+**动效档位**（`MotionLevel`）：`Full` 全开；`Reduced` 只让**位移类**补间（构造时标了
+`.movement()` 的：位置、尺寸、展开高度）瞬时到位，颜色与透明度渐变保留；`Off` 全部瞬时收敛、不续帧。
+默认随系统：系统要求减弱动效（Windows「显示动画」关、macOS「减弱动态效果」开、GNOME
+`enable-animations` 关）时落到 `App::reduced_motion(..)` 指定的档位，默认 `Reduced`；不要求时 `Full`。
+
+```rust
+App::new("t", 400, 300)
+    .reduced_motion(MotionLevel::Off)   // 系统要求减弱时干脆全关
+    // .motion(MotionLevel::Full)       // 或强制档位，无视系统（.animations(bool) 是它的简写）
+```
+
+运行期用 `anim::set_motion_level(..)` 切换。调试曲线时设环境变量 `WINDUI_ANIM_SCALE=5` 把所有补间
+放慢 5 倍（只影响补间，双击/长按等时长判定仍按真实时间）。截图默认等过渡收尾；要截中间帧加
+`--anim-at <ms>`，截的是最后一次合成交互之后第 ms 毫秒那一帧（时钟被钉住，结果与机器快慢无关）：
+
+```bash
+cargo run --example animation -- --screenshot mid.png --click 240 412 --anim-at 80
+```
+
 ### 9.1 可编辑文本控件：接住输入法合成串
 
 自绘的可编辑文本控件（不是用 `TextInput` 的那种）要显示输入法未上屏的合成串
@@ -2876,7 +2927,7 @@ fn every_key_used_is_translated() {
 | `windui::event` | `Event / PointerEvent / KeyEvent / Key / MenuItem`；`window_state()`（窗口快照）、`window_open(key)`（某个单例窗口开着没有，常驻模式判显隐用它） |
 | `windui::core` | `Widget / EventCtx`（自定义控件） |
 | `windui::render` | `Canvas / Paint`（自绘图元） |
-| `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画） |
+| `windui::anim` | `request_repaint()`（驱动动画）、`request_repaint_in_after()`（定时动画）、`Transition` / `Easing` / `Spring`（补间）、`MotionLevel` / `set_motion_level()`（动效档位） |
 | `windui::testing` | `run_with_ctx()`（在测试里跑收 `EventCtx` 的回调，见 §9.2）、`run_with_tray_ctx*()`、`run_with_hotkey_ctx()` / `run_with_hotkey_ctx_closes()`（热键回调请求的显隐意图 / 关窗键） |
 
 更多可运行示例见 `examples/`（`phase4_form` 表单、`fullshowcase` 全控件、`theming` 主题、`list` 列表、`multi_window` 多窗口、`i18n` 多语言等）。
