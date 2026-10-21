@@ -585,6 +585,8 @@ impl Canvas for WgpuCanvas<'_> {
         // ① 对齐物理像素整数坐标：四边乘 scale 取整后还原，使描边中心落在物理半像素上，
         //    两侧各 0.5px 恰好覆盖完整一列像素，消除 125%/150% 等非整数 DPI 的亚像素糊边。
         let (x, y, w, h) = crate::render::align_to_device(x, y, w, h, self.scale);
+        // 线宽也取整数个物理像素，否则 150% 下 1px 边框是一实一虚两行
+        let width = crate::render::align_stroke_width(width, self.scale);
         // ② 线宽 clamp 到半边。
         let width = width.min(w / 2.0).min(h / 2.0).max(0.0);
         let half = width / 2.0;
@@ -604,6 +606,8 @@ impl Canvas for WgpuCanvas<'_> {
 
     fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, paint: &Paint) {
         self.before_prim();
+        // 横竖线对齐物理像素（三个后端同一份公式，见 `align_line`）
+        let (x0, y0, x1, y1, width) = crate::render::align_line(x0, y0, x1, y1, width, self.scale);
         // 端帽是 Butt（skia.rs:262 的 `LineCap::Butt`）：线段两端不外延，
         // 几何上就是一个以线段为中轴的旋转矩形——`sd_segment_box` 直接给这个形状。
         let (clip, m) = (self.clip_phys(), self.aa_margin());
