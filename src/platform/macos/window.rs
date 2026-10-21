@@ -2589,6 +2589,7 @@ pub(crate) fn run_windowed(
     }
     // 单实例首实例：起 accept 线程接收二次实例 argv（收到后经 libdispatch 派回主线程
     // 切页 + 激活窗口）。窗口指针存活至进程退出，对照 MacWake 持视图指针的做法。
+    let single_installed = single.is_some();
     if let Some(si) = single {
         crate::single_instance::install_listener(
             &si.app_id,
@@ -2600,6 +2601,9 @@ pub(crate) fn run_windowed(
         // 装晚了就直接丢掉（表现为「第一次点链接没反应，第二次才行」）。
         super::url_scheme::install();
     }
+    // 关联文件的打开事件（Finder 双击 / 打开方式 / 拖到 Dock）同样走 on_second，没开单实例
+    // 时没有接收方，也就不装——装了 delegate 却丢掉文件，不如让 AppKit 照常提示打不开。
+    let _app_delegate = single_installed.then(|| super::open_files::install(mtm, &app));
 
     // 主窗登记：托盘与全局热键的"唤出窗口"指的是它。装热键**之前**设好——热键一旦
     // 注册就可能立刻被按下。
@@ -2624,6 +2628,7 @@ pub(crate) fn run_windowed(
     super::activate_app(&app);
     app.run();
     drop(_tray);
+    drop(_app_delegate);
 
     // 事件循环结束后释放 GPU 共享设备链，对照 win32 消息循环之后的 `release_shared_device`。
     //

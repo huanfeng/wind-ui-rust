@@ -1951,6 +1951,11 @@ impl App {
     /// 仅首实例会被调用 `on_second_instance`（收到另一进程 argv 时，在 UI 线程）；
     /// 二次实例：argv 已转发给首实例，`run()` 直接返回、不建窗口。
     ///
+    /// macOS 上被系统「用本应用打开」的文件（Finder 双击关联文件、打开方式、拖到 Dock 图标）
+    /// 和自定义 URL scheme 一样不进 argv，而是走 Apple Event；开了单实例后它们也按
+    /// `[exe, 路径…]` / `[exe, url]` 交给 `on_second_instance`，冷启动与已在运行时都一样。
+    /// 文件类型仍要在 `Info.plist` 的 `CFBundleDocumentTypes` 里声明。
+    ///
     /// 把窗口带到前台**不需要**你动手：平台层在本回调返回后就会激活主窗口。
     ///
     /// # 为什么这个回调不收 `EventCtx`

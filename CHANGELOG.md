@@ -7,6 +7,9 @@
 
 ### 新增
 
+- **macOS 接收「用本应用打开」的文件**：Finder 双击关联文件、「打开方式」、拖到 Dock 图标发的是 `odoc`
+  Apple Event，不进 argv。开了 `App::single_instance` 时，库装一个实现 `application:openURLs:` 的 app delegate，
+  把文件按 `[exe, 路径…]` 交给 `on_second_instance`（冷启动与已在运行时都走这条），与 URL scheme 同一通路。
 - **`Element::reveal_when(Signal<u64>)`**：计数信号一变就把该元素滚进祖先滚动容器的视口（不动焦点），
   规则同 `focus_when`（初值不触发、同一次事件里重建的节点照样认这次触发、不可见的等出现再滚）。
   用于让新加入或被程序选中的列表行可见。

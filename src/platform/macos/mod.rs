@@ -17,6 +17,7 @@
 
 pub mod clipboard;
 pub mod hotkey;
+pub mod open_files;
 pub mod tray;
 pub mod url_scheme;
 pub mod window;
