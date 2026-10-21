@@ -776,3 +776,54 @@ fn stacked_sibling_reveal_does_not_suppress() {
         "B 应从旧位置起步"
     );
 }
+
+/// 自己居中、又在做高度过渡的容器：它每帧重新居中，里面的 B 跟着被推。展开节点是 B 的
+/// 祖先这一情形，只看"祖先自己的高度过渡只裁剪"会漏掉它本身的落点也在变。
+#[test]
+fn centered_height_animating_ancestor_carries_child() {
+    let clock = Clock::new(MotionLevel::Full);
+    let track = |flip: bool| {
+        let show = signal(false);
+        let app = App::new("t", W, H).content(
+            Element::stack().fill().bg(Color::WHITE).child(
+                Element::col()
+                    .width(120)
+                    .align(crate::spec::Align::Center)
+                    .animate_height()
+                    .child({
+                        let b = Element::leaf().size(100, 30).bg(RED);
+                        if flip {
+                            b.animate_layout()
+                        } else {
+                            b
+                        }
+                    })
+                    .child(
+                        Element::button("切换")
+                            .size(80, 30)
+                            .on_click(move |_| show.set(!show.get())),
+                    )
+                    .child(Element::leaf().size(100, 100).bg(GRAY).visible_signal(show)),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        clock.at(1_000);
+        render(&mut h);
+        let col = h.tree.get(h.tree.root.unwrap()).unwrap().children[0];
+        let btn = h.tree.abs_bounds(h.tree.get(col).unwrap().children[1]);
+        click(&mut h, Point::new(btn.x + 10, btn.y + 10));
+        let mut ys = Vec::new();
+        for t in (0..=300).step_by(25) {
+            clock.at(1_000 + t);
+            ys.push(red_top(&render(&mut h), 120).unwrap());
+        }
+        ys
+    };
+    let plain = track(false);
+    assert!(
+        plain.windows(2).filter(|w| w[0] != w[1]).count() > 2,
+        "前提：容器逐帧重新居中、B 被逐帧推动：{plain:?}"
+    );
+    assert_eq!(track(true), plain, "应逐帧跟随，不落后");
+}

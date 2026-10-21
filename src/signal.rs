@@ -14,8 +14,8 @@
 //!
 //! 剩下一小撮是**构建期临时信号**：在 `Element` 构建过程中被创建（控件内部需要一处可写状态，
 //! 或调用方在行构建闭包里现造一个）。这一撮的问题在于**元素构建会重复发生**——本库有三处
-//! 会按数据变化重建子树的宿主（`Element::list_signal` 的 `DynList`、`reorder_list_signal`
-//! 的行源、以及可排序表格的行/表头），每重建一轮就再造一批。没有回收，这批槽位随线程存活。
+//! 会按数据变化重建子树的宿主（`Element::list_signal` 的 `KeyedList`、`host_signal` 的 `DynList`、
+//! `reorder_list_signal` 的行源、以及可排序表格的行/表头），每重建一轮就再造一批。没有回收，这批槽位随线程存活。
 //!
 //! 所以本模块的所有权模型是**两级**的，而不是 leptos / floem 那样的单一作用域树：
 //!
@@ -396,9 +396,9 @@ pub fn signal<T: 'static>(value: T) -> Signal<T> {
 ///
 /// # 谁在用它
 ///
-/// 库内三处会按数据重建子树的宿主各持有一个：`Element::list_signal` 的 `DynList`、
-/// `Element::reorder_list_signal` 的行源、以及可排序表格的行/表头。它们在重建时先回收
-/// 上一轮的作用域、再在新作用域里构建新行——所以**在 `row_fn` 里 `signal(..)` 是安全的**，
+/// 库内会按数据重建子树的宿主各自持有：`Element::list_signal` 的 `KeyedList`（**每行一个**，
+/// 删行或重建那一行时回收）、`Element::host_signal` 的 `DynList`、`Element::reorder_list_signal`
+/// 的行源、以及可排序表格的行/表头。它们在重建时先回收上一轮的作用域、再在新作用域里构建新行——所以**在 `row_fn` 里 `signal(..)` 是安全的**，
 /// 每轮重建的临时信号会随该轮子树一起消失，不会累积。
 ///
 /// # 回收后旧句柄会失效

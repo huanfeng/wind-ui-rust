@@ -175,9 +175,9 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 - **归属作用域**：在 `SignalScope::collect(..)` 内创建的信号归该作用域所有，作用域回收
   时整批释放，槽位可被后续 `signal()` 复用。
 
-本库有三处会按数据变化整批重建子树的宿主：`list_signal` / `host_signal`（`DynList`）、
-`reorder_list_signal` 的行源、以及可排序表格的表头与正文。**它们各自持有一个作用域**，
-重建时先回收上一轮再收集新一轮。所以：
+本库有几处会按数据变化重建子树的宿主：`list_signal`（每行一个作用域，删行 / 重建那一行时回收）、
+`host_signal`、`reorder_list_signal` 的行源、以及可排序表格的表头与正文（整批一个作用域）。
+**它们各自持有作用域**，重建时先回收上一轮再收集新一轮。所以：
 
 ```rust
 // 安全：每次数据变化重建行时，上一轮的 caption 会被回收，不会累积
@@ -1142,7 +1142,7 @@ windui 的做法是：把整份数据放进一个 `Signal<Vec<T>>`，UI 声明"�
 ```rust
 use windui::prelude::*;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]   // list_signal 靠 PartialEq 判断同一个键的数据变没变
 struct Task { name: String, done: bool }
 
 fn main() {
@@ -1164,8 +1164,8 @@ fn main() {
 
     let list = Element::list_signal(
         tasks,
-        |t: &Task| t.name.clone(),          // key_fn：预留给后续 diff 优化，现在随便给
-        |t: Task| Element::label(t.name).width_match().padding(8),
+        |t: &Task| t.name.clone(),          // key_fn：每条数据的唯一键
+        |t: Task| Element::label(t.name).width_match().padding(8).animate_item(),
     );
 
     let ui = Element::col().fill().padding(16).spacing(10)
@@ -1178,19 +1178,33 @@ fn main() {
 
 **机制**：`list_signal` 建出的节点被标记为**响应式**（`Element::reactive()` 做的就是这个标记），
 框架在每次 layout 之前，对所有已注册的响应式节点调一次 `Widget::on_update`。控件在那里比对
-绑定信号的 `version()`（每次 `set`/`update` 自增）与自己缓存的版本号：不等就清空旧子节点、
-用 `row_fn` 重建一批新的。所以你只需保证"信号里的 `Vec` 就是当前该显示的内容"，重建时机
+绑定信号的 `version()`（每次 `set`/`update` 自增）与自己缓存的版本号：不等就按 `key_fn`
+比对新旧两批。所以你只需保证"信号里的 `Vec` 就是当前该显示的内容"，更新时机
 不用管。
 
-当前实现是**全量重建**，不做 keyed diff（`key_fn` 是给后续优化预留的参数，传
-`|_| ()` 也合法）。因此行内控件的临时状态（未提交的输入、悬停）会随重建丢失——需要保留的
-状态请放进信号里，由数据携带。
+比对规则（keyed diff）：
+- 键在、数据没变（`PartialEq` 相等）的行**原样保留节点**，只按新顺序重排——焦点、未提交的输入、
+  控件内部状态都留着；
+- 键在但数据变了的行用 `row_fn` 重建（这一行的临时状态随之丢失）；新键建新行；消失的键删行；
+- 新数据里**键有重复**时退回整批重建（一个键对不上唯一的行）。传 `|_| ()` 也合法，两行以上时
+  就是每次整批重建（只有零或一行时键不重复，照常比对）。
+- **行外依赖不会随重新 `set` 刷新**：数据相等的行原样复用，所以 `row_fn` 在构建时读的外部状态
+  （`if selected.get() == t.id { 高亮 }`、全局配置）不会因为 `data.set(data.get())` 重新求值。
+  这类依赖要么放进 `T`，要么在行内绑信号（`bg_when`、`visible_signal`、文案传 `Signal<String>`）。
+- 列表的子节点只能由数据生成：别在 `list_signal(..)` 后面再 `.child(..)`。
+
+行上挂 `.animate_item()`（= `.transition(Presence::reveal()).animate_layout()`）即得列表项动效：
+新增的行淡入展开，删除的行淡出收起，重排时各行滑到新位置。删除时行先作为残影留在原处播离场
+（不在数据里，点不到、拿不到焦点），播完才真正移除；播离场途中又加回来就地复活。首批行不播进场。
+行上只挂了 `transition(..)` 也会在增删时播它，只挂 `animate_layout()` 则只有重排滑动。过渡要挂在
+`row_fn` 返回的**根元素**上，挂在行内部的子元素上不算。增删动画期间每帧重排整个列表，几千行以内
+没问题；行数再多用 `virtual_list`（它的行随滚动回收重建，不带这套动效）。
 
 这一族 API 一览：
 
 | API | 容器形态 | 用途 |
 |---|---|---|
-| `Element::list_signal(data, key_fn, row_fn)` | **滚动**容器 | 行数会变的长列表 |
+| `Element::list_signal(data, key_fn, row_fn)` | **滚动**容器 | 行数会变的长列表（按键复用行，可挂 `animate_item`） |
 | `Element::host_signal(data, build_fn)` | 普通 `col` | 整段结构随状态重建（如列集随类别切换的表格） |
 | `Element::reorder_list_signal(data, row_fn)` | `col` + 拖动手柄 | 顺序真相源在信号里的可拖拽排序列表 |
 | `Element::dropdown_signal(options, selected)` | 下拉 | 选项列表异步到达 |
@@ -2627,7 +2641,8 @@ Element::col()
   照常收尾。父子都声明时子只过渡相对父的部分，不会叠两遍。减弱动效档下瞬时到位。
 - 别挂在逐帧改布局位置的节点上（`place_fn` 跟指针拖动）：每帧起一段新过渡，会拖在指针后面。过渡途中
   锚在它上面的下拉浮层、提示按最终位置定位。
-- 节点要**活过**那次布局变化才有旧位置可比：`list_signal` 每次数据变化都重建全部行，挂在行上没有效果。
+- 节点要**活过**那次布局变化才有旧位置可比：`list_signal` 按键复用行，挂在行上有效（`animate_item`
+  一并带上增删过渡，见 §6.5）；`host_signal` 每次整批重建，挂了无效。
 
 运行期用 `anim::set_motion_level(..)` 切换。调试曲线时设环境变量 `WINDUI_ANIM_SCALE=5` 把所有补间
 放慢 5 倍（只影响补间，双击/长按等时长判定仍按真实时间）。截图默认等过渡收尾；要截中间帧加
@@ -2769,7 +2784,8 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
   GPU 后端：Windows 走 Direct2D（feature `d2d`，默认开），macOS 走 wgpu/Metal（默认编入）；
   Linux 窗口模式暂只有软光栅。见 §5。
 - `list` 当前每行是独立 Tab 停靠点，超长列表会拉长焦点链（计划：单 Tab 停靠 + 方向键导航）。
-- `list_signal` 一族当前是**全量重建**、无 keyed diff，行内未提交的临时状态会随重建丢失（见 §6.5）。
+- `list_signal` 按键复用行，但**数据变了的那一行**仍是重建，行内未提交的临时状态随之丢失；
+  `host_signal` 每次整批重建（见 §6.5）。
 - 表格扩展修饰符只对部分表格变体生效，误用时 debug 期 panic、release 静默忽略——见 §5 的适用矩阵。
 - **虚拟滚动要求行高固定**，且 Tab 焦点环只覆盖已渲染的行、行内部临时状态随重建重置、
   与拖拽重排互斥（见 §6.6 的限制表）。几百行以内用 `list_signal` 更省心。
@@ -2778,7 +2794,7 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
   而次像素抗锯齿要求每个通道各有一个 alpha、RGBA 只有一个，层内因此退化为灰度抗锯齿
   （浏览器给 `opacity` 子树的也是这个取舍）。小字号下会觉得比不透明路径略"细"。
   两个后端都如此，与 GPU 与否无关。全不透明的常规路径不受影响。
-- **信号槽位回收只覆盖库内四处**：`list_signal` / `host_signal` 的 `DynList`、
+- **信号槽位回收只覆盖库内四处**：`list_signal`（按行）/ `host_signal`（整批）、
   `reorder_list_signal` 的行源、可排序表格的表头与正文，以及**子窗内容构建期**
   （`Window::content` 的闭包内，随窗口关闭整批回收，见 §8.8）。作用域外的 `signal()` **永不回收**，
   这是刻意的——应用状态没有所有者，也不该有。但若应用自己写了"按数据整批重建子树"的

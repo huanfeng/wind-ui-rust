@@ -41,6 +41,8 @@ mod focus;
 #[cfg(test)]
 mod key_damage_tests;
 #[cfg(test)]
+mod keyed_list_tests;
+#[cfg(test)]
 mod layout_anim_tests;
 #[cfg(test)]
 mod marks_tests;

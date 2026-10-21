@@ -2051,9 +2051,23 @@ impl Element {
     /// 别挂在逐帧改布局位置的节点上（`place_fn` 跟指针拖动的画布元素）：每帧都会起一段
     /// 新过渡，拖在指针后面。过渡途中挂在它上面的下拉浮层、提示按最终位置定位。
     ///
-    /// 节点要**活过**这次布局变化才有旧位置可比：`list_signal` 每次数据变化都重建全部行，
-    /// 挂在行上不会有效果。
+    /// 节点要**活过**这次布局变化才有旧位置可比：`list_signal` 按键复用行节点，挂在行上
+    /// 有效（见 [`animate_item`](Self::animate_item)）；`host_signal` 每次整批重建，无效。
     pub fn animate_layout(mut self) -> Self {
+        self.animate_layout = true;
+        self
+    }
+
+    /// 列表项动效（Compose `animateItem`）：挂在 [`list_signal`](Self::list_signal) 的行上，
+    /// 新增的行淡入展开、删除的行淡出收起（播完才真正移除）、重排时滑到新位置。
+    ///
+    /// 等价于 `.transition(Presence::reveal()).animate_layout()`；已经声明了
+    /// [`transition`](Self::transition) 的保留原样，只补布局过渡。首批行不播进场。
+    /// 要挂在 `row_fn` 返回的根元素上；增删动画期间每帧重排整个列表，几千行以内没问题。
+    pub fn animate_item(mut self) -> Self {
+        if self.presence.is_none() {
+            self.presence = Some(presence::Presence::reveal());
+        }
         self.animate_layout = true;
         self
     }
@@ -2301,41 +2315,50 @@ impl Element {
         self
     }
 
-    /// 响应式动态列表：数据源绑定 `Signal<Vec<T>>`，信号变化时框架自动重建行元素。
+    /// 响应式动态列表：数据源绑定 `Signal<Vec<T>>`，信号变化时按键更新行。
     ///
     /// - `data`：数据源信号；写入新 Vec 即触发列表刷新（排序/过滤均可）。
-    /// - `_key_fn`：预留 diff 优化用，当前版本做全量重建，传 `|_| ()` 即可。
+    /// - `key_fn`：每条数据的唯一键（id 之类）。键在、数据没变的行**原样保留节点**（焦点、
+    ///   控件内部状态都留着），只按新顺序重排；键在但数据变了的行重建；新键建新行，消失的
+    ///   键删行。新数据里键有重复时退回整批重建。数据相等的行不重建，`row_fn` 在构建时读的
+    ///   外部状态也就不会因为重新 `set` 而刷新——这类依赖放进 `T` 或在行内绑信号。
+    ///   子节点只能由数据生成，别再 `.child(..)` 追加。
     /// - `row_fn`：每行的构建函数，接收数据条目返回 `Element`。
+    ///
+    /// 行上挂 [`animate_item`](Self::animate_item) 即得增删淡入淡出、重排滑动；删除时行先
+    /// 留在原处播离场（不在数据里，点不到），播完才移除。
     ///
     /// # 示例
     /// ```ignore
-    /// let items = signal(vec!["苹果", "香蕉", "橙子"]);
-    /// Element::list_signal(items, |_| (), |s| Element::label(s))
+    /// let items = signal(vec![Task { id: 1, .. }, Task { id: 2, .. }]);
+    /// Element::list_signal(items, |t| t.id, |t| Element::label(t.title).animate_item())
     /// ```
     pub fn list_signal<T, K>(
         data: Signal<Vec<T>>,
-        _key_fn: impl Fn(&T) -> K + 'static,
+        key_fn: impl Fn(&T) -> K + 'static,
         row_fn: impl Fn(T) -> Self + 'static,
     ) -> Self
     where
-        T: Clone + 'static,
-        K: Eq + std::hash::Hash,
+        T: Clone + PartialEq + 'static,
+        K: Eq + std::hash::Hash + Clone + 'static,
     {
-        let row_fn = std::rc::Rc::new(row_fn);
-        // 构建初始子元素。圈进作用域交给 widget：首批行的构建期信号（`row_fn` 里现造的、
-        // 或行内控件内部造的）才能在第一次重建时随旧行一起回收，否则永久漏一代。
-        let mut rows = crate::signal::SignalScope::new();
-        let initial: Vec<Self> =
-            rows.collect(|| data.get().into_iter().map(|item| row_fn(item)).collect());
-        // DynList widget 持有 Rc 副本，信号变更时重建子节点
-        let row_fn_clone = row_fn.clone();
-        let widget = dyn_list::DynList::with_scope(data, move |item: T| row_fn_clone(item), rows);
+        // 首批行各自在自己的作用域里构建：行被删除或重建时，它构建期创建的信号（`row_fn`
+        // 里现造的、或行内控件内部造的）随之回收，否则永久漏一代。
+        let mut elements = Vec::new();
+        let initial: Vec<_> = data
+            .get()
+            .into_iter()
+            .map(|item| {
+                let mut scope = crate::signal::SignalScope::new();
+                elements.push(scope.collect(|| row_fn(item.clone())));
+                (key_fn(&item), item, scope)
+            })
+            .collect();
+        let widget = dyn_list::KeyedList::new(data, key_fn, row_fn, initial);
         let mut container = Self::scroll().fill();
         container.set_widget(Box::new(widget));
         container.reactive = true;
-        for el in initial {
-            container.children.push(el);
-        }
+        container.children = elements;
         container
     }
 
@@ -5483,7 +5506,8 @@ mod tests {
     #[test]
     fn list_signal_rebuild_reclaims_row_signals() {
         // 根因回归：`row_fn` 里创建的信号曾随每次数据变化永久累积（运行时 arena 只增不减）。
-        // 现在 DynList 持有一个 SignalScope，重建时先整批回收上一轮，再收集新一轮。
+        // 现在每行持有一个 SignalScope（`KeyedList`），删行 / 重建时随行回收；这里键全是 `()`，
+        // 走的是整批重建分支。
         use crate::signal::stats;
 
         let data = signal(vec![1u8, 2, 3]);

@@ -5,6 +5,7 @@
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::signal::Signal;
@@ -146,7 +147,7 @@ pub trait ClipboardProvider {
 }
 
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId {
     index: u32,
     generation: u32,
@@ -739,6 +740,152 @@ pub struct Node {
     pub focus_when: Option<FocusTrigger>,
 }
 
+/// 一次布局同步里"哪些布局过渡节点被展开推着走"的索引（见 [`Tree::sync_layout_anims`]）。
+///
+/// 逐对判断（每个推进中的展开 × 每个布局过渡节点 × 树深，外加找兄弟下标的线性扫描）在
+/// 长列表增删时是平方级：2000 行挂 `animate_item` 删掉一半，一帧 140ms。这里先把每个展开到
+/// 根的链摊到沿途各层（记下展开落在哪些子支），再让每个节点只走自己到根的那一条链，判据与
+/// 逐对判断逐条对应（测试里对拍）。兄弟下标、"前面有没有加权兄弟"都按父节点缓存。
+struct PushIndex {
+    /// 自身就在推进展开的节点。
+    movers: HashSet<NodeId>,
+    /// 子树里有展开的节点 → 展开所在子支的（最小, 最大）下标。
+    branches: HashMap<NodeId, (usize, usize)>,
+    /// 子节点 → 它在父节点 children 里的下标。
+    index: HashMap<NodeId, usize>,
+    /// 父节点 → 第一个主轴加权子节点的下标（没有为 `usize::MAX`）。
+    first_weighted: HashMap<NodeId, usize>,
+    /// 节点 → [`Tree::size_sensitive`]。
+    sensitive: HashMap<NodeId, bool>,
+}
+
+impl PushIndex {
+    fn new(tree: &Tree, movers: &[NodeId]) -> Self {
+        let mut px = PushIndex {
+            movers: movers.iter().copied().collect(),
+            branches: HashMap::new(),
+            index: HashMap::new(),
+            first_weighted: HashMap::new(),
+            sensitive: HashMap::new(),
+        };
+        for &m in movers {
+            let mut child = m;
+            while let Some(p) = tree.get(child).and_then(|n| n.parent) {
+                // 有父指针却不在父节点 children 里（正常路径走不到）：这一层记不了子支，
+                // 照样往上走，别让更高的层漏记——参照实现也不会因一层断掉就放弃。
+                if let Some(i) = px.child_index(tree, child) {
+                    let e = px.branches.entry(p).or_insert((i, i));
+                    *e = (e.0.min(i), e.1.max(i));
+                }
+                child = p;
+            }
+        }
+        px
+    }
+
+    fn child_index(&mut self, tree: &Tree, n: NodeId) -> Option<usize> {
+        if let Some(&i) = self.index.get(&n) {
+            return Some(i);
+        }
+        let parent = tree.get(tree.get(n)?.parent?)?;
+        for (i, &c) in parent.children.iter().enumerate() {
+            self.index.insert(c, i);
+        }
+        self.index.get(&n).copied()
+    }
+
+    fn sensitive(&mut self, tree: &Tree, n: NodeId) -> bool {
+        if let Some(&s) = self.sensitive.get(&n) {
+            return s;
+        }
+        let idx = self.child_index(tree, n);
+        let parent_id = tree.get(n).and_then(|x| x.parent);
+        let first_weighted = &mut self.first_weighted;
+        let s = tree.size_sensitive_with(n, |parent, axis| {
+            let Some(pid) = parent_id else {
+                return false;
+            };
+            let first = *first_weighted.entry(pid).or_insert_with(|| {
+                parent
+                    .children
+                    .iter()
+                    .position(|&c| {
+                        tree.get(c).is_some_and(|c| {
+                            let main = if axis == Axis::Horizontal {
+                                &c.width
+                            } else {
+                                &c.height
+                            };
+                            main.is_weight() || c.weight_fn.is_some()
+                        })
+                    })
+                    .unwrap_or(usize::MAX)
+            });
+            idx.is_some_and(|i| first < i)
+        });
+        self.sensitive.insert(n, s);
+        s
+    }
+
+    /// `id` 是否被某个展开推着走。逐层对应 [`Tree::pushes`] 的三种情形：
+    /// 某层自己就是展开（展开是 `id` 的祖先或自身）、`id` 自己的子树里有展开（`id` 是祖先）、
+    /// 某层是展开与 `id` 的共同父节点（展开落在别的子支上）。
+    fn pushed(&mut self, tree: &Tree, id: NodeId) -> bool {
+        let mut chain = vec![id];
+        let mut n = id;
+        while let Some(p) = tree.get(n).and_then(|x| x.parent) {
+            chain.push(p);
+            n = p;
+        }
+        chain.reverse();
+        let sens: Vec<bool> = chain.iter().map(|&c| self.sensitive(tree, c)).collect();
+        // prefix[k] = chain[..k] 里有落点随尺寸变化的；suffix[k] = chain[k..] 里有。
+        let mut prefix = vec![false; chain.len() + 1];
+        for k in 0..chain.len() {
+            prefix[k + 1] = prefix[k] || sens[k];
+        }
+        let mut suffix = vec![false; chain.len() + 1];
+        for k in (0..chain.len()).rev() {
+            suffix[k] = suffix[k + 1] || sens[k];
+        }
+        for (k, &node) in chain.iter().enumerate() {
+            if self.movers.contains(&node) && prefix[k + 1] {
+                return true;
+            }
+            let Some(&(lo, hi)) = self.branches.get(&node) else {
+                continue;
+            };
+            if k + 1 == chain.len() {
+                // 展开在 `id` 自己的子树里。
+                if prefix[k + 1] {
+                    return true;
+                }
+                continue;
+            }
+            let Some(i) = self.child_index(tree, chain[k + 1]) else {
+                continue;
+            };
+            if lo == i && hi == i {
+                // 展开都在 `id` 这一支里，共同父节点在更深处。
+                continue;
+            }
+            if prefix[k + 1] || suffix[k + 1] {
+                return true;
+            }
+            match tree.get(node).map(|p| &p.layout) {
+                Some(Layout::Linear { .. } | Layout::Scroll) => {
+                    if lo < i {
+                        return true;
+                    }
+                }
+                Some(Layout::Frame) | None => {}
+                Some(_) => return true,
+            }
+        }
+        false
+    }
+}
+
 struct Slot {
     generation: u32,
     node: Option<Node>,
@@ -1151,6 +1298,7 @@ impl Tree {
     /// 比一帧到位难受得多。
     fn sync_layout_anims(&mut self, animate: bool) {
         let moving = self.layout_following.take();
+        let mut push = (!moving.is_empty()).then(|| PushIndex::new(self, &moving));
         let mut th = None;
         for (i, slot) in self.slots.iter().enumerate() {
             let Some(a) = slot.node.as_ref().and_then(|n| n.layout_anim.as_ref()) else {
@@ -1161,13 +1309,20 @@ impl Tree {
                 generation: slot.generation,
             };
             let pos = self.layout_anim_pos(id);
-            let pushed = moving.iter().any(|&m| self.pushes(m, id));
+            let pushed = push.as_mut().is_some_and(|px| px.pushed(self, id));
+            #[cfg(test)]
+            debug_assert_eq!(
+                pushed,
+                moving.iter().any(|&m| self.pushes(m, id)),
+                "PushIndex 须与逐对判断一致"
+            );
             let th = th.get_or_insert_with(crate::theme::current);
             a.relayout(pos, animate && !pushed, th);
         }
     }
 
-    /// 展开 / 高度过渡中的 `mover` 是否可能推动 `id` 的位置。宁可多判：多判只是这段
+    /// 逐对判断的参照实现（测试里与 [`PushIndex`] 对拍）：展开 / 高度过渡中的 `mover`
+    /// 是否可能推动 `id` 的位置。宁可多判：多判只是这段
     /// 期间的位移不另起过渡，漏判则每帧起一段新过渡去追，明显拖在后面。
     ///
     /// `mover` 变高时，先把它到根的每一层容器撑大（共同祖先 `P` 以上的每一层都包含 `id`），
@@ -1178,6 +1333,7 @@ impl Tree {
     ///
     /// `mover` 是 `id` 的祖先时，`id` 只在 `mover` 及其以上某层落点随尺寸变化时被推动——
     /// 祖先自己的高度过渡只裁剪，子节点按自然尺寸排布。`id` 是 `mover` 的祖先时同理。
+    #[cfg(test)]
     fn pushes(&self, mover: NodeId, id: NodeId) -> bool {
         let chain = |mut n: NodeId| {
             let mut v = vec![n];
@@ -1220,7 +1376,31 @@ impl Tree {
     ///
     /// 居中 / 靠后对齐、`Placement::Rect`、浮层（翻到锚点上方时随高度上移）、排在它前面的
     /// 加权兄弟（它变大，那个兄弟就缩）都算。未知布局一律算，理由见 [`Self::pushes`]。
+    #[cfg(test)]
     fn size_sensitive(&self, id: NodeId) -> bool {
+        self.size_sensitive_with(id, |parent, axis| {
+            let weighted = |c: &Node| {
+                let main = if axis == Axis::Horizontal {
+                    &c.width
+                } else {
+                    &c.height
+                };
+                main.is_weight() || c.weight_fn.is_some()
+            };
+            parent
+                .children
+                .iter()
+                .take_while(|&&c| c != id)
+                .any(|&c| self.get(c).is_some_and(weighted))
+        })
+    }
+
+    /// [`Self::size_sensitive`] 的骨架；"前面有没有加权兄弟"交给调用方（[`PushIndex`] 按父节点缓存）。
+    fn size_sensitive_with(
+        &self,
+        id: NodeId,
+        weighted_before: impl FnOnce(&Node, Axis) -> bool,
+    ) -> bool {
         let Some(n) = self.get(id) else {
             return false;
         };
@@ -1242,22 +1422,7 @@ impl Tree {
                 }
             },
             Layout::Linear { axis, cross, .. } => {
-                if moves(n.align.unwrap_or(cross)) {
-                    return true;
-                }
-                let weighted = |c: &Node| {
-                    let main = if axis == Axis::Horizontal {
-                        &c.width
-                    } else {
-                        &c.height
-                    };
-                    main.is_weight() || c.weight_fn.is_some()
-                };
-                parent
-                    .children
-                    .iter()
-                    .take_while(|&&c| c != id)
-                    .any(|&c| self.get(c).is_some_and(weighted))
+                moves(n.align.unwrap_or(cross)) || weighted_before(parent, axis)
             }
             _ => true,
         }

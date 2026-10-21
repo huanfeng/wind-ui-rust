@@ -1,6 +1,6 @@
 //! 虚拟滚动列表 widget（`Element::virtual_list` / `Element::table_virtual` 的内部驱动）。
 //!
-//! 常规列表（[`dyn_list::DynList`](super::dyn_list::DynList)、
+//! 常规列表（[`dyn_list::KeyedList`](super::dyn_list::KeyedList)、
 //! [`SortableBody`](super::sortable_table)）把**每一行**都建成真实节点：行数一多，
 //! 建树、每帧 measure/arrange、每帧 paint 三条 O(N) 成本一条都躲不掉，且滚动一格就要
 //! 全付一遍（`ScrollWidget` 滚动即 `mark_layout_dirty`）。实测 3 列表格在 release 下

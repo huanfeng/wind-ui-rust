@@ -10,8 +10,9 @@
 //! 这靠给 `Element::button` 传 `Signal<String>` 实现（见 `TextContent`）——文案改了，
 //! 按钮宽度也跟着重新测量，无需重建控件。
 //!
-//! 列表本身则是每次点击对 Signal<Vec<Task>> 调 `.set()`，框架自动清空旧子节点并重建
-//! 新子节点，调用方不感知 reconciler 的存在。
+//! 列表本身则是每次点击对 Signal<Vec<Task>> 调 `.set()`，框架按 `key_fn` 比对新旧两批：
+//! 键在且数据没变的行原样保留节点、按新顺序重排，消失的键删行，新键建行。行上挂了
+//! `animate_item()`，所以排序时行滑到新位置，筛选时被删的行淡出收起、恢复的行淡入展开。
 
 use windui::prelude::*;
 
@@ -41,7 +42,8 @@ impl Priority {
     }
 }
 
-#[derive(Clone)]
+// 键控列表靠 `PartialEq` 判断"同一个键的数据变没变"，变了才重建那一行。
+#[derive(Clone, PartialEq)]
 struct Task {
     name: &'static str,
     priority: Priority,
@@ -204,15 +206,16 @@ fn main() {
         .child(sort_btn)
         .child(filter_btn);
 
-    // 响应式列表：数据变化时框架自动清空旧行、重建新行
+    // 响应式列表：按键比对，行节点随数据复用、重排、增删
     let list = Element::list_signal(
         tasks,
-        |t: &Task| t.name, // key_fn（暂未做 diff 优化，用于未来接入）
+        |t: &Task| t.name,
         |t: Task| {
             task_row(t)
                 .bg_role(Role::Surface)
                 .border_role(Role::Border, 1)
                 .corner(6.0)
+                .animate_item()
         },
     );
 

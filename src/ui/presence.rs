@@ -163,6 +163,18 @@ impl PresenceState {
         self.tr.set(tr);
     }
 
+    /// 退回"尚未出现"：下一次 paint 从隐藏起播进场。给运行中才插入树的节点用（键控列表
+    /// 新增的行）——构建时按"首次出现不回放进场"落定在显示，这里改回起点。
+    pub(crate) fn rewind(&self) {
+        self.tr.set(Transition::new(0.0));
+    }
+
+    /// 接过另一个节点的进度（键控列表重建同一个键的行时用）：进场 / 离场播到一半的行
+    /// 换了新节点，从原进度接着走，而不是在新节点上一下子满尺寸冒出来。
+    pub(crate) fn adopt(&self, from: &PresenceState) {
+        self.tr.set(from.tr.get());
+    }
+
     /// paint 期调用：据本帧逻辑可见改向，返回进度 `[0,1]`。
     pub(crate) fn advance(&self, shown: bool, th: &Theme) -> f32 {
         let mut tr = self.tr.get();
