@@ -59,6 +59,10 @@
   `Element::select_without_focus_when`：焦点留在查询框，Enter 一次跳一处，正文框只亮出当前这一处。
   `fullshowcase`「表单」页加「查找命中」卡片演示。
 
+- **`PickDialog::last_pick_failed()`：分清「文件选择框没弹出来」与「用户取消」**。两者原先都只回 `None`，
+  应用无从提示。目前仅 Linux 会判出失败：rfd 的门户与 zenity 都不可用时秒回 `None`、多选秒回空列表（耗时 < 300ms 即判失败），
+  windui 先试 kdialog（rfd 不支持它），仍不行才置位并记 `warn`。其它平台恒 `false`、行为不变。
+
 ### 修复
 
 - **投影外延估算偏小**：软件后端的投影是 3 趟 box-blur、尾巴伸到 3×模糊半径，脏区与剪枝却只按 1×算，

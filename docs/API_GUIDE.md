@@ -2178,6 +2178,11 @@ fn main() {
 两者都在事件分发**完全返回**后才执行闭包，闭包内可放心直接同步调 `PickDialog::pick_file()`
 等阻塞 API。
 
+文件对话框返回 `None` 有两种可能：用户取消，或对话框根本没弹出来。拿到 `None` 后（同一线程、
+下一次弹框前）问 `PickDialog::last_pick_failed()` 区分，`true` 时应提示用户，取消时保持静默。
+目前只有 Linux 会判出 `true`：rfd 走 xdg 门户、退 zenity，都不可用时静默返回 `None`；windui
+据返回耗时（< 300ms）判为没弹出来，先试 kdialog，仍不行才置位并记一条 `warn`。
+
 **哪里有 `ctx`**：所有控件回调，菜单项动作（`MenuItem::run` 的闭包，见 §8.2），
 以及 App 级回调——`App::channel` 的 `on_message`、`App::on_interval`、`App::on_close_request`
 （见 §8.5 / §8.7）。0.12.0 之前这些回调都拿不到 `ctx`，得绕道自由函数
