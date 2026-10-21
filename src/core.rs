@@ -552,6 +552,13 @@ pub struct FocusTrigger {
     select: FocusSelect,
 }
 
+/// 滚进可视区的触发器：计数信号的值一变，宿主就把这个节点滚进祖先滚动容器的视口
+/// （见 `Element::reveal_when`）。与 [`FocusTrigger`] 同一套「按信号记已兑现值」的规则。
+pub struct RevealTrigger {
+    signal: Signal<u64>,
+    seen: u64,
+}
+
 /// 定向送焦点兑现时顺带对选区做什么（见 `Element::focus_when` / `select_when`）。
 #[derive(Clone, Copy)]
 pub(crate) enum FocusSelect {
@@ -746,6 +753,8 @@ pub struct Node {
     pub autofocus_done: bool,
     /// 定向送焦点的触发器（`Element::focus_when`）。
     pub focus_when: Option<FocusTrigger>,
+    /// 滚进可视区的触发器（`Element::reveal_when`）。
+    pub reveal_when: Option<RevealTrigger>,
 }
 
 /// 一次布局同步里"哪些布局过渡节点被展开推着走"的索引（见 [`Tree::sync_layout_anims`]）。
@@ -937,6 +946,8 @@ pub struct Tree {
     /// 值，这次触发就被它自己吞掉了。每个触发信号一条，句柄带代际不会错认；表变大时清掉已回收的
     /// 信号（应用在重建闭包里每次新建触发信号时，不清就只增不减）。
     focus_seen: std::collections::HashMap<Signal<u64>, u64>,
+    /// 各滚进视口信号已兑现到的值（见 `Tree::reveal_trigger`），规则同 `focus_seen`。
+    reveal_seen: std::collections::HashMap<Signal<u64>, u64>,
     /// on_update 相位里控件请求的**开窗**暂存区。与 `pending_toasts` 同因同治：
     /// 该相位不经 `DispatchResult`，不暂存就会被整个丢掉——症状是
     /// "在 on_update 里 `ctx.open_window` 什么都不发生，且没有任何报错"。
@@ -1010,6 +1021,7 @@ impl Tree {
             pending_focus: None,
             pending_release: Vec::new(),
             focus_seen: std::collections::HashMap::new(),
+            reveal_seen: std::collections::HashMap::new(),
             pending_windows: Vec::new(),
             active_renderer: crate::platform::ActiveRenderer::Software,
             pending_menu: None,
@@ -4526,6 +4538,69 @@ impl Tree {
             }
         }
         fired
+    }
+
+    /// 为新节点建滚进视口触发器（规则同 [`Tree::focus_trigger`]：初值不触发，
+    /// 同一次事件里加了计数又重建了节点，新节点照样认这次触发）。
+    pub(crate) fn reveal_trigger(&mut self, signal: Signal<u64>) -> RevealTrigger {
+        if self.reveal_seen.len() >= 64 {
+            self.reveal_seen.retain(|s, _| s.is_alive());
+        }
+        let now = signal.try_get().unwrap_or(0);
+        let seen = *self.reveal_seen.entry(signal).or_insert(now);
+        RevealTrigger { signal, seen }
+    }
+
+    /// 取出触发器已变值、且此刻在布局里（自身与祖先都可见）的节点，记为已兑现。
+    /// 不可见的不记，等它出现那一帧再兑现。
+    pub(crate) fn take_fired_reveal_triggers(&mut self) -> Vec<NodeId> {
+        if self.reveal_seen.is_empty() {
+            return Vec::new();
+        }
+        let ids: Vec<NodeId> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                let t = slot.node.as_ref()?.reveal_when.as_ref()?;
+                (t.signal.try_get()? != t.seen).then_some(NodeId {
+                    index: i as u32,
+                    generation: slot.generation,
+                })
+            })
+            .collect();
+        let mut fired = Vec::new();
+        for id in ids {
+            if !self.shown_in_tree(id) {
+                continue;
+            }
+            let Some(t) = self.get_mut(id).and_then(|n| n.reveal_when.as_mut()) else {
+                continue;
+            };
+            let Some(v) = t.signal.try_get() else {
+                continue;
+            };
+            t.seen = v;
+            let signal = t.signal;
+            self.reveal_seen.insert(signal, v);
+            fired.push(id);
+        }
+        fired
+    }
+
+    /// 节点自身与所有祖先都有效可见。
+    fn shown_in_tree(&self, id: NodeId) -> bool {
+        let mut cur = Some(id);
+        while let Some(c) = cur {
+            let Some(n) = self.get(c) else {
+                return false;
+            };
+            if !n.effective_visible() {
+                return false;
+            }
+            cur = n.parent;
+        }
+        true
     }
 
     /// 标记某节点的 autofocus 已兑现。

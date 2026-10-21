@@ -714,6 +714,8 @@ pub struct Element {
     /// 定向送焦点（见 [`Element::focus_when`] / [`Element::select_when`]）：触发信号与
     /// 兑现时对选区做什么。
     focus_when: Option<(Signal<u64>, crate::core::FocusSelect)>,
+    /// 滚进可视区的触发信号（见 [`Element::reveal_when`]）。
+    reveal_when: Option<Signal<u64>>,
     focusable: Option<bool>,
     enabled_static: bool,
     enabled: Option<Signal<bool>>,
@@ -766,6 +768,7 @@ impl Element {
             window_drag: false,
             autofocus: None,
             focus_when: None,
+            reveal_when: None,
             focusable: None,
             enabled_static: true,
             enabled: None,
@@ -1139,6 +1142,23 @@ impl Element {
             crate::core::FocusSelect::All,
             "focus_select_all_when()",
         )
+    }
+
+    /// 计数信号的值一变，就把本元素滚进祖先滚动容器的视口（不动焦点）。
+    ///
+    /// 典型用途：列表里新加的、或被程序选中的那一行要让用户看得到。规则同
+    /// [`focus_when`](Self::focus_when)：建节点时的初值不触发；同一次事件里加了计数又重建了
+    /// 这一行，新建的行照样认这次触发；此刻不可见的等它出现那一帧再滚。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// let reveal = signal(0u64);
+    /// let row = Element::label("刚打开的文件").reveal_when(reveal);
+    /// // 打开文件后：reveal.update(|n| *n += 1);
+    /// ```
+    pub fn reveal_when(mut self, trigger: Signal<u64>) -> Self {
+        self.reveal_when = Some(trigger);
+        self
     }
 
     /// 三种定向送焦点共用一个槽：后挂的会顶掉先挂的，debug 构建下断言提示。
@@ -4931,6 +4951,7 @@ impl Element {
         let focus_when = self
             .focus_when
             .map(|(s, select)| tree.focus_trigger(s, select));
+        let reveal_when = self.reveal_when.map(|s| tree.reveal_trigger(s));
         let mut node = Node {
             parent: None,
             children: Vec::new(),
@@ -4963,6 +4984,7 @@ impl Element {
             window_drag: self.window_drag,
             autofocus: self.autofocus,
             focus_when,
+            reveal_when,
             autofocus_done: false,
             focusable: self.focusable,
             tooltip: self.tooltip,

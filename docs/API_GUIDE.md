@@ -1935,6 +1935,9 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
   **窗口每次从隐藏态被唤起时重新兑现一次**（托盘点击 / 全局热键 / `WindowOp::Show`）：
   唤起是一段新交互的开始，查询框该重新拿到焦点、上次的词该重新被全选。已经可见时再按
   热键不算唤起，故不会每按一次就把界面重置一遍。
+- `.reveal_when(trigger)`（`trigger: Signal<u64>`）：计数每变一次就把该元素滚进祖先滚动容器的视口，
+  **不动焦点**。规则同下面的 `focus_when`（初值不触发、同一次事件里重建的节点照样认这次触发）。
+  典型用法：侧栏文件列表里刚打开 / 刚切换到的那一行要看得见。
 - `.focus_when(trigger)` / `.focus_select_all_when(trigger)`（`trigger: Signal<u64>`）：**定向送焦点**，
   计数的值每变一次就把焦点交给该元素（夺取已有焦点），`_select_all` 额外全选。给**常驻**输入框用——
   它的 `autofocus` 开机时就用掉了，`ctx.request_focus()` 只能聚焦自己，而应用拿不到框架控件的 `NodeId`：

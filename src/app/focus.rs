@@ -63,6 +63,7 @@ impl UiHost {
         self.apply_pending_focus();
         // 定向送焦点排在控件请求之后、autofocus 之前：它是应用明确点名的目标。
         self.apply_focus_triggers();
+        self.apply_reveal_triggers();
         // 声明式初始焦点：在归一化**之后**兑现——归一化可能刚把失效焦点抹成 None，
         // 那正是"此刻没有焦点"该由 autofocus 接手的时机。
         self.honor_autofocus();
@@ -160,6 +161,16 @@ impl UiHost {
                         self.select_range_in(id, r);
                     }
                 }
+            }
+        }
+    }
+
+    /// 兑现 `Element::reveal_when`：触发信号变了值的节点滚进视口，焦点不动。
+    fn apply_reveal_triggers(&mut self) {
+        for id in self.tree.take_fired_reveal_triggers() {
+            if self.tree.scroll_into_view(id) {
+                self.damage.needs_relayout = true;
+                self.damage.needs_full = true;
             }
         }
     }
@@ -610,6 +621,60 @@ mod tests {
             h.focus.current,
             Some(input),
             "重建后的新输入框仍应拿到这次触发的焦点"
+        );
+    }
+
+    /// `reveal_when`：点按钮让计数加一 → 滚动区里视口外的那一行被滚进来，焦点不动；
+    /// 建节点时的初值不触发。
+    #[test]
+    fn reveal_when_scrolls_row_into_view() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::signal::signal;
+        use tiny_skia::Pixmap;
+        let trigger = signal(0u64);
+        let mut list = Element::col().width_match();
+        for i in 0..10 {
+            let mut row = Element::leaf().width(100).height(40);
+            if i == 9 {
+                row = row.reveal_when(trigger);
+            }
+            list = list.child(row);
+        }
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .child(
+                    Element::button("定位")
+                        .width(80)
+                        .height(30)
+                        .on_click(move |_| trigger.update(|n| *n += 1)),
+                )
+                .child(Element::scroll().width(200).height(100).child(list)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        let scroll = h
+            .tree
+            .scroll_node_at(crate::geometry::Point::new(50, 60))
+            .expect("按钮下方是滚动区");
+        assert_eq!(h.tree.get(scroll).unwrap().scroll_y, 0, "初值不触发");
+        let button = h.focus.order[0];
+        let r = h.tree.abs_bounds(button);
+        let p = crate::geometry::Point::new(r.x + r.w / 2, r.y + r.h / 2);
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            p,
+            MouseButton::Left,
+        ));
+        h.on_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        assert_eq!(
+            h.tree.get(scroll).unwrap().scroll_y,
+            400 - 100,
+            "末行应被滚到视口底边"
         );
     }
 
