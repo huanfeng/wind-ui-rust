@@ -1683,6 +1683,21 @@ impl Element {
         self.config_text_input(|c| c.read_only = true)
     }
 
+    /// **无框**：不画底与边框，只留文字 / 光标 / 选区，底色由外层容器给。
+    /// 配合 [`read_only`](Self::read_only) 就是「可选中、可复制的纯文本」——字段值、
+    /// 文件路径这类既要像 label 一样排在版面里、又要能局部复制的展示文本；单行时过长
+    /// 的内容随光标横向滚动，不会把布局撑破。仅 `Element::text_input(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let path = signal(String::from("C:/very/long/path/to/app.apk"));
+    /// let ui = Element::text_input(path, "").read_only().frameless();
+    /// ```
+    #[track_caller]
+    pub fn frameless(self) -> Self {
+        self.config_text_input(|c| c.frameless = true)
+    }
+
     /// 前置图标字形（如放大镜 `'\u{1F50D}'`）：在输入框左侧留出图标区并绘制，
     /// 文字/光标/点击命中相应右移。搜索框等用。仅 `Element::text_input(..)` 可用。
     #[track_caller]
