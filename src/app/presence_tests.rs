@@ -408,10 +408,14 @@ fn off_level_hides_without_a_gap_frame() {
 /// 自己的矩形报，伸出去的投影会孤零零地留在画面上。
 #[test]
 fn exit_damage_covers_descendant_shadow() {
+    // 窗口放大：投影外延按 3×blur 算后，小窗口里这张卡片的脏区会超过半窗、被升成整窗帧，
+    // 测不到局部帧——而在常见尺寸的窗口里它应当仍走局部帧（末尾的断言即锁住这一点）。
+    const BW: i32 = 800;
+    const BH: i32 = 600;
     let clock = Clock::new(MotionLevel::Full);
     let show = signal(true);
     let app =
-        App::new("t", W, H).content(
+        App::new("t", BW, BH).content(
             Element::stack()
                 .fill()
                 .bg(Color::WHITE)
@@ -432,9 +436,9 @@ fn exit_damage_covers_descendant_shadow() {
         );
     let mut h = app.into_handler_for_test();
     h.set_scale(1.0);
-    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    let mut pm = Pixmap::new(BW as u32, BH as u32).unwrap();
     let frame = |h: &mut UiHost, pm: &mut Pixmap| {
-        h.render(&mut PixmapTarget { pixmap: pm }, Size::new(W, H))
+        h.render(&mut PixmapTarget { pixmap: pm }, Size::new(BW, BH))
     };
     frame(&mut h, &mut pm);
     let card = {
@@ -458,7 +462,10 @@ fn exit_damage_covers_descendant_shadow() {
             );
         }
     }
-    assert!(partial_seen, "前提：过渡中走了局部帧（否则测不到脏区）");
+    assert!(
+        partial_seen,
+        "大投影卡片的过渡在常见尺寸窗口里应仍走局部帧（否则脏区估算过大，也测不到脏区）"
+    );
     assert_eq!(green_at(&pm, shadow), 255);
 }
 

@@ -109,6 +109,19 @@ impl Paint {
     }
 }
 
+/// 投影伸出投影矩形（未外扩 spread 前）之外的最大距离（逻辑像素，向上取整）。
+///
+/// 软件后端的投影是 3 趟 box-blur、**每趟各扩散 `blur`**（见 `SkiaCanvas::draw_shadow`），
+/// 尾巴实际伸到 3×blur。只算 1×blur 的话，离屏层与局部重绘的脏区都会把淡尾截掉——
+/// 前者表现为投影外圈被切出一道边，后者是挪走后留下一圈极淡的残影。
+///
+/// 不按"8 位量化后看不见"去缩：满不透明的投影在约 2.9σ（σ≈blur）处仍有 1 级色阶，
+/// 3×blur 正是 3 趟 box-blur 的支撑范围，是精确上界。代价是大投影的脏区更大、更容易
+/// 升成整窗帧——那是正确性的代价。
+pub(crate) fn shadow_reach(spread: f32, blur: f32, dx: f32, dy: f32) -> i32 {
+    (spread + 3.0 * blur).ceil() as i32 + dx.abs().max(dy.abs()).ceil() as i32 + 1
+}
+
 /// `draw_text` 剔除用的**逻辑**矩形：字形可能落到的范围的保守上界。
 ///
 /// 不能直接拿调用方的 rect：引擎的纵向契约（见 `TextEngine::draw`）允许 rect 比文本盒
@@ -448,6 +461,13 @@ pub trait Canvas {
     /// 压入一层离屏合成层：后续绘制重定向到该层；`pop_layer` 时以 `opacity`
     /// 整体合成回父层。用于子树统一不透明度（避免逐节点 alpha 导致的重叠错叠）。
     fn push_layer(&mut self, opacity: f32);
+    /// 同 [`push_layer`](Self::push_layer)，并告知层内容只落在 `bounds`（逻辑坐标）之内：
+    /// 后端可只为这块分配离屏缓冲。超出 `bounds` 的绘制**可能**被丢弃，调用方须给足范围
+    /// （含投影、焦点环、子孙偏移）。默认退回整窗层。
+    fn push_layer_in(&mut self, opacity: f32, bounds: Rect) {
+        let _ = bounds;
+        self.push_layer(opacity);
+    }
     /// 弹出最近的合成层并按其 opacity 合成回父层。
     fn pop_layer(&mut self);
 

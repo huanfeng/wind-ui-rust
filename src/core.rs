@@ -422,12 +422,10 @@ impl PresenceFlags {
     }
 }
 
-/// 节点投影伸出边框之外的最大距离（逻辑像素）；无投影为 0。脏区与剪枝都要按它外扩。
+/// 节点投影伸出边框之外的最大距离（逻辑像素）；无投影为 0。脏区、剪枝与离屏层范围都按它外扩。
 fn shadow_extent(n: &Node) -> i32 {
     match &n.style.shadow {
-        Some(sh) if sh.color.a > 0 => {
-            (sh.spread + sh.blur).ceil() as i32 + (sh.dx.abs().max(sh.dy.abs())).ceil() as i32
-        }
+        Some(sh) if sh.color.a > 0 => crate::render::shadow_reach(sh.spread, sh.blur, sh.dx, sh.dy),
         _ => 0,
     }
 }
@@ -1961,7 +1959,9 @@ impl Tree {
         let opacity = n.style.opacity * presence_alpha;
         let use_layer = opacity < 1.0;
         if use_layer {
-            canvas.push_layer(opacity);
+            // 层只开子树实际画得到的范围（含子孙投影与偏移）：一个小浮层淡入不必每帧
+            // 分配、合成一整窗的离屏缓冲。
+            canvas.push_layer_in(opacity, self.subtree_visual(n, abs));
         }
         // 卷帘：占位高度小于自然高度（高度过渡 / 展开类进出场）时，本节点的自绘连同子树
         // 一起裁到本节点矩形。只裁子树不够——叶子控件（label 当折叠内容）自己就会画出界。
@@ -3095,7 +3095,13 @@ impl Tree {
                 cn.bounds.w,
                 cn.bounds.h,
             );
-            r = r.union(&self.subtree_visual(cn, ca));
+            // 子孙自己的进出场滑动（祖先离场时它们一起滑出）不在 `offset` 里，按幅度外扩。
+            let slide = cn
+                .presence
+                .as_ref()
+                .filter(|p| p.alive())
+                .map_or(0, |p| p.slide_extent());
+            r = r.union(&self.subtree_visual(cn, ca).inflate(slide));
         }
         r
     }

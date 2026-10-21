@@ -140,8 +140,9 @@ impl TooltipState {
             theme.anim.fast(),
         );
         if alpha < 1.0 {
-            crate::anim::request_repaint_in(Rect::new(x, y, w, h).inflate(2));
-            canvas.push_layer(alpha);
+            let area = Rect::new(x, y, w, h).inflate(2);
+            crate::anim::request_repaint_in(area);
+            canvas.push_layer_in(alpha, area);
         }
         self.paint_body(canvas, &text, Rect::new(x, y, w, h), theme);
         if alpha < 1.0 {

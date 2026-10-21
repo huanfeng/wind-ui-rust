@@ -2484,7 +2484,12 @@ let dot = Element::leaf().widget(Dot { on: state });
 
 **`EventCtx` 能力**：`mark_dirty()` 重绘、`bounds()` 取绝对矩形、`capture()/release_capture()` 拖拽捕获、`request_focus()/release_focus()/request_close()`、`scroll_by()/set_scroll()/scroll_metrics()`、`clipboard_get()/clipboard_set()`、`show_menu()/show_context_menu()/show_menu_request()`、`set_bg()`。
 
-**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`fill_polygon`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）。坐标为 f32 绝对窗口坐标。
+**`Canvas` 图元**：`fill_rect`、`fill_round_rect`、`stroke_round_rect`、`draw_line`、`fill_circle`、`fill_polygon`、`draw_text`、`measure_text`、`text_advance`、`save/restore/clip_rect`（裁剪用 save→clip_rect→绘制→restore）、`push_layer(opacity)/pop_layer`（整体半透明）。坐标为 f32 绝对窗口坐标。
+
+**离屏层给出范围**：`push_layer_in(opacity, bounds)` 同 `push_layer`，但告知层内容只落在 `bounds`
+（逻辑坐标）之内，软件后端据此只开那么大的离屏缓冲（而不是整窗）、D2D 据此分配层资源。范围要给足——
+含投影（软件后端的投影外延是 3×模糊半径）、焦点环与子孙偏移，超出部分可能被丢弃。`save` / `restore`
+不得跨 `push_layer*` / `pop_layer` 配对（层内的 save 在出层前 restore），debug 构建下会断言。
 
 **多边形用 `fill_polygon(contours, paint)`**：`contours` 每项是一个闭合轮廓（首尾自动相连），按非零环绕
 规则填充——要挖洞就让内圈与外圈方向相反，圆盘相减、带孔图标、齿轮都是一次调用。软件后端与 Windows D2D

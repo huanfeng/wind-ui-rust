@@ -1603,21 +1603,25 @@ impl MenuHost {
             self.fade.set(fade);
         }
         let alpha = fade.value();
+        // 面板连同投影的范围（投影参数走主题，见 `MenuTheme::shadow`）：脏区与离屏层都按它。
+        let sh = theme.menu.shadow();
+        let pad = crate::render::shadow_reach(0.0, sh.blur, sh.dx, sh.dy);
+        let area = menu
+            .levels
+            .iter()
+            .map(|l| l.rect)
+            .reduce(|a, b| a.union(&b))
+            .map(|r| r.inflate(pad));
         if fade.is_active() {
-            // 脏区按投影外扩（投影参数走主题，见 `MenuTheme::shadow`）。
-            let sh = theme.menu.shadow();
-            let pad = (sh.blur + sh.dx.abs().max(sh.dy.abs())).ceil() as i32 + 2;
-            let area = menu
-                .levels
-                .iter()
-                .map(|l| l.rect)
-                .reduce(|a, b| a.union(&b));
             if let Some(r) = area {
-                crate::anim::request_repaint_in(r.inflate(pad));
+                crate::anim::request_repaint_in(r);
             }
         }
         if alpha < 1.0 {
-            canvas.push_layer(alpha);
+            match area {
+                Some(r) => canvas.push_layer_in(alpha, r),
+                None => canvas.push_layer(alpha),
+            }
         }
         self.paint_levels(menu, canvas, theme);
         if alpha < 1.0 {

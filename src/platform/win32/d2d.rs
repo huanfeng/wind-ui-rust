@@ -919,6 +919,24 @@ impl D2DCanvas<'_> {
         self.solid_brush(paint.color)
     }
 
+    /// 离屏合成层：后续绘制重定向到层，PopLayer 时按 opacity 整体合回父层（子树统一
+    /// 不透明度）。`content` 为层内容范围，D2D 据此分配层资源。
+    fn push_layer_bounded(&mut self, opacity: f32, content: D2D_RECT_F) {
+        let params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: content,
+            geometricMask: std::mem::ManuallyDrop::new(None),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: opacity.clamp(0.0, 1.0),
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
+        };
+        // layer 传 None：让 D2D 自行分配/复用层资源（device context 重载支持）。
+        unsafe { self.ctx.PushLayer(&params, None) };
+        self.pushed_layers += 1;
+        self.sync_text_aa();
+    }
+
     /// 按当前层深度同步文字抗锯齿模式：**层内恒 GRAYSCALE、层外恒 ClearType**。
     ///
     /// ClearType 是子像素渲染，需要知道字形背后的真实底色才能做三通道混合。`PushLayer`
@@ -1760,21 +1778,19 @@ impl Canvas for D2DCanvas<'_> {
     }
 
     fn push_layer(&mut self, opacity: f32) {
-        // 离屏合成层：后续绘制重定向到层，PopLayer 时按 opacity 整体合回父层
-        // （子树统一不透明度）。无限 contentBounds 不裁剪层内容（裁剪由 clip 栈负责）。
-        let params = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: INFINITE_RECT,
-            geometricMask: std::mem::ManuallyDrop::new(None),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity: opacity.clamp(0.0, 1.0),
-            opacityBrush: std::mem::ManuallyDrop::new(None),
-            layerOptions: D2D1_LAYER_OPTIONS1_NONE,
-        };
-        // layer 传 None：让 D2D 自行分配/复用层资源（device context 重载支持）。
-        unsafe { self.ctx.PushLayer(&params, None) };
-        self.pushed_layers += 1;
-        self.sync_text_aa();
+        // 无限 contentBounds 不裁剪层内容（裁剪由 clip 栈负责）。
+        self.push_layer_bounded(opacity, INFINITE_RECT);
+    }
+
+    /// 告知 D2D 层内容的范围（逻辑坐标，与绘制同一空间），它据此只为这块分配层资源。
+    fn push_layer_in(&mut self, opacity: f32, bounds: crate::geometry::Rect) {
+        let b = rect_f(
+            bounds.x as f32,
+            bounds.y as f32,
+            bounds.w as f32,
+            bounds.h as f32,
+        );
+        self.push_layer_bounded(opacity, b);
     }
 
     fn pop_layer(&mut self) {
