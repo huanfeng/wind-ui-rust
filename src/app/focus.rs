@@ -624,6 +624,51 @@ mod tests {
         );
     }
 
+    /// 同一时刻只有焦点框显示选区：A 自动聚焦并全选，点进 B 之后 A 的选区收起。
+    #[test]
+    fn selection_collapses_when_focus_moves_to_another_input() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::signal::signal;
+        use tiny_skia::Pixmap;
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .spacing(10)
+                .child(
+                    Element::text_input(signal(String::from("hello")), "")
+                        .width(200)
+                        .height(30)
+                        .autofocus_select_all(),
+                )
+                .child(
+                    Element::text_input(signal(String::from("world")), "")
+                        .width(200)
+                        .height(30),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        let (a, b) = (h.focus.order[0], h.focus.order[1]);
+        let sel = |h: &crate::app::UiHost, id| h.tree.get(id).unwrap().widget.selection_range();
+        assert_eq!(sel(&h, a), Some((0, 5)), "前提：A 聚焦并全选");
+        let r = h.tree.abs_bounds(b);
+        let p = crate::geometry::Point::new(r.x + r.w / 2, r.y + r.h / 2);
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            p,
+            MouseButton::Left,
+        ));
+        h.on_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        assert_eq!(h.focus.current, Some(b));
+        let (s, e) = sel(&h, a).unwrap();
+        assert_eq!(s, e, "失焦的 A 不应再有选区");
+    }
+
     /// `reveal_when`：点按钮让计数加一 → 滚动区里视口外的那一行被滚进来，焦点不动；
     /// 建节点时的初值不触发。
     #[test]

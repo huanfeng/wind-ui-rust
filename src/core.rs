@@ -260,6 +260,14 @@ pub trait Widget {
     /// 这个输入框"，挂在上面的"改完即提交"若跟着触发，就会在对话框弹出时把半成品提交掉。
     /// 默认无操作。`TextInput` 借它实现 `on_commit`。
     fn on_blur(&mut self, _ctx: &mut EventCtx) {}
+    /// 焦点从本节点移走时调用，**不分原因**（用户点了别处、Tab 离开、程序把焦点交给
+    /// 别的控件、点空白处失焦）。与 [`on_blur`](Self::on_blur) 不同，这里只该做纯视觉
+    /// 的收尾，不该触发应用回调。
+    ///
+    /// 文本框借它清掉选区：桌面惯例是同一时刻只有拿着焦点的那个框显示选区（Win32 编辑框、
+    /// WPF / WinUI 的 TextBox、浏览器的 input 失焦后都不再显示选区，Qt 的 QLineEdit 失焦即
+    /// 取消选择）。窗口失活不经过这里，切回来选区仍在。默认无操作。
+    fn focus_lost(&mut self) {}
     /// 类型擦除下转钩子：供 Builder 对具体控件做类型化配置（如 TextInput 的
     /// 多行/密码开关）。默认返回 None，需要的控件返回 `Some(self)`。
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
@@ -4635,9 +4643,10 @@ impl Tree {
     }
 
     pub fn set_focused(&mut self, id: Option<NodeId>, old: Option<NodeId>) {
-        if let Some(o) = old {
+        if let Some(o) = old.filter(|&o| Some(o) != id) {
             if let Some(n) = self.get_mut(o) {
                 n.focused = false;
+                n.widget.focus_lost();
             }
         }
         if let Some(i) = id {

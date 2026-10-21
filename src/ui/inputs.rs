@@ -2933,6 +2933,12 @@ impl Widget for TextInput {
     fn on_blur(&mut self, ctx: &mut EventCtx) {
         self.fire_commit(ctx);
     }
+    fn focus_lost(&mut self) {
+        // 只让拿着焦点的那个框显示选区：失焦就收起选区（光标位置保留），
+        // 否则在几个框里各划一段，屏幕上会同时亮着好几段选区。
+        self.anchor = None;
+        self.dragging = false;
+    }
     fn reset_interaction(&mut self) {
         // 未提交的编辑随隐藏作废：复用同一对话框切换编辑目标时，带着上一条的"改过"
         // 进入下一次编辑，没动一个字也会在失焦时提交。
