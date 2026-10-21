@@ -71,7 +71,7 @@ L1–L4 + 单测：缓动端点/单调、`Lerp` 插值、`Transition` 收敛与�
 - **Switch**：滑块位置 `Transition<f32>`（0↔1）+ 轨道色 `Transition<Color>`。
 - **Button**：hover/press 背景 `Transition<Color>` 淡入淡出。
 - **nav 头家族**：`paint_panel_header`（NavRow/Collapsible/Accordion 共用）hover 底色淡入——一处接入覆盖三控件。
-- **Checkbox**：勾选透明度/缩放过渡。
+- **Checkbox**：勾选时先铺底色、对勾沿笔画画出（取消倒放）；悬停/按下叠层，按下方框缩小、松开弹回。
 - 其余（Dropdown 箭头、Segmented 选中滑块、Radio）同款模式，后续机械接入，不在本轮。
 
 ### Phase C —— 布局/展开高度动画（本轮只设计，后做）

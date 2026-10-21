@@ -6,7 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
-use crate::anim::{Easing, Lerp, Transition};
+use crate::anim::{Easing, Lerp, Spring, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
 use crate::event::{
     CursorShape, Event, Key, KeyEvent, MenuItem, MouseButton, PointerKind, Preedit, PreeditSpan,
@@ -68,8 +68,15 @@ type LayoutKey = (String, i32, Option<String>, u32, u16, Option<u32>);
 pub struct CheckBox {
     label: TextContent,
     state: Signal<bool>,
-    /// 勾选填充补间（0=未选、1=选中）：驱动方框底色 white↔accent + 对勾淡入。
+    /// 勾选补间（0=未选、1=选中，线性主进度）：前段驱动方框底色 white↔accent，
+    /// 后段驱动对勾沿笔画逐段画出（见 [`check_phases`]）。
     fill: Cell<Transition<f32>>,
+    /// 悬停/按下反馈叠层强度（0=静止、[`HOVER_TINT`]/[`PRESS_TINT`]），弹簧驱动。
+    tint: Cell<Transition<f32>>,
+    /// 按下时方框缩放（1=原大、[`PRESS_SCALE`]=按下），弹簧驱动：松开带一点回弹。
+    press: Cell<Transition<f32>>,
+    hovered: bool,
+    pressed: bool,
     /// 显隐翻转经 `reset_interaction` 复位；复显时首帧靠 `primed` 瞬时落定填充，不回放动画。
     primed: Cell<bool>,
     /// 点击拦截回调（受控模式）。设了它，点击/键盘激活只调回调、不自动翻转 `state`，
@@ -89,6 +96,10 @@ impl CheckBox {
             label: label.into(),
             state,
             fill: Cell::new(Transition::new(init)),
+            tint: Cell::new(Transition::new(0.0)),
+            press: Cell::new(Transition::new(1.0).movement()),
+            hovered: false,
+            pressed: false,
             primed: Cell::new(false),
             on_toggle: None,
             intent: Intent::Primary,
@@ -170,19 +181,61 @@ impl Widget for CheckBox {
         };
         let cy = bounds.y + (bounds.h - bsz_i) / 2;
         let (bx, by) = (bounds.x as f32, cy as f32);
-        // 勾选填充补间：据状态改向，amount 驱动底色渐变 + 边框淡出 + 对勾淡入。
+        // 勾选补间：据状态改向。主进度线性走，前段铺底色、后段画对勾（`check_phases`）；
+        // 取消勾选沿原路倒放——对勾先收回，底色再褪。
         let mut fill = self.fill.get();
         let target = if self.state.get() { 1.0 } else { 0.0 };
+        // 悬停/按下反馈：两者都是高频打断的反馈，走弹簧继承速度。
+        let mut tint = self.tint.get();
+        let mut press = self.press.get();
+        let tint_to = if !enabled {
+            0.0
+        } else if self.pressed {
+            PRESS_TINT
+        } else if self.hovered {
+            HOVER_TINT
+        } else {
+            0.0
+        };
+        let press_to = if self.pressed && enabled {
+            PRESS_SCALE
+        } else {
+            1.0
+        };
         if !self.primed.get() {
             // 首帧/对话框复显：瞬时落定到当前状态，不回放动画。
-            fill = Transition::new(target);
+            fill.settle(target);
+            tint.settle(tint_to);
+            press.settle(press_to);
             self.primed.set(true);
-        } else if fill.target() != target {
-            fill.retarget(target, th.anim.fast(), Easing::EaseOut);
+        } else {
+            if fill.target() != target {
+                // 时长按剩余路程折算：勾到一半又取消，只倒放走过的那段，速度与正向一致，
+                // 而不是用满整段时长慢慢收回。
+                let full = (th.anim.normal() + th.anim.fast()) as f32;
+                let dist = (fill.value() - target).abs();
+                fill.retarget(target, (full * dist).round() as u32, Easing::Linear);
+            }
+            if tint.target() != tint_to {
+                tint.retarget_spring(tint_to, th.anim.spring());
+            }
+            if press.target() != press_to {
+                press.retarget_spring(press_to, Spring::SNAPPY);
+            }
         }
         let amount = fill.animate();
+        let tint_a = tint.animate();
+        // 松开时弹簧略有过冲，钳到 1：方框只缩不放，画不出 bounds。
+        let zoom = press.animate().min(1.0);
         self.fill.set(fill);
-        let sz = bsz_i as f32;
+        self.tint.set(tint);
+        self.press.set(press);
+        let (fill_t, check_t) = check_phases(amount);
+        // 按下缩放以方框中心为支点，圆角随之等比缩。
+        let full = bsz_i as f32;
+        let sz = full * zoom;
+        let radius = radius * zoom;
+        let (bx, by) = (bx + (full - sz) / 2.0, by + (full - sz) / 2.0);
         // 底色 white→accent；边框（未选描边）随填充淡出。
         canvas.fill_round_rect(
             bx,
@@ -190,9 +243,9 @@ impl Widget for CheckBox {
             sz,
             sz,
             radius,
-            &Paint::fill(tg.knob(p).lerp(accent, amount)),
+            &Paint::fill(tg.knob(p).lerp(accent, fill_t)),
         );
-        if amount < 1.0 {
+        if fill_t < 1.0 {
             canvas.stroke_round_rect(
                 bx,
                 by,
@@ -200,26 +253,37 @@ impl Widget for CheckBox {
                 sz,
                 radius,
                 stroke_w,
-                &Paint::fill(tg.track(p).scale_alpha(1.0 - amount)),
+                &Paint::fill(tg.track(p).scale_alpha(1.0 - fill_t)),
             );
         }
-        if amount > 0.0 {
+        if tint_a > 0.001 {
+            // 悬停/按下叠层：用正文色的低透明度压一层，明暗主题下分别变暗/变亮，
+            // 与可点击容器的反馈同源。
+            canvas.fill_round_rect(
+                bx,
+                by,
+                sz,
+                sz,
+                radius,
+                &Paint::fill(p.text.scale_alpha(tint_a)),
+            );
+        }
+        if check_t > 0.0 {
             // 启用用 intent 解析的对比色（浅底自动转深）；禁用回退 on_accent。
             let check = if enabled { check_fg } else { p.on_accent };
-            // 勾：一条三点折线按 amount 淡入；坐标按方框尺寸等比缩放。
+            // 勾：一条三点折线按 check_t 沿笔画画出；坐标按方框尺寸等比缩放。
             // 必须走 `draw_polyline` 而不是两次 `draw_line`——后者在 V 底那个拐点
             // 留一块楔形缺口，低 DPI 被抗锯齿糊过去，150% 以上就是肉眼可见的裂口。
-            let paint = Paint::fill(check.scale_alpha(amount));
             let s = sz / 18.0; // 18px 为基准尺寸
-            canvas.draw_polyline(
-                &[
+            let (pts, n) = trim_polyline(
+                [
                     (bx + 4.0 * s, by + 9.0 * s),
                     (bx + 8.0 * s, by + 13.0 * s),
                     (bx + 14.0 * s, by + 5.0 * s),
                 ],
-                check_stroke,
-                &paint,
+                check_t,
             );
+            canvas.draw_polyline(&pts[..n], check_stroke * zoom, &Paint::fill(check));
         }
         let text_rect = Rect::new(
             bounds.x + bsz_i + gap_i,
@@ -241,13 +305,33 @@ impl Widget for CheckBox {
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         match ev {
             Event::Pointer(p) if p.kind == PointerKind::Up => {
-                if ctx.bounds().contains(p.pos) {
+                let inside = ctx.bounds().contains(p.pos);
+                // 只认自己收到过的按下：在别处按下、拖进来松开不算点击（与按钮一致）。
+                let was_press = std::mem::replace(&mut self.pressed, false);
+                self.hovered = inside;
+                ctx.release_capture();
+                ctx.mark_dirty();
+                if was_press && inside {
                     self.toggle(ctx);
                 }
                 true
             }
             Event::Pointer(p) if p.kind == PointerKind::Down => {
+                // 捕获：拖出去再松开也要收到 Up，否则按下态（缩小的方框）会一直留着。
+                self.pressed = true;
+                ctx.capture();
                 ctx.request_focus();
+                ctx.mark_dirty();
+                true
+            }
+            Event::Pointer(p) if p.kind == PointerKind::Enter => {
+                self.hovered = true;
+                ctx.mark_dirty();
+                true
+            }
+            Event::Pointer(p) if p.kind == PointerKind::Leave => {
+                self.hovered = false;
+                ctx.mark_dirty();
                 true
             }
             Event::Key(k) if k.pressed && (k.key == Key::Space || k.key == Key::Enter) => {
@@ -264,10 +348,47 @@ impl Widget for CheckBox {
         self.on_toggle = Some(f);
     }
     fn reset_interaction(&mut self) {
-        self.primed.set(false); // 下次显示瞬时落定填充，不回放旧的勾选动画
+        // 下次显示瞬时落定填充与反馈，不回放旧的勾选动画
+        self.hovered = false;
+        self.pressed = false;
+        self.primed.set(false);
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
+    }
+}
+
+/// 悬停叠层强度（正文色透明度）。
+const HOVER_TINT: f32 = 0.06;
+/// 按下叠层强度。
+const PRESS_TINT: f32 = 0.12;
+/// 按下时方框缩到的比例。
+const PRESS_SCALE: f32 = 0.86;
+
+/// 把勾选主进度 `a`（0..1，线性）拆成（底色进度，对勾笔画进度），各自已缓动。
+///
+/// 底色占前 55%、对勾从 30% 起画到终点：两段交叠，底色铺到一半时笔尖就落下，
+/// 不会出现"底色铺满后停顿一下再出勾"的断档。倒放（取消勾选）时顺序自然反过来。
+fn check_phases(a: f32) -> (f32, f32) {
+    let fill = Easing::STANDARD.apply((a / 0.55).clamp(0.0, 1.0));
+    let check = Easing::DECELERATE.apply(((a - 0.3) / 0.7).clamp(0.0, 1.0));
+    (fill, check)
+}
+
+/// 截取三点折线从起点算起、占总长 `t`（0..1）的那一段，返回点集与有效点数。
+///
+/// 按长度而非按段截：对勾短边与长边长度差近一倍，按段平分会让笔尖在拐点处突然提速。
+fn trim_polyline(pts: [(f32, f32); 3], t: f32) -> ([(f32, f32); 3], usize) {
+    let seg = |a: (f32, f32), b: (f32, f32)| ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+    let (l0, l1) = (seg(pts[0], pts[1]), seg(pts[1], pts[2]));
+    let want = (l0 + l1) * t.clamp(0.0, 1.0);
+    let at = |a: (f32, f32), b: (f32, f32), k: f32| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k);
+    if want <= l0 {
+        let k = if l0 > 0.0 { want / l0 } else { 1.0 };
+        ([pts[0], at(pts[0], pts[1], k), pts[1]], 2)
+    } else {
+        let k = if l1 > 0.0 { (want - l0) / l1 } else { 1.0 };
+        ([pts[0], pts[1], at(pts[1], pts[2], k)], 3)
     }
 }
 
@@ -2847,10 +2968,27 @@ impl Widget for TextInput {
 #[cfg(test)]
 mod tests {
     use super::{
-        preedit_pieces, word_run, wrap_paragraph, Color, Preedit, PreeditSpan, TextInput,
-        TextLayout, UnderlineStyle, VisLine,
+        preedit_pieces, trim_polyline, word_run, wrap_paragraph, Color, Preedit, PreeditSpan,
+        TextInput, TextLayout, UnderlineStyle, VisLine,
     };
     use crate::signal::signal;
+
+    /// 对勾截取按**长度**分配：两段长 5 与 10，总长 15 的 1/4 落在第一段 3/4 处，
+    /// 3/4 落在第二段的 5/8 处。按段平分的实现会在 t=0.25 时给出第一段的一半。
+    #[test]
+    fn trim_polyline_splits_by_length() {
+        let pts = [(0.0, 0.0), (3.0, 4.0), (3.0, 14.0)];
+        let close =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4;
+        let (p, n) = trim_polyline(pts, 0.25);
+        assert_eq!(n, 2);
+        assert!(close(p[1], (2.25, 3.0)), "{:?}", p[1]);
+        let (p, n) = trim_polyline(pts, 0.75);
+        assert_eq!(n, 3);
+        assert!(close(p[2], (3.0, 10.25)), "{:?}", p[2]);
+        let (p, n) = trim_polyline(pts, 1.0);
+        assert_eq!((n, p), (3, pts));
+    }
 
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();

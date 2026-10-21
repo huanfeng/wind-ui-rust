@@ -33,6 +33,8 @@ use crate::text::{PlatformTextEngine, TextEngine};
 use crate::theme::Theme;
 use crate::ui::Element;
 
+#[cfg(test)]
+mod checkbox_motion_tests;
 mod damage;
 mod fling;
 mod focus;
