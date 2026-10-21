@@ -418,6 +418,28 @@ impl Image {
     pub(crate) fn cache_id(&self) -> u64 {
         self.id
     }
+
+    /// 这张图的存活探针：所有克隆都释放后 [`ImageLiveness::is_alive`] 变假。
+    ///
+    /// 渲染后端的位图 / 纹理缓存按 [`cache_id`](Self::cache_id) 存，而 id 永不复用——
+    /// 图片释放后那一条再也不会命中，却要等缓存积满才随整批清掉。应用里换一份文档就
+    /// 重建一次图标，关掉的文档的图标就这样一直占着显存 / 内存。缓存条目带上探针，
+    /// 每帧扫一遍丢掉死条目，占用就跟着图片的生命周期走。
+    #[cfg_attr(not(any(all(windows, feature = "d2d"), gpu_backend)), allow(dead_code))]
+    pub(crate) fn liveness(&self) -> ImageLiveness {
+        ImageLiveness(Rc::downgrade(&self.pixmap))
+    }
+}
+
+/// 见 [`Image::liveness`]。只持弱引用：不延长像素数据的寿命。
+#[cfg_attr(not(any(all(windows, feature = "d2d"), gpu_backend)), allow(dead_code))]
+pub(crate) struct ImageLiveness(std::rc::Weak<Pixmap>);
+
+#[cfg_attr(not(any(all(windows, feature = "d2d"), gpu_backend)), allow(dead_code))]
+impl ImageLiveness {
+    pub(crate) fn is_alive(&self) -> bool {
+        self.0.strong_count() > 0
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +492,17 @@ mod tests {
     }
 
     /// 同一张图的克隆共享身份：否则每次 `clone` 都会让后端重传一遍纹理。
+    #[test]
+    fn liveness_follows_last_clone() {
+        let a = Image::from_pixmap(Pixmap::new(2, 2).unwrap());
+        let probe = a.liveness();
+        let b = a.clone();
+        drop(a);
+        assert!(probe.is_alive(), "还有克隆持有时应存活");
+        drop(b);
+        assert!(!probe.is_alive(), "最后一个克隆释放后应失效");
+    }
+
     #[test]
     fn cache_id_shared_by_clone() {
         let a = Image::from_png_bytes(&red_png(4, 4)).unwrap();

@@ -22,6 +22,7 @@
 //! 引用），一张已经没人引用的大图会一直占着显存，直到被 LRU 挤出去。上限兜住了总量，
 //! 但「大图早就该走了却还占着」这段延迟是真实存在的。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -29,7 +30,7 @@ use bytemuck::{Pod, Zeroable};
 use super::device::SharedGpu;
 use super::layer::{LayerPool, LayerTexture};
 use super::text::LruCache;
-use crate::render::image::Image;
+use crate::render::image::{Image, ImageLiveness};
 
 /// 图片纹理缓存的条数上限（对齐 d2d `image_cache` 的同一水位）。
 pub(super) const MAX_IMAGE_ENTRIES: usize = 64;
@@ -218,6 +219,8 @@ pub(super) struct ImageRenderer {
     used: usize,
     format: wgpu::TextureFormat,
     cache: LruCache<ImageKey, Bound>,
+    /// 缓存里每张图的存活探针，帧末据此丢掉已释放图片的纹理（见 [`Image::liveness`]）。
+    alive: HashMap<ImageKey, ImageLiveness>,
     pool: LayerPool,
 }
 
@@ -365,6 +368,7 @@ impl ImageRenderer {
             used: 0,
             format,
             cache: LruCache::new("图片纹理缓存", MAX_IMAGE_ENTRIES, MAX_IMAGE_BYTES),
+            alive: HashMap::new(),
             pool: LayerPool::new(),
         }
     }
@@ -430,6 +434,7 @@ impl ImageRenderer {
         );
         UPLOADS.with(|c| c.set(c.get() + 1));
         let bound = self.bind_texture(device, texture);
+        self.alive.insert(key, img.liveness());
         Some(self.cache.insert(key, Arc::new(bound), need))
     }
 
@@ -492,6 +497,20 @@ impl ImageRenderer {
     pub(super) fn end_frame(&mut self) {
         self.pool.end_frame();
         self.used = 0;
+        self.drop_dead_images();
+    }
+
+    /// 丢掉图片已释放的纹理；探针表顺带清掉已被 LRU 逐出的条目，不随换图无界增长。
+    fn drop_dead_images(&mut self) {
+        let cache = &mut self.cache;
+        self.alive.retain(|key, probe| {
+            if probe.is_alive() {
+                cache.contains(key)
+            } else {
+                cache.remove(key);
+                false
+            }
+        });
     }
 
     /// 把 `batch` 里攒下的图片画掉，随后清空。

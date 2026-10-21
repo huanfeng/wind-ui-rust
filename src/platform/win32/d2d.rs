@@ -106,7 +106,7 @@ pub(super) struct D2DBackend {
     /// `ID2D1Bitmap1`。绝不每帧重建——图片每帧可画几十次，每次 `CreateBitmap` 会 churn 驱动内存
     /// 到几百 M（与 layout/grad 同源的内存累积坑）。device-**dependent**（绑定 context）：
     /// Task 11 设备丢失重建 context 时必须 `image_cache.clear()`（同 solid/grad_cache）。
-    image_cache: HashMap<u64, ID2D1Bitmap1>,
+    image_cache: ImageCache,
     /// `image_cache` 已占字节（见 [`IMAGE_CACHE_MAX_BYTES`]）。
     image_bytes: u64,
     /// 离屏烘焙用的第二个设备上下文：主帧 BeginDraw 期间主 ctx 禁止 SetTarget，故用独立 ctx
@@ -169,6 +169,27 @@ const SHADOW_CACHE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// 两者差着五个数量级。64 条 16×16 是 64 KB，64 条 4000×3000 却是 3 GB——
 /// 浏览一遍图片目录就能把显存撑爆，而条数计数器还显示得好好的。
 const IMAGE_CACHE_MAX_BYTES: u64 = 48 * 1024 * 1024;
+
+/// 图片位图缓存：键 = `Image::cache_id()`。
+type ImageCache = HashMap<u64, CachedBitmap>;
+
+struct CachedBitmap {
+    bitmap: ID2D1Bitmap1,
+    /// 图片释放后这一条再也不会命中，帧首据此丢掉（见 `Image::liveness`）。
+    alive: crate::render::image::ImageLiveness,
+    bytes: u64,
+}
+
+/// 丢掉图片已释放的位图，字节账同步扣掉。
+fn drop_dead_images(cache: &mut ImageCache, total: &mut u64) {
+    cache.retain(|_, e| {
+        let keep = e.alive.is_alive();
+        if !keep {
+            *total -= e.bytes;
+        }
+        keep
+    });
+}
 
 /// 9-slice 代理图两端固定段之外，中间留出的均匀带宽度（像素）。
 ///
@@ -514,6 +535,7 @@ impl WinRenderBackend for D2DBackend {
         let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
         let size = Size::new(rc.right - rc.left, rc.bottom - rc.top);
 
+        drop_dead_images(&mut self.image_cache, &mut self.image_bytes);
         self.context.BeginDraw();
         self.context.Clear(Some(&d2d_color(bg)));
         // 单线程 STA：把 ctx/solid/渐变缓存借给本帧 target，由 handler 渲染控件树。
@@ -573,7 +595,7 @@ struct D2DTarget<'a> {
     private_use: Option<&'a PrivateUseFont>,
     format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
-    image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
+    image_cache: &'a mut ImageCache,
     image_bytes: &'a mut u64,
     bake_ctx: &'a ID2D1DeviceContext,
     shadow_effect: &'a mut Option<ID2D1Effect>,
@@ -635,7 +657,7 @@ struct D2DCanvas<'a> {
     format_cache: &'a mut HashMap<FormatKey, IDWriteTextFormat>,
     layout_cache: &'a mut HashMap<LayoutKey, IDWriteTextLayout>,
     /// 图片位图缓存（借入，可变）：按 `Image::cache_id()` 复用 GPU 位图，避免每帧 `CreateBitmap`。
-    image_cache: &'a mut HashMap<u64, ID2D1Bitmap1>,
+    image_cache: &'a mut ImageCache,
     /// `image_cache` 已占字节（借入，可变）：见 [`IMAGE_CACHE_MAX_BYTES`]。
     image_bytes: &'a mut u64,
     /// 离屏烘焙阴影用的第二个设备上下文（借入）。
@@ -715,8 +737,8 @@ impl D2DCanvas<'_> {
     /// + `PREMULTIPLIED` 一致（无需 R/B 交换，区别于后备缓冲的 BGRA）。
     fn image_bitmap(&mut self, img: &crate::render::image::Image) -> Option<ID2D1Bitmap1> {
         let id = img.cache_id();
-        if let Some(b) = self.image_cache.get(&id) {
-            return Some(b.clone());
+        if let Some(e) = self.image_cache.get(&id) {
+            return Some(e.bitmap.clone());
         }
         let pm = img.pixmap(); // 预乘 RGBA8
         let (w, h) = (img.width(), img.height());
@@ -753,7 +775,14 @@ impl D2DCanvas<'_> {
             self.image_cache.clear();
             *self.image_bytes = 0;
         }
-        self.image_cache.insert(id, bitmap.clone());
+        self.image_cache.insert(
+            id,
+            CachedBitmap {
+                bitmap: bitmap.clone(),
+                alive: img.liveness(),
+                bytes,
+            },
+        );
         *self.image_bytes += bytes;
         Some(bitmap)
     }
@@ -1938,7 +1967,7 @@ pub(crate) mod offscreen {
         grad_cache: HashMap<GradKey, ID2D1Brush>,
         format_cache: HashMap<FormatKey, IDWriteTextFormat>,
         layout_cache: HashMap<LayoutKey, IDWriteTextLayout>,
-        image_cache: HashMap<u64, ID2D1Bitmap1>,
+        image_cache: ImageCache,
         image_bytes: u64,
         shadow_effect: Option<ID2D1Effect>,
         shadow_cache: HashMap<ShadowKey, ID2D1Bitmap1>,
@@ -1950,6 +1979,12 @@ pub(crate) mod offscreen {
         #[cfg(test)]
         pub(crate) fn cached_images(&self) -> usize {
             self.image_cache.len()
+        }
+
+        /// 缓存位图的字节账。**仅供测试**。
+        #[cfg(test)]
+        pub(crate) fn cached_image_bytes(&self) -> u64 {
+            self.image_bytes
         }
 
         /// 建一个 `w×h` 的离屏后端。无可用 D2D 运行时返回 `None`（绝不 panic）。
@@ -2037,6 +2072,7 @@ pub(crate) mod offscreen {
                 // 与 try_create_inner 同样的初始状态，否则测的不是生产配置。
                 self.ctx
                     .SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
+                drop_dead_images(&mut self.image_cache, &mut self.image_bytes);
                 self.ctx.BeginDraw();
                 self.ctx.Clear(Some(&d2d_color(bg)));
                 {
@@ -2210,6 +2246,46 @@ mod tests {
     /// 没有这条时错在哪：这个缓存同时装 16×16 的文件图标与整屏的图片预览，两者差着
     /// 五个数量级。只看条数的话，64 条 4000×3000 就是 3 GB 显存，而计数器才走到 64。
     /// 用两张大图把预算撑过去，断言缓存被清空重建（条数回到 1），而不是一路涨上去。
+    /// 图片释放后它的位图下一帧就离开缓存，不等积满整批清空。
+    ///
+    /// 没有这条时错在哪：id 永不复用，释放了的图片那一条再也不会命中，却一直占着
+    /// 显存——应用每换一份文档重建一次图标，关掉的文档的图标就留在缓存里。
+    #[test]
+    fn released_image_leaves_cache_next_frame() {
+        use crate::render::image::Image;
+        let mut backend =
+            OffscreenBackend::new(64, 64).expect("D2D 离屏渲染不可用：硬件与 WARP 都没建起来");
+        let draw = |backend: &mut OffscreenBackend, img: &Image| {
+            backend
+                .draw(1.0, Color::rgb(255, 255, 255), |c| {
+                    c.draw_image(
+                        img,
+                        Rect::new(0, 0, 8, 8),
+                        crate::render::image::Fit::Fill,
+                        0.0,
+                        1.0,
+                    );
+                })
+                .expect("离屏帧读回失败");
+        };
+        let img = || {
+            let pm = Pixmap::new(32, 32).unwrap();
+            Image::from_png_bytes(&pm.encode_png().unwrap()).unwrap()
+        };
+        let (a, b) = (img(), img());
+        draw(&mut backend, &a);
+        draw(&mut backend, &b);
+        assert_eq!(backend.cached_images(), 2);
+        drop(a);
+        draw(&mut backend, &b);
+        assert_eq!(backend.cached_images(), 1, "已释放图片的位图应被丢掉");
+        assert_eq!(
+            backend.cached_image_bytes(),
+            32 * 32 * 4,
+            "字节账应同步扣掉"
+        );
+    }
+
     #[test]
     fn image_cache_is_capped_by_bytes_not_only_by_count() {
         use crate::render::image::Image;

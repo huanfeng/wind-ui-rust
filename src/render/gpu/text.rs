@@ -348,6 +348,20 @@ impl<K: std::hash::Hash + Eq, V> LruCache<K, V> {
         value
     }
 
+    /// 移除一条（不计入逐出统计）。返回是否存在。
+    pub(super) fn remove(&mut self, key: &K) -> bool {
+        let Some(old) = self.map.remove(key) else {
+            return false;
+        };
+        self.order.remove(&old.stamp);
+        self.bytes -= old.bytes;
+        true
+    }
+
+    pub(super) fn contains(&self, key: &K) -> bool {
+        self.map.contains_key(key)
+    }
+
     /// 逐出最久未用的，直到两条预算都满足。
     ///
     /// **永远留下至少一条**：单条就超字节预算时（超大字号的长段落），一路逐出会把刚
