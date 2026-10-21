@@ -86,6 +86,9 @@ struct Layer {
     prev_clips: Vec<Clip>,
     /// 入层时 `saves` 的深度：save / restore 不得跨层配对（见 `push_layer_in`）。
     saves_at_push: usize,
+    /// 出层合成时绕 `pivot`（逻辑世界坐标）缩放的倍数；1 = 不缩放。
+    zoom: f32,
+    pivot: (f32, f32),
     /// 范围为空（整个落在裁剪外）：层内一切绘制都丢弃，出层不合成。
     empty: bool,
 }
@@ -1008,12 +1011,26 @@ impl Canvas for SkiaCanvas<'_> {
             prev_offset: self.offset,
             prev_clips: std::mem::take(&mut self.clips),
             saves_at_push: self.saves.len(),
+            zoom: 1.0,
+            pivot: (0.0, 0.0),
             empty,
         };
         self.offset = layer.origin;
         self.layers.push(layer);
         if let (Some(c), false) = (clip, empty) {
             self.push_clip(c);
+        }
+    }
+
+    fn push_layer_scaled(&mut self, opacity: f32, bounds: Rect, scale: f32, pivot: (f32, f32)) {
+        self.push_layer_in(opacity, bounds);
+        if let Some(l) = self.layers.last_mut() {
+            l.zoom = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
+            l.pivot = pivot;
         }
     }
 
@@ -1039,19 +1056,30 @@ impl Canvas for SkiaCanvas<'_> {
                 ((layer.origin.y - self.offset.y) as f32 * self.scale).round() as i32,
             );
             let src = layer.pixmap;
+            // 缩放合成：先放到原位，再绕支点（换算到父目标的物理坐标）缩放、双线性采样。
+            // 不缩放时走整像素平移、不重采样。
+            let (dx, dy, tf, pp) = if (layer.zoom - 1.0).abs() > super::ZOOM_EPS {
+                let (px, py) = (
+                    (layer.pivot.0 - self.offset.x as f32) * self.scale,
+                    (layer.pivot.1 - self.offset.y as f32) * self.scale,
+                );
+                let tf = Transform::from_translate(dx as f32, dy as f32)
+                    .post_translate(-px, -py)
+                    .post_scale(layer.zoom, layer.zoom)
+                    .post_translate(px, py);
+                let pp = PixmapPaint {
+                    quality: FilterQuality::Bilinear,
+                    ..pp
+                };
+                (0, 0, tf, pp)
+            } else {
+                (dx, dy, Transform::identity(), pp)
+            };
             match self.layers.last_mut() {
-                Some(parent) => parent.pixmap.draw_pixmap(
-                    dx,
-                    dy,
-                    src.as_ref(),
-                    &pp,
-                    Transform::identity(),
-                    None,
-                ),
-                None => {
-                    self.pixmap
-                        .draw_pixmap(dx, dy, src.as_ref(), &pp, Transform::identity(), None)
-                }
+                Some(parent) => parent
+                    .pixmap
+                    .draw_pixmap(dx, dy, src.as_ref(), &pp, tf, None),
+                None => self.pixmap.draw_pixmap(dx, dy, src.as_ref(), &pp, tf, None),
             };
         }
     }
@@ -2532,6 +2560,102 @@ mod tests {
                 pm.data() == &before[..],
                 "scale={scale}：空层内的绘制不得落到画布上"
             );
+        }
+    }
+
+    /// 缩放合成：40×40 红块绕自身中心按 0.5 合成，成品是居中的 20×20；100% 与 125%、
+    /// 按范围开层与整窗层都一样。
+    #[test]
+    fn scaled_layer_shrinks_around_pivot() {
+        for scale in [1.0f32, 1.25] {
+            for bounded in [true, false] {
+                let n = (100.0 * scale) as u32;
+                let mut pm = Pixmap::new(n, n).unwrap();
+                pm.fill(tiny_skia::Color::WHITE);
+                {
+                    let mut eng = crate::text::NullTextEngine;
+                    let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, scale);
+                    let b = if bounded {
+                        Rect::new(30, 30, 40, 40)
+                    } else {
+                        Rect::new(0, 0, 100, 100)
+                    };
+                    c.push_layer_scaled(1.0, b, 0.5, (50.0, 50.0));
+                    c.fill_rect(30.0, 30.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+                    c.pop_layer();
+                }
+                let red = |x: f32, y: f32| {
+                    let (r, g, _) = px(&pm, (x * scale) as u32, (y * scale) as u32);
+                    r > 200 && g < 60
+                };
+                let tag = format!("scale={scale} bounded={bounded}");
+                assert!(
+                    red(50.0, 50.0) && red(42.0, 42.0) && red(58.0, 58.0),
+                    "{tag}：中心 20×20 应是红"
+                );
+                assert!(
+                    !red(35.0, 50.0) && !red(50.0, 35.0) && !red(65.0, 65.0),
+                    "{tag}：缩小后外圈应露出白底"
+                );
+            }
+        }
+    }
+
+    /// 缩放合成在局部帧（画布带原点偏移）与层套层里，与整帧单层逐像素一致：出层时 `offset`
+    /// 已切回父目标的原点，平移与支点都按它换算。
+    #[test]
+    fn scaled_layer_is_frame_and_nesting_independent() {
+        let draw = |scale: f32, offset: Point, nested: bool| {
+            let n = (100.0 * scale).round() as u32;
+            let (ox, oy) = (
+                (offset.x as f32 * scale).round() as u32,
+                (offset.y as f32 * scale).round() as u32,
+            );
+            let mut pm = Pixmap::new(n - ox, n - oy).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            {
+                let mut eng = crate::text::NullTextEngine;
+                let mut c = SkiaCanvas::with_text_offset(&mut pm, &mut eng, scale, offset);
+                if nested {
+                    c.push_layer_in(0.9, Rect::new(0, 0, 100, 100));
+                }
+                c.push_layer_scaled(0.8, Rect::new(10, 10, 80, 80), 0.6, (50.0, 50.0));
+                c.draw_shadow(30.0, 30.0, 40.0, 40.0, 4.0, 4.0, Color::rgba(0, 0, 0, 160));
+                c.fill_rect(30.0, 30.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+                c.pop_layer();
+                if nested {
+                    c.pop_layer();
+                }
+            }
+            (pm, ox, oy)
+        };
+        for scale in [1.0f32, 1.25, 1.5] {
+            for nested in [false, true] {
+                let (full, _, _) = draw(scale, Point::new(0, 0), nested);
+                let (local, ox, oy) = draw(scale, Point::new(20, 20), nested);
+                // 容差 2 级：两边的层原点不同（局部帧的层被裁到画布范围），双线性采样位置的
+                // 浮点舍入不同，边缘像素会差 ±1；错位（支点或平移算错）会差几十级。
+                let worst = (0..local.height())
+                    .flat_map(|y| (0..local.width()).map(move |x| (x, y)))
+                    .map(|(x, y)| {
+                        let a = local.pixel(x, y).unwrap();
+                        let b = full.pixel(x + ox, y + oy).unwrap();
+                        [
+                            a.red().abs_diff(b.red()),
+                            a.green().abs_diff(b.green()),
+                            a.blue().abs_diff(b.blue()),
+                        ]
+                        .into_iter()
+                        .max()
+                        .unwrap()
+                    })
+                    .max()
+                    .unwrap();
+                assert!(
+                    worst <= 2,
+                    "scale={scale} nested={nested}：局部帧与整帧的缩放合成最大差 {worst} 级"
+                );
+            }
         }
     }
 

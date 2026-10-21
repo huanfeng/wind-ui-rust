@@ -1045,3 +1045,109 @@ fn animate_height_stops_following_once_inner_settles() {
         );
     }
 }
+
+/// 对话框面板默认从 0.96 倍放大进场：中途面板比终态窄，结束时与终态一致；减弱档下不缩放
+/// （对照组，免得"本来就不缩"被当成"减弱生效"）。
+#[test]
+fn dialog_panel_scales_in() {
+    let panel_width = |level: MotionLevel, at: u64| -> i32 {
+        let clock = Clock::new(level);
+        let show = signal(false);
+        let app = App::new("t", W, H).content(
+            Element::stack()
+                .fill()
+                .bg(Color::WHITE)
+                .child(
+                    Element::button("弹出")
+                        .size(80, 30)
+                        .on_click(move |_| show.set(true)),
+                )
+                .child(Element::dialog(
+                    show,
+                    Element::leaf().size(200, 100).bg(RED),
+                )),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        render(&mut h);
+        click(&mut h, Point::new(10, 10));
+        render(&mut h);
+        clock.at(1_000 + at);
+        h.damage.needs_full = true;
+        let pm = render(&mut h);
+        // 沿中线数染红的列（遮罩是灰，不算红）。
+        (0..W)
+            .filter(|&x| {
+                let p = pm.pixel(x as u32, (H / 2) as u32).unwrap();
+                p.red() as i32 - p.green() as i32 > 40
+            })
+            .count() as i32
+    };
+    let mid = panel_width(MotionLevel::Full, 40);
+    let done = panel_width(MotionLevel::Full, 2_000);
+    assert!(done >= 198, "前提：终态面板约 200 宽，实得 {done}");
+    assert!(mid < done - 2, "进场中途面板应比终态窄：{mid} vs {done}");
+    assert!(
+        panel_width(MotionLevel::Reduced, 40) >= done - 1,
+        "减弱档不缩放"
+    );
+}
+
+/// 缩放进出场走局部帧时，与每帧强制整窗逐帧逐像素一致（脏区盖得住缩放合成的范围）。
+/// 两个宿主同步推进，只差"是否强制整窗"。
+#[test]
+fn scale_transition_partial_frames_match_full_frames() {
+    let clock = Clock::new(MotionLevel::Full);
+    let make = |show: Signal<bool>| {
+        let app = App::new("t", W, H).content(
+            Element::stack()
+                .fill()
+                .bg(Color::WHITE)
+                .child(
+                    Element::button("切")
+                        .size(60, 30)
+                        .on_click(move |_| show.set(!show.get())),
+                )
+                .child(
+                    Element::leaf()
+                        .size(100, 60)
+                        .bg(RED)
+                        .align(crate::spec::Align::Center)
+                        .shadow(crate::style::Shadow::new(
+                            0.0,
+                            4.0,
+                            6.0,
+                            Color::rgb(0, 0, 255),
+                        ))
+                        .visible_signal(show)
+                        .transition(Presence::default().scale(0.7)),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        h
+    };
+    let (s1, s2) = (signal(false), signal(false));
+    let (mut partial, mut full) = (make(s1), make(s2));
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    render(&mut full);
+    let mut saw_partial = false;
+    for dir in 0..2u64 {
+        click(&mut partial, Point::new(10, 10));
+        click(&mut full, Point::new(10, 10));
+        let base = 1_000 + dir * 5_000;
+        for t in [0u64, 16, 40, 80, 120, 160, 200, 400, 1_000] {
+            clock.at(base + t);
+            partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+            saw_partial |= !partial.damage.last_frame_full;
+            full.damage.needs_full = true;
+            let want = render(&mut full);
+            assert!(
+                pm.data() == want.data(),
+                "dir={dir} t={t}：局部帧与整窗帧不一致"
+            );
+        }
+    }
+    assert!(saw_partial, "前提：过渡中走了局部帧");
+}

@@ -2577,7 +2577,10 @@ Element::label("已保存")
 - **展开**：`Presence::expand()`（预置 `Presence::reveal()` = 淡入 + 展开）让占位高度随进度从 0 长到
   自然高度，子树按自然尺寸排、裁到当前高度，同级平滑让位。`collapsible` / `accordion` 的内容默认就是
   `reveal()`，标题头箭头随之旋转。
-- 内置接入：`dialog` / `dialog_panel`（遮罩淡入 + 面板自下 12px 升起）、`popup` 浮层（默认
+- **缩放**：`Presence::scale(from)` 显示时从 `from` 倍（以节点中心为支点）缩放到原大，隐藏时反向；只支持
+  缩小进场（`from` 钳到 0.5～1）。缩放发生在合成阶段，布局与命中按原大算；减弱动效档位下不缩放；Windows 的
+  D2D 后端忽略缩放——只声明了缩放的过渡在那里没有可见效果（对话框面板即如此，只剩遮罩淡入）。
+- 内置接入：`dialog` / `dialog_panel`（遮罩淡入 + 面板从 0.96 倍放大）、`popup` 浮层（默认
   `Presence::popover()`：淡入 + 自上 4px 落下；要瞬显就给内容声明 `.transition(Presence::default())`）、
   下拉 / 右键 / 菜单栏菜单与悬停提示（只淡入，收起瞬时）。
 

@@ -18,7 +18,7 @@
 //! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
 //! - 手风琴 / 折叠面板：高度卷帘展开 + 淡入、箭头旋转；`animate_height`：内容变高变矮时平滑过渡
-//! - 进出场（`Element::transition`）：提示条淡入下落/淡出上收、对话框遮罩淡入 + 面板升起、
+//! - 进出场（`Element::transition`）：提示条淡入下落/淡出上收、对话框遮罩淡入 + 面板放大、
 //!   颜色选择浮层淡入轻落、下拉菜单与悬停提示淡入
 
 use windui::prelude::*;
@@ -205,7 +205,8 @@ fn main() {
         "对话框",
         320,
         move |_| show_dialog.set(false),
-        Element::label("遮罩淡入，面板自下方升起；关闭时反向。减弱档下只淡不升。").width_match(),
+        Element::label("遮罩淡入，面板从 0.96 倍放大；关闭时反向。减弱档下只淡不缩放。")
+            .width_match(),
         Element::row()
             .width_match()
             .child(Element::flex_spacer())

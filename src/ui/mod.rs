@@ -2755,7 +2755,7 @@ impl Element {
         // `reactive()` 是拖动位移的复位钩子：每次 layout 前调 `ModalScrim::on_update`，
         // 在那里识别"重新弹出"并把位移清零。
         //
-        // 进出场：遮罩连同面板整体淡入淡出，面板另外升起/下沉（只滑不再淡，否则透明度相乘）。
+        // 进出场：遮罩连同面板整体淡入淡出，面板另外从 0.96 倍放大（只缩放不再淡，否则透明度相乘）。
         // 面板的过渡初值按"遮罩未弹出"落定（见 `build_in`），故第一次弹出也会进场。
         Element::stack()
             .fill()
@@ -2769,7 +2769,7 @@ impl Element {
                 // 面板自己声明了过渡就尊重它（与 `popup` 同口径）。
                 let p = panel
                     .presence
-                    .unwrap_or(presence::Presence::default().slide(0, 12));
+                    .unwrap_or(presence::Presence::default().scale(0.96));
                 panel.align(Align::Center).transition(p)
             })
     }

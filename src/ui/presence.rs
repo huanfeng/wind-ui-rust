@@ -30,6 +30,8 @@ pub struct Presence {
     fade: bool,
     slide: (i32, i32),
     expand: bool,
+    /// 显示时从这个倍数缩放到 1（隐藏时反向）。`None` = 不缩放。
+    zoom: Option<f32>,
     enter_ms: Option<u32>,
     exit_ms: Option<u32>,
 }
@@ -48,14 +50,36 @@ impl Presence {
         Self::fade().slide(0, -4)
     }
 
-    /// 对话框面板：淡入，同时自下方 12px 升起。
+    /// 对话框：淡入，同时从 0.96 倍放大到原大（Fluent / WinUI 对话框的进场方式）。
     pub fn dialog() -> Self {
-        Self::fade().slide(0, 12)
+        Self::fade().scale(0.96)
     }
 
     /// 折叠内容（折叠面板、手风琴的 body）：淡入，同时高度从 0 展开。
     pub fn reveal() -> Self {
         Self::fade().expand()
+    }
+
+    /// 缩放：显示时从 `from` 倍（以节点中心为支点）缩放到原大，隐藏时反向。属位移类动效，
+    /// 减弱动效档位下不缩放（淡入淡出保留）。
+    ///
+    /// **只支持缩小进场**：`from` 钳到 `[0.5, 1]`。缩放发生在合成阶段（整棵子树先按原大画进
+    /// 离屏层，再缩放合成），合成不带祖先的裁剪——放大的话会越出滚动视口盖到兄弟上、被祖先
+    /// 的离屏层截断。布局、命中都按原大算。
+    ///
+    /// 只有软件与 GPU 后端会缩放；Windows 的 D2D 后端忽略缩放——只声明了缩放的过渡在那里
+    /// 没有可见效果（对话框面板即如此，只剩遮罩淡入）。
+    pub fn scale(mut self, from: f32) -> Self {
+        debug_assert!(
+            from <= 1.0,
+            "Presence::scale 只支持缩小进场（from ≤ 1），传入 {from}"
+        );
+        // 钳完等于 1 的不记：没有可见效果却会让离场白白占位一段时长。
+        self.zoom = from
+            .is_finite()
+            .then(|| from.clamp(0.5, 1.0))
+            .filter(|z| 1.0 - z > crate::render::ZOOM_EPS);
+        self
     }
 
     /// 展开：显示时占位高度从 0 长到自然高度，隐藏时收回 0；子树按自然尺寸排布、裁到
@@ -88,7 +112,9 @@ impl Presence {
 
     /// 按当前动效档位，这个过渡还有没有看得见的效果。
     fn visible_effect(&self) -> bool {
-        self.fade || ((self.slide != (0, 0) || self.expand) && anim::movement_enabled())
+        self.fade
+            || ((self.slide != (0, 0) || self.expand || self.zoom.is_some())
+                && anim::movement_enabled())
     }
 }
 
@@ -200,6 +226,13 @@ impl PresenceState {
     /// 是否为展开类过渡且仍在进行：过渡期每帧都要重排（高度在变）、子树要裁到当前高度。
     pub(crate) fn expanding(&self) -> bool {
         self.height_factor().is_some() && self.is_active()
+    }
+
+    /// 进度 `p` 下的合成缩放倍数；不缩放（或减弱动效、已到原大）时为 `None`。
+    pub(crate) fn zoom(&self, p: f32) -> Option<f32> {
+        let from = self.spec.zoom.filter(|_| anim::movement_enabled())?;
+        let z = from + (1.0 - from) * p;
+        ((z - 1.0).abs() > crate::render::ZOOM_EPS).then_some(z)
     }
 
     /// 滑动的最大幅度：过渡期的脏区要按它外扩，盖住上一帧与这一帧两处位置。

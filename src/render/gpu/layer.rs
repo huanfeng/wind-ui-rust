@@ -55,6 +55,8 @@ pub(super) struct LayerTexture {
     size: (u32, u32),
     /// 合成回父目标时的整体不透明度（`push_layer` 的入参，已 clamp）。
     pub(super) opacity: f32,
+    /// 合成时绕支点（逻辑坐标）缩放：`(倍数, 支点)`。`None` = 1:1。
+    pub(super) zoom: Option<(f32, (f32, f32))>,
 }
 
 impl LayerTexture {
@@ -63,6 +65,7 @@ impl LayerTexture {
             bound,
             size,
             opacity: 1.0,
+            zoom: None,
         }
     }
 

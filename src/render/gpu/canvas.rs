@@ -975,6 +975,15 @@ impl Canvas for WgpuCanvas<'_> {
         }
     }
 
+    fn push_layer_scaled(&mut self, opacity: f32, bounds: Rect, scale: f32, pivot: (f32, f32)) {
+        self.push_layer_in(opacity, bounds);
+        if let Some(Some(l)) = self.layers.last_mut() {
+            if scale.is_finite() && scale > 0.0 && (scale - 1.0).abs() > crate::render::ZOOM_EPS {
+                l.zoom = Some((scale, pivot));
+            }
+        }
+    }
+
     fn pop_layer(&mut self) {
         // 守卫防下溢（仿软后端 `pop_layer` 的 `if let Some`）。
         debug_assert!(!self.layers.is_empty(), "pop_layer 多于 push_layer");
@@ -991,15 +1000,26 @@ impl Canvas for WgpuCanvas<'_> {
         // （层内容自身已被各自的 clip 裁过，这里再裁一次只会重复剪切）。
         let (w, h) = self.size;
         let full = [0.0, 0.0, w as f32, h as f32];
+        // 缩放合成：quad 绕支点（换算到物理坐标）缩放、线性采样；否则层与目标 1:1，
+        // nearest 免掉一次无谓的重采样。
+        let (quad, nearest) = match top.zoom {
+            Some((z, (px, py))) => {
+                let (px, py) = (px * self.scale, py * self.scale);
+                (
+                    [px - px * z, py - py * z, w as f32 * z, h as f32 * z],
+                    false,
+                )
+            }
+            None => (full, true),
+        };
         self.image_batch.push(image_item(
             top.bound(),
+            quad,
+            quad,
             full,
-            full,
-            [0.0, 0.0, w as f32, h as f32],
             0.0,
             top.opacity,
-            // 层与目标 1:1，nearest 免掉一次无谓的重采样。
-            true,
+            nearest,
         ));
         // 此刻 `current_view` 已回到父目标，合成 quad 正好画在那里。
         self.flush_images();
@@ -2535,6 +2555,47 @@ mod tests {
             "绿/蓝应被白底抬到中段（50% 合成），实得 {p:?}"
         );
         assert_eq!(p[3], 255, "不透明背景上合成后 alpha 应仍为满");
+    }
+
+    /// 缩放合成与软后端一致：红块绕中心按 0.5 合成，内部取样框与外圈白底两后端都对得上。
+    #[test]
+    fn scaled_layer_matches_soft() {
+        assert_matches_soft(
+            "layer_zoom",
+            100,
+            100,
+            1.0,
+            WHITE,
+            &[(44, 44, 12, 12), (2, 2, 20, 20), (78, 78, 20, 20)],
+            |c| {
+                c.push_layer_scaled(0.8, Rect::new(30, 30, 40, 40), 0.5, (50.0, 50.0));
+                c.fill_rect(30.0, 30.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+                c.pop_layer();
+            },
+        );
+    }
+
+    /// 高 DPI + 偏心支点：支点换算到物理坐标时要乘缩放，GPU 与软后端仍对得上。
+    #[test]
+    fn scaled_layer_matches_soft_hidpi_off_center() {
+        let sc = 1.25;
+        let c = |v: f32| (v * sc) as u32;
+        assert_matches_soft(
+            "layer_zoom_hidpi",
+            c(100.0),
+            c(100.0),
+            sc,
+            WHITE,
+            &[
+                (c(38.0), c(58.0), c(4.0), c(4.0)),
+                (c(2.0), c(2.0), c(10.0), c(10.0)),
+            ],
+            |cv| {
+                cv.push_layer_scaled(1.0, Rect::new(20, 40, 40, 40), 0.7, (40.0, 60.0));
+                cv.fill_rect(20.0, 40.0, 40.0, 40.0, &Paint::fill(Color::hex(0xFF0000)));
+                cv.pop_layer();
+            },
+        );
     }
 
     /// 层的意义在于「**整体**一次 opacity」：层内两块不透明色重叠，重叠处与非重叠处

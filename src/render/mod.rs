@@ -109,6 +109,9 @@ impl Paint {
     }
 }
 
+/// 合成缩放视为"不缩放"的阈值：与 1 相差不到它就按 1:1 合成（不重采样）。三处判定共用。
+pub(crate) const ZOOM_EPS: f32 = 1e-3;
+
 /// 投影伸出投影矩形（未外扩 spread 前）之外的最大距离（逻辑像素，向上取整）。
 ///
 /// 软件后端的投影是 3 趟 box-blur、**每趟各扩散 `blur`**（见 `SkiaCanvas::draw_shadow`），
@@ -467,6 +470,13 @@ pub trait Canvas {
     fn push_layer_in(&mut self, opacity: f32, bounds: Rect) {
         let _ = bounds;
         self.push_layer(opacity);
+    }
+    /// 同 [`push_layer_in`](Self::push_layer_in)，出层时把层内容以 `pivot`（逻辑坐标）为中心
+    /// 缩放 `scale` 倍再合成（进出场的缩小进场）。合成**不带**父级裁剪，`scale > 1` 时结果会
+    /// 越出 `bounds` 乃至祖先的裁剪——只应传 `≤ 1`。不支持的后端忽略缩放（照常按 opacity 合成）。
+    fn push_layer_scaled(&mut self, opacity: f32, bounds: Rect, scale: f32, pivot: (f32, f32)) {
+        let _ = (scale, pivot);
+        self.push_layer_in(opacity, bounds);
     }
     /// 弹出最近的合成层并按其 opacity 合成回父层。
     fn pop_layer(&mut self);

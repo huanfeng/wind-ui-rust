@@ -1899,9 +1899,9 @@ impl Tree {
         let shown = parent_shown && n.effective_visible();
         // 进出场：进度乘进不透明度、换算成滑动偏移。没声明过渡的节点只看自身可见
         // （祖先离场时它跟着祖先的层一起淡出，不必自己动）。
-        let (presence_alpha, slide) = match &n.presence {
+        let (presence_alpha, slide, zoom) = match &n.presence {
             None if !n.effective_visible() => return,
-            None => (1.0, Point::new(0, 0)),
+            None => (1.0, Point::new(0, 0), None),
             Some(p) => {
                 let progress = p.advance(shown, &crate::theme::current());
                 if progress <= 0.0 && !shown {
@@ -1911,7 +1911,7 @@ impl Tree {
                     }
                     return;
                 }
-                (p.opacity(progress), p.offset(progress))
+                (p.opacity(progress), p.offset(progress), p.zoom(progress))
             }
         };
         // 高度过渡 / 展开类进出场：过渡期每帧重排一次，高度才跟得上进度。须在下面的
@@ -1936,6 +1936,7 @@ impl Tree {
         }
         if let Some(p) = n.presence.as_ref().filter(|p| p.is_active()) {
             // 过渡中：脏区取整棵子树的视觉范围，再按滑动幅度外扩，盖住上一帧与这一帧两处位置。
+            // 缩放只缩小（见 `Presence::scale`），合成不越出原大的范围，无需另算。
             crate::anim::request_repaint_in(self.subtree_visual(n, abs).inflate(p.slide_extent()));
         }
         let (fx, fy, fw, fh) = (abs.x as f32, abs.y as f32, abs.w as f32, abs.h as f32);
@@ -1957,11 +1958,24 @@ impl Tree {
         // 子树整体不透明度：<1 时入离屏层，绘完整棵子树后按 opacity 合成回父层。
         // 与自绘剪枝无关——层的 push/pop 必须成对，且子树可能有内容要画。
         let opacity = n.style.opacity * presence_alpha;
-        let use_layer = opacity < 1.0;
+        let use_layer = opacity < 1.0 || zoom.is_some();
         if use_layer {
             // 层只开子树实际画得到的范围（含子孙投影与偏移）：一个小浮层淡入不必每帧
             // 分配、合成一整窗的离屏缓冲。
-            canvas.push_layer_in(opacity, self.subtree_visual(n, abs));
+            let visual = self.subtree_visual(n, abs);
+            match zoom {
+                // 缩放以节点中心为支点：子树先按原大画进层，合成时再缩放。
+                Some(z) => canvas.push_layer_scaled(
+                    opacity,
+                    visual,
+                    z,
+                    (
+                        abs.x as f32 + abs.w as f32 / 2.0,
+                        abs.y as f32 + abs.h as f32 / 2.0,
+                    ),
+                ),
+                None => canvas.push_layer_in(opacity, visual),
+            }
         }
         // 卷帘：占位高度小于自然高度（高度过渡 / 展开类进出场）时，本节点的自绘连同子树
         // 一起裁到本节点矩形。只裁子树不够——叶子控件（label 当折叠内容）自己就会画出界。
