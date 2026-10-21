@@ -2261,8 +2261,10 @@ impl Tree {
             Some(p) => {
                 let progress = p.advance(shown, &crate::theme::current());
                 if progress <= 0.0 && !shown {
-                    // 离场播完：布局还为它留着位置的话，补一次重排让出来。
-                    if p.laid_exiting.get() {
+                    // 离场播完：布局还为它留着位置的话，补一次重排让出来。只补一次：那次重排
+                    // 里父容器已不再测量它（不占位的子节点不进测量），标志没人清，留着就会
+                    // 每帧再要一次重排，永远回不到空闲。
+                    if p.laid_exiting.replace(false) {
                         crate::anim::request_relayout();
                     }
                     return;

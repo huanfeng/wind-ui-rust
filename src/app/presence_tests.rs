@@ -132,6 +132,11 @@ fn exit_fades_keeps_space_then_releases_it() {
     );
     render(&mut h);
     assert_eq!(child_bounds(&h, 2).y, a.y, "播完后空间让给同级");
+    // 让出空间那次重排里父容器已不再测量它，"留着位置"的标志若不在请求时清掉，
+    // 会每帧再要一次重排，永远回不到空闲。
+    clock.at(1_000 + 400);
+    render(&mut h);
+    assert!(!h.wants_animation(), "让出空间后回到空闲");
 }
 
 /// 进场从透明起，而不是首帧就落定；中途再隐藏从当前值掉头。
