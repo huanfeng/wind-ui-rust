@@ -808,7 +808,10 @@ fn leaf_body_does_not_overflow_while_expanding() {
         saw_partial |= body.h > 0 && body.h < 60;
         let outside = (0..H)
             .flat_map(|y| (0..W).map(move |x| (x, y)))
-            .filter(|&(x, y)| !body.contains(Point::new(x, y)))
+            // 只查 body 顶边以下：label 顶边与 body 顶边重合，越界只会往下溢出。上方是标题行，
+            // Windows 下它的文字走 ClearType 子像素抗锯齿，深色字边缘有 (157,95,55)、
+            // (125,53,55) 这类偏红的彩边，按颜色分不干净，按区域排除。
+            .filter(|&(x, y)| y >= body.y && !body.contains(Point::new(x, y)))
             .filter(|&(x, y)| {
                 let p = pm.pixel(x as u32, y as u32).unwrap();
                 p.red() > 150 && p.green() < 120 && p.blue() < 120
