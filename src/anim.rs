@@ -756,6 +756,18 @@ impl<T: Lerp> Transition<T> {
     }
 }
 
+impl Transition<Point> {
+    /// 把整段运动平移 `d`（起点、终点一起挪），进度与速度不变。
+    ///
+    /// 参照系变了而视觉位置不该跳的场合用它：布局过渡（FLIP）里节点的布局位置又变了，
+    /// 偏移量要整体加上新旧位置之差，接着 [`retarget_spring`](Self::retarget_spring)
+    /// 回零就能继承原来的速度。
+    pub(crate) fn translate(&mut self, d: Point) {
+        self.from = Point::new(self.from.x + d.x, self.from.y + d.y);
+        self.to = Point::new(self.to.x + d.x, self.to.y + d.y);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -728,6 +728,7 @@ pub struct Element {
     bg_cond: Option<Box<dyn Fn() -> Color>>,
     opacity_cond: Option<Box<dyn Fn() -> f32>>,
     animate_style: bool,
+    animate_layout: bool,
 }
 
 impl Element {
@@ -774,6 +775,7 @@ impl Element {
             bg_cond: None,
             opacity_cond: None,
             animate_style: false,
+            animate_layout: false,
         }
     }
 
@@ -2018,6 +2020,26 @@ impl Element {
     /// "自然高度变了"而滞后跟随，像橡皮筋。
     pub fn animate_height(mut self) -> Self {
         self.animate_height = true;
+        self
+    }
+
+    /// 布局过渡（FLIP）：布局位置变了——前面的兄弟增删、显隐，列表重排，换行布局重新
+    /// 折行——就从旧位置平滑滑到新位置，而不是一帧跳过去（Framer Motion `layout`、
+    /// Compose `animateItem` 的位移部分）。
+    ///
+    /// 只管位置，尺寸变化照常一帧到位（高度用 [`animate_height`](Self::animate_height)）。
+    /// 过渡中命中与焦点按**最终**布局：点下去落到的是终点位置上的节点，不会点错行。
+    /// 以下位移不过渡：滚动、窗口改尺寸、展开 / 高度过渡推着走的位移（前面的兄弟展开、
+    /// 居中容器里别的项展开——那本身已是平滑的）、`offset`（拖拽让位）；这些发生在过渡途中时，正在播的那段照常收尾。
+    /// 父子都声明时，子只过渡相对父的那部分。减弱动效档位下瞬时到位。
+    ///
+    /// 别挂在逐帧改布局位置的节点上（`place_fn` 跟指针拖动的画布元素）：每帧都会起一段
+    /// 新过渡，拖在指针后面。过渡途中挂在它上面的下拉浮层、提示按最终位置定位。
+    ///
+    /// 节点要**活过**这次布局变化才有旧位置可比：`list_signal` 每次数据变化都重建全部行，
+    /// 挂在行上不会有效果。
+    pub fn animate_layout(mut self) -> Self {
+        self.animate_layout = true;
         self
     }
 
@@ -4797,6 +4819,9 @@ impl Element {
             style_anim: self
                 .animate_style
                 .then(|| Box::new(presence::StyleAnim::new())),
+            layout_anim: self
+                .animate_layout
+                .then(|| Box::new(presence::LayoutAnim::new())),
         };
         let shown = pf.shown && node.effective_visible();
         node.presence = self

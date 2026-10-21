@@ -4,7 +4,7 @@
 //! 纯内容（只报固有尺寸、只画自身 content rect，绝不访问树），从根上避免
 //! Rust 借用冲突。容器节点的 `widget` 为 `EmptyWidget`，视觉由 `Style` 表达。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 
 use crate::signal::Signal;
@@ -723,6 +723,8 @@ pub struct Node {
     pub(crate) opacity_cond: Option<Box<dyn Fn() -> f32>>,
     /// 样式过渡状态（`Element::animate_style`）。只有声明了的节点才分配。
     pub(crate) style_anim: Option<Box<crate::ui::presence::StyleAnim>>,
+    /// 布局过渡状态（`Element::animate_layout`）。只有声明了的节点才分配。
+    pub(crate) layout_anim: Option<Box<crate::ui::presence::LayoutAnim>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -811,6 +813,10 @@ pub struct Tree {
     /// 上一帧的值。需要在响应式相位就知道"这一帧窗口有多大"的控件读这个字段，典型是
     /// 虚拟滚动：它按视口高决定构建多少行，而视口再大也不会超过窗口。
     pub layout_size: Size,
+    /// 上一帧绘制时正在推进的展开 / 高度过渡节点（它们每帧请求一次重排）。被它们推着走的
+    /// 节点，位置变化本身已经是平滑的，布局过渡只记位置、不另起过渡——否则每帧都去追一个
+    /// 移动的目标，远远落在后面。取用即清，见 [`Tree::sync_layout_anims`]。
+    layout_following: RefCell<Vec<NodeId>>,
     /// 本树上所有对话框遮罩的显示信号，按 `build` 的先序遍历登记（父在前、子在后），
     /// 故**栈顶即最内层**：嵌套对话框下 ESC 先关最里面那个。
     ///
@@ -855,6 +861,7 @@ impl Tree {
             pending_dialog: None,
             arrange_origin: Point::new(0, 0),
             layout_size: Size::ZERO,
+            layout_following: RefCell::new(Vec::new()),
             modals: Vec::new(),
             overlays: Vec::new(),
         }
@@ -1119,6 +1126,7 @@ impl Tree {
     pub fn layout_root(&mut self, size: Size, text: &mut dyn TextEngine) {
         // 先记本帧尺寸再广播响应式更新：`on_update` 里读得到"这一帧窗口多大"，
         // 而节点的 bounds 此刻还停在上一帧（见 `layout_size`）。
+        let resized = self.layout_size != size;
         self.layout_size = size;
         // 先让响应式节点重建子树结构，再 measure/arrange
         self.dispatch_reactive_updates();
@@ -1134,6 +1142,161 @@ impl Tree {
         // 浮层必须排在整棵树 arrange **之后**：它的锚点取自父节点的绝对矩形，
         // 而那要等父级排完才成立。
         self.layout_overlays(size, text);
+        self.sync_layout_anims(!resized);
+    }
+
+    /// 布局完成后，让声明了布局过渡的节点比对新旧位置（见 [`Node::layout_anim`]）。
+    ///
+    /// `animate`：窗口改尺寸引起的位移不过渡——拖窗口边时内容像橡皮筋一样拖在后面，
+    /// 比一帧到位难受得多。
+    fn sync_layout_anims(&mut self, animate: bool) {
+        let moving = self.layout_following.take();
+        let mut th = None;
+        for (i, slot) in self.slots.iter().enumerate() {
+            let Some(a) = slot.node.as_ref().and_then(|n| n.layout_anim.as_ref()) else {
+                continue;
+            };
+            let id = NodeId {
+                index: i as u32,
+                generation: slot.generation,
+            };
+            let pos = self.layout_anim_pos(id);
+            let pushed = moving.iter().any(|&m| self.pushes(m, id));
+            let th = th.get_or_insert_with(crate::theme::current);
+            a.relayout(pos, animate && !pushed, th);
+        }
+    }
+
+    /// 展开 / 高度过渡中的 `mover` 是否可能推动 `id` 的位置。宁可多判：多判只是这段
+    /// 期间的位移不另起过渡，漏判则每帧起一段新过渡去追，明显拖在后面。
+    ///
+    /// `mover` 变高时，先把它到根的每一层容器撑大（共同祖先 `P` 以上的每一层都包含 `id`），
+    /// 于是 `id` 被推动当且仅当：
+    /// - 在 `P` 里，`mover` 那一支排在 `id` 那一支前面（线性 / 滚动容器按顺序堆叠）；或
+    /// - `id` 那一支上（直到 `id` 自己）、`P` 及 `P` 以上任一层的落点随尺寸变化
+    ///   （见 [`Self::size_sensitive`]）。
+    ///
+    /// `mover` 是 `id` 的祖先时，`id` 只在 `mover` 及其以上某层落点随尺寸变化时被推动——
+    /// 祖先自己的高度过渡只裁剪，子节点按自然尺寸排布。`id` 是 `mover` 的祖先时同理。
+    fn pushes(&self, mover: NodeId, id: NodeId) -> bool {
+        let chain = |mut n: NodeId| {
+            let mut v = vec![n];
+            while let Some(p) = self.get(n).and_then(|x| x.parent) {
+                v.push(p);
+                n = p;
+            }
+            v.reverse();
+            v
+        };
+        let (a, b) = (chain(mover), chain(id));
+        let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        if common == 0 {
+            return false;
+        }
+        let sensitive_up = |from: usize| a[..from].iter().any(|&n| self.size_sensitive(n));
+        if common >= a.len() || common >= b.len() {
+            // 一方是另一方的祖先（含自身）：只看较高那个及以上各层。
+            return sensitive_up(common);
+        }
+        // `id` 那一支整条往下都查：顶层节点自己不挪，尺寸却可能随兄弟变（加权、拉伸），
+        // 它里面居中的子孙照样被推。
+        if sensitive_up(common) || b[common..].iter().any(|&n| self.size_sensitive(n)) {
+            return true;
+        }
+        let Some(parent) = self.get(a[common - 1]) else {
+            return false;
+        };
+        match parent.layout {
+            Layout::Linear { .. } | Layout::Scroll => {}
+            // 层叠的兄弟互相推不动；随 P 变大而挪的已在上面按对齐判过。
+            Layout::Frame => return false,
+            _ => return true,
+        }
+        let at = |n: NodeId| parent.children.iter().position(|&c| c == n);
+        matches!((at(a[common]), at(b[common])), (Some(x), Some(y)) if x < y)
+    }
+
+    /// 节点在父容器里的落点是否随尺寸变化：自身变大、父容器变大或前面的兄弟变大时会挪。
+    ///
+    /// 居中 / 靠后对齐、`Placement::Rect`、浮层（翻到锚点上方时随高度上移）、排在它前面的
+    /// 加权兄弟（它变大，那个兄弟就缩）都算。未知布局一律算，理由见 [`Self::pushes`]。
+    fn size_sensitive(&self, id: NodeId) -> bool {
+        let Some(n) = self.get(id) else {
+            return false;
+        };
+        if n.overlay.is_some() {
+            return true;
+        }
+        let Some(parent) = n.parent.and_then(|p| self.get(p)) else {
+            return false;
+        };
+        let moves = |a: Align| !matches!(a, Align::Start | Align::Stretch);
+        match parent.layout {
+            Layout::Scroll => false,
+            Layout::Frame => match &n.place {
+                Some(Placement::At(_)) => false,
+                Some(Placement::Rect(_)) => true,
+                None => {
+                    let h = n.align.unwrap_or(Align::Start);
+                    moves(h) || moves(n.align_v.unwrap_or(h))
+                }
+            },
+            Layout::Linear { axis, cross, .. } => {
+                if moves(n.align.unwrap_or(cross)) {
+                    return true;
+                }
+                let weighted = |c: &Node| {
+                    let main = if axis == Axis::Horizontal {
+                        &c.width
+                    } else {
+                        &c.height
+                    };
+                    main.is_weight() || c.weight_fn.is_some()
+                };
+                parent
+                    .children
+                    .iter()
+                    .take_while(|&&c| c != id)
+                    .any(|&c| self.get(c).is_some_and(weighted))
+            }
+            _ => true,
+        }
+    }
+
+    /// 布局过渡比对用的位置：相对最近一个同样声明了布局过渡的祖先（没有就是根），并扣掉
+    /// 沿途滚动容器的滚动量与越界回弹。不在布局里（自身或任一祖先不占位）时为 `None`。
+    ///
+    /// 相对祖先：父子都声明时，父的位移已经带着子走了，子只补自己相对父的那部分，
+    /// 否则同一段位移会被叠两遍。扣滚动：滚动不是布局变化，滚一下不能让每一行都滑一段。
+    /// `offset`（拖拽让位等）不计入——那是调用方逐帧写的视觉位移，跟着补间会拖在指针后面。
+    fn layout_anim_pos(&self, id: NodeId) -> Option<Point> {
+        let n = self.get(id)?;
+        if !n.layout_visible() {
+            return None;
+        }
+        let mut pos = Point::new(n.bounds.x, n.bounds.y);
+        let mut anchored = false;
+        let mut cur = n.parent;
+        while let Some(pid) = cur {
+            let pn = self.get(pid)?;
+            if !pn.layout_visible() {
+                return None;
+            }
+            if !anchored {
+                if matches!(pn.layout, Layout::Scroll) {
+                    // arrange 把子节点整体挪了 `-scroll_y + over_scroll`（见 `arrange_scroll`）。
+                    pos.y += pn.scroll_y - pn.over_scroll;
+                }
+                if pn.layout_anim.is_some() {
+                    anchored = true;
+                } else {
+                    pos.x += pn.bounds.x;
+                    pos.y += pn.bounds.y;
+                }
+            }
+            cur = pn.parent;
+        }
+        Some(pos)
     }
 
     /// 锚定浮层与其锚点之间的间隙（逻辑 px）。
@@ -1948,19 +2111,29 @@ impl Tree {
             || n.height_anim.as_ref().is_some_and(|a| a.is_active());
         if revealing {
             crate::anim::request_relayout();
+            self.layout_following.borrow_mut().push(id);
         }
         // 有效启用态 = 父链启用 ∧ 自身启用；向下传递实现父禁用子跟随。
         let enabled = parent_enabled && n.own_enabled();
         // 绘制偏移叠加在布局位置之上（见 `Node::offset`）。子节点以 abs 为原点递归，
         // 故父节点的位移自动带着整棵子树走。
+        // 布局过渡（FLIP）的视觉偏移：只在绘制时叠加，命中与焦点按最终布局。
+        let flip = n
+            .layout_anim
+            .as_ref()
+            .map_or(Point::new(0, 0), |a| a.shift());
         let abs = Rect::new(
-            origin.x + n.bounds.x + n.offset.x + slide.x,
-            origin.y + n.bounds.y + n.offset.y + slide.y,
+            origin.x + n.bounds.x + n.offset.x + slide.x + flip.x,
+            origin.y + n.bounds.y + n.offset.y + slide.y + flip.y,
             n.bounds.w,
             n.bounds.h,
         );
         if abs.is_empty() {
             return;
+        }
+        if let Some(a) = n.layout_anim.as_ref().filter(|a| a.is_active()) {
+            // 偏移不进结构签名（否则每帧整窗），脏区自己报：按整段幅度外扩，盖住上一帧位置。
+            crate::anim::request_repaint_in(self.subtree_visual(n, abs).inflate(a.extent()));
         }
         if let Some(p) = n.presence.as_ref().filter(|p| p.is_active()) {
             // 过渡中：脏区取整棵子树的视觉范围，再按滑动幅度外扩，盖住上一帧与这一帧两处位置。
@@ -3174,12 +3347,14 @@ impl Tree {
                 cn.bounds.w,
                 cn.bounds.h,
             );
-            // 子孙自己的进出场滑动（祖先离场时它们一起滑出）不在 `offset` 里，按幅度外扩。
+            // 子孙自己的进出场滑动（祖先离场时它们一起滑出）与布局过渡偏移都不在 `offset`
+            // 里，按幅度外扩。
             let slide = cn
                 .presence
                 .as_ref()
                 .filter(|p| p.alive())
-                .map_or(0, |p| p.slide_extent());
+                .map_or(0, |p| p.slide_extent())
+                + cn.layout_anim.as_ref().map_or(0, |a| a.extent());
             r = r.union(&self.subtree_visual(cn, ca).inflate(slide));
         }
         r

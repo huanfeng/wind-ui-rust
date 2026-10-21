@@ -303,6 +303,94 @@ impl HeightAnim {
     }
 }
 
+/// 布局过渡状态（`Element::animate_layout`，FLIP）：布局位置变了，视觉上从旧位置滑到新位置。
+///
+/// 只存一个"视觉偏移"补间：布局一出新位置，就把偏移设成"旧视觉位置 − 新布局位置"，
+/// 再补间回零。命中与焦点一律按新布局（偏移只在绘制时叠加），过渡中点下去落到的是
+/// 最终位置上的那个节点。
+pub(crate) struct LayoutAnim {
+    shift: Cell<Transition<Point>>,
+    /// 上一次布局的位置（相对最近的同样声明了布局过渡的祖先，扣掉滚动）；`None` = 还没
+    /// 排过或期间不在布局里，下次直接落定。
+    last: Cell<Option<Point>>,
+    /// 这一段过渡的最大偏移幅度（取 x/y 较大者），用于外扩脏区。
+    extent: Cell<i32>,
+}
+
+impl LayoutAnim {
+    pub(crate) fn new() -> Self {
+        Self {
+            shift: Cell::new(Transition::new(Point::new(0, 0)).movement()),
+            last: Cell::new(None),
+            extent: Cell::new(0),
+        }
+    }
+
+    /// 布局后调用：`pos` 是本次的布局位置，`None` 表示节点不在布局里。
+    /// `animate` 为 false 时（窗口改尺寸、位移由别的过渡驱动）只记位置：正在播的偏移原样
+    /// 保留、照常收尾——清零会让剩下的那段一帧跳没。
+    pub(crate) fn relayout(&self, pos: Option<Point>, animate: bool, th: &Theme) {
+        let mut tr = self.shift.get();
+        let old = self.last.replace(pos);
+        let (Some(old), Some(pos)) = (old, pos) else {
+            tr.settle(Point::new(0, 0));
+            self.shift.set(tr);
+            return;
+        };
+        if old == pos {
+            return;
+        }
+        if !animate {
+            return;
+        }
+        // 旧视觉位置 = 旧布局位置 + 当前偏移；要它不动，偏移整体加上 old − pos。
+        let d = Point::new(old.x - pos.x, old.y - pos.y);
+        let origin = Point::new(0, 0);
+        if tr.is_active() {
+            // 正在滑：整段平移后改向回零，继承当前速度（连续增删不会顿一下）。
+            tr.translate(d);
+            tr.retarget_spring(origin, th.anim.spring());
+        } else {
+            tr.settle(d);
+            tr.retarget(origin, th.anim.normal(), th.anim.easing());
+        }
+        let cur = tr.value();
+        let reach = cur.x.abs().max(cur.y.abs());
+        let prev = if self.is_active() {
+            self.extent.get()
+        } else {
+            0
+        };
+        self.extent.set(prev.max(reach));
+        self.shift.set(tr);
+    }
+
+    /// 本帧的视觉偏移。
+    ///
+    /// 不续帧：续帧与脏区由调用方按子树范围自报（`request_repaint_in`）。这里若走
+    /// `Transition::animate`，它在绘制矩形未设时请求的是**整窗**，自报的局部脏区就白报了。
+    pub(crate) fn shift(&self) -> Point {
+        let v = self.shift.get().value();
+        // 弹簧改向继承反向速度时会先冲过改向时的偏移再回头：幅度按实际走到的最大值记。
+        self.extent
+            .set(self.extent.get().max(v.x.abs().max(v.y.abs())));
+        v
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.shift.get().is_active()
+    }
+
+    /// 这一段过渡里偏移的最大幅度（脏区外扩用）。
+    pub(crate) fn extent(&self) -> i32 {
+        if self.is_active() {
+            self.extent.get()
+        } else {
+            0
+        }
+    }
+}
+
 /// 预乘颜色：过渡按预乘 RGBA 插值。非预乘逐通道插值在一端透明时会把那一端的 rgb（通常是
 /// 黑）掺进来——透明底淡到浅粉，中途发灰约 25%。
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -150,6 +150,8 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(8)
+            // 卡片高度也跟着平滑伸缩，下方区块随之让位（里面的行仍各自滑动）。
+            .animate_height()
             .child(
                 Element::row()
                     .spacing(8)
@@ -171,10 +173,12 @@ fn main() {
                     .transition(Presence::fade().slide(0, -6)),
             )
             .child(
-                Element::label("↑ 提示条下面的这行会在它让出空间时上移")
+                // 布局过渡：提示条显隐改变了下面几行的布局位置，它们滑过去而不是跳过去。
+                Element::label("↑ 提示条显隐时，下面这几行平滑让位（animate_layout）")
                     .font_size(12.0)
                     .fg_role(Role::TextMuted)
-                    .height(18),
+                    .height(18)
+                    .animate_layout(),
             )
             .child(
                 // 隐式样式过渡：背景色随状态变（bg_when），变化平滑过渡（animate_style）。
@@ -192,6 +196,7 @@ fn main() {
                         }
                     })
                     .animate_style()
+                    .animate_layout()
                     .child(
                         Element::label("状态卡片：背景色随状态平滑过渡（bg_when + animate_style）")
                             .weight(1.0)
@@ -206,7 +211,8 @@ fn main() {
             .child(
                 Element::button("展开/收起详情（animate_height）")
                     .outline()
-                    .on_click(move |_| more.set(!more.get())),
+                    .on_click(move |_| more.set(!more.get()))
+                    .animate_layout(),
             )
             .child(
                 // 内容的自然高度变化时，占位高度平滑跟过去。
@@ -217,6 +223,7 @@ fn main() {
                     .bg_role(Role::SurfaceAlt)
                     .corner(6.0)
                     .animate_height()
+                    .animate_layout()
                     .child(Element::label("摘要：本卡片的高度随内容平滑变化。").height(22))
                     .child(
                         Element::col()
