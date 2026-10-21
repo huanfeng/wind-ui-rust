@@ -26,10 +26,10 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromWindow,
-    ReleaseDC, ScreenToClient, SetDIBitsToDevice, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    PAINTSTRUCT, VREFRESH,
+    BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
+    MonitorFromWindow, ReleaseDC, ScreenToClient, SetDIBitsToDevice, UpdateWindow, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DIB_RGB_COLORS, LOGFONTW, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, PAINTSTRUCT, VREFRESH,
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -63,11 +63,11 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetCaretBlinkTime, GetClientRect, GetMessageExtraInfo, GetMessageTime, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow, IsWindowVisible,
-    IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx, PeekMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    GetCaretBlinkTime, GetClientRect, GetCursorPos, GetMessageExtraInfo, GetMessageTime,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow,
+    IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT,
     HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
     HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO,
@@ -1330,6 +1330,8 @@ unsafe fn create_window(
     #[cfg_attr(not(feature = "d2d"), allow(unused_variables))] renderer: Renderer,
     // 归属窗口（`cfg.owned` / `cfg.modal`）：`None` 就是独立顶层窗口。主窗恒为 `None`。
     owner: Option<HWND>,
+    // 发起开窗的窗口：不归属时也据它决定居中在哪块屏上。主窗 / 托盘开的窗口为 `None`。
+    origin: Option<HWND>,
 ) -> Option<HWND> {
     // 装箱前先问：样式要据此定（见下面 `WS_MINIMIZEBOX` 那段）。
     let hide_on_minimize = handler.hide_on_minimize();
@@ -1502,24 +1504,24 @@ unsafe fn create_window(
         }
     }
 
-    // 居中窗口：有 owner 就居中在 owner 上（对话框该出现在它所属的窗口中央，而不是
-    // 主屏中央——主窗在副屏时尤其明显），再钳进 owner 所在显示器的工作区；否则居中屏幕。
-    // 指定了位置就以位置为准。
+    // 居中窗口：有 owner（或发起开窗的窗口）就居中在它上面（对话框该出现在它所属的窗口
+    // 中央，而不是主屏中央——主窗在副屏时尤其明显），再钳进那块显示器的工作区；
+    // 都没有（主窗、托盘开的窗口）就居中在鼠标所在的显示器上。指定了位置就以位置为准。
     if cfg.centered && cfg.position.is_none() {
         let mut rc = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rc);
         let win_w = rc.right - rc.left;
         let win_h = rc.bottom - rc.top;
-        let (x, y) = match owner {
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let (x, y) = match owner.or(origin) {
             Some(o) => {
                 let mut orc = RECT::default();
                 let _ = GetWindowRect(o, &mut orc);
                 let mut x = orc.left + (orc.right - orc.left - win_w) / 2;
                 let mut y = orc.top + (orc.bottom - orc.top - win_h) / 2;
-                let mut mi = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
                 let mon = MonitorFromWindow(o, MONITOR_DEFAULTTONEAREST);
                 if GetMonitorInfoW(mon, &mut mi).as_bool() {
                     let w = mi.rcWork;
@@ -1528,10 +1530,23 @@ unsafe fn create_window(
                 }
                 (x, y)
             }
-            None => (
-                (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2,
-                (GetSystemMetrics(SM_CYSCREEN) - win_h) / 2,
-            ),
+            None => {
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+                if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                    let w = mi.rcWork;
+                    (
+                        w.left + (w.right - w.left - win_w) / 2,
+                        w.top + (w.bottom - w.top - win_h) / 2,
+                    )
+                } else {
+                    (
+                        (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2,
+                        (GetSystemMetrics(SM_CYSCREEN) - win_h) / 2,
+                    )
+                }
+            }
         };
         let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
     }
@@ -1687,7 +1702,7 @@ unsafe fn run_windowed(
     let hwnd = if cfg.resident {
         None
     } else {
-        Some(create_window(hinst, &cfg, handler, cfg.renderer, None).expect("主窗口创建失败"))
+        Some(create_window(hinst, &cfg, handler, cfg.renderer, None, None).expect("主窗口创建失败"))
     };
 
     // App 级消息宿主：托盘、全局热键、跨线程唤醒的落点。它们的生命周期属于应用而非
@@ -2861,7 +2876,9 @@ unsafe fn open_pending_windows(hwnd: HWND) {
             NewWindow::Create(cfg, handler) => {
                 // 归属 / 模态窗口的 owner 就是发起开窗的这个窗口。
                 let owner = (cfg.owned || cfg.modal).then_some(hwnd);
-                if let Some(child) = create_window(hinst, &cfg, handler, renderer, owner) {
+                if let Some(child) =
+                    create_window(hinst, &cfg, handler, renderer, owner, Some(hwnd))
+                {
                     show_window(child);
                 }
             }
@@ -2912,7 +2929,7 @@ unsafe fn materialize_window(item: NewWindow) {
             let hinst = HINSTANCE(hmodule.0);
             // 后端沿用应用那次的选择；宿主没了（理论上不会，托盘消息正由它派发）就用默认。
             let renderer = app_host().map(|h| h.renderer).unwrap_or_default();
-            if let Some(child) = create_window(hinst, &cfg, handler, renderer, None) {
+            if let Some(child) = create_window(hinst, &cfg, handler, renderer, None, None) {
                 // 托盘/热键开的窗口是用户此刻要用的东西，建完直接前置——否则它会开在
                 // 当前前台窗口的背后，用户按了热键却什么也没看见。
                 show_and_activate(child);
