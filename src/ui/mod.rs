@@ -800,6 +800,25 @@ impl Element {
             cross: Align::Start,
         })
     }
+    /// 横向流式容器：子节点从左往右排，放不下就折到下一行；行内默认纵向居中。
+    /// 用 [`Element::spacing`] 设同行间距、[`Element::run_spacing`] 设行间距。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// Element::flow()
+    ///     .width_match()
+    ///     .spacing(6)
+    ///     .run_spacing(4)
+    ///     .child(Element::badge("APK"))
+    ///     .child(Element::badge("v2 · v3"));
+    /// ```
+    pub fn flow() -> Self {
+        Self::base(Layout::Flow {
+            spacing: 0,
+            run_spacing: 0,
+            cross: Align::Center,
+        })
+    }
     /// 叠层容器（FrameLayout）。
     pub fn stack() -> Self {
         Self::base(Layout::Frame)
@@ -4645,15 +4664,24 @@ impl Element {
     }
     /// 线性容器主轴子间距。
     pub fn spacing(mut self, s: i32) -> Self {
-        if let Layout::Linear { spacing, .. } = &mut self.layout {
-            *spacing = s;
+        match &mut self.layout {
+            Layout::Linear { spacing, .. } | Layout::Flow { spacing, .. } => *spacing = s,
+            _ => {}
+        }
+        self
+    }
+    /// 流式容器（[`Element::flow`]）的行间距；其他容器上无效。
+    pub fn run_spacing(mut self, s: i32) -> Self {
+        if let Layout::Flow { run_spacing, .. } = &mut self.layout {
+            *run_spacing = s;
         }
         self
     }
     /// 线性容器交叉轴默认对齐。
     pub fn cross(mut self, a: Align) -> Self {
-        if let Layout::Linear { cross, .. } = &mut self.layout {
-            *cross = a;
+        match &mut self.layout {
+            Layout::Linear { cross, .. } | Layout::Flow { cross, .. } => *cross = a,
+            _ => {}
         }
         self
     }

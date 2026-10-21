@@ -491,6 +491,14 @@ pub enum Layout {
     Frame,
     /// 垂直滚动容器：子内容按无限高度测量，按 scroll_y 偏移并裁剪到视口。
     Scroll,
+    /// 横向流式：子节点从左往右排，一行放不下就折到下一行（徽章、标签云）。
+    /// `spacing` 是同一行里的横向间距，`run_spacing` 是行与行之间的纵向间距，
+    /// `cross` 是子节点在所在行内的纵向对齐。
+    Flow {
+        spacing: i32,
+        run_spacing: i32,
+        cross: Align,
+    },
 }
 
 /// stack（`Layout::Frame`）子节点的**自由摆放**（[`crate::ui::Element::place`] /
@@ -1685,6 +1693,11 @@ impl Tree {
             }
             Layout::Frame => self.measure_frame(id, wspec, hspec, avail_w, avail_h, text),
             Layout::Scroll => self.measure_scroll(id, avail_w, text),
+            Layout::Flow {
+                spacing,
+                run_spacing,
+                ..
+            } => self.measure_flow(id, spacing, run_spacing, wspec, avail_w, text),
         };
 
         let desired_w = content.w + padding.horizontal();
@@ -1896,6 +1909,42 @@ impl Tree {
         Size::new(max_w, total_h)
     }
 
+    /// 流式容器：子节点按自身宽度（不超过一整行）测量，再按可用宽折行。
+    /// 宽不受限时等同于单行的 row。
+    fn measure_flow(
+        &mut self,
+        id: NodeId,
+        spacing: i32,
+        run_spacing: i32,
+        wspec: MeasureSpec,
+        avail_w: i32,
+        text: &mut dyn TextEngine,
+    ) -> Size {
+        let unbounded = wspec.mode == MeasureMode::Unbounded;
+        let children = self.visible_children(id);
+        let mut sizes = Vec::with_capacity(children.len());
+        for &c in &children {
+            let (cw, ch, cm) = {
+                let n = self.get(c).unwrap();
+                (n.width, n.height, n.margin)
+            };
+            // 单个子节点最宽占满一行：长文本据此换行 / 截断，而不是把容器撑出界。
+            let cwspec = child_spec(cw, (avail_w - cm.horizontal()).max(0), unbounded);
+            let chspec = child_spec(ch, 0, true);
+            let s = self.measure(c, cwspec, chspec, text);
+            sizes.push(Size::new(s.w + cm.horizontal(), s.h + cm.vertical()));
+        }
+        let limit = if unbounded { i32::MAX } else { avail_w };
+        let lines = flow_lines(&sizes, limit, spacing);
+        let mut w = 0;
+        let mut h = 0;
+        for (i, line) in lines.iter().enumerate() {
+            w = w.max(line.width);
+            h += line.height + if i > 0 { run_spacing } else { 0 };
+        }
+        Size::new(w, h)
+    }
+
     fn measure_frame(
         &mut self,
         id: NodeId,
@@ -2029,6 +2078,11 @@ impl Tree {
             } => self.arrange_linear(id, inner, axis, spacing, cross),
             Layout::Frame => self.arrange_frame(id, inner),
             Layout::Scroll => self.arrange_scroll(id, inner),
+            Layout::Flow {
+                spacing,
+                run_spacing,
+                cross,
+            } => self.arrange_flow(id, inner, spacing, run_spacing, cross),
         }
         self.arrange_origin = saved_origin;
     }
@@ -2143,6 +2197,44 @@ impl Tree {
             };
             self.arrange(c, child_bounds);
             cursor = main_pos + s_main + cm_main_end + spacing;
+        }
+    }
+
+    fn arrange_flow(
+        &mut self,
+        id: NodeId,
+        inner: Rect,
+        spacing: i32,
+        run_spacing: i32,
+        cross: Align,
+    ) {
+        let children = self.visible_children(id);
+        let sizes: Vec<Size> = children
+            .iter()
+            .map(|&c| {
+                let (s, m) = (self.measured_of(c), self.margin_of(c));
+                Size::new(s.w + m.horizontal(), s.h + m.vertical())
+            })
+            .collect();
+        let lines = flow_lines(&sizes, inner.w, spacing);
+        let mut y = inner.y;
+        for line in lines {
+            let mut x = inner.x;
+            for i in line.start..line.end {
+                let c = children[i];
+                let (cs, cm) = (self.measured_of(c), self.margin_of(c));
+                let align = self.get(c).and_then(|n| n.align).unwrap_or(cross);
+                let avail_h = (line.height - cm.vertical()).max(0);
+                let ch = if align == Align::Stretch {
+                    avail_h
+                } else {
+                    cs.h
+                };
+                let cy = y + cm.top + align_offset(align, avail_h, ch);
+                self.arrange(c, Rect::new(x + cm.left, cy, cs.w, ch));
+                x += sizes[i].w + spacing;
+            }
+            y += line.height + run_spacing;
         }
     }
 
@@ -4483,6 +4575,35 @@ impl Tree {
 
 // ---- 辅助 ----
 
+/// 流式布局的一行：子节点下标区间 `[start, end)` 与行宽、行高（均含 margin）。
+struct FlowLine {
+    start: usize,
+    end: usize,
+    width: i32,
+    height: i32,
+}
+
+/// 按 `limit` 宽折行。每行至少放一个子节点（单个超宽的不再折，交给它自己截断）。
+fn flow_lines(sizes: &[Size], limit: i32, spacing: i32) -> Vec<FlowLine> {
+    let mut lines: Vec<FlowLine> = Vec::new();
+    for (i, s) in sizes.iter().enumerate() {
+        match lines.last_mut() {
+            Some(l) if l.width + spacing + s.w <= limit => {
+                l.end = i + 1;
+                l.width += spacing + s.w;
+                l.height = l.height.max(s.h);
+            }
+            _ => lines.push(FlowLine {
+                start: i,
+                end: i + 1,
+                width: s.w,
+                height: s.h,
+            }),
+        }
+    }
+    lines
+}
+
 fn child_spec(dim: Dimension, avail: i32, parent_unbounded: bool) -> MeasureSpec {
     match dim {
         Dimension::Px(v) => MeasureSpec::exactly(v.max(0)),
@@ -4545,6 +4666,34 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(w, h), &mut te);
         tree
+    }
+
+    /// 流式容器：放不下就折行，容器高度随行数增长；每行按行高纵向居中。
+    #[test]
+    fn flow_wraps_children_onto_new_lines() {
+        let leaf = |w, h| Element::leaf().width(w).height(h);
+        let tree = layout(
+            Element::col().width(200).child(
+                Element::flow()
+                    .width_match()
+                    .spacing(10)
+                    .run_spacing(5)
+                    .child(leaf(80, 20))
+                    .child(leaf(80, 30))
+                    .child(leaf(80, 20)),
+            ),
+            200,
+            400,
+        );
+        let root = tree.root.unwrap();
+        let flow = tree.get(root).unwrap().children[0];
+        let kids = tree.get(flow).unwrap().children.clone();
+        let b = |i: usize| tree.get(kids[i]).unwrap().bounds;
+        // 第一行 80 + 10 + 80 = 170 ≤ 200；第三个放不下，折到第二行。
+        assert_eq!((b(0).x, b(1).x, b(2).x), (0, 90, 0));
+        assert_eq!(b(0).y, 5, "矮的那个在 30 高的行里居中");
+        assert_eq!(b(2).y, 30 + 5);
+        assert_eq!(tree.get(flow).unwrap().bounds.h, 30 + 5 + 20);
     }
 
     /// `as_u64` 是给平台层当「焦点控件身份」比较用的：槽位被复用后必须不同，否则删掉一个

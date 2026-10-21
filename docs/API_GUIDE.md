@@ -262,6 +262,7 @@ Element::tabs_pill(selected, vec![("标签", page), ...])         // 胶囊风�
 Element::tabs_items(selected, vec![(TabItem::new("标签".into()), page), ...], TabStyle::Underline)
                                      // 逐项定制的标签页：标签项由调用方造，能用上逐项禁用与前置图标
 Element::grid(cols, gap, items)      // 等宽网格：每行 cols 个、列按权重均分、末行补空对齐
+Element::flow().spacing(6).run_spacing(4)  // 流式：从左往右排，放不下折行（徽章 / 标签一排）
 Element::dialog(show, content)       // 模态遮罩 + 居中内容（show: Signal<bool>）
 Element::dialog_closable(show, content, on_close)  // 同上，额外在面板右上角叠一个小关闭 ×
 Element::dialog_panel(show, "标题", width, on_close, body, footer)  // 带标题栏/关闭×/底栏的对话框面板
