@@ -197,7 +197,11 @@ pub fn pixel_snap() -> PixelSnap {
         _ => {
             let off = std::env::var("WINDUI_PIXEL_SNAP")
                 .is_ok_and(|v| v.eq_ignore_ascii_case("off") || v == "0");
-            let mode = if off { PixelSnap::Off } else { PixelSnap::Edges };
+            let mode = if off {
+                PixelSnap::Off
+            } else {
+                PixelSnap::Edges
+            };
             // 只在仍未设置时写入：与并发的 set_pixel_snap 竞争时以显式设置为准
             let v = if off { 2 } else { 1 };
             let _ = PIXEL_SNAP.compare_exchange(
@@ -373,7 +377,10 @@ mod align_tests {
         assert_eq!(y0, y1);
         assert_eq!((x0, x1), (0.3, 50.0), "两端不动");
         let pw = w * s;
-        assert!((pw - pw.round()).abs() < 1e-4 && pw >= 1.0, "线宽 {pw} 物理像素应为整数");
+        assert!(
+            (pw - pw.round()).abs() < 1e-4 && pw >= 1.0,
+            "线宽 {pw} 物理像素应为整数"
+        );
         for v in [y0 * s - pw / 2.0, y0 * s + pw / 2.0] {
             assert!((v - v.round()).abs() < 1e-4, "{v} 应落在物理整数上");
         }

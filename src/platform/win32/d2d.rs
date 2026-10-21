@@ -1830,11 +1830,7 @@ impl Canvas for D2DCanvas<'_> {
         // 边界按物理像素取整后再还原成逻辑值（与软后端 mask 的 `Rect::scaled` 同源）：
         // ALIASED 裁剪按像素中心判定，边落在半像素上时会和对齐过的底色差出一列。
         let (x, y, w, h) = crate::render::align_to_device(
-            r.x as f32,
-            r.y as f32,
-            r.w as f32,
-            r.h as f32,
-            self.scale,
+            r.x as f32, r.y as f32, r.w as f32, r.h as f32, self.scale,
         );
         let rect = rect_f(x, y, w, h);
         unsafe {
@@ -2328,7 +2324,10 @@ mod tests {
                 blue_rows += 1;
             }
         }
-        assert_eq!(blue_rows, 2, "边框上下各 1 物理像素（1 逻辑像素在 150% 下取 1）");
+        assert_eq!(
+            blue_rows, 2,
+            "边框上下各 1 物理像素（1 逻辑像素在 150% 下取 1）"
+        );
     }
 
     /// 纵向定位契约的 D2D 版，与 `text::text_block_contract` 同构：
