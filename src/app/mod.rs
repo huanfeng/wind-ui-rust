@@ -49,6 +49,8 @@ mod marks_tests;
 mod menu;
 #[cfg(test)]
 mod presence_tests;
+#[cfg(test)]
+mod switch_tests;
 mod toast;
 mod tooltip;
 

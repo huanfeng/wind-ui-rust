@@ -34,6 +34,10 @@
   行原样保留节点、按新顺序重排（焦点与控件内部状态都留着），数据变了的行重建，新键建行，消失的键删行；键有重复
   时退回整批重建。行上挂 `animate_item()`（= `transition(Presence::reveal())` + `animate_layout()`）即得增删
   淡入淡出、重排滑动；删除的行先留在原处播离场、播完才移除，途中又加回来就地复活。行的构建期信号按行回收。
+- **`Presence::none()`**：不过渡、一帧到位，用来关掉控件默认带的过渡。
+- **内容切换 `Element::switcher(key, build)`**：`key` 变了就重建内容，旧内容淡出、新内容淡入，两者在同一处
+  交叠，旧的播完才回收（连同构建期信号）。按内容取尺寸、不强加撑满；内容自己声明了 `transition` 的照用；
+  `key` 写入相同值不重建。
 - **`Widget::settle_offscreen()`**（默认空实现）：节点不在绘制路径上时，每次结构变化后调用，供控件把跟随
   状态的补间就地落定——隐藏期间状态被程序改过，露出来时不补播过渡。
 - **样式过渡 `Element::animate_style()`** 与运行期样式 **`Element::bg_when(|| 颜色)` / `opacity_when(|| 值)`**：
@@ -80,6 +84,11 @@
   静默顶掉先挂的**：现在 debug 构建下断言。
 
 ### 变更
+
+- **标签页切换默认带过渡**（可见行为变化）：`tabs` / `tabs_icons` / `tabs_pill` / `tabs_items` 切换时旧页淡出、
+  新页淡入，并按选中下标的增减横向滑动 24px（减弱动效档只淡入淡出），过渡期间两页各开一层离屏层。只在切页时
+  播，外层对话框、手风琴开合时页面跟着外层走、自己不动。页面自己声明了 `transition` 的照用；要关掉就给页面挂
+  `.transition(Presence::none())`。
 
 - **破坏性**：`Element::list_signal` 的约束变为 `T: Clone + PartialEq`、`K: Eq + Hash + Clone + 'static`
   （按键比对要判断同一个键的数据变没变）。数据类型补 `#[derive(PartialEq)]` 即可。

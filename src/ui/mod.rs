@@ -73,6 +73,8 @@ pub use window_buttons::{WindowButton, WindowButtonKind};
 
 /// 图标与文字之间的间距（Button 等）。
 const ICON_GAP: i32 = 6;
+/// 标签页切换时内容横向滑动的距离（逻辑 px）。
+const TAB_SLIDE: i32 = 24;
 
 /// 表格单元格内边距（横/纵，px）与可点击单元格高亮圆角。内边距在单元格内部，
 /// 使可点击单元格填满整格、hover 高亮覆盖整格（而非仅贴着文字）。
@@ -724,6 +726,8 @@ pub struct Element {
     /// 锚定浮层的展开信号（见 [`Node::overlay`]）。由 [`Element::popup`] 设置。
     overlay: Option<Signal<bool>>,
     presence: Option<presence::Presence>,
+    /// 进出场滑动方向（标签页切换用）：显隐翻转时问一次，返回滑动量的符号。
+    presence_dir: Option<Rc<dyn Fn(bool) -> i32>>,
     animate_height: bool,
     bg_cond: Option<Box<dyn Fn() -> Color>>,
     opacity_cond: Option<Box<dyn Fn() -> f32>>,
@@ -771,6 +775,7 @@ impl Element {
             reactive: false,
             overlay: None,
             presence: None,
+            presence_dir: None,
             animate_height: false,
             bg_cond: None,
             opacity_cond: None,
@@ -2342,6 +2347,58 @@ impl Element {
         T: Clone + PartialEq + 'static,
         K: Eq + std::hash::Hash + Clone + 'static,
     {
+        Self::keyed(Self::scroll().fill(), data, key_fn, row_fn)
+    }
+
+    /// 内容切换（Flutter `AnimatedSwitcher` / Compose `AnimatedContent`）：`key` 变了就用
+    /// `build` 建出新内容，旧内容淡出、新内容淡入，两者在同一处交叠播放，旧的播完才回收。
+    ///
+    /// 典型用法是分页、向导步骤这类"同一块区域按状态换一份内容"的场景——内容按需构建，
+    /// 不像 [`tabs`](Self::tabs) 那样所有页常驻。`build` 返回的元素自己声明了
+    /// [`transition`](Self::transition) 的照用（比如 `Presence::fade().slide(0, 8)`），没有就淡入淡出。
+    /// 切换期间新旧两份内容同时存在，大块内容会短暂占双份内存。按内容取尺寸、不强加撑满：
+    /// 要占满一块区域就给 switcher 与内容各自设 `fill` / `weight`。新旧内容大小不一时，旧内容
+    /// 回收那一帧 switcher 会缩到新内容的尺寸，下方兄弟跟着一跳——这种场合给它定个尺寸。
+    ///
+    /// `key` 写入相同的值不会重建；内容的构建期信号随那份内容一起回收。
+    ///
+    /// ```ignore
+    /// let page = signal(0usize);
+    /// Element::switcher(page, |p| page_view(p))   // 配合 Element::pager 翻页
+    /// ```
+    pub fn switcher<K>(key: Signal<K>, build: impl Fn(K) -> Self + 'static) -> Self
+    where
+        K: Clone + Eq + std::hash::Hash + 'static,
+    {
+        let data = key.map(|k| vec![k.clone()]);
+        // 层叠容器按内容取尺寸（新旧内容交叠时取两者之大），不强加撑满：放进自适应高度的
+        // 父容器里不会塌成 0，内容自己设的尺寸也不被覆盖。要撑满就给 switcher 与内容各设。
+        Self::keyed(
+            Self::stack(),
+            data,
+            |k: &K| k.clone(),
+            move |k: K| {
+                let mut el = build(k);
+                if el.presence.is_none() {
+                    el.presence = Some(presence::Presence::fade());
+                }
+                el
+            },
+        )
+    }
+
+    /// 按键复用子节点的响应式容器（[`list_signal`](Self::list_signal) /
+    /// [`switcher`](Self::switcher) 共用）：`container` 决定子节点怎么排。
+    fn keyed<T, K>(
+        mut container: Self,
+        data: Signal<Vec<T>>,
+        key_fn: impl Fn(&T) -> K + 'static,
+        row_fn: impl Fn(T) -> Self + 'static,
+    ) -> Self
+    where
+        T: Clone + PartialEq + 'static,
+        K: Eq + std::hash::Hash + Clone + 'static,
+    {
         // 首批行各自在自己的作用域里构建：行被删除或重建时，它构建期创建的信号（`row_fn`
         // 里现造的、或行内控件内部造的）随之回收，否则永久漏一代。
         let mut elements = Vec::new();
@@ -2355,7 +2412,6 @@ impl Element {
             })
             .collect();
         let widget = dyn_list::KeyedList::new(data, key_fn, row_fn, initial);
-        let mut container = Self::scroll().fill();
         container.set_widget(Box::new(widget));
         container.reactive = true;
         container.children = elements;
@@ -2699,11 +2755,11 @@ impl Element {
     /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
     pub fn tabs(selected: Signal<usize>, pages: Vec<(impl Into<String>, Element)>) -> Self {
         let mut items = Vec::new();
-        let mut content = Element::stack().fill().weight(1.0);
+        let mut content = Self::tab_content();
+        let motion = Self::tab_motion(selected);
         for (i, (title, page)) in pages.into_iter().enumerate() {
             items.push(containers::TabItem::new(title.into()));
-            let sel2 = selected;
-            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+            content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Underline)
     }
@@ -2715,11 +2771,11 @@ impl Element {
         pages: Vec<(impl Into<String>, ImageContent, Element)>,
     ) -> Self {
         let mut items = Vec::new();
-        let mut content = Element::stack().fill().weight(1.0);
+        let mut content = Self::tab_content();
+        let motion = Self::tab_motion(selected);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
             items.push(containers::TabItem::new(title.into()).icon_content(icon));
-            let sel2 = selected;
-            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+            content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Underline)
     }
@@ -2728,11 +2784,11 @@ impl Element {
     /// 签名与 [`tabs`](Self::tabs) 一致，仅视觉风格不同。
     pub fn tabs_pill(selected: Signal<usize>, pages: Vec<(impl Into<String>, Element)>) -> Self {
         let mut items = Vec::new();
-        let mut content = Element::stack().fill().weight(1.0);
+        let mut content = Self::tab_content();
+        let motion = Self::tab_motion(selected);
         for (i, (title, page)) in pages.into_iter().enumerate() {
             items.push(containers::TabItem::new(title.into()));
-            let sel2 = selected;
-            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+            content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Pill)
     }
@@ -2770,13 +2826,57 @@ impl Element {
         style: containers::TabStyle,
     ) -> Self {
         let mut items = Vec::new();
-        let mut content = Element::stack().fill().weight(1.0);
+        let mut content = Self::tab_content();
+        let motion = Self::tab_motion(selected);
         for (i, (item, page)) in pages.into_iter().enumerate() {
             items.push(item);
-            let sel2 = selected;
-            content = content.child(page.fill().visible_when(move || sel2.get() == i));
+            content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, style)
+    }
+
+    /// 标签页内容区：各页叠放在同一处，切换时旧页离场、新页进场交叠播放。不裁剪：
+    /// 滑动只有 24px 且同时在淡，短暂越出一点比把贴边控件的焦点环、投影常年裁掉好。
+    fn tab_content() -> Self {
+        Element::stack().fill().weight(1.0)
+    }
+
+    /// 标签页切换方向：选中下标变大，新页从右侧滑入、旧页向左滑出；变小反之。
+    ///
+    /// 各页在显隐翻转那一帧各自来问一次。第一个来问的发现选中值变了，记下方向；后来的
+    /// 读到同一个方向——同一次切换里进场页与离场页方向必然一致。自己声明了过渡的页面不来问，
+    /// 只在这类页面之间切换时记录会落后，下一次方向可能取旧值（只差 24px 的滑向，不另处理）。
+    fn tab_motion(selected: Signal<usize>) -> Rc<dyn Fn(bool) -> i32> {
+        let prev = Cell::new(selected.get());
+        let dir = Cell::new(1);
+        Rc::new(move |entering| {
+            let cur = selected.get();
+            if cur != prev.get() {
+                dir.set(if cur > prev.get() { 1 } else { -1 });
+                prev.set(cur);
+            }
+            if entering {
+                dir.get()
+            } else {
+                -dir.get()
+            }
+        })
+    }
+
+    /// 一页内容：只在选中时显示，切换时淡入淡出并按方向横向滑动（减弱动效档只淡入淡出）。
+    /// 页面自己声明了过渡的保留原样。
+    fn tab_page(
+        page: Element,
+        selected: Signal<usize>,
+        i: usize,
+        motion: &Rc<dyn Fn(bool) -> i32>,
+    ) -> Self {
+        let mut page = page.fill().visible_when(move || selected.get() == i);
+        if page.presence.is_none() {
+            page.presence = Some(presence::Presence::fade().slide(TAB_SLIDE, 0));
+            page.presence_dir = Some(motion.clone());
+        }
+        page
     }
 
     /// `tabs` / `tabs_icons` / `tabs_pill` 的共同骨架：整条标签条是**一个**
@@ -4861,10 +4961,11 @@ impl Element {
                 .animate_layout
                 .then(|| Box::new(presence::LayoutAnim::new())),
         };
-        let shown = pf.shown && node.effective_visible();
+        // 带方向的过渡（标签页）只认自身显隐，初值同理，见 `PresenceState::own_only`。
+        let shown = (pf.shown || self.presence_dir.is_some()) && node.effective_visible();
         node.presence = self
             .presence
-            .map(|p| Box::new(presence::PresenceState::new(p, shown)));
+            .map(|p| Box::new(presence::PresenceState::new(p, shown).with_dir(self.presence_dir)));
         let child_pf = pf.child(&node);
         let id = tree.insert(node);
         if is_reactive {

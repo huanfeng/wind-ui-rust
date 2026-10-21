@@ -2259,6 +2259,11 @@ impl Tree {
             None if !n.effective_visible() => return,
             None => (1.0, Point::new(0, 0), None),
             Some(p) => {
+                let shown = if p.own_only() {
+                    n.effective_visible()
+                } else {
+                    shown
+                };
                 let progress = p.advance(shown, &crate::theme::current());
                 if progress <= 0.0 && !shown {
                     // 离场播完：布局还为它留着位置的话，补一次重排让出来。只补一次：那次重排
@@ -3472,7 +3477,8 @@ impl Tree {
                             p.settle(false);
                         }
                     } else if !pf.painted {
-                        p.settle(pf.shown && n.effective_visible());
+                        let own = n.effective_visible();
+                        p.settle(if p.own_only() { own } else { pf.shown && own });
                     }
                 }
                 let offscreen = !pf.painted || !n.layout_visible();

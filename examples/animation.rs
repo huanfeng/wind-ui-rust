@@ -15,7 +15,8 @@
 //! 动画是交互触发的（hover / 点击 / 切换 / 选中），**截图看不到**，请实跑后用鼠标交互：
 //! - 开关 Switch：滑块平移 + 轨道色渐变      - CheckBox：方框填充 + 对勾淡入
 //! - RadioButton：环加粗 + 中心点放大        - 分段控制器：选中胶囊跨段滑动
-//! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
+//! - 标签页：底部指示条展宽滑动，内容按方向滑入滑出 - 列表行：底色 + 左缘条淡入
+//! - 内容切换（`Element::switcher`）：换一份内容时交叉淡入淡出
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
 //! - 手风琴 / 折叠面板：高度卷帘展开 + 淡入、箭头旋转；`animate_height`：内容变高变矮时平滑过渡
 //! - 状态卡片：`bg_when` + `animate_style`，背景色随状态平滑过渡
@@ -116,18 +117,45 @@ fn main() {
                 .height(20),
         )
     };
+    let step = signal(0usize);
     let tabs = Element::card(
-        "标签页（切换看指示条展宽滑动）",
-        Element::tabs(
-            tab,
-            vec![
-                ("常规", page("常规设置内容")),
-                ("外观", page("外观设置内容")),
-                ("高级", page("高级设置内容")),
-            ],
-        )
-        .width_match()
-        .height(96),
+        "标签页（指示条展宽滑动，内容按方向滑入滑出）",
+        Element::col()
+            .width_match()
+            .spacing(12)
+            .child(
+                Element::tabs(
+                    tab,
+                    vec![
+                        ("常规", page("常规设置内容")),
+                        ("外观", page("外观设置内容")),
+                        ("高级", page("高级设置内容")),
+                    ],
+                )
+                .width_match()
+                .height(96),
+            )
+            .child(
+                // 按需构建的内容切换：step 一变就重建内容，新旧交叉淡入淡出。
+                Element::row()
+                    .width_match()
+                    .cross(Align::Center)
+                    .spacing(8)
+                    .child(
+                        Element::button("下一步（switcher）")
+                            .outline()
+                            .on_click(move |_| step.set((step.get() + 1) % 3)),
+                    )
+                    .child(
+                        Element::switcher(step, |s| {
+                            Element::label(format!("向导第 {} 步：按需构建的内容", s + 1))
+                                .fg_role(Role::TextMuted)
+                                .height(24)
+                        })
+                        .weight(1.0)
+                        .height(24),
+                    ),
+            ),
     );
 
     let list = Element::card(

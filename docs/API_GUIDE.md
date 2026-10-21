@@ -268,6 +268,28 @@ Element::dialog_panel(show, "标题", width, on_close, body, footer)  // 带标�
 Element::flex_spacer()               // 弹性空白：占满主轴剩余空间（把兄弟推到另一端，如底栏左/右分布）
 ```
 
+**标签页切换过渡**：切换时旧页淡出、新页淡入，并按选中下标的增减横向滑动（往后切新页从右侧进来，
+往前切反过来；减弱动效档只淡入淡出）。各页常驻，切换不重建；过渡期间两页各开一层离屏层。只在切页时播，
+外层对话框、手风琴开合时页面跟着外层走。页面自己声明了 `transition` 的照用，要关掉就给页面挂
+`.transition(Presence::none())`。
+
+**按需构建的内容切换**用 `Element::switcher(key, build)`：`key` 变了就用 `build(key)` 建出新内容，
+旧内容淡出、新内容淡入，旧的播完才回收（连同它构建期的信号）。适合分页、向导步骤这类"同一块区域按
+状态换一份内容"、又不想所有页常驻的场景：
+
+```rust
+let page = signal(0usize);
+Element::col()
+    .child(Element::switcher(page, |p| page_view(p).fill()).weight(1.0))   // 翻页时交叉淡入淡出
+    .child(Element::pager(page, total, 20, |_, _| {}))
+```
+
+switcher 按内容取尺寸（新旧交叠时取两者之大），不强加撑满——放进自适应高度的容器里照常；要占满一块区域
+就像上例那样给 switcher 与内容各自设尺寸（新旧内容大小不一时也建议定尺寸：旧内容回收那一帧会缩到新内容的
+大小，下方的兄弟跟着一跳）。`build` 返回的元素自己带了 `transition` 的照用（如
+`Presence::fade().slide(0, 8)`）。切换期间新旧两份内容同时存在，大块内容会短暂占双份内存；`key` 写入相同
+的值不会重建。
+
 **标签逐项禁用**用 `tabs_items`：`tabs` / `tabs_icons` / `tabs_pill` 在内部自己造标签项，
 要给某一项绑可用态就得自己造 `TabItem`。
 

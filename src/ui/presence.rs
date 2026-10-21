@@ -11,6 +11,7 @@
 //! 过渡的节点会随之离场，故对话框可以"遮罩淡出、面板同时下沉"。
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use crate::anim::{self, Easing, Transition};
 use crate::geometry::Point;
@@ -37,6 +38,12 @@ pub struct Presence {
 }
 
 impl Presence {
+    /// 不过渡：显隐一帧到位。用来关掉控件默认带的过渡（比如标签页的页面切换动画：
+    /// 页面自己挂 `.transition(Presence::none())`）。
+    pub fn none() -> Self {
+        Self::default()
+    }
+
     /// 淡入淡出。
     pub fn fade() -> Self {
         Self {
@@ -125,6 +132,10 @@ pub(crate) struct PresenceState {
     tr: Cell<Transition<f32>>,
     /// 上次布局时本节点**只因离场未完**才占位。离场播完那帧据此补一次重排，把空间让出来。
     pub(crate) laid_exiting: Cell<bool>,
+    /// 见 [`with_dir`](Self::with_dir)：显隐翻转时以是否进场问一次，结果存进 `sign`。
+    dir: Option<Rc<dyn Fn(bool) -> i32>>,
+    /// 当前这段过渡的滑动方向（乘到 `slide` 上）。
+    sign: Cell<i32>,
 }
 
 impl PresenceState {
@@ -134,7 +145,23 @@ impl PresenceState {
             spec,
             tr: Cell::new(Transition::new(if shown { 1.0 } else { 0.0 })),
             laid_exiting: Cell::new(false),
+            dir: None,
+            sign: Cell::new(1),
         }
+    }
+
+    /// 滑动方向随每次显隐翻转而定（标签页切换：进场页与离场页按选中下标的增减反向滑）。
+    ///
+    /// 设了方向的过渡只认节点**自身**的显隐（见 [`own_only`](Self::own_only)）。
+    pub(crate) fn with_dir(mut self, dir: Option<Rc<dyn Fn(bool) -> i32>>) -> Self {
+        self.dir = dir;
+        self
+    }
+
+    /// 进出场只跟节点自身的显隐走，不看祖先：标签页的页面只在切换时过渡。外层对话框、
+    /// 手风琴开合时它跟着外层的层一起淡入淡出，自己不再滑一遍、淡一遍。
+    pub(crate) fn own_only(&self) -> bool {
+        self.dir.is_some()
     }
 
     /// 是否还需要占位与绘制：显示中、进场中、离场未完，或刚被隐藏而本帧 paint 还没
@@ -159,6 +186,13 @@ impl PresenceState {
     /// 改向，没被画到的那段时间里发生的显隐，露出来时不该补播（更不该先以旧状态冒出来）。
     pub(crate) fn settle(&self, shown: bool) {
         let mut tr = self.tr.get();
+        if let Some(dir) = &self.dir {
+            // 不画也要让方向函数看到这次翻转：它靠逐次翻转记"上一次选中的是哪页"，
+            // 隐藏期间换了页却没记，露出来后下一次切换的方向就会反。
+            if tr.target() != if shown { 1.0 } else { 0.0 } {
+                dir(shown);
+            }
+        }
         tr.settle(if shown { 1.0 } else { 0.0 });
         self.tr.set(tr);
     }
@@ -180,6 +214,9 @@ impl PresenceState {
         let mut tr = self.tr.get();
         let target = if shown { 1.0 } else { 0.0 };
         if tr.target() != target {
+            if let Some(dir) = &self.dir {
+                self.sign.set(dir(shown));
+            }
             if self.spec.visible_effect() {
                 let (ms, easing) = if shown {
                     (
@@ -221,7 +258,7 @@ impl PresenceState {
         if !anim::movement_enabled() {
             return Point::new(0, 0);
         }
-        let k = 1.0 - p;
+        let k = (1.0 - p) * self.sign.get() as f32;
         let (dx, dy) = self.spec.slide;
         Point::new(
             (dx as f32 * k).round() as i32,
