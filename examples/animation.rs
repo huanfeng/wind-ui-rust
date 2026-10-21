@@ -18,6 +18,7 @@
 //! - 标签页：底部指示条展宽滑动              - 列表行：底色 + 左缘条淡入
 //! - 下拉/步进/按钮/链接：hover/press 颜色淡变
 //! - 手风琴 / 折叠面板：高度卷帘展开 + 淡入、箭头旋转；`animate_height`：内容变高变矮时平滑过渡
+//! - 状态卡片：`bg_when` + `animate_style`，背景色随状态平滑过渡
 //! - 进出场（`Element::transition`）：提示条淡入下落/淡出上收、对话框遮罩淡入 + 面板放大、
 //!   颜色选择浮层淡入轻落、下拉菜单与悬停提示淡入
 
@@ -141,6 +142,7 @@ fn main() {
     // 进出场：提示条显隐（离场期间继续占位，播完才让出空间）、对话框、锚定浮层。
     let hint_on = signal(false);
     let more = signal(false);
+    let alert = signal(false);
     let show_dialog = signal(false);
     let color = signal(Color::hex(0x4C8BF5));
     let presence = Element::card(
@@ -173,6 +175,33 @@ fn main() {
                     .font_size(12.0)
                     .fg_role(Role::TextMuted)
                     .height(18),
+            )
+            .child(
+                // 隐式样式过渡：背景色随状态变（bg_when），变化平滑过渡（animate_style）。
+                Element::row()
+                    .width_match()
+                    .cross(Align::Center)
+                    .spacing(8)
+                    .padding_xy(12, 8)
+                    .corner(6.0)
+                    .bg_when(move || {
+                        if alert.get() {
+                            Color::hex(0xFDE2E1)
+                        } else {
+                            Color::hex(0xE7F0FD)
+                        }
+                    })
+                    .animate_style()
+                    .child(
+                        Element::label("状态卡片：背景色随状态平滑过渡（bg_when + animate_style）")
+                            .weight(1.0)
+                            .height(22),
+                    )
+                    .child(
+                        Element::button("切换告警")
+                            .small()
+                            .on_click(move |_| alert.set(!alert.get())),
+                    ),
             )
             .child(
                 Element::button("展开/收起详情（animate_height）")

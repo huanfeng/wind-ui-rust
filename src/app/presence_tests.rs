@@ -1151,3 +1151,445 @@ fn scale_transition_partial_frames_match_full_frames() {
     }
     assert!(saw_partial, "前提：过渡中走了局部帧");
 }
+
+/// 一个切换按钮 + 一块 `bg_when(红/蓝)` 的色块（`animate` 时声明样式过渡），色块不在按钮的
+/// 脏区里——读者刷新靠签名升整窗。返回宿主与色块中心。
+fn bg_host(flag: Signal<bool>, animate: bool) -> (UiHost, Point) {
+    let mut block = Element::leaf()
+        .size(100, 60)
+        .bg_when(move || if flag.get() { BLUE } else { RED });
+    if animate {
+        block = block.animate_style();
+    }
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .fill()
+            .bg(Color::WHITE)
+            .child(
+                Element::button("切")
+                    .size(80, 30)
+                    .on_click(move |_| flag.set(!flag.get())),
+            )
+            .child(Element::leaf().height(80))
+            .child(block),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    let b = child_bounds(&h, 2);
+    (h, center(b))
+}
+
+/// 跨帧复用同一画布推进到 `t`，返回色块中心的 (红, 蓝)。
+fn rb_at(h: &mut UiHost, pm: &mut Pixmap, clock: &Clock, t: u64, p: Point) -> (u8, u8) {
+    clock.at(t);
+    h.render(&mut PixmapTarget { pixmap: pm }, Size::new(W, H));
+    let px = pm.pixel(p.x as u32, p.y as u32).unwrap();
+    (px.red(), px.blue())
+}
+
+/// `bg_when` 不声明过渡：状态一变，下一帧就是新色。
+/// 声明 `animate_style`：首帧不过渡，切换后中途是两色之间，结束即目标色。
+#[test]
+fn bg_when_repaints_reader_and_animate_style_transitions() {
+    let clock = Clock::new(MotionLevel::Full);
+    let flag = signal(false);
+    let (mut h, p) = bg_host(flag, false);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    assert_eq!(rb_at(&mut h, &mut pm, &clock, 1_000, p), (255, 0), "初始红");
+    // 事件之外写信号（定时器 / 通道消息那类）。签名是否包含 `bg_when` 由
+    // `style_conditions_enter_layout_signature`（单元级）与 `bg_when_reader_refreshes_on_typing`
+    // （宿主级）验；这里只验"不声明过渡时下一帧即新色"。
+    flag.set(true);
+    h.damage.needs_relayout = true;
+    assert_eq!(
+        rb_at(&mut h, &mut pm, &clock, 1_000, p),
+        (0, 255),
+        "不过渡：下一帧即蓝"
+    );
+
+    let flag = signal(false);
+    let (mut h, p) = bg_host(flag, true);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    assert_eq!(
+        rb_at(&mut h, &mut pm, &clock, 1_000, p),
+        (255, 0),
+        "首帧直接是目标色"
+    );
+    click(&mut h, Point::new(10, 10));
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    let (r, b) = rb_at(&mut h, &mut pm, &clock, 1_000 + 80, p);
+    assert!(
+        r > 20 && r < 235 && b > 20 && b < 235,
+        "过渡中途应在两色之间：r={r} b={b}"
+    );
+    assert_eq!(
+        rb_at(&mut h, &mut pm, &clock, 1_000 + 2_000, p),
+        (0, 255),
+        "结束即目标色"
+    );
+}
+
+/// 颜色过渡不是位移：减弱档照常过渡；关闭档瞬变（对照组）。
+#[test]
+fn style_transition_follows_off_but_not_reduced() {
+    for (level, should_animate) in [(MotionLevel::Reduced, true), (MotionLevel::Off, false)] {
+        let clock = Clock::new(level);
+        let flag = signal(false);
+        let (mut h, p) = bg_host(flag, true);
+        let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+        rb_at(&mut h, &mut pm, &clock, 1_000, p);
+        click(&mut h, Point::new(10, 10));
+        rb_at(&mut h, &mut pm, &clock, 1_000, p);
+        let (r, b) = rb_at(&mut h, &mut pm, &clock, 1_000 + 80, p);
+        let mid = r > 20 && r < 235;
+        assert_eq!(mid, should_animate, "{level:?}：r={r} b={b}");
+    }
+}
+
+/// `opacity_when` + `animate_style`：不透明度过渡（白底上红块中途是粉）；`ctx.set_bg` 也过渡。
+#[test]
+fn opacity_when_and_set_bg_transition() {
+    let clock = Clock::new(MotionLevel::Full);
+    let dim = signal(false);
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .fill()
+            .bg(Color::WHITE)
+            .child(
+                Element::button("暗")
+                    .size(80, 30)
+                    .on_click(move |_| dim.set(!dim.get())),
+            )
+            .child(
+                Element::col()
+                    .size(100, 60)
+                    .bg(RED)
+                    .clickable()
+                    .on_click(|ctx| ctx.set_bg(BLUE))
+                    .opacity_when(move || if dim.get() { 0.2 } else { 1.0 })
+                    .animate_style(),
+            ),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    let p = {
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+        center(child_bounds(&h, 1))
+    };
+    click(&mut h, Point::new(10, 10)); // 变暗
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    let g_mid = {
+        rb_at(&mut h, &mut pm, &clock, 1_000 + 80, p);
+        pm.pixel(p.x as u32, p.y as u32).unwrap().green()
+    };
+    rb_at(&mut h, &mut pm, &clock, 1_000 + 2_000, p);
+    let g_end = pm.pixel(p.x as u32, p.y as u32).unwrap().green();
+    assert!(
+        g_mid > 0 && g_mid < g_end,
+        "不透明度应逐渐降低：中途 g={g_mid} 终态 g={g_end}"
+    );
+
+    click(&mut h, Point::new(10, 10)); // 复原
+    rb_at(&mut h, &mut pm, &clock, 5_000, p);
+    rb_at(&mut h, &mut pm, &clock, 7_000, p);
+    click(&mut h, p); // set_bg 换蓝
+    rb_at(&mut h, &mut pm, &clock, 7_000, p);
+    let (r, b) = rb_at(&mut h, &mut pm, &clock, 7_000 + 80, p);
+    assert!(r > 20 && b > 20, "set_bg 也应过渡：r={r} b={b}");
+}
+
+/// 隐藏期间目标变了：露出来时直接是新色，不补播过渡。
+#[test]
+fn style_transition_settles_offscreen() {
+    let clock = Clock::new(MotionLevel::Full);
+    let page = signal(true);
+    let flag = signal(false);
+    let app = App::new("t", W, H).content(
+        Element::col().fill().bg(Color::WHITE).child(
+            Element::col().visible_signal(page).child(
+                Element::leaf()
+                    .size(100, 60)
+                    .bg_when(move || if flag.get() { BLUE } else { RED })
+                    .animate_style(),
+            ),
+        ),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    let p = Point::new(50, 30);
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    page.set(false);
+    h.damage.needs_relayout = true;
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    flag.set(true);
+    h.damage.needs_relayout = true;
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    page.set(true);
+    h.damage.needs_relayout = true;
+    assert_eq!(
+        rb_at(&mut h, &mut pm, &clock, 5_000, p),
+        (0, 255),
+        "露出那一帧就是新色"
+    );
+}
+
+/// `bg_when` / `opacity_when` 的值进结构签名：值一变签名就变，宿主据此升整窗——读这两个
+/// 闭包的节点不在事件脏区里（定时器、通道消息、别处控件写的信号）也会刷新。
+#[test]
+fn style_conditions_enter_layout_signature() {
+    let (c, o) = (signal(false), signal(false));
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .child(
+                Element::leaf()
+                    .size(10, 10)
+                    .bg_when(move || if c.get() { BLUE } else { RED }),
+            )
+            .child(Element::leaf().size(10, 10).bg(RED).opacity_when(move || {
+                if o.get() {
+                    0.3
+                } else {
+                    1.0
+                }
+            })),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    render(&mut h);
+    let s0 = h.tree.layout_signature();
+    c.set(true);
+    let s1 = h.tree.layout_signature();
+    assert_ne!(s0, s1, "bg_when 的值变化应改变签名");
+    o.set(true);
+    assert_ne!(
+        s1,
+        h.tree.layout_signature(),
+        "opacity_when 的值变化应改变签名"
+    );
+}
+
+/// 透明 ↔ 有色的过渡不发灰：非预乘插值会把透明那一端的黑掺进来，白底上淡到浅粉的中途
+/// 比两端都暗约 25%。中途每个通道都不得低于两端的较小者。
+#[test]
+fn transparent_to_color_does_not_darken() {
+    let clock = Clock::new(MotionLevel::Full);
+    let pink = Color::hex(0xFDE2E1);
+    let flag = signal(false);
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .fill()
+            .bg(Color::WHITE)
+            .child(
+                Element::button("切")
+                    .size(80, 30)
+                    .on_click(move |_| flag.set(!flag.get())),
+            )
+            .child(
+                Element::leaf()
+                    .size(100, 60)
+                    .bg_when(move || if flag.get() { pink } else { Color::TRANSPARENT })
+                    .animate_style(),
+            ),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    let p = center(child_bounds(&h, 1));
+    let px = |pm: &Pixmap| {
+        let c = pm.pixel(p.x as u32, p.y as u32).unwrap();
+        [c.red(), c.green(), c.blue()]
+    };
+    for (dir, t0) in [(0, 1_000u64), (1, 5_000)] {
+        click(&mut h, Point::new(10, 10));
+        rb_at(&mut h, &mut pm, &clock, t0, p);
+        for dt in [20u64, 40, 80, 120] {
+            rb_at(&mut h, &mut pm, &clock, t0 + dt, p);
+            let c = px(&pm);
+            for (i, (v, lo)) in c.iter().zip([pink.r, pink.g, pink.b]).enumerate() {
+                assert!(
+                    *v as i32 + 2 >= lo as i32,
+                    "dir={dir} +{dt}ms：通道 {i} 为 {v}，比两端（白 / 浅粉 {lo}）都暗"
+                );
+            }
+        }
+        rb_at(&mut h, &mut pm, &clock, t0 + 2_000, p);
+    }
+}
+
+/// 渐变 → 纯色直接切换：不先闪成透明、也不从渐变之前的旧色淡过来。
+#[test]
+fn gradient_to_solid_switches_instantly() {
+    let clock = Clock::new(MotionLevel::Full);
+    let app = App::new("t", W, H).content(
+        Element::col().fill().bg(Color::WHITE).child(
+            Element::col()
+                .size(100, 60)
+                .bg_gradient(crate::render::Gradient::linear(
+                    (0.0, 0.0),
+                    (100.0, 0.0),
+                    vec![(0.0, BLUE), (1.0, Color::hex(0x00AAFF))],
+                ))
+                .clickable()
+                .on_click(|ctx| ctx.set_bg(RED))
+                .animate_style(),
+        ),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    let p = Point::new(50, 30);
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    click(&mut h, p);
+    // 指针移开，免得 clickable 的悬停叠层混进读数。
+    h.on_pointer(PointerEvent::single(
+        PointerKind::Move,
+        Point::new(W - 5, H - 5),
+        MouseButton::Left,
+    ));
+    let (r, b) = rb_at(&mut h, &mut pm, &clock, 2_000, p);
+    assert!(r > 245 && b < 10, "渐变换成纯色应直接到位：r={r} b={b}");
+}
+
+/// 换主题时直接落定：前景文字是瞬变的，背景若慢慢淡过去，中途会"浅字配浅底"。
+#[test]
+fn style_transition_settles_on_theme_switch() {
+    let clock = Clock::new(MotionLevel::Full);
+    let mut app = App::new("t", W, H);
+    let handle = app.theme_handle();
+    let app = app.content(
+        Element::col().fill().bg(Color::WHITE).child(
+            Element::leaf()
+                .size(100, 60)
+                .bg_role(crate::style::Role::Surface)
+                .animate_style(),
+        ),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    let p = Point::new(50, 30);
+    rb_at(&mut h, &mut pm, &clock, 1_000, p);
+    let dark = crate::theme::Theme::dark();
+    let want = dark.palette.surface;
+    handle.set(dark);
+    h.damage.needs_full = true;
+    let c = {
+        rb_at(&mut h, &mut pm, &clock, 1_000, p);
+        pm.pixel(p.x as u32, p.y as u32).unwrap()
+    };
+    assert_eq!(
+        (c.red(), c.green(), c.blue()),
+        (want.r, want.g, want.b),
+        "换主题那一帧背景就是新主题色"
+    );
+}
+
+/// 样式过渡走局部帧时与每帧强制整窗逐帧逐像素一致（带投影与文字子节点，背景色与
+/// 不透明度同时过渡），结束后不再续帧。
+#[test]
+fn style_transition_partial_frames_match_full_and_go_idle() {
+    let clock = Clock::new(MotionLevel::Full);
+    let make = |dim: Signal<bool>| {
+        let app = App::new("t", W, H).content(
+            Element::stack()
+                .fill()
+                .bg(Color::WHITE)
+                .child(
+                    Element::button("切")
+                        .size(60, 30)
+                        .on_click(move |_| dim.set(!dim.get())),
+                )
+                .child(
+                    Element::col()
+                        .size(120, 70)
+                        .align(crate::spec::Align::Center)
+                        .shadow(crate::style::Shadow::new(
+                            0.0,
+                            4.0,
+                            6.0,
+                            Color::rgb(0, 0, 255),
+                        ))
+                        .bg_when(move || if dim.get() { BLUE } else { RED })
+                        .opacity_when(move || if dim.get() { 0.4 } else { 1.0 })
+                        .animate_style()
+                        .child(Element::label("文字").height(20)),
+                ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        h
+    };
+    let (s1, s2) = (signal(false), signal(false));
+    let (mut partial, mut full) = (make(s1), make(s2));
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    render(&mut full);
+    let mut saw_partial = false;
+    for dir in 0..2u64 {
+        click(&mut partial, Point::new(10, 10));
+        click(&mut full, Point::new(10, 10));
+        let base = 1_000 + dir * 5_000;
+        for t in [0u64, 16, 40, 80, 120, 160, 200, 400, 1_000] {
+            clock.at(base + t);
+            partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+            saw_partial |= !partial.damage.last_frame_full;
+            full.damage.needs_full = true;
+            let want = render(&mut full);
+            assert!(
+                pm.data() == want.data(),
+                "dir={dir} t={t}：局部帧与整窗帧不一致"
+            );
+        }
+    }
+    assert!(saw_partial, "前提：过渡中走了局部帧");
+    partial.on_pointer(PointerEvent::single(
+        PointerKind::Move,
+        Point::new(W - 5, H - 5),
+        MouseButton::Left,
+    ));
+    // 移开指针那一刻按钮的悬停淡出才开始，推进一段再看。
+    clock.at(20_000);
+    partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    clock.at(22_000);
+    partial.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    assert!(!partial.wants_animation(), "过渡结束后不再续帧");
+}
+
+/// 宿主级的签名守护：输入框打字写的是它绑定的信号，按键只给局部脏区、但置重排——
+/// 读这个信号的 `bg_when` 色块在另一个节点上，只有签名包含它的值才会升整窗刷新。
+#[test]
+fn bg_when_reader_refreshes_on_typing() {
+    use crate::app::test_support::key_ev;
+    use crate::event::Key;
+    let text = signal(String::new());
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .fill()
+            .bg(Color::WHITE)
+            .child(Element::text_input(text, "x").height(30).autofocus())
+            .child(Element::leaf().height(60))
+            .child(Element::leaf().size(100, 60).bg_when(move || {
+                if text.with(|s| s.is_empty()) {
+                    RED
+                } else {
+                    BLUE
+                }
+            })),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    let mut pm = Pixmap::new(W as u32, H as u32).unwrap();
+    h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    let p = center(child_bounds(&h, 2));
+    h.on_key(key_ev()(Key::Char('a')));
+    h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
+    assert_eq!(text.get(), "a", "前提：打字写进了绑定信号");
+    let px = pm.pixel(p.x as u32, p.y as u32).unwrap();
+    assert_eq!((px.red(), px.blue()), (0, 255), "读者色块应已刷新为蓝");
+}

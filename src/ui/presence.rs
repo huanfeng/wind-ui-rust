@@ -302,3 +302,123 @@ impl HeightAnim {
         self.tr.get().is_active()
     }
 }
+
+/// 预乘颜色：过渡按预乘 RGBA 插值。非预乘逐通道插值在一端透明时会把那一端的 rgb（通常是
+/// 黑）掺进来——透明底淡到浅粉，中途发灰约 25%。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Premul(crate::geometry::Color);
+
+impl crate::anim::Lerp for Premul {
+    fn lerp(self, to: Self, t: f32) -> Self {
+        let (a, b) = (self.0, to.0);
+        let (aa, ba) = (a.a as f32 / 255.0, b.a as f32 / 255.0);
+        let alpha = aa + (ba - aa) * t;
+        if alpha <= 0.0 {
+            return Premul(crate::geometry::Color::TRANSPARENT);
+        }
+        let ch = |x: u8, y: u8| {
+            let (px, py) = (x as f32 * aa, y as f32 * ba);
+            ((px + (py - px) * t) / alpha).round().clamp(0.0, 255.0) as u8
+        };
+        Premul(crate::geometry::Color::rgba(
+            ch(a.r, b.r),
+            ch(a.g, b.g),
+            ch(a.b, b.b),
+            (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
+        ))
+    }
+}
+
+/// 背景过渡的目标。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BgTarget {
+    /// 无背景：淡到透明（淡完不画）。
+    None,
+    /// 渐变：不参与过渡，照原样画；下次回到纯色时直接落定。
+    Gradient,
+    Solid(crate::geometry::Color),
+}
+
+/// 样式过渡状态（`Element::animate_style`）：背景色与不透明度的变化平滑过渡。
+///
+/// 改向放在 paint：目标值来自 `bg_when` / `opacity_when` 闭包或 `ctx.set_bg`，都在 paint
+/// 前已就位。颜色与透明度不是位移，减弱动效档位下照常过渡。
+pub(crate) struct StyleAnim {
+    bg: Cell<Transition<Premul>>,
+    opacity: Cell<Transition<f32>>,
+    /// 已见过第一次目标值：首帧（以及重新露出、换主题、从渐变回来时）直接落定。
+    primed: Cell<bool>,
+    /// 背景下次直接落定（刚从渐变回到纯色）。与 `primed` 分开：渐变期间不透明度照常过渡。
+    bg_fresh: Cell<bool>,
+    /// 上次绘制时的主题（指针）。换主题时直接落定：前景文字是瞬变的，背景若慢慢淡过去，
+    /// 中途会出现"浅字配浅底"。
+    theme: Cell<usize>,
+}
+
+impl StyleAnim {
+    pub(crate) fn new() -> Self {
+        Self {
+            bg: Cell::new(Transition::new(Premul(crate::geometry::Color::TRANSPARENT))),
+            opacity: Cell::new(Transition::new(1.0)),
+            primed: Cell::new(false),
+            bg_fresh: Cell::new(false),
+            theme: Cell::new(0),
+        }
+    }
+
+    /// 本帧要画的背景色（`None` = 不画，渐变时由调用方照原样画）与不透明度。
+    pub(crate) fn resolve(
+        &self,
+        bg: BgTarget,
+        opacity: f32,
+        th: &std::rc::Rc<Theme>,
+    ) -> (Option<crate::geometry::Color>, f32) {
+        let (mut b, mut o) = (self.bg.get(), self.opacity.get());
+        let theme_id = std::rc::Rc::as_ptr(th) as usize;
+        // 两个 replace 都要执行：写成一个 `||` 的话首帧会短路掉记主题那一步，下一帧被误判为换了主题。
+        let first = !self.primed.replace(true);
+        let theme_changed = self.theme.replace(theme_id) != theme_id;
+        let settle = first || theme_changed;
+        let (ms, easing) = (th.anim.normal(), th.anim.easing());
+        let bg_settle = settle || self.bg_fresh.replace(false);
+        let step = |tr: &mut Transition<Premul>, c: crate::geometry::Color| {
+            if bg_settle {
+                tr.settle(Premul(c));
+            } else if tr.target() != Premul(c) {
+                tr.retarget(Premul(c), ms, easing);
+            }
+        };
+        let drawn = match bg {
+            BgTarget::Solid(c) => {
+                step(&mut b, c);
+                Some(b.value().0)
+            }
+            BgTarget::None => {
+                step(&mut b, crate::geometry::Color::TRANSPARENT);
+                Some(b.value().0).filter(|c| c.a > 0)
+            }
+            BgTarget::Gradient => {
+                // 渐变画完之后回到纯色：直接落定，不从渐变前的旧色淡过去。
+                self.bg_fresh.set(true);
+                None
+            }
+        };
+        if settle {
+            o.settle(opacity);
+        } else if (o.target() - opacity).abs() > 1e-4 {
+            o.retarget(opacity, ms, easing);
+        }
+        self.bg.set(b);
+        self.opacity.set(o);
+        (drawn, o.value().clamp(0.0, 1.0))
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.bg.get().is_active() || self.opacity.get().is_active()
+    }
+
+    /// 下次绘制直接落定（节点不在绘制路径上期间目标变了，露出来时不补播）。
+    pub(crate) fn unprime(&self) {
+        self.primed.set(false);
+    }
+}

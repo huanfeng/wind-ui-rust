@@ -438,6 +438,28 @@ impl Node {
             && self.vis_signal.as_ref().is_none_or(|s| s.get())
             && self.vis_cond.as_ref().map(|f| f()).unwrap_or(true)
     }
+    /// 子树整体不透明度的目标值：`opacity_when` 压过静态 `opacity`。
+    pub(crate) fn effective_opacity(&self) -> f32 {
+        let o = self
+            .opacity_cond
+            .as_ref()
+            .map_or(self.style.opacity, |f| f());
+        // NaN 当不透明：clamp 不改 NaN，而 `NaN < 1.0` 为假会让它按不透明画，过渡也不改向。
+        if o.is_nan() {
+            1.0
+        } else {
+            o.clamp(0.0, 1.0)
+        }
+    }
+
+    /// 背景的目标画笔：`bg_when` 压过静态 `bg`。
+    fn bg_paint(&self, theme: &crate::theme::Theme) -> Option<Paint> {
+        match &self.bg_cond {
+            Some(f) => Some(Paint::fill(f())),
+            None => self.style.bg.as_ref().map(|b| b.resolve_paint(theme)),
+        }
+    }
+
     /// 是否参与布局与绘制：逻辑可见，或带进出场过渡且离场未播完。
     ///
     /// 与 [`effective_visible`](Self::effective_visible) 的分工：布局、绘制看它；命中、焦点、
@@ -695,6 +717,12 @@ pub struct Node {
     pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
     /// 高度过渡状态（`Element::animate_height`）。只有声明了的节点才分配。
     pub(crate) height_anim: Option<Box<crate::ui::presence::HeightAnim>>,
+    /// 运行期背景色（`Element::bg_when`）：有则压过 `style.bg`。
+    pub(crate) bg_cond: Option<Box<dyn Fn() -> Color>>,
+    /// 运行期不透明度（`Element::opacity_when`）：有则压过 `style.opacity`。
+    pub(crate) opacity_cond: Option<Box<dyn Fn() -> f32>>,
+    /// 样式过渡状态（`Element::animate_style`）。只有声明了的节点才分配。
+    pub(crate) style_anim: Option<Box<crate::ui::presence::StyleAnim>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -1957,7 +1985,33 @@ impl Tree {
 
         // 子树整体不透明度：<1 时入离屏层，绘完整棵子树后按 opacity 合成回父层。
         // 与自绘剪枝无关——层的 push/pop 必须成对，且子树可能有内容要画。
-        let opacity = n.style.opacity * presence_alpha;
+        // 背景与不透明度的目标值（`bg_when` / `opacity_when` 压过静态样式），声明了
+        // `animate_style` 的节点在这里过渡到目标。渐变背景不参与过渡。
+        let theme = crate::theme::current();
+        // 背景画笔只在要画（自绘可见）或要推进过渡时才解析：渐变画笔每次解析都分配。
+        let mut bg_paint = if self_visible || n.style_anim.is_some() {
+            n.bg_paint(&theme)
+        } else {
+            None
+        };
+        let mut target_opacity = n.effective_opacity();
+        if let Some(sa) = &n.style_anim {
+            use crate::ui::presence::BgTarget;
+            let target = match &bg_paint {
+                None => BgTarget::None,
+                Some(p) if p.gradient.is_some() => BgTarget::Gradient,
+                Some(p) => BgTarget::Solid(p.color),
+            };
+            let (bg, o) = sa.resolve(target, target_opacity, &theme);
+            if !matches!(target, BgTarget::Gradient) {
+                bg_paint = bg.map(Paint::fill);
+            }
+            target_opacity = o;
+            if sa.is_active() {
+                crate::anim::request_repaint_in(self.subtree_visual(n, abs));
+            }
+        }
+        let opacity = target_opacity * presence_alpha;
         let use_layer = opacity < 1.0 || zoom.is_some();
         if use_layer {
             // 层只开子树实际画得到的范围（含子孙投影与偏移）：一个小浮层淡入不必每帧
@@ -1989,7 +2043,6 @@ impl Tree {
             canvas.clip_rect(abs);
         }
 
-        let theme = crate::theme::current();
         let content = abs.inset(n.padding);
         if self_visible {
             // 投影：在背景之下、按 spread 外扩并按 dx/dy 偏移后柔化绘制。
@@ -2007,11 +2060,10 @@ impl Tree {
                     );
                 }
             }
-            if let Some(bg) = &n.style.bg {
-                let p = bg.resolve_paint(&theme);
+            if let Some(p) = &bg_paint {
                 match n.style.corner_radii {
-                    Some(c) => canvas.fill_round_rect_corners(fx, fy, fw, fh, c, &p),
-                    None => canvas.fill_round_rect(fx, fy, fw, fh, radius, &p),
+                    Some(c) => canvas.fill_round_rect_corners(fx, fy, fw, fh, c, p),
+                    None => canvas.fill_round_rect(fx, fy, fw, fh, radius, p),
                 }
             }
             if let Some((bc, bw)) = &n.style.border {
@@ -2989,7 +3041,8 @@ impl Tree {
     }
 
     /// 全树**结构签名**：对每个存活节点哈希
-    /// (索引, 代际, 有效可见, 有效启用, bounds, offset, raised)。
+    /// (索引, 代际, 有效可见, 有效启用, 生效前景角色, `bg_when` / `opacity_when` 的值,
+    /// bounds, offset, raised)。
     /// 用于交互后判定"是否发生了显隐/启用/位移/尺寸变化"——签名不变即本次仅为局部视觉
     /// 变化（可局部重绘），变了则说明结构改变（影响区域不可局部化，需整窗）。
     /// 注：`own_enabled()` 含 `en_cond` 闭包求值，确保 `enabled_when` 联动能被签名感知。
@@ -3007,6 +3060,15 @@ impl Tree {
                 // 判成"结构没变"而走局部重绘，那一帧只重画事件所在的节点，改了色的那行字
                 // 保持旧色不动。折进来即自动升整窗，无需为它单开特例分支。
                 n.style.effective_fg_role().hash(&mut h);
+                // 运行期背景 / 不透明度同理：值变了不改任何 bounds，不进签名就只重画事件
+                // 所在的节点，读这两个闭包的节点停在旧值。
+                if let Some(f) = &n.bg_cond {
+                    let c = f();
+                    (c.r, c.g, c.b, c.a).hash(&mut h);
+                }
+                if n.opacity_cond.is_some() {
+                    n.effective_opacity().to_bits().hash(&mut h);
+                }
                 let b = n.bounds;
                 (b.x, b.y, b.w, b.h).hash(&mut h);
                 // 绘制偏移/层级提升进签名：拖拽让位这类"布局不变但像素位移"的变化据此
@@ -3051,9 +3113,12 @@ impl Tree {
             Some(n) => {
                 let v = parent_interactive && n.effective_visible() && n.own_enabled();
                 let prev = n.prev_visible.replace(v);
-                if let Some(a) = &n.height_anim {
-                    // 不在绘制路径上也就不被测量：期间内容变了，露出来时直接落定。
-                    if !pf.painted || !n.layout_visible() {
+                if !pf.painted || !n.layout_visible() {
+                    // 不在绘制路径上也就不被测量、不被绘制：期间目标变了，露出来时直接落定。
+                    if let Some(a) = &n.height_anim {
+                        a.unprime();
+                    }
+                    if let Some(a) = &n.style_anim {
                         a.unprime();
                     }
                 }

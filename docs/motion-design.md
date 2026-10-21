@@ -1,6 +1,6 @@
 # 动效体系规划（windui）
 
-> 状态：方向已确认（2026-10-20）。M0、M1、M2 已实现，M3 进行中（M3a 按范围分配离屏层、M3b 合成缩放已实现）。承接 [`animation-design.md`](animation-design.md)（Phase A/B 已交付、Phase C 未做）。
+> 状态：方向已确认（2026-10-20）。M0–M3 已实现，M4 未开始。承接 [`animation-design.md`](animation-design.md)（Phase A/B 已交付、Phase C 未做）。
 > 本文先对照主流框架找出缺口，再按"对用户可见度 / 成本"排出分期。
 
 ## 0. 结论先行
@@ -194,7 +194,10 @@ M1+M2 做完，用户可感知的"动效不足"基本消失；M3/M4 是把能力
 
 ### M3 —— 节点级隐式过渡 + 动画成本收口
 
-> 拆成三步：**M3a 按范围分配离屏层**（✅）→ **M3b 合成缩放**（✅）→ M3c 隐式属性过渡。
+> 拆成三步：**M3a 按范围分配离屏层**（✅）→ **M3b 合成缩放**（✅）→ **M3c 隐式属性过渡**（✅）。
+> M3c 落地：没有做成 `.animate(Prop::Bg | Prop::Opacity)` 的通用属性表——运行期能变的样式本就只有背景与
+> 不透明度，故新增 `bg_when` / `opacity_when`（值进结构签名）+ `animate_style()` 一个开关覆盖两者，
+> `ctx.set_bg` 的变化同样过渡。位移类（`offset`）的隐式过渡留给 M4 的 FLIP。
 > M3b 落地：`Presence::scale(from)` + `Canvas::push_layer_scaled`，缩放只在合成阶段做（布局、命中按原大），
 > 软件后端出层时带变换双线性合成、GPU 后端缩放 quad；D2D 层不支持变换合成，退化为不缩放。对话框面板默认
 > 从 0.96 倍放大，取代自下 12px 升起；没有改为画布级 `translate`（缩放只出现在进出场，合成阶段做就够了）。

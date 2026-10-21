@@ -1525,7 +1525,7 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
 
 没有它只能建两个绑同一份文本的 label 各自 `visible_when`，外加包住它们的容器也要带同样的判定（否则父容器仍为那个高度为 0 的容器计入 spacing）——三个节点、两处判定，表达的是「这行字有两种颜色」。
 
-> 换色靠「生效角色进布局签名 → 重排后签名不等 → 升整窗」生效（同 `enabled_signal` 的置灰）。重排只在宿主置了 `needs_relayout` 的帧发生，而指针 `Move` 刻意不置（hover 高频）。故在自定义 `Widget` 的 Move 分支里改**别的**节点的颜色信号需自行 `ctx.mark_dirty()`；按键/点击/菜单/`App::channel` 都无需额外处理。
+> 换色靠「生效角色进布局签名 → 重排后签名不等 → 升整窗」生效（同 `enabled_signal` 的置灰）。重排只在宿主置了 `needs_relayout` 的帧发生，而指针 `Move` 刻意不置（hover 高频）。故在自定义 `Widget` 的 Move 分支里改**别的**节点的颜色信号需自行 `ctx.mark_dirty_all()`（`mark_dirty()` 只失效本节点）；按键/点击/菜单/`App::channel` 都无需额外处理。
 
 ### 7.2 `Theme`（全局 + 每控件覆盖层）
 控件默认视觉**不从内联 Style 取**，而从当前 `Theme` 取。`Theme` 两层（外加一个全局字族）：
@@ -2583,6 +2583,25 @@ Element::label("已保存")
 - 内置接入：`dialog` / `dialog_panel`（遮罩淡入 + 面板从 0.96 倍放大）、`popup` 浮层（默认
   `Presence::popover()`：淡入 + 自上 4px 落下；要瞬显就给内容声明 `.transition(Presence::default())`）、
   下拉 / 右键 / 菜单栏菜单与悬停提示（只淡入，收起瞬时）。
+
+**样式过渡**（`Element::animate_style()`，对应 CSS `transition`）：背景色与不透明度的变化平滑过渡，不论
+变化来自 `bg_when(|| 颜色)` / `opacity_when(|| 值)`（随状态变的背景与不透明度，读信号即可）还是事件里的
+`ctx.set_bg(..)`。渐变背景直接切换；颜色与透明度不是位移，减弱动效档位下照常过渡。
+
+```rust
+Element::row()
+    .bg_when(move || if alert.get() { Color::hex(0xFDE2E1) } else { Color::WHITE })
+    .animate_style()
+```
+
+- `bg_when` / `opacity_when` 的值进结构签名，重排后值变了即整窗重绘——读它们的节点不在事件的脏区里
+  也会刷新（同 `fg_role_signal`）。同一处残留约束：指针 `Move` 刻意不置重排，在自定义控件的 Move 分支里改
+  别的节点读的信号不会自动升整窗，请自行 `ctx.mark_dirty_all()`（`mark_dirty()` 只失效本节点）。
+- 优先级：`bg_when` 压过 `bg` / `bg_role`，也压过事件里的 `ctx.set_bg`（后者在 `bg_when` 节点上无效）。
+- 要跟随主题就在闭包里读 `windui::theme::current().palette`（闭包在绘制期求值），别写死颜色。
+- 换主题时样式过渡直接落定（前景文字是瞬变的，背景慢慢淡过去中途会"浅字配浅底"）。
+- `opacity_when` 为 0 时节点仍占位、可点、可聚焦（同 CSS）；要真正隐藏用 `visible_when`。不透明度 < 1 的
+  子树常驻离屏层（与静态 `opacity` 同价），静止态别长期停在 < 1。
 
 **高度过渡**（`Element::animate_height()`）：内容的自然高度变化时（换了文字、子项显隐），占位高度平滑
 跟过去，而不是一帧跳变。只管高度；过渡期每帧重排一次，用在面板、卡片上，别挂在长列表的每一行。

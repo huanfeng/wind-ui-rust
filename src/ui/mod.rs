@@ -725,6 +725,9 @@ pub struct Element {
     overlay: Option<Signal<bool>>,
     presence: Option<presence::Presence>,
     animate_height: bool,
+    bg_cond: Option<Box<dyn Fn() -> Color>>,
+    opacity_cond: Option<Box<dyn Fn() -> f32>>,
+    animate_style: bool,
 }
 
 impl Element {
@@ -768,6 +771,9 @@ impl Element {
             overlay: None,
             presence: None,
             animate_height: false,
+            bg_cond: None,
+            opacity_cond: None,
+            animate_style: false,
         }
     }
 
@@ -1963,6 +1969,41 @@ impl Element {
     /// ```
     pub fn transition(mut self, presence: presence::Presence) -> Self {
         self.presence = Some(presence);
+        self
+    }
+
+    /// 运行期背景色：闭包返回本帧的背景色，压过 `bg` / `bg_role` 与事件里的 `ctx.set_bg`。
+    /// 读信号即可随状态变色（选中、告警、拖放悬停）；配合 [`animate_style`](Self::animate_style)
+    /// 平滑过渡。要跟随主题就在闭包里读 `windui::theme::current().palette`。
+    ///
+    /// 闭包须为纯函数（每帧绘制与结构签名都会求值）。值的变化会使整窗重绘——与
+    /// `fg_role_signal` 同一做法，读者节点不在事件的脏区里也会刷新。
+    pub fn bg_when(mut self, f: impl Fn() -> Color + 'static) -> Self {
+        self.bg_cond = Some(Box::new(f));
+        self
+    }
+
+    /// 运行期子树不透明度（0..=1，NaN 当 1）：闭包返回本帧的值，压过 `opacity`。约束同
+    /// [`bg_when`](Self::bg_when)。为 0 时节点仍可点、可聚焦（同 CSS），要隐藏用 `visible_when`。
+    pub fn opacity_when(mut self, f: impl Fn() -> f32 + 'static) -> Self {
+        self.opacity_cond = Some(Box::new(f));
+        self
+    }
+
+    /// 样式过渡（CSS `transition` 的对应物）：背景色与不透明度变化时平滑过渡，不论变化来自
+    /// [`bg_when`](Self::bg_when) / [`opacity_when`](Self::opacity_when) 还是事件里的
+    /// `ctx.set_bg`。时长与曲线取主题 `anim.normal()` / `anim.easing()`；渐变背景直接切换。
+    /// 颜色与透明度不是位移，减弱动效档位下照常过渡。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let alert = signal(false);
+    /// let card = Element::col()
+    ///     .bg_when(move || if alert.get() { Color::hex(0xFDECEA) } else { Color::WHITE })
+    ///     .animate_style();
+    /// ```
+    pub fn animate_style(mut self) -> Self {
+        self.animate_style = true;
         self
     }
 
@@ -4601,7 +4642,7 @@ impl Element {
     /// 换色靠"生效角色进布局签名、重排后签名不等即升整窗"生效（同 `enabled_signal` 的
     /// 置灰）。而重排只在宿主置了 `needs_relayout` 的帧发生——指针 `Move` **刻意不置**
     /// （hover 高频）。所以在自定义 `Widget` 的 Move 分支里改别的节点的颜色信号不会自动
-    /// 升整窗，那一帧只重画悬停节点；这种写法请自行 `ctx.mark_dirty()`。
+    /// 升整窗，那一帧只重画悬停节点；这种写法请自行 `ctx.mark_dirty_all()`（`mark_dirty()` 只失效本节点）。
     /// 按键、点击、菜单、`App::channel` 这些路径都置了 `needs_relayout`，无需额外处理。
     pub fn fg_role_signal(mut self, role: Signal<crate::style::Role>) -> Self {
         self.style.fg_role_signal = Some(role);
@@ -4751,6 +4792,11 @@ impl Element {
             height_anim: self
                 .animate_height
                 .then(|| Box::new(presence::HeightAnim::new())),
+            bg_cond: self.bg_cond,
+            opacity_cond: self.opacity_cond,
+            style_anim: self
+                .animate_style
+                .then(|| Box::new(presence::StyleAnim::new())),
         };
         let shown = pf.shown && node.effective_visible();
         node.presence = self

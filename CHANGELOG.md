@@ -29,6 +29,9 @@
   直接跟随，不另起过渡。
 - **`Widget::settle_offscreen()`**（默认空实现）：节点不在绘制路径上时，每次结构变化后调用，供控件把跟随
   状态的补间就地落定——隐藏期间状态被程序改过，露出来时不补播过渡。
+- **样式过渡 `Element::animate_style()`** 与运行期样式 **`Element::bg_when(|| 颜色)` / `opacity_when(|| 值)`**：
+  背景色与不透明度随状态变，变化平滑过渡（对应 CSS `transition`），`ctx.set_bg` 的变化同样过渡。闭包的值进
+  结构签名，读者节点不在事件脏区里也会刷新。颜色与透明度不是位移，减弱档照常过渡。
 - **缩放过渡 `Presence::scale(from)`** 与 **`Canvas::push_layer_scaled(opacity, bounds, scale, pivot)`**：子树先按
   原大画进离屏层，合成时绕支点缩放（软件后端双线性、GPU 后端按缩放后的 quad 线性采样；D2D 忽略缩放）。
   只支持缩小进场（`from` 钳到 0.5～1：合成不带祖先裁剪，放大会越出滚动视口）。
