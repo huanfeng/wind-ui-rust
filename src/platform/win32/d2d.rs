@@ -1856,12 +1856,19 @@ impl Canvas for D2DCanvas<'_> {
         // PushAxisAlignedClip 自动与现有 clip 栈求交，无需手算交集。
         // 逻辑坐标：当前 SetTransform(scale) 会对 clip rect 施加缩放（仅缩放不旋转，
         // axis-aligned 仍成立）。ALIASED 与软后端的整数矩形 mask 边缘语义一致。
-        // 边界按物理像素取整后再还原成逻辑值（与软后端 mask 的 `Rect::scaled` 同源）：
+        // 边界按物理像素取整后再还原成逻辑值，直接用软后端 mask 的 `Rect::scaled`：
         // ALIASED 裁剪按像素中心判定，边落在半像素上时会和对齐过的底色差出一列。
-        let (x, y, w, h) = crate::render::align_to_device(
-            r.x as f32, r.y as f32, r.w as f32, r.h as f32, self.scale,
+        // 不走 `align_to_device`——它受 `PixelSnap` 管，`with_pixel_snap(Off)` 里画图标时
+        // 裁剪区会跟着落到半像素上，而软 / GPU 后端的裁剪始终取整。
+        let s = self.scale;
+        debug_assert!(s > 0.0, "D2D 画布缩放必须为正，实得 {s}");
+        let p = r.scaled(s);
+        let rect = rect_f(
+            p.x as f32 / s,
+            p.y as f32 / s,
+            p.w as f32 / s,
+            p.h as f32 / s,
         );
-        let rect = rect_f(x, y, w, h);
         unsafe {
             self.ctx
                 .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED)
@@ -2659,6 +2666,33 @@ mod tests {
             c.restore();
         });
         assert_eq!(n, 0, "矩形裁剪必须软硬逐像素一致");
+    }
+
+    /// 裁剪区不受 `PixelSnap` 管：`with_pixel_snap(Off)` 作用域里，150% 下奇数逻辑坐标的
+    /// 裁剪（边落在 `n.5` 物理像素）仍与软后端逐像素一致。曾经 D2D 的裁剪经
+    /// `align_to_device` 取整，作用域一关就落到半像素上，ALIASED 按像素中心判定差出一列。
+    #[test]
+    fn clip_ignores_pixel_snap_scope() {
+        use crate::render::{with_pixel_snap, PixelSnap};
+        let red = Color::rgb(200, 60, 60);
+        // 默认档也跑一遍：两档结果都必须与软后端一致
+        for mode in [PixelSnap::Off, PixelSnap::Edges] {
+            let draw = move |c: &mut dyn Canvas| {
+                with_pixel_snap(mode, || {
+                    c.save();
+                    c.clip_rect(Rect::new(21, 21, 41, 31));
+                    c.fill_rect(0.0, 0.0, 120.0, 90.0, &Paint::fill(red));
+                    c.restore();
+                })
+            };
+            let g = render(180, 135, 1.5, draw);
+            let s = render_soft(180, 135, 1.5, draw);
+            let diff = (0..g.height())
+                .flat_map(|y| (0..g.width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| px(&g, x, y)[..3] != px(&s, x, y)[..3])
+                .count();
+            assert_eq!(diff, 0, "{mode:?} 下裁剪区与软后端差 {diff} 个像素");
+        }
     }
 
     /// 渐变：只容许舍入级偏差（≤2/255）。
