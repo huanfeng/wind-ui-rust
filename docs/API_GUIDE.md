@@ -231,7 +231,7 @@ assert!(!tmp.is_alive());
 - **布局/样式修饰符 = 属性名**：`width`、`padding`、`bg`、`corner`…，设置型方法**不加** `set_` 前缀（builder 惯例）。
 - **颜色用缩写**：背景 `bg`、前景 `fg`，全库一致（`Element::bg`、`App::bg`、`Style.bg`、`EventCtx::set_bg`）。
 - **单条文案参数都是 `impl Into<TextContent>`**：`button`、`label`、`link`、`badge`、`checkbox`、`radio`、`nav_row`、`icon_button` 的文案可传 `&str`、`String`，也可以直接传 `Signal<String>` 让文案跟着状态变（见 §5「动态文案」）。
-  成组的文案（`dropdown`/`list`/`tabs` 的 `Vec<impl Into<String>>`、表格的列名与单元格）仍是 `impl Into<String>`：整组内容要动的场景归 `list_signal` 一族管（§6.5），不是逐条绑信号。
+  成组的文案（`dropdown`/`segmented`/`list`/`tabs` 的选项）是 `Vec<impl Into<TextContent>>`，可逐条传 `t!` 跟随语言（§12.2）；但整组内容要动的场景归 `list_signal` / `dropdown_signal` 一族管（§6.5），不是逐条绑信号。表格的列名与单元格仍是 `impl Into<String>`。
 - **`_signal` 后缀只用于「参数类型不同」的构造器**：`list_signal(Signal<Vec<T>>)`、`dropdown_signal(Signal<Vec<String>>, Signal<usize>)`……文案绑定不需要这个后缀，因为传信号和传字符串走的是**同一个**构造器。
 - **状态参数一律 `Signal<T>`**：`checkbox(label, Signal<bool>)`、`dropdown(options, Signal<usize>)`……第一个参数是内容、第二个是状态，顺序全库一致。
 - **事件回调 = `on_<动作>`**：`on_click`、`on_toggle`、`on_row_activate`……签名规则见 §8.1。
@@ -259,7 +259,7 @@ Element::divider()                   // 分隔线
 Element::tabs(selected, vec![("标签", page_element), ...])       // selected: Signal<usize>
 Element::tabs_icons(selected, vec![("标签", icon, page), ...])  // 带图标的标签（icon: ImageContent）
 Element::tabs_pill(selected, vec![("标签", page), ...])         // 胶囊风格标签页（签名同 tabs，仅视觉不同）
-Element::tabs_items(selected, vec![(TabItem::new("标签".into()), page), ...], TabStyle::Underline)
+Element::tabs_items(selected, vec![(TabItem::new("标签"), page), ...], TabStyle::Underline)
                                      // 逐项定制的标签页：标签项由调用方造，能用上逐项禁用与前置图标
 Element::grid(cols, gap, items)      // 等宽网格：每行 cols 个、列按权重均分、末行补空对齐
 Element::flow().spacing(6).run_spacing(4)  // 流式：从左往右排，放不下折行（徽章 / 标签一排）
@@ -303,8 +303,8 @@ let has_examples = signal(false);          // 本次查询有没有例句
 Element::tabs_items(
     sel,
     vec![
-        (TabItem::new("释义".into()), meanings),
-        (TabItem::new("例句".into()).enabled(has_examples), examples),
+        (TabItem::new("释义"), meanings),
+        (TabItem::new("例句").enabled(has_examples), examples),
     ],
     TabStyle::Underline,                   // 或 TabStyle::Pill
 )
@@ -515,9 +515,9 @@ Element::button(caption).on_click(move |_| {          // 传信号，不是字�
 - `rich` 钉了比内容矮的高度时整块裁剪、下沿按整行对齐；被裁掉的部分不响应悬停、点击与
   键盘焦点（拖选仍可延伸进去，复制会带上看不见的部分）。
 
-> **一个反例**：`dropdown` / `list` / `tabs` 的选项是 `Vec<impl Into<String>>`，**不**支持
-> 逐条绑信号。整组内容会变的场景用 `list_signal` / `dropdown_signal`（§6.5）——那是重建
-> 子树的问题，不是换一段文字的问题。
+> **一个提醒**：`dropdown` / `list` / `tabs` 的选项虽然是 `Vec<impl Into<TextContent>>`（逐条传
+> `t!` 会跟随语言，见 §12.2），但整组内容会变（增删项）的场景请用 `list_signal` /
+> `dropdown_signal`（§6.5）——那是重建子树的问题，不是换一段文字的问题。
 
 ### 导航 / 分组
 
@@ -2890,7 +2890,8 @@ slider（`show_value`）、reorder（`on_reorder`/`commit_mode`）、intent 一�
 属性设置器统一去掉 `with_` 前缀（`with_badge` → `badge` 等），旧名留 `#[deprecated]`
 过渡，编译期会提示新名。单条文案统一收 `impl Into<TextContent>`（`button`、`label`、
 `link`、`checkbox`、`radio`、`nav_row`、`badge`、`icon_button`，可传 `&str` / `String` /
-`Signal<String>`）；成组文案收 `impl Into<String>`（`dropdown`、`list`、`tabs` 的选项等）。
+`Signal<String>`）；成组文案收 `impl Into<String>`（`dropdown`、`list`、`tabs` 的选项等，
+后来也改为 `impl Into<TextContent>`，见 §12.2）。
 少数破例仍收裸 `String`：`Element::table_custom(columns: Vec<(String, f32)>, ..)`。碰上编译
 错误时补一个 `.to_string()` / `.into()` 即可。
 
@@ -2930,8 +2931,35 @@ let lang = app.locale_handle();                 // 克隆进回调，lang.set("e
 | `t!("key", name = v)` | `Message` | 控件参数（任何收 `impl Into<TextContent>` 的位置） | **跟随** |
 | `tr!("key", name = v)` | `String` | `MenuItem` 标签、`ctx.toast`、日志 | 定格不变 |
 
-菜单每次弹出重建，所以用 `tr!` 定格正是对的。反过来把 `tr!` 塞进 `Element::label` 能编过，
-症状只是那条文案不跟随——编译期拦不住，靠 review。
+菜单每次弹出重建，所以用 `tr!` 定格正是对的。
+
+**容器与选项型构造器同样收 `t!`**：下面这些的文案参数都是 `impl Into<TextContent>`（选项型为
+`Vec<impl Into<TextContent>>`），控件内部存文案载体、在测量 / 绘制 / 悬停提示时现取，换语言即跟随，
+不必重建界面：
+
+- 容器：`card` 标题、`setting_row` / `setting_row_desc` 的标签与说明、`field` 标签、`dialog_panel`
+  标题、`collapsible` / `accordion` / `accordion_multi` 面板标题、`chip`、`check_menu` 标题；
+- 选项型：`dropdown`、`segmented`、`list` / `list_pill` / `list_icons`、`tabs` / `tabs_icons` /
+  `tabs_pill` 的标题，以及底层的 `TabItem::new`、`ListRow::new`、`SegmentedControl::new`、
+  `Dropdown::new`、`CollapsibleHeader::new`、`AccordionHeader::new`；
+- 任意元素的 `.tooltip(..)`（表单行限行时自动挂的"看全文"提示也随之跟随）。
+
+```rust
+Element::card(t!("settings.general"), Element::col()
+    .child(Element::setting_row(t!("settings.theme"), Element::dropdown(
+        vec![t!("theme.light"), t!("theme.dark")], theme_idx)))
+    .child(Element::setting_row_desc(t!("settings.tray"), t!("settings.tray_desc"),
+        Element::switch(tray))));
+Element::tabs(page, vec![(t!("tab.basic"), basic), (t!("tab.libs"), libs)]);
+```
+
+`dropdown_signal(Signal<Vec<String>>, ..)` 的选项是信号里的现成字符串，不经翻译：要跟随语言就在
+换语言时由应用重写那个信号，或改用 `dropdown(vec![t!(..), ..])`。
+
+反过来把 `tr!` 塞进上面任何一处——`Element::label`、`card` 标题、`setting_row` 标签、`dropdown`
+选项、`tabs` 标题、`.tooltip(..)`……——都能编过，因为 `String` 本身也是合法文案；症状只是那条文案
+定格在构建那一刻的语言，切换语言后不变，直到整块界面被重建。编译期拦不住，靠 review：**进控件的
+文案一律 `t!`**，`tr!` 只留给菜单项、toast、日志这类"用的时候现拼"的地方。
 
 ### 12.3 译文格式（TOML）
 

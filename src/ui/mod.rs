@@ -720,7 +720,7 @@ pub struct Element {
     enabled_static: bool,
     enabled: Option<Signal<bool>>,
     en_cond: Option<Box<dyn Fn() -> bool>>,
-    tooltip: Option<String>,
+    tooltip: Option<TextContent>,
     cursor: Option<crate::event::CursorShape>,
     /// 注册为响应式节点：build 后自动调用 `Tree::register_reactive`，
     /// 框架在每次 layout 前向其 widget 调用 `on_update`。
@@ -1512,7 +1512,10 @@ impl Element {
     /// ⚠️ 行数**不设上限**：浮层高到放不下时只能贴边（见 `app::tooltip`），一屏铺满
     /// 的提示没人看得完。要列很多条时由调用方截断（列前几条 + "等 N 项"），
     /// 别把整份清单塞进来。
-    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+    ///
+    /// 收 `impl Into<TextContent>`：传 [`t!`](crate::t) 时每次弹出都按当前语言取译文，
+    /// 换语言即跟随；`String`/`&str` 照旧是定格文本。
+    pub fn tooltip(mut self, text: impl Into<TextContent>) -> Self {
         self.tooltip = Some(text.into());
         self
     }
@@ -2129,16 +2132,21 @@ impl Element {
     /// 分段控制器（绑定 `Signal<usize>` 选中索引 + 段标签）：连体多段单选，
     /// 选中段高亮。语义同 `radio` 组，外观更紧凑——适合"二/三选一"切换。
     /// 点击选段、悬停逐段高亮、聚焦后左右方向键移动选中。
+    ///
+    /// 段标签收 `impl Into<TextContent>`：传 [`t!`](crate::t) 时换语言自动跟随。
     #[track_caller]
-    pub fn segmented(options: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
-        let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
+    pub fn segmented(options: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
+        let opts: Vec<TextContent> = options.into_iter().map(|o| o.into()).collect();
         debug_assert!(!opts.is_empty(), "Element::segmented 至少需要一段");
         Self::base(Layout::None).widget(segmented::SegmentedControl::new(opts, selected))
     }
 
     /// 下拉选择（绑定 `Signal<usize>` 选中索引 + 选项标签）。
-    pub fn dropdown(options: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
-        let opts: Vec<String> = options.into_iter().map(|o| o.into()).collect();
+    ///
+    /// 选项收 `impl Into<TextContent>`：传 [`t!`](crate::t) 时收起态文字、测量宽度与
+    /// 展开的列表都按当前语言现取，换语言自动跟随。
+    pub fn dropdown(options: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
+        let opts: Vec<TextContent> = options.into_iter().map(|o| o.into()).collect();
         Self::base(Layout::None).widget(select::Dropdown::new(opts, selected))
     }
 
@@ -2198,7 +2206,7 @@ impl Element {
     ///     CheckMenuItem::action("全部展开", |_ctx| {}),
     /// ]).width(132);
     /// ```
-    pub fn check_menu(title: impl Into<String>, items: Vec<select::CheckMenuItem>) -> Self {
+    pub fn check_menu(title: impl Into<TextContent>, items: Vec<select::CheckMenuItem>) -> Self {
         Self::base(Layout::None).widget(select::CheckMenu::new(title, items))
     }
 
@@ -2323,10 +2331,12 @@ impl Element {
     ///
     /// 已知限制：每行均可聚焦，长列表会拉长 Tab 焦点链（用户需多次 Tab 跨过）。
     /// 后续可改为整列表单一 tab-stop + 方向键内部移动。
-    pub fn list(items: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
+    ///
+    /// 行标签收 `impl Into<TextContent>`：传 [`t!`](crate::t) 时换语言自动跟随。
+    pub fn list(items: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(it.into(), selected, i);
+            let row = list::ListRow::new(it, selected, i);
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -2338,10 +2348,10 @@ impl Element {
     }
 
     /// 同 `list`，但选中/悬停为内缩圆角 pill 底（无左缘强调条）。侧栏导航等现代样式用。
-    pub fn list_pill(items: Vec<impl Into<String>>, selected: Signal<usize>) -> Self {
+    pub fn list_pill(items: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(it.into(), selected, i).pill();
+            let row = list::ListRow::new(it, selected, i).pill();
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -2620,12 +2630,12 @@ impl Element {
     /// 带前置图标的单选列表：`items` 为 (标签, 图标内容) 列表。其余同 `list`。
     /// 图标用 `ImageContent`，可链 `.fit()`/状态换图等；行图标随选中/悬停状态调制。
     pub fn list_icons(
-        items: Vec<(impl Into<String>, ImageContent)>,
+        items: Vec<(impl Into<TextContent>, ImageContent)>,
         selected: Signal<usize>,
     ) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, (label, icon)) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(label.into(), selected, i).icon_content(icon);
+            let row = list::ListRow::new(label, selected, i).icon_content(icon);
             scroll = scroll.child(
                 Self::base(Layout::None)
                     .widget(row)
@@ -2648,9 +2658,13 @@ impl Element {
     /// 可折叠分组：点击标题行展开 / 收起 `body`。`expanded` 绑定展开状态，
     /// body 经 `visible_when(expanded)` 显隐——收起时不占布局、不参与命中。
     /// 标题行右侧三角随状态翻转（展开向下 / 收起向右）。
-    pub fn collapsible(title: impl Into<String>, expanded: Signal<bool>, body: Element) -> Self {
+    pub fn collapsible(
+        title: impl Into<TextContent>,
+        expanded: Signal<bool>,
+        body: Element,
+    ) -> Self {
         let header = Self::base(Layout::None)
-            .widget(nav::CollapsibleHeader::new(title.into(), expanded))
+            .widget(nav::CollapsibleHeader::new(title, expanded))
             .width_match()
             .height(nav::NAV_ROW_H);
         let show = expanded;
@@ -2674,7 +2688,7 @@ impl Element {
     /// 手风琴可以全收起。
     pub fn accordion(
         selected: Signal<Option<usize>>,
-        panels: Vec<(impl Into<String>, Element)>,
+        panels: Vec<(impl Into<TextContent>, Element)>,
     ) -> Self {
         Self::accordion_impl(panels, |i| nav::ExpandState::Single {
             sel: selected,
@@ -2683,7 +2697,7 @@ impl Element {
     }
 
     /// 手风琴**多开**版：各面板独立展开/收起、互不影响（初始全部收起）。
-    pub fn accordion_multi(panels: Vec<(impl Into<String>, Element)>) -> Self {
+    pub fn accordion_multi(panels: Vec<(impl Into<TextContent>, Element)>) -> Self {
         Self::accordion_impl(panels, |_| {
             nav::ExpandState::Multi(crate::signal::signal(false))
         })
@@ -2692,7 +2706,7 @@ impl Element {
     /// 手风琴共用组装：外层卡片 + 逐面板（首面板前不加分隔线）头与显隐 body。
     /// `make_state(i)` 决定第 i 个面板的展开模型（单开共享索引 / 多开独立布尔）。
     fn accordion_impl(
-        panels: Vec<(impl Into<String>, Element)>,
+        panels: Vec<(impl Into<TextContent>, Element)>,
         make_state: impl Fn(usize) -> nav::ExpandState,
     ) -> Self {
         // 四色改用主题角色延迟解析（运行期换主题自动跟随）；corner 为度量，构建期取值即可
@@ -2718,7 +2732,7 @@ impl Element {
             }
             let state = make_state(i);
             let header = Self::base(Layout::None)
-                .widget(nav::AccordionHeader::new(title.into(), state.clone()))
+                .widget(nav::AccordionHeader::new(title, state.clone()))
                 .width_match()
                 .height(nav::NAV_ROW_H)
                 .bg_role(Role::AccordionHeaderBg);
@@ -2791,13 +2805,14 @@ impl Element {
 
     /// 标签页：顶部标签条切换、下方内容区按选中项显隐。
     /// `selected` 绑定当前选中索引，`pages` 为 (标题, 页面) 列表。
-    /// 标题接受 `impl Into<String>`，与 `dropdown`/`list` 的选项类型一致。
-    pub fn tabs(selected: Signal<usize>, pages: Vec<(impl Into<String>, Element)>) -> Self {
+    /// 标题接受 `impl Into<TextContent>`，与 `dropdown`/`list` 的选项类型一致：传
+    /// [`t!`](crate::t) 时换语言自动跟随。
+    pub fn tabs(selected: Signal<usize>, pages: Vec<(impl Into<TextContent>, Element)>) -> Self {
         let mut items = Vec::new();
         let mut content = Self::tab_content();
         let motion = Self::tab_motion(selected);
         for (i, (title, page)) in pages.into_iter().enumerate() {
-            items.push(containers::TabItem::new(title.into()));
+            items.push(containers::TabItem::new(title));
             content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Underline)
@@ -2807,13 +2822,13 @@ impl Element {
     /// 标签图标随选中/悬停状态调制。
     pub fn tabs_icons(
         selected: Signal<usize>,
-        pages: Vec<(impl Into<String>, ImageContent, Element)>,
+        pages: Vec<(impl Into<TextContent>, ImageContent, Element)>,
     ) -> Self {
         let mut items = Vec::new();
         let mut content = Self::tab_content();
         let motion = Self::tab_motion(selected);
         for (i, (title, icon, page)) in pages.into_iter().enumerate() {
-            items.push(containers::TabItem::new(title.into()).icon_content(icon));
+            items.push(containers::TabItem::new(title).icon_content(icon));
             content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Underline)
@@ -2821,12 +2836,15 @@ impl Element {
 
     /// 胶囊式标签页：选中项为 accent 实底圆角胶囊、白字，胶囊在标签间滑动；无基线。
     /// 签名与 [`tabs`](Self::tabs) 一致，仅视觉风格不同。
-    pub fn tabs_pill(selected: Signal<usize>, pages: Vec<(impl Into<String>, Element)>) -> Self {
+    pub fn tabs_pill(
+        selected: Signal<usize>,
+        pages: Vec<(impl Into<TextContent>, Element)>,
+    ) -> Self {
         let mut items = Vec::new();
         let mut content = Self::tab_content();
         let motion = Self::tab_motion(selected);
         for (i, (title, page)) in pages.into_iter().enumerate() {
-            items.push(containers::TabItem::new(title.into()));
+            items.push(containers::TabItem::new(title));
             content = content.child(Self::tab_page(page, selected, i, &motion));
         }
         Self::tabs_frame(items, selected, content, containers::TabStyle::Pill)
@@ -2848,9 +2866,9 @@ impl Element {
     /// Element::tabs_items(
     ///     sel,
     ///     vec![
-    ///         (TabItem::new("释义".into()), a),
+    ///         (TabItem::new("释义"), a),
     ///         // 本次查询没有例句：留在原位置灰，而不是把这一项摘掉
-    ///         (TabItem::new("例句".into()).enabled(has_examples), b),
+    ///         (TabItem::new("例句").enabled(has_examples), b),
     ///     ],
     ///     TabStyle::Underline,
     /// );
@@ -3020,7 +3038,7 @@ impl Element {
     /// 用 `Element::flex_spacer()` 把按钮推到右侧）。
     pub fn dialog_panel(
         show: Signal<bool>,
-        title: impl Into<String>,
+        title: impl Into<TextContent>,
         width: i32,
         on_close: impl FnMut(&mut EventCtx) + 'static,
         body: Element,
@@ -3031,7 +3049,7 @@ impl Element {
             .width_match()
             .cross(Align::Center)
             .child(
-                Element::label(title.into())
+                Element::label(title)
                     .font_size(18.0)
                     .font_weight(700)
                     .fg_role(crate::style::Role::Text)
@@ -3301,7 +3319,7 @@ impl Element {
     /// ```
     ///
     /// [`FormTheme`]: crate::theme::FormTheme
-    pub fn field(label: impl Into<String>, control: Element) -> Self {
+    pub fn field(label: impl Into<TextContent>, control: Element) -> Self {
         let th = crate::theme::current();
         let f = &th.form;
         Element::row()
@@ -3333,7 +3351,7 @@ impl Element {
     /// ```
     ///
     /// [`FormTheme::row_height`]: crate::theme::FormTheme::row_height
-    pub fn setting_row(label: impl Into<String>, control: Element) -> Self {
+    pub fn setting_row(label: impl Into<TextContent>, control: Element) -> Self {
         Self::setting_row_inner(label.into(), None, control)
     }
 
@@ -3342,7 +3360,7 @@ impl Element {
     /// 这一种**不定高**：高度由内容加 [`FormTheme::row_pad_y`](crate::theme::FormTheme::row_pad_y)
     /// 撑出来。副标题长短不一，定高只会把它挤出去。
     ///
-    /// 做成独立构造器而非给 `setting_row` 加一个 `Option` 参数：`Option<impl Into<String>>`
+    /// 做成独立构造器而非给 `setting_row` 加一个 `Option` 参数：`Option<impl Into<TextContent>>`
     /// 的 `None` 推断不出类型（调用方得写 `None::<&str>`），而退成 `Option<&str>` 又会让
     /// 这一个参数破例不收 `String`。两个各自说得清的签名比一个别扭的签名好，
     /// 也免得没有副标题的行——占多数——为此多写一个 `None`。
@@ -3358,15 +3376,15 @@ impl Element {
     /// );
     /// ```
     pub fn setting_row_desc(
-        label: impl Into<String>,
-        desc: impl Into<String>,
+        label: impl Into<TextContent>,
+        desc: impl Into<TextContent>,
         control: Element,
     ) -> Self {
         Self::setting_row_inner(label.into(), Some(desc.into()), control)
     }
 
     /// `setting_row` / `setting_row_desc` 的共同骨架。
-    fn setting_row_inner(label: String, desc: Option<String>, control: Element) -> Self {
+    fn setting_row_inner(label: TextContent, desc: Option<TextContent>, control: Element) -> Self {
         let th = crate::theme::current();
         let f = &th.form;
         // 左块吃掉剩余宽度，控件因此被推到右缘——比「标签定宽 + flex_spacer」少一个
@@ -3389,7 +3407,7 @@ impl Element {
                     .font_size(f.desc_size(&th.metrics))
                     .fg_role(crate::style::Role::TextSubtle)
                     .width_match();
-                left = left.child(Self::clamp_lines(desc, f.desc_max_lines(), &d));
+                left = left.child(Self::clamp_lines(desc, f.desc_max_lines(), d));
                 row = row.padding_xy(0, f.row_pad_y());
             }
             // 单行：定高，与 `field` 同一档，整列才对得齐。
@@ -3400,7 +3418,7 @@ impl Element {
 
     /// 表单族共用的标签：字号/字重/文字色统一走 [`FormTheme`](crate::theme::FormTheme)。
     fn form_label(
-        text: impl Into<String>,
+        text: impl Into<TextContent>,
         f: &crate::theme::FormTheme,
         m: &crate::theme::Metrics,
     ) -> Self {
@@ -3409,7 +3427,7 @@ impl Element {
             .font_size(f.label_size(m))
             .font_weight(f.label_weight())
             .fg_role(crate::style::Role::Text);
-        Self::clamp_lines(el, f.label_max_lines(), &text)
+        Self::clamp_lines(el, f.label_max_lines(), text)
     }
 
     /// 表单族的行数限制：`None` 原样返回；`Some(n)` 加末尾省略并挂上看全文的 tooltip。
@@ -3421,7 +3439,10 @@ impl Element {
     /// 含换行的文本一样挂 tooltip：`Element::tooltip` 收多行之后，这里不再需要绕开它。
     /// 此前那条特例是为躲 `debug_assert` 而设的，代价是**多行说明被限行截断后连兜底
     /// 都没有**——恰恰是最需要看全文的那一类。
-    fn clamp_lines(el: Element, max_lines: Option<usize>, full_text: &str) -> Self {
+    ///
+    /// 全文以 [`TextContent`] 原样挂上 tooltip（不在构建时 resolve）：传 `t!` 进来时，
+    /// 换语言后悬停看到的全文与 label 显示的译文同步。
+    fn clamp_lines(el: Element, max_lines: Option<usize>, full_text: TextContent) -> Self {
         let Some(n) = max_lines else { return el };
         el.max_lines(n)
             .truncate(crate::ui::Truncate::End)
@@ -3450,7 +3471,7 @@ impl Element {
     /// ```
     ///
     /// [`CardTheme`]: crate::theme::CardTheme
-    pub fn card(title: impl Into<String>, body: Element) -> Self {
+    pub fn card(title: impl Into<TextContent>, body: Element) -> Self {
         let th = crate::theme::current();
         let c = &th.card;
         Element::col()
@@ -3460,7 +3481,7 @@ impl Element {
             .padding(c.pad())
             .spacing(c.gap())
             .child(
-                Element::label(title.into())
+                Element::label(title)
                     .font_size(c.title_size(&th.metrics))
                     .font_weight(c.title_weight())
                     .fg_role(crate::style::Role::Text)
@@ -3507,7 +3528,10 @@ impl Element {
 
     /// 可删除标签（chip）：意图色淡底 pill + 文字 + 右侧 × 删除按钮。点 × 触发 `on_remove`。
     /// 纯展示标签（不可删）用 [`Element::badge`]。多值字段见 [`Element::tag_field`]。
-    pub fn chip(text: impl Into<String>, on_remove: impl FnMut(&mut EventCtx) + 'static) -> Self {
+    pub fn chip(
+        text: impl Into<TextContent>,
+        on_remove: impl FnMut(&mut EventCtx) + 'static,
+    ) -> Self {
         // 颜色走主题角色延迟解析：运行期换主题自动跟随。
         use crate::style::Role;
         Element::row()
@@ -3517,7 +3541,7 @@ impl Element {
             .corner(999.0)
             .bg_role_alpha(Role::Accent, 0.14)
             .child(
-                Element::label(text.into())
+                Element::label(text)
                     .font_size(12.5)
                     .fg_role(Role::Accent)
                     .height(18),
@@ -6191,7 +6215,7 @@ mod tests {
             for i in path {
                 cur = &mut cur.children[*i];
             }
-            let tip = cur.tooltip.clone();
+            let tip = cur.tooltip.as_ref().map(|t| t.resolve().into_owned());
             let l = cur
                 .widget
                 .as_any_mut()
@@ -7073,6 +7097,164 @@ mod tests {
                 "改信号后应画出新文案，实得 {got:?}"
             );
         }
+    }
+
+    /// 装一份中 / 英两语的测试目录（固定从中文起步）。英文译文刻意更长，便于同时
+    /// 断言"量出来的宽度也变了"。
+    fn install_container_locales() {
+        crate::i18n::install(
+            crate::i18n::Locales::builder()
+                .embed(
+                    "[meta]\nlocale = \"zh-CN\"\n[w]\ncard = \"卡片\"\nrow = \"设置项\"\n\
+                     desc = \"说明\"\nfield = \"字段\"\nopt = \"甲\"\nopt2 = \"乙\"\n\
+                     tab = \"标签\"\nseg = \"分段\"\nitem = \"条目\"\nfold = \"折叠\"\n\
+                     acc = \"面板\"\nmenu = \"菜单\"\nchip = \"标记\"\ntip = \"提示\"\n",
+                )
+                .embed(
+                    "[meta]\nlocale = \"en\"\n[w]\ncard = \"Card\"\nrow = \"Setting\"\n\
+                     desc = \"Description\"\nfield = \"Field\"\nopt = \"A much longer option\"\n\
+                     opt2 = \"B\"\ntab = \"Tab\"\nseg = \"Segment\"\nitem = \"Item\"\n\
+                     fold = \"Fold\"\nacc = \"Panel\"\nmenu = \"Menu\"\nchip = \"Chip\"\n\
+                     tip = \"Tip\"\n",
+                )
+                .initial(crate::i18n::Initial::Fixed("zh-CN".into()))
+                .build(),
+        );
+    }
+
+    /// 容器 / 选项型构造器收 `t!`：**同一棵树**换语言后再 layout + paint，画出的是新语言
+    /// 文字，旧语言一个字都不剩；下拉的测量宽度随译文变长。
+    ///
+    /// 判据必须是同一棵树：构建期就把译文定格成 `String` 的实现，重建树也能画出新语言，
+    /// 只有不重建、仍画出新字才说明控件真的每帧现取。
+    #[test]
+    fn container_constructors_follow_language_switch() {
+        install_container_locales();
+        let sel = signal(0usize);
+        let open = signal(Some(0usize));
+        let ui = Element::col()
+            .child(Element::card(
+                crate::t!("w.card"),
+                Element::col()
+                    .width_match()
+                    .child(Element::setting_row(
+                        crate::t!("w.row"),
+                        Element::leaf().size(40, 20),
+                    ))
+                    .child(Element::setting_row_desc(
+                        crate::t!("w.row"),
+                        crate::t!("w.desc"),
+                        Element::leaf().size(40, 20),
+                    ))
+                    .child(Element::field(
+                        crate::t!("w.field"),
+                        Element::leaf().size(40, 20),
+                    )),
+            ))
+            .child(Element::dropdown(
+                vec![crate::t!("w.opt"), crate::t!("w.opt2")],
+                sel,
+            ))
+            .child(Element::tabs(sel, vec![(crate::t!("w.tab"), Element::col())]).height(60))
+            .child(Element::segmented(vec![crate::t!("w.seg")], sel))
+            .child(Element::list(vec![crate::t!("w.item")], sel).height(40))
+            .child(Element::collapsible(
+                crate::t!("w.fold"),
+                signal(false),
+                Element::col(),
+            ))
+            .child(Element::accordion(
+                open,
+                vec![(crate::t!("w.acc"), Element::col())],
+            ))
+            .child(Element::check_menu(crate::t!("w.menu"), vec![]))
+            .child(Element::chip(crate::t!("w.chip"), |_| {}));
+
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        let mut eng = crate::text::NullTextEngine;
+        let mut frame = |tree: &mut Tree| {
+            tree.layout_root(Size::new(800, 1200), &mut eng);
+            let mut cv = CaptureCanvas::default();
+            tree.paint(&mut cv);
+            let dd = tree.get(root).unwrap().children[1];
+            (cv.texts.into_inner(), tree.abs_bounds(dd).w)
+        };
+
+        let zh = [
+            "卡片",
+            "设置项",
+            "说明",
+            "字段",
+            "甲",
+            "标签",
+            "分段",
+            "条目",
+            "折叠",
+            "面板",
+            "菜单",
+            "标记",
+        ];
+        let en = [
+            "Card",
+            "Setting",
+            "Description",
+            "Field",
+            "A much longer option",
+            "Tab",
+            "Segment",
+            "Item",
+            "Fold",
+            "Panel",
+            "Menu",
+            "Chip",
+        ];
+        let (before, dd_zh) = frame(&mut tree);
+        for want in zh {
+            assert!(
+                before.iter().any(|t| t == want),
+                "中文帧应画出 {want:?}：{before:?}"
+            );
+        }
+
+        assert!(crate::i18n::LocaleHandle::new().set("en"));
+        let (after, dd_en) = frame(&mut tree);
+        for want in en {
+            assert!(
+                after.iter().any(|t| t == want),
+                "换英文后应画出 {want:?}：{after:?}"
+            );
+        }
+        for stale in zh {
+            assert!(
+                !after.iter().any(|t| t == stale),
+                "换英文后不该再画旧译文 {stale:?}：{after:?}"
+            );
+        }
+        assert!(
+            dd_en > dd_zh,
+            "下拉按最宽选项测量：译文变长后同一控件应量得更宽（{dd_zh} → {dd_en}）"
+        );
+
+        crate::i18n::install(crate::i18n::Locales::default());
+    }
+
+    /// `.tooltip(t!(..))`：悬停提示在弹出时现取，换语言后同一节点给出新译文。
+    /// 表单行限行时挂的"看全文"提示走的也是这条（`clamp_lines` 不在构建期 resolve）。
+    #[test]
+    fn tooltip_follows_language_switch() {
+        install_container_locales();
+        let mut tree = Tree::new();
+        let root = Element::stack()
+            .size(40, 20)
+            .tooltip(crate::t!("w.tip"))
+            .build(&mut tree);
+        tree.root = Some(root);
+        assert_eq!(tree.node_tooltip(root).as_deref(), Some("提示"));
+        assert!(crate::i18n::LocaleHandle::new().set("en"));
+        assert_eq!(tree.node_tooltip(root).as_deref(), Some("Tip"));
+        crate::i18n::install(crate::i18n::Locales::default());
     }
 
     #[test]

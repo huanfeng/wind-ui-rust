@@ -18,13 +18,15 @@ use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
+use crate::ui::TextContent;
 
 /// 段内左右内边距（measure 用，决定等宽段的自然宽度）。
 const SEG_PAD_X: i32 = 14;
 
 /// 多段单选控件。各段等宽，选中段高亮，段间以分隔线连体。
 pub struct SegmentedControl {
-    options: Vec<String>,
+    /// 段标签。存 [`TextContent`]，measure/paint 时现取——传 `t!` 进来换语言即跟随。
+    options: Vec<TextContent>,
     selected: Signal<usize>,
     /// 当前悬停段下标（仅视觉，不写绑定状态）。
     hover: Option<usize>,
@@ -35,7 +37,8 @@ pub struct SegmentedControl {
 }
 
 impl SegmentedControl {
-    pub fn new(options: Vec<String>, selected: Signal<usize>) -> Self {
+    pub fn new(options: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
+        let options: Vec<TextContent> = options.into_iter().map(Into::into).collect();
         let init = selected.get().min(options.len().saturating_sub(1)) as f32;
         Self {
             selected,
@@ -88,7 +91,7 @@ impl Widget for SegmentedControl {
         let mut tw = 0;
         let mut th = 0;
         for o in &self.options {
-            let t = text.measure(o, &crate::text::TextStyle::of(style), None);
+            let t = text.measure(&o.resolve(), &crate::text::TextStyle::of(style), None);
             tw = tw.max(t.w);
             th = th.max(t.h);
         }
@@ -191,25 +194,21 @@ impl Widget for SegmentedControl {
             // text_muted 比 text_disabled 更深，使选中段与非选中段有可见对比
             pal.text_muted
         };
-        for i in 0..n {
+        // 每帧现取一次（两遍绘制共用）：`t!` 标签换语言后这里拿到新译文，单行截断缓存
+        // 按文字散列做键，文字一变即失效。
+        let labels: Vec<_> = self.options.iter().map(TextContent::resolve).collect();
+        for (i, label) in labels.iter().enumerate() {
             let (x0, x1) = self.seg_x(bounds, i);
             let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-            self.fits[i].draw_text(canvas, &self.options[i], seg, tc_normal, Align::Center, ts);
+            self.fits[i].draw_text(canvas, label, seg, tc_normal, Align::Center, ts);
         }
         if let Some(clip) = pill_clip {
             canvas.save();
             canvas.clip_rect(clip);
-            for i in 0..n {
+            for (i, label) in labels.iter().enumerate() {
                 let (x0, x1) = self.seg_x(bounds, i);
                 let seg = Rect::new(x0, bounds.y, x1 - x0, bounds.h);
-                self.fits[i].draw_text(
-                    canvas,
-                    &self.options[i],
-                    seg,
-                    tc_selected,
-                    Align::Center,
-                    ts,
-                );
+                self.fits[i].draw_text(canvas, label, seg, tc_selected, Align::Center, ts);
             }
             canvas.restore();
         }
@@ -456,7 +455,7 @@ mod tests {
     fn selected_pill_slides_then_settles_when_animated() {
         crate::anim::set_enabled(true);
         let sel = signal(0usize);
-        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel);
+        let sc = SegmentedControl::new(vec!["A", "B", "C"], sel);
         paint_at(&sc, 0);
         assert_eq!(sc.sel_pos.get().value(), 0.0, "初始胶囊在第 0 段");
         sel.set(2); // 外部选到第 3 段
@@ -471,7 +470,7 @@ mod tests {
     fn selected_pill_snaps_when_animation_disabled() {
         crate::anim::set_enabled(false);
         let sel = signal(0usize);
-        let sc = SegmentedControl::new(vec!["A".into(), "B".into(), "C".into()], sel);
+        let sc = SegmentedControl::new(vec!["A", "B", "C"], sel);
         sel.set(2);
         paint_at(&sc, 0);
         assert_eq!(sc.sel_pos.get().value(), 2.0, "关闭动画应瞬时到选中段");
@@ -481,7 +480,7 @@ mod tests {
 
     #[test]
     fn seg_at_maps_boundaries() {
-        let sc = SegmentedControl::new(vec!["a".into(), "b".into(), "c".into()], signal(0));
+        let sc = SegmentedControl::new(vec!["a", "b", "c"], signal(0));
         let b = Rect::new(0, 0, 180, 32);
         assert_eq!(sc.seg_at(b, 0), 0);
         assert_eq!(sc.seg_at(b, 59), 0);

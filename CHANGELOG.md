@@ -10,6 +10,21 @@
 - **标签条放不下时收起文字**：`tabs_icons` / 带图标的 `tabs_items` 在内边距收到下限仍放不下时，从最右一项起
   逐个把未选中的标签收成只剩图标，收到放得下为止；选中项始终保留文字，收起的标签悬停用 tooltip 显示全文。
   以前是末项被直接截掉一截。没有图标的标签条维持原行为。
+- **容器与选项型构造器的文案收 `t!`，换语言即跟随**：以下参数由 `impl Into<String>` 改为
+  `impl Into<TextContent>`（选项型由 `Vec<impl Into<String>>` 改为 `Vec<impl Into<TextContent>>`），控件内部存
+  `TextContent`，在测量 / 绘制 / 命中 / tooltip 时现取：
+  `Element::card`、`setting_row`、`setting_row_desc`、`field`、`dialog_panel`、`collapsible`、`accordion`、
+  `accordion_multi`、`chip`、`check_menu`、`dropdown`、`segmented`、`list`、`list_pill`、`list_icons`、`tabs`、
+  `tabs_icons`、`tabs_pill`，以及 `Element::tooltip`。以前这些只能传定格的 `String`，切换语言后不变。
+  传 `String` / `&str` / `Vec<String>` / `Vec<&str>` 的既有调用不用改；`dropdown_signal(Signal<Vec<String>>, ..)`
+  与 `Dropdown::new_reactive` 不变。单行截断缓存本就按文字散列做键，译文一变即重新截断。
+  表单行限行时挂的"看全文" tooltip 不再在构建期定格，与 label 一起跟随语言。
+- **破坏性**：底层控件构造器同步改为 `impl Into<TextContent>`：`TabItem::new`、`ListRow::new`、
+  `CollapsibleHeader::new`、`AccordionHeader::new`（原收 `String`）、`SegmentedControl::new`、`Dropdown::new`
+  （原收 `Vec<String>`）、`CheckMenu::new`。直接传 `String` / `&str` 照常编过，但原先 `TabItem::new("x".into())`
+  这种写法会因类型推断不出而报 E0283，去掉 `.into()` 即可。
+- **破坏性**：公开字段 `TabItem::label` 由 `String` 改为 `TextContent`（读当前文字用 `.resolve()`）；
+  `Node::tooltip` 由 `Option<String>` 改为 `Option<TextContent>`。`TextContent` 新增 `Clone`。
 
 ## [0.26.0] - 2026-10-21
 

@@ -15,7 +15,7 @@ use crate::signal::Signal;
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::TextEngine;
-use crate::ui::ImageContent;
+use crate::ui::{ImageContent, TextContent};
 
 /// 行高（逻辑 px）。
 pub const ROW_H: i32 = 36;
@@ -32,7 +32,8 @@ const PILL_INSET_Y: f32 = 3.0;
 const PILL_RADIUS: f32 = 7.0;
 
 pub struct ListRow {
-    label: String,
+    /// 行标签。存 [`TextContent`]，paint 时现取——传 `t!` 进来换语言即跟随。
+    label: TextContent,
     icon: Option<ImageContent>,
     group: Signal<usize>,
     index: usize,
@@ -50,10 +51,10 @@ pub struct ListRow {
 }
 
 impl ListRow {
-    pub fn new(label: String, group: Signal<usize>, index: usize) -> Self {
+    pub fn new(label: impl Into<TextContent>, group: Signal<usize>, index: usize) -> Self {
         let on = if group.get() == index { 1.0 } else { 0.0 };
         Self {
-            label,
+            label: label.into(),
             icon: None,
             group,
             index,
@@ -209,9 +210,10 @@ impl Widget for ListRow {
         };
         let tw = (bounds.right() - PAD_X - text_x).max(0);
         let tr = Rect::new(text_x, bounds.y, tw, bounds.h);
+        // 截断缓存按文字散列做键：`t!` 换语言后 resolve 出新文字，缓存自然失效。
         self.fit.draw_text(
             canvas,
-            &self.label,
+            &self.label.resolve(),
             tr,
             color,
             Align::Start,
@@ -288,7 +290,7 @@ mod tests {
     fn row_with_icon_paints_icon_area() {
         let group = signal(0);
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
-        let row = ListRow::new("Inbox".into(), group, 0)
+        let row = ListRow::new("Inbox", group, 0)
             .icon_content(ImageContent::new(Some(red)).fit(Fit::Fill));
         let mut pm = Pixmap::new(200, ROW_H as u32).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
@@ -320,9 +322,9 @@ mod tests {
     #[test]
     fn row_visual_state_tracks_selection() {
         let group = signal(1);
-        let selected = ListRow::new("A".into(), group, 1);
+        let selected = ListRow::new("A", group, 1);
         assert_eq!(selected.visual_state(), VisualState::Selected);
-        let other = ListRow::new("B".into(), group, 2);
+        let other = ListRow::new("B", group, 2);
         assert_eq!(other.visual_state(), VisualState::Normal);
     }
 }
@@ -355,7 +357,7 @@ mod overflow_tests {
     fn long_list_label_stays_in_its_row_wrap_width() {
         assert_wraps_taller(LONG_LATIN, 14.0, 120, ROW_H);
         let row = Element::base(Layout::None)
-            .widget(ListRow::new(LONG_LATIN.into(), signal(99usize), 0))
+            .widget(ListRow::new(LONG_LATIN, signal(99usize), 0))
             .height(ROW_H);
         let el = Element::col()
             .width_match()

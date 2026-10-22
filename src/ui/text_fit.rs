@@ -510,6 +510,38 @@ mod tests {
         }
     }
 
+    /// 单行截断缓存按**当前文字**做键：同一个 `SingleLine`、同一宽度，换一段文字（如
+    /// `t!` 换语言后 resolve 出的新译文）必须重新截断，不能沿用上一段的截断串。
+    #[test]
+    fn single_line_cache_invalidates_when_text_changes() {
+        const OTHER: &str = "Ut enim ad minim veniam, quis nostrud exercitation ullamco";
+        let mut eng = engine();
+        let mut pm = white(200, 40);
+        let mut cv = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+        let fit = SingleLine::default();
+        let ts = TextStyle::new(13.0);
+        let rect = Rect::new(0, 0, 80, 20);
+        let black = Color::rgb(0, 0, 0);
+        let cached = |fit: &SingleLine| {
+            fit.cache
+                .borrow()
+                .as_ref()
+                .and_then(|(_, v)| v.clone())
+                .expect("前提：两段文案都比 80 宽，应发生截断")
+        };
+
+        fit.draw_text(&mut cv, LONG_LATIN, rect, black, Align::Start, &ts);
+        let first = cached(&fit);
+        assert!(first.starts_with("Lo"), "首段截断串应取自原文：{first:?}");
+
+        fit.draw_text(&mut cv, OTHER, rect, black, Align::Start, &ts);
+        let second = cached(&fit);
+        assert!(
+            second.starts_with("Ut"),
+            "文字变了截断缓存必须失效，却仍是上一段的截断串：{second:?}"
+        );
+    }
+
     /// 宽度连省略号都放不下：截成空串，而不是画一个比矩形还宽的 `…`。
     #[test]
     fn truncate_narrower_than_ellipsis_is_empty() {

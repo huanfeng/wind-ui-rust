@@ -65,6 +65,7 @@ use crate::signal::Signal;
 ///     caption.set(format!("已选 {} 项", count.get()));
 /// });
 /// ```
+#[derive(Clone)]
 #[non_exhaustive]
 pub enum TextContent {
     /// 构建期定下、此后不变的文案。

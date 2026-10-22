@@ -788,7 +788,9 @@ impl Widget for IconButton {
 
 /// 标签条中的一项：标题 + 可选前置图标 + 是否可选。
 pub struct TabItem {
-    pub label: String,
+    /// 标题。存 [`TextContent`]，标签条每次 measure/paint/tooltip 时现取——传
+    /// [`t!`](crate::t) 进来换语言即跟随。
+    pub label: TextContent,
     pub icon: Option<ImageContent>,
     /// 可选与否，`None` = 恒可选。`false` 时文字走 `text_disabled`、悬停不亮、
     /// 点击与键盘都跳过它。
@@ -804,9 +806,9 @@ pub struct TabItem {
 }
 
 impl TabItem {
-    pub fn new(label: String) -> Self {
+    pub fn new(label: impl Into<TextContent>) -> Self {
         Self {
-            label,
+            label: label.into(),
             icon: None,
             enabled: None,
         }
@@ -935,7 +937,7 @@ impl TabBar {
         self.items
             .iter()
             .map(|it| {
-                let t = measure(&it.label, &ts);
+                let t = measure(&it.label.resolve(), &ts);
                 let content = if it.icon.is_some() {
                     t.h + TAB_ICON_GAP + t.w
                 } else {
@@ -1201,7 +1203,7 @@ impl Widget for TabBar {
                 }
                 let tx = cx + text_h + TAB_ICON_GAP;
                 canvas.draw_text(
-                    &self.items[i].label,
+                    &self.items[i].label.resolve(),
                     Rect::new(tx, bounds.y, ix + iw - tx, th_box),
                     color,
                     Align::Start,
@@ -1209,7 +1211,7 @@ impl Widget for TabBar {
                 );
             } else {
                 canvas.draw_text(
-                    &self.items[i].label,
+                    &self.items[i].label.resolve(),
                     Rect::new(ix, bounds.y, iw, th_box),
                     color,
                     Align::Center,
@@ -1302,7 +1304,7 @@ impl Widget for TabBar {
         self.items
             .get(i)
             .filter(|_| collapsed)
-            .map(|it| it.label.clone())
+            .map(|it| it.label.resolve().into_owned())
     }
 }
 
@@ -1343,10 +1345,7 @@ mod tests {
     }
 
     fn bar(labels: &[&str], g: Signal<usize>) -> TabBar {
-        TabBar::new(
-            labels.iter().map(|s| TabItem::new((*s).into())).collect(),
-            g,
-        )
+        TabBar::new(labels.iter().map(|s| TabItem::new(*s)).collect(), g)
     }
 
     #[test]
@@ -1386,8 +1385,7 @@ mod tests {
         let w0 = bar(&["Home"], g).measure(Size::ZERO, &style, &mut te).w;
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
         let iconed = TabBar::new(
-            vec![TabItem::new("Home".into())
-                .icon_content(ImageContent::new(Some(red)).fit(Fit::Fill))],
+            vec![TabItem::new("Home").icon_content(ImageContent::new(Some(red)).fit(Fit::Fill))],
             g,
         );
         let w1 = iconed.measure(Size::ZERO, &style, &mut te).w;
@@ -1511,7 +1509,7 @@ mod tests {
             labels
                 .iter()
                 .enumerate()
-                .map(|(i, s)| TabItem::new((*s).into()).enabled(signal(!off.contains(&i))))
+                .map(|(i, s)| TabItem::new(*s).enabled(signal(!off.contains(&i))))
                 .collect(),
             g,
         )
@@ -1579,15 +1577,15 @@ mod tests {
     /// `TabItem` 默认可选——不写 `.enabled(..)` 的既有调用方行为不变。
     #[test]
     fn tab_item_enabled_by_default() {
-        assert!(TabItem::new("A".into()).is_enabled());
-        assert!(!TabItem::new("A".into()).enabled(signal(false)).is_enabled());
+        assert!(TabItem::new("A").is_enabled());
+        assert!(!TabItem::new("A").enabled(signal(false)).is_enabled());
     }
 
     /// 绑了信号之后，改信号即改可用态——不必重建标签条。这正是收信号而非布尔的理由。
     #[test]
     fn tab_enabled_follows_signal() {
         let flag = signal(true);
-        let it = TabItem::new("A".into()).enabled(flag);
+        let it = TabItem::new("A").enabled(flag);
         assert!(it.is_enabled());
         flag.set(false);
         assert!(!it.is_enabled());

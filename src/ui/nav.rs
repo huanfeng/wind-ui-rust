@@ -332,7 +332,8 @@ impl Widget for NavRow {
 /// 不同于 NavRow：折叠头用 `hover: bool` 而非三态、按下不 `capture()`——toggle
 /// 语义无需"拖出取消"，也无独立按压色，故不引入 Press 态。
 pub struct CollapsibleHeader {
-    title: String,
+    /// 标题。存 [`TextContent`]，paint 时现取——传 `t!` 进来换语言即跟随。
+    title: TextContent,
     expanded: Signal<bool>,
     hover: bool,
     hover_anim: Cell<Transition<f32>>,
@@ -343,9 +344,9 @@ pub struct CollapsibleHeader {
 }
 
 impl CollapsibleHeader {
-    pub fn new(title: String, expanded: Signal<bool>) -> Self {
+    pub fn new(title: impl Into<TextContent>, expanded: Signal<bool>) -> Self {
         Self {
-            title,
+            title: title.into(),
             expanded,
             hover: false,
             hover_anim: Cell::new(Transition::new(0.0)),
@@ -389,7 +390,7 @@ impl Widget for CollapsibleHeader {
             canvas,
             &self.fit,
             bounds,
-            &self.title,
+            &self.title.resolve(),
             turn_amount(&self.turn_anim, self.expanded.get()),
             amt,
             enabled,
@@ -480,7 +481,8 @@ impl ExpandState {
 /// 卡片分层用的 header 背景由 `Element::accordion` 在 Element 层 `.bg()` 注入（折叠头没有），
 /// 不在本 widget 内绘制——故两者头部背景不同是有意为之。
 pub struct AccordionHeader {
-    title: String,
+    /// 标题。存 [`TextContent`]，paint 时现取——传 `t!` 进来换语言即跟随。
+    title: TextContent,
     state: ExpandState,
     hover: bool,
     hover_anim: Cell<Transition<f32>>,
@@ -491,9 +493,9 @@ pub struct AccordionHeader {
 }
 
 impl AccordionHeader {
-    pub fn new(title: String, state: ExpandState) -> Self {
+    pub fn new(title: impl Into<TextContent>, state: ExpandState) -> Self {
         Self {
-            title,
+            title: title.into(),
             turn_anim: Cell::new(
                 Transition::new(if state.is_expanded() { 1.0 } else { 0.0 }).movement(),
             ),
@@ -537,7 +539,7 @@ impl Widget for AccordionHeader {
             canvas,
             &self.fit,
             bounds,
-            &self.title,
+            &self.title.resolve(),
             turn_amount(&self.turn_anim, self.state.is_expanded()),
             amt,
             enabled,
@@ -790,12 +792,12 @@ mod overflow_tests {
             ("NavRow", row().widget(NavRow::new(LONG_LATIN))),
             (
                 "CollapsibleHeader",
-                row().widget(CollapsibleHeader::new(LONG_LATIN.into(), signal(false))),
+                row().widget(CollapsibleHeader::new(LONG_LATIN, signal(false))),
             ),
             (
                 "AccordionHeader",
                 row().widget(AccordionHeader::new(
-                    LONG_LATIN.into(),
+                    LONG_LATIN,
                     ExpandState::Multi(signal(false)),
                 )),
             ),

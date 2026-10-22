@@ -684,7 +684,8 @@ pub struct Node {
     pub focusable: Option<bool>,
     /// 悬停提示文本（None=无）。宿主在悬停延时后于指针附近绘制浮层；
     /// 像 `enabled`/`window_drag` 一样挂在节点上，适用于任意控件/容器。
-    pub tooltip: Option<String>,
+    /// 存 [`TextContent`](crate::ui::TextContent)，弹出时现取：传 `t!` 进来换语言即跟随。
+    pub tooltip: Option<crate::ui::TextContent>,
     /// 光标形状覆盖（`Element::cursor`）。`None` 按控件自己的 [`Widget::cursor`]；
     /// 见 [`Tree::cursor_at`] 的取值顺序。
     pub cursor: Option<CursorShape>,
@@ -3358,7 +3359,7 @@ impl Tree {
             if let Some(dynamic) = n.widget.tooltip() {
                 return Some(dynamic);
             }
-            let Some(text) = n.tooltip.clone() else {
+            let Some(text) = n.tooltip.as_ref() else {
                 continue;
             };
             // 截断判定按**持有这条提示的那个节点**算，不是按命中的子节点算。
@@ -3367,7 +3368,7 @@ impl Tree {
             if n.widget.text_truncated() == Some(false) {
                 return None;
             }
-            return Some(text);
+            return Some(text.resolve().into_owned());
         }
         None
     }
@@ -6029,10 +6030,10 @@ mod tests {
                 sel,
                 vec![
                     (
-                        TabItem::new("甲".into()).enabled(signal(first_enabled)),
+                        TabItem::new("甲").enabled(signal(first_enabled)),
                         Element::label("page A"),
                     ),
-                    (TabItem::new("乙".into()), Element::label("page B")),
+                    (TabItem::new("乙"), Element::label("page B")),
                 ],
                 TabStyle::Underline,
             );
