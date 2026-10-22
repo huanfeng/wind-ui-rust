@@ -1063,12 +1063,13 @@ impl Widget for SelectAllCheck {
                 &mark,
             );
         } else if some {
-            // 部分选中：横杠（indeterminate）。
-            canvas.draw_line(
-                box_x + 4.5 * s,
-                box_y + 9.0 * s,
-                box_x + 13.5 * s,
-                box_y + 9.0 * s,
+            // 部分选中：横杠（indeterminate）。用折线而不是 `draw_line`：后者会把横线的线宽
+            // 取成整数物理像素，125% / 175% 下横杠比对勾细半个像素，切换全选 / 半选时粗细跳一下。
+            canvas.draw_polyline(
+                &[
+                    (box_x + 4.5 * s, box_y + 9.0 * s),
+                    (box_x + 13.5 * s, box_y + 9.0 * s),
+                ],
                 2.0,
                 &mark,
             );
@@ -2484,5 +2485,59 @@ mod tests {
         // 应用换页/换排序：写回新一页数据 → 下次布局触发 PagedBody 重建，不 panic 即路径健康。
         rows.set(vec![vec!["z".to_string()], vec!["y".to_string()]]);
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
+    }
+
+    /// 全选框里对勾与半选横杠的粗细一致：横杠若走 `draw_line`，线宽会被取整，125% / 175%
+    /// 下比对勾（折线，不取整）细半个物理像素，切换时跳一下。
+    /// 按墨量 / 笔画长度估出线宽来比。
+    #[test]
+    fn select_all_check_and_dash_share_stroke_width() {
+        use crate::render::skia::SkiaCanvas;
+        use tiny_skia::Pixmap;
+        // 在 `scale` 下画全选框，返回方框内标记的总墨量（纯 on_accent 像素记 1）。
+        let mark_ink = |all: bool, scale: f32| -> f32 {
+            let sel = vec![signal(true), signal(all)];
+            let n = (SELECT_COL_W as f32 * scale) as u32;
+            let mut pm = Pixmap::new(n, n).unwrap();
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, scale);
+            let b = Rect::new(0, 0, SELECT_COL_W, SELECT_COL_W);
+            SelectAllCheck::new(sel).paint(b, b, false, true, &mut c, &Style::default());
+            let th = crate::theme::current();
+            let (bg, fg) = (th.toggle.accent(&th.palette), th.palette.on_accent);
+            // 取前后景差最大的通道换算覆盖率。
+            let ch = |c: Color| [c.r, c.g, c.b];
+            let k = (0..3)
+                .max_by_key(|&i| (ch(fg)[i] as i32 - ch(bg)[i] as i32).abs())
+                .unwrap();
+            let (b0, f0) = (ch(bg)[k] as f32, ch(fg)[k] as f32);
+            let o = ((SELECT_COL_W - SEL_BOX) / 2) as f32 * scale;
+            let side = SEL_BOX as f32 * scale;
+            let mut ink = 0.0;
+            for y in (o + 1.0) as u32..(o + side - 1.0) as u32 {
+                for x in (o + 1.0) as u32..(o + side - 1.0) as u32 {
+                    let px = pm.pixel(x, y).unwrap();
+                    if px.alpha() == 0 {
+                        continue; // 圆角外没画到的像素，不算墨
+                    }
+                    let px = px.demultiply();
+                    let v = [px.red(), px.green(), px.blue()][k] as f32;
+                    ink += ((v - b0) / (f0 - b0)).clamp(0.0, 1.0);
+                }
+            }
+            ink
+        };
+        // 18px 基准下的笔画长度：对勾两段 4√2 + 10，横杠 9。
+        // 能拦住回归的是 125%（取整后 2 对 2.5）与 175%（3 对 3.5）；150% 下两者都是
+        // 3 物理像素，取不取整都一样，只作陪跑。
+        let check_len = 4.0 * std::f32::consts::SQRT_2 + 10.0;
+        for scale in [1.25_f32, 1.5, 1.75] {
+            let check_w = mark_ink(true, scale) / (check_len * scale);
+            let dash_w = mark_ink(false, scale) / (9.0 * scale);
+            assert!(
+                (check_w / dash_w - 1.0).abs() < 0.12,
+                "{scale}x：对勾线宽 {check_w:.2} 应与横杠 {dash_w:.2} 一致"
+            );
+        }
     }
 }
