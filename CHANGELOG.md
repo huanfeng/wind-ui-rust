@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **`list_signal` 看得见滚动条却滚不动**：它的容器是 `Element::scroll()`，内部却用列表驱动 widget 把
+  `ScrollWidget` 整个换掉了——布局仍是滚动容器（照样裁剪、画滚动条），处理滚轮与拖动滚动条的控件没了。
+  现在列表驱动接管原 widget 并转发事件与交互钩子；另在 `set_widget` 加了调试断言，滚动容器的
+  `ScrollWidget` 被直接顶掉时当场报错——`Element::scroll().clickable()` 以前悄悄滚不动，现在 debug 下会断言失败。
+- **单行省略的 Label 配说明型 tooltip 弹不出来**：`max_lines(1)` + `truncate(..)` 的 Label 在没截断时一律
+  不弹 tooltip，本意是给"看全文"提示去重，却把内容不同的说明（版本详情之类）也压掉了。现在只有提示与
+  正文相同时才按截断状态门控。新增 `Widget::display_text` 供该判断。
+
 ## [0.27.0] - 2026-10-22
 
 ### 变更

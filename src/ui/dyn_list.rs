@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::core::{EventCtx, NodeId, Tree, Widget};
-use crate::event::Event;
+use crate::event::{CursorShape, Event};
 use crate::geometry::{Rect, Size};
 use crate::render::Canvas;
 use crate::signal::{Signal, SignalScope};
@@ -127,6 +127,9 @@ pub struct KeyedList<T: Clone + PartialEq + 'static, K: Eq + Hash + Clone + 'sta
     rows: Vec<Row<T, K>>,
     /// 首批行：构建期已建好元素，节点 id 等第一次 `on_update` 按子节点顺序认领。
     pending: Option<Vec<(K, T, SignalScope)>>,
+    /// 容器原本的 widget（`list_signal` 的 `ScrollWidget`）。本类型挂上去会顶掉它，
+    /// 指针事件要转给它，否则滚动容器看得见滚动条却滚不动。
+    inner: Option<Box<dyn Widget>>,
 }
 
 struct Row<T, K> {
@@ -153,7 +156,14 @@ impl<T: Clone + PartialEq + 'static, K: Eq + Hash + Clone + 'static> KeyedList<T
             row_fn: Box::new(row_fn),
             rows: Vec::new(),
             pending: Some(initial),
+            inner: None,
         }
+    }
+
+    /// 接管容器原有的 widget，事件转交给它（见 `inner` 字段）。
+    pub(super) fn with_inner(mut self, inner: Box<dyn Widget>) -> Self {
+        self.inner = Some(inner);
+        self
     }
 
     /// 建一行：元素在本行自己的作用域里构建，挂到列表节点下（顺序稍后统一重写）。
@@ -377,7 +387,24 @@ impl<T: Clone + PartialEq + 'static, K: Eq + Hash + Clone + 'static> Widget for 
         _style: &Style,
     ) {
     }
-    fn on_event(&mut self, _ctx: &mut EventCtx, _ev: &Event) -> bool {
-        false
+    fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        self.inner.as_mut().is_some_and(|w| w.on_event(ctx, ev))
+    }
+    // 交互相关的钩子一并转给原 widget：它日后在这些钩子里清状态（如隐藏时放掉拖动），
+    // 挂在列表上照样生效。
+    fn reset_interaction(&mut self) {
+        if let Some(w) = self.inner.as_mut() {
+            w.reset_interaction();
+        }
+    }
+    fn focus_lost(&mut self) {
+        if let Some(w) = self.inner.as_mut() {
+            w.focus_lost();
+        }
+    }
+    fn cursor(&self) -> CursorShape {
+        self.inner
+            .as_ref()
+            .map_or(CursorShape::Arrow, |w| w.cursor())
     }
 }

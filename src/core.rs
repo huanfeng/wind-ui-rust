@@ -377,6 +377,11 @@ pub trait Widget {
     fn text_truncated(&self) -> Option<bool> {
         None
     }
+    /// 控件显示的完整正文（截断前）。供 [`Tree::node_tooltip`] 判断节点提示是不是
+    /// "正文全文"：只有这种提示才按 [`Widget::text_truncated`] 门控。
+    fn display_text(&self) -> Option<String> {
+        None
+    }
     /// 控件自报的悬停提示，**优先于**节点上 `.tooltip(..)` 设的静态文本。
     ///
     /// 给自绘控件用：图表类控件整个是一个节点，提示内容取决于指针落在哪个数据点上
@@ -3365,10 +3370,16 @@ impl Tree {
             // 截断判定按**持有这条提示的那个节点**算，不是按命中的子节点算。
             // 找到提示就到此为止：被自身判定压掉时不再往上找，否则一个没被截断的
             // Label 会转而弹出祖先容器的提示，看着像"弹错了别人的说明"。
-            if n.widget.text_truncated() == Some(false) {
+            //
+            // 只压"正文全文"型提示（与正文相同，截断时才有用）。内容不同的说明型提示
+            // 与截不截断无关：曾经一律压掉，单行省略的 Label 配上说明就永远弹不出来。
+            let tip = text.resolve();
+            if n.widget.text_truncated() == Some(false)
+                && n.widget.display_text().as_deref() == Some(&*tip)
+            {
                 return None;
             }
-            return Some(text.resolve().into_owned());
+            return Some(tip.into_owned());
         }
         None
     }
@@ -6899,6 +6910,30 @@ mod tests {
         tree.dispatch_pointer(down, &mut h, &mut cap);
         assert_eq!(cap, Some(id), "滚动条区域按下应捕获滚动容器");
         // 向下拖 30px → 内容按 content/view 比例移动
+        let mv = PointerEvent::single(PointerKind::Move, Point::new(x, 40), MouseButton::Left);
+        tree.dispatch_pointer(mv, &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert!(tree.get(id).unwrap().scroll_y > 0, "拖动滚动条应增加偏移");
+    }
+
+    /// `list_signal` 的滚动条同样拖得动（它的容器 widget 由列表驱动转发，见 `KeyedList`）。
+    #[test]
+    fn list_signal_scrollbar_drag_changes_offset() {
+        let data = crate::signal::signal((0..10).collect::<Vec<u8>>());
+        let list = Element::list_signal(data, |n| *n, |_| Element::leaf().width_match().height(30))
+            .width(100)
+            .height(100);
+        let mut tree = Tree::new();
+        let id = list.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let (lo, hi) = tree.scrollbar_hit_zone(tree.abs_bounds(id));
+        let x = (lo + hi) / 2;
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent::single(PointerKind::Down, Point::new(x, 10), MouseButton::Left);
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        assert_eq!(cap, Some(id), "滚动条区域按下应捕获列表容器");
         let mv = PointerEvent::single(PointerKind::Move, Point::new(x, 40), MouseButton::Left);
         tree.dispatch_pointer(mv, &mut h, &mut cap);
         tree.layout_root(Size::new(100, 100), &mut te);

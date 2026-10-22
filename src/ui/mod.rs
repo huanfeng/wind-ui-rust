@@ -263,6 +263,9 @@ impl Widget for Label {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(self)
     }
+    fn display_text(&self) -> Option<String> {
+        Some(self.text.resolve().into_owned())
+    }
     fn text_truncated(&self) -> Option<bool> {
         // 不限行时交回 None 表示"这个问题对我不适用"。固定高度配多行文本时 paint 也会
         // 裁，但那只是不让字画出 bounds 的视觉兜底，不算截断语义——报 Some 会让宿主拿
@@ -1000,7 +1003,8 @@ impl Element {
     /// 让**任意容器**（`col`/`row`/`stack`）成为可点击面板：补上 hover/press 视觉反馈
     /// （主题自适应半透明叠层）、键盘可聚焦 + 回车/空格激活、悬停手型光标。
     /// 配合 `.on_click(...)` 设回调，`.bg()`/`.corner()`/`.border()` 设外观即得卡片。
-    /// 注意：会替换该节点的占位 widget，故不可与叶子控件（label/button 等）叠加使用。
+    /// 注意：会替换该节点的占位 widget，故不可与叶子控件（label/button 等）叠加使用，
+    /// 也不能用在 `scroll()` 上（会顶掉处理滚轮的 `ScrollWidget`，debug 下断言报错）。
     #[track_caller]
     pub fn clickable(mut self) -> Self {
         debug_assert!(
@@ -2460,7 +2464,13 @@ impl Element {
                 (key_fn(&item), item, scope)
             })
             .collect();
-        let widget = dyn_list::KeyedList::new(data, key_fn, row_fn, initial);
+        let mut widget = dyn_list::KeyedList::new(data, key_fn, row_fn, initial);
+        // 容器自带的 widget（滚动容器的 `ScrollWidget`）交给列表转发事件，不能直接顶掉。
+        if container.has_widget {
+            let own = std::mem::replace(&mut container.widget, Box::new(crate::core::EmptyWidget));
+            container.has_widget = false;
+            widget = widget.with_inner(own);
+        }
         container.set_widget(Box::new(widget));
         container.reactive = true;
         container.children = elements;
@@ -4525,6 +4535,12 @@ impl Element {
     /// 组合构造器把 widget 挂到自己刚建的容器上时用它——那是构造器自己的节点，
     /// 不是调用方误挂。
     fn set_widget(&mut self, w: Box<dyn Widget>) {
+        // 滚动容器的滚轮 / 拖滚动条都在 `ScrollWidget` 里：直接顶掉就成了"有滚动条、滚不动"。
+        // 要挂别的 widget 先把它取走转交（见 `keyed`）。
+        debug_assert!(
+            !(self.has_widget && matches!(self.layout, Layout::Scroll)),
+            "滚动容器的 ScrollWidget 不能被替换，否则滚轮失效"
+        );
         self.widget = w;
         self.has_widget = true;
     }
@@ -5678,6 +5694,34 @@ mod tests {
         );
     }
 
+    /// 根因回归：`list_signal` 的容器是 `Element::scroll()`，`keyed` 曾直接用 `KeyedList`
+    /// 换掉它的 `ScrollWidget`——布局仍是 `Layout::Scroll`（照样裁剪、画滚动条），处理
+    /// 滚轮与拖动滚动条的控件却没了：看得见滚动条，滚不动。
+    #[test]
+    fn list_signal_scrolls_with_wheel() {
+        use crate::event::PointerKind;
+        let data = signal((0..10).collect::<Vec<u8>>());
+        let mut tree = Tree::new();
+        let list = Element::list_signal(data, |n| *n, |_| Element::leaf().width_match().height(30))
+            .width(100)
+            .height(100);
+        let root = list.build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(root).unwrap().content_h, 300);
+
+        let wheel = PointerEvent::single(
+            PointerKind::Wheel(-120),
+            Point::new(50, 50),
+            MouseButton::Left,
+        );
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(wheel, &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert!(tree.get(root).unwrap().scroll_y > 0, "滚轮向下应滚动列表");
+    }
+
     #[test]
     fn list_signal_rebuild_reclaims_row_signals() {
         // 根因回归：`row_fn` 里创建的信号曾随每次数据变化永久累积（运行时 arena 只增不减）。
@@ -5974,6 +6018,25 @@ mod tests {
         // 未配置 truncate/max_lines(1) 的普通 Label：截断概念不适用 → None。
         let plain = Label::new("短文本");
         assert_eq!(plain.text_truncated(), None);
+    }
+
+    /// 截断门控只管"正文全文"型提示：单行省略的 Label 配一条**不同内容**的说明，
+    /// 没截断也要弹（曾一律压掉，摘要行上的版本说明因此永远看不到）。
+    #[test]
+    fn untruncated_label_still_shows_explanatory_tooltip() {
+        let tip_of = |el: Element| {
+            let mut tree = Tree::new();
+            let root = el.build(&mut tree);
+            tree.root = Some(root);
+            tree.layout_root(Size::new(400, 40), &mut crate::text::NullTextEngine);
+            tree.node_tooltip(root)
+        };
+        let clamped = |text: &str| Element::label(text).max_lines(1).truncate(Truncate::End);
+        assert_eq!(
+            tip_of(clamped("minSdk 24").tooltip("Android 7.0")).as_deref(),
+            Some("Android 7.0")
+        );
+        assert_eq!(tip_of(clamped("minSdk 24").tooltip("minSdk 24")), None);
     }
 
     /// **多行**限行的截断状态同样要如实反映，否则 tooltip 会无条件弹。
