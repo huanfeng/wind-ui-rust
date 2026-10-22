@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-10-22
+
 ### 修复
 
 - **`list_signal` 看得见滚动条却滚不动**：它的容器是 `Element::scroll()`，内部却用列表驱动 widget 把
