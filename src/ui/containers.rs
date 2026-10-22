@@ -882,6 +882,8 @@ pub struct TabBar {
     /// 收缩内边距（见 [`Self::shrink_pad`]）。因此**溢出场景**下首帧前的命中可能有
     /// 几个像素偏移，paint 一跑就以真实内边距覆盖、自校正。不溢出时二者完全一致。
     layout: RefCell<Vec<(i32, i32)>>,
+    /// 上一帧哪些项收起了文字（见 [`Self::collapse`]）：收起的标签悬停时用 tooltip 补全文。
+    collapsed: RefCell<Vec<bool>>,
 }
 
 /// 单个标签的度量：`(内容宽, 整宽, 文字高)`。内容宽即指示条宽度。
@@ -902,6 +904,7 @@ impl TabBar {
                 .collect(),
             primed: Cell::new(false),
             layout: RefCell::new(Vec::new()),
+            collapsed: RefCell::new(Vec::new()),
         }
     }
 
@@ -965,6 +968,35 @@ impl TabBar {
         let sides = m.len() as i32 * 2;
         let per_side = (natural - avail_w + sides - 1) / sides;
         (TAB_PAD_X - per_side).max(TAB_PAD_MIN)
+    }
+
+    /// 收起文字：内边距收到下限仍放不下、且**每项都有图标**时，从最右一项起逐个把未选中
+    /// 项收成只剩图标（悬停经 tooltip 看全文），收到放得下为止；选中项始终保留文字。
+    /// 返回每项是否收起。
+    ///
+    /// 比继续挤压或截断末项好：图标本来就是为识别准备的，被切掉一半的标签既看不清
+    /// 也点不准。从右往左收，是因为左侧通常是最常用的几项。没有图标的标签条收起后
+    /// 就无从辨认，故不收，维持原先的溢出行为。
+    fn collapse(m: &mut [TabMetrics], all_icons: bool, sel: usize, avail_w: i32) -> Vec<bool> {
+        let mut out = vec![false; m.len()];
+        if !all_icons {
+            return out;
+        }
+        let min_total =
+            |m: &[TabMetrics]| -> i32 { m.iter().map(|(c, _, _)| c + TAB_PAD_MIN * 2).sum() };
+        for i in (0..m.len()).rev() {
+            if min_total(m) <= avail_w {
+                break;
+            }
+            if i == sel {
+                continue;
+            }
+            // 图标边长即文字行高（见 `metrics`）
+            m[i].0 = m[i].2;
+            m[i].1 = m[i].2 + TAB_PAD_X * 2;
+            out[i] = true;
+        }
+        out
     }
 
     /// 有效选中索引（钳到项数内，容忍外部信号越界）。
@@ -1048,7 +1080,10 @@ impl Widget for TabBar {
 
         // 布局：标签依次左排，间距 0（靠各自 padding 分隔，命中/居中都按整格算）。
         // 这里用真实可用宽算内边距，比 measure 那份更准，覆盖回缓存。
-        let m = self.metrics(style, |s, ts| canvas.measure_text(s, ts));
+        let mut m = self.metrics(style, |s, ts| canvas.measure_text(s, ts));
+        let all_icons = self.items.iter().all(|it| it.icon.is_some());
+        let collapsed = Self::collapse(&mut m, all_icons, self.selected(), bounds.w);
+        self.collapsed.replace(collapsed.clone());
         let xs = Self::lay_out(&m, Self::shrink_pad(&m, bounds.w));
         self.layout.replace(xs.clone());
 
@@ -1161,6 +1196,9 @@ impl Widget for TabBar {
                     ..style.clone()
                 };
                 icon.paint_into(Rect::new(cx, iy, text_h, text_h), canvas, &istyle, vstate);
+                if collapsed[i] {
+                    continue;
+                }
                 let tx = cx + text_h + TAB_ICON_GAP;
                 canvas.draw_text(
                     &self.items[i].label,
@@ -1256,6 +1294,15 @@ impl Widget for TabBar {
     fn reset_interaction(&mut self) {
         self.hover = None;
         self.primed.set(false); // 下次显示瞬时落定，不回放旧 hover / 旧指示条位置
+    }
+
+    fn tooltip(&self) -> Option<String> {
+        let i = self.hover?;
+        let collapsed = self.collapsed.borrow().get(i).copied().unwrap_or(false);
+        self.items
+            .get(i)
+            .filter(|_| collapsed)
+            .map(|it| it.label.clone())
     }
 }
 
@@ -1403,6 +1450,59 @@ mod tests {
         let laid = TabBar::lay_out(&m, squeezed);
         let total = laid.last().map_or(0, |(x, w)| x + w);
         assert!(total <= natural - 60, "收缩后应放得进可用宽，实得 {total}");
+    }
+
+    #[test]
+    fn tab_collapses_from_the_right_only_as_far_as_needed() {
+        let style = Style::default();
+        let mut te = NullTextEngine;
+        let b = bar(&["设置", "控件", "表格", "图片", "历史", "关于"], signal(0));
+        b.measure(Size::ZERO, &style, &mut te);
+        let m = b.metrics(&style, |s, ts| te.measure(s, ts, None));
+        let min_total: i32 = m.iter().map(|(c, _, _)| c + TAB_PAD_MIN * 2).sum();
+        let saved = m[5].0 - m[5].2;
+
+        let mut fits = m.clone();
+        assert_eq!(
+            TabBar::collapse(&mut fits, true, 2, min_total),
+            vec![false; 6],
+            "压内边距放得下就不收"
+        );
+        assert_eq!(fits, m);
+
+        let mut no_icons = m.clone();
+        assert!(
+            !TabBar::collapse(&mut no_icons, false, 2, 10).contains(&true),
+            "无图标不收"
+        );
+
+        let mut one = m.clone();
+        let got = TabBar::collapse(&mut one, true, 2, min_total - saved);
+        assert_eq!(
+            got,
+            [false, false, false, false, false, true],
+            "差一项的宽度只收最右一项"
+        );
+        assert_eq!(one[5].0, m[5].2, "收起项只剩图标宽（= 行高）");
+
+        let mut all = m.clone();
+        let got = TabBar::collapse(&mut all, true, 5, 10);
+        assert_eq!(
+            got,
+            [true, true, true, true, true, false],
+            "选中项始终保留文字"
+        );
+    }
+
+    #[test]
+    fn collapsed_tab_tooltip_shows_hovered_label() {
+        let mut b = bar(&["概览", "权限"], signal(0));
+        b.hover = Some(1);
+        assert_eq!(b.tooltip(), None, "未收起时文字都在，不给 tooltip");
+        b.collapsed.replace(vec![false, true]);
+        assert_eq!(b.tooltip().as_deref(), Some("权限"));
+        b.hover = Some(0);
+        assert_eq!(b.tooltip(), None, "没收起的项文字仍在");
     }
 
     /// 造一条标签条，`off` 里的下标为禁用项。
