@@ -299,6 +299,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for Wl {
                 enter_serial: 0,
                 pos: (0.0, 0.0),
                 wheel: WheelFrame::default(),
+                wheel_x: WheelFrame::default(),
                 pressed: 0,
             });
         } else if !has_ptr {
@@ -479,10 +480,8 @@ impl Wl {
                 self.on_button(serial, time, button, press);
             }
             wl_pointer::Event::Axis { axis, value, .. } => {
-                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    if let Some(p) = self.pointer.as_mut() {
-                        p.wheel.axis(value);
-                    }
+                if let Some(w) = self.wheel_of(axis) {
+                    w.axis(value);
                     // v5 以下没有 frame 事件：每个 axis 自成一帧。
                     if ptr.version() < 5 {
                         self.flush_wheel();
@@ -490,17 +489,13 @@ impl Wl {
                 }
             }
             wl_pointer::Event::AxisValue120 { axis, value120 } => {
-                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    if let Some(p) = self.pointer.as_mut() {
-                        p.wheel.value120(value120);
-                    }
+                if let Some(w) = self.wheel_of(axis) {
+                    w.value120(value120);
                 }
             }
             wl_pointer::Event::AxisDiscrete { axis, discrete } => {
-                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    if let Some(p) = self.pointer.as_mut() {
-                        p.wheel.discrete(discrete);
-                    }
+                if let Some(w) = self.wheel_of(axis) {
+                    w.discrete(discrete);
                 }
             }
             wl_pointer::Event::Frame => self.flush_wheel(),
@@ -508,22 +503,35 @@ impl Wl {
         }
     }
 
+    /// 该滚动轴对应的累积器；未知轴为 `None`。
+    fn wheel_of(&mut self, axis: WEnum<wl_pointer::Axis>) -> Option<&mut WheelFrame> {
+        let p = self.pointer.as_mut()?;
+        match axis {
+            WEnum::Value(wl_pointer::Axis::VerticalScroll) => Some(&mut p.wheel),
+            WEnum::Value(wl_pointer::Axis::HorizontalScroll) => Some(&mut p.wheel_x),
+            _ => None,
+        }
+    }
+
     fn flush_wheel(&mut self) {
-        let Some(delta) = self.pointer.as_mut().and_then(|p| p.wheel.take()) else {
-            return;
+        let (dy, dx) = match self.pointer.as_mut() {
+            Some(p) => (p.wheel.take(), p.wheel_x.take()),
+            None => return,
         };
+        if dy.is_none() && dx.is_none() {
+            return;
+        }
         // 标题栏上的滚轮不下发（系统标题栏同样不响应滚轮）。
         let Some((i, Region::Content(pos))) = self.pointer_region() else {
             return;
         };
         let key = self.windows[i].key;
-        let ev = PointerEvent::single_with(
-            PointerKind::Wheel(delta),
-            pos,
-            MouseButton::Left,
-            self.mods(),
-        );
-        self.dispatch_pointer(key, ev);
+        // 一帧里两个轴都有（触控板斜滑）就各发一个，交给各自方向的滚动容器。
+        let kinds = [dy.map(PointerKind::Wheel), dx.map(PointerKind::HWheel)];
+        for kind in kinds.into_iter().flatten() {
+            let ev = PointerEvent::single_with(kind, pos, MouseButton::Left, self.mods());
+            self.dispatch_pointer(key, ev);
+        }
     }
 
     fn pointer_move(&mut self) {

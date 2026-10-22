@@ -179,68 +179,129 @@ impl VScrollbar {
 /// 滚动容器内部 widget：处理滚轮 + 拖动滚动条。
 #[derive(Default)]
 pub struct ScrollWidget {
-    dragging: bool,
-    start_y: i32,
+    /// 正在拖的滚动条：`Some(Vertical)` 竖条、`Some(Horizontal)` 横条。
+    dragging: Option<crate::spec::Axis>,
+    /// 按下时指针在拖动方向上的坐标。
+    start_pos: i32,
     start_scroll: i32,
-    /// 高精度滚轮 / 触控板的亚格零头（见 `WheelCarry`）。
+    /// 高精度滚轮 / 触控板的亚格零头（见 `WheelCarry`），两个方向各攒各的。
     wheel: crate::event::WheelCarry,
+    wheel_x: crate::event::WheelCarry,
+}
+
+impl ScrollWidget {
+    /// 竖向滚 `delta`（`Wheel` 单位）。不可滚或已到该方向边界时返回 false，冒泡给外层。
+    fn wheel_vertical(&mut self, ctx: &mut EventCtx, delta: i32) -> bool {
+        let (scroll_y, content_h, view_h) = ctx.scroll_metrics();
+        let max_scroll = (content_h - view_h).max(0);
+        // 已到边界 → 冒泡给外层滚动容器，实现嵌套滚动。按滚动方向判（像素位移可能因
+        // 零头为 0），免得触控板在边界处一点一点地把事件吞掉、外层永远滚不动。
+        let down = delta < 0;
+        if !ctx.scroll_axis().vertical()
+            || max_scroll == 0
+            || (!down && scroll_y <= 0)
+            || (down && scroll_y >= max_scroll)
+        {
+            self.wheel.reset();
+            return false;
+        }
+        // delta>0 向上（减小 scroll_y），delta<0 向下（增大 scroll_y）；每格 48px。
+        let dy = self.wheel.scroll_px(delta, 48);
+        ctx.scroll_by(dy);
+        true
+    }
+
+    /// 横向滚 `delta`（`HWheel` 单位，正=向左）。规则同 [`Self::wheel_vertical`]。
+    fn wheel_horizontal(&mut self, ctx: &mut EventCtx, delta: i32) -> bool {
+        let (scroll_x, content_w, view_w) = ctx.scroll_metrics_x();
+        let max_scroll = (content_w - view_w).max(0);
+        let right = delta < 0;
+        if !ctx.scroll_axis().horizontal()
+            || max_scroll == 0
+            || (!right && scroll_x <= 0)
+            || (right && scroll_x >= max_scroll)
+        {
+            self.wheel_x.reset();
+            return false;
+        }
+        let dx = self.wheel_x.scroll_px(delta, 48);
+        ctx.scroll_by_x(dx);
+        true
+    }
 }
 
 impl Widget for ScrollWidget {
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
         let Event::Pointer(p) = ev else { return false };
         match p.kind {
-            PointerKind::Wheel(delta) => {
-                let (scroll_y, content_h, view_h) = ctx.scroll_metrics();
-                let max_scroll = (content_h - view_h).max(0);
-                // 无溢出内容 → 直接冒泡。
-                if max_scroll == 0 {
-                    self.wheel.reset();
-                    return false;
-                }
-                // delta>0 向上（减小 scroll_y），delta<0 向下（增大 scroll_y）；每格 48px。
-                let dy = self.wheel.scroll_px(delta, 48);
-                // 已到边界 → 冒泡给外层滚动容器，实现嵌套滚动。按滚动方向判（dy 可能因
-                // 零头为 0），免得触控板在边界处一点一点地把事件吞掉、外层永远滚不动。
-                let down = delta < 0;
-                let at_boundary = (!down && scroll_y <= 0) || (down && scroll_y >= max_scroll);
-                if at_boundary {
-                    self.wheel.reset();
-                    return false;
-                }
-                ctx.scroll_by(dy);
-                true
+            // Shift+滚轮：横向滚（Windows / Linux 的通行做法；macOS 系统已把它转成横向量）。
+            // 本容器不能横滚时 Shift 不起作用，照常竖滚（只竖滚的容器保持原行为）。
+            PointerKind::Wheel(delta) if p.mods.shift && ctx.scroll_axis().horizontal() => {
+                self.wheel_horizontal(ctx, delta)
             }
+            // 竖向滚轮：能竖滚就竖滚；本容器根本竖滚不了（只横滚，或双向但竖向不溢出）时
+            // 转成横滚——鼠标没有横向滚轮，否则只能去拖滚动条。与 Qt / GTK / WinUI 一致。
+            // 滚到头照常冒泡给外层。
+            PointerKind::Wheel(delta) => {
+                let (_, content_h, view_h) = ctx.scroll_metrics();
+                let can_v = ctx.scroll_axis().vertical() && content_h > view_h;
+                if can_v {
+                    self.wheel_vertical(ctx, delta)
+                } else {
+                    self.wheel.reset();
+                    self.wheel_horizontal(ctx, delta)
+                }
+            }
+            PointerKind::HWheel(delta) => self.wheel_horizontal(ctx, delta),
             PointerKind::Down => {
                 // 命中到这里且在滚动条可抓取区时启动拖动（hit_node 已优先派发）。
                 // 区间取自 ctx，与 hit_node 的判定同源——贴窗口边的容器滚动条整体内缩，
                 // 这里若还按 `right - HIT_W` 自行推算就会错开一个内缩量。
+                // 两条都有时右下角交叠处归横条：竖条止于横条之上，那里没画竖条。
+                use crate::spec::Axis;
+                let (v_bar, h_bar) = ctx.scroll_bars_shown();
                 let (lo, hi) = ctx.scrollbar_hit_zone();
-                let (scroll_y, content_h, view_h) = ctx.scroll_metrics();
-                if content_h > view_h && p.pos.x >= lo && p.pos.x < hi {
-                    self.dragging = true;
-                    self.start_y = p.pos.y;
-                    self.start_scroll = scroll_y;
-                    ctx.capture();
-                    true
+                let (ylo, yhi) = ctx.hscrollbar_hit_zone();
+                let grab = if h_bar && p.pos.y >= ylo && p.pos.y < yhi {
+                    Some((Axis::Horizontal, p.pos.x, ctx.scroll_metrics_x().0))
+                } else if v_bar && p.pos.x >= lo && p.pos.x < hi {
+                    Some((Axis::Vertical, p.pos.y, ctx.scroll_metrics().0))
                 } else {
-                    false
-                }
+                    None
+                };
+                let Some((axis, pos, scroll)) = grab else {
+                    return false;
+                };
+                self.dragging = Some(axis);
+                self.start_pos = pos;
+                self.start_scroll = scroll;
+                ctx.capture();
+                true
             }
-            PointerKind::Move if self.dragging => {
-                let (_, content_h, view_h) = ctx.scroll_metrics();
-                if view_h > 0 && content_h > view_h {
-                    let max_scroll = content_h - view_h;
+            PointerKind::Move if self.dragging.is_some() => {
+                let horizontal = self.dragging == Some(crate::spec::Axis::Horizontal);
+                let ((_, content, view), pos) = if horizontal {
+                    (ctx.scroll_metrics_x(), p.pos.x)
+                } else {
+                    (ctx.scroll_metrics(), p.pos.y)
+                };
+                if view > 0 && content > view {
+                    let max_scroll = content - view;
                     // 按 thumb 实际行程换算，精确反演绘制映射（与 core paint 同源公式）。
-                    let travel = crate::core::scrollbar::travel(view_h, content_h);
-                    let dy = p.pos.y - self.start_y;
-                    let delta = (dy as f32 * max_scroll as f32 / travel) as i32;
-                    ctx.set_scroll((self.start_scroll + delta).clamp(0, max_scroll));
+                    let travel = crate::core::scrollbar::travel(view, content);
+                    let d = pos - self.start_pos;
+                    let delta = (d as f32 * max_scroll as f32 / travel) as i32;
+                    let to = (self.start_scroll + delta).clamp(0, max_scroll);
+                    if horizontal {
+                        ctx.set_scroll_x(to);
+                    } else {
+                        ctx.set_scroll(to);
+                    }
                 }
                 true
             }
-            PointerKind::Up if self.dragging => {
-                self.dragging = false;
+            PointerKind::Up if self.dragging.is_some() => {
+                self.dragging = None;
                 ctx.release_capture();
                 true
             }

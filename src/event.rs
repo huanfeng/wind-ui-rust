@@ -628,6 +628,12 @@ pub enum PointerKind {
     Leave,
     /// 滚轮，携带步进量（正=上滚）。
     Wheel(i32),
+    /// 横向滚轮（触控板横滑、倾斜滚轮），单位同 `Wheel`，**正=向左滚**（朝内容起点，
+    /// 与 `Wheel` 正=上滚同向）。各平台原始符号不一，平台层统一换算成这个约定。
+    ///
+    /// Shift+竖向滚轮不在平台层转换，仍以 `Wheel` 送达、`mods.shift` 置位，由滚动容器
+    /// 自己转成横向。
+    HWheel(i32),
 }
 
 #[derive(Debug, Clone, Copy)]

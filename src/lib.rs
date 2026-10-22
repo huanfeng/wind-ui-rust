@@ -51,7 +51,7 @@ pub mod prelude {
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixelSnap, PixmapTarget, RenderTarget};
     pub use crate::signal::{signal, Signal};
-    pub use crate::spec::{Align, Axis, Dimension};
+    pub use crate::spec::{Align, Axis, Dimension, ScrollAxis};
     pub use crate::style::{Brush, Edges, Role, Shadow, Style};
     pub use crate::sync::Sender;
     pub use crate::theme::{Intent, Len, Palette, TableTheme, Theme};

@@ -1943,7 +1943,8 @@ mod tests {
         let root = tree.root.unwrap();
         let scroll = *tree.get(root).unwrap().children.last().unwrap();
         assert!(
-            tree.scroll_range(scroll).is_some_and(|(_, max)| max > 0),
+            tree.scroll_range(scroll, crate::spec::Axis::Vertical)
+                .is_some_and(|(_, max)| max > 0),
             "20 行应溢出，正文应可滚"
         );
         // 在正文区域派发向下滚轮（delta<0），正文应滚动。

@@ -87,6 +87,29 @@ pub enum Axis {
     Vertical,
 }
 
+/// 滚动容器可滚动的方向，见 [`crate::ui::Element::scroll_axis`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollAxis {
+    /// 只竖向滚动（默认）。
+    #[default]
+    Vertical,
+    /// 只横向滚动。
+    Horizontal,
+    /// 两个方向都能滚动。
+    Both,
+}
+
+impl ScrollAxis {
+    /// 是否可横向滚动。
+    pub fn horizontal(self) -> bool {
+        matches!(self, Self::Horizontal | Self::Both)
+    }
+    /// 是否可竖向滚动。
+    pub fn vertical(self) -> bool {
+        matches!(self, Self::Vertical | Self::Both)
+    }
+}
+
 /// 交叉轴对齐方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {

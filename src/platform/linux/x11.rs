@@ -1457,12 +1457,16 @@ impl X11 {
             1 => MouseButton::Left,
             2 => MouseButton::Middle,
             3 => MouseButton::Right,
-            // 4/5 = 纵向滚轮（按下即一格，松开忽略）；6/7 横向滚轮暂不支持。
-            4 | 5 => {
+            // 4/5 = 纵向滚轮、6/7 = 横向滚轮（左/右），按下即一格，松开忽略。
+            4..=7 => {
                 if press {
-                    let d = if e.detail == 4 { 120 } else { -120 };
-                    let mut ev =
-                        PointerEvent::single(PointerKind::Wheel(d), pos, MouseButton::Left);
+                    let kind = match e.detail {
+                        4 => PointerKind::Wheel(120),
+                        5 => PointerKind::Wheel(-120),
+                        6 => PointerKind::HWheel(120),
+                        _ => PointerKind::HWheel(-120),
+                    };
+                    let mut ev = PointerEvent::single(kind, pos, MouseButton::Left);
                     ev.mods = mods;
                     self.dispatch_pointer(id, ev);
                 }

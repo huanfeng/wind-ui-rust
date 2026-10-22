@@ -707,6 +707,7 @@ pub struct Element {
     weight_fn: Option<Box<dyn Fn() -> f32>>,
     place: Option<crate::core::Placement>,
     clip_children: bool,
+    scroll_axis: crate::spec::ScrollAxis,
     click: Option<ClickFn>,
     blur: Option<ClickFn>,
     on_drop: Option<DropFn>,
@@ -764,6 +765,7 @@ impl Element {
             weight_fn: None,
             place: None,
             clip_children: false,
+            scroll_axis: crate::spec::ScrollAxis::Vertical,
             click: None,
             blur: None,
             on_drop: None,
@@ -2768,6 +2770,30 @@ impl Element {
         let mut e = Self::base(Layout::Scroll).widget(containers::ScrollWidget::default());
         e.clip_children = true;
         e
+    }
+
+    /// 滚动容器可滚动的方向，默认 [`ScrollAxis::Vertical`](crate::spec::ScrollAxis)。
+    ///
+    /// 子节点仍纵向堆叠；可滚的方向上子节点按内容长度测量（`Match` 视同 `Wrap`），
+    /// 超出视口的部分可滚动。只横向滚动时，`height_match()` 的子节点取视口高。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// let strip = Element::scroll()
+    ///     .scroll_axis(ScrollAxis::Horizontal)
+    ///     .width_match()
+    ///     .child(Element::row().spacing(8).children((0..20).map(|i| Element::button(format!("卡片 {i}")))));
+    /// ```
+    ///
+    /// 只能用于 [`Element::scroll`]，链到别的元素上 debug 期 panic。
+    #[track_caller]
+    pub fn scroll_axis(mut self, axis: crate::spec::ScrollAxis) -> Self {
+        debug_assert!(
+            matches!(self.layout, Layout::Scroll),
+            "scroll_axis() 只能用于 Element::scroll()"
+        );
+        self.scroll_axis = axis;
+        self
     }
 
     /// 水平分隔线。背景用主题角色，运行期换主题自动跟随。
@@ -5031,9 +5057,14 @@ impl Element {
             cursor: self.cursor,
             focused: false,
             clip_children: self.clip_children,
+            scroll_axis: self.scroll_axis,
             scroll_y: 0,
             content_h: 0,
+            scroll_x: 0,
+            content_w: 0,
             over_scroll: 0,
+            over_scroll_x: 0,
+            scroll_bars: Size::ZERO,
             prev_visible: Cell::new(true),
             offset: Point::new(0, 0),
             raised: false,

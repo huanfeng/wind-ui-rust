@@ -80,11 +80,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
     WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST,
-    WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT,
-    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
+    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -97,6 +98,7 @@ use windows::Win32::UI::WindowsAndMessaging::SM_REMOTESESSION;
 use super::{to_skia_color, ActiveRenderer, AppHandler, NewWindow, Renderer, WindowConfig};
 use crate::event::{CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, WindowOp};
 use crate::geometry::{Color, Point, Rect, Size};
+use crate::spec::Axis;
 
 thread_local! {
     /// wnd_proc 入口处写入当前 HWND；PickDialog::pick_* 读取以注入父窗口。
@@ -1099,11 +1101,13 @@ struct Touch {
     /// 按下起点 + 上一帧位置（客户区物理像素）。
     start: (i32, i32),
     last: (i32, i32),
-    /// 是否已越过移动阈值进入滑动滚动。
-    scrolling: bool,
+    /// 越过移动阈值进入滑动滚动后锁定的轴（按越阈值时位移较大的一边），`None` = 尚未越阈值。
+    /// 整个手势只沿这个轴平移，斜着拖不会两个方向一起滚。
+    axis: Option<Axis>,
     /// 上一次移动的消息时间（ms，`GetMessageTime`）。
     last_t: u32,
-    /// 平滑后的 y 速度（**物理像素/ms**），松手时据此启动惯性滑动。
+    /// 平滑后的 x / y 速度（**物理像素/ms**），松手时取锁定轴那一个启动惯性滑动。
+    vx: f32,
     vy: f32,
 }
 
@@ -2179,8 +2183,14 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
-            handle_wheel(hwnd, wparam, lparam);
+            handle_wheel(hwnd, wparam, lparam, false);
             LRESULT(0)
+        }
+        // 横向滚轮回 TRUE：部分鼠标驱动的倾斜滚轮要看到 TRUE 才继续连发（Chromium /
+        // Firefox 同样如此），回 0 只滚一格就停。
+        WM_MOUSEHWHEEL => {
+            handle_wheel(hwnd, wparam, lparam, true);
+            LRESULT(1)
         }
         WM_KEYDOWN => {
             handle_key(hwnd, wparam);
@@ -3384,13 +3394,7 @@ unsafe fn handle_pointer_at(hwnd: HWND, kind: PointerKind, button: MouseButton, 
     } else {
         1
     };
-    let down = |vk: VIRTUAL_KEY| (GetKeyState(vk.0 as i32) as u16 & 0x8000) != 0;
-    let mods = crate::event::Mods {
-        ctrl: down(VK_CONTROL),
-        alt: down(VK_MENU),
-        shift: down(VK_SHIFT),
-        meta: down(VK_LWIN) || down(VK_RWIN),
-    };
+    let mods = pointer_mods();
     dispatch_pointer_event(
         hwnd,
         PointerEvent {
@@ -3401,6 +3405,17 @@ unsafe fn handle_pointer_at(hwnd: HWND, kind: PointerKind, button: MouseButton, 
             mods,
         },
     );
+}
+
+/// 当前消息时刻的修饰键状态（`GetKeyState` 跟随消息队列，与该鼠标消息同步）。
+unsafe fn pointer_mods() -> crate::event::Mods {
+    let down = |vk: VIRTUAL_KEY| (GetKeyState(vk.0 as i32) as u16 & 0x8000) != 0;
+    crate::event::Mods {
+        ctrl: down(VK_CONTROL),
+        alt: down(VK_MENU),
+        shift: down(VK_SHIFT),
+        meta: down(VK_LWIN) || down(VK_RWIN),
+    }
 }
 
 /// 向系统申请鼠标离开通知（含非客户区），离开时收到 WM_MOUSELEAVE / WM_NCMOUSELEAVE。
@@ -3447,9 +3462,17 @@ unsafe fn handle_nc_mouse_move(hwnd: HWND, lparam: LPARAM) {
     );
 }
 
-/// WM_MOUSEWHEEL：高位字为滚动量（±120/刻度），lParam 为屏幕坐标需转客户区。
-unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+/// WM_MOUSEWHEEL / WM_MOUSEHWHEEL：高位字为滚动量（±120/刻度），lParam 为屏幕坐标需转客户区。
+///
+/// 横向消息的正值是**向右**，`PointerKind::HWheel` 约定正=向左，故取反。带上修饰键：
+/// Shift+竖向滚轮由滚动容器转成横向。
+unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM, horizontal: bool) {
     let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
+    let kind = if horizontal {
+        PointerKind::HWheel(-delta)
+    } else {
+        PointerKind::Wheel(delta)
+    };
     let mut pt = POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
         y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
@@ -3457,10 +3480,11 @@ unsafe fn handle_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     let _ = ScreenToClient(hwnd, &mut pt);
     dispatch_pointer_event(
         hwnd,
-        PointerEvent::single(
-            PointerKind::Wheel(delta),
+        PointerEvent::single_with(
+            kind,
             Point::new(pt.x, pt.y),
             MouseButton::Left,
+            pointer_mods(),
         ),
     );
 }
@@ -3605,83 +3629,93 @@ unsafe fn handle_touch(hwnd: HWND, kind: PointerKind, x: i32, y: i32, t: u32) {
             }
         }
         PointerKind::Move => {
-            let (down, start, last, last_t, scrolling, vy) = match state_from(hwnd) {
-                Some(s) => (
-                    s.touch.down,
-                    s.touch.start,
-                    s.touch.last,
-                    s.touch.last_t,
-                    s.touch.scrolling,
-                    s.touch.vy,
-                ),
-                None => return,
+            let Some(prev) = state_from(hwnd).map(|s| s.touch) else {
+                return;
             };
-            if !down {
+            if !prev.down {
                 return;
             }
-            let dy = y - last.1;
+            let (dx, dy) = (x - prev.last.0, y - prev.last.1);
             // 估算瞬时速度并低通平滑（dt=0 的重复样本跳过，避免除零）。
-            let dt = t.wrapping_sub(last_t) as i32;
-            let vy = if dt > 0 {
-                let inst = dy as f32 / dt as f32;
-                vy * (1.0 - TOUCH_VEL_SMOOTH) + inst * TOUCH_VEL_SMOOTH
-            } else {
-                vy
+            let dt = t.wrapping_sub(prev.last_t) as i32;
+            let smooth = |v: f32, d: i32| {
+                if dt > 0 {
+                    v * (1.0 - TOUCH_VEL_SMOOTH) + (d as f32 / dt as f32) * TOUCH_VEL_SMOOTH
+                } else {
+                    v
+                }
             };
-            let past = scrolling
-                || (x - start.0).abs() >= TOUCH_THRESHOLD
-                || (y - start.1).abs() >= TOUCH_THRESHOLD;
+            let (vx, vy) = (smooth(prev.vx, dx), smooth(prev.vy, dy));
+            let axis = prev.axis.or_else(|| {
+                let state = state_from(hwnd)?;
+                let pos = Point::new(x, y);
+                crate::platform::touch_lock_axis(
+                    x - prev.start.0,
+                    y - prev.start.1,
+                    TOUCH_THRESHOLD,
+                    |a| state.handler.can_pan(pos, a),
+                )
+            });
             if let Some(s) = state_from(hwnd) {
                 s.touch.last = (x, y);
                 s.touch.last_t = t;
+                s.touch.vx = vx;
                 s.touch.vy = vy;
-                if past {
-                    s.touch.scrolling = true;
-                }
+                s.touch.axis = axis;
             }
-            if past {
-                dispatch_pan(hwnd, Point::new(x, y), dy);
+            if let Some(axis) = axis {
+                let d = if axis == Axis::Horizontal { dx } else { dy };
+                dispatch_pan(hwnd, Point::new(x, y), axis, d);
             }
         }
         PointerKind::Up => {
-            let (down, start, scrolling, vy) = match state_from(hwnd) {
-                Some(s) => (s.touch.down, s.touch.start, s.touch.scrolling, s.touch.vy),
-                None => return,
+            let Some(prev) = state_from(hwnd).map(|s| s.touch) else {
+                return;
             };
             if let Some(s) = state_from(hwnd) {
                 s.touch.down = false;
-                s.touch.scrolling = false;
+                s.touch.axis = None;
             }
-            if down && scrolling {
-                // 拖动滚动后松手：按释放速度启动惯性滑动（速度过低时宿主会忽略）。
-                dispatch_fling(hwnd, Point::new(x, y), vy);
-            } else if down {
+            match (prev.down, prev.axis) {
+                // 拖动滚动后松手：按锁定轴的释放速度启动惯性滑动（速度过低时宿主会忽略）。
+                (true, Some(axis)) => {
+                    let v = if axis == Axis::Horizontal {
+                        prev.vx
+                    } else {
+                        prev.vy
+                    };
+                    dispatch_fling(hwnd, Point::new(x, y), axis, v);
+                }
                 // 未进入滚动 → 视为点击：在起点合成按下，抬起处合成抬起，走正常派发。
-                dispatch_pointer_event(
-                    hwnd,
-                    PointerEvent::single(
-                        PointerKind::Down,
-                        Point::new(start.0, start.1),
-                        MouseButton::Left,
-                    ),
-                );
-                dispatch_pointer_event(
-                    hwnd,
-                    PointerEvent::single(PointerKind::Up, Point::new(x, y), MouseButton::Left),
-                );
+                (true, None) => {
+                    let start = prev.start;
+                    dispatch_pointer_event(
+                        hwnd,
+                        PointerEvent::single(
+                            PointerKind::Down,
+                            Point::new(start.0, start.1),
+                            MouseButton::Left,
+                        ),
+                    );
+                    dispatch_pointer_event(
+                        hwnd,
+                        PointerEvent::single(PointerKind::Up, Point::new(x, y), MouseButton::Left),
+                    );
+                }
+                _ => {}
             }
         }
         _ => {}
     }
 }
 
-/// 触摸滚动：把 dy 注入手指下的滚动容器（两段式：借用读取后释放再 InvalidateRect）。
-unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
+/// 触摸滚动：把沿 `axis` 的位移 `d` 注入手指下的滚动容器（两段式：借用读取后释放再 InvalidateRect）。
+unsafe fn dispatch_pan(hwnd: HWND, pos: Point, axis: Axis, d: i32) {
     let repaint = {
         let Some(state) = state_from(hwnd) else {
             return;
         };
-        state.handler.on_pan(pos, dy)
+        state.handler.on_pan(pos, axis, d)
     };
     if repaint {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -3689,12 +3723,12 @@ unsafe fn dispatch_pan(hwnd: HWND, pos: Point, dy: i32) {
 }
 
 /// 触摸松手：按释放速度启动惯性滑动。启动后触发首帧，其余由动画循环按帧推进。
-unsafe fn dispatch_fling(hwnd: HWND, pos: Point, vy: f32) {
+unsafe fn dispatch_fling(hwnd: HWND, pos: Point, axis: Axis, v: f32) {
     let started = {
         let Some(state) = state_from(hwnd) else {
             return;
         };
-        state.handler.start_fling(pos, vy)
+        state.handler.start_fling(pos, axis, v)
     };
     if started {
         let _ = InvalidateRect(Some(hwnd), None, false);

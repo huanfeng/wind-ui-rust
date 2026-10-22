@@ -392,6 +392,8 @@ struct ViewState {
     /// 滚轮增量的亚像素残差（见 `on_wheel`）：触控板慢速滑动单次增量常不足 1 个框架单位，
     /// 直接取整会整格丢掉，残差留到下次事件补齐（同 `app/fling.rs` 的 `pan_residual`）。
     wheel_residual: f32,
+    /// 横向滚动的亚像素残差，同上。
+    wheel_residual_x: f32,
     /// 动画帧的一次性定时器（仅动画期间存在；空闲为 None → 零唤醒）。每帧续约前先废止旧的。
     frame_timer: Option<Retained<NSTimer>>,
     /// 本帧**开始绘制**的时刻。帧截止从这里起算而不是从帧画完起算——理由见
@@ -976,6 +978,7 @@ impl ContentView {
             preedit: Preedit::default(),
             capturing: false,
             wheel_residual: 0.0,
+            wheel_residual_x: 0.0,
             frame_timer: None,
             frame_start: std::time::Instant::now(),
             partial_invalidate: None,
@@ -1641,7 +1644,7 @@ impl ContentView {
         });
     }
 
-    /// 滚轮 / 触控板两指滑动 → Wheel 事件。框架约定一刻度 ±120（正=上滚）。
+    /// 滚轮 / 触控板两指滑动 → Wheel / HWheel 事件。框架约定一刻度 ±120（正=上滚 / 左滚）。
     ///
     /// # 惯性由系统给，本后端**刻意不实现** `start_fling` / `cancel_fling`
     ///
@@ -1670,33 +1673,48 @@ impl ContentView {
         // 旧残差把新手势的第一格吃掉。鼠标滚轮的 phase 恒为 None，走不到这里。
         let phase = ev.phase();
         if phase.contains(NSEventPhase::Began) || phase.contains(NSEventPhase::MayBegin) {
-            self.ivars().borrow_mut().wheel_residual = 0.0;
+            let mut st = self.ivars().borrow_mut();
+            st.wheel_residual = 0.0;
+            st.wheel_residual_x = 0.0;
         }
-        let dy = ev.scrollingDeltaY();
         // 触控板（精确增量，单位=点）：按点位细粒度滚；鼠标滚轮（行增量）：约 3 行/刻度。
-        let raw = if ev.hasPreciseScrollingDeltas() {
-            dy as f32 * 3.0
+        let k = if ev.hasPreciseScrollingDeltas() {
+            3.0
         } else {
-            dy as f32 * 40.0
+            40.0
         };
         // 亚像素累积后再取整：触控板慢速滑动单次增量常 <1，直接 `as i32` 截成 0 就把整个
         // 事件丢了，表现为"轻推没反应、猛推才动"，动量尾段也会提前断掉。
-        let delta = {
+        let (dy, dx) = {
             let mut st = self.ivars().borrow_mut();
-            let total = raw + st.wheel_residual;
-            let whole = total.trunc();
-            st.wheel_residual = total - whole;
-            whole as i32
+            let take = |raw: f32, residual: &mut f32| {
+                let total = raw + *residual;
+                let whole = total.trunc();
+                *residual = total - whole;
+                whole as i32
+            };
+            let dy = take(ev.scrollingDeltaY() as f32 * k, &mut st.wheel_residual);
+            let dx = take(ev.scrollingDeltaX() as f32 * k, &mut st.wheel_residual_x);
+            (dy, dx)
         };
-        if delta == 0 {
-            return;
-        }
+        // 横向：deltaX 正 = 内容右移 = 向左滚，与 `HWheel` 正=向左同号，不用变号。
+        // 系统已把 Shift+鼠标滚轮转成 deltaX，这里不必再看修饰键。斜着滑的一次事件两个
+        // 分量都有，各发一个，交给各自方向的滚动容器。
         let pos = self.loc_phys(ev);
-        self.dispatch_pointer(PointerEvent::single(
-            PointerKind::Wheel(delta),
-            pos,
-            MouseButton::Left,
-        ));
+        if dy != 0 {
+            self.dispatch_pointer(PointerEvent::single(
+                PointerKind::Wheel(dy),
+                pos,
+                MouseButton::Left,
+            ));
+        }
+        if dx != 0 {
+            self.dispatch_pointer(PointerEvent::single(
+                PointerKind::HWheel(dx),
+                pos,
+                MouseButton::Left,
+            ));
+        }
     }
 
     /// 键盘按下：特殊键直发；普通文本交输入法（IME 提交后经 `insertText:` 回到 Key::Char），

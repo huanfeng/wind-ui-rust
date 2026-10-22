@@ -503,6 +503,8 @@ struct Ptr {
     /// 表面坐标（逻辑，带小数）。
     pos: (f64, f64),
     wheel: WheelFrame,
+    /// 横向滚动量（同一结构：Wayland 横轴正值 = 向右，换算后正 = 向左，正合 `HWheel`）。
+    wheel_x: WheelFrame,
     /// 按着的按钮数（隐式抓取期间指针事件仍送给按下时的表面）。
     pressed: u32,
 }

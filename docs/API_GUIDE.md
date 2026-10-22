@@ -254,7 +254,8 @@ Element::col()                       // 纵向线性容器
 Element::row()                       // 横向线性容器
 Element::stack()                     // 层叠（Frame，后者覆盖前者）
 Element::leaf()                      // 叶子（自定义控件载体，见 §9）
-Element::scroll()                    // 垂直滚动容器（支持鼠标滚轮 + 触摸滑动/惯性）
+Element::scroll()                    // 滚动容器，默认竖向（支持鼠标滚轮 + 触摸滑动/惯性）
+Element::scroll().scroll_axis(ScrollAxis::Horizontal) // 横向滚动；ScrollAxis::Both 双向
 Element::divider()                   // 分隔线
 Element::tabs(selected, vec![("标签", page_element), ...])       // selected: Signal<usize>
 Element::tabs_icons(selected, vec![("标签", icon, page), ...])  // 带图标的标签（icon: ImageContent）
@@ -1195,6 +1196,38 @@ Element::button("展开")
 - **触摸**：直接手指滑动、松手惯性滑行、撞界轻微回弹（见 DESIGN.md / 跨平台缝合）
 
 第三方无需做任何事，把可滚内容放进 `scroll()` 即可。
+
+**横向与双向**：`scroll_axis` 决定哪个方向可滚，默认 `ScrollAxis::Vertical`。
+
+```rust
+// 一行标签放不下就横向滚
+let strip = Element::scroll()
+    .scroll_axis(ScrollAxis::Horizontal)
+    .width_match()
+    .child(Element::row().spacing(8).children(tags));
+
+// 大表格两个方向都滚
+let sheet = Element::scroll()
+    .scroll_axis(ScrollAxis::Both)
+    .width_match()
+    .height(300)
+    .child(grid);
+```
+
+- **布局**：子节点仍纵向堆叠。可滚的方向上子节点按内容长度测量（`width_match` 视同
+  `Wrap`，不会被压到视口宽）；只横向滚动时，`height_match()` 的子节点取视口高。
+- **滚动条**：横条贴底，溢出时才出现，并为它让出高度——高度随内容的横向容器会自动加高
+  一条滚动条的位置，不压内容。双向时两条在右下角互相让位，内容裁在两条滚动条以内。
+- **滚轮**（与 Qt / GTK / WinUI 等桌面原生框架一致）：
+  - 触控板横滑、倾斜滚轮（`PointerKind::HWheel`）和 **Shift+滚轮**滚横向；
+  - 普通竖滚轮：容器能竖滚就竖滚；**只能横滚**（或双向但竖向不溢出）时转成横滚；
+  - 任一方向滚到头就交给外层容器——竖向页面里嵌一条横条时，滚轮先把横条滚到头，
+    之后接着滚页面。
+- **触摸**：越过拖动阈值时按位移较大的一边锁定方向，此后整个手势（含松手惯性）只沿这一
+  方向滚；横向拖动落在只竖滚的区域上不产生滚动。
+- **焦点跟随**：Tab 到横向容器里视口外的控件时，容器横向滚过去。
+- 自定义控件在 `on_event` 里可用 `ctx.scroll_metrics_x()` / `ctx.set_scroll_x(..)` /
+  `ctx.scroll_by_x(..)` 读写横向偏移，与竖向的 `scroll_metrics` / `set_scroll` / `scroll_by` 对应。
 
 ### 6.5 动态列表（数据驱动的子树重建）
 

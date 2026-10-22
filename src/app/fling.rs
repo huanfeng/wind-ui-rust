@@ -1,16 +1,20 @@
 //! 触摸惯性滑动（fling）：松手后的滑行、撞界回弹，以及触摸平移的亚像素残差。
 //!
 //! 只依赖 `Tree` 的滚动接口（`pan_scroll` / `scroll_range` / `scroll_target` /
-//! `set_scroll_y` / `set_over_scroll`），与控件树其余部分无耦合。
+//! `set_scroll_offset` / `set_over_scroll`），与控件树其余部分无耦合。
+//!
+//! 一次手势只沿一个轴：平台层在越过拖动阈值时按位移较大的一边锁定方向，平移与松手后的
+//! 惯性都沿这个轴。
 
 use crate::core::NodeId;
 use crate::geometry::Point;
+use crate::spec::Axis;
 
 use super::UiHost;
 
 /// 每 ms 速度保留系数（指数摩擦）。0.996 ≈ 衰减常数 0.004/ms，松手后约 1s 内停下。
 const FLING_FRICTION: f32 = 0.996;
-/// 启动惯性的最小释放速度，比较对象是 `vy`（**物理像素/ms**）；低于此视为缓慢拖放，不滑。
+/// 启动惯性的最小释放速度，比较对象是手指速度 `v`（**物理像素/ms**）；低于此视为缓慢拖放，不滑。
 const FLING_TRIGGER: f32 = 0.25;
 /// 停止阈值，比较对象是 `Fling::vel`（**逻辑像素/ms**，与触发阈值差一个 scale）；
 /// 速度低于此即结束（约 <0.3px/帧@60）。
@@ -37,11 +41,13 @@ enum FlingPhase {
 struct Fling {
     /// 目标滚动容器节点。
     node: NodeId,
+    /// 滑行所沿的轴。
+    axis: Axis,
     /// 当前相位（滑行/回弹）。
     phase: FlingPhase,
-    /// scroll_y 速度（**逻辑像素/ms**）；正=继续增大 scroll_y（内容上移）。
+    /// 偏移速度（**逻辑像素/ms**）；正=继续增大偏移（内容上移 / 左移）。
     vel: f32,
-    /// 回弹越界偏移（逻辑像素，Bounce 相位用）；正=顶部回弹、负=底部回弹。
+    /// 回弹越界偏移（逻辑像素，Bounce 相位用）；正=起始端（顶 / 左）回弹、负=末端回弹。
     over: f32,
     /// 亚像素累积，避免逐帧取整丢失。
     residual: f32,
@@ -57,6 +63,8 @@ pub(super) struct ScrollState {
     active: Option<Fling>,
     /// 触摸平移的亚像素残差（物理→逻辑取整丢失部分累积，避免高 DPI 细微平移发黏）。
     pan_residual: f32,
+    /// 残差所属的轴：换了轴（新的一次手势锁到另一个方向）旧残差作废。
+    pan_axis: Option<Axis>,
 }
 
 impl UiHost {
@@ -65,27 +73,27 @@ impl UiHost {
     pub(super) fn clear_fling(&mut self) -> bool {
         match self.scroll.active.take() {
             Some(f) => {
-                self.tree.set_over_scroll(f.node, 0);
+                self.tree.set_over_scroll(f.node, f.axis, 0);
                 true
             }
             None => false,
         }
     }
 
-    /// 步进惯性滑动一帧：Glide 按速度推进 scroll_y、摩擦衰减，撞界转 Bounce；
+    /// 步进惯性滑动一帧：Glide 按速度推进偏移、摩擦衰减，撞界转 Bounce；
     /// Bounce 短暂越界偏移弹回归零。仍在进行时请求下一帧重绘。
     pub(super) fn step_fling(&mut self, now_ms: u64) {
         let Some(f) = self.scroll.active.as_ref() else {
             return;
         };
-        let (node, phase, last) = (f.node, f.phase, f.last_ms);
+        let (node, axis, phase, last) = (f.node, f.axis, f.phase, f.last_ms);
         // 首帧用标称帧长起步；其后按真实间隔，长停滞（最小化/卡顿）直接结算防巨跳。
         let dt = match last {
             None => 16,
             Some(prev) => {
                 let raw = now_ms.saturating_sub(prev);
                 if raw > FLING_STALL_MS {
-                    self.tree.set_over_scroll(node, 0);
+                    self.tree.set_over_scroll(node, axis, 0);
                     self.scroll.active = None;
                     return;
                 }
@@ -102,11 +110,11 @@ impl UiHost {
                 f.residual = advance - delta as f32;
                 let vel = f.vel;
                 // 推进并检测撞界（scroll_y 始终钳制；clamp 改变值即撞界）。
-                let hit = match self.tree.scroll_range(node) {
+                let hit = match self.tree.scroll_range(node, axis) {
                     Some((cur, max)) => {
                         let next = cur + delta;
                         let clamped = next.clamp(0, max);
-                        self.tree.set_scroll_y(node, clamped);
+                        self.tree.set_scroll_offset(node, axis, clamped);
                         clamped != next
                     }
                     None => {
@@ -118,10 +126,11 @@ impl UiHost {
                     // 撞界 → 按撞界速度给一个小幅越界偏移，转入回弹。
                     let impulse = (-vel * BOUNCE_GAIN).clamp(-MAX_BOUNCE, MAX_BOUNCE);
                     if impulse.abs() < 1.0 {
-                        self.tree.set_over_scroll(node, 0);
+                        self.tree.set_over_scroll(node, axis, 0);
                         self.scroll.active = None;
                     } else {
-                        self.tree.set_over_scroll(node, impulse.round() as i32);
+                        self.tree
+                            .set_over_scroll(node, axis, impulse.round() as i32);
                         let f = self.scroll.active.as_mut().unwrap();
                         f.phase = FlingPhase::Bounce;
                         f.over = impulse;
@@ -139,18 +148,18 @@ impl UiHost {
                 f.over *= BOUNCE_DECAY.powf(dt);
                 let over = f.over;
                 if over.abs() < 0.5 {
-                    self.tree.set_over_scroll(node, 0);
+                    self.tree.set_over_scroll(node, axis, 0);
                     self.scroll.active = None;
                 } else {
-                    self.tree.set_over_scroll(node, over.round() as i32);
+                    self.tree.set_over_scroll(node, axis, over.round() as i32);
                     crate::anim::request_repaint();
                 }
             }
         }
     }
 
-    /// 触摸平移一帧（`AppHandler::on_pan` 的实现体）。
-    pub(super) fn pan(&mut self, pos: Point, dy: i32) -> bool {
+    /// 触摸平移一帧（`AppHandler::on_pan` 的实现体）：沿 `axis` 平移 `d` 物理像素。
+    pub(super) fn pan(&mut self, pos: Point, axis: Axis, d: i32) -> bool {
         self.damage.needs_full = true; // 滚动改变大片区域 → 全窗重绘。
                                        // 菜单激活时忽略平移（并清残差，避免菜单关闭后跳变）。
         if self.menu.is_open() {
@@ -163,19 +172,23 @@ impl UiHost {
             (pos.x as f32 / s).round() as i32,
             (pos.y as f32 / s).round() as i32,
         );
-        let total = dy as f32 / s + self.scroll.pan_residual;
-        let dyl = total.trunc() as i32;
-        self.scroll.pan_residual = total - dyl as f32;
-        if dyl == 0 {
+        if self.scroll.pan_axis != Some(axis) {
+            self.scroll.pan_axis = Some(axis);
+            self.scroll.pan_residual = 0.0;
+        }
+        let total = d as f32 / s + self.scroll.pan_residual;
+        let dl = total.trunc() as i32;
+        self.scroll.pan_residual = total - dl as f32;
+        if dl == 0 {
             return false;
         }
         // 拖动跟手时打断残留惯性/回弹，避免方向冲突。
         self.clear_fling();
-        self.tree.pan_scroll(p, dyl)
+        self.tree.pan_scroll(p, axis, dl)
     }
 
-    /// 松手启动惯性滑动（`AppHandler::start_fling` 的实现体）。
-    pub(super) fn begin_fling(&mut self, pos: Point, vy: f32) -> bool {
+    /// 松手启动惯性滑动（`AppHandler::start_fling` 的实现体）：沿 `axis`，手指速度 `v`。
+    pub(super) fn begin_fling(&mut self, pos: Point, axis: Axis, v: f32) -> bool {
         // 复位任何残留惯性/回弹偏移，再决定是否启动新的。
         self.clear_fling();
         // 菜单激活时不滑。
@@ -183,7 +196,7 @@ impl UiHost {
             return false;
         }
         // 释放速度过低 → 视为缓慢拖放，不进入惯性。
-        if vy.abs() < FLING_TRIGGER {
+        if v.abs() < FLING_TRIGGER {
             return false;
         }
         let s = self.scale;
@@ -191,14 +204,15 @@ impl UiHost {
             (pos.x as f32 / s).round() as i32,
             (pos.y as f32 / s).round() as i32,
         );
-        // scroll_y 速度 = −手指速度（手指上移 vy<0 → 内容上移、scroll_y 增大）；物理→逻辑。
-        let vel = -vy / s;
+        // 偏移速度 = −手指速度（手指上移 / 左移 v<0 → 内容跟着走、偏移增大）；物理→逻辑。
+        let vel = -v / s;
         // 按惯性方向找能继续滚动的容器：内层到界则冒泡外层（与 pan 一致）。
-        let Some(node) = self.tree.scroll_target(p, vel > 0.0) else {
+        let Some(node) = self.tree.scroll_target(p, axis, vel > 0.0) else {
             return false;
         };
         self.scroll.active = Some(Fling {
             node,
+            axis,
             phase: FlingPhase::Glide,
             vel,
             over: 0.0,

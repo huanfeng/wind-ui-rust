@@ -445,6 +445,33 @@ fn shadow_extent(n: &Node) -> i32 {
 }
 
 impl Node {
+    /// 子节点的裁剪区（`content` 为本节点内容区的绝对矩形）。可横滚的滚动容器裁到视口——
+    /// 扣掉两条滚动条占的位置，内容不会露到竖条右侧或横条下方；其余节点就是内容区。
+    ///
+    /// 只竖滚的容器维持整块内容区：它靠收窄子节点宽度为竖条让位，且约定内容自带右内边距
+    /// 吸收让位量（见 [`scrollbar::occupied_w`]），裁窄会切掉伸到滚动条底下的那部分。
+    pub fn child_clip(&self, content: Rect) -> Rect {
+        if matches!(self.layout, Layout::Scroll) && self.scroll_axis.horizontal() {
+            let b = self.scroll_bars;
+            Rect::new(
+                content.x,
+                content.y,
+                (content.w - b.w).max(0),
+                (content.h - b.h).max(0),
+            )
+        } else {
+            content
+        }
+    }
+
+    /// 滚动容器的视口尺寸：内容区扣掉 arrange 预留的滚动条（基于上一帧布局）。
+    pub fn scroll_view(&self) -> Size {
+        Size::new(
+            (self.bounds.w - self.padding.horizontal() - self.scroll_bars.w).max(0),
+            (self.bounds.h - self.padding.vertical() - self.scroll_bars.h).max(0),
+        )
+    }
+
     /// 该帧是否有效可见：静态标志、可见信号、可见条件闭包三者取与
     /// （对应 `Element::visible` / `visible_signal` / `visible_when`）。
     pub fn effective_visible(&self) -> bool {
@@ -698,13 +725,24 @@ pub struct Node {
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
     pub clip_children: bool,
+    /// 滚动容器可滚动的方向（仅 `Layout::Scroll` 有意义）。
+    pub scroll_axis: crate::spec::ScrollAxis,
     /// 垂直滚动偏移（Scroll 容器）。
     pub scroll_y: i32,
     /// 内容总高（measure 记录，用于滚动钳制与滚动条）。
     pub content_h: i32,
+    /// 水平滚动偏移（可横向滚动的 Scroll 容器）。
+    pub scroll_x: i32,
+    /// 内容总宽（measure 记录；只有可横向滚动的容器才有意义）。
+    pub content_w: i32,
     /// 越界回弹的瞬时视觉偏移（不参与钳制，仅惯性撞界时短暂非零）。
     /// 正=内容下移（顶部回弹），负=内容上移（底部回弹）。
     pub over_scroll: i32,
+    /// 横向越界回弹的瞬时视觉偏移，正=内容右移。
+    pub over_scroll_x: i32,
+    /// arrange 为滚动条预留的位置：`w` = 右侧竖条占宽，`h` = 底部横条占高；
+    /// 非零即该方向溢出、画出滚动条。视口 = 内容区减去这两项。
+    pub scroll_bars: Size,
     /// 上一次 [`Tree::reset_hidden_interactions`] 扫描时**是否参与交互**
     /// （祖先链累积可见 ∧ 祖先链累积启用）。用于检测「退出交互」的翻转。
     ///
@@ -1483,7 +1521,8 @@ impl Tree {
             }
             if !anchored {
                 if matches!(pn.layout, Layout::Scroll) {
-                    // arrange 把子节点整体挪了 `-scroll_y + over_scroll`（见 `arrange_scroll`）。
+                    // arrange 把子节点整体挪了 `-scroll + over_scroll`（见 `arrange_scroll`）。
+                    pos.x += pn.scroll_x - pn.over_scroll_x;
                     pos.y += pn.scroll_y - pn.over_scroll;
                 }
                 if pn.layout_anim.is_some() {
@@ -1587,7 +1626,9 @@ impl Tree {
             if !n.clip_children {
                 continue;
             }
-            if a.intersect(&self.abs_bounds(c).inset(n.padding)).is_empty() {
+            if a.intersect(&n.child_clip(self.abs_bounds(c).inset(n.padding)))
+                .is_empty()
+            {
                 return true;
             }
         }
@@ -1860,7 +1901,9 @@ impl Tree {
             };
             let s = self.measure(c, cwspec, chspec, text);
             let (s_main, s_cross) = main_cross(horizontal, s);
-            used_main += s_main + cm_main;
+            // 饱和加：主轴不设限时（横向滚动容器里的 row），"按可用宽铺满"的控件会量出
+            // 近乎无限的宽，几个相加就溢出 i32。量出来的大数由外层滚动容器兜底处理。
+            used_main = used_main.saturating_add(s_main + cm_main);
             max_cross = max_cross.max(s_cross + cm_cross);
         }
         let gaps = spacing * (children.len() as i32 - 1).max(0);
@@ -1896,7 +1939,7 @@ impl Tree {
                 };
                 let s = self.measure(c, cwspec, chspec, text);
                 let (s_main, s_cross) = main_cross(horizontal, s);
-                used_main += s_main; // margin 已预扣，此处只加 portion
+                used_main = used_main.saturating_add(s_main); // margin 已预扣，此处只加 portion
                 max_cross = max_cross.max(s_cross + cm_cross);
             }
         }
@@ -1908,8 +1951,10 @@ impl Tree {
         }
     }
 
-    /// 垂直滚动容器：子按受限宽度、无限高度测量；记录内容总高。
+    /// 滚动容器：子节点纵向堆叠，可滚方向上按无限长测量；记录内容总高 / 总宽。
+    /// 只竖滚时宽度受限（与视口同宽），可横滚时宽度不设上限。
     fn measure_scroll(&mut self, id: NodeId, avail_w: i32, text: &mut dyn TextEngine) -> Size {
+        let h_scroll = self.get(id).is_some_and(|n| n.scroll_axis.horizontal());
         let children = self.visible_children(id);
         let mut total_h = 0;
         let mut max_w = 0;
@@ -1922,17 +1967,36 @@ impl Tree {
             // （`inner.w - scrollbar_w - cm.horizontal()`），这里不扣的话，子树会按
             // **更宽**的宽度算高、再按更窄的宽度排版——换行文本因此少算一行，底部被裁。
             // （`scrollbar_w` 那一份在 measure 阶段拿不到：是否可滚要等 arrange 才知道。）
-            let cwspec = child_spec(cw, (avail_w - cm.horizontal()).max(0), false);
+            let cwspec = child_spec(cw, (avail_w - cm.horizontal()).max(0), h_scroll);
             // 高度方向视为无限：Px 固定其值，Wrap/Match 按内容展开。
             let chspec = child_spec(ch, 0, true);
-            let s = self.measure(c, cwspec, chspec, text);
+            let mut s = self.measure(c, cwspec, chspec, text);
+            // 宽度不设限时，"按可用宽铺满"的控件（列表行、导航行等直接返回 avail.w 的）
+            // 会量出近乎无限的宽——这类控件没有内容宽可言，退回按视口宽重测，不横向滚动。
+            if h_scroll && s.w >= i32::MAX / 8 {
+                let exact = MeasureSpec::exactly((avail_w - cm.horizontal()).max(0));
+                s = self.measure(c, exact, chspec, text);
+            }
             total_h += s.h + cm.vertical();
             max_w = max_w.max(s.w + cm.horizontal());
         }
         if let Some(n) = self.get_mut(id) {
             n.content_h = total_h;
+            n.content_w = max_w;
         }
-        Size::new(max_w, total_h)
+        // 横向溢出时底部要多出一条横条的位置：高度随内容（Wrap）的横向容器若不算它，
+        // 横条就压在内容底边上。贴窗口底缘的内缩量此时还不知道，按不内缩算。
+        //
+        // 判据比 arrange 宽一条竖条：外层（或自己，双向时）若有竖条，arrange 时视口会再窄
+        // 一个 `occupied_w`，而 measure 拿到的 `avail_w` 还没扣它。内容宽正好落在这一条里时
+        // 只按 `avail_w` 判会漏留位置，横条压住内容底边、又滚不开；宁可在不出横条时底下多
+        // 一条空白。
+        let bar_h = if h_scroll && max_w > avail_w - scrollbar::occupied_w(0) {
+            scrollbar::occupied_w(0)
+        } else {
+            0
+        };
+        Size::new(max_w, total_h + bar_h)
     }
 
     /// 流式容器：子节点按自身宽度（不超过一整行）测量，再按可用宽折行。
@@ -2133,6 +2197,34 @@ impl Tree {
         (hi - scrollbar::hit_w(), hi)
     }
 
+    /// 点 `p` 是否落在横向滚动条可抓取区，见 [`Self::in_scrollbar_hit_zone`]。
+    pub fn in_hscrollbar_hit_zone(&self, p: Point, abs: Rect) -> bool {
+        let (lo, hi) = self.hscrollbar_hit_zone(abs);
+        p.y >= lo && p.y < hi
+    }
+
+    /// 横向滚动条可抓取区的 y 区间 `[lo, hi)`（绝对坐标），贴底；见 [`Self::scrollbar_hit_zone`]。
+    pub fn hscrollbar_hit_zone(&self, abs: Rect) -> (i32, i32) {
+        let hi = abs.bottom() - self.hscrollbar_edge_inset(abs.bottom());
+        (hi - scrollbar::hit_w(), hi)
+    }
+
+    /// 底缘版的 [`Self::scrollbar_edge_inset`]：贴窗口底缘时横条同样避开缩放边框。
+    fn hscrollbar_edge_inset(&self, abs_bottom: i32) -> i32 {
+        let inset = self.scroll_edge_inset;
+        if inset <= 0 {
+            return 0;
+        }
+        let Some(root_h) = self.root.and_then(|r| self.get(r)).map(|n| n.bounds.h) else {
+            return 0;
+        };
+        if abs_bottom >= root_h - inset {
+            inset
+        } else {
+            0
+        }
+    }
+
     fn scrollbar_edge_inset(&self, abs_right: i32) -> i32 {
         let inset = self.scroll_edge_inset;
         if inset <= 0 {
@@ -2149,34 +2241,85 @@ impl Tree {
     }
 
     fn arrange_scroll(&mut self, id: NodeId, inner: Rect) {
-        // 钳制滚动量：[0, content_h - 视口高]。
-        let (content_h, mut scroll_y) = {
+        let (axis, content_w, content_h, over_x, over_y) = {
             let n = self.get(id).unwrap();
-            (n.content_h, n.scroll_y)
+            (
+                n.scroll_axis,
+                n.content_w,
+                n.content_h,
+                n.over_scroll_x,
+                n.over_scroll,
+            )
         };
-        let max_scroll = (content_h - inner.h).max(0);
-        scroll_y = scroll_y.clamp(0, max_scroll);
-        let over = self.get(id).map(|n| n.over_scroll).unwrap_or(0);
-        if let Some(n) = self.get_mut(id) {
-            n.scroll_y = scroll_y;
+        // 可滚动时为滚动条预留位置（右侧竖条、底部横条），避免内容被遮挡。贴窗口右缘 / 底缘
+        // 的容器滚动条会内缩，预留量须同步加上内缩量，否则滚动条会盖到内容上。
+        // 双向时两条互相让位：横条占掉的高度可能让竖向也溢出，反之亦然，故按对方的
+        // 预留再判一次（两轮即收敛：每条至多从无到有一次）。
+        let (abs_right, abs_bottom) = (
+            self.arrange_origin.x + inner.right(),
+            self.arrange_origin.y + inner.bottom(),
+        );
+        let (mut bar_w, mut bar_h) = (0, 0);
+        for _ in 0..2 {
+            bar_w = if axis.vertical() && content_h > inner.h - bar_h {
+                scrollbar::occupied_w(self.scrollbar_edge_inset(abs_right))
+            } else {
+                0
+            };
+            bar_h = if axis.horizontal() && content_w > inner.w - bar_w {
+                scrollbar::occupied_w(self.hscrollbar_edge_inset(abs_bottom))
+            } else {
+                0
+            };
         }
-        // 可滚动时为右侧滚动条预留宽度，避免内容被遮挡。贴窗口右缘的容器滚动条会内缩，
-        // 预留宽度须同步加上内缩量，否则滚动条会盖到内容上。
-        let scrollbar_w = if content_h > inner.h {
-            let abs_right = self.arrange_origin.x + inner.x + inner.w;
-            scrollbar::occupied_w(self.scrollbar_edge_inset(abs_right))
+        let view = Size::new((inner.w - bar_w).max(0), (inner.h - bar_h).max(0));
+        // 钳制滚动量：[0, 内容 - 视口]；不可滚的方向恒为 0。
+        let max_y = if axis.vertical() {
+            (content_h - view.h).max(0)
         } else {
             0
         };
-        // 子节点从视口顶起按内容顺序堆叠，整体上移 scroll_y；over_scroll 为越界回弹瞬时偏移。
+        let max_x = if axis.horizontal() {
+            (content_w - view.w).max(0)
+        } else {
+            0
+        };
+        let (scroll_x, scroll_y) = {
+            let n = self.get_mut(id).unwrap();
+            n.scroll_y = n.scroll_y.clamp(0, max_y);
+            n.scroll_x = n.scroll_x.clamp(0, max_x);
+            n.scroll_bars = Size::new(bar_w, bar_h);
+            (n.scroll_x, n.scroll_y)
+        };
+        // 子节点从视口左上起纵向堆叠，整体上移 scroll_y、左移 scroll_x；
+        // over_scroll(_x) 为越界回弹的瞬时偏移。
         let children = self.visible_children(id);
-        let mut y = inner.y - scroll_y + over;
+        let x = inner.x - scroll_x + over_x;
+        let mut y = inner.y - scroll_y + over_y;
         for c in children {
             let (cs, cm) = (self.measured_of(c), self.margin_of(c));
-            let cw = (inner.w - scrollbar_w - cm.horizontal()).max(0);
-            let bounds = Rect::new(inner.x + cm.left, y + cm.top, cw, cs.h);
+            let (wdim, hdim) = self
+                .get(c)
+                .map(|n| (n.width, n.height))
+                .unwrap_or((Dimension::Wrap, Dimension::Wrap));
+            // 宽：只竖滚时与视口同宽；可横滚时按测量宽，`Match` 铺满视口与内容中较宽者
+            // （一行带底色的条目不至于短一截）。
+            let cw = if !axis.horizontal() {
+                view.w - cm.horizontal()
+            } else if matches!(wdim, Dimension::Match) {
+                view.w.max(content_w) - cm.horizontal()
+            } else {
+                cs.w
+            };
+            // 高：只横滚时 `Match` 取视口高；其余按测量高（可竖滚方向本就按内容展开）。
+            let ch = if !axis.vertical() && matches!(hdim, Dimension::Match) {
+                view.h - cm.vertical()
+            } else {
+                cs.h
+            };
+            let bounds = Rect::new(x + cm.left, y + cm.top, cw.max(0), ch.max(0));
             self.arrange(c, bounds);
-            y += cs.h + cm.vertical();
+            y += bounds.h + cm.vertical();
         }
     }
 
@@ -2595,7 +2738,7 @@ impl Tree {
         // 否则会被排在它后面的行盖住。绝大多数容器没有 raised 子节点，第二趟是空转。
         if n.clip_children {
             canvas.save();
-            canvas.clip_rect(content);
+            canvas.clip_rect(n.child_clip(content));
             self.paint_children(canvas, n, child_origin, enabled, shown);
             canvas.restore();
         } else {
@@ -2605,14 +2748,17 @@ impl Tree {
         // 滚动条：内容高于视口时在右缘绘制纵向指示条。贴窗口右缘时整体内缩，避开
         // 被 WM_NCHITTEST 判为缩放边框的那一段（否则画得出来、点不着）。
         // 卷帘过渡中视口小于自然内容是暂时的，不是"内容放不下"，不画滚动条。
-        if matches!(n.layout, Layout::Scroll) && n.content_h > content.h && !reveal_clip {
+        // 横向滚动条同理贴底；双向时竖条止于横条之上、横条止于竖条之左，互不压角。
+        let bars = n.scroll_bars;
+        if matches!(n.layout, Layout::Scroll) && bars.w > 0 && !reveal_clip {
             let track_w = scrollbar::track_w();
             let inset = self.scrollbar_edge_inset(abs.right());
             let tx = abs.right() as f32 - track_w - scrollbar::margin() - inset as f32;
             let ty = content.y as f32;
-            let th = content.h as f32;
-            let thumb_h = scrollbar::thumb_h(content.h, n.content_h);
-            let max_scroll = (n.content_h - content.h).max(1) as f32;
+            let view_h = (content.h - bars.h).max(0);
+            let th = view_h as f32;
+            let thumb_h = scrollbar::thumb_h(view_h, n.content_h);
+            let max_scroll = (n.content_h - view_h).max(1) as f32;
             let thumb_y = ty + (th - thumb_h) * (n.scroll_y as f32 / max_scroll);
             let r = track_w / 2.0;
             if let Some(track) = scrollbar::track() {
@@ -2623,6 +2769,29 @@ impl Tree {
                 thumb_y,
                 track_w,
                 thumb_h,
+                r,
+                &Paint::fill(scrollbar::thumb(false)),
+            );
+        }
+        if matches!(n.layout, Layout::Scroll) && bars.h > 0 && !reveal_clip {
+            let track_h = scrollbar::track_w();
+            let inset = self.hscrollbar_edge_inset(abs.bottom());
+            let ty = abs.bottom() as f32 - track_h - scrollbar::margin() - inset as f32;
+            let tx = content.x as f32;
+            let view_w = (content.w - bars.w).max(0);
+            let tw = view_w as f32;
+            let thumb_w = scrollbar::thumb_h(view_w, n.content_w);
+            let max_scroll = (n.content_w - view_w).max(1) as f32;
+            let thumb_x = tx + (tw - thumb_w) * (n.scroll_x as f32 / max_scroll);
+            let r = track_h / 2.0;
+            if let Some(track) = scrollbar::track() {
+                canvas.fill_round_rect(tx, ty, tw, track_h, r, &Paint::fill(track));
+            }
+            canvas.fill_round_rect(
+                thumb_x,
+                ty,
+                thumb_w,
+                track_h,
                 r,
                 &Paint::fill(scrollbar::thumb(false)),
             );
@@ -3021,24 +3190,65 @@ impl EventCtx<'_> {
         }
         self.mark_layout_dirty();
     }
-    /// 读取本滚动节点的 (scroll_y, content_h, 视口高)。
+    /// 读取本滚动节点的 (scroll_y, content_h, 视口高)。视口高已扣掉底部横向滚动条。
     pub fn scroll_metrics(&self) -> (i32, i32, i32) {
         if let Some(n) = self.tree.get(self.self_id) {
-            let view_h = (n.bounds.h - n.padding.vertical()).max(0);
+            let view_h = (n.bounds.h - n.padding.vertical() - n.scroll_bars.h).max(0);
             (n.scroll_y, n.content_h, view_h)
         } else {
             (0, 0, 0)
         }
+    }
+    /// 横向版的 [`Self::scroll_metrics`]：(scroll_x, content_w, 视口宽)。视口宽已扣掉右侧竖向滚动条。
+    pub fn scroll_metrics_x(&self) -> (i32, i32, i32) {
+        if let Some(n) = self.tree.get(self.self_id) {
+            let view_w = (n.bounds.w - n.padding.horizontal() - n.scroll_bars.w).max(0);
+            (n.scroll_x, n.content_w, view_w)
+        } else {
+            (0, 0, 0)
+        }
+    }
+    /// 本滚动节点可滚动的方向（非滚动节点返回默认的竖向）。
+    pub fn scroll_axis(&self) -> crate::spec::ScrollAxis {
+        self.tree
+            .get(self.self_id)
+            .map(|n| n.scroll_axis)
+            .unwrap_or_default()
+    }
+    /// 本滚动节点当前是否画着 (竖向, 横向) 滚动条——即该方向内容溢出。
+    pub fn scroll_bars_shown(&self) -> (bool, bool) {
+        self.tree
+            .get(self.self_id)
+            .map(|n| (n.scroll_bars.w > 0, n.scroll_bars.h > 0))
+            .unwrap_or((false, false))
     }
     /// 本滚动节点的滚动条可抓取区 x 区间 `[lo, hi)`（绝对坐标）。
     /// 与 `Tree::hit_test` 的分发判定同源，避免"分发到了控件、控件却认为没点中"。
     pub fn scrollbar_hit_zone(&self) -> (i32, i32) {
         self.tree.scrollbar_hit_zone(self.bounds())
     }
+    /// 本滚动节点横向滚动条可抓取区 y 区间 `[lo, hi)`（绝对坐标），同源性见上。
+    pub fn hscrollbar_hit_zone(&self) -> (i32, i32) {
+        self.tree.hscrollbar_hit_zone(self.bounds())
+    }
     /// 直接设置滚动偏移（拖动滚动条用），下一帧 arrange 钳制范围。
     pub fn set_scroll(&mut self, y: i32) {
         if let Some(n) = self.tree.get_mut(self.self_id) {
             n.scroll_y = y;
+        }
+        self.mark_layout_dirty();
+    }
+    /// 横向版的 [`Self::scroll_by`]。
+    pub fn scroll_by_x(&mut self, dx: i32) {
+        if let Some(n) = self.tree.get_mut(self.self_id) {
+            n.scroll_x += dx;
+        }
+        self.mark_layout_dirty();
+    }
+    /// 横向版的 [`Self::set_scroll`]。
+    pub fn set_scroll_x(&mut self, x: i32) {
+        if let Some(n) = self.tree.get_mut(self.self_id) {
+            n.scroll_x = x;
         }
         self.mark_layout_dirty();
     }
@@ -3727,21 +3937,15 @@ impl Tree {
         None
     }
 
-    /// 找 `p` 下**能在指定方向继续滚动**的最近滚动容器：`increase=true` 需能增大 `scroll_y`
-    /// （内容上移 / 向下滚），`false` 需能减小。内层滚动在该方向已到边界（或内容不溢出、
-    /// 根本不可滚）时跳过，冒泡到外层——修正嵌套滚动"内层吃掉滚轮、外层滚不动"的问题。
-    pub fn scroll_target(&self, p: Point, increase: bool) -> Option<NodeId> {
+    /// 找 `p` 下**能沿 `axis` 在指定方向继续滚动**的最近滚动容器：`increase=true` 需能增大
+    /// 偏移（内容上移 / 左移），`false` 需能减小。内层在该方向已到边界、内容不溢出或根本
+    /// 不沿该轴滚动时跳过，冒泡到外层——修正嵌套滚动"内层吃掉手势、外层滚不动"的问题。
+    pub fn scroll_target(&self, p: Point, axis: Axis, increase: bool) -> Option<NodeId> {
         let mut cur = self.hit_test(p);
         while let Some(id) = cur {
             let n = self.get(id)?;
-            if matches!(n.layout, Layout::Scroll) {
-                let view_h = (n.bounds.h - n.padding.vertical()).max(0);
-                let max = (n.content_h - view_h).max(0);
-                let can = if increase {
-                    n.scroll_y < max
-                } else {
-                    n.scroll_y > 0
-                };
+            if let Some((v, max)) = self.scroll_range(id, axis) {
+                let can = if increase { v < max } else { v > 0 };
                 if can {
                     return Some(id);
                 }
@@ -3751,45 +3955,68 @@ impl Tree {
         None
     }
 
-    /// 滚动节点的 `(当前偏移, 最大偏移)`（基于上一帧布局的内容高/视口高）。
-    /// 非滚动节点返回 None。供惯性滑动按边界结算。
-    pub fn scroll_range(&self, id: NodeId) -> Option<(i32, i32)> {
+    /// 滚动节点沿 `axis` 的 `(当前偏移, 最大偏移)`（基于上一帧布局的内容尺寸 / 视口）。
+    /// 非滚动节点、或该节点不沿此轴滚动时返回 None。供惯性滑动按边界结算。
+    pub fn scroll_range(&self, id: NodeId, axis: Axis) -> Option<(i32, i32)> {
         let n = self.get(id)?;
         if !matches!(n.layout, Layout::Scroll) {
             return None;
         }
-        let view_h = (n.bounds.h - n.padding.vertical()).max(0);
-        Some((n.scroll_y, (n.content_h - view_h).max(0)))
+        let view = n.scroll_view();
+        match axis {
+            Axis::Vertical if n.scroll_axis.vertical() => {
+                Some((n.scroll_y, (n.content_h - view.h).max(0)))
+            }
+            Axis::Horizontal if n.scroll_axis.horizontal() => {
+                Some((n.scroll_x, (n.content_w - view.w).max(0)))
+            }
+            _ => None,
+        }
     }
 
-    /// 直接设置滚动节点偏移（惯性滑动用，不钳制；下一帧 arrange 钳制）。
+    /// 直接设置滚动节点沿 `axis` 的偏移（惯性滑动用，不钳制；下一帧 arrange 钳制）。
     /// 节点不存在或非滚动容器时返回 false。
-    pub fn set_scroll_y(&mut self, id: NodeId, y: i32) -> bool {
+    pub fn set_scroll_offset(&mut self, id: NodeId, axis: Axis, v: i32) -> bool {
         match self.get_mut(id) {
             Some(n) if matches!(n.layout, Layout::Scroll) => {
-                n.scroll_y = y;
+                match axis {
+                    Axis::Vertical => n.scroll_y = v,
+                    Axis::Horizontal => n.scroll_x = v,
+                }
                 true
             }
             _ => false,
         }
     }
 
-    /// 设置滚动节点的越界回弹偏移（不参与钳制；惯性撞界回弹用）。
-    pub fn set_over_scroll(&mut self, id: NodeId, over: i32) {
+    /// 竖向的 [`Self::set_scroll_offset`]。
+    pub fn set_scroll_y(&mut self, id: NodeId, y: i32) -> bool {
+        self.set_scroll_offset(id, Axis::Vertical, y)
+    }
+
+    /// 横向的 [`Self::set_scroll_offset`]。
+    pub fn set_scroll_x(&mut self, id: NodeId, x: i32) -> bool {
+        self.set_scroll_offset(id, Axis::Horizontal, x)
+    }
+
+    /// 设置滚动节点沿 `axis` 的越界回弹偏移（不参与钳制；惯性撞界回弹用）。
+    pub fn set_over_scroll(&mut self, id: NodeId, axis: Axis, over: i32) {
         if let Some(n) = self.get_mut(id) {
-            n.over_scroll = over;
+            match axis {
+                Axis::Vertical => n.over_scroll = over,
+                Axis::Horizontal => n.over_scroll_x = over,
+            }
         }
     }
 
-    /// 触摸平移滚动：找 `p`（逻辑坐标）下最近的滚动容器，按 `dy`（逻辑 px）平移。
-    /// `dy>0`（手指下移）→ 内容下移（scroll_y 减小，自然跟手）。下一帧 arrange 钳制范围。
+    /// 触摸平移滚动：找 `p`（逻辑坐标）下能沿 `axis` 滚动的最近容器，按 `d`（逻辑 px）平移。
+    /// `d>0`（手指下移 / 右移）→ 内容跟着移（偏移减小，自然跟手）。下一帧 arrange 钳制范围。
     /// 返回是否命中可滚动容器。
-    pub fn pan_scroll(&mut self, p: Point, dy: i32) -> bool {
-        // dy>0 减小 scroll_y、dy<0 增大；按方向找能继续滚动的容器（内层到界则冒泡外层）。
-        if let Some(id) = self.scroll_target(p, dy < 0) {
-            if let Some(n) = self.get_mut(id) {
-                n.scroll_y -= dy;
-            }
+    pub fn pan_scroll(&mut self, p: Point, axis: Axis, d: i32) -> bool {
+        // d>0 减小偏移、d<0 增大；按方向找能继续滚动的容器（内层到界则冒泡外层）。
+        if let Some(id) = self.scroll_target(p, axis, d < 0) {
+            let cur = self.scroll_range(id, axis).map_or(0, |r| r.0);
+            self.set_scroll_offset(id, axis, cur - d);
             return true;
         }
         false
@@ -3899,14 +4126,18 @@ impl Tree {
         }
         // 滚动条区域优先命中滚动容器自身（用于拖动滚动条，而非下方内容）。
         if matches!(n.layout, Layout::Scroll) {
-            let content = abs.inset(n.padding);
-            if n.content_h > content.h && self.in_scrollbar_hit_zone(p, abs) {
+            // 两条都有时右下角交叠处归横条（竖条止于横条之上，那里没画竖条）；
+            // `ScrollWidget` 按下时按同一顺序认领。
+            let bars = n.scroll_bars;
+            let in_h = bars.h > 0 && self.in_hscrollbar_hit_zone(p, abs);
+            let in_v = bars.w > 0 && self.in_scrollbar_hit_zone(p, abs);
+            if in_h || in_v {
                 return Some(id);
             }
         }
         // 裁剪容器：点不在内容区时不下探子节点（仍可命中容器自身处理滚轮）。
         let in_content = if n.clip_children {
-            abs.inset(n.padding).contains(p)
+            n.child_clip(abs.inset(n.padding)).contains(p)
         } else {
             true
         };
@@ -4040,30 +4271,42 @@ impl Tree {
             if !matches!(n.layout, Layout::Scroll) {
                 continue;
             }
-            let (pad, content_h, scroll_y) = (n.padding, n.content_h, n.scroll_y);
-            let abs = self.abs_bounds(c);
-            let view = Rect::new(
-                abs.x + pad.left,
-                abs.y + pad.top,
-                (abs.w - pad.horizontal()).max(0),
-                (abs.h - pad.vertical()).max(0),
+            let (pad, axis, content) = (
+                n.padding,
+                n.scroll_axis,
+                Size::new(n.content_w, n.content_h),
             );
-            // 上溢取负（内容下移、scroll 减小），下溢取正；都在视口内则不动。
-            let delta = if target.y < view.y {
-                target.y - view.y
-            } else if target.bottom() > view.bottom() {
-                target.bottom() - view.bottom()
+            let (scroll_x, scroll_y, vs) = (n.scroll_x, n.scroll_y, n.scroll_view());
+            let abs = self.abs_bounds(c);
+            let view = Rect::new(abs.x + pad.left, abs.y + pad.top, vs.w, vs.h);
+            // 上溢取负（内容下移、scroll 减小），下溢取正；都在视口内则不动。两个方向同一规则。
+            let need = |lo: i32, hi: i32, vlo: i32, vhi: i32| {
+                if lo < vlo {
+                    lo - vlo
+                } else if hi > vhi {
+                    hi - vhi
+                } else {
+                    0
+                }
+            };
+            let dy = if axis.vertical() {
+                need(target.y, target.bottom(), view.y, view.bottom())
             } else {
                 0
             };
-            if delta != 0 {
-                let next = (scroll_y + delta).clamp(0, (content_h - view.h).max(0));
-                if next != scroll_y {
-                    if let Some(n) = self.get_mut(c) {
-                        n.scroll_y = next;
-                    }
-                    changed = true;
+            let dx = if axis.horizontal() {
+                need(target.x, target.right(), view.x, view.right())
+            } else {
+                0
+            };
+            let next_y = (scroll_y + dy).clamp(0, (content.h - view.h).max(0));
+            let next_x = (scroll_x + dx).clamp(0, (content.w - view.w).max(0));
+            if (next_x, next_y) != (scroll_x, scroll_y) {
+                if let Some(n) = self.get_mut(c) {
+                    n.scroll_x = next_x;
+                    n.scroll_y = next_y;
                 }
+                changed = true;
             }
             // 无论本级是否真滚了，下一级（更外层）要对齐的都是本级容器自身。
             target = self.abs_bounds(c);
@@ -4684,9 +4927,11 @@ fn flow_lines(sizes: &[Size], limit: i32, spacing: i32) -> Vec<FlowLine> {
     let mut lines: Vec<FlowLine> = Vec::new();
     for (i, s) in sizes.iter().enumerate() {
         match lines.last_mut() {
-            Some(l) if l.width + spacing + s.w <= limit => {
+            // 饱和加：宽度不设限时（横向滚动容器里的 flow）"按可用宽铺满"的控件会量出近乎
+            // 无限的宽，几个相加就溢出 i32；量出来的大数由外层滚动容器兜底处理。
+            Some(l) if l.width.saturating_add(spacing + s.w) <= limit => {
                 l.end = i + 1;
-                l.width += spacing + s.w;
+                l.width = l.width.saturating_add(spacing + s.w);
                 l.height = l.height.max(s.h);
             }
             _ => lines.push(FlowLine {
@@ -6753,7 +6998,10 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, max scroll 200
                                                         // 手指上滑(dy<0) → 内容上移 → scroll_y 增大。
-        assert!(tree.pan_scroll(Point::new(50, 50), -40), "命中滚动容器");
+        assert!(
+            tree.pan_scroll(Point::new(50, 50), Axis::Vertical, -40),
+            "命中滚动容器"
+        );
         tree.layout_root(Size::new(100, 100), &mut te); // 钳制
         assert_eq!(
             tree.get(id).unwrap().scroll_y,
@@ -6762,7 +7010,7 @@ mod tests {
         );
         // 非滚动区域返回 false。
         assert!(
-            !tree.pan_scroll(Point::new(-100, -100), 10),
+            !tree.pan_scroll(Point::new(-100, -100), Axis::Vertical, 10),
             "命中外返回 false"
         );
     }
@@ -6791,7 +7039,7 @@ mod tests {
 
         // 内层在顶部（scroll_y=0），向下滚（increase）内层仍有空间 → 命中内层。
         assert_eq!(
-            tree.scroll_target(Point::new(20, 15), true),
+            tree.scroll_target(Point::new(20, 15), Axis::Vertical, true),
             Some(inner_id),
             "内层未到底，向下滚应命中内层"
         );
@@ -6799,13 +7047,13 @@ mod tests {
         tree.set_scroll_y(inner_id, 60);
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(
-            tree.scroll_target(Point::new(20, 15), true),
+            tree.scroll_target(Point::new(20, 15), Axis::Vertical, true),
             Some(oid),
             "内层到底后向下滚应冒泡到外层"
         );
         // 内层在底部，向上滚（decrease）内层仍可回滚 → 命中内层。
         assert_eq!(
-            tree.scroll_target(Point::new(20, 15), false),
+            tree.scroll_target(Point::new(20, 15), Axis::Vertical, false),
             Some(inner_id),
             "内层可上滚时向上应命中内层"
         );
@@ -6829,7 +7077,7 @@ mod tests {
         let mut te = crate::text::NullTextEngine;
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(
-            tree.scroll_target(Point::new(20, 10), true),
+            tree.scroll_target(Point::new(20, 10), Axis::Vertical, true),
             Some(oid),
             "内层不可滚，滚动应直接命中外层"
         );
@@ -6848,15 +7096,24 @@ mod tests {
         tree.layout_root(Size::new(100, 100), &mut te); // content_h=300, view=100 → max=200
                                                         // 惯性滑动定位到的滚动节点。
         assert_eq!(tree.scroll_node_at(Point::new(50, 50)), Some(id));
-        let (cur, max) = tree.scroll_range(id).expect("滚动节点应有范围");
+        let (cur, max) = tree
+            .scroll_range(id, Axis::Vertical)
+            .expect("滚动节点应有范围");
         assert_eq!((cur, max), (0, 200), "初始偏移 0、最大 200");
         // 惯性推进越界 → set 后 arrange 钳制；范围读数据反映撞底。
         assert!(tree.set_scroll_y(id, 500), "设置滚动偏移成功");
         tree.layout_root(Size::new(100, 100), &mut te);
-        assert_eq!(tree.scroll_range(id).unwrap().0, 200, "越界应钳制到 max");
+        assert_eq!(
+            tree.scroll_range(id, Axis::Vertical).unwrap().0,
+            200,
+            "越界应钳制到 max"
+        );
         // 非滚动节点 / 不存在节点：范围与设置均失败。
         let leaf = tree.get(id).unwrap().children[0];
-        assert!(tree.scroll_range(leaf).is_none(), "非滚动节点无范围");
+        assert!(
+            tree.scroll_range(leaf, Axis::Vertical).is_none(),
+            "非滚动节点无范围"
+        );
         assert!(!tree.set_scroll_y(leaf, 10), "非滚动节点不可设置滚动");
     }
 
@@ -6874,7 +7131,7 @@ mod tests {
         let child0 = tree.get(id).unwrap().children[0];
         let y0 = tree.abs_bounds(child0).y;
         // 越界回弹偏移：内容整体下移 12px，且不被 arrange 钳掉（区别于 scroll_y）。
-        tree.set_over_scroll(id, 12);
+        tree.set_over_scroll(id, Axis::Vertical, 12);
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(
             tree.get(id).unwrap().over_scroll,
@@ -6914,6 +7171,448 @@ mod tests {
         tree.dispatch_pointer(mv, &mut h, &mut cap);
         tree.layout_root(Size::new(100, 100), &mut te);
         assert!(tree.get(id).unwrap().scroll_y > 0, "拖动滚动条应增加偏移");
+    }
+
+    /// 横向滚动测试用：`w`×`h` 的横向容器，内含一行 `n` 个 50 宽、30 高的块。
+    fn hscroll_tree(
+        axis: crate::spec::ScrollAxis,
+        w: i32,
+        h: i32,
+        n: usize,
+    ) -> (Tree, NodeId, Vec<NodeId>) {
+        let mut row = Element::row();
+        for _ in 0..n {
+            row = row.child(Element::leaf().width(50).height(30));
+        }
+        let sc = Element::scroll()
+            .scroll_axis(axis)
+            .width(w)
+            .height(h)
+            .child(row);
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.scroll_edge_inset = 0;
+        let row_id = tree.get(id).unwrap().children[0];
+        let blocks = tree.get(row_id).unwrap().children.clone();
+        tree.layout_root(Size::new(w, h), &mut crate::text::NullTextEngine);
+        (tree, id, blocks)
+    }
+
+    /// 横向容器：子按无限宽测量、记录内容总宽，偏移钳制在 [0, 内容宽 - 视口宽]，
+    /// 子节点随 scroll_x 左移。
+    #[test]
+    fn horizontal_scroll_offsets_and_clamps() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, blocks) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        let n = tree.get(id).unwrap();
+        assert_eq!(
+            n.content_w, 250,
+            "5 个 50 宽的块按无限宽并排，不被压到视口宽"
+        );
+        assert_eq!(n.scroll_bars.w, 0, "只横滚：没有竖条");
+        assert!(n.scroll_bars.h > 0, "横向溢出：底部有横条");
+        tree.get_mut(id).unwrap().scroll_x = 500;
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 150, "钳到 内容宽 - 视口宽");
+        assert_eq!(tree.abs_bounds(blocks[0]).x, -150, "内容整体左移 scroll_x");
+        assert_eq!(
+            tree.abs_bounds(blocks[4]).right(),
+            100,
+            "滚到底时最后一块贴视口右缘"
+        );
+        // 只横滚的容器不竖滚：写进去的 scroll_y 被钳回 0。
+        tree.get_mut(id).unwrap().scroll_y = 40;
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0);
+    }
+
+    /// 内容不溢出时没有横条，`scroll_x` 恒为 0。
+    #[test]
+    fn horizontal_scroll_without_overflow_has_no_bar() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, _) = hscroll_tree(ScrollAxis::Horizontal, 300, 60, 5);
+        assert_eq!(tree.get(id).unwrap().scroll_bars, Size::ZERO);
+        tree.get_mut(id).unwrap().scroll_x = 30;
+        tree.layout_root(Size::new(300, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 0);
+    }
+
+    /// 默认竖向容器不受影响：子宽仍强制为视口宽，宽内容不产生横向滚动。
+    #[test]
+    fn vertical_scroll_still_forces_child_width() {
+        let sc = Element::scroll()
+            .width(100)
+            .height(100)
+            .child(Element::leaf().width(300).height(30));
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let child = tree.get(id).unwrap().children[0];
+        tree.get_mut(id).unwrap().scroll_x = 50;
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        let n = tree.get(id).unwrap();
+        assert_eq!((n.scroll_x, n.scroll_bars), (0, Size::ZERO));
+        assert_eq!(tree.abs_bounds(child).w, 100);
+    }
+
+    /// 横向容器里 `Match` 宽的子铺满视口与内容中较宽者，`Match` 高的子取视口高
+    /// （有横条时扣掉横条）。
+    #[test]
+    fn horizontal_scroll_match_children_fill_viewport() {
+        use crate::spec::ScrollAxis;
+        let sc = Element::scroll()
+            .scroll_axis(ScrollAxis::Horizontal)
+            .width(100)
+            .height(60)
+            .child(Element::leaf().width_match().height_match())
+            .child(Element::leaf().width(250).height(10));
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.scroll_edge_inset = 0;
+        let kids = tree.get(id).unwrap().children.clone();
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        let bar_h = tree.get(id).unwrap().scroll_bars.h;
+        assert!(bar_h > 0);
+        let b = tree.abs_bounds(kids[0]);
+        assert_eq!(b.w, 250, "Match 宽取内容宽（比视口宽）");
+        assert_eq!(b.h, 60 - bar_h, "Match 高取视口高，扣掉横条");
+    }
+
+    /// 双向容器：两条滚动条互相让位。内容高 95 本身放得下 100 高的视口，但横条
+    /// 占掉高度后放不下，竖条也得出现（先判竖条再判横条，单轮会漏掉这种）；
+    /// 钳制按扣掉两条后的视口算。
+    #[test]
+    fn both_axes_scrollbars_yield_to_each_other() {
+        use crate::spec::ScrollAxis;
+        let sc = Element::scroll()
+            .scroll_axis(ScrollAxis::Both)
+            .width(100)
+            .height(100)
+            .child(Element::leaf().width(300).height(95));
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.scroll_edge_inset = 0;
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        let bars = tree.get(id).unwrap().scroll_bars;
+        assert!(bars.w > 0 && bars.h > 0, "两条都应出现：{bars:?}");
+        assert!(95 > 100 - bars.h, "本例前提：横条让位后内容才放不下");
+        let n = tree.get_mut(id).unwrap();
+        n.scroll_x = 1000;
+        n.scroll_y = 1000;
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        let n = tree.get(id).unwrap();
+        assert_eq!(n.scroll_x, 300 - (100 - bars.w));
+        assert_eq!(n.scroll_y, 95 - (100 - bars.h));
+    }
+
+    /// 高度随内容（Wrap）的横向容器：溢出时多出一条横条的高度，横条不压内容；
+    /// 不溢出时就是内容高。
+    #[test]
+    fn wrap_height_horizontal_scroll_makes_room_for_the_bar() {
+        use crate::spec::ScrollAxis;
+        let build = |n: usize| {
+            let mut row = Element::row();
+            for _ in 0..n {
+                row = row.child(Element::leaf().width(50).height(30));
+            }
+            let sc = Element::scroll()
+                .scroll_axis(ScrollAxis::Horizontal)
+                .width(100)
+                .child(row);
+            let mut tree = Tree::new();
+            let root = Element::col().child(sc).build(&mut tree);
+            tree.root = Some(root);
+            tree.scroll_edge_inset = 0;
+            let id = tree.get(root).unwrap().children[0];
+            tree.layout_root(Size::new(100, 200), &mut crate::text::NullTextEngine);
+            let n = tree.get(id).unwrap();
+            (n.bounds.h, n.scroll_bars.h, n.scroll_view().h)
+        };
+        let (h, bar, view) = build(5);
+        assert!(bar > 0);
+        assert_eq!(
+            (h, view),
+            (30 + bar, 30),
+            "溢出：高度 = 内容 + 横条，视口恰好放下内容"
+        );
+        assert_eq!(build(1), (30, 0, 30), "不溢出：没有横条");
+    }
+
+    /// 宽度随页面的横条放在已竖向溢出的页面里：measure 时页面还没扣竖条宽，arrange 时扣了。
+    /// 内容宽恰好落在这条竖条宽度里时，横条仍须有自己的位置，不能压住内容底边。
+    #[test]
+    fn hstrip_in_overflowing_page_keeps_room_for_bar() {
+        use crate::spec::ScrollAxis;
+        let occ = scrollbar::occupied_w(0);
+        // 内容宽 = 页面宽 - 半条竖条：按 measure 的 avail 不溢出，按 arrange 的视口溢出。
+        let content_w = 200 - occ / 2;
+        let strip = Element::scroll()
+            .scroll_axis(ScrollAxis::Horizontal)
+            .width_match()
+            .child(Element::leaf().width(content_w).height(30));
+        let page = Element::scroll()
+            .width(200)
+            .height(100)
+            .child(strip)
+            .child(Element::leaf().width_match().height(300));
+        let mut tree = Tree::new();
+        let page_id = page.build(&mut tree);
+        tree.root = Some(page_id);
+        tree.scroll_edge_inset = 0;
+        let strip_id = tree.get(page_id).unwrap().children[0];
+        tree.layout_root(Size::new(200, 100), &mut crate::text::NullTextEngine);
+        let n = tree.get(strip_id).unwrap();
+        assert!(n.scroll_bars.h > 0, "本例前提：arrange 时横向溢出");
+        assert_eq!(n.scroll_view().h, 30, "视口放得下内容高，横条不压内容");
+    }
+
+    /// 横向容器里"按可用宽铺满"的控件（量出 avail.w）不会把内容宽撑到近乎无限：
+    /// 退回按视口宽，不横向滚动，几个并排也不溢出 i32。
+    #[test]
+    fn fill_width_widgets_in_horizontal_scroll_fall_back_to_viewport() {
+        use crate::spec::ScrollAxis;
+        struct FillW;
+        impl Widget for FillW {
+            fn measure(&self, avail: Size, _: &Style, _: &mut dyn TextEngine) -> Size {
+                Size::new(avail.w.max(0), 20)
+            }
+        }
+        let mut row = Element::row();
+        for _ in 0..6 {
+            row = row.child(Element::leaf().widget(FillW));
+        }
+        let sc = Element::scroll()
+            .scroll_axis(ScrollAxis::Horizontal)
+            .width(300)
+            .height(60)
+            .child(row);
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(300, 60), &mut crate::text::NullTextEngine);
+        let n = tree.get(id).unwrap();
+        assert_eq!(n.content_w, 300, "退回视口宽");
+        assert_eq!(n.scroll_bars, Size::ZERO);
+    }
+
+    /// 同上，`flow` 直接放在横向容器里：折行累加也不得溢出。
+    #[test]
+    fn fill_width_widgets_in_flow_inside_horizontal_scroll_do_not_overflow() {
+        use crate::spec::ScrollAxis;
+        struct FillW;
+        impl Widget for FillW {
+            fn measure(&self, avail: Size, _: &Style, _: &mut dyn TextEngine) -> Size {
+                Size::new(avail.w.max(0), 20)
+            }
+        }
+        let mut flow = Element::flow();
+        for _ in 0..6 {
+            flow = flow.child(Element::leaf().widget(FillW));
+        }
+        let sc = Element::scroll()
+            .scroll_axis(ScrollAxis::Horizontal)
+            .width(300)
+            .height(60)
+            .child(flow);
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(300, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(tree.get(id).unwrap().content_w, 300, "退回视口宽");
+    }
+
+    /// 只竖滚的容器上 Shift+滚轮照常竖滚（改动前的行为）。
+    #[test]
+    fn shift_wheel_on_vertical_only_scrolls_vertically() {
+        let mut sc = Element::scroll().width(100).height(100);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        wheel_at(
+            &mut tree,
+            Point::new(40, 40),
+            PointerKind::Wheel(-120),
+            true,
+        );
+        assert_eq!(tree.get(id).unwrap().scroll_y, 48);
+    }
+
+    /// 横条可拖：按在底部命中区捕获容器，向右拖内容随之左移。
+    #[test]
+    fn hscrollbar_drag_changes_offset() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, _) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        let abs = tree.abs_bounds(id);
+        let (lo, hi) = tree.hscrollbar_hit_zone(abs);
+        assert_eq!(hi, 60, "未贴缩放边框时命中区止于底缘");
+        let y = (lo + hi) / 2;
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent::single(PointerKind::Down, Point::new(10, y), MouseButton::Left);
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        assert_eq!(cap, Some(id), "横条区域按下应捕获滚动容器");
+        let mv = PointerEvent::single(PointerKind::Move, Point::new(40, y), MouseButton::Left);
+        tree.dispatch_pointer(mv, &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        let n = tree.get(id).unwrap();
+        // 与绘制同源的换算：拖 30px 对应 30 × 最大偏移 / 滑块行程。
+        let view = n.scroll_view().w;
+        let expect =
+            (30.0 * (n.content_w - view) as f32 / scrollbar::travel(view, n.content_w)) as i32;
+        assert_eq!(n.scroll_x, expect, "向右拖 30px");
+        assert_eq!(n.scroll_y, 0, "横条不动竖向");
+    }
+
+    /// 横条贴窗口底缘时与竖条一样内缩，避开缩放边框。
+    #[test]
+    fn hscrollbar_insets_at_window_bottom_edge() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, _) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        tree.scroll_edge_inset = scrollbar::WINDOW_EDGE_INSET;
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        let (_, hi) = tree.hscrollbar_hit_zone(tree.abs_bounds(id));
+        assert_eq!(hi, 60 - scrollbar::WINDOW_EDGE_INSET);
+    }
+
+    /// 焦点跟随：横向容器里视口右侧之外的块被滚进来，右缘贴视口右缘。
+    #[test]
+    fn scroll_into_view_reveals_horizontally() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, blocks) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        assert!(tree.scroll_into_view(blocks[3]));
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_x,
+            100,
+            "第 4 块 [150,200) 右缘对齐视口右缘"
+        );
+        assert_eq!(tree.abs_bounds(blocks[3]).right(), 100);
+        // 往回：第 1 块在左侧之外，左缘对齐视口左缘。
+        assert!(tree.scroll_into_view(blocks[0]));
+        tree.layout_root(Size::new(100, 60), &mut crate::text::NullTextEngine);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 0);
+    }
+
+    /// 在 `p` 处发一次滚轮（`shift` 控制修饰键）后重排。
+    fn wheel_at(tree: &mut Tree, p: Point, kind: PointerKind, shift: bool) {
+        let mods = crate::event::Mods {
+            shift,
+            ..Default::default()
+        };
+        let ev = PointerEvent::single_with(kind, p, MouseButton::Left, mods);
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ev, &mut h, &mut cap);
+        let size = tree.get(tree.root.unwrap()).unwrap().bounds.size();
+        tree.layout_root(size, &mut crate::text::NullTextEngine);
+    }
+
+    /// 横向滚轮滚横向容器（正=向左，负=向右），到头钳住。
+    #[test]
+    fn hwheel_scrolls_horizontal_container() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, _) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        let p = Point::new(50, 20);
+        wheel_at(&mut tree, p, PointerKind::HWheel(-120), false);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 48, "向右滚一格 48px");
+        wheel_at(&mut tree, p, PointerKind::HWheel(120), false);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 0, "向左滚回起点");
+        for _ in 0..10 {
+            wheel_at(&mut tree, p, PointerKind::HWheel(-120), false);
+        }
+        assert_eq!(tree.get(id).unwrap().scroll_x, 150, "钳到最大偏移");
+    }
+
+    /// 只横滚的容器：竖向滚轮转成横滚（向下 = 向右）；Shift+滚轮同样横滚。
+    #[test]
+    fn vertical_wheel_and_shift_wheel_scroll_horizontal_only_container() {
+        use crate::spec::ScrollAxis;
+        let (mut tree, id, _) = hscroll_tree(ScrollAxis::Horizontal, 100, 60, 5);
+        let p = Point::new(50, 20);
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), false);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 48, "竖滚轮向下 → 向右");
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), true);
+        assert_eq!(tree.get(id).unwrap().scroll_x, 96, "Shift+向下 → 向右");
+    }
+
+    /// 双向容器：竖向溢出时普通滚轮竖滚，Shift+滚轮横滚，两轴互不串。
+    #[test]
+    fn both_axes_wheel_routes_by_axis() {
+        use crate::spec::ScrollAxis;
+        let sc = Element::scroll()
+            .scroll_axis(ScrollAxis::Both)
+            .width(100)
+            .height(100)
+            .child(Element::leaf().width(300).height(300));
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        tree.scroll_edge_inset = 0;
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        let p = Point::new(40, 40);
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), false);
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), true);
+        wheel_at(&mut tree, p, PointerKind::HWheel(-120), false);
+        let n = tree.get(id).unwrap();
+        assert_eq!((n.scroll_x, n.scroll_y), (96, 48));
+    }
+
+    /// 竖向页面里嵌一条横向条：滚轮在横条上先把横条滚到头，之后交给页面竖滚；
+    /// 横向滚轮在只竖滚的页面上不产生任何滚动。
+    #[test]
+    fn horizontal_strip_in_vertical_page_bubbles_at_end() {
+        use crate::spec::ScrollAxis;
+        let mut row = Element::row();
+        for _ in 0..3 {
+            row = row.child(Element::leaf().width(40).height(30));
+        }
+        let strip = Element::scroll()
+            .scroll_axis(ScrollAxis::Horizontal)
+            .width_match()
+            .height(40)
+            .child(row);
+        let page = Element::scroll()
+            .width(100)
+            .height(100)
+            .child(strip)
+            .child(Element::leaf().width_match().height(300));
+        let mut tree = Tree::new();
+        let page_id = page.build(&mut tree);
+        tree.root = Some(page_id);
+        tree.scroll_edge_inset = 0;
+        let strip_id = tree.get(page_id).unwrap().children[0];
+        tree.layout_root(Size::new(100, 100), &mut crate::text::NullTextEngine);
+        let max_x = {
+            let n = tree.get(strip_id).unwrap();
+            n.content_w - n.scroll_view().w
+        };
+        assert!(
+            max_x > 0 && max_x < 48,
+            "本例前提：横条一格就能滚到头（{max_x}）"
+        );
+        let p = Point::new(30, 15);
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), false);
+        assert_eq!(tree.get(strip_id).unwrap().scroll_x, max_x, "第一格滚横条");
+        assert_eq!(tree.get(page_id).unwrap().scroll_y, 0);
+        wheel_at(&mut tree, p, PointerKind::Wheel(-120), false);
+        assert_eq!(
+            tree.get(page_id).unwrap().scroll_y,
+            48,
+            "横条到头后交给页面"
+        );
+        // 横向滚轮落在页面的空白处：页面只竖滚，什么都不动。
+        wheel_at(
+            &mut tree,
+            Point::new(30, 80),
+            PointerKind::HWheel(-120),
+            false,
+        );
+        assert_eq!(tree.get(page_id).unwrap().scroll_y, 48);
     }
 
     /// `list_signal` 的滚动条同样拖得动（它的容器 widget 由列表驱动转发，见 `KeyedList`）。

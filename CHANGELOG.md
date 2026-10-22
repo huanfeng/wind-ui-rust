@@ -10,8 +10,22 @@
 - **`render::with_pixel_snap(mode, || ..)`**：在一段绘制里临时改用另一种像素对齐策略（线程局部、可嵌套、
   panic 也会恢复）。画图标时包成 `PixelSnap::Off`，锁体描边、竖直线、折线弧就按同一套亚像素宽度绘制，
   不再一部分被吸成整数像素、一部分保持原宽。以前只有进程级开关，关掉会把矩形与分隔线的对齐一起丢掉。
+- **横向与双向滚动**（#23）：`Element::scroll().scroll_axis(ScrollAxis::Horizontal | Both)`，默认仍是竖向。
+  可滚方向上子节点按内容长度测量；横条贴底、溢出时才出现，双向时两条在右下角互相让位。
+  - 滚轮：新增 `PointerKind::HWheel`（正 = 向左），Win32 `WM_MOUSEHWHEEL`、macOS 触控板横向量、
+    Wayland 横轴、X11 按钮 6/7 都已接入；Shift+滚轮滚横向；只能横滚的容器上竖滚轮也转成横滚（与
+    Qt / GTK / WinUI 一致），滚到头交给外层。
+  - 触摸（Win32）：越过拖动阈值时按位移较大的一边锁定方向，平移与松手惯性、撞界回弹都沿该方向；
+    那个方向在手指下没有可滚的容器时改锁另一边（只竖滚的页面上偏横的斜滑照样竖滚）。
+  - 焦点跟随（`scroll_into_view`）、锚定浮层的位置补偿都计入横向偏移。
+  - `EventCtx::scroll_metrics_x` / `set_scroll_x` / `scroll_by_x` / `scroll_axis` / `scroll_bars_shown` /
+    `hscrollbar_hit_zone`，`Tree::set_scroll_x` / `set_scroll_offset`。
 
 ### 变更
+
+- **触摸与惯性接口按轴参数化**（为横向滚动）：`AppHandler::on_pan(pos, axis, d)`、
+  `AppHandler::start_fling(pos, axis, v)`，新增 `AppHandler::can_pan(pos, axis)`（默认 true），`Tree::scroll_target` / `scroll_range` / `set_over_scroll` /
+  `pan_scroll` 都多了一个 `Axis` 参数。对 `PointerKind` 做穷尽匹配的代码需补上 `HWheel` 分支。
 
 - **描边与横竖线的线宽取整改为分两档**：≤ 1 逻辑像素的发丝线照旧向下取整（150% / 175% 下仍是 1 物理
   像素）；更粗的笔画改为取最近整数、`.5` 舍去。以前一律向下取整，125% 下 1.4 逻辑像素（1.75 物理）的

@@ -1245,6 +1245,60 @@ fn main() {
                 ),
         );
 
+    // 横向 / 双向滚动：容器仍纵向堆叠子节点，`scroll_axis` 决定哪个方向不设上限、可滚动。
+    // 滚轮：Shift+滚轮或触控板横滑滚横向；只能横滚的容器上，竖滚轮也转成横滚。
+    let mut strip = Element::row().spacing(8).padding_xy(2, 4);
+    for i in 1..=18 {
+        strip = strip.child(Element::button(format!("标签 {i}")).outline());
+    }
+    let mut grid = Element::col().spacing(4);
+    for r in 0..14 {
+        let mut line = Element::row().spacing(4);
+        for c in 0..12 {
+            line = line.child(
+                Element::label(format!("{}{}", (b'A' + c as u8) as char, r + 1))
+                    .font_size(12.5)
+                    .align(Align::Center)
+                    .width(64)
+                    .height(28)
+                    .bg_role(Role::SurfaceAlt)
+                    .border_role(Role::Divider, 1),
+            );
+        }
+        grid = grid.child(line);
+    }
+    let cp_28 = Element::card(
+        "横向 / 双向滚动（scroll_axis）",
+        Element::col()
+            .width_match()
+            .spacing(10)
+            .child(
+                Element::label("Horizontal：一行标签放不下就横向滚，竖滚轮在这里也会转成横滚。")
+                    .font_size(12.5)
+                    .fg_role(Role::TextMuted),
+            )
+            .child(
+                Element::scroll()
+                    .scroll_axis(ScrollAxis::Horizontal)
+                    .width_match()
+                    .child(strip),
+            )
+            .child(
+                Element::label(
+                    "Both：表格两个方向都溢出，右侧与底部各一条滚动条，在右下角互相让位。",
+                )
+                .font_size(12.5)
+                .fg_role(Role::TextMuted),
+            )
+            .child(
+                Element::scroll()
+                    .scroll_axis(ScrollAxis::Both)
+                    .width_match()
+                    .height(180)
+                    .child(grid),
+            ),
+    );
+
     let im_1 = Element::card(
         "适配模式（源图 4:3）",
         Element::row()
@@ -1656,6 +1710,7 @@ fn main() {
             .child(cp_1)
             .child(cp_2)
             .child(cp_26)
+            .child(cp_28)
             .child(tb_1)
             .child(tb_2)
             .child(tb_3)

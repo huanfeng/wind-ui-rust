@@ -82,7 +82,7 @@ impl KeyRepeat {
     }
 }
 
-/// 一个 `wl_pointer.frame` 之内的纵向滚轮量，frame 到了再合成一次 `Wheel`。
+/// 一个 `wl_pointer.frame` 之内某一轴的滚轮量，frame 到了再合成一次 `Wheel` / `HWheel`。
 ///
 /// 同一次滚动合成器可能同时发 `axis`（连续量）与 `axis_value120` / `axis_discrete`（格数）：
 /// 有格数就只认格数（鼠标滚轮），没有才按连续量换算（触控板两指滚动）。符号与框架相反：

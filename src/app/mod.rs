@@ -2944,7 +2944,9 @@ impl UiHost {
     fn sync_clock(&self) -> u64 {
         let now = self.start.elapsed().as_millis() as u64;
         crate::anim::set_clock_ms(now);
-        now
+        // 返回实际生效的时钟：被钉住时（截图取中间帧、测试）是钉住的值，惯性滑动与补间
+        // 才走同一条时间线。没钉住时与 `now` 相同。
+        crate::anim::clock_ms()
     }
 
     /// 无边框窗口的标题栏右键：控件树没人认领这次右键时，补上窗口系统菜单。
@@ -4127,13 +4129,23 @@ impl AppHandler for UiHost {
         }
     }
 
-    fn on_pan(&mut self, pos: Point, dy: i32) -> bool {
+    fn on_pan(&mut self, pos: Point, axis: crate::spec::Axis, d: i32) -> bool {
         self.enter();
-        self.pan(pos, dy)
+        self.pan(pos, axis, d)
     }
 
-    fn start_fling(&mut self, pos: Point, vy: f32) -> bool {
-        self.begin_fling(pos, vy)
+    fn start_fling(&mut self, pos: Point, axis: crate::spec::Axis, v: f32) -> bool {
+        self.begin_fling(pos, axis, v)
+    }
+
+    fn can_pan(&self, pos: Point, axis: crate::spec::Axis) -> bool {
+        let s = self.scale;
+        let p = Point::new(
+            (pos.x as f32 / s).round() as i32,
+            (pos.y as f32 / s).round() as i32,
+        );
+        self.tree.scroll_target(p, axis, true).is_some()
+            || self.tree.scroll_target(p, axis, false).is_some()
     }
 
     fn cancel_fling(&mut self) -> bool {
@@ -8285,5 +8297,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 横向滚动条在纵向页面里的触摸路由：横向平移滚横条、竖向平移落到页面；
+    /// 横向松手惯性沿横轴滑到头，回弹结束后越界偏移归零。scale 1.5 下验证物理→逻辑换算。
+    #[test]
+    fn touch_pan_and_fling_follow_the_locked_axis() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use crate::spec::{Axis, ScrollAxis};
+        use tiny_skia::Pixmap;
+
+        let mut row = Element::row();
+        for _ in 0..8 {
+            row = row.child(Element::leaf().width(50).height(30));
+        }
+        let app = App::new("t", 200, 150).content(
+            Element::scroll()
+                .width_match()
+                .height_match()
+                .child(
+                    Element::scroll()
+                        .scroll_axis(ScrollAxis::Horizontal)
+                        .width_match()
+                        .height(50)
+                        .child(row),
+                )
+                .child(Element::leaf().width_match().height(400)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.5);
+        let mut pm = Pixmap::new(300, 225).unwrap();
+        let mut t = 1_000;
+        let mut frame = |h: &mut UiHost, t: &mut u64| {
+            *t += 16;
+            crate::anim::pin_clock(Some(*t));
+            h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 225));
+        };
+        frame(&mut h, &mut t);
+        // 从横条上的一点往上找：先遇到横条，再遇到页面。
+        let scrolls: Vec<_> = {
+            let mut v = Vec::new();
+            let mut cur = h.tree.hit_test(Point::new(40, 20));
+            while let Some(id) = cur {
+                let n = h.tree.get(id).unwrap();
+                if matches!(n.layout, crate::core::Layout::Scroll) {
+                    v.push(id);
+                }
+                cur = n.parent;
+            }
+            v
+        };
+        let (strip, page) = (scrolls[0], scrolls[1]);
+        let on_strip = Point::new(60, 30); // 物理像素，落在横条上
+                                           // 锁轴回落的依据：横条上两个方向都有容器可滚（横条 / 页面），页面空白处只能竖滚。
+        let on_page = Point::new(60, 150);
+        assert!(h.can_pan(on_strip, Axis::Horizontal) && h.can_pan(on_strip, Axis::Vertical));
+        assert!(!h.can_pan(on_page, Axis::Horizontal) && h.can_pan(on_page, Axis::Vertical));
+        // 手指左移 30 物理像素 = 20 逻辑像素 → 横条右滚 20。
+        assert!(h.on_pan(on_strip, Axis::Horizontal, -30));
+        frame(&mut h, &mut t);
+        assert_eq!(h.tree.get(strip).unwrap().scroll_x, 20);
+        // 竖向平移在横条上：横条不竖滚，交给页面。
+        assert!(h.on_pan(on_strip, Axis::Vertical, -30));
+        frame(&mut h, &mut t);
+        assert_eq!(h.tree.get(page).unwrap().scroll_y, 20);
+        assert_eq!(h.tree.get(strip).unwrap().scroll_x, 20, "竖向平移不动横条");
+        // 横向快速松手：惯性沿横轴滑到头，回弹后越界偏移归零，页面不动。
+        assert!(h.start_fling(on_strip, Axis::Horizontal, -3.0));
+        let mut max_over = 0;
+        for _ in 0..60 {
+            frame(&mut h, &mut t);
+            let (sn, pn) = (h.tree.get(strip).unwrap(), h.tree.get(page).unwrap());
+            max_over = max_over.max(sn.over_scroll_x.abs());
+            assert_eq!((sn.over_scroll, pn.over_scroll), (0, 0), "回弹只写横向偏移");
+        }
+        assert!(max_over > 0, "撞到右端应有横向回弹");
+        crate::anim::pin_clock(None);
+        let n = h.tree.get(strip).unwrap();
+        assert_eq!(n.scroll_x, n.content_w - n.scroll_view().w, "滑到最右");
+        assert_eq!(n.over_scroll_x, 0, "回弹结束归零");
+        assert_eq!(h.tree.get(page).unwrap().scroll_y, 20);
     }
 }

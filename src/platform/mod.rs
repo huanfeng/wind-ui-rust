@@ -1140,20 +1140,30 @@ pub trait AppHandler {
         CursorShape::Arrow
     }
 
-    /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）按 `dy` 物理像素平移，
-    /// 滚动手指下的容器。返回 true 表示需要重绘。**仅 win32 后端调用**（触摸屏拖动滚动）；
-    /// macOS 触控板的两指滑动是滚轮事件，走 `PointerKind::Wheel` 而非本方法。
-    fn on_pan(&mut self, _pos: Point, _dy: i32) -> bool {
+    /// 触摸平移手势：在 `pos`（**物理像素**，相对客户区）沿 `axis` 平移 `d` 物理像素
+    /// （正 = 手指下移 / 右移），滚动手指下能沿该轴滚动的容器。返回 true 表示需要重绘。
+    ///
+    /// 一次手势只沿一个轴：平台层越过拖动阈值时按位移较大的一边锁定。**仅 win32 后端调用**
+    /// （触摸屏拖动滚动）；macOS 触控板的两指滑动是滚轮事件，走 `PointerKind::Wheel` /
+    /// `HWheel` 而非本方法。
+    fn on_pan(&mut self, _pos: Point, _axis: crate::spec::Axis, _d: i32) -> bool {
         false
     }
 
+    /// `pos`（**物理像素**）下有没有能沿 `axis` 滚动的容器。平台锁定触摸方向时据此回落：
+    /// 位移较大的那一轴滚不了、另一轴滚得了，就锁另一轴——只竖滚的页面上偏横向的斜滑
+    /// 照样竖滚，而不是整次手势什么都不动。默认 true（不干预锁轴）。
+    fn can_pan(&self, _pos: Point, _axis: crate::spec::Axis) -> bool {
+        true
+    }
+
     /// 触摸抬起时按释放速度启动惯性滑动（fling）。`pos` 为**物理像素**（相对客户区）、
-    /// `vy` 为手指 y 速度（**物理像素/ms**）。返回 true 表示已启动（平台据此触发首帧）。
+    /// `v` 为手指沿锁定轴 `axis` 的速度（**物理像素/ms**）。返回 true 表示已启动（平台据此触发首帧）。
     ///
     /// **仅 win32 后端调用**：`WM_TOUCH` 只给位置不给动量，惯性必须自算。macOS 后端
     /// 刻意不调本方法，触控板的动量由系统在 `scrollWheel:` 里续发（见
     /// `platform/macos/window.rs::on_wheel`）——那不是漏实现，别去移植 win32 那套状态机。
-    fn start_fling(&mut self, _pos: Point, _vy: f32) -> bool {
+    fn start_fling(&mut self, _pos: Point, _axis: crate::spec::Axis, _v: f32) -> bool {
         false
     }
 
@@ -1728,5 +1738,75 @@ mod motion_level_tests {
     fn screenshot_runs_full_motion() {
         let c = cfg(None, MotionLevel::Off, true);
         assert_eq!(resolve_motion_level(&c, || true), MotionLevel::Full);
+    }
+}
+
+/// 触摸拖动的方向锁定：从按下点起的总位移 `(dx, dy)` 有一边越过 `threshold`（物理像素）时，
+/// 锁到位移较大的那一轴；相等时竖向优先（竖向滚动最常见）。未越阈值返回 `None`（仍可能是点击）。
+///
+/// 平台层在越阈值那一刻调用一次，此后整个手势只沿这一轴平移与惯性，斜着拖不会两个方向一起滚。
+///
+/// `can_pan` 回答手指下有没有能沿某轴滚动的容器（见 [`AppHandler::can_pan`]）：较大一边
+/// 滚不了而另一边滚得了时改锁另一边。
+#[cfg_attr(not(windows), allow(dead_code))] // 目前只有 win32 自己判触摸拖动
+pub(crate) fn touch_lock_axis(
+    dx: i32,
+    dy: i32,
+    threshold: i32,
+    can_pan: impl Fn(crate::spec::Axis) -> bool,
+) -> Option<crate::spec::Axis> {
+    use crate::spec::Axis;
+    let (ax, ay) = (dx.abs(), dy.abs());
+    if ax < threshold && ay < threshold {
+        return None;
+    }
+    let (first, other) = if ax > ay {
+        (Axis::Horizontal, Axis::Vertical)
+    } else {
+        (Axis::Vertical, Axis::Horizontal)
+    };
+    if !can_pan(first) && can_pan(other) {
+        Some(other)
+    } else {
+        Some(first)
+    }
+}
+
+#[cfg(test)]
+mod touch_lock_tests {
+    use super::touch_lock_axis;
+    use crate::spec::Axis;
+
+    #[test]
+    fn locks_to_the_dominant_axis_once_past_threshold() {
+        let any = |_| true;
+        assert_eq!(
+            touch_lock_axis(5, -8, 12, any),
+            None,
+            "未越阈值：可能是点击"
+        );
+        assert_eq!(touch_lock_axis(-13, 4, 12, any), Some(Axis::Horizontal));
+        assert_eq!(touch_lock_axis(9, 12, 12, any), Some(Axis::Vertical));
+        assert_eq!(
+            touch_lock_axis(15, -20, 12, any),
+            Some(Axis::Vertical),
+            "斜拖取较大一边"
+        );
+        assert_eq!(
+            touch_lock_axis(14, 14, 12, any),
+            Some(Axis::Vertical),
+            "相等时竖向优先"
+        );
+    }
+
+    /// 较大一边滚不了、另一边滚得了：改锁另一边；两边都滚不了时仍锁较大一边。
+    #[test]
+    fn falls_back_to_the_other_axis_when_dominant_cannot_scroll() {
+        let only_v = |a| a == Axis::Vertical;
+        assert_eq!(touch_lock_axis(20, 13, 12, only_v), Some(Axis::Vertical));
+        assert_eq!(
+            touch_lock_axis(20, 13, 12, |_| false),
+            Some(Axis::Horizontal)
+        );
     }
 }
