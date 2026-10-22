@@ -1403,6 +1403,39 @@ mod tests {
         }
     }
 
+    /// `with_pixel_snap` 在后端出像素时真实生效：125% 下 1.4 宽的竖线，吸附时占满 2 列实色，
+    /// 关掉时是 1.75 物理像素、两侧带抗锯齿的半透明列。对齐若被推迟到调用之后（比如攒批再读
+    /// 策略），作用域就形同虚设，这条会先红。
+    #[test]
+    fn pixel_snap_scope_takes_effect_in_backend() {
+        use crate::render::{with_pixel_snap, PixelSnap};
+        let s = 1.25;
+        let draw = |mode| {
+            let mut pm = Pixmap::new(40, 40).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            let mut eng = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut eng, s);
+            with_pixel_snap(mode, || {
+                c.draw_line(10.3, 2.0, 10.3, 28.0, 1.4, &Paint::fill(Color::BLACK))
+            });
+            // 行 20 上每列的墨：0 = 白，255 = 全黑
+            (0..40)
+                .map(|x| 255 - px(&pm, x, 20).0)
+                .filter(|&ink| ink > 0)
+                .collect::<Vec<u8>>()
+        };
+        assert_eq!(
+            draw(PixelSnap::Edges),
+            vec![255, 255],
+            "吸附：恰好 2 列实色"
+        );
+        let off = draw(PixelSnap::Off);
+        assert!(
+            off.iter().any(|&ink| ink < 250),
+            "不吸附：应有抗锯齿的半透明列，实得 {off:?}"
+        );
+    }
+
     /// 退化坐标不得卡死 UI 线程：顶点 y 为 1e9 时行范围钳到画布可见范围（旧写法要逐行跑
     /// 十亿次），含 inf 的边整条跳过。可见区内照常出墨。
     #[test]

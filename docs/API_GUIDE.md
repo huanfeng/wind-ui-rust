@@ -1068,6 +1068,42 @@ Element::button("关于").on_click(move |ctx| {
 
 ---
 
+### 像素对齐（非整数缩放下的线与边）
+
+125% / 150% / 175% 下，逻辑坐标乘出来常落在半个物理像素上，边会被抗锯齿铺成一实一虚两行。
+框架默认把部分图元**吸到物理像素**上（`PixelSnap::Edges`），边界线因此是一条硬边：
+
+| 图元 | 位置 | 线宽 |
+|---|---|---|
+| `fill_rect` / `fill_round_rect` | 吸 | — |
+| `stroke_round_rect` | 吸 | 取整数物理像素 |
+| `draw_line`（横 / 竖） | 横截面方向吸，两端不动 | 取整数物理像素 |
+| `draw_line`（斜）、`draw_polyline`、`fill_polygon`、`fill_circle`、文字 | 不吸 | 原样（亚像素） |
+
+线宽取整按**逻辑**线宽分两档：≤ 1 逻辑像素的发丝线（边框、分隔线）向下取整，150% / 175%
+下都是 1 物理像素，与系统控件、浏览器的边框一致；更粗的笔画取最近的整数（`.5` 舍去），
+如 125% 下 1.4 逻辑像素（1.75 物理）取 2。
+
+**画图标时要留意**：一颗图标若混用上表两侧的图元（例如锁体 `stroke_round_rect` + 竖直锁梁
+`draw_line` + 弧 `draw_polyline`），吸了的与没吸的线宽、位置会有细微差别。要笔画完全一致，
+把整段绘制包进作用域关掉对齐：
+
+```rust
+use windui::render::{with_pixel_snap, PixelSnap};
+
+with_pixel_snap(PixelSnap::Off, || {
+    canvas.stroke_round_rect(x, y, w, h, r, 1.4, &paint);
+    canvas.draw_line(lx, y0, lx, y1, 1.4, &paint);
+    canvas.draw_polyline(&arc, 1.4, &paint);
+});
+```
+
+`with_pixel_snap` 只作用于当前线程、可嵌套、退出（含 panic）即恢复。裁剪区不受这套策略管，始终按物理像素取整。全局策略用
+`App::pixel_snap(..)` / `render::set_pixel_snap(..)`，环境变量 `WINDUI_PIXEL_SNAP=off` 可临时整体关闭
+以便对比——但那会连矩形、分隔线的对齐一起关掉，局部需求请用作用域版本。
+
+---
+
 ### 锚定浮层（下拉面板）
 
 需要「浮在内容之上、点外面就收起」的临时界面（取色盘、日期选择、自定义下拉），用

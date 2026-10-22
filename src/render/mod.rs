@@ -165,8 +165,16 @@ pub(crate) fn align_to_device(x: f32, y: f32, w: f32, h: f32, scale: f32) -> (f3
 /// 高亮、选中底、分隔线看起来就是糊的。对齐后边界都落在整数像素上，代价是同一尺寸的
 /// 元素在不同位置可能差 1 物理像素（肉眼几乎不可见，远好于糊边）。
 ///
-/// 只影响矩形 / 圆角矩形的填充与描边、横竖直线、裁剪区；文字、斜线、圆、多边形不动
-/// （它们本来就该抗锯齿）。用 [`set_pixel_snap`] 或 `App::pixel_snap` 设置，环境变量
+/// 只影响矩形 / 圆角矩形的填充与描边、横竖直线；文字、斜线、折线、圆、多边形不动
+/// （它们本来就该抗锯齿）。其中 `stroke_round_rect` 与横竖 `draw_line` 的**线宽**也取整数个物理像素，
+/// 规则见 [`phys_line_width`]：≤ 1 逻辑像素的发丝线向下取整，更粗的笔画取最近整数（`.5` 舍去）。
+/// 因此同一颗图标里混用吸与不吸的图元时，粗笔画最多差半个物理像素，发丝线可能差得更多
+/// （175% 下 1 逻辑像素吸成 1、不吸是 1.75）。图标这类要求笔画一致的绘制，用
+/// [`with_pixel_snap`] 把整段绘制包成 `Off`。
+///
+/// 裁剪区不归它管：各后端的裁剪始终按物理像素取整。
+///
+/// 用 [`set_pixel_snap`] 或 `App::pixel_snap` 设置全局策略，环境变量
 /// `WINDUI_PIXEL_SNAP=off` 可在不改代码的情况下关掉，方便对比。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PixelSnap {
@@ -189,8 +197,43 @@ pub fn set_pixel_snap(mode: PixelSnap) {
     PIXEL_SNAP.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 当前的全局像素对齐策略。没设置过时看环境变量 `WINDUI_PIXEL_SNAP`（`off` / `0` 关闭）。
+thread_local! {
+    /// [`with_pixel_snap`] 的作用域覆盖；`None` = 用全局策略。
+    static SNAP_OVERRIDE: std::cell::Cell<Option<PixelSnap>> = const { std::cell::Cell::new(None) };
+}
+
+/// 在 `f` 执行期间临时改用 `mode`，结束（含 panic 展开）后恢复原值；可嵌套。
+///
+/// 只作用于当前线程。绘制在 UI 线程同步进行、各后端都在调用当下对齐，所以把一段
+/// `paint` 包进来就能让其中所有图元按 `mode` 画（裁剪区除外，见 [`PixelSnap`]）——
+/// 典型用法是图标：
+///
+/// ```ignore
+/// render::with_pixel_snap(PixelSnap::Off, || {
+///     canvas.stroke_round_rect(..); // 锁体
+///     canvas.draw_line(..);         // 竖直的锁梁腿
+///     canvas.draw_polyline(..);     // 锁梁的弧
+/// });
+/// ```
+///
+/// 不包的话，锁体与竖腿的线宽会被取成整数物理像素，弧则保持亚像素宽度，两者粗细不一。
+pub fn with_pixel_snap<R>(mode: PixelSnap, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<PixelSnap>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SNAP_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(SNAP_OVERRIDE.with(|c| c.replace(Some(mode))));
+    f()
+}
+
+/// 当前生效的像素对齐策略：[`with_pixel_snap`] 作用域内取其值，否则取全局策略
+/// （没设置过时看环境变量 `WINDUI_PIXEL_SNAP`，`off` / `0` 关闭）。
 pub fn pixel_snap() -> PixelSnap {
+    if let Some(mode) = SNAP_OVERRIDE.with(|c| c.get()) {
+        return mode;
+    }
     match PIXEL_SNAP.load(std::sync::atomic::Ordering::Relaxed) {
         1 => PixelSnap::Edges,
         2 => PixelSnap::Off,
@@ -246,11 +289,24 @@ fn align_rect_with(
     (x0, y0, x1 - x0, y1 - y0)
 }
 
-/// 线宽（物理像素）取整：向下取整、至少 1。1 逻辑像素的线在 150% 下是 1.5 物理像素，
-/// 向上取整成 2 会显得粗，保持 1.5 则是一实一虚两行；取 1 最接近系统自己控件的观感。
-/// 加一点容差：浮点乘出来的 2.9999 应当算 3。
-fn phys_line_width(raw: f32) -> f32 {
-    (raw + 1e-3).floor().max(1.0)
+/// 线宽取整数个物理像素（至少 1），按**逻辑**线宽分两档：
+///
+/// - **发丝线**（≤ 1 逻辑像素：边框、分隔线）向下取整。150% 下 1.5 物理像素取 2 显得粗，
+///   保持 1.5 则是一实一虚两行；取 1 最接近系统控件与浏览器（Chromium 的边框宽度同样向下
+///   取整）的观感。175% 下同理取 1。
+/// - **更粗的笔画**（图标、对勾、粗分隔）取最近的整数，`.5` 舍去。曾经也一律向下取整，
+///   125% 下 1.4 逻辑像素的图标笔画（1.75 物理像素）被削成 1，而同一颗图标里不吸附的折线 /
+///   斜线仍是 1.75，一粗一细；取最近整数后两者最多差半个像素。
+///
+/// 加一点容差：浮点乘出来的 2.9999 应当算 3，2.5001 应当算 2.5。
+fn phys_line_width(width: f32, scale: f32) -> f32 {
+    let raw = width * scale;
+    let px = if width <= 1.0 + 1e-3 {
+        (raw + 1e-3).floor()
+    } else {
+        (raw - 0.5 - 1e-3).ceil()
+    };
+    px.max(1.0)
 }
 
 /// 描边线宽对齐到整数个物理像素（见 [`phys_line_width`]），返回逻辑值。三个后端的
@@ -260,7 +316,7 @@ pub(crate) fn align_stroke_width(width: f32, scale: f32) -> f32 {
     if pixel_snap() == PixelSnap::Off || scale <= 0.0 || width <= 0.0 {
         return width;
     }
-    phys_line_width(width * scale) / scale
+    phys_line_width(width, scale) / scale
 }
 
 /// 把横线 / 竖线在**横截面方向**对齐到物理像素：线宽取整数个物理像素（至少 1），线的两条
@@ -297,7 +353,7 @@ fn align_line_with(
         return (x0, y0, x1, y1, width);
     }
     let raw = width * scale;
-    let pw = phys_line_width(raw);
+    let pw = phys_line_width(width, scale);
     // 线的一条长边（中心减半宽）吸到整数像素，中心随之落在 n 或 n.5 上
     let center = |c: f32| (snap_phys(c * scale - pw / 2.0) + pw / 2.0) / scale;
     let w = if raw > pw && raw - pw < 0.1 { raw } else { pw } / scale;
@@ -369,7 +425,7 @@ mod align_tests {
         assert_eq!(x * 1.5, -1.0, "-1.5 → -1（不是 -2）");
     }
 
-    /// 150% 下 1 逻辑像素的横线：线宽取 2 物理像素，上下两条边都落在整数像素上。
+    /// 150% 下 1 逻辑像素的横线：线宽取 1 物理像素，上下两条边都落在整数像素上。
     #[test]
     fn horizontal_line_covers_whole_physical_rows() {
         let s = 1.5;
@@ -405,6 +461,152 @@ mod align_tests {
         assert!((w * s - 1.0).abs() < 1e-4);
         let left = x0 * s - 0.5;
         assert!((left - left.round()).abs() < 1e-4);
+    }
+
+    /// 发丝线（≤ 1 逻辑像素）向下取整：150% / 175% 的 1 逻辑像素都是 1 物理像素。
+    /// 更粗的笔画取最近整数、`.5` 舍去：125% 的 1.4 逻辑像素（1.75）取 2 而不是削成 1——
+    /// 后者会让它与同一颗图标里不吸附的折线一粗一细。
+    #[test]
+    fn line_width_floors_hairlines_and_rounds_thicker_strokes() {
+        use super::phys_line_width;
+        for (w, s, want) in [
+            (0.5, 1.25, 1.0),
+            (1.0, 1.0, 1.0),
+            (1.0, 1.25, 1.0),
+            (1.0, 1.5, 1.0),
+            (1.0, 1.75, 1.0),
+            (1.0, 2.0, 2.0),
+            (1.4, 1.25, 2.0),
+            (1.5, 1.25, 2.0),
+            (1.5, 1.5, 2.0),
+            (1.5, 1.75, 3.0),
+            (2.0, 1.25, 2.0),
+            (2.0, 1.3, 3.0),
+            (2.0, 1.75, 3.0),
+            (2.0, 2.0, 4.0),
+            (3.0, 1.0, 3.0),
+        ] {
+            assert_eq!(phys_line_width(w, s), want, "width={w} scale={s}");
+        }
+    }
+
+    /// 粗笔画档经 `align_line`：125% 下 1.4 宽的竖线取 2 物理像素，两条长边落在整数像素上。
+    #[test]
+    fn thick_vertical_line_rounds_to_nearest_and_aligns() {
+        let s = 1.25;
+        let (x0, _, x1, _, w) = align_line_with(PixelSnap::Edges, 7.3, 0.0, 7.3, 30.0, 1.4, s);
+        assert_eq!(x0, x1);
+        assert!((w * s - 2.0).abs() < 1e-4, "线宽 {} 物理像素应为 2", w * s);
+        let left = x0 * s - 1.0;
+        assert!(
+            (left - left.round()).abs() < 1e-4,
+            "{left} 应落在物理整数上"
+        );
+    }
+
+    /// 只记录 `draw_line` 收到的线宽、以及当时生效的对齐策略的画布：用来看 trait 默认实现
+    /// （D2D 与 GPU 后端走的就是它）把折线拆成哪些调用。
+    struct LineLog(Vec<(f32, PixelSnap)>);
+
+    impl super::Canvas for LineLog {
+        fn dpi_scale(&self) -> f32 {
+            1.25
+        }
+        fn fill_rect(&mut self, _: f32, _: f32, _: f32, _: f32, _: &super::Paint) {}
+        fn fill_round_rect(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: &super::Paint) {}
+        #[allow(clippy::too_many_arguments)]
+        fn stroke_round_rect(
+            &mut self,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: &super::Paint,
+        ) {
+        }
+        fn draw_line(&mut self, _: f32, _: f32, _: f32, _: f32, w: f32, _: &super::Paint) {
+            self.0.push((w, super::pixel_snap()));
+        }
+        fn fill_circle(&mut self, _: f32, _: f32, _: f32, _: &super::Paint) {}
+        fn draw_shadow(
+            &mut self,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: f32,
+            _: crate::geometry::Color,
+        ) {
+        }
+        fn draw_image(
+            &mut self,
+            _: &super::image::Image,
+            _: crate::geometry::Rect,
+            _: super::image::Fit,
+            _: f32,
+            _: f32,
+        ) {
+        }
+        fn draw_text(
+            &mut self,
+            _: &str,
+            _: crate::geometry::Rect,
+            _: crate::geometry::Color,
+            _: crate::spec::Align,
+            _: &crate::text::TextStyle,
+        ) {
+        }
+        fn measure_text(&mut self, _: &str, _: &crate::text::TextStyle) -> crate::geometry::Size {
+            crate::geometry::Size::ZERO
+        }
+        fn push_layer(&mut self, _: f32) {}
+        fn pop_layer(&mut self) {}
+        fn save(&mut self) {}
+        fn restore(&mut self) {}
+        fn clip_rect(&mut self, _: crate::geometry::Rect) {}
+    }
+
+    /// 默认 `draw_polyline` 逐段转 `draw_line` 时必须关掉对齐，否则横竖段被吸、斜段不吸，
+    /// 同一条折线一段粗一段细（下游报告的"同一颗图标一粗一细"在 D2D / GPU 上的来源）。
+    #[test]
+    fn default_polyline_segments_are_not_snapped() {
+        use super::Canvas;
+        let mut c = LineLog(Vec::new());
+        super::with_pixel_snap(PixelSnap::Edges, || {
+            c.draw_polyline(
+                &[(0.0, 0.0), (0.0, 10.0), (8.0, 14.0)],
+                1.4,
+                &super::Paint::fill(crate::geometry::Color::BLACK),
+            );
+            assert_eq!(
+                super::pixel_snap(),
+                PixelSnap::Edges,
+                "折线画完要恢复外层策略"
+            );
+        });
+        assert_eq!(c.0, vec![(1.4, PixelSnap::Off), (1.4, PixelSnap::Off)]);
+    }
+
+    /// 作用域覆盖：内部生效、嵌套取最内层、退出（含 panic）后恢复。
+    #[test]
+    fn with_pixel_snap_scopes_and_restores() {
+        use super::{pixel_snap, with_pixel_snap};
+        let outer = pixel_snap();
+        with_pixel_snap(PixelSnap::Off, || {
+            assert_eq!(pixel_snap(), PixelSnap::Off);
+            assert_eq!(super::align_stroke_width(1.4, 1.25), 1.4, "Off 下线宽原样");
+            with_pixel_snap(PixelSnap::Edges, || {
+                assert_eq!(pixel_snap(), PixelSnap::Edges)
+            });
+            assert_eq!(pixel_snap(), PixelSnap::Off, "内层退出后回到外层");
+        });
+        assert_eq!(pixel_snap(), outer);
+        let r = std::panic::catch_unwind(|| with_pixel_snap(PixelSnap::Off, || panic!("boom")));
+        assert!(r.is_err());
+        assert_eq!(pixel_snap(), outer, "panic 展开后也要恢复");
     }
 
     /// 斜线不碰：它本来就该抗锯齿。
@@ -582,10 +784,14 @@ pub trait Canvas {
         if pts.len() < 2 {
             return;
         }
-        for seg in pts.windows(2) {
-            let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
-            self.draw_line(x0, y0, x1, y1, width, paint);
-        }
+        // 折线不吸附（见 [`PixelSnap`]）：逐段转给 `draw_line` 时横竖段会被吸，
+        // 斜段不会，同一条折线就一段粗一段细，也与整条路径描边的后端不一致。
+        with_pixel_snap(PixelSnap::Off, || {
+            for seg in pts.windows(2) {
+                let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
+                self.draw_line(x0, y0, x1, y1, width, paint);
+            }
+        });
         // 只补**内部**拐点：两端点是线头，补圆会变成 round cap，改变外观。
         for &(x, y) in &pts[1..pts.len() - 1] {
             self.fill_circle(x, y, width / 2.0, paint);

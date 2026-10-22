@@ -1445,7 +1445,7 @@ impl App {
     }
 
     /// 像素对齐策略（默认 [`PixelSnap::Edges`](crate::render::PixelSnap)）：非整数缩放下
-    /// 矩形、线、裁剪区的边是否吸到物理像素上。进程级设置，所有窗口、所有后端共用，
+    /// 矩形与横竖线的边是否吸到物理像素上（裁剪区不受它管，始终取整）。进程级设置，所有窗口、所有后端共用，
     /// 当场生效（同 [`crate::render::set_pixel_snap`]）。
     pub fn pixel_snap(self, mode: crate::render::PixelSnap) -> Self {
         crate::render::set_pixel_snap(mode);
