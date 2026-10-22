@@ -1076,7 +1076,7 @@ Element::button("关于").on_click(move |ctx| {
 | 图元 | 位置 | 线宽 |
 |---|---|---|
 | `fill_rect` / `fill_round_rect` | 吸 | — |
-| `stroke_round_rect` | 吸 | 取整数物理像素 |
+| `stroke_round_rect` / `stroke_round_rect_corners` | 吸 | 取整数物理像素 |
 | `draw_line`（横 / 竖） | 横截面方向吸，两端不动 | 取整数物理像素 |
 | `draw_line`（斜）、`draw_polyline`、`fill_polygon`、`fill_circle`、文字 | 不吸 | 原样（亚像素） |
 

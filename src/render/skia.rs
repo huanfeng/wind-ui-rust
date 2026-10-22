@@ -2944,6 +2944,32 @@ mod tests {
         pm
     }
 
+    /// 四角不同的描边（折线环带）与四角相同的描边（`stroke_round_rect`）在直边上的横截面
+    /// 逐像素一致：两条路径的线宽都要按同一规则取整数物理像素，否则同一个框换个圆角就
+    /// 变粗变细（125% 下 1 逻辑像素：一边 1 列实色，一边 1.25 列带半透明边）。
+    #[test]
+    fn stroke_corners_width_matches_uniform_stroke() {
+        use crate::geometry::Corners;
+        for s in [1.25f32, 1.5, 1.75] {
+            // 1.5 而非 1.4：150% 下 1.4 宽旧路径画 2.1 列，那 0.1 列被抗锯齿采样量化掉，区分不出
+            for w in [1.0f32, 1.5] {
+                let mixed = paint_corners(s, Some(w), Corners::top(16.0));
+                let uniform = paint_corners(s, Some(w), Corners::all(16.0));
+                // 左边直段中部那一行，从框外到框内的 8 列
+                let y = (40.0 * s) as u32;
+                let x0 = (8.0 * s) as u32;
+                let row = |pm: &Pixmap| (x0..x0 + 8).map(|x| px(pm, x, y).0).collect::<Vec<_>>();
+                // 容差 8 级：路径描边的光栅化在边缘留一两级浮点残余；线宽不一时多数组合
+                // 差 0.25 列以上（≥ 60 级），差得更少的会被抗锯齿采样量化掉、由别的组合兜住
+                let (m, u) = (row(&mixed), row(&uniform));
+                assert!(
+                    m.iter().zip(&u).all(|(a, b)| a.abs_diff(*b) <= 8),
+                    "s={s} w={w}：两条描边路径线宽不一\n  四角不同 {m:?}\n  四角相同 {u:?}"
+                );
+            }
+        }
+    }
+
     /// 四角各自半径：直角的那个角贴到顶点都有墨，圆的角在顶点处留白；非整数 DPI 同样成立。
     #[test]
     fn fill_round_rect_corners_squares_only_the_zero_corner() {

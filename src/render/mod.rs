@@ -166,8 +166,9 @@ pub(crate) fn align_to_device(x: f32, y: f32, w: f32, h: f32, scale: f32) -> (f3
 /// 元素在不同位置可能差 1 物理像素（肉眼几乎不可见，远好于糊边）。
 ///
 /// 只影响矩形 / 圆角矩形的填充与描边、横竖直线；文字、斜线、折线、圆、多边形不动
-/// （它们本来就该抗锯齿）。其中 `stroke_round_rect` 与横竖 `draw_line` 的**线宽**也取整数个物理像素，
-/// 规则见 [`phys_line_width`]：≤ 1 逻辑像素的发丝线向下取整，更粗的笔画取最近整数（`.5` 舍去）。
+/// （它们本来就该抗锯齿）。其中 `stroke_round_rect`（含四角不同的
+/// `stroke_round_rect_corners`）与横竖 `draw_line` 的**线宽**也取整数个物理像素，规则见
+/// [`phys_line_width`]：≤ 1 逻辑像素的发丝线向下取整，更粗的笔画取最近整数（`.5` 舍去）。
 /// 因此同一颗图标里混用吸与不吸的图元时，粗笔画最多差半个物理像素，发丝线可能差得更多
 /// （175% 下 1 逻辑像素吸成 1、不吸是 1.75）。图标这类要求笔画一致的绘制，用
 /// [`with_pixel_snap`] 把整段绘制包成 `Off`。
@@ -324,9 +325,7 @@ pub(crate) fn align_stroke_width(width: f32, scale: f32) -> f32 {
 ///
 /// 1 逻辑像素的分隔线在 150% 下是 1.5 物理像素宽，不对齐时画出来是一实一虚两行。
 ///
-/// 两端**不**对齐：多边形的逐行扫描填充（[`fill_polygon_rows`]）借横线画每一行，行两端
-/// 的亚像素位置正是多边形斜边的抗锯齿。同理，略宽于整像素（不到 0.1）的线保留原宽、
-/// 只对齐位置——扫描填充特意把 1 像素的行放宽 3% 来消行间缝，取整会把缝放回来。
+/// 两端**不**对齐：线头的亚像素位置是调用方给的几何，吸过去会改变线的长度。
 pub(crate) fn align_line(
     x0: f32,
     y0: f32,
@@ -352,11 +351,10 @@ fn align_line_with(
     if mode == PixelSnap::Off || scale <= 0.0 || horizontal == vertical || width <= 0.0 {
         return (x0, y0, x1, y1, width);
     }
-    let raw = width * scale;
     let pw = phys_line_width(width, scale);
     // 线的一条长边（中心减半宽）吸到整数像素，中心随之落在 n 或 n.5 上
     let center = |c: f32| (snap_phys(c * scale - pw / 2.0) + pw / 2.0) / scale;
-    let w = if raw > pw && raw - pw < 0.1 { raw } else { pw } / scale;
+    let w = pw / scale;
     if horizontal {
         let y = center(y0);
         (x0, y, x1, y, w)
@@ -442,14 +440,23 @@ mod align_tests {
         }
     }
 
-    /// 扫描填充特意放宽 3% 的行：保留宽度，只对齐位置，否则行间缝会回来。
+    /// 略宽于整像素的线也取整：线宽规则对所有横竖线一视同仁（扫描填充放宽 3% 的行
+    /// 自己关掉了对齐，不靠这里开特例）。
     #[test]
-    fn slightly_wider_line_keeps_its_width() {
-        let s = 1.75;
-        let y = 58.5 / s;
-        let (_, y0, _, _, w) = align_line_with(PixelSnap::Edges, 1.0, y, 9.0, y, 1.03 / s, s);
-        assert!((w * s - 1.03).abs() < 1e-4);
-        assert!((y0 * s - 58.5).abs() < 1e-3, "行中心不动");
+    fn slightly_wider_line_rounds_like_any_other() {
+        let s = 1.5;
+        let (_, _, _, _, w) = align_line_with(PixelSnap::Edges, 1.0, 7.0, 9.0, 7.0, 1.36, s);
+        assert!(
+            (w * s - 2.0).abs() < 1e-4,
+            "1.36 × 1.5 = 2.04 应取 2，实得 {}",
+            w * s
+        );
+        let (_, _, _, _, w) = align_line_with(PixelSnap::Edges, 1.0, 7.0, 9.0, 7.0, 1.03 / s, s);
+        assert!(
+            (w * s - 1.0).abs() < 1e-4,
+            "1.03 物理像素应取 1，实得 {}",
+            w * s
+        );
     }
 
     /// 竖线同理；细到不足 1 物理像素的线也至少占满 1 列。
@@ -662,31 +669,35 @@ pub(crate) fn fill_polygon_rows<C: Canvas + ?Sized>(
         ..paint.clone()
     };
     let mut hits: Vec<(f32, i32)> = Vec::new();
-    for row in (top * s).floor() as i64..(bottom * s).ceil() as i64 {
-        let y = (row as f32 + 0.5) / s;
-        hits.clear();
-        // 半开区间 [上端, 下端)：顶点恰在行中心时只算一次。
-        for &(x0, y0, x1, y1, dir) in &edges {
-            if y >= y0 && y < y1 {
-                hits.push((x0 + (y - y0) / (y1 - y0) * (x1 - x0), dir));
+    // 不吸附：每行的中心已是物理行中心、线宽特意放宽 3%（见下），两端的亚像素位置正是
+    // 斜边的抗锯齿——三样都不能让 `draw_line` 的横线对齐改掉。
+    with_pixel_snap(PixelSnap::Off, || {
+        for row in (top * s).floor() as i64..(bottom * s).ceil() as i64 {
+            let y = (row as f32 + 0.5) / s;
+            hits.clear();
+            // 半开区间 [上端, 下端)：顶点恰在行中心时只算一次。
+            for &(x0, y0, x1, y1, dir) in &edges {
+                if y >= y0 && y < y1 {
+                    hits.push((x0 + (y - y0) / (y1 - y0) * (x1 - x0), dir));
+                }
+            }
+            hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (mut winding, mut start) = (0, 0.0);
+            for &(x, dir) in &hits {
+                let was = winding;
+                winding += dir;
+                if was == 0 && winding != 0 {
+                    start = x;
+                } else if was != 0 && winding == 0 && x > start {
+                    // 线宽放宽 3%：恰好 1 物理像素时，1/scale 的浮点误差会让行缘各缺一丝
+                    // （175% 下实测内部一行只有 98.8% 覆盖），相邻行重叠这 0.03 像素即可补上。
+                    // 代价是半透明色的内部像素多叠约 1.5% 的覆盖（alpha 0.5 时差 1～2 个色阶），
+                    // 各行一致、不成横纹，肉眼不可见。
+                    c.draw_line(start, y, x, y, 1.03 / s, &line);
+                }
             }
         }
-        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (mut winding, mut start) = (0, 0.0);
-        for &(x, dir) in &hits {
-            let was = winding;
-            winding += dir;
-            if was == 0 && winding != 0 {
-                start = x;
-            } else if was != 0 && winding == 0 && x > start {
-                // 线宽放宽 3%：恰好 1 物理像素时，1/scale 的浮点误差会让行缘各缺一丝
-                // （175% 下实测内部一行只有 98.8% 覆盖），相邻行重叠这 0.03 像素即可补上。
-                // 代价是半透明色的内部像素多叠约 1.5% 的覆盖（alpha 0.5 时差 1～2 个色阶），
-                // 各行一致、不成横纹，肉眼不可见。
-                c.draw_line(start, y, x, y, 1.03 / s, &line);
-            }
-        }
-    }
+    });
 }
 
 /// 绘制接口。Phase 1 提供基础图元；裁剪/变换在 Phase 3 扩展。
@@ -804,10 +815,10 @@ pub trait Canvas {
     /// 圆盘相减、带孔图标、齿轮都是一个调用。凹多边形、自交轮廓照常。
     ///
     /// 软件后端与 Windows D2D 后端覆盖为一次性路径光栅化（边缘双向抗锯齿，支持渐变）。
-    /// 默认实现逐物理行扫描：每行取行中心求交，按环绕数取区间，用 1 物理像素宽的
-    /// [`draw_line`](Self::draw_line) 画出——左右端点带抗锯齿、行与行首尾相接无隙无叠，但
-    /// 上下沿是物理像素台阶，渐变退为 `paint.color` 的纯色（经 `Paint::gradient`
-    /// 构造时即首个色标，与描边类图元一致）。正确但不精致，
+    /// 默认实现逐物理行扫描：每行取行中心求交，按环绕数取区间，用约 1.03 物理像素宽、
+    /// 关闭像素对齐的 [`draw_line`](Self::draw_line) 画出——左右端点带抗锯齿、相邻行略重叠
+    /// 以消行间缝，但上下沿是物理像素台阶，渐变退为 `paint.color` 的纯色（经
+    /// `Paint::gradient` 构造时即首个色标，与描边类图元一致）。正确但不精致，
     /// 是兜底而非占位。
     ///
     /// 扫描按**物理行**而不是逻辑行：逐逻辑行（每行 1 逻辑像素）配 `fill_rect` 时，边界被
@@ -1070,7 +1081,8 @@ pub(crate) fn stroke_round_rect_corners_poly<C: Canvas + ?Sized>(
 ) {
     let s = canvas.dpi_scale();
     let (x, y, w, h) = align_to_device(x, y, w, h, s);
-    let width = width.min(w / 2.0).min(h / 2.0);
+    // 线宽与四角相同的 `stroke_round_rect` 同一规则取整，否则同一框换个圆角就变粗变细
+    let width = align_stroke_width(width, s).min(w / 2.0).min(h / 2.0);
     if width <= 0.0 {
         return;
     }
