@@ -31,6 +31,8 @@ use crate::spec::Align;
 
 /// 默认字重（DirectWrite NORMAL = 400）。
 pub const WEIGHT_NORMAL: u16 = 400;
+/// 半粗字重（DirectWrite 数值 600）：卡片 / 对话框标题等需要压过正文、又不必全粗的文字。
+pub const WEIGHT_SEMIBOLD: u16 = 600;
 
 /// 一次文字排版所需的全部字体属性。
 ///

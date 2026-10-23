@@ -1193,9 +1193,9 @@ pub struct FormTheme {
     /// 单行行**定高**而非按内容撑开：一列表单行必须等高才成其为"一列"，
     /// 按内容撑开会让放开关的行比放下拉的行矮一截，整列参差不齐。
     pub row_height: Option<i32>,
-    /// 标签与控件之间的水平间距。默认 12。
+    /// 标签与控件之间的水平间距（回退 `metrics.space_md`，默认 12）。
     pub gap: Option<i32>,
-    /// `setting_row_desc` 的上下内边距。默认 12。
+    /// `setting_row_desc` 的上下内边距（回退 `metrics.space_md`，默认 12）。
     ///
     /// 带副标题的行是唯一**不定高**的一种——副标题让内容高度本就因行而异，
     /// 定高只会把它挤出去。故这一种用内边距把高度撑出来，与上面的 `row_height` 分工。
@@ -1204,7 +1204,7 @@ pub struct FormTheme {
     pub label_size: Option<f32>,
     /// 标签字重。默认 400（库默认字重）；设置类界面常用 500 让标签压过控件文字。
     pub label_weight: Option<u16>,
-    /// 副标题字号（回退 `metrics.font_sm - 1`，即比正文小两档）。
+    /// 副标题字号（回退 `metrics.font_xs`，即比正文小两档）。
     pub desc_size: Option<f32>,
     /// 标签最多显示几行（`None` = 不限，按内容换行）。
     ///
@@ -1229,11 +1229,11 @@ impl FormTheme {
     pub fn row_height(&self) -> i32 {
         self.row_height.unwrap_or(40)
     }
-    pub fn gap(&self) -> i32 {
-        self.gap.unwrap_or(12)
+    pub fn gap(&self, m: &Metrics) -> i32 {
+        self.gap.unwrap_or(m.space_md)
     }
-    pub fn row_pad_y(&self) -> i32 {
-        self.row_pad_y.unwrap_or(12)
+    pub fn row_pad_y(&self, m: &Metrics) -> i32 {
+        self.row_pad_y.unwrap_or(m.space_md)
     }
     pub fn label_size(&self, m: &Metrics) -> f32 {
         self.label_size.unwrap_or(m.font_md)
@@ -1242,7 +1242,7 @@ impl FormTheme {
         self.label_weight.unwrap_or(crate::text::WEIGHT_NORMAL)
     }
     pub fn desc_size(&self, m: &Metrics) -> f32 {
-        self.desc_size.unwrap_or(m.font_sm - 1.0)
+        self.desc_size.unwrap_or(m.font_xs)
     }
     pub fn label_max_lines(&self) -> Option<usize> {
         self.label_max_lines
@@ -1265,31 +1265,40 @@ impl FormTheme {
 pub struct CardTheme {
     /// 卡片圆角（回退 `metrics.corner_lg`）。
     pub corner: Option<f32>,
-    /// 卡片内边距。默认 16。
+    /// 卡片内边距（回退 `metrics.space_lg`，默认 16）。
     pub pad: Option<i32>,
-    /// 卡片内元素间距（标题/分隔线/内容之间）。默认 10。
+    /// 卡片内元素间距（标题/分隔线/内容之间，回退 `metrics.space_md`，默认 12）。
     pub gap: Option<i32>,
     /// 标题字号（回退 `metrics.font_lg`）。
     pub title_size: Option<f32>,
-    /// 标题字重。默认 400。
+    /// 标题字重。默认 600（半粗）：标题与正文同字重时层级拉不开。
     pub title_weight: Option<u16>,
+    /// 是否画 1px 描边（`palette.divider`）。默认 `true`：卡片底（白）与窗口底
+    /// （slate-50）明度只差一点，没有描边时卡片边界几乎看不出来。
+    ///
+    /// 默认不加投影：投影按尺寸缓存整张模糊位图，每种卡片尺寸约多占 1MB，与本库的低内存
+    /// 目标相悖。需要浮起感时对单张卡片 `.shadow(...)`。
+    pub bordered: Option<bool>,
 }
 
 impl CardTheme {
     pub fn corner(&self, m: &Metrics) -> f32 {
         self.corner.unwrap_or(m.corner_lg)
     }
-    pub fn pad(&self) -> i32 {
-        self.pad.unwrap_or(16)
+    pub fn pad(&self, m: &Metrics) -> i32 {
+        self.pad.unwrap_or(m.space_lg)
     }
-    pub fn gap(&self) -> i32 {
-        self.gap.unwrap_or(10)
+    pub fn gap(&self, m: &Metrics) -> i32 {
+        self.gap.unwrap_or(m.space_md)
+    }
+    pub fn bordered(&self) -> bool {
+        self.bordered.unwrap_or(true)
     }
     pub fn title_size(&self, m: &Metrics) -> f32 {
         self.title_size.unwrap_or(m.font_lg)
     }
     pub fn title_weight(&self) -> u16 {
-        self.title_weight.unwrap_or(crate::text::WEIGHT_NORMAL)
+        self.title_weight.unwrap_or(crate::text::WEIGHT_SEMIBOLD)
     }
 }
 

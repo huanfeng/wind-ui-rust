@@ -821,6 +821,31 @@ impl Element {
             cross: Align::Start,
         })
     }
+    /// **带默认间距的横排**：子项间距取主题 `metrics.space_sm`（默认 8），纵向居中。
+    ///
+    /// 拼按钮组、图标 + 文字、标签 + 徽章这类"一排小东西"的日常写法——不设任何参数就是
+    /// 主流的间距。需要精确控制（贴紧、自定间距、顶对齐）时用 [`row`](Self::row)，
+    /// 它默认间距 0、顶对齐，是不带任何主张的原语。两者可以随意混用，后链的
+    /// `.spacing(..)` / `.cross(..)` 照常覆盖。
+    ///
+    /// ```
+    /// use windui::prelude::*;
+    /// let actions = Element::hstack()
+    ///     .child(Element::button("保存"))
+    ///     .child(Element::button("取消").neutral());
+    /// ```
+    pub fn hstack() -> Self {
+        let m = &crate::theme::current().metrics;
+        Self::row().spacing(m.space_sm).cross(Align::Center)
+    }
+    /// **带默认间距的竖排**：子项间距取主题 `metrics.space_md`（默认 12），左对齐。
+    ///
+    /// 页面里一块接一块地往下排（标题、说明、表单、按钮行）时的日常写法；与
+    /// [`hstack`](Self::hstack) 成对。不带主张的原语是 [`col`](Self::col)（间距 0）。
+    pub fn vstack() -> Self {
+        let m = &crate::theme::current().metrics;
+        Self::col().spacing(m.space_md)
+    }
     /// 横向流式容器：子节点从左往右排，放不下就折到下一行；行内默认纵向居中。
     /// 用 [`Element::spacing`] 设同行间距、[`Element::run_spacing`] 设行间距。
     ///
@@ -2982,7 +3007,8 @@ impl Element {
         let bar = Element::base(Layout::None)
             .widget(containers::TabBar::new(items, selected).style(style))
             .width_match();
-        Element::col().fill().spacing(16).child(bar).child(content)
+        let gap = crate::theme::current().metrics.space_md;
+        Element::col().fill().spacing(gap).child(bar).child(content)
     }
 
     /// 模态对话框：全窗半透明遮罩 + 居中内容，遮罩吞掉指针事件实现模态。
@@ -3082,12 +3108,14 @@ impl Element {
             .width_match()
             .cross(Align::Center)
             .child(
+                // 单行：标题行高度要落在拖动带（`DIALOG_DRAG_BAND_H`）内，折行会把下半截
+                // 挤出带外、按住拖不动。
                 Element::label(title)
-                    .font_size(18.0)
-                    .font_weight(700)
+                    .font_size(th.metrics.font_lg)
+                    .font_weight(crate::text::WEIGHT_SEMIBOLD)
+                    .max_lines(1)
                     .fg_role(crate::style::Role::Text)
-                    .weight(1.0)
-                    .height(26),
+                    .weight(1.0),
             )
             .child(
                 Element::icon_button("\u{2715}")
@@ -3099,12 +3127,29 @@ impl Element {
             .width(width)
             .bg_role(crate::style::Role::Surface)
             .corner(th.metrics.corner_lg)
-            .padding(20)
-            .spacing(16)
+            .padding(th.metrics.space_xl)
+            .spacing(th.metrics.space_lg)
             .child(header)
             .child(body)
-            .child(footer);
+            .child(Self::button_row_spacing(footer, th.metrics.space_sm));
         Element::dialog(show, panel)
+    }
+
+    /// 底部按钮行没设间距（仍是 `row()` 的默认 0）时补上 `gap`：footer 在语义上就是一排
+    /// 按钮，贴在一起没有任何场景是想要的。显式设过非 0 间距的保持原样。
+    ///
+    /// 只认**横排**（`row` / `flow`）：竖排的 footer 是别的结构，不替它做主。`spacing(0)` 与
+    /// "没设"分不出来，故显式要贴紧的横排 footer 请用 `spacing(1)` 或再包一层。
+    fn button_row_spacing(footer: Element, gap: i32) -> Element {
+        match footer.layout {
+            Layout::Linear {
+                axis: Axis::Horizontal,
+                spacing: 0,
+                ..
+            }
+            | Layout::Flow { spacing: 0, .. } => footer.spacing(gap),
+            _ => footer,
+        }
     }
 
     /// **锚定浮层**：把 `content` 挂成本元素的浮层子节点，展开时贴在本元素正下方
@@ -3359,7 +3404,7 @@ impl Element {
             .width_match()
             .height(f.row_height())
             .cross(Align::Center)
-            .spacing(f.gap())
+            .spacing(f.gap(&th.metrics))
             .child(Self::form_label(label, f, &th.metrics).width(f.label_width()))
             .child(control)
     }
@@ -3429,7 +3474,7 @@ impl Element {
         let mut row = Element::row()
             .width_match()
             .cross(Align::Center)
-            .spacing(f.gap());
+            .spacing(f.gap(&th.metrics));
         match desc {
             // 带副标题：高度按内容撑开（副标题长短不一，定高会把它挤出去）。
             Some(d) => {
@@ -3441,7 +3486,7 @@ impl Element {
                     .fg_role(crate::style::Role::TextSubtle)
                     .width_match();
                 left = left.child(Self::clamp_lines(desc, f.desc_max_lines(), d));
-                row = row.padding_xy(0, f.row_pad_y());
+                row = row.padding_xy(0, f.row_pad_y(&th.metrics));
             }
             // 单行：定高，与 `field` 同一档，整列才对得齐。
             None => row = row.height(f.row_height()),
@@ -3486,8 +3531,9 @@ impl Element {
     ///
     /// 分组内容的默认外壳。标题**不设固定高**，长标题在卡片宽度内换行、分隔线随之下移。
     ///
-    /// 底色/圆角/内边距/标题字号取自 [`CardTheme`]。想要描边卡片就在返回值上链
-    /// `.border_role(Role::Border, 1)`——那是样式修饰符，对这种组合容器有效
+    /// 底色/圆角/内边距/标题字号取自 [`CardTheme`]。默认画 `Divider` 色 1px 描边：
+    /// 整套主题关掉用 `theme.card.bordered = Some(false)`，单张卡片换色或去掉就在返回值上
+    /// 链 `.border_role(..)` / `.border(c, 0)`——样式修饰符对这种组合容器有效
     /// （可用/不可用的修饰符同 [`field`](Self::field)）。
     ///
     /// # 示例
@@ -3500,28 +3546,33 @@ impl Element {
     ///         .width_match()
     ///         .child(Element::field("推送", Element::switch(notify))),
     /// )
-    /// .border_role(Role::Border, 1); // 样式修饰符可以链
+    /// .border_role(Role::Border, 1); // 样式修饰符可以链：描边换深一档
     /// ```
     ///
     /// [`CardTheme`]: crate::theme::CardTheme
     pub fn card(title: impl Into<TextContent>, body: Element) -> Self {
         let th = crate::theme::current();
         let c = &th.card;
-        Element::col()
+        let card = Element::col()
             .width_match()
             .bg_role(crate::style::Role::Surface)
             .corner(c.corner(&th.metrics))
-            .padding(c.pad())
-            .spacing(c.gap())
-            .child(
-                Element::label(title)
-                    .font_size(c.title_size(&th.metrics))
-                    .font_weight(c.title_weight())
-                    .fg_role(crate::style::Role::Text)
-                    .width_match(),
-            )
-            .child(Element::divider())
-            .child(body)
+            .padding(c.pad(&th.metrics))
+            .spacing(c.gap(&th.metrics));
+        let card = if c.bordered() {
+            card.border_role(crate::style::Role::Divider, 1)
+        } else {
+            card
+        };
+        card.child(
+            Element::label(title)
+                .font_size(c.title_size(&th.metrics))
+                .font_weight(c.title_weight())
+                .fg_role(crate::style::Role::Text)
+                .width_match(),
+        )
+        .child(Element::divider())
+        .child(body)
     }
 
     /// 等宽网格：把 `items` 按每行 `cols` 个排布，行/列间距 `gap`，列按权重均分等宽；
@@ -5242,6 +5293,50 @@ mod tests {
         }
     }
 
+    /// 卡片默认带 1px 分隔线色描边（白卡片放在 slate-50 窗口底上，没有描边边界几乎看不出），
+    /// 主题关掉后不画。
+    #[test]
+    fn card_is_bordered_by_default_and_theme_can_turn_it_off() {
+        let c = Element::card("标题", Element::col());
+        assert!(c.style.border.is_some(), "默认应有描边");
+        let _restore = ThemeRestore(crate::theme::current());
+        let mut th = crate::theme::Theme::default();
+        th.card.bordered = Some(false);
+        crate::theme::set_current(Rc::new(th));
+        let c = Element::card("标题", Element::col());
+        assert!(c.style.border.is_none(), "主题关掉后不画描边");
+    }
+
+    /// `hstack` / `vstack` 不设参数就带主题间距（`col` / `row` 仍是 0 的原语），且后链可覆盖。
+    #[test]
+    fn stacks_carry_theme_spacing_and_stay_overridable() {
+        let lin = |e: &Element| match e.layout {
+            Layout::Linear { spacing, cross, .. } => (spacing, cross),
+            _ => unreachable!(),
+        };
+        let m = crate::theme::current().metrics.clone();
+        assert_eq!(lin(&Element::hstack()), (m.space_sm, Align::Center));
+        assert_eq!(lin(&Element::vstack()).0, m.space_md);
+        assert_eq!(lin(&Element::row()).0, 0, "原语不变");
+        assert_eq!(lin(&Element::hstack().spacing(2)).0, 2, "后链覆盖");
+    }
+
+    /// 对话框底部按钮行：没设间距的补上 `space_sm`，显式设过的不动。
+    #[test]
+    fn dialog_footer_gets_default_spacing_only_when_unset() {
+        let spacing = |e: &Element| match e.layout {
+            Layout::Linear { spacing, .. } => spacing,
+            _ => unreachable!(),
+        };
+        let gap = crate::theme::current().metrics.space_sm;
+        let f = Element::button_row_spacing(Element::row(), gap);
+        assert_eq!(spacing(&f), gap);
+        let f = Element::button_row_spacing(Element::row().spacing(20), gap);
+        assert_eq!(spacing(&f), 20);
+        let f = Element::button_row_spacing(Element::col(), gap);
+        assert_eq!(spacing(&f), 0, "竖排不替它做主");
+    }
+
     /// 测试里临时换主题后复位（panic 也复位，理由同 [`AnimOff`]）。
     struct ThemeRestore(Rc<crate::theme::Theme>);
     impl Drop for ThemeRestore {
@@ -6281,7 +6376,11 @@ mod tests {
     #[test]
     fn field_lays_out_label_column_from_theme() {
         let th = crate::theme::current();
-        let (lw, gap, h) = (th.form.label_width(), th.form.gap(), th.form.row_height());
+        let (lw, gap, h) = (
+            th.form.label_width(),
+            th.form.gap(&th.metrics),
+            th.form.row_height(),
+        );
         // 套一层填充容器：`layout` 会把根拉满窗口，直接量根就量不到行的固有高度。
         let row_of = |el: Element| {
             let tree = layout(Element::col().fill().child(el));
@@ -6346,7 +6445,7 @@ mod tests {
         );
         assert_eq!(
             h,
-            left_h + 2 * f.form.row_pad_y(),
+            left_h + 2 * f.form.row_pad_y(&f.metrics),
             "副标题行 = 内容 + 内边距"
         );
         assert!(h > f.form.row_height(), "两行文字应撑得比单行行高更高");
