@@ -1217,7 +1217,11 @@ impl Widget for TabBar {
             // 整条禁用与**单项**禁用在这里合流：两者对这一项的效果完全一样，故只取
             // 一个布尔往下走，不必在每处判断里写两遍。
             let enabled = enabled && self.items[i].is_enabled();
-            let sel_color = if pill { pal.on_accent } else { tab.accent(pal) };
+            let sel_color = if pill {
+                pal.on_accent
+            } else {
+                tab.accent_text(pal)
+            };
             let target_color = if !enabled {
                 pal.text_disabled
             } else if i == sel {
@@ -1289,7 +1293,7 @@ impl Widget for TabBar {
                 (bounds.y + bounds.h) as f32 - ih,
                 pw,
                 ih,
-                &Paint::fill(tab.accent(pal)),
+                &Paint::fill(tab.accent_text(pal)),
             );
         }
     }

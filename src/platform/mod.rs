@@ -755,7 +755,7 @@ impl Default for WindowConfig {
             title: "windui".into(),
             width: 800,
             height: 600,
-            bg: Color::hex(0xF3F3F3),
+            bg: Color::hex(0xF8FAFC),
             centered: false,
             resizable: true,
             screenshot: None,

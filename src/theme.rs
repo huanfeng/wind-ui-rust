@@ -25,6 +25,15 @@ pub struct Palette {
     pub accent_active: Color,
     /// 强调色之上的前景（按钮文字等）。
     pub on_accent: Color,
+    /// 强调色**当前景**用时的取值：选中项文字、链接、描边按钮的字与边、徽章字。
+    ///
+    /// 与 `accent` 分开，是因为两种用法对明度的要求相反：`accent` 要当白字的底
+    /// （够深才读得清白字），而当字用时要在 `bg`/`surface` 上读得清。亮色主题二者
+    /// 可以同值；暗色主题下同一个蓝压在藏青底上只有约 3:1，必须提亮一档。
+    ///
+    /// `None`（默认）= 由 `accent` 推导（见 [`Palette::accent_text`]）：只改 `accent`
+    /// 的主题，链接、焦点环、选中文字会一起换色，不会出现两种蓝。需要精调时再显式给值。
+    pub accent_text: Option<Color>,
     /// 窗口背景。
     pub bg: Color,
     /// 卡片 / 输入框等表面。
@@ -58,64 +67,85 @@ pub struct Palette {
     /// 警告 / 需注意语义色（非阻断提示、中优先级标记）。
     ///
     /// 取值刻意比"品牌琥珀"暗一档：警告色经常直接当**前景**用（标签文字、边框），
-    /// 而饱和的亮黄在浅色表面上只有 1.9:1，字一上去就糊。这里的取值对白底约 3.2:1，
-    /// 与 `danger` 的 3.8:1 同量级，既保住琥珀色相又能当字用。
+    /// 而饱和的亮黄在浅色表面上只有 1.9:1，字一上去就糊。亮色取 amber-700，对白底约 5:1，
+    /// 与 `danger` 的 4.8:1 同量级，既保住琥珀色相又能当字用。
     pub warning: Color,
 }
 
 impl Default for Palette {
+    /// 亮色：Tailwind slate 灰阶 + blue-600 强调色（shadcn 一路的现代观感）。
+    /// 所有灰出自同一条 slate 色阶，避免"背景纯灰、正文偏青、边框偏蓝"三套色相混用。
     fn default() -> Self {
         Self {
-            accent: Color::hex(0x4C8BF5),
-            accent_hover: Color::hex(0x6BA3FF),
-            accent_active: Color::hex(0x3A6FD0),
+            accent: Color::hex(0x2563EB),
+            // 亮色下 hover/按下都**变深**：变亮会把白字的对比度从 5.2 拉到 3 以下。
+            accent_hover: Color::hex(0x1D4ED8),
+            accent_active: Color::hex(0x1E40AF),
             on_accent: Color::WHITE,
-            bg: Color::hex(0xF3F3F3),
+            accent_text: None,
+            bg: Color::hex(0xF8FAFC),
             surface: Color::WHITE,
-            surface_alt: Color::hex(0xF6F8FA),
-            surface_inverse: Color::hex(0x2D3436),
-            on_surface_inverse: Color::hex(0xF3F3F3),
-            text: Color::hex(0x2D3436),
-            text_muted: Color::hex(0x636E72),
-            text_subtle: Color::hex(0x8A9099),
-            text_disabled: Color::hex(0xB0B6BD),
-            border: Color::hex(0xCFD4DC),
-            track: Color::hex(0xCFD4DC),
-            placeholder: Color::hex(0xAAB0B8),
-            divider: Color::hex(0xE2E6EA),
-            danger: Color::hex(0xE5484D),
-            success: Color::hex(0x2EA043),
-            warning: Color::hex(0xD97706),
+            surface_alt: Color::hex(0xF1F5F9),
+            surface_inverse: Color::hex(0x0F172A),
+            on_surface_inverse: Color::hex(0xF8FAFC),
+            text: Color::hex(0x0F172A),
+            text_muted: Color::hex(0x475569),
+            text_subtle: Color::hex(0x64748B),
+            text_disabled: Color::hex(0x94A3B8),
+            border: Color::hex(0xCBD5E1),
+            track: Color::hex(0xCBD5E1),
+            placeholder: Color::hex(0x94A3B8),
+            divider: Color::hex(0xE2E8F0),
+            danger: Color::hex(0xDC2626),
+            // green-700 而非 green-600：后者当字用对白底只有 3.3:1。
+            success: Color::hex(0x15803D),
+            warning: Color::hex(0xB45309),
         }
     }
 }
 
 impl Palette {
+    /// 强调色当前景用的取值：显式设了 `accent_text` 用它；否则亮色主题即 `accent`，
+    /// 暗色主题把 `accent` 向白提亮 35%（blue-600 → 约 blue-400，在 slate-800 上 ≥ 4.5:1）。
+    pub fn accent_text(&self) -> Color {
+        self.accent_text.unwrap_or_else(|| {
+            if is_dark(self) {
+                self.accent.lighten(0.35)
+            } else {
+                self.accent
+            }
+        })
+    }
+
     /// 暗色调色板预设（与亮色 Default 语义角色一一对应，仅取暗色值）。
     pub fn dark() -> Self {
         Self {
-            accent: Color::hex(0x4C8BF5),
-            accent_hover: Color::hex(0x6BA3FF),
-            accent_active: Color::hex(0x3A6FD0),
+            // 按钮底沿用亮色同一个蓝（白字 5.2:1）；hover 在暗底上习惯**变亮**。
+            accent: Color::hex(0x2563EB),
+            accent_hover: Color::hex(0x3B82F6),
+            accent_active: Color::hex(0x1D4ED8),
             on_accent: Color::WHITE,
-            bg: Color::hex(0x111827),
-            surface: Color::hex(0x1B2333),
-            surface_alt: Color::hex(0x232C3E),
+            // 当前景用时由 accent 推导提亮一档（blue-600 压在 slate-800 上只有约 3:1）。
+            accent_text: None,
+            bg: Color::hex(0x0F172A),
+            surface: Color::hex(0x1E293B),
+            surface_alt: Color::hex(0x273449),
             // 暗色下的"反色"是**浅色**条块，故与亮色主题互为镜像：底取 text、字取 bg。
-            surface_inverse: Color::hex(0xE6E8EC),
-            on_surface_inverse: Color::hex(0x111827),
-            text: Color::hex(0xE6E8EC),
-            text_muted: Color::hex(0x9AA3B2),
-            text_subtle: Color::hex(0x76808F),
-            text_disabled: Color::hex(0x5A6172),
-            border: Color::hex(0x2C3650),
-            track: Color::hex(0x2B3344),
-            placeholder: Color::hex(0x6B7280),
-            divider: Color::hex(0x242C3C),
-            danger: Color::hex(0xE5484D),
-            // 暗底上不必压暗，取更亮的一档以拉开与背景的对比。
-            success: Color::hex(0x3FB950),
-            warning: Color::hex(0xD29922),
+            surface_inverse: Color::hex(0xF1F5F9),
+            on_surface_inverse: Color::hex(0x0F172A),
+            text: Color::hex(0xF1F5F9),
+            text_muted: Color::hex(0x94A3B8),
+            text_subtle: Color::hex(0x7C8BA1),
+            text_disabled: Color::hex(0x56657B),
+            border: Color::hex(0x3B4A61),
+            track: Color::hex(0x475569),
+            placeholder: Color::hex(0x64748B),
+            divider: Color::hex(0x2E3B50),
+            // danger 仍取 red-600：它同时要当实底配白字（4.8:1），再亮就只能配深字了。
+            // success / warning 取亮的一档拉开与暗底的对比；当实底时自动配深字。
+            danger: Color::hex(0xDC2626),
+            success: Color::hex(0x22C55E),
+            warning: Color::hex(0xF59E0B),
         }
     }
 }
@@ -166,13 +196,23 @@ impl Intent {
     /// 覆盖层上（`Role::InputBg` 等），只有整个 `Theme` 才解得出。故本方法须在主题
     /// 已就位的时机调用（布局/绘制期），这也是控件唯一调它的地方。
     pub fn colors(self, p: &Palette) -> IntentColors {
-        const L: f32 = 0.10; // hover 变亮系数
-        const D: f32 = 0.10; // active 变暗系数
+        const L: f32 = 0.12; // 暗色主题 hover 变亮系数
+        const D: f32 = 0.12; // hover 变深 / active 再深的系数
+                             // hover 的方向跟随主题明暗：亮色下变深（变亮会把白字对比度拉低、按钮发白），
+                             // 暗色下变亮（暗底上"更亮"才读作"被指着"）。按下恒为变深。
+        let dark = is_dark(p);
+        // 前景在"深字 / 浅字"两个候选里取对比度高的。深字候选不能直接用 `p.text`：
+        // 暗色主题的 text 是浅色，两个候选会都是浅的，绿/琥珀实底上的字就糊了。
+        let ink = if dark { p.on_surface_inverse } else { p.text };
         let derive = |c: Color| IntentColors {
             bg: c,
-            hover: c.lighten(L),
-            active: c.darken(D),
-            fg: c.pick_fg(p.text, p.on_accent),
+            hover: if dark { c.lighten(L) } else { c.darken(D) },
+            active: if dark { c.darken(D) } else { c.darken(D * 2.0) },
+            fg: if contrast_ratio(p.on_accent, c) >= contrast_ratio(ink, c) {
+                p.on_accent
+            } else {
+                ink
+            },
         };
         match self {
             Intent::Primary => IntentColors {
@@ -181,30 +221,17 @@ impl Intent {
                 active: p.accent_active,
                 fg: p.on_accent,
             },
+            // 次要操作用**文字色的半透明叠层**而非某个实色灰：叠在白卡片、灰底、斑马纹行、
+            // 暗色表面上都能读出"一块按钮"，不必为每种底色各配一个灰。
             Intent::Neutral => IntentColors {
-                bg: p.border,
-                hover: p.border.darken(D),
-                active: p.border.darken(D * 2.0),
+                bg: p.text.scale_alpha(0.08),
+                hover: p.text.scale_alpha(0.13),
+                active: p.text.scale_alpha(0.18),
                 fg: p.text,
             },
-            Intent::Danger => IntentColors {
-                bg: p.danger,
-                hover: p.danger.lighten(L),
-                active: p.danger.darken(D),
-                fg: p.danger.pick_fg(p.text, p.on_accent),
-            },
-            Intent::Success => IntentColors {
-                bg: p.success,
-                hover: p.success.lighten(L),
-                active: p.success.darken(D),
-                fg: p.success.pick_fg(p.text, p.on_accent),
-            },
-            Intent::Warning => IntentColors {
-                bg: p.warning,
-                hover: p.warning.lighten(L),
-                active: p.warning.darken(D),
-                fg: p.warning.pick_fg(p.text, p.on_accent),
-            },
+            Intent::Danger => derive(p.danger),
+            Intent::Success => derive(p.success),
+            Intent::Warning => derive(p.warning),
             Intent::Custom(c) => derive(c),
             Intent::CustomRole(r) => derive(r.resolve(&current())),
         }
@@ -215,7 +242,7 @@ impl Intent {
     /// 当字色——否则灰字灰底几乎看不清。
     pub fn badge_colors(self, p: &Palette) -> (Color, Color) {
         let fg = match self {
-            Intent::Primary => p.accent,
+            Intent::Primary => p.accent_text(),
             Intent::Neutral => p.text_muted,
             Intent::Danger => p.danger,
             Intent::Success => p.success,
@@ -381,7 +408,7 @@ impl InputTheme {
         self.border.unwrap_or(p.border)
     }
     pub fn border_focus(&self, p: &Palette) -> Color {
-        self.border_focus.unwrap_or(p.accent)
+        self.border_focus.unwrap_or(p.accent_text())
     }
     pub fn text(&self, p: &Palette) -> Color {
         self.text.unwrap_or(p.text)
@@ -466,7 +493,7 @@ impl DropdownTheme {
         self.border.unwrap_or(p.border)
     }
     pub fn border_focus(&self, p: &Palette) -> Color {
-        self.border_focus.unwrap_or(p.accent)
+        self.border_focus.unwrap_or(p.accent_text())
     }
     pub fn text(&self, p: &Palette) -> Color {
         self.text.unwrap_or(p.text)
@@ -536,8 +563,9 @@ impl MenuTheme {
         self.hover
             .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
     }
+    /// 悬停 / 激活项的文字色（强调色当前景用）。
     pub fn accent(&self, p: &Palette) -> Color {
-        self.accent.unwrap_or(p.accent)
+        self.accent.unwrap_or(p.accent_text())
     }
 }
 
@@ -561,8 +589,13 @@ pub struct TabTheme {
 }
 
 impl TabTheme {
+    /// 胶囊式选中块的**填充**色。
     pub fn accent(&self, p: &Palette) -> Color {
         self.accent.unwrap_or(p.accent)
+    }
+    /// 下划线式选中项的文字与指示条色（强调色当前景用）。设了 `accent` 覆盖时两处同色。
+    pub fn accent_text(&self, p: &Palette) -> Color {
+        self.accent.unwrap_or(p.accent_text())
     }
     pub fn inactive(&self, p: &Palette) -> Color {
         self.inactive.unwrap_or(p.text_muted)
@@ -622,7 +655,7 @@ impl SplitTheme {
         self.handle.unwrap_or(p.divider)
     }
     pub fn handle_active(&self, p: &Palette) -> Color {
-        self.handle_active.unwrap_or(p.accent)
+        self.handle_active.unwrap_or(p.accent_text())
     }
 }
 
@@ -654,7 +687,7 @@ impl StepperTheme {
         self.text.unwrap_or(p.text)
     }
     pub fn button(&self, p: &Palette) -> Color {
-        self.button.unwrap_or(p.accent)
+        self.button.unwrap_or(p.accent_text())
     }
     pub fn button_hover(&self, p: &Palette) -> Color {
         self.button_hover
@@ -681,7 +714,7 @@ impl ListTheme {
             .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
-        self.selected_text.unwrap_or(p.accent)
+        self.selected_text.unwrap_or(p.accent_text())
     }
     pub fn hover_bg(&self, p: &Palette) -> Color {
         self.hover_bg.unwrap_or(p.surface_alt)
@@ -699,13 +732,23 @@ pub struct LinkTheme {
 
 impl LinkTheme {
     pub fn color(&self, p: &Palette) -> Color {
-        self.color.unwrap_or(p.accent)
+        self.color.unwrap_or(p.accent_text())
     }
+    /// 悬停：亮色主题沿用按钮的 hover 蓝（更深）；暗色主题链接本就是调亮的那一档，
+    /// 再取 accent_hover 反而变暗，故在 accent_text 上再提亮一点。
     pub fn hover(&self, p: &Palette) -> Color {
-        self.hover.unwrap_or(p.accent_hover)
+        self.hover.unwrap_or(if is_dark(p) {
+            p.accent_text().lighten(0.2)
+        } else {
+            p.accent_hover
+        })
     }
     pub fn pressed(&self, p: &Palette) -> Color {
-        self.pressed.unwrap_or(p.accent_active)
+        self.pressed.unwrap_or(if is_dark(p) {
+            p.accent_text().darken(0.1)
+        } else {
+            p.accent_active
+        })
     }
 }
 
@@ -783,7 +826,7 @@ impl RichTheme {
         }
         let bg = composite_over(self.chip_bg(p), p.surface);
         for i in 0..=8 {
-            let c = mix(p.accent, p.text, i as f32 / 8.0);
+            let c = mix(p.accent_text(), p.text, i as f32 / 8.0);
             if contrast_ratio(c, bg) >= 4.5 {
                 return c;
             }
@@ -840,7 +883,7 @@ impl SegmentTheme {
         self.border.unwrap_or(p.border)
     }
     pub fn border_focus(&self, p: &Palette) -> Color {
-        self.border_focus.unwrap_or(p.accent)
+        self.border_focus.unwrap_or(p.accent_text())
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
         // 选中段为实心强调色（参考设计：高亮色 + 文字反色），无半透明渐变感。
@@ -1035,7 +1078,7 @@ impl ReorderTheme {
         self.shadow_blur.unwrap_or(12.0)
     }
     pub fn indicator(&self, p: &Palette) -> Color {
-        self.indicator.unwrap_or(p.accent)
+        self.indicator.unwrap_or(p.accent_text())
     }
     pub fn handle_w(&self) -> i32 {
         self.handle_w.unwrap_or(20)
@@ -1203,6 +1246,25 @@ pub struct ColorPickerTheme {
     pub corner: Option<f32>,
 }
 
+/// tooltip / toast 这类"浮在内容上的深色小块"的 `(底, 字)`。
+///
+/// 两套主题下都是**深底浅字**：亮色主题取反色表面（slate-900），与页面拉开最大反差；
+/// 暗色主题若也取反色就成了刺眼的白块，故改取比卡片表面再亮一档的深灰，靠明度差浮起来。
+fn floating_inverse(p: &Palette) -> (Color, Color) {
+    if is_dark(p) {
+        (p.surface_alt.lighten(0.08), p.text)
+    } else {
+        (p.surface_inverse, p.on_surface_inverse)
+    }
+}
+
+/// 主题整体是否为暗色：看窗口底色 `bg`。决定 hover 方向、浮层配色、强调前景提亮这些
+/// "跟着主题明暗走"的取舍。不看 `surface`：深窗口配浅卡片这类局部反色的主题，整体仍是暗色。
+fn is_dark(p: &Palette) -> bool {
+    let s = p.bg;
+    0.299 * s.r as f32 + 0.587 * s.g as f32 + 0.114 * s.b as f32 <= 153.0
+}
+
 /// 面板底色是否偏暗。阈值与 [`Color::pick_fg`] 同源（感知亮度 153），
 /// 免得同一份主题在"该配什么前景"与"该配什么棋盘格"两处得出相反的判断。
 fn surface_is_dark(p: &Palette) -> bool {
@@ -1265,11 +1327,11 @@ impl TooltipTheme {
     pub fn delay_ms(&self) -> u64 {
         self.delay_ms.unwrap_or(500)
     }
-    pub fn bg(&self, _p: &Palette) -> Color {
-        self.bg.unwrap_or(Color::hex(0x303033))
+    pub fn bg(&self, p: &Palette) -> Color {
+        self.bg.unwrap_or(floating_inverse(p).0)
     }
-    pub fn text(&self, _p: &Palette) -> Color {
-        self.text.unwrap_or(Color::WHITE)
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(floating_inverse(p).1)
     }
     pub fn corner(&self, m: &Metrics) -> f32 {
         self.corner.unwrap_or(m.corner_sm)
@@ -1372,18 +1434,26 @@ impl ToastTheme {
                 .unwrap_or(Color::rgba(0, 0, 0, MENU_SHADOW_ALPHA)),
         }
     }
-    pub fn bg(&self, _p: &Palette) -> Color {
-        self.bg.unwrap_or(Color::rgba(0x32, 0x32, 0x35, 235))
+    pub fn bg(&self, p: &Palette) -> Color {
+        self.bg
+            .unwrap_or(floating_inverse(p).0.scale_alpha(240.0 / 255.0))
     }
-    pub fn text(&self, _p: &Palette) -> Color {
-        self.text.unwrap_or(Color::WHITE)
+    pub fn text(&self, p: &Palette) -> Color {
+        self.text.unwrap_or(floating_inverse(p).1)
     }
-    /// 信息图标色（中性，跟随文字白）。
-    pub fn info(&self, _p: &Palette) -> Color {
-        self.text.unwrap_or(Color::WHITE)
+    /// 信息图标色（中性，跟随文字色）。
+    pub fn info(&self, p: &Palette) -> Color {
+        self.text(p)
     }
-    pub fn success(&self, _p: &Palette) -> Color {
-        self.success.unwrap_or(Color::hex(0x4ADE80))
+    /// 成功图标色。toast 底恒为深色（见 [`floating_inverse`]），亮色主题的
+    /// `palette.success`（green-600）压在深底上发闷，故取 green-400；暗色主题的
+    /// success 本就是亮的那一档，直接用。
+    pub fn success(&self, p: &Palette) -> Color {
+        self.success.unwrap_or(if is_dark(p) {
+            p.success
+        } else {
+            Color::hex(0x4ADE80)
+        })
     }
     pub fn error(&self, p: &Palette) -> Color {
         self.error.unwrap_or(p.danger)
@@ -1785,12 +1855,96 @@ caret_width = { px = 2 }
         assert_eq!(bt.bg(&p), Color::hex(0x010203), "有覆盖取覆盖值");
     }
 
+    /// 两套默认调色板的对比度底线。断言关系而非色值：换配色时色值该变，这几条不该变。
+    /// 阈值：正文级（主按钮白字、正文、次要文字、强调色当字）≥ 4.5（WCAG AA）；
+    /// 三级弱化文字与语义色当字 ≥ 3（AA 大字 / 非文本 UI 的门槛）。
+    #[test]
+    fn default_palettes_meet_contrast_floors() {
+        for (name, p) in [("亮色", Palette::default()), ("暗色", Palette::dark())] {
+            let need = |what: &str, fg: Color, bg: Color, min: f32| {
+                let r = contrast_ratio(fg, bg);
+                assert!(r >= min, "{name}：{what} 对比度 {r:.2} < {min}");
+            };
+            need("主按钮白字", p.on_accent, p.accent, 4.5);
+            for (iname, i) in [
+                ("Primary", Intent::Primary),
+                ("Danger", Intent::Danger),
+                ("Success", Intent::Success),
+                ("Warning", Intent::Warning),
+            ] {
+                let c = i.colors(&p);
+                need(&format!("{iname} 实底文字"), c.fg, c.bg, 4.5);
+                need(&format!("{iname} hover 文字"), c.fg, c.hover, 3.0);
+            }
+            for (bg_name, bg) in [("bg", p.bg), ("surface", p.surface)] {
+                need(
+                    &format!("accent_text 在 {bg_name}"),
+                    p.accent_text(),
+                    bg,
+                    4.5,
+                );
+                need(&format!("text 在 {bg_name}"), p.text, bg, 4.5);
+                need(&format!("text_muted 在 {bg_name}"), p.text_muted, bg, 4.5);
+                need(&format!("text_subtle 在 {bg_name}"), p.text_subtle, bg, 3.0);
+                need(&format!("danger 在 {bg_name}"), p.danger, bg, 3.0);
+                need(&format!("success 在 {bg_name}"), p.success, bg, 3.0);
+                need(&format!("warning 在 {bg_name}"), p.warning, bg, 3.0);
+            }
+        }
+    }
+
+    /// 只改 `accent` 的主题（文档示例、旧 TOML 都是这么写的），当前景用的那一档必须跟着变，
+    /// 否则按钮换了色、链接 / 焦点环 / 选中文字还是默认蓝。暗色下推导值须提亮且够读。
+    #[test]
+    fn accent_text_follows_accent_unless_overridden() {
+        let light = Palette {
+            accent: Color::hex(0x2E9E5B),
+            ..Palette::default()
+        };
+        assert_eq!(light.accent_text(), light.accent, "亮色主题推导值即 accent");
+        let mut dark = Palette {
+            accent: Color::hex(0x7C3AED),
+            ..Palette::dark()
+        };
+        let at = dark.accent_text();
+        assert_ne!(at, dark.accent, "暗色主题须提亮");
+        assert!(contrast_ratio(at, dark.surface) > contrast_ratio(dark.accent, dark.surface));
+        dark.accent_text = Some(Color::hex(0x123456));
+        assert_eq!(dark.accent_text(), Color::hex(0x123456), "显式值优先");
+        // 旧 TOML 不写 accent_text：缺省为 None，走推导，而不是回落到亮色主题的定值。
+        let t = Theme::from_toml("[palette]\naccent = \"#7C3AED\"\n").unwrap();
+        assert_eq!(t.palette.accent_text, None);
+    }
+
+    /// hover 的方向跟随主题明暗：亮色变深（变亮会把白字对比度拉低），暗色变亮。
+    #[test]
+    fn intent_hover_direction_follows_theme_brightness() {
+        fn luma(c: Color) -> f32 {
+            0.299 * c.r as f32 + 0.587 * c.g as f32 + 0.114 * c.b as f32
+        }
+        let light = Palette::default();
+        let dark = Palette::dark();
+        for i in [Intent::Primary, Intent::Danger, Intent::Success] {
+            let c = i.colors(&light);
+            assert!(luma(c.hover) < luma(c.bg), "亮色主题 hover 应变深");
+            assert!(
+                luma(c.active) < luma(c.hover),
+                "亮色主题按下应比 hover 更深"
+            );
+        }
+        for i in [Intent::Primary, Intent::Danger, Intent::Success] {
+            let c = i.colors(&dark);
+            assert!(luma(c.hover) > luma(c.bg), "暗色主题 hover 应变亮");
+            assert!(luma(c.active) < luma(c.bg), "暗色主题按下应变深");
+        }
+    }
+
     #[test]
     fn intent_colors_maps_palette_and_derives_fg() {
         let p = Palette::default();
         assert_eq!(Intent::Primary.colors(&p).bg, p.accent);
         assert_eq!(Intent::Primary.colors(&p).fg, p.on_accent);
-        assert_eq!(Intent::Neutral.colors(&p).bg, p.border);
+        assert_eq!(Intent::Neutral.colors(&p).bg, p.text.scale_alpha(0.08));
         assert_eq!(Intent::Danger.colors(&p).bg, p.danger);
         // Success/Warning 与 Danger 同源于 palette 语义色槽——不是另起一套并行体系。
         assert_eq!(Intent::Success.colors(&p).bg, p.success);
@@ -1814,8 +1968,8 @@ caret_width = { px = 2 }
         use crate::style::Role;
         let light = Theme::default();
         let dark = Theme::dark();
-        // 用 `Role::Text` 而不是 `Role::Danger` 作探针：两套主题的 danger 刻意取同值
-        // （红就是红），角色解析换没换主题从结果上看不出来。
+        // 用 `Role::Text` 作探针：它在两套主题下必然不同（深字 / 浅字），
+        // 角色解析换没换主题从结果上一眼可辨。
         let fixed = Intent::Custom(light.palette.text);
 
         set_current(Rc::new(light.clone()));

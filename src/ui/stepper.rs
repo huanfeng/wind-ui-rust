@@ -257,7 +257,7 @@ impl Widget for StepperFrame {
 
         // 焦点在中部输入框身上，本节点自己永远拿不到焦点，故读共享标志。
         let border = if self.shared.focused.get() {
-            pal.accent
+            pal.accent_text()
         } else {
             st.border(pal)
         };

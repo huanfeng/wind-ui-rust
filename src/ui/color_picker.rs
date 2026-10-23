@@ -836,7 +836,7 @@ impl Widget for PresetSwatch {
         }
         canvas.fill_round_rect(x, y, w, h, radius, &Paint::fill(fill));
         let (ring, width) = if self.selected() {
-            (pal.accent, 2.0)
+            (pal.accent_text(), 2.0)
         } else if self.hovered && enabled {
             (pal.text_muted, 1.0)
         } else {
@@ -1008,7 +1008,7 @@ impl Widget for ColorTrigger {
         let border = if !enabled {
             pal.border
         } else if self.open.get() {
-            pal.accent
+            pal.accent_text()
         } else if self.hovered {
             pal.text_muted
         } else {

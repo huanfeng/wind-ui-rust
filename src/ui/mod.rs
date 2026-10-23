@@ -444,6 +444,15 @@ impl Widget for Button {
         } else {
             self.intent.colors(pal)
         };
+        // Outline 的文字/描边色（hover 淡叠层也取它）：
+        // - Primary 用 `accent_text`——它是"强调色当前景"的那一档，暗色主题下比 accent 亮；
+        // - Neutral 的填充色是文字色的半透明叠层，当线条/文字太淡，改用 text_muted；
+        // - 其余意图用意图主色（红/绿/琥珀/自定义）。
+        let outline_col = match self.intent {
+            Intent::Primary => pal.accent_text(),
+            Intent::Neutral => pal.text_muted,
+            _ => ic.bg,
+        };
         // 背景：
         // - Outline：透明底，hover/press 用意图色的淡色叠层（禁用恒透明）。
         // - Solid：禁用用置灰底；Primary 下 style.bg 单点覆盖优先；否则按三态取 intent 色。
@@ -452,8 +461,8 @@ impl Widget for Button {
                 VisualState::Disabled => Color::TRANSPARENT,
                 _ => match self.state {
                     BtnState::Normal => Color::TRANSPARENT,
-                    BtnState::Hover => ic.bg.scale_alpha(0.10),
-                    BtnState::Press => ic.bg.scale_alpha(0.18),
+                    BtnState::Hover => outline_col.scale_alpha(0.10),
+                    BtnState::Press => outline_col.scale_alpha(0.18),
                 },
             }
         } else {
@@ -479,13 +488,6 @@ impl Widget for Button {
         }
         let color = anim.animate();
         self.bg_anim.set(anim);
-        // Outline 的文字/描边色：Primary/Danger 用意图主色（蓝/红）；Neutral 的意图主色是
-        // p.border（分割线色，过淡，启用态会比禁用态还不可见），改用 text_muted 保证可读对比。
-        let outline_col = if matches!(self.intent, Intent::Neutral) {
-            pal.text_muted
-        } else {
-            ic.bg
-        };
         // 文字色：禁用用 text_disabled；Outline 用意图主色（蓝/红/灰）作文字；
         // 显式 .fg(color) 覆盖优先；显式 .fg_role(非默认角色) 次之；否则填充按钮用意图对比
         // 前景 ic.fg（on_accent，跟随主题，保证蓝底白字）。
@@ -888,7 +890,7 @@ impl Element {
         match intent {
             Intent::Primary => shell
                 .bg_role_alpha(Role::Accent, 0.15)
-                .child(label.fg_role(Role::Accent)),
+                .child(label.fg_role(Role::AccentText)),
             // Neutral 前景用 text_muted（够深可读）——不能用浅灰 border 当字色，
             // 灰字灰底几乎看不清（badge_colors 已修过的同一个坑，此处对齐）。
             Intent::Neutral => shell
@@ -3579,14 +3581,14 @@ impl Element {
             .child(
                 Element::label(text)
                     .font_size(12.5)
-                    .fg_role(Role::Accent)
+                    .fg_role(Role::AccentText)
                     .height(18),
             )
             .child(
                 Element::icon_button("\u{2715}")
                     .size(16, 16)
                     .font_size(11.0)
-                    .fg_role(Role::Accent)
+                    .fg_role(Role::AccentText)
                     .on_click(on_remove),
             )
     }

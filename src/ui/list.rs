@@ -171,7 +171,13 @@ impl Widget for ListRow {
         let sel_amt = selt.animate();
         self.sel.set(selt);
         if sel_amt > 0.0 {
-            canvas.fill_rect(x, y, 3.0, h, &Paint::fill(pal.accent.scale_alpha(sel_amt)));
+            canvas.fill_rect(
+                x,
+                y,
+                3.0,
+                h,
+                &Paint::fill(pal.accent_text().scale_alpha(sel_amt)),
+            );
         }
         // 前置图标：方形、垂直居中；文字相应右移。禁用走 Disabled 调制。
         let vstate = if !enabled {

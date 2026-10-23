@@ -1152,7 +1152,7 @@ impl App {
                 title: title.into(),
                 width,
                 height,
-                bg: Color::hex(0xF3F3F3),
+                bg: Color::hex(0xF8FAFC),
                 centered: false,
                 resizable: true,
                 screenshot: None,

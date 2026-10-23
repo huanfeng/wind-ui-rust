@@ -69,7 +69,7 @@ pub enum RichColor {
     Text,
     /// 次要文字（palette.text_muted）。
     Muted,
-    /// 强调色（palette.accent）。
+    /// 强调色（当前景用的那一档，`Palette::accent_text()`）。
     Accent,
     /// 危险色（palette.danger）。
     Danger,
@@ -82,7 +82,7 @@ impl RichColor {
         match self {
             RichColor::Text => p.text,
             RichColor::Muted => p.text_muted,
-            RichColor::Accent => p.accent,
+            RichColor::Accent => p.accent_text(),
             RichColor::Danger => p.danger,
             RichColor::Fixed(c) => c,
         }
@@ -2412,7 +2412,7 @@ impl Widget for RichText {
                 (rh + 4) as f32,
                 4.0,
                 1.0,
-                &Paint::fill(pal.accent),
+                &Paint::fill(pal.accent_text()),
             );
             if visible_h.is_some() {
                 canvas.restore();

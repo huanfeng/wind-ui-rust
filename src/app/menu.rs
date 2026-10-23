@@ -2566,7 +2566,7 @@ mod tests {
         let pick = |it: &MenuItem, active: bool| match (it.enabled, it.intent) {
             (false, _) => pal.text_disabled,
             (true, Some(i)) => i.badge_colors(&pal).1,
-            _ if active => pal.accent,
+            _ if active => pal.accent_text(),
             _ => pal.text,
         };
         let del = MenuItem::run("删除", |_ctx| {}, false).danger();
@@ -2586,7 +2586,11 @@ mod tests {
         );
         let plain = MenuItem::run("复制", |_ctx| {}, false);
         assert_eq!(pick(&plain, false), pal.text);
-        assert_eq!(pick(&plain, true), pal.accent, "普通项悬停仍走强调色");
+        assert_eq!(
+            pick(&plain, true),
+            pal.accent_text(),
+            "普通项悬停仍走强调色（当前景的那一档）"
+        );
     }
 
     /// 指针移出菜单面板后不留残影高亮。

@@ -38,6 +38,9 @@ pub enum Role {
     AccentHover,
     AccentActive,
     OnAccent,
+    /// 强调色当前景（文字 / 描边 / 图标）用时的取值，见 `Palette::accent_text`。
+    /// 暗色主题下比 [`Role::Accent`] 亮一档，蓝字压在深色底上才读得清。
+    AccentText,
     Danger,
     /// 成功 / 已完成语义色。与 [`crate::theme::Intent::Success`] 同源于 `palette.success`。
     Success,
@@ -77,6 +80,7 @@ impl Role {
             Role::AccentHover => p.accent_hover,
             Role::AccentActive => p.accent_active,
             Role::OnAccent => p.on_accent,
+            Role::AccentText => p.accent_text(),
             Role::Danger => p.danger,
             Role::Success => p.success,
             Role::Warning => p.warning,

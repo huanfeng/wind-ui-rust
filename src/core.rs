@@ -2714,7 +2714,7 @@ impl Tree {
 
             // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
             if n.focused && self.focus_ring_visible {
-                let ring = Paint::fill(crate::theme::current().palette.accent);
+                let ring = Paint::fill(crate::theme::current().palette.accent_text());
                 let (rx, ry, rw, rh) = (fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0);
                 match n.style.corner_radii {
                     // 直角仍保持直角：外扩 1px 只给本来就圆的角加 1。

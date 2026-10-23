@@ -160,6 +160,9 @@ impl Widget for CheckBox {
         // 对勾色用 IntentColors.fg 自适应对比（浅底自动转深）。
         let (base_accent, check_fg) = match self.intent {
             Intent::Primary => (tg.accent(p), p.on_accent),
+            // Neutral 的意图色是文字色的半透明叠层（给按钮用的），当勾选框的实心填充太淡——
+            // 选中后描边又淡出了，只剩一个对勾悬空。勾选框改用实色：次要文字灰底 + 表面色对勾。
+            Intent::Neutral => (p.text_muted, p.surface),
             other => {
                 let ic = other.colors(p);
                 (ic.bg, ic.fg)
