@@ -71,8 +71,7 @@ fn main() {
     let grad = gradient(64, 48); // 4:3 源图，便于看出各 Fit 差异
     let icon = plus_icon(32);
 
-    let fit_row = Element::row()
-        .spacing(12)
+    let fit_row = Element::hstack()
         .child(demo(
             "Contain",
             Element::image_rgba(64, 48, &grad).fit(Fit::Contain),
@@ -90,9 +89,7 @@ fn main() {
             Element::image_rgba(64, 48, &grad).fit(Fit::None),
         ));
 
-    let corner_row = Element::row()
-        .spacing(12)
-        .cross(Align::Center)
+    let corner_row = Element::hstack()
         .child(demo(
             "圆角 12",
             Element::image_rgba(64, 48, &grad)
@@ -120,9 +117,7 @@ fn main() {
         .child(demo("占位(加载失败)", Element::image("不存在的文件.png")));
 
     // 状态：正常 / 禁用（背景与图标自动置灰）；以及单色图标着色。
-    let state_row = Element::row()
-        .spacing(12)
-        .cross(Align::Center)
+    let state_row = Element::hstack()
         .child(Element::button("新建").icon_rgba(32, 32, &icon))
         .child(
             Element::button("禁用")
@@ -172,9 +167,7 @@ fn main() {
     let svg_circle: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ff6b9d"/><stop offset="1" stop-color="#4c8bf5"/></linearGradient></defs><circle cx="32" cy="32" r="28" fill="url(#g)"/></svg>"##;
     let svg_check: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z" fill="#000000"/></svg>"##;
 
-    let svg_row = Element::row()
-        .spacing(12)
-        .cross(Align::Center)
+    let svg_row = Element::hstack()
         // 固有尺寸光栅 vs 指定 2× 宽度光栅（矢量按需出清晰位图）。
         .child(demo(
             "SVG 固有",

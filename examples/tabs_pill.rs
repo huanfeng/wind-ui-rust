@@ -18,7 +18,7 @@ fn page(title: &str, note: &str) -> Element {
         .child(
             Element::label(note.to_string())
                 .font_size(13.0)
-                .fg(Color::hex(0x636E72)),
+                .fg_role(Role::TextMuted),
         )
 }
 
@@ -56,26 +56,24 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(0xF3F3F3))
         .padding(20)
         .spacing(20)
         .child(
             Element::label("下划线式（默认）".to_string())
                 .font_size(13.0)
-                .fg(Color::hex(0x8A94A6)),
+                .fg_role(Role::TextSubtle),
         )
         .child(underline.height(150))
         .child(Element::divider())
         .child(
             Element::label("胶囊式（tabs_pill）".to_string())
                 .font_size(13.0)
-                .fg(Color::hex(0x8A94A6)),
+                .fg_role(Role::TextSubtle),
         )
         .child(pill.height(150));
 
     App::new("标签条风格演示", 540, 460)
         .icon(brand_icon())
-        .bg(Color::hex(0xF3F3F3))
         .screenshot_from_args()
         .content(ui)
         .run();

@@ -34,7 +34,6 @@ const STYLES: [(CaretStyle, &str, &str); 4] = [
 /// 按当前选择拼一份主题：只覆盖 `input` 的光标四项，其余留默认。
 fn theme_for(style: CaretStyle, smooth_move: bool, rounded: bool, width: Len) -> Theme {
     let mut t = Theme::default();
-    t.palette.bg = Color::hex(0xF5F7FA);
     t.input.caret_style = Some(style);
     t.input.caret_smooth_move = Some(smooth_move);
     t.input.caret_rounded = Some(rounded);
@@ -81,7 +80,7 @@ fn main() {
     };
 
     // 风格选择：段控件没有变更回调，故用按钮各自 set 索引后重灌主题。
-    let mut picker = Element::row().width_match().spacing(8);
+    let mut picker = Element::hstack().width_match();
     for (i, (_, name, _)) in STYLES.iter().enumerate() {
         let h = handle.clone();
         picker = picker.child(
@@ -111,18 +110,19 @@ fn main() {
         .child(
             Element::label("光标风格")
                 .font_size(17.0)
-                .fg(Color::hex(0x1A2035)),
+                .fg_role(Role::Text),
         )
         .child(picker)
         .child(
             Element::label_signal(desc)
                 .font_size(12.0)
-                .fg(Color::hex(0x666680)),
+                .fg_role(Role::TextMuted),
         )
         .child(
             Element::col()
                 .width_match()
-                .bg(Color::hex(0xFFFFFF))
+                .bg_role(Role::Surface)
+                .border_role(Role::Divider, 1)
                 .corner(10.0)
                 .padding(16)
                 .spacing(10)
@@ -135,7 +135,7 @@ fn main() {
                 ),
         )
         .child(
-            Element::row()
+            Element::hstack()
                 .width_match()
                 .spacing(16)
                 .child(toggle("平滑移动", smooth_move, handle.clone()))
@@ -148,7 +148,7 @@ fn main() {
                 "闪烁周期跟随系统「插入符」设置；只重绘光标那一条，静止界面回到零 CPU 空闲。",
             )
             .font_size(11.0)
-            .fg(Color::hex(0x8A8AA0)),
+            .fg_role(Role::TextSubtle),
         );
 
     app.content(ui).screenshot_from_args().run();

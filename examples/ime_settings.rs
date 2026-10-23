@@ -107,7 +107,6 @@ fn main() {
                     .cross(Align::Center)
                     .child(
                         Element::label("显示输入指示器")
-                            .font_size(14.0)
                             .fg_role(Role::Text)
                             .margin_xy(12, 0),
                     )

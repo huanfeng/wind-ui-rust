@@ -11,10 +11,9 @@
 use windui::prelude::*;
 
 fn main() {
-    let buttons = Element::row()
+    let buttons = Element::hstack()
         .width_match()
         .height(48)
-        .spacing(12)
         .child(
             Element::button("成功提示")
                 .width(110)
@@ -40,12 +39,11 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(16)
-        .bg(Color::hex(0xF3F3F3))
         .child(
             Element::label("点击按钮弹出轻提示（Toast）")
                 .font_size(18.0)
                 .font_weight(600)
-                .fg(Color::hex(0x2D3436))
+                .fg_role(Role::Text)
                 .width_match()
                 .height(28),
         )
@@ -55,14 +53,13 @@ fn main() {
                 "顶部居中堆叠展示，最多 4 条；悬停暂停倒计时，✕ 手动关闭，右键复制内容。连点按钮可观察堆叠效果。",
             )
             .font_size(13.0)
-            .fg(Color::hex(0x636E72))
+            .fg_role(Role::TextMuted)
             .width_match()
             .height(40),
         );
 
     App::new("Toast — 轻提示", 480, 300)
         .icon(brand_icon())
-        .bg(Color::hex(0xF3F3F3))
         .screenshot_from_args()
         .content(ui)
         .run();

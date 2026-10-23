@@ -16,11 +16,10 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(14)
-        .bg(Color::hex(0xF5F6FA))
         .child(
             Element::label("设置面板")
                 .font_size(22.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .width_match()
                 .height(32),
         )
@@ -35,7 +34,7 @@ fn main() {
         .child(Element::field("深色主题", Element::switch(dark)))
         .child(Element::field(
             "渲染模式",
-            Element::row()
+            Element::hstack()
                 .spacing(16)
                 .child(Element::radio("快速", mode, 0))
                 .child(Element::radio("均衡", mode, 1))
@@ -43,18 +42,15 @@ fn main() {
         ))
         .child(Element::field("音量", Element::slider(volume).width(220)))
         .child(
-            Element::row()
+            Element::hstack()
                 .width_match()
                 .height(44)
-                .cross(Align::Center)
-                .spacing(12)
                 .child(Element::button("保存").on_click(|_| println!("saved")))
                 .child(Element::button("重置").on_click(|_| println!("reset"))),
         );
 
     App::new("Phase 4 — 输入控件", 480, 420)
         .icon(brand_icon())
-        .bg(Color::hex(0xF5F6FA))
         .screenshot_from_args()
         .content(ui)
         .run();

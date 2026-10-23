@@ -46,7 +46,6 @@ fn main() {
         .child(Element::divider())
         .child(
             Element::label_signal(report)
-                .font_size(14.0)
                 .fg_role(Role::Text)
                 .width_match()
                 .weight(1.0),

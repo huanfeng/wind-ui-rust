@@ -76,8 +76,7 @@ fn main() {
                         .fg_role(Role::TextMuted),
                 )
                 .child(
-                    Element::row()
-                        .spacing(12)
+                    Element::hstack()
                         .child(Element::button("打开设置…").on_click(move |ctx| {
                             let th = th_child.clone();
                             ctx.open_window(
@@ -188,9 +187,8 @@ fn confirm_page(name: Signal<String>) -> Element {
         ))
         .child(Element::flex_spacer())
         .child(
-            Element::row()
+            Element::hstack()
                 .width_match()
-                .spacing(8)
                 .child(Element::flex_spacer())
                 .child(
                     Element::button("取消")

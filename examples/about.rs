@@ -72,9 +72,7 @@ fn main() {
                         .width_match(),
                 )
                 .child(
-                    Element::row()
-                        .spacing(10)
-                        .cross(Align::Center)
+                    Element::hstack()
                         .child(Element::badge("v0.0.0-alpha"))
                         .child(Element::button("检查更新").small().outline()),
                 )

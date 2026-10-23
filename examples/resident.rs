@@ -23,13 +23,12 @@ fn main_window() -> WindowRequest {
         .content(|| {
             Element::col()
                 .fill()
-                .bg(Color::hex(0xFFFFFF))
                 .padding(24)
                 .spacing(10)
                 .child(
                     Element::label("零窗口常驻")
                         .font_size(22.0)
-                        .fg(Color::hex(0x2D3436))
+                        .fg_role(Role::Text)
                         .height(30)
                         .width_match(),
                 )
@@ -39,7 +38,7 @@ fn main_window() -> WindowRequest {
                          再从托盘（或 Ctrl+Alt+W）打开时，是新建的一棵控件树。",
                     )
                     .font_size(13.0)
-                    .fg(Color::hex(0x636E72))
+                    .fg_role(Role::TextMuted)
                     .width_match()
                     .weight(1.0),
                 )

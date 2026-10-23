@@ -50,16 +50,14 @@ const CJK_SAMPLE: &str = "行高决定中文正文的呼吸感。这段字用来
 /// 刻意做成"行内带交互控件 + 高度不等"的形态——这正是拖拽手柄存在的理由：
 /// 整行拖拽会与开关抢事件，而让位算法也必须按各行实际高度重新堆叠。
 fn scheme_row(name: &str, sub: &str, on: Signal<bool>) -> Element {
-    Element::row()
+    Element::hstack()
         .width_match()
-        .cross(Align::Center)
-        .spacing(10)
         .padding_xy(8, 6)
         .child(
             Element::col()
                 .weight(1.0)
                 .spacing(2)
-                .child(Element::label(name).font_size(14.0).fg_role(Role::Text))
+                .child(Element::label(name).fg_role(Role::Text))
                 .child(Element::label(sub).font_size(11.0).fg_role(Role::TextMuted)),
         )
         .child(Element::switch(on))
@@ -224,7 +222,6 @@ fn main() {
                 })
                 .child(
                     Element::label(format!("历史记录 {i:02}"))
-                        .font_size(14.0)
                         .fg_role(Role::Text)
                         .weight(1.0),
                 )
@@ -413,7 +410,7 @@ fn main() {
             ))
             .child(Element::field(
                 "质量",
-                Element::row()
+                Element::hstack()
                     .spacing(16)
                     .child(Element::radio("低", quality, 0))
                     .child(Element::radio("中", quality, 1))
@@ -477,9 +474,8 @@ fn main() {
             .width_match()
             .spacing(6)
             .child(
-                Element::row()
+                Element::hstack()
                     .width_match()
-                    .spacing(8)
                     .child(
                         // 焦点一直留在查询框：Enter 一次跳一处（正文框用的是不夺焦点版）。
                         Element::text_input(find_query, "要找的字")
@@ -548,7 +544,7 @@ fn main() {
                                     .weight(1.0)
                                     .spacing(2)
                                     .padding_xy(8, 6)
-                                    .child(Element::label(name).font_size(14.0).fg_role(Role::Text))
+                                    .child(Element::label(name).fg_role(Role::Text))
                                     .child(
                                         Element::label(sub)
                                             .font_size(11.0)
@@ -631,9 +627,7 @@ fn main() {
 
     let cp_4 = Element::card(
         "按钮风格（intent：primary / neutral / danger + accent 扩展）",
-        Element::row()
-            .spacing(10)
-            .cross(Align::Center)
+        Element::hstack()
             .child(Element::button("主操作"))
             .child(Element::button("次要").neutral())
             .child(Element::button("删除").danger())
@@ -643,9 +637,7 @@ fn main() {
 
     let cp_5 = Element::card(
         "轻提示 Toast（居中浮层 + 淡入淡出 + 定时消失，回调内 ctx.toast*）",
-        Element::row()
-            .spacing(10)
-            .cross(Align::Center)
+        Element::hstack()
             .child(Element::button("成功提示").on_click(|ctx| ctx.toast_ok("已添加到剪贴板")))
             .child(
                 Element::button("普通提示")
@@ -661,9 +653,7 @@ fn main() {
 
     let cp_6 = Element::card(
         "描边按钮 Outline + 胶囊徽章 Badge",
-        Element::row()
-            .spacing(10)
-            .cross(Align::Center)
+        Element::hstack()
             .child(Element::button("检查更新").outline())
             .child(Element::button("次要").neutral().outline())
             .child(Element::button("删除").danger().outline())
@@ -677,35 +667,34 @@ fn main() {
 
     let cp_7 = Element::card(
         "可点击容器 clickable（hover/press 叠层 + 键盘激活 + 手型光标）",
-        Element::row()
+        Element::hstack()
             .clickable()
             .on_click(|ctx| ctx.toast_ok("卡片被点击"))
             .width_match()
-            .cross(Align::Center)
-            .spacing(12)
             .padding(12)
             .corner(10.0)
             .bg_role(Role::Surface)
             .border_role(Role::Border, 1)
             .child(
                 Element::label("整行可点击 — 悬停高亮 / 回车激活 / 点击弹 Toast")
-                    .font_size(14.0)
                     .fg_role(Role::Text)
                     .weight(1.0),
             )
-            .child(Element::label("›").font_size(20.0).fg(Color::hex(0x8A9099))),
+            .child(
+                Element::label("›")
+                    .font_size(20.0)
+                    .fg_role(Role::TextSubtle),
+            ),
     );
 
     let cp_8 = Element::card(
         "图标按钮 IconButton / 标签 chip / 标签字段 tag_field",
-        Element::row()
+        Element::hstack()
             .width_match()
-            .spacing(8)
-            .cross(Align::Center)
-            .child(Element::icon_button("\u{25B2}").fg(Color::hex(0x8A9099)))
-            .child(Element::icon_button("\u{25BC}").fg(Color::hex(0x8A9099)))
-            .child(Element::icon_button("\u{24D8}").fg(Color::hex(0x8A9099)))
-            .child(Element::icon_button("\u{2715}").fg(Color::hex(0x8A9099)))
+            .child(Element::icon_button("\u{25B2}").fg_role(Role::TextSubtle))
+            .child(Element::icon_button("\u{25BC}").fg_role(Role::TextSubtle))
+            .child(Element::icon_button("\u{24D8}").fg_role(Role::TextSubtle))
+            .child(Element::icon_button("\u{2715}").fg_role(Role::TextSubtle))
             .child(
                 Element::tag_field(
                     "添加触发键…",
@@ -1017,7 +1006,6 @@ fn main() {
             .child(Element::field(
                 "帮助图标",
                 Element::label("(?)")
-                    .font_size(14.0)
                     .fg_role(Role::TextMuted)
                     .tooltip("把鼠标停在元素上片刻即可看到提示"),
             )),
@@ -1201,10 +1189,10 @@ fn main() {
             Element::col()
                 .width_match()
                 .spacing(8)
-                .child(Element::field("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(Element::field("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(Element::field("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).font_size(14.0).fg_role(Role::Text).weight(1.0)))
-                .child(Element::field("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).font_size(14.0).fg_role(Role::Text).weight(1.0))),
+                .child(Element::field("End", Element::label("这是一段很长很长的文本，用来演示末尾省略号效果，超出部分会被截断显示为 …").max_lines(1).truncate(Truncate::End).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("Start", Element::label("这是一段很长很长的文本，用来演示开头省略号效果，超出部分会在开头显示为 …").max_lines(1).truncate(Truncate::Start).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("Middle", Element::label("这是一段很长很长的文本，用来演示中间省略号效果，超出部分在中间被截断显示为 …").max_lines(1).truncate(Truncate::Middle).fg_role(Role::Text).weight(1.0)))
+                .child(Element::field("2行裁剪", Element::label("行一：这是第一行内容。\n行二：这是第二行内容。\n行三：这一行被 max_lines(2) 裁剪不显示。").max_lines(2).fg_role(Role::Text).weight(1.0))),
         );
 
     let cp_26 = Element::card(
@@ -1224,11 +1212,9 @@ fn main() {
                 .child(
                     // 数据是 Vec<usize>，行文本在构建行时才生成——不必预先格式化十万个 String。
                     Element::virtual_list(huge_rows, 32, |i, v: usize| {
-                        Element::row()
+                        Element::hstack()
                             .width_match()
-                            .cross(Align::Center)
                             .padding_xy(10, 0)
-                            .spacing(10)
                             .child(
                                 Element::label(format!("{:>6}", i + 1))
                                     .font_size(12.5)
@@ -1247,7 +1233,7 @@ fn main() {
 
     // 横向 / 双向滚动：容器仍纵向堆叠子节点，`scroll_axis` 决定哪个方向不设上限、可滚动。
     // 滚轮：Shift+滚轮或触控板横滑滚横向；只能横滚的容器上，竖滚轮也转成横滚。
-    let mut strip = Element::row().spacing(8).padding_xy(2, 4);
+    let mut strip = Element::hstack().padding_xy(2, 4);
     for i in 1..=18 {
         strip = strip.child(Element::button(format!("标签 {i}")).outline());
     }
@@ -1301,8 +1287,7 @@ fn main() {
 
     let im_1 = Element::card(
         "适配模式（源图 4:3）",
-        Element::row()
-            .spacing(10)
+        Element::hstack()
             .child(img_cell(
                 "Contain",
                 Element::image_rgba(64, 48, &grad).fit(Fit::Contain),
@@ -1319,9 +1304,7 @@ fn main() {
 
     let im_2 = Element::card(
         "圆角 & 占位 & 图标",
-        Element::row()
-            .spacing(12)
-            .cross(Align::Center)
+        Element::hstack()
             .child(img_cell(
                 "圆角",
                 Element::image_rgba(64, 48, &grad)
@@ -1339,9 +1322,7 @@ fn main() {
 
     let im_3 = Element::card(
         "SVG 矢量（resvg）",
-        Element::row()
-            .spacing(12)
-            .cross(Align::Center)
+        Element::hstack()
             .child(img_cell(
                 "渐变圆",
                 Element::image_svg(SVG_CIRCLE, Some(120)).fit(Fit::Contain),
@@ -1386,8 +1367,7 @@ fn main() {
         // 尾列由闭包按行生成按钮组；row 为原始行下标（Copy），各按钮 move 捕获它绑定回调。
         // 用 .small() 紧凑按钮，让三枚操作按钮在窄列内并排不溢出。
         .actions("操作", 2.6, |row| {
-            Element::row()
-                .spacing(6)
+            Element::hstack()
                 .child(
                     Element::button("查看")
                         .neutral()
@@ -1471,10 +1451,8 @@ fn main() {
                 .child({
                     // 底部统计：点击"刷新选中数"读取选中集并写入动态标签（演示 app 读取选择）。
                     let (sel_c, msg) = (sel.clone(), sel_count);
-                    Element::row()
+                    Element::hstack()
                         .width_match()
-                        .cross(Align::Center)
-                        .spacing(10)
                         .child(Element::button("刷新选中数").neutral().outline().on_click(
                             move |_| {
                                 let n = sel_c.iter().filter(|s| s.get()).count();
@@ -1607,9 +1585,8 @@ fn main() {
                     .height(160),
                 )
                 .child(
-                    Element::row()
+                    Element::hstack()
                         .width_match()
-                        .spacing(8)
                         .child(Element::button("均分").small().on_click(move |ctx| {
                             ratio.set(0.5);
                             ctx.mark_dirty_all();
@@ -1664,9 +1641,8 @@ fn main() {
         Element::card(
             "自由摆放 place / place_fn + 四角圆角 corners（几何由信号算出）",
             Element::col().width_match().spacing(8).child(board).child(
-                Element::row()
+                Element::hstack()
                     .width_match()
-                    .spacing(8)
                     .child(Element::button("拉高").small().on_click(move |_| {
                         card_h.update(|h| *h = (*h + 20).min(160));
                     }))
@@ -1768,12 +1744,11 @@ fn main() {
             )
             .child(
                 Element::label("一个用 Rust 编写的轻量桌面 GUI 框架，适合做内存友好的小工具。")
-                    .font_size(14.0)
                     .fg_role(Role::TextMuted)
                     .width_match(),
             )
             .child(
-                Element::row()
+                Element::hstack()
                     .width_match()
                     .height(40)
                     .child(Element::label("").weight(1.0))

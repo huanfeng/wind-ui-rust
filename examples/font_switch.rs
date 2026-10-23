@@ -85,12 +85,12 @@ fn main() {
     };
     let (first, rest) = FAMILIES.split_at(3);
     let row_a = first.iter().fold(
-        Element::row().spacing(6).child(button("平台默认", None)),
+        Element::hstack().child(button("平台默认", None)),
         |r, &f| r.child(button(f, Some(f))),
     );
-    let row_b = rest.iter().fold(Element::row().spacing(6), |r, &f| {
-        r.child(button(f, Some(f)))
-    });
+    let row_b = rest
+        .iter()
+        .fold(Element::hstack(), |r, &f| r.child(button(f, Some(f))));
     let buttons = Element::col().spacing(6).child(row_a).child(row_b);
 
     let menu_theme = theme.clone();
@@ -148,8 +148,7 @@ fn main() {
                 .font_family("SimSun"),
             )
             .child(
-                Element::row()
-                    .spacing(8)
+                Element::hstack()
                     .child(
                         Element::button("弹一个 toast")
                             .tooltip("悬停这里看 tooltip 的字体")

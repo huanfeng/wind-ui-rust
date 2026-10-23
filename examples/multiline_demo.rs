@@ -111,8 +111,7 @@ DirectWrite on Windows with subpixel antialiasing and proper line metrics.",
                         .height(120),
                 )
                 .child(
-                    Element::row()
-                        .spacing(8)
+                    Element::hstack()
                         .child(
                             Element::button("追加段落")
                                 .accent_role(Role::Accent)
@@ -163,8 +162,7 @@ Home/End 跳行首尾、Ctrl+A 全选，\
                         .height(200),
                 )
                 .child(
-                    Element::row()
-                        .spacing(8)
+                    Element::hstack()
                         .child(
                             Element::button("追加段落")
                                 .accent_role(Role::Accent)

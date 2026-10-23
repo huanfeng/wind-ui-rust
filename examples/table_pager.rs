@@ -95,26 +95,22 @@ fn main() {
 
     reload(rows, total, page, only_log, sort);
 
-    let toolbar = Element::row()
-        .width_match()
-        .cross(Align::Center)
-        .spacing(12)
-        .child(
-            Element::checkbox(
-                "只看 .log（故意不重置页码：翻到末页再勾，看页码被钳回来）",
-                only_log,
-            )
-            .on_click(move |_ctx| {
-                // 复选框挂了 on_click 之后，**翻转要自己做**：回调是接管不是追加
-                // （见 Element::checkbox 的说明）。少了这一行，勾选框点了不打勾、
-                // 筛选也永远读到 false。
-                only_log.set(!only_log.get());
-                // 这里**故意不**回到第一页，好让"页码越界被自动钳回末页"看得见：
-                // 翻到第 103 页再勾上，条目只剩 21 页，页码栏会把它钳到第 21 页并
-                // 重取那一页。真实应用换筛选条件时通常还是回第一页（同下面换排序）。
-                reload(rows, total, page, only_log, sort);
-            }),
-        );
+    let toolbar = Element::hstack().width_match().child(
+        Element::checkbox(
+            "只看 .log（故意不重置页码：翻到末页再勾，看页码被钳回来）",
+            only_log,
+        )
+        .on_click(move |_ctx| {
+            // 复选框挂了 on_click 之后，**翻转要自己做**：回调是接管不是追加
+            // （见 Element::checkbox 的说明）。少了这一行，勾选框点了不打勾、
+            // 筛选也永远读到 false。
+            only_log.set(!only_log.get());
+            // 这里**故意不**回到第一页，好让"页码越界被自动钳回末页"看得见：
+            // 翻到第 103 页再勾上，条目只剩 21 页，页码栏会把它钳到第 21 页并
+            // 重取那一页。真实应用换筛选条件时通常还是回第一页（同下面换排序）。
+            reload(rows, total, page, only_log, sort);
+        }),
+    );
 
     let table = Element::table_sortable_server(
         vec![("名称", 3.0), ("大小(KB)", 1.2), ("修改日期", 1.6)],

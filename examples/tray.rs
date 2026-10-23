@@ -40,20 +40,19 @@ fn main() {
 
     let ui = Element::col()
         .fill()
-        .bg(Color::hex(0xFFFFFF))
         .padding(24)
         .spacing(10)
         .child(
             Element::label("系统托盘")
                 .font_size(22.0)
-                .fg(Color::hex(0x2D3436))
+                .fg_role(Role::Text)
                 .height(30)
                 .width_match(),
         )
         .child(
             Element::label("左键托盘图标显示窗口；右键弹原生菜单（含勾选项、分隔线、气泡通知）。")
                 .font_size(13.0)
-                .fg(Color::hex(0x636E72))
+                .fg_role(Role::TextMuted)
                 .width_match()
                 .weight(1.0),
         );
@@ -61,7 +60,6 @@ fn main() {
     App::new("windui — 托盘", 420, 240)
         .icon(brand_icon())
         .screenshot_from_args()
-        .bg(Color::hex(0xFFFFFF))
         .tray(tray)
         .content(ui)
         .run();

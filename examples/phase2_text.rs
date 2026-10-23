@@ -4,10 +4,10 @@
 
 use windui::prelude::*;
 
-fn row_label(text: &str, size: f32, color: u32) -> Element {
+fn row_label(text: &str, size: f32, role: Role) -> Element {
     Element::label(text)
         .font_size(size)
-        .fg(Color::hex(color))
+        .fg_role(role)
         .height_match()
 }
 
@@ -16,24 +16,23 @@ fn main() {
         .fill()
         .padding(24)
         .spacing(14)
-        .bg(Color::hex(0xFFFFFF))
         .child(
             Element::label("windui 文字渲染")
                 .font_size(28.0)
-                .fg(Color::hex(0x1A1A2E))
+                .fg_role(Role::Text)
                 .width_match()
                 .height(40),
         )
         .child(
             Element::label("基于 DirectWrite 的高质量中文排版")
                 .font_size(16.0)
-                .fg(Color::hex(0x555555))
+                .fg_role(Role::TextMuted)
                 .width_match()
                 .height(26),
         )
         // 不同字号
-        .child(row_label("16px：快速的棕色狐狸 Quick Fox 0123", 16.0, 0x333333).height(26))
-        .child(row_label("20px：轻量级桌面 GUI 框架", 20.0, 0x0066CC).height(32))
+        .child(row_label("16px：快速的棕色狐狸 Quick Fox 0123", 16.0, Role::Text).height(26))
+        .child(row_label("20px：轻量级桌面 GUI 框架", 20.0, Role::AccentText).height(32))
         // 彩色块上的白字（验证任意背景合成）
         .child(
             Element::col()
@@ -51,28 +50,27 @@ fn main() {
         )
         // 对齐演示
         .child(
-            Element::row()
+            Element::hstack()
                 .width_match()
                 .height(40)
-                .spacing(8)
                 .child(
                     Element::label("左对齐")
                         .text_align(Align::Start)
-                        .bg(Color::hex(0xF0F0F0))
+                        .bg_role(Role::SurfaceAlt)
                         .weight(1.0)
                         .height_match(),
                 )
                 .child(
                     Element::label("居中")
                         .text_align(Align::Center)
-                        .bg(Color::hex(0xF0F0F0))
+                        .bg_role(Role::SurfaceAlt)
                         .weight(1.0)
                         .height_match(),
                 )
                 .child(
                     Element::label("右对齐")
                         .text_align(Align::End)
-                        .bg(Color::hex(0xF0F0F0))
+                        .bg_role(Role::SurfaceAlt)
                         .weight(1.0)
                         .height_match(),
                 ),
@@ -80,7 +78,6 @@ fn main() {
 
     App::new("Phase 2 — 文字", 600, 420)
         .icon(brand_icon())
-        .bg(Color::hex(0xFFFFFF))
         .screenshot_from_args()
         .content(ui)
         .run();

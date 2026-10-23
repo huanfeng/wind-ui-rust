@@ -103,8 +103,7 @@ fn main() {
         .child(Element::label_signal(edge_text).width_match())
         .child(Element::label("2. 指定位置 + 不进任务栏").font_size(15.0))
         .child(
-            Element::row()
-                .spacing(8)
+            Element::hstack()
                 .child(Element::button("在 (100, 100) 开浮窗").on_click(|ctx| {
                     ctx.open_window(floating(100, 100));
                 }))

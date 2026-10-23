@@ -161,7 +161,7 @@ fn main() {
 
     // 语言按钮从**译文自己报的显示名**生成（`[meta] name`），不是写死一张语言名表——
     // 加一种语言只该动一个文件。
-    let mut switcher = Element::row().spacing(8).width_match();
+    let mut switcher = Element::hstack().width_match();
     for info in lang.available() {
         let id = info.id.clone();
         let handle = lang;
@@ -174,9 +174,7 @@ fn main() {
 
     // 复数的数量轴用信号：计数变了自动刷，换语言也自动刷——一条路，不是两条。
     let count = signal(1i64);
-    let counter = Element::row()
-        .spacing(8)
-        .cross(Align::Center)
+    let counter = Element::hstack()
         .width_match()
         .child(Element::button("−").small().on_click(move |_| {
             count.set((count.get() - 1).max(0));

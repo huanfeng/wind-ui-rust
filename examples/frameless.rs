@@ -40,7 +40,6 @@ fn main() {
         })
         .child(
             Element::label("   windui — 无边框窗口")
-                .font_size(14.0)
                 .fg(Color::WHITE)
                 .weight(1.0),
         )

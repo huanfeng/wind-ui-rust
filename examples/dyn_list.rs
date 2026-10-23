@@ -120,12 +120,10 @@ fn task_row(task: Task) -> Element {
     let badge_text = format!("优先级：{}", task.priority.label());
     let done_text = if task.done { " ✓ 已完成" } else { "" };
 
-    Element::row()
+    Element::hstack()
         .width_match()
         .height(48)
-        .cross(Align::Center)
         .padding_xy(12, 0)
-        .spacing(10)
         .child(
             // 优先级色块
             Element::col()
@@ -137,7 +135,6 @@ fn task_row(task: Task) -> Element {
         .child(
             // 任务名
             Element::label(format!("{}{}", task.name, done_text))
-                .font_size(14.0)
                 .fg_role(name_role)
                 .weight(1.0),
         )
@@ -198,11 +195,9 @@ fn main() {
     };
 
     // 工具栏
-    let toolbar = Element::row()
+    let toolbar = Element::hstack()
         .width_match()
         .height(40)
-        .cross(Align::Center)
-        .spacing(8)
         .child(sort_btn)
         .child(filter_btn);
 

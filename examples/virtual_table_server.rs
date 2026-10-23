@@ -110,8 +110,7 @@ fn main() {
     )
     // 行内修饰符与本地表格通用；下标是**整份数据里的真实行号**，不是段内位置。
     .actions("操作", 2.0, |row| {
-        Element::row()
-            .spacing(6)
+        Element::hstack()
             .child(
                 Element::button("查看")
                     .neutral()

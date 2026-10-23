@@ -34,8 +34,7 @@ fn main() {
             anim_label.set(format!("当前：{text}"));
         })
     };
-    let toggle = Element::row()
-        .spacing(6)
+    let toggle = Element::hstack()
         .child(level_button("全开", MotionLevel::Full))
         .child(level_button("减弱", MotionLevel::Reduced))
         .child(level_button("关闭", MotionLevel::Off));
@@ -62,14 +61,14 @@ fn main() {
             .child(Element::field("Switch B", Element::switch(sw2)))
             .child(Element::field(
                 "CheckBox",
-                Element::row()
+                Element::hstack()
                     .spacing(16)
                     .child(Element::checkbox("自动更新", chk1))
                     .child(Element::checkbox("Beta", chk2)),
             ))
             .child(Element::field(
                 "Radio",
-                Element::row()
+                Element::hstack()
                     .spacing(16)
                     .child(Element::radio("低", radio, 0))
                     .child(Element::radio("中", radio, 1))
@@ -100,9 +99,7 @@ fn main() {
 
     let buttons = Element::card(
         "按钮 / 链接（hover/press 看淡变）",
-        Element::row()
-            .spacing(12)
-            .cross(Align::Center)
+        Element::hstack()
             .child(Element::button("主要按钮"))
             .child(Element::button("禁用").disabled(true))
             .child(Element::link("一个链接").url("https://example.com")),
@@ -137,10 +134,8 @@ fn main() {
             )
             .child(
                 // 按需构建的内容切换：step 一变就重建内容，新旧交叉淡入淡出。
-                Element::row()
+                Element::hstack()
                     .width_match()
-                    .cross(Align::Center)
-                    .spacing(8)
                     .child(
                         Element::button("下一步（switcher）")
                             .outline()
@@ -181,8 +176,7 @@ fn main() {
             // 卡片高度也跟着平滑伸缩，下方区块随之让位（里面的行仍各自滑动）。
             .animate_height()
             .child(
-                Element::row()
-                    .spacing(8)
+                Element::hstack()
                     .child(
                         Element::button("显示/隐藏提示")
                             .on_click(move |_| hint_on.set(!hint_on.get())),
@@ -210,10 +204,8 @@ fn main() {
             )
             .child(
                 // 隐式样式过渡：背景色随状态变（bg_when），变化平滑过渡（animate_style）。
-                Element::row()
+                Element::hstack()
                     .width_match()
-                    .cross(Align::Center)
-                    .spacing(8)
                     .padding_xy(12, 8)
                     .corner(6.0)
                     .bg_when(move || {
@@ -271,7 +263,7 @@ fn main() {
         move |_| show_dialog.set(false),
         Element::label("遮罩淡入，面板从 0.96 倍放大；关闭时反向。减弱档下只淡不缩放。")
             .width_match(),
-        Element::row()
+        Element::hstack()
             .width_match()
             .child(Element::flex_spacer())
             .child(Element::button("关闭").on_click(move |_| show_dialog.set(false))),
@@ -300,10 +292,8 @@ fn main() {
         ),
     );
 
-    let header = Element::row()
+    let header = Element::hstack()
         .width_match()
-        .cross(Align::Center)
-        .spacing(12)
         .child(
             Element::label("动画总览")
                 .font_size(24.0)

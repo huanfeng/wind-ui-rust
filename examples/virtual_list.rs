@@ -28,11 +28,9 @@ const ROW_H: i32 = 34;
 /// 单行：序号 + 内容 + 右侧数值。行内不放可聚焦控件，故不受"Tab 焦点环只覆盖已渲染行"
 /// 这条限制影响（见 `ui::virtual_list` 模块文档的「已知限制」）。
 fn row(i: usize, v: usize) -> Element {
-    Element::row()
+    Element::hstack()
         .width_match()
-        .cross(Align::Center)
         .padding_xy(12, 0)
-        .spacing(10)
         .child(
             Element::label(format!("{:>6}", i + 1))
                 .font_size(12.5)
@@ -55,8 +53,8 @@ fn row(i: usize, v: usize) -> Element {
 
 /// 行内放控件时的行高：`TABLE_ROW_H` 是给**纯文本行**的（单行文本盒 20px），装不下按钮。
 /// 行高在虚拟滚动里是硬约束——占位撑高按它算，行也被强制成它，短了内容会溢出到邻行。
-/// 这个值由截图核对得来：`.small()` 按钮约 30px + 单元格上下内边距 9×2 + 行下分隔线 1。
-const ACTION_ROW_H: i32 = 30 + 9 * 2 + 1;
+/// 这个值由截图核对得来：`.small()` 按钮28px + 单元格上下内边距 9×2 + 行下分隔线 1。
+const ACTION_ROW_H: i32 = 28 + 9 * 2 + 1;
 
 fn table_rows(n: usize) -> Vec<Vec<String>> {
     (0..n)
@@ -80,11 +78,9 @@ fn main() {
     let status = signal(String::from("列表 100000 行 · 表格 10000 行"));
 
     // 三个按钮都只改数据信号，完全不碰滚动量——重建与滚动位置是两件事。
-    let toolbar = Element::row()
+    let toolbar = Element::hstack()
         .width_match()
         .height(36)
-        .cross(Align::Center)
-        .spacing(8)
         .child(Element::button("跳到中间").small().on_click(move |_| {
             items.set((50_000..150_000).collect());
             status.set(String::from("列表已换成 50000..150000 这一段"));
@@ -155,8 +151,7 @@ fn main() {
             // 末列按行生成按钮组。row 是**真实行下标**（不是它在渲染窗口里的位置），
             // 滚到哪一行、闭包拿到的就是哪一行——这点与非虚拟表格一致。
             .actions("操作", 2.2, move |row| {
-                Element::row()
-                    .spacing(6)
+                Element::hstack()
                     .child(
                         Element::button("查看")
                             .neutral()

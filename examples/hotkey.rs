@@ -70,8 +70,7 @@ fn main() {
         .child(Element::label_signal(hits_text).height(22).width_match())
         .child(Element::divider())
         .child(
-            Element::row()
-                .spacing(8)
+            Element::hstack()
                 .child(Element::button("改绑 Ctrl+Alt+J").on_click(move |ctx| {
                     hk_j.set(Hotkey::new(Key::Char('J')).ctrl().alt());
                     bt1.set(String::from("当前唤起热键：Ctrl+Alt+J"));
@@ -108,8 +107,7 @@ fn main() {
                 }),
         )
         .child(
-            Element::row()
-                .spacing(8)
+            Element::hstack()
                 .child(
                     Element::button("切换暗色/亮色")
                         .neutral()

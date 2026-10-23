@@ -246,9 +246,6 @@ pub fn theme_toggle(th: ThemeHandle, dark: Signal<bool>) -> Element {
             // 子元素的方式——挂在 stack 上等于说「这个 stack 在标题栏里居中」，对图标
             // 毫无作用，实测字形贴在格子左上角（偏 dx=-16.5, dy=-10）。要居中就挂在
             // 图标自己身上：Frame 里一个 `align` 同时管两轴。
-            Element::label("◐")
-                .font_size(14.0)
-                .fg_role(Role::Text)
-                .align(Align::Center),
+            Element::label("◐").fg_role(Role::Text).align(Align::Center),
         )
 }

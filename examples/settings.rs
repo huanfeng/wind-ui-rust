@@ -18,9 +18,7 @@ use common::{theme_toggle, Shell};
 
 /// 左侧竖色条 + 标题的小节头。
 fn section_title(title: &str) -> Element {
-    Element::row()
-        .cross(Align::Center)
-        .spacing(10)
+    Element::hstack()
         .child(
             Element::leaf()
                 .size(4, 18)
@@ -54,10 +52,8 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
     } else {
         Element::button("设为当前").small().outline().neutral()
     };
-    Element::row()
+    Element::hstack()
         .width_match()
-        .cross(Align::Center)
-        .spacing(12)
         .padding_xy(4, 10)
         .child(
             Element::col()
@@ -78,9 +74,7 @@ fn scheme_row(name: &str, tag: &str, current: bool, desc: &str) -> Element {
                 .weight(1.0)
                 .spacing(4)
                 .child(
-                    Element::row()
-                        .cross(Align::Center)
-                        .spacing(8)
+                    Element::hstack()
                         .child(
                             Element::label(name)
                                 .font_size(15.0)
@@ -118,10 +112,8 @@ fn dropdown_row(title: &str, desc: &str, options: Vec<&str>, sel: Signal<usize>)
 /// 快捷键一行：名称 + 右侧键位胶囊。用 `SurfaceAlt` 淡底 + 等宽感字号，
 /// 让键位与正文区分开。
 fn shortcut_row(name: &str, keys: &str) -> Element {
-    Element::row()
+    Element::hstack()
         .width_match()
-        .cross(Align::Center)
-        .spacing(10)
         .child(
             Element::label(name)
                 .font_size(13.0)
@@ -157,7 +149,6 @@ fn nav_placeholder(title: &str) -> Element {
             )
             .child(card(
                 Element::label("（此页为导航切换占位演示）")
-                    .font_size(14.0)
                     .fg_role(Role::TextMuted)
                     .width_match(),
             )),
@@ -200,7 +191,6 @@ fn nav_item(name: &'static str, glyph: &'static str, i: usize, sel: Signal<usize
             })
             .child(
                 Element::label(glyph)
-                    .font_size(14.0)
                     .fg_role(if selected {
                         Role::OnAccent
                     } else {
@@ -210,12 +200,10 @@ fn nav_item(name: &'static str, glyph: &'static str, i: usize, sel: Signal<usize
             )
     };
 
-    let on = Element::row()
+    let on = Element::hstack()
         .width_match()
         .height(38)
         .corner(9.0)
-        .cross(Align::Center)
-        .spacing(10)
         .padding_xy(10, 0)
         // 淡底而非实底：实底 accent 会把整条侧栏拉成一块高饱和色斑，压过右侧内容。
         .bg_role_alpha(Role::Accent, 0.12)
@@ -230,14 +218,12 @@ fn nav_item(name: &'static str, glyph: &'static str, i: usize, sel: Signal<usize
         )
         .visible_when(move || sel.get() == i);
 
-    let off = Element::row()
+    let off = Element::hstack()
         .clickable()
         .on_click(move |_| sel.set(i))
         .width_match()
         .height(38)
         .corner(9.0)
-        .cross(Align::Center)
-        .spacing(10)
         .padding_xy(10, 0)
         .child(chip(false))
         .child(
@@ -355,9 +341,7 @@ fn main() {
             .padding(24)
             .spacing(20)
             .child(
-                Element::row()
-                    .cross(Align::Center)
-                    .spacing(12)
+                Element::hstack()
                     .child(
                         Element::label("方案设置")
                             .font_size(24.0)
@@ -451,10 +435,8 @@ fn main() {
                     ))
                     .child(Element::divider())
                     .child(
-                        Element::row()
+                        Element::hstack()
                             .width_match()
-                            .cross(Align::Center)
-                            .spacing(8)
                             .child(Element::badge_intent("已同步", Intent::Success))
                             .child(
                                 Element::label("上次同步：今天 09:41")
@@ -476,9 +458,7 @@ fn main() {
             .padding(24)
             .spacing(20)
             .child(
-                Element::row()
-                    .cross(Align::Center)
-                    .spacing(12)
+                Element::hstack()
                     .child(
                         Element::label("输入设置")
                             .font_size(24.0)
@@ -568,9 +548,7 @@ fn main() {
             .padding(24)
             .spacing(20)
             .child(
-                Element::row()
-                    .cross(Align::Center)
-                    .spacing(12)
+                Element::hstack()
                     .child(
                         Element::label("外观设置")
                             .font_size(24.0)
@@ -691,7 +669,7 @@ fn main() {
                     .width_match(),
             )
             .child(table_w),
-        Element::row()
+        Element::hstack()
             .width_match()
             .child(Element::button("恢复默认").small().outline().neutral())
             .child(Element::flex_spacer())
@@ -717,7 +695,7 @@ fn main() {
         340,
         move |_| edit_show.set(false),
         Element::text_input(edit_buf, "输入字符…").width_match(),
-        Element::row()
+        Element::hstack()
             .width_match()
             .child(Element::flex_spacer())
             .child(
@@ -745,7 +723,7 @@ fn main() {
         520,
         move |_| show_pairs.set(false),
         Element::grid(2, 14, checks).width_match(),
-        Element::row()
+        Element::hstack()
             .width_match()
             .child(Element::flex_spacer())
             .child(Element::button("全选").small().outline().neutral())
@@ -756,12 +734,10 @@ fn main() {
     // ── 底部操作栏：左=服务状态 + 明暗切换；右=全局动作 ──
     // 保存/重载是对**整窗**的提交，故横贯全窗放在底部，而不是塞进侧栏底部——
     // 后者会让人以为它只对当前选中的那一页负责。
-    let footer = Element::row()
+    let footer = Element::hstack()
         .width_match()
         .height(54)
-        .cross(Align::Center)
         .padding_xy(16, 0)
-        .spacing(10)
         .bg_role(Role::SurfaceAlt)
         .child(
             Element::stack()
