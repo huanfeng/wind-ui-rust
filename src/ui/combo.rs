@@ -401,6 +401,9 @@ impl Widget for ComboField {
     fn frame_corner(&self, bounds: Rect) -> Option<f32> {
         self.inner.frame_corner(bounds)
     }
+    fn frame_shows_focus(&self) -> bool {
+        self.inner.frame_shows_focus()
+    }
 
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         self.inner.measure(avail, style, text)

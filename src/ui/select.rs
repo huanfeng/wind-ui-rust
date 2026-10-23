@@ -348,6 +348,9 @@ impl Widget for Dropdown {
         let th = crate::theme::current();
         Some(th.dropdown.corner(&th.metrics))
     }
+    fn frame_shows_focus(&self) -> bool {
+        true
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let mut w = 0;
         match &self.options {
@@ -729,6 +732,9 @@ impl Widget for CheckMenu {
     fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
         let th = crate::theme::current();
         Some(th.dropdown.corner(&th.metrics))
+    }
+    fn frame_shows_focus(&self) -> bool {
+        true
     }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         // 取标题与当前摘要中较宽者：摘要为空时回落到标题，宽度不至于塌缩。

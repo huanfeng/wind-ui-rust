@@ -352,6 +352,13 @@ pub trait Widget {
     fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
         None
     }
+    /// 控件的**外框自己表达焦点**（聚焦时换强调色并加粗到 `metrics.border_width_focus`）。
+    /// 为真时宿主不再在键盘导航时外套焦点环——两圈叠在一起，键盘聚焦反而比鼠标聚焦
+    /// 粗出一大圈。输入框、下拉框、步进器、取色器触发器这类「字段」控件返回 true：
+    /// 它们的焦点态无论鼠标还是键盘都看得见，焦点环只会重复表达。默认 false。
+    fn frame_shows_focus(&self) -> bool {
+        false
+    }
     /// 是否接收非左键（右/中键）的按下/抬起。默认 false——右键**不**作为单击，
     /// 符合桌面习惯。仅需右键交互的控件（如 TextInput 的上下文菜单）返回 true。
     fn wants_right_click(&self) -> bool {
@@ -2728,7 +2735,7 @@ impl Tree {
             crate::anim::set_paint_rect(None);
 
             // 焦点环：仅在键盘导航时（focus_ring_visible）绘制，纯鼠标操作不显示。
-            if n.focused && self.focus_ring_visible {
+            if n.focused && self.focus_ring_visible && !n.widget.frame_shows_focus() {
                 let ring = Paint::fill(crate::theme::current().palette.accent_text());
                 let (rx, ry, rw, rh) = (fx - 1.0, fy - 1.0, fw + 2.0, fh + 2.0);
                 match n.style.corner_radii {
@@ -5592,6 +5599,91 @@ mod tests {
             .find(|&&(_, lw)| lw == 2.0)
             .expect("键盘焦点应画出焦点环");
         assert_eq!(ring.0, want, "焦点环圆角 = 按钮圆角 + 外扩 1px");
+    }
+
+    /// 「字段」控件（输入框 / 下拉框 / 组合框 / 取色器 / 步进器）的焦点由外框表达：键盘
+    /// 聚焦时外框加粗到 `border_width_focus`，宿主**不再**外套焦点环——两圈叠在一起，
+    /// 键盘聚焦就比鼠标聚焦粗出一大圈。无框输入框没有外框可变色，焦点环照画。
+    #[test]
+    fn field_controls_show_focus_in_their_frame_not_a_ring() {
+        let probe = |el: crate::ui::Element, focus_child: Option<usize>| {
+            let mut tree = Tree::new();
+            let root = el.build(&mut tree);
+            tree.root = Some(root);
+            tree.layout_root(Size::new(300, 100), &mut crate::text::NullTextEngine);
+            let target = match focus_child {
+                Some(i) => tree.get(root).unwrap().children[i],
+                None => root,
+            };
+            tree.set_focused(Some(target), None);
+            tree.focus_ring_visible = true;
+            let canvas = || StrokeLogCanvas {
+                clips: Vec::new(),
+                depth: 0,
+                fills: Vec::new(),
+                strokes: Vec::new(),
+            };
+            // 先画一帧：步进器的外框画在中部数字框之前，焦点态要下一帧才读得到
+            // （它自己会续那一帧，见 `NumberField::paint`）。
+            tree.paint(&mut canvas());
+            let mut cv = canvas();
+            tree.paint(&mut cv);
+            cv.strokes
+        };
+        let focus_w = crate::theme::current()
+            .metrics
+            .border_width_focus
+            .to_logical(1.0);
+        let text = || signal(String::from("12"));
+        let cases: Vec<(&str, crate::ui::Element, Option<usize>)> = vec![
+            (
+                "text_input",
+                crate::ui::Element::text_input(text(), ""),
+                None,
+            ),
+            (
+                "dropdown",
+                crate::ui::Element::dropdown(vec!["甲"], signal(0)),
+                None,
+            ),
+            (
+                "combo_box",
+                crate::ui::Element::combo_box(text(), vec!["12"]),
+                None,
+            ),
+            (
+                "color_picker",
+                crate::ui::Element::color_picker(signal(Color::WHITE)),
+                None,
+            ),
+            // 焦点在中部数字框上，外框由整行的 StepperFrame 画。
+            (
+                "stepper",
+                crate::ui::Element::stepper(signal(1.0), 0.0, 9.0, 1.0),
+                Some(1),
+            ),
+        ];
+        for (name, el, child) in cases {
+            let strokes = probe(el, child);
+            assert!(
+                !strokes.iter().any(|&(_, lw)| lw == 2.0),
+                "{name}：外框已表达焦点，不该再套焦点环：{strokes:?}"
+            );
+            assert!(
+                strokes.iter().any(|&(_, lw)| (lw - focus_w).abs() < 1e-3),
+                "{name}：聚焦外框应加粗到 border_width_focus：{strokes:?}"
+            );
+        }
+        let frameless = probe(
+            crate::ui::Element::text_input(text(), "")
+                .read_only()
+                .frameless(),
+            None,
+        );
+        assert!(
+            frameless.iter().any(|&(_, lw)| lw == 2.0),
+            "无框输入框只能靠焦点环：{frameless:?}"
+        );
     }
 
     /// 对话框弹出后，长在它**外面**的浮层不得再抢命中，并且会被收起。

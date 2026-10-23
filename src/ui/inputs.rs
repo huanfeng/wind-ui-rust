@@ -3076,6 +3076,10 @@ impl Widget for TextInput {
         self.goal_x.set(None);
         self.follow_cursor.set(true);
     }
+    fn frame_shows_focus(&self) -> bool {
+        // 无框时没有外框可变色，焦点只能靠焦点环。
+        !self.config.frameless
+    }
     fn wants_right_click(&self) -> bool {
         true // 右键弹出上下文菜单（剪切/复制/粘贴/全选）
     }

@@ -264,12 +264,19 @@ impl Widget for StepperFrame {
         canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
 
         // 焦点在中部输入框身上，本节点自己永远拿不到焦点，故读共享标志。
-        let border = if self.shared.focused.get() {
+        // 聚焦加粗与输入框、下拉框同一规则（`border_width_focus`）。
+        let focused = self.shared.focused.get();
+        let border = if focused {
             pal.accent_text()
         } else {
             st.border(pal)
         };
-        let bw = th.metrics.border_width.to_logical(canvas.dpi_scale());
+        let bw = if focused {
+            th.metrics.border_width_focus
+        } else {
+            th.metrics.border_width
+        }
+        .to_logical(canvas.dpi_scale());
         canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
 
         let div = Paint::fill(st.border(pal));
@@ -726,6 +733,10 @@ impl Widget for NumberField {
 
     fn focusable(&self) -> bool {
         self.inner.focusable()
+    }
+    /// 焦点由外层 `StepperFrame` 的整圈外框表达；焦点环若画在本节点上，只会圈住中间那段。
+    fn frame_shows_focus(&self) -> bool {
+        true
     }
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         self.inner.as_any_mut()

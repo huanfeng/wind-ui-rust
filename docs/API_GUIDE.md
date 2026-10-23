@@ -2035,7 +2035,9 @@ Element::table_sortable_server(cols, rows, sort, on_sort)
 **动作**，那里有 `ctx`。
 
 ### 8.3 焦点与键盘
-- Tab / Shift+Tab 在 `focusable()` 控件间导航（框架自动维护焦点环）。
+- Tab / Shift+Tab 在 `focusable()` 控件间导航（框架自动维护焦点环）。输入框、下拉框、组合框、步进器、
+  取色器这类带外框的「字段」控件用**加粗的强调色外框**表达焦点（鼠标、键盘聚焦一致），不再外套焦点环；
+  自定义控件若自己画了同类外框，覆盖 `Widget::frame_shows_focus() -> true` 即可免去那一圈。
 - 自定义控件实现 `Widget::focusable() -> true` 即加入导航链。
 - `.autofocus()` / `.autofocus_select_all()`：**声明式初始焦点**。布局稳定后宿主把焦点
   交给该节点，一次性（语义同 HTML `autofocus`）。`_select_all` 额外全选已有内容——

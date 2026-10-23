@@ -995,7 +995,7 @@ impl Widget for ColorTrigger {
         &self,
         bounds: Rect,
         _content: Rect,
-        _focused: bool,
+        focused: bool,
         enabled: bool,
         canvas: &mut dyn Canvas,
         style: &Style,
@@ -1009,18 +1009,27 @@ impl Widget for ColorTrigger {
             bounds.w as f32,
             bounds.h as f32,
         );
-        // 外框：与输入框同一套视觉，让它在表单里跟文本框、下拉框排得齐。
+        // 外框：与输入框同一套视觉，让它在表单里跟文本框、下拉框排得齐——聚焦 / 展开
+        // 时同样换强调色并加粗到 `border_width_focus`。
         canvas.fill_round_rect(x, y, w, h, radius, &Paint::fill(cp.bg(pal)));
+        let active = enabled && (focused || self.open.get());
         let border = if !enabled {
             pal.border
-        } else if self.open.get() {
+        } else if active {
             pal.accent_text()
         } else if self.hovered {
             pal.text_muted
         } else {
             cp.border(pal)
         };
-        canvas.stroke_round_rect(x, y, w, h, radius, 1.0, &Paint::fill(border));
+        let m = &th.metrics;
+        let bw = if active {
+            m.border_width_focus
+        } else {
+            m.border_width
+        }
+        .to_logical(canvas.dpi_scale());
+        canvas.stroke_round_rect(x, y, w, h, radius, bw, &Paint::fill(border));
 
         // 色块：在**物理像素**里定位（见 [`trigger_chip_rect`]）。
         let (cx, cy, cw, ch) = trigger_chip_rect(bounds, canvas.dpi_scale(), self.show_text);
@@ -1154,6 +1163,9 @@ impl Widget for ColorTrigger {
         Some(self)
     }
     fn focusable(&self) -> bool {
+        true
+    }
+    fn frame_shows_focus(&self) -> bool {
         true
     }
     fn cursor(&self) -> CursorShape {
