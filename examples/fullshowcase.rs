@@ -1147,34 +1147,23 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(8)
-            .child(
-                Element::link("打开 windui 官网（用系统浏览器）")
-                    .url("https://example.com")
-                    .font_size(14.0),
-            )
+            .child(Element::link("打开 windui 官网（用系统浏览器）").url("https://example.com"))
             .child(
                 Element::row()
                     .spacing(20)
                     .cross(Align::Center)
-                    .child(
-                        Element::link("无下划线样式")
-                            .underline(false)
-                            .font_size(14.0),
-                    )
+                    .child(Element::link("无下划线样式").underline(false))
                     .child(
                         Element::link("已禁用链接")
                             .url("https://example.com")
-                            .disabled(true)
-                            .font_size(14.0),
+                            .disabled(true),
                     ),
             )
             .child(
-                Element::link("点我计数（自定义 on_click）")
-                    .font_size(14.0)
-                    .on_click(move |_| {
-                        ln.set(ln.get() + 1);
-                        lm.set(format!("已点击 {} 次", ln.get()));
-                    }),
+                Element::link("点我计数（自定义 on_click）").on_click(move |_| {
+                    ln.set(ln.get() + 1);
+                    lm.set(format!("已点击 {} 次", ln.get()));
+                }),
             )
             .child(
                 Element::label_signal(link_msg)

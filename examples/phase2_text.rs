@@ -35,7 +35,7 @@ fn main() {
         .child(row_label("20px：轻量级桌面 GUI 框架", 20.0, Role::AccentText).height(32))
         // 彩色块上的白字（验证任意背景合成）
         .child(
-            Element::col()
+            Element::stack()
                 .width_match()
                 .height(64)
                 .bg(Color::hex(0x6C5CE7))
@@ -45,7 +45,7 @@ fn main() {
                     Element::label("彩色背景上的白色文字 — 灰度抗锯齿合成")
                         .font_size(18.0)
                         .fg(Color::WHITE)
-                        .fill(),
+                        .align_xy(Align::Start, Align::Center),
                 ),
         )
         // 对齐演示
@@ -57,6 +57,7 @@ fn main() {
                     Element::label("左对齐")
                         .text_align(Align::Start)
                         .bg_role(Role::SurfaceAlt)
+                        .padding_xy(12, 0)
                         .weight(1.0)
                         .height_match(),
                 )
@@ -64,6 +65,7 @@ fn main() {
                     Element::label("居中")
                         .text_align(Align::Center)
                         .bg_role(Role::SurfaceAlt)
+                        .padding_xy(12, 0)
                         .weight(1.0)
                         .height_match(),
                 )
@@ -71,6 +73,7 @@ fn main() {
                     Element::label("右对齐")
                         .text_align(Align::End)
                         .bg_role(Role::SurfaceAlt)
+                        .padding_xy(12, 0)
                         .weight(1.0)
                         .height_match(),
                 ),

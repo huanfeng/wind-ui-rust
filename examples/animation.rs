@@ -310,8 +310,10 @@ fn main() {
                 .width(90),
         );
 
+    // 右侧留出滚动条的位置：滚动条浮在内容之上，不留会压住卡片右边框。
     let body = Element::col()
         .width_match()
+        .padding_edges(Insets::new(0, 0, 14, 0))
         .spacing(14)
         .child(header)
         .child(toggles)
