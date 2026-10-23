@@ -224,14 +224,16 @@ impl Intent {
                              // hover 的方向跟随主题明暗：亮色下变深（变亮会把白字对比度拉低、按钮发白），
                              // 暗色下变亮（暗底上"更亮"才读作"被指着"）。按下恒为变深。
         let dark = is_dark(p);
-        // 前景在"深字 / 浅字"两个候选里取对比度高的。深字候选不能直接用 `p.text`：
-        // 暗色主题的 text 是浅色，两个候选会都是浅的，绿/琥珀实底上的字就糊了。
+        // 前景优先白字（`on_accent`）：饱和的中间色按钮配白字是主流观感，哪怕深字的对比度
+        // 数值更高（`#2E9E5B` 上白字 3.4、深字 5.2，白字看着反而更清楚）。白字低于 3:1
+        // （WCAG 对大字号 / UI 组件的门槛）才换深字——暗色主题的亮绿、亮琥珀属于这一种。
+        // 深字候选不能直接用 `p.text`：暗色主题的 text 是浅色，两个候选会都是浅的。
         let ink = if dark { p.on_surface_inverse } else { p.text };
         let derive = |c: Color| IntentColors {
             bg: c,
             hover: if dark { c.lighten(L) } else { c.darken(D) },
             active: if dark { c.darken(D) } else { c.darken(D * 2.0) },
-            fg: if contrast_ratio(p.on_accent, c) >= contrast_ratio(ink, c) {
+            fg: if contrast_ratio(p.on_accent, c) >= 3.0 {
                 p.on_accent
             } else {
                 ink
@@ -2040,6 +2042,12 @@ caret_width = { px = 2 }
             Intent::Custom(custom).colors(&p).bg,
             custom,
             "Custom 基色直用"
+        );
+        // 饱和的中间色（品牌绿）配白字，不因深字对比度数值更高就换成深字。
+        assert_eq!(
+            Intent::Custom(Color::hex(0x2E9E5B)).colors(&p).fg,
+            p.on_accent,
+            "中间色实底应是白字"
         );
         // Custom 浅基色 → fg 取深色(text) 保证对比。
         assert_eq!(Intent::Custom(Color::hex(0xFFF0A0)).colors(&p).fg, p.text);
