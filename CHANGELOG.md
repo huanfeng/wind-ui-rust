@@ -5,6 +5,43 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **默认主题全面换新**（Tailwind / shadcn slate 风格），目标是"不手调任何参数，组合出来就是主流观感"：
+  - 配色：所有灰出自同一条 slate 色阶（原先背景纯灰、正文偏青、边框偏蓝三套色相混用）；强调色改为
+    blue-600 `#2563EB`，主按钮白字对比度由 3.3 提到 5.2；亮色主题 hover / 按下改为**变深**（原先变亮，
+    白字对比度跌到 2.5）。暗色主题改为 slate-900 底，强调色当文字用时自动提亮一档。语义色 danger / success /
+    warning 当字用均 ≥ 3:1；实底按钮优先白字，白字对比度低于 3:1 时（暗色主题的亮绿、亮琥珀）才换深字。
+  - 次要按钮（`Intent::Neutral`）由实色灰改为文字色 8% 半透明叠层，放在卡片、窗口底、暗色表面上都成立。
+  - tooltip / toast 不再写死颜色：亮色主题取反色表面（深底浅字），暗色主题取比卡片亮一档的深灰。
+  - 尺寸：按钮、输入框、下拉框、分段控件、步进器、图标按钮默认同高 32（原先 37 / 30 / 33 参差）；
+    list / nav_row / 折叠标题行统一 36（nav 原 40）；标签条 44 → 40，标签条与内容间距 16 → 12；
+    菜单行 30 → 32、字号 13.5 → 14；输入框内距 10 → 12（与下拉框对齐）。
+  - 交互态：hover / 按下 / 选中统一为三档叠层（文字色 6% / 10%、强调色 12%），原先七种取法；菜单悬停只换底、
+    字保持正文色（与 Windows 11 一致）；下拉框悬停边框改为加深一档而非强调色；输入框聚焦边框与下拉框一样加粗。
+  - 卡片默认带 1px 分隔线色描边、标题半粗，间距 10 → 12；对话框内边距 20 → 24、标题 18/700 → 16/600。
+  - 焦点环按控件自身圆角绘制（原先按钮、输入框这类圆角来自主题的控件，环是近乎直角的框）。
+- **破坏性**：`Style.font_size` 由 `f32` 改为 `Option<f32>`，`None` = 跟随主题 `metrics.font_md`（布局期解析），
+  读取改用 `Style::font_size()`。此前默认字号写死 14，改 `font_md` 毫无效果。
+- **破坏性**：`Metrics` 删除无人读取的 `spacing` / `text_pad`，新增间距档 `space_xs/sm/md/lg/xl`（4/8/12/16/24）、
+  `control_h` / `control_h_sm`（32 / 28）、`row_h`（36）、`font_xs` / `font_xl`（12 / 20）与
+  `Metrics::control_height(font)`。旧 TOML 里的两个旧键会被静默忽略。
+- **破坏性**：删除公开常量 `ui::list::ROW_H`、`ui::nav::NAV_ROW_H`，行高改取 `metrics.row_h`。
+- `Widget` 新增可选方法 `frame_corner(bounds)`（默认 `None`）：控件自绘外框的圆角，焦点环据此贴合外形。
+- `CardTheme::pad` / `gap`、`FormTheme::gap` / `row_pad_y` 改为接收 `&Metrics`（未设时回退到间距档）。
+
+### 新增
+
+- **`Element::hstack()` / `Element::vstack()`**：带主题默认间距的横排（8、纵向居中）/ 竖排（12）。
+  `row()` / `col()` 仍是间距 0 的原语，现有布局不受影响。
+- `Palette::accent_text`（`Option<Color>`，默认由 `accent` 推导）与 `Role::AccentText`：强调色当前景（链接、
+  选中文字、描边按钮、焦点环）时的取值。约定：当填充用 `accent`，当前景用 `accent_text()`。
+- `Palette::hover_overlay()` / `press_overlay()` / `selected_soft()` 与常量 `theme::HOVER_ALPHA` /
+  `PRESS_ALPHA` / `SELECTED_ALPHA`，自定义控件的交互态可直接复用。
+- `CardTheme::bordered`（默认 `true`）、`DropdownTheme::border_hover`、`text::WEIGHT_SEMIBOLD`。
+- `dialog_panel` 的底部按钮行没设间距时自动补 `space_sm`（只认横排；`spacing(0)` 与未设分不出，要贴紧请用
+  `spacing(1)`）。
+
 ## [0.28.0] - 2026-10-23
 
 ### 新增

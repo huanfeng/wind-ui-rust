@@ -250,8 +250,10 @@ assert!(!tmp.is_alive());
 
 ### 容器 / 布局
 ```rust
-Element::col()                       // 纵向线性容器
-Element::row()                       // 横向线性容器
+Element::vstack()                    // 纵向排列，子项间距取主题 space_md（默认 12）——日常写法
+Element::hstack()                    // 横向排列，间距 space_sm（默认 8）、纵向居中——按钮组/图标+文字
+Element::col()                       // 纵向线性容器（原语：间距 0、不带任何主张）
+Element::row()                       // 横向线性容器（原语：间距 0、顶对齐）
 Element::stack()                     // 层叠（Frame，后者覆盖前者）
 Element::leaf()                      // 叶子（自定义控件载体，见 §9）
 Element::scroll()                    // 滚动容器，默认竖向（支持鼠标滚轮 + 触摸滑动/惯性）
@@ -343,7 +345,9 @@ Element::card("通知", body)                                 // 标题 + 分隔
 - `setting_row_desc` 是唯一**不定高**的一种——副标题长短不一，定高会把它挤出去，故改由上下内边距撑开。
 - 行高、标签列宽、间距、字号一律走主题（`theme.form`，见 §7.2），**不进签名**：一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值。卡片的圆角/内边距/标题字号同理走 `theme.card`。
 - **说明文字长度不可控时设 `theme.form.desc_max_lines`**（标签同理 `label_max_lines`）：限行后自动加末尾省略，并挂上悬浮看全文的 tooltip（没真截断就不弹）。默认 `None` = 不限，长说明会把行撑成三四行、同一列行高从此参差。这两项只能由主题给——返回的是拼好的容器，`.max_lines()` 链在上面只会打到容器身上。
-- 想要描边卡片：`Element::card("标题", body).border_role(Role::Border, 1)`。
+- 卡片默认带 `Divider` 色 1px 描边、标题半粗。整套关掉描边：`theme.card.bordered = Some(false)`；单张换深一档：
+  `.border_role(Role::Border, 1)`；单张去掉：`.border(c, 0)`。默认**不加投影**——投影按尺寸缓存整张模糊位图，
+  每种卡片尺寸约多占 1MB 内存；要浮起感就对那一张链 `.shadow(..)`。
 
 > **这几个构造器返回的是拼好的容器，不是挂了 widget 的控件**（`badge` / `chip` / `grid` / `dialog_panel` 同理）。因此**可以**链容器/样式类修饰符（`.padding()` / `.margin_xy()` / `.bg_role()` / `.corner()` / `.width()` / `.visible_when()` / `.enabled(false)`），但**不能**链控件专属修饰符（`.intent()` / `.small()` / `.outline()` / `.on_click()`）——后者要 downcast 到具体 widget，挂到组合容器上在 debug 下会 `debug_assert` 失败、release 下静默无效。要改控件外观请加在**传进去的那个 control 上**。
 >
@@ -408,8 +412,8 @@ Element::pager(page /* Signal<usize>, 0 基 */, total_items, PAGE_SIZE, |ctx, p|
 >
 > 只有一处要自己把关：**行高**。虚拟滚动要求行高固定，行元素会被强制设成 `row_height`，
 > 而 `TABLE_ROW_H` 是按**纯文本行**给的（单行文本盒 20px），装不下按钮。行里放控件或用
-> `cell_lines(2)` 时，`row_height` 得按 `控件高 + 9×2 + 1` 自己算大（`.small()` 按钮约
-> 30px，即 49）——短了内容会溢出到邻行。
+> `cell_lines(2)` 时，`row_height` 得按 `控件高 + 9×2 + 1` 自己算大（`.small()` 按钮
+> 28px，即 47）——短了内容会溢出到邻行。
 >
 > **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
 > 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
@@ -978,12 +982,12 @@ app.run_resident();
 ### 无标题栏窗口（自定义标题栏）
 ```rust
 let title_bar = Element::row().width_match().height(36).cross(Align::Stretch)
-    .bg(Color::hex(0x2D3436))
+    .bg_role(Role::SurfaceInverse)                   // 反色条块：亮色主题深底、暗色主题浅底
     .window_drag()                                   // 整条可拖（落在按钮上不拖）
-    .child(Element::label("  我的应用").fg(Color::WHITE).weight(1.0))
-    .child(Element::window_button(WindowButtonKind::Minimize).fg(Color::WHITE))
-    .child(Element::window_button(WindowButtonKind::Maximize).fg(Color::WHITE))
-    .child(Element::window_button(WindowButtonKind::Close).fg(Color::WHITE));
+    .child(Element::label("  我的应用").fg_role(Role::OnSurfaceInverse).weight(1.0))
+    .child(Element::window_button(WindowButtonKind::Minimize).fg_role(Role::OnSurfaceInverse))
+    .child(Element::window_button(WindowButtonKind::Maximize).fg_role(Role::OnSurfaceInverse))
+    .child(Element::window_button(WindowButtonKind::Close).fg_role(Role::OnSurfaceInverse));
 App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar).child(body.weight(1.0))).run();
 ```
 - `App::frameless()` 去掉系统标题栏，客户区铺满整窗，**保留 Aero 吸附/缩放/投影**（WM_NCCALCSIZE + WS_THICKFRAME + DwmExtendFrameIntoClientArea）。
@@ -1530,7 +1534,7 @@ Element::split_opts(Axis::Vertical, top, bottom, ratio, SplitOpts { thickness: 8
 两栏经 `weight_when(move || ratio.get())` / `1.0 - ratio.get()` 读同一个信号，分隔条
 （`SplitHandle`，光标 ↔ / ↕）拖动时改写它并请求重排——**拖动只重排、不重建子树**，
 两侧放文件面板这种重量级内容也不会每帧重建。嵌套即多栏。分隔条颜色走 `Theme::split`
-（静态细线回退 `palette.divider`，激活时回退 `palette.accent`）。
+（静态细线回退 `palette.divider`，激活时回退 `palette.accent_text()`）。
 
 底下的通用能力是 `Element::weight_when(f)`：线性容器子节点的**运行期权重**，与
 `visible_when` 同一契约（纯函数、帧内值不变）。写入信号的一方要记得
@@ -1649,8 +1653,24 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
   别用字面量 `TextStyle { family: None, .. }` 的 `None` 做键——换默认字族后会命中旧字体的结果。
   菜单开着时换字族（粘滞的「字体」菜单项）面板会按新字体重新测宽。完整示例：`examples/font_switch.rs`
   （按钮 / 粘滞菜单换字族、输入法组合串、字体查询；`-- gpu` 走 GPU 后端）。
-- `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。
-- `metrics`（`Metrics`）：圆角、边框宽、间距、字号等度量。
+- `palette`（`Palette`）：accent / bg / surface / text / border … 全局色板。默认是 Tailwind slate 灰阶 +
+  blue-600（`Palette::default()` 亮色 / `Palette::dark()` 暗色），所有灰出自同一条色阶。
+  - **强调色的两种用法分开取**：当**填充**（主按钮底、开关轨道、分段选中块）用 `accent`；当**前景**（链接、
+    选中文字、描边按钮的字与边、焦点环、聚焦边框）用 `accent_text()`（`Role::AccentText`）。暗色主题下同一个蓝
+    压在深底上只有约 3:1，`accent_text` 会提亮一档。`accent_text` 字段默认 `None` = 由 `accent` 推导，只改
+    `accent` 的主题两处一起变；要精调再显式给值。
+  - **交互态叠层**统一三档：悬停 `hover_overlay()`（文字色 6%）、按下 `press_overlay()`（10%）、选中淡底
+    `selected_soft()`（强调色 12%），常量 `theme::HOVER_ALPHA` / `PRESS_ALPHA` / `SELECTED_ALPHA`。半透明叠层
+    叠在任何底色上都读得出，自定义控件请复用它们而不是另配一个灰。
+  - 选中态两种：「一列里选一项」（列表、表格、菜单）用淡底 + `accent_text` 字；「几个里选一个」（分段控件、
+    胶囊标签）用 `accent` 实底 + `on_accent` 字。
+- `metrics`（`Metrics`）：有档位的尺寸 token，控件与组合构造器的默认尺寸都从这里取：
+  - 间距 `space_xs/sm/md/lg/xl` = 4/8/12/16/24；字号 `font_xs/sm/md/lg/xl` = 12/13/14/16/20；
+    圆角 `corner_sm/md/lg` = 4/6/10；边框 `border_width` / `border_width_focus`（聚焦加粗，输入框与下拉框共用）。
+  - 控件高度 `control_h`（32，按钮/输入框/下拉框/分段控件/步进器/图标按钮共用，同一行天然等高）、
+    `control_h_sm`（28，`.small()` 按钮）、行高 `row_h`（36，list / nav_row / 折叠标题行）。
+    `Metrics::control_height(font)` = `max(control_h, 字号 + 16)`：字号调大时控件随之增高、彼此仍等高。
+  - 没显式设字号的文字取 `font_md`（`Style.font_size` 为 `None`，布局期解析）：改 `font_md` 全局生效。
 - 每控件覆盖层：`button` / `input` / `toggle` / `dropdown` / `menu` / `tab` / `progress` / `stepper` / `list` / `form` / `card` / `color_picker` / `tooltip` / `scrollbar` / …，每个字段是 `Option<_>`，`None` 时回退到 palette / metrics。
   - `scrollbar.thumb` / `thumb_active`：滚动条滑块常态 / 拖动态色，回退 `palette.border` / `text_muted`。
     单开一槽是为了只改滑块时不连带改掉输入框描边、`Role::Border`、窗口外框这些同样取 `border` 的东西。
@@ -1663,7 +1683,8 @@ Element::label_signal(msg).fg_role_signal(tone)   // 运行期 tone.set(Role::Su
     `Role::Scrim` 绘制期解析，亮暗主题各写一份即随换肤切换。
 
 其中 `form`（[表单脚手架](#表单脚手架)的行高、标签列宽、间距、标签字号字重、副标题字号）
-与 `card`（卡片圆角、内边距、标题字号）承载的是**尺寸**而非颜色。这些量刻意不进构造器签名：
+与 `card`（卡片圆角、内边距、间距、标题字号字重、是否描边）承载的是**尺寸**而非颜色，未设时回退到
+`metrics` 的档位（卡片内边距 `space_lg`、间距 `space_md`；表单间距 `space_md`）。这些量刻意不进构造器签名：
 一个应用里的表单行必须整齐划一，逐行传尺寸只会让每处各写一个近似值，最终对不齐。
 `examples/ime.rs`、`examples/settings.rs`、`examples/ime_settings.rs` 各演示了一套自定义表单度量。
 
@@ -2905,8 +2926,9 @@ assert_eq!(windui::testing::run_with_hotkey_ctx(|ctx| ctx.show_window()), Some(W
   控件，其构建期信号仍会一轮轮累积，须自持一个 `SignalScope` 管起来
   （`WINDUI_SIGNALS=1` 可在活跃槽位创新高时打印，健康应用启动后应永久安静）。
 - **构造期读取的主题尺寸不跟随运行期换主题**：`card` / `field` / `setting_row` /
-  `setting_row_desc` 这类组合构建器在**构建时**就把 `CardTheme` / `FormTheme` 的行高、
-  内边距、间距、字号烘进 Element。颜色不受影响（走 `Role` 延迟解析，见 §7），
+  `setting_row_desc` / `dialog_panel` / `hstack` / `vstack`，以及 `badge` / `chip` / 表格 / 分页器的小字号，
+  这类组合构建器在**构建时**就把 `metrics` / `CardTheme` / `FormTheme` 的行高、
+  内边距、间距、字号烘进 Element（控件自己的高度、正文字号则在布局期读，换主题即跟随）。颜色不受影响（走 `Role` 延迟解析，见 §7），
   但换主题后要尺寸也跟着变，必须重建这棵子树。
 - **不支持 RTL（从右向左）排版**：阿拉伯语 / 希伯来语的双向重排没有实现，多行文本是
   自绘的视觉行布局、按字符切分，接上 RTL 译文会逐字错位。译文文件可以写 `[meta] rtl = true`
