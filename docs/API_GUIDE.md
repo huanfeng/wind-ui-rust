@@ -536,6 +536,7 @@ Element::button(caption).on_click(move |_| {          // 传信号，不是字�
 
 ```rust
 Element::segmented(vec!["亮", "暗", "跟随"], selected)   // 连体多段单选（selected: Signal<usize>）
+//  .on_segment_change(|ctx, i| ..)   选中变化后的钩子（收已生效的新下标；点同一段不触发）
                                                          //   语义同 radio 组，外观更紧凑；聚焦后左右键移动
 Element::nav_row("键盘设置").on_click(|ctx| { /* 钻入子页 */ })  // 左标签 + 右 chevron 的导航行，无持久选中态
 Element::collapsible("高级选项", expanded, body)         // 可折叠分组（expanded: Signal<bool>）
@@ -662,14 +663,14 @@ selection      = "#FFFFFF"
 selection_text = "#000000"
 ```
 
-**插入光标**：默认 `Blink` 风格——亮/灭各半周期硬切换（跟随系统插入符设置），2px 宽、两端圆角；
+**插入光标**：默认 `Blink` 风格——亮/灭各半周期硬切换（跟随系统插入符设置），1.5 逻辑 px 宽、两端圆角；
 打字/移动光标/点击定位后保持实心 0.5s，停手才开始闪。四种风格与外观都走主题，
 `text_input` 与 `stepper`（中部内嵌的正是同一个输入框）共用同一份配置：
 
 ```toml
 [input]
 caret_style       = "smooth"  # blink（默认）| smooth | phase | solid
-caret_width       = 2.0       # 逻辑 px（也可写 { px = 2 } 固定物理像素）
+caret_width       = 1.5       # 逻辑 px，默认 1.5（也可写 { px = 2 } 固定物理像素）
 caret_rounded     = true      # 两端半圆（窄到画不出圆弧时自动退回直角）
 caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行仍瞬移）
 ```
@@ -678,6 +679,7 @@ caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行
 > 不吸附的话 2 逻辑 px 会落成 2.5 物理 px，抗锯齿铺成「中间 2 列实 + 两侧各半列淡」的
 > 3 列——又糊又比实际更肿。`caret_width` 与 `border_width` 同为 [`Len`]：`2.0` 随 DPI
 > 等比放大（125% → 2 物理 px、200% → 4），`{ px = 2 }` 则任意 DPI 恒为 2 物理像素。
+> 默认 `1.5` 落成 100%/125% → 1、150% → 2、200% → 3 物理像素；想在低缩放下也有 2 像素就写 `{ px = 2 }`。
 
 > **闪烁跟随系统的「插入符」设置**（Windows `GetCaretBlinkTime`、macOS
 > `NSTextInsertionPointBlinkPeriod*`）：周期随它走，用户在辅助功能里关掉闪烁则恒实心、

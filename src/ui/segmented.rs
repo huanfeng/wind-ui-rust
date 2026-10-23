@@ -7,7 +7,7 @@
 //! 事件契约：点击某段即选中该段；悬停逐段高亮（依赖 `Move` 派发到悬停控件，
 //! 见 `core::dispatch_pointer`）；获得焦点后左右方向键在相邻段间移动选中。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use crate::anim::{Easing, Transition};
 use crate::core::{EventCtx, Widget};
@@ -34,7 +34,14 @@ pub struct SegmentedControl {
     sel_pos: Cell<Transition<f32>>,
     /// 各段文字的单行截断，一段一份缓存（共用一份会在段间来回失效，每帧重算）。
     fits: Vec<super::text_fit::SingleLine>,
+    /// 选中变化**之后**的副作用钩子（见 [`SegmentChangeFn`]）。`RefCell` 只为在 `&self`
+    /// 的 `select` 里取用。
+    on_change: RefCell<Option<SegmentChangeFn>>,
 }
+
+/// 选中段变化之后的副作用钩子：回调收到已生效的新下标，不必自己再 `set`。
+/// 与 [`crate::ui::inputs::SwitchChangeFn`] 同构——`ctx` 恒在首位，新值跟在后面。
+pub type SegmentChangeFn = Box<dyn Fn(&mut EventCtx, usize)>;
 
 impl SegmentedControl {
     pub fn new(options: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
@@ -46,7 +53,13 @@ impl SegmentedControl {
             sel_pos: Cell::new(Transition::new(init).movement()),
             fits: options.iter().map(|_| Default::default()).collect(),
             options,
+            on_change: RefCell::new(None),
         }
+    }
+
+    /// 设置选中变化后的钩子（供 Builder 的 `.on_segment_change()` 调用）。
+    pub fn set_on_change(&mut self, f: SegmentChangeFn) {
+        *self.on_change.borrow_mut() = Some(f);
     }
 
     fn len(&self) -> usize {
@@ -80,12 +93,21 @@ impl SegmentedControl {
     fn select(&self, ctx: &mut EventCtx, i: usize) {
         if i < self.len() && self.selected.get() != i {
             self.selected.set(i);
+            // 先 set 再通知（回调读到的是新值），借用在调用前结束——理由同 `Switch::toggle`。
+            let cb = self.on_change.borrow_mut().take();
+            if let Some(f) = cb {
+                f(ctx, i);
+                *self.on_change.borrow_mut() = Some(f);
+            }
             ctx.mark_dirty();
         }
     }
 }
 
 impl Widget for SegmentedControl {
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
     fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
         let th = crate::theme::current();
         Some(th.segment.corner(&th.metrics))
@@ -399,6 +421,28 @@ mod tests {
         assert_eq!(sel.get(), 2, "点击第三段应选中索引 2");
         click(&mut tree, Point::new(30, 16)); // 第一段
         assert_eq!(sel.get(), 0, "点击第一段应选中索引 0");
+    }
+
+    /// `on_segment_change`：选中变了才通知，收到的是已生效的新下标；点同一段不通知。
+    #[test]
+    fn change_hook_fires_with_new_index_only_on_change() {
+        let sel = signal(0usize);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let mut tree = layout(
+            Element::segmented(vec!["A", "B", "C"], sel)
+                .width(180)
+                .height(32)
+                .on_segment_change(move |_, i| log.borrow_mut().push((i, sel.get()))),
+        );
+        click(&mut tree, Point::new(150, 16));
+        click(&mut tree, Point::new(150, 16)); // 同一段：不通知
+        click(&mut tree, Point::new(90, 16));
+        assert_eq!(
+            *seen.borrow(),
+            vec![(2, 2), (1, 1)],
+            "回调读到的信号已是新值"
+        );
     }
 
     #[test]

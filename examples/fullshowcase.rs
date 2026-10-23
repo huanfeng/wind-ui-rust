@@ -1082,6 +1082,92 @@ fn main() {
             .child(Element::label(combo_note).fg_role(Role::TextMuted)),
     );
 
+    // 文本光标：四项都是主题 `input.caret_*` 的字段，经 ThemeHandle 改了即对本窗口所有
+    // 输入框生效（明暗切换时 `theme_toggle` 会把它们带过去，不会被重置）。
+    const CARET_STYLES: [CaretStyle; 4] = [
+        CaretStyle::Blink,
+        CaretStyle::Smooth,
+        CaretStyle::Phase,
+        CaretStyle::Solid,
+    ];
+    // 宽度最终向下吸附到整数物理像素：dp 档随缩放走（150% 下 1→1px、1.5→2px、2→3px），
+    // 「固定」档在任何缩放下都是那个物理像素数。
+    const CARET_WIDTHS: [Len; 6] = [
+        Len::Dp(1.0),
+        Len::Dp(1.5),
+        Len::Dp(2.0),
+        Len::Dp(3.0),
+        Len::Physical { px: 1.0 },
+        Len::Physical { px: 2.0 },
+    ];
+    let cur_input = th.current().input.clone();
+    let caret_style = signal(
+        CARET_STYLES
+            .iter()
+            .position(|s| *s == cur_input.caret_style())
+            .unwrap_or(0),
+    );
+    let caret_width = signal(
+        CARET_WIDTHS
+            .iter()
+            .position(|w| *w == cur_input.caret_width())
+            .unwrap_or(2),
+    );
+    let caret_rounded = signal(cur_input.caret_rounded());
+    let caret_smooth = signal(cur_input.caret_smooth_move());
+    let caret_demo = signal(String::from("在这里打字、按方向键试试"));
+    let (th_s, th_w, th_r, th_m) = (th.clone(), th.clone(), th.clone(), th.clone());
+    let cp_30 = Element::card(
+        "文本光标（主题 input.caret_*：风格 / 粗细 / 圆角端 / 平滑移动）",
+        Element::col()
+            .width_match()
+            .spacing(10)
+            .child(Element::field(
+                "闪烁风格",
+                Element::segmented(
+                    vec!["方波闪烁", "平滑呼吸", "半明半暗", "静态实心"],
+                    caret_style,
+                )
+                .on_segment_change(move |_, i| {
+                    th_s.update(|t| t.input.caret_style = Some(CARET_STYLES[i]))
+                }),
+            ))
+            .child(Element::field(
+                "粗细",
+                Element::segmented(
+                    vec!["1dp", "1.5dp", "2dp", "3dp", "固定1px", "固定2px"],
+                    caret_width,
+                )
+                .on_segment_change(move |_, i| {
+                    th_w.update(|t| t.input.caret_width = Some(CARET_WIDTHS[i]))
+                }),
+            ))
+            .child(Element::field(
+                "圆角端",
+                Element::switch(caret_rounded).on_switch_change(move |_, on| {
+                    th_r.update(|t| t.input.caret_rounded = Some(on))
+                }),
+            ))
+            .child(Element::field(
+                "平滑移动",
+                Element::switch(caret_smooth).on_switch_change(move |_, on| {
+                    th_m.update(|t| t.input.caret_smooth_move = Some(on))
+                }),
+            ))
+            .child(Element::field(
+                "试一试",
+                Element::text_input(caret_demo, "").width(360),
+            ))
+            .child(
+                Element::label(
+                    "dp 随缩放放大并向下取整到整像素（150% 下 1dp→1px、1.5dp→2px、2dp→3px）；\
+                     「固定」在任何缩放下都是该物理像素数。圆角端要宽到 3 个物理像素才看得出；\
+                     闪烁周期跟随系统的光标闪烁速度设置。",
+                )
+                .fg_role(Role::TextMuted),
+            ),
+    );
+
     // 颜色选择器：面板走锚定浮层，会盖住卡片下方的内容——这正是它与普通子节点的分别。
     let brand_color = signal(Color::hex(0x4C8BF5));
     let pen_color = signal(Color::rgba(0xE0, 0x31, 0x31, 0xCC));
@@ -1563,6 +1649,7 @@ fn main() {
             .child(cp_16)
             .child(cp_21)
             .child(cp_29)
+            .child(cp_30)
             .child(cp_27)
             .child(cp_8),
     );

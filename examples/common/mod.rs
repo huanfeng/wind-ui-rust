@@ -235,11 +235,18 @@ pub fn theme_toggle(th: ThemeHandle, dark: Signal<bool>) -> Element {
         .on_click(move |_| {
             let next = !dark.get();
             dark.set(next);
-            th.set(if next {
+            let mut t = if next {
                 Theme::dark()
             } else {
                 Theme::default()
-            });
+            };
+            // 明暗只换配色：用户调过的光标偏好（fullshowcase 的光标卡片）原样带过去。
+            let cur = th.current();
+            t.input.caret_style = cur.input.caret_style;
+            t.input.caret_width = cur.input.caret_width;
+            t.input.caret_rounded = cur.input.caret_rounded;
+            t.input.caret_smooth_move = cur.input.caret_smooth_move;
+            th.set(t);
         })
         .child(
             // `align` 是**自身**在父容器里的对齐（`Node::align` 的定义），不是容器摆

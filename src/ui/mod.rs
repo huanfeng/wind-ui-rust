@@ -1697,6 +1697,30 @@ impl Element {
         self
     }
 
+    /// 分段控件选中变化后的副作用钩子。仅 `Element::segmented(..)` 可用。
+    ///
+    /// 回调收到**已生效的新下标**，不必自己再 `set`；点同一段（选中没变）不触发。
+    /// 典型用途是选项即时生效——换主题配置、切换视图模式。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let mode = signal(0usize);
+    /// let ui = Element::segmented(vec!["列表", "网格"], mode)
+    ///     .on_segment_change(|ctx, i| ctx.toast_ok(format!("切到第 {} 种视图", i + 1)));
+    /// ```
+    #[track_caller]
+    pub fn on_segment_change(mut self, f: impl Fn(&mut EventCtx, usize) + 'static) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<segmented::SegmentedControl>())
+        {
+            Some(s) => s.set_on_change(Box::new(f)),
+            None => debug_assert!(false, "on_segment_change() 只能用于 Element::segmented(..)"),
+        }
+        self
+    }
+
     /// 开关翻转后的副作用钩子。仅 `Element::switch(..)` 可用。
     ///
     /// 回调收到**已生效的新值**，不必自己再 `set`。典型用途是互斥开关：开了这个就把
