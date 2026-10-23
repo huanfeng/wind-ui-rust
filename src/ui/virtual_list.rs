@@ -563,6 +563,44 @@ mod tests {
         (tree, id, scroll)
     }
 
+    #[test]
+    fn table_text_cell_is_vertically_centered_in_a_tall_row() {
+        // 行里放了按钮时要给大行高；文本格若仍贴顶，会与同行竖直居中的按钮、徽章错开。
+        let rows = signal(vec![vec![String::from("a"), String::from("1")]]);
+        let root = Element::col().width(400).height(300).child(
+            Element::table_virtual(vec![("名称", 2.0), ("值", 1.0)], rows, 61)
+                // 第二列换成比单行高的控件（同行有按钮的情形），行随它长高、文本格被拉伸。
+                .cell_render(|_, col, _| (col == 1).then(|| Element::label("x").height(40)))
+                .fill(),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(400, 300), &mut te);
+        tree.layout_root(Size::new(400, 300), &mut te);
+        let table = tree.get(id).unwrap().children[0];
+        let scroll = tree.get(table).unwrap().children[2];
+        let body = tree.get(scroll).unwrap().children[0];
+        // body = [上方占位, 行…]；行 = col[tr, divider]；tr = [单元格…]；单元格 = stack[label]。
+        let row = tree.get(body).unwrap().children[1];
+        let tr = tree.get(row).unwrap().children[0];
+        let cell = tree.get(tr).unwrap().children[0];
+        let label = tree.get(cell).unwrap().children[0];
+        let (tr_b, lb) = (tree.abs_bounds(tr), tree.abs_bounds(label));
+        assert_eq!(lb.h, 20, "文本盒仍是单行高");
+        assert!(
+            tr_b.h >= 40 + 2 * crate::ui::TABLE_CELL_PAD_Y,
+            "前提：行被高控件撑高（{tr_b:?}）"
+        );
+        let gap_top = lb.y - tr_b.y;
+        let gap_bottom = tr_b.y + tr_b.h - (lb.y + lb.h);
+        assert!(
+            (gap_top - gap_bottom).abs() <= 1,
+            "文本盒应竖直居中：上 {gap_top} 下 {gap_bottom}（行 {tr_b:?} 文本 {lb:?}）"
+        );
+    }
+
     /// 行是否有斑马纹底色（`body_row` 给奇数显示位置铺 `Role::SurfaceAlt`）。
     fn is_striped(tree: &Tree, row: NodeId) -> bool {
         // body_row 返回 col[tr, divider]，底色在 tr 上。

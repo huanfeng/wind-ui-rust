@@ -3709,10 +3709,16 @@ impl Element {
     /// 由绘制层精确裁到 `lines` 行（内容不足则更矮，超出裁切不溢出邻行）。
     fn table_cell_pad_lines(content: Element, lines: usize) -> Self {
         if lines <= 1 {
-            // 单行：锁定 20px 单行盒（现状不变）。
+            // 单行：锁定 20px 单行盒。行被同行的按钮 / 徽章等高控件撑高时
+            // 文本盒竖直居中——贴顶会与同行居中的控件错开。
+            let mut content = content.width_match().height(20);
+            // 纵轴未设时跟随 `align`（见 `Node::align_v`），两者都没设才补居中。
+            if content.align.is_none() && content.align_v.is_none() {
+                content.align_v = Some(Align::Center);
+            }
             Element::stack()
                 .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
-                .child(content.width_match().height(20))
+                .child(content)
         } else {
             // 多行：行随同行最高单元格拉伸；文本竖直居中，内容不足一行时不再顶部对齐。
             // 用 row + cross(Center) 与自定义单元格（action_cell）保持一致的竖直居中。
@@ -4021,7 +4027,7 @@ impl Element {
     ///
     /// 只有一处要自己把关：**行高**。虚拟滚动要求行高固定，行会被强制设成 `row_height`，
     /// 而 `TABLE_ROW_H` 是按纯文本行给的（单行文本盒 20px），装不下按钮。行里放控件时按
-    /// `控件高 + TABLE_CELL_PAD_Y×2 + 1` 自己算大（`.small()` 按钮约 30px，即 49），
+    /// `控件高 + TABLE_CELL_PAD_Y×2 + 1` 自己算大（`.small()` 按钮 28px，即 47），
     /// 短了内容会溢出到邻行。
     ///
     /// 不支持的只有 [`sort_indicator`](Self::sort_indicator)：表头是静态行、不重建，
