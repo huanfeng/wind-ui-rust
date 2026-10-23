@@ -1591,13 +1591,21 @@ impl Tree {
                 Some(n) => (n.width, n.height),
                 None => continue,
             };
+            // `width_match()` 对齐的是**锚点**宽度而不是窗口：浮层的「父」就是锚点，
+            // match parent 的本义正是跟它一样宽（下拉面板、组合框列表都要这个）。
+            // 锚点在主树排布里已经定了位，这里读到的是本帧的值，不差一拍。
+            let anchor = self.abs_bounds(parent);
+            let avail_w = if w_dim == Dimension::Match {
+                anchor.w
+            } else {
+                win.w
+            };
             let size = self.measure(
                 id,
-                child_spec(w_dim, win.w, false),
+                child_spec(w_dim, avail_w, false),
                 child_spec(h_dim, win.h, false),
                 text,
             );
-            let anchor = self.abs_bounds(parent);
             let below = anchor.bottom() + Self::OVERLAY_GAP;
             let y = if below + size.h <= win.h {
                 below

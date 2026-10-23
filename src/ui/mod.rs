@@ -5,6 +5,7 @@
 
 pub mod caret;
 pub mod color_picker;
+pub mod combo;
 pub mod containers;
 pub mod dyn_list;
 pub mod image;
@@ -50,6 +51,7 @@ pub use caret::{CaretOpts, CaretState, CaretStyle};
 // `default_presets` 供在默认色之上增删、`ColorTrigger` 有公开的 `hex_text()` 供 downcast。
 // 面板内那四个 widget 的构造器要 crate 私有的 `PickerState`，外部拿到类型名也无事可做。
 pub use color_picker::{default_presets, ColorPickerOpts, ColorTrigger, Hsva};
+pub use combo::ComboField;
 pub use image::{ImageContent, ImageView};
 pub use inputs::{
     CheckBox, CheckBoxSize, RadioButton, Slider, Switch, SwitchSize, TextInput, TextMark,
@@ -101,6 +103,18 @@ pub enum SortOrder {
     Asc,
     /// 降序。
     Desc,
+}
+
+/// 取出控件里的 `TextInput`：本身就是，或是包着它的 [`combo::ComboField`]。
+///
+/// text_input 的修饰符（`on_commit` / `on_submit` / `numeric` …）与宿主的
+/// `select_when` 都经它找文本框，组合框因此不必把这些修饰符再抄一遍。
+pub(crate) fn text_input_of(any: &mut dyn std::any::Any) -> Option<&mut TextInput> {
+    if any.is::<TextInput>() {
+        return any.downcast_mut::<TextInput>();
+    }
+    any.downcast_mut::<combo::ComboField>()
+        .map(|c| c.inner_mut())
 }
 
 /// 文本控件（[`Label`]）前景色：启用取样式解析色；禁用统一降为 `text_disabled`，
@@ -1720,11 +1734,7 @@ impl Element {
     /// 链到其他控件属误用——debug 构建下 panic 提示，release 下静默忽略（无类型分裂代价）。
     #[track_caller]
     fn config_text_input(mut self, f: impl FnOnce(&mut inputs::TextConfig)) -> Self {
-        match self
-            .widget
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<TextInput>())
-        {
+        match self.widget.as_any_mut().and_then(text_input_of) {
             Some(ti) => f(ti.config_mut()),
             None => debug_assert!(
                 false,
@@ -1796,6 +1806,24 @@ impl Element {
     #[track_caller]
     pub fn leading_icon(self, glyph: char) -> Self {
         self.config_text_input(|c| c.leading = Some(glyph))
+    }
+
+    /// **只允许输入数字**：ASCII 数字、打头的一个 `-`、一个小数点，与
+    /// [`Element::stepper`] 的数值框同一把尺子。键入与粘贴都按它放行，不合格的改动整次
+    /// 丢弃。只管「能打进去什么」，不做范围钳制与格式规整——那些放 `on_commit` 里做。
+    /// 仅 `Element::text_input(..)` / `Element::combo_box(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let port = signal(String::from("8080"));
+    /// let ui = Element::text_input(port, "端口").numeric();
+    /// ```
+    #[track_caller]
+    pub fn numeric(self) -> Self {
+        self.config_text_input_widget(
+            |ti| ti.set_filter(|s| stepper::accepts_number(s, true, true)),
+            "numeric()",
+        )
     }
 
     /// **单行输入的 Enter 出口**：Enter 按下时触发（提交查询、执行命令面板选中项）。
@@ -2039,13 +2067,12 @@ impl Element {
     /// 装不了闭包）。误用的处理同 [`config_text_input`](Self::config_text_input)。
     #[track_caller]
     fn config_text_input_widget(mut self, f: impl FnOnce(&mut TextInput), what: &str) -> Self {
-        match self
-            .widget
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<TextInput>())
-        {
+        match self.widget.as_any_mut().and_then(text_input_of) {
             Some(ti) => f(ti),
-            None => debug_assert!(false, "{what} 只能用于 Element::text_input(..)"),
+            None => debug_assert!(
+                false,
+                "{what} 只能用于 Element::text_input(..) / Element::combo_box(..)"
+            ),
         }
         self
     }
@@ -2235,6 +2262,85 @@ impl Element {
         selected: Signal<usize>,
     ) -> Self {
         Self::dropdown_items_signal(items, selected)
+    }
+
+    /// **可输入的下拉框**（combobox）：文本框右端带下拉箭头，既能直接输入，也能从
+    /// 列表里选——选中后把那一项的文字写进 `text`。
+    ///
+    /// - 点箭头或按 ↓ 展开全部选项，当前值在列表里就高亮并打勾；↑↓ 移动高亮，
+    ///   Enter 选中高亮项，Esc 收起。
+    /// - 打字时按**前缀**（不区分大小写）过滤并自动展开，没有匹配就收起。打字不预选任何
+    ///   一项，所以 Enter 提交的是框里打的字；只有用 ↑↓ / 指针挑中了一项，Enter 才取它。
+    /// - 列表开着时 Enter / Esc 先用来收起列表；列表收起后它们与 `text_input` 完全一致
+    ///   （Enter 提交并交给 `on_submit` / 对话框默认按钮，Esc 上达宿主）。
+    /// - 选中一项算一次用户修改：挂了 [`on_commit`](Self::on_commit) 会立刻触发。
+    ///
+    /// text_input 的修饰符照常可用：[`on_commit`](Self::on_commit)、
+    /// [`on_submit`](Self::on_submit)、[`numeric`](Self::numeric)、`read_only` 等。
+    /// 选项会变化时链 [`options_signal`](Self::options_signal)。
+    ///
+    /// 选项收 `impl Into<TextContent>`：传 [`t!`](crate::t) 时换语言自动跟随。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let size = signal(String::from("12"));
+    /// let ui = Element::combo_box(size, vec!["9", "10", "12", "14", "18", "24"])
+    ///     .numeric()
+    ///     .width(120)
+    ///     .on_commit(move |ctx| ctx.toast_ok(format!("字号 {}", size.get())));
+    /// ```
+    pub fn combo_box(text: Signal<String>, options: Vec<impl Into<TextContent>>) -> Self {
+        combo::build(text, options.into_iter().map(Into::into).collect())
+    }
+
+    /// 组合框的选项改为绑定信号：写入新 `Vec` 即生效（展开着也会跟着刷新）。
+    /// 覆盖构造时给的静态选项。仅 `Element::combo_box(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let fonts = signal(vec![String::from("宋体")]);
+    /// let font = signal(String::new());
+    /// let ui = Element::combo_box(font, Vec::<String>::new()).options_signal(fonts);
+    /// // 异步加载完再写：fonts.set(list);
+    /// ```
+    #[track_caller]
+    pub fn options_signal(mut self, options: Signal<Vec<String>>) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<combo::ComboField>())
+        {
+            Some(c) => c.set_options_signal(options),
+            None => debug_assert!(false, "options_signal() 只能用于 Element::combo_box(..)"),
+        }
+        self
+    }
+
+    /// 组合框选中列表项后**全选**正文（默认是光标落到末尾、不留选区）。
+    ///
+    /// 默认与网页 / WAI-ARIA 组合框一致：选完接着打字是续写。全选是经典 Win32 组合框的
+    /// 做法，适合「选一个值、多半整体换掉」的字段——字号、缩放比例这类：选了 12 想改 14，
+    /// 直接打字即可，不必先删。仅 `Element::combo_box(..)` 可用。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let zoom = signal(String::from("100%"));
+    /// let ui = Element::combo_box(zoom, vec!["50%", "100%", "200%"]).select_all_on_pick();
+    /// ```
+    #[track_caller]
+    pub fn select_all_on_pick(mut self) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<combo::ComboField>())
+        {
+            Some(c) => c.set_select_all_on_pick(true),
+            None => debug_assert!(
+                false,
+                "select_all_on_pick() 只能用于 Element::combo_box(..)"
+            ),
+        }
+        self
     }
 
     /// 下拉式复选菜单：外观同 `dropdown`，面板是菜单，项可单独开关。
@@ -3171,9 +3277,9 @@ impl Element {
     /// - **`content` 的可见性由 `open` 独占**：本方法会覆盖 `content` 上已有的
     ///   `visible_signal` / `visible`。浮层的「展开」与「可见」是同一件事，留两个开关
     ///   只会制造出「登记为浮层却看不见」和「看得见却关不掉」两种半开状态。
-    /// - **`content` 要给出确定宽度**（`.width(px)`）。浮层脱离了父容器的布局流，
-    ///   量它时可用宽是**整个窗口**；写 `.width_match()` 会得到一块窗口那么宽的面板，
-    ///   而不是「跟锚点一样宽」。要跟随锚点宽度，请自行把锚点的宽度传进来。
+    /// - **`content` 的宽度**：`.width(px)` 给定宽；`.width_match()` 与**锚点**（`self`）
+    ///   同宽——下拉列表那种「跟触发器一样宽」的面板就写它。不设宽（Wrap）时按内容测量，
+    ///   可用宽是整个窗口。
     ///
     /// # 示例
     /// ```

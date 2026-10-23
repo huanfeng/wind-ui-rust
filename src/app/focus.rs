@@ -185,11 +185,7 @@ impl UiHost {
         let Some(node) = self.tree.get_mut(id) else {
             return;
         };
-        let Some(ti) = node
-            .widget
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<crate::ui::TextInput>())
-        else {
+        let Some(ti) = node.widget.as_any_mut().and_then(crate::ui::text_input_of) else {
             return;
         };
         ti.select_now(start, end);

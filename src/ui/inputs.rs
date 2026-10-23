@@ -972,6 +972,9 @@ pub struct TextConfig {
     /// 前置图标字形（如放大镜 🔍）：在左侧留出图标区并绘制，文字/光标/命中相应右移。
     /// 单字形（Copy 友好）；搜索框等用。
     pub leading: Option<char>,
+    /// 右侧额外留白（逻辑像素）：给复合控件画在框内右端的部件让位（如
+    /// `Element::combo_box` 的下拉箭头），文字与水平滚动在它之前截止。默认 0。
+    pub trail: i32,
     /// 无边框：不画自身的背景与边框。供**外框由容器统一绘制**的复合控件内嵌
     /// （如 `Element::stepper` 的中部数值框）——两层框叠在一起会画出双线。
     pub frameless: bool,
@@ -997,6 +1000,7 @@ impl Default for TextConfig {
             password: false,
             wrap: true,
             leading: None,
+            trail: 0,
             frameless: false,
             align: Align::Start,
             read_only: false,
@@ -1213,6 +1217,37 @@ impl TextInput {
         self.cursor = e;
         self.anchor = if s == e { None } else { Some(s) };
         self.follow_cursor.set(true);
+    }
+
+    /// 以**用户编辑**的身份整体替换正文（组合框从列表里选中一项时用）。`select_all` 为假时
+    /// 光标落到末尾、不留选区，为真时全选：
+    /// 与键入同一口径记入 `on_commit` 的改动，随后 [`Self::commit_now`] 才认得出来。
+    /// 外部直接写信号则不算改动——那条路径是给程序改值用的。
+    ///
+    /// 只读时不动正文；不过 `set_filter` 的准入——选项是应用自己给的，不归键入过滤管。
+    pub(crate) fn replace_as_edit(&mut self, s: &str, select_all: bool) {
+        if self.config.read_only {
+            return;
+        }
+        if self.text.with(|t| t != s) {
+            self.mark_edited();
+            self.text.set(s.to_string());
+        }
+        // 整段换掉不是「光标移动」：不从旧位置滑过来（长短文本之间切换时那一程滑行就是跳）。
+        self.caret.reset();
+        // 默认光标放到末尾、不留选区：与网页 / WAI-ARIA 组合框一致，选完接着打字是续写。
+        self.cursor = self.char_count();
+        self.anchor = select_all.then_some(0);
+        self.follow_cursor.set(true);
+    }
+
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
+    /// 立即走一次「改完即提交」（若改过）。组合框选中列表项即是一次完成的修改。
+    pub(crate) fn commit_now(&mut self, ctx: &mut EventCtx) {
+        self.fire_commit(ctx);
     }
 
     /// 设置单行 Enter 回调（供 Builder；下游用 [`crate::ui::Element::on_submit`]）。
@@ -2142,7 +2177,7 @@ impl Widget for TextInput {
         let inner = Rect::new(
             bounds.x + TEXT_PAD + lead,
             bounds.y + vpad,
-            bounds.w - 2 * TEXT_PAD - lead,
+            bounds.w - 2 * TEXT_PAD - lead - self.config.trail.max(0),
             bounds.h - 2 * vpad,
         );
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。

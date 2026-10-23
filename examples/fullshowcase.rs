@@ -1047,6 +1047,41 @@ fn main() {
             )),
     );
 
+    // 可输入下拉框：既能直接打字（按前缀过滤列表），也能点箭头 / 按 ↓ 从列表里选。
+    let font_size = signal(String::from("12"));
+    let font_name = signal(String::new());
+    let combo_note = signal(String::from("改完按 Enter、失焦或从列表选中即提交"));
+    let cp_29 = Element::card(
+        "可输入下拉框（combo_box：输入 + 列表选择）",
+        Element::col()
+            .width_match()
+            .spacing(10)
+            .child(Element::field(
+                "字号（numeric）",
+                Element::combo_box(font_size, vec!["9", "10", "12", "14", "18", "24", "36"])
+                    .numeric()
+                    .width(120)
+                    .on_commit(move |_| combo_note.set(format!("字号已提交：{}", font_size.get()))),
+            ))
+            .child(Element::field(
+                "字体",
+                Element::combo_box(
+                    font_name,
+                    vec![
+                        "Consolas",
+                        "Courier New",
+                        "Segoe UI",
+                        "宋体",
+                        "微软雅黑",
+                        "黑体",
+                    ],
+                )
+                .width(200)
+                .on_commit(move |_| combo_note.set(format!("字体已提交：{}", font_name.get()))),
+            ))
+            .child(Element::label(combo_note).fg_role(Role::TextMuted)),
+    );
+
     // 颜色选择器：面板走锚定浮层，会盖住卡片下方的内容——这正是它与普通子节点的分别。
     let brand_color = signal(Color::hex(0x4C8BF5));
     let pen_color = signal(Color::rgba(0xE0, 0x31, 0x31, 0xCC));
@@ -1527,6 +1562,7 @@ fn main() {
             .child(cp_12)
             .child(cp_16)
             .child(cp_21)
+            .child(cp_29)
             .child(cp_27)
             .child(cp_8),
     );

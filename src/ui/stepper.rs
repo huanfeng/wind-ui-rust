@@ -142,20 +142,7 @@ impl NumSpec {
     /// 用 parse 当门禁会让"删光重打"和"打小数点"直接卡死。真正的取值合法性交给
     /// [`Self::parse`] 与提交时的钳制。
     fn accepts(&self, s: &str) -> bool {
-        let body = match s.strip_prefix('-') {
-            // 负号只在允许负值时放行，且只能打头（`body` 里再出现即非法）。
-            Some(rest) if self.min < 0.0 => rest,
-            Some(_) => return false,
-            None => s,
-        };
-        if body.contains('-') {
-            return false;
-        }
-        let dots = body.chars().filter(|c| *c == '.').count();
-        if dots > usize::from(self.decimals > 0) {
-            return false;
-        }
-        body.chars().all(|c| c.is_ascii_digit() || c == '.')
+        accepts_number(s, self.min < 0.0, self.decimals > 0)
     }
 
     /// 正文 → 数值。半成品（空串 / `-` / `.`）返回 `None`，表示"这一刻没有可用值"。
@@ -166,6 +153,27 @@ impl NumSpec {
         }
         t.parse::<f64>().ok().filter(|v| v.is_finite())
     }
+}
+
+/// 数字输入的准入判据（见 [`NumSpec::accepts`]）：只认 ASCII 数字，`allow_negative` 时
+/// 允许打头的一个 `-`，`allow_decimal` 时允许一个 `.`。半成品（`""`、`"-"`、`"1."`）放行。
+///
+/// `Element::stepper` 与 `.numeric()` 共用这一把尺子，两处「能打进去什么」不会分叉。
+pub(crate) fn accepts_number(s: &str, allow_negative: bool, allow_decimal: bool) -> bool {
+    let body = match s.strip_prefix('-') {
+        // 负号只在允许负值时放行，且只能打头（`body` 里再出现即非法）。
+        Some(rest) if allow_negative => rest,
+        Some(_) => return false,
+        None => s,
+    };
+    if body.contains('-') {
+        return false;
+    }
+    let dots = body.chars().filter(|c| *c == '.').count();
+    if dots > usize::from(allow_decimal) {
+        return false;
+    }
+    body.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 // ---------------- 共享状态 ----------------

@@ -150,10 +150,10 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
 | `stepper` | `Signal<f64>` | 数值 |
 | `color_picker` | `Signal<Color>` | 颜色（含 alpha） |
-| `text_input` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
+| `text_input` / `combo_box` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
 | `label` / `button` / `link` / `badge` / `checkbox` / `radio` / `nav_row` / `icon_button` 的**文案参数** | `Signal<String>`（可选，也可给 `&str`） | 跟随状态变化的文案，见 §5「动态文案」 |
 | `list_signal` / `host_signal` / `reorder_list_signal` | `Signal<Vec<T>>` | 动态数据源（见 §6.5） |
-| `dropdown_signal` | `Signal<Vec<String>>` | 动态选项 |
+| `dropdown_signal` / `combo_box(..).options_signal` | `Signal<Vec<String>>` | 动态选项 |
 | `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
 | `table_selectable` | `Vec<Signal<bool>>` | 每行一个选中信号 |
 | `table_sortable` / `_server` | `Signal<Option<SortKey>>` | 排序列 + 方向（`SortKey { column, order }`） |
@@ -460,6 +460,14 @@ Element::check_menu("列表显示", vec![             // 下拉式复选菜单�
     CheckMenuItem::action("恢复默认", |_ctx| {}),  //   动作项：点了执行并关闭
 ]).summary(|on| format!("显示 ({})", on.len()))   // 收起态文案（默认恒为标题；用摘要建议配 .width）
 //  默认点击即关（同普通菜单）；.stay_open() 改为开关点了不关、可连点，点面板外才收起
+Element::combo_box(text, vec!["9", "10", "12"])  // 可输入的下拉框：text: Signal<String>，选中即把该项文字写进 text
+//  .options_signal(opts)   选项绑信号（opts: Signal<Vec<String>>），覆盖静态选项
+//  .numeric()              只允许输入数字（同 stepper 的输入过滤）
+//  .select_all_on_pick()   选中列表项后全选正文（默认光标落到末尾，接着打字是续写）
+//  .on_commit(|ctx| ..)    同 text_input：改过后 Enter / 失焦触发；从列表选中一项也算一次提交
+//  点箭头 / ↓ / Alt+↓ 展开全部选项（当前值高亮打勾），read_only 时不展开；打字按前缀（不分大小写）过滤并自动展开、无匹配收起；
+//  ↑↓ 移动高亮、Enter 选中高亮项；没挑过的 Enter 提交框里打的字。列表开着时 Enter / Esc 先收起列表，
+//  收起后与 text_input 完全一致。其余 text_input 修饰符（on_submit / read_only …）照常可用
 Element::stepper(value, min, max, step)           // value: Signal<f64>；min/max/step: f64
 //  中部是完整的文本输入框（可拖选/双击选词/Ctrl+A·C·X·V/右键菜单/输入法，与 text_input 同源）；
 //  ↑↓ 步进、Enter 提交并全选、Esc 撤销本轮编辑、失焦自动提交（越界钳回、按步长小数位规整）；
@@ -589,6 +597,7 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .wrap(true)        // 多行时是否自动折行（默认 true）
     .read_only()       // 只读：可聚焦 / 选择 / 复制，拒绝一切编辑（与 disabled 不同：disabled 不可聚焦不可选）
     .leading_icon('\u{1F50D}')  // 前置图标字形（搜索框等）：左侧留图标区，文字/光标/命中相应右移
+    .numeric()                  // 只允许输入数字：数字 / 打头的 `-` / 一个小数点（键入与粘贴同一把尺子）
     .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行 Enter 插入换行，不触发）
     .on_commit(|ctx| ..)        // 「改完即提交」：改过之后 Enter 或用户失焦时触发一次
     .on_nav_key(|ctx, key| ..)  // 本控件未处理的 上/下 键（候选列表游标用）
@@ -1139,7 +1148,8 @@ Element::button("展开")
 
 框架为浮层节点做三件普通子节点做不到的事：**脱离父容器布局流**（不占位、不撑大父容器）、
 **在整棵树之后绘制且不受祖先 `clip_children` 裁剪**、**命中先于整棵树**。定位是「贴在触发器
-正下方，下方装不下就翻到上方」，与下拉菜单同一口径。
+正下方，下方装不下就翻到上方」，与下拉菜单同一口径。面板 `.width_match()` 即与触发器同宽
+（浮层的「父」就是触发器），`.width(px)` 定宽，不设宽按内容测量。
 
 轻量关闭由框架负责：在浮层**与触发器**之外按下、或按 ESC，都会把 `open` 置 false。
 点在触发器自身上时框架不插手——那一下归你的 `on_click` toggle，否则会「先被关掉、再被打开」，

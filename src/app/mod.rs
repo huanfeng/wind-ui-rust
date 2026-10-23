@@ -35,6 +35,8 @@ use crate::ui::Element;
 
 #[cfg(test)]
 mod checkbox_motion_tests;
+#[cfg(test)]
+mod combo_tests;
 mod damage;
 mod fling;
 mod focus;
