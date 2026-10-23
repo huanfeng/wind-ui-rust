@@ -2234,7 +2234,8 @@ impl Widget for TextInput {
         self.scroll_y.set(sy);
 
         // 水平滚动：仅非软换行（单行 / 多行不换行）时按光标更新。
-        let mut sx = self.scroll_x.get();
+        let old_sx = self.scroll_x.get();
+        let mut sx = old_sx;
         if !wrap {
             if cx_in - sx > inner.w {
                 sx = cx_in - inner.w;
@@ -2242,11 +2243,25 @@ impl Widget for TextInput {
             if cx_in - sx < 0 {
                 sx = cx_in;
             }
-            sx = sx.max(0);
+            // 上限是「最长一行 − 视口宽」：正文变短（长文本换成短文本、删掉行尾）后，
+            // 旧的滚动量会让短文本整个缩在视口左外侧——光标落在左沿、字看不见，要等下一次
+            // 碰巧移动光标才跳回来。
+            let content_w = lay
+                .lines
+                .iter()
+                .map(|ln| ln.x.last().copied().unwrap_or(0))
+                .max()
+                .unwrap_or(0);
+            sx = sx.min((content_w - inner.w).max(0)).max(0);
         } else {
             sx = 0;
         }
         self.scroll_x.set(sx);
+        // 视口横移了：正文整体瞬间换了位置，光标若还从旧屏幕位置滑过去，看上去就是
+        // 字先跳、光标再追一程。光标跟着正文一起落位。
+        if sx != old_sx {
+            self.caret.reset();
+        }
 
         // 首行 y：多行从内框顶部减滚动；单行在内框内垂直居中。
         let first_line_y = if multiline {
@@ -3973,6 +3988,79 @@ mod tests {
             .zip(b)
             .map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs())
             .sum()
+    }
+
+    /// 用真实文字引擎在 `now_ms` 画一帧聚焦态（120 宽，长文本会溢出），返回像素。
+    fn text_frame(ti: &TextInput, now_ms: u64) -> Vec<u8> {
+        use crate::core::Widget;
+        let b = crate::geometry::Rect::new(0, 0, 120, 32);
+        crate::anim::set_clock_ms(now_ms);
+        let mut pm = tiny_skia::Pixmap::new(120, 32).unwrap();
+        let mut eng = crate::ui::text_fit::ink::engine();
+        {
+            let mut c = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            ti.paint(b, b, true, true, &mut c, &crate::style::Style::default());
+        }
+        pm.data().to_vec()
+    }
+
+    /// 回归：长文本滚到末尾后整段换成短文本，横向滚动要钳回正文宽——此前滚动量停在
+    /// 半路，短文本整个缩在视口左外侧、光标贴在左沿。
+    #[test]
+    fn shrinking_text_clamps_horizontal_scroll() {
+        let text = signal("WWWWWWWWWWWWWWWWWWWWWWWW".to_string());
+        let mut ti = TextInput::new(text, "");
+        ti.cursor = ti.char_count();
+        text_frame(&ti, 1_000);
+        assert!(ti.scroll_x.get() > 0, "前提：长文本溢出、已横向滚动");
+        ti.replace_as_edit("WW", false);
+        text_frame(&ti, 1_000);
+        assert_eq!(ti.scroll_x.get(), 0, "短文本放得下，不该再有滚动量");
+    }
+
+    /// 整段换掉正文（组合框选中一项）时光标直接落位，不从旧位置滑过来——与一个本来就是
+    /// 这段正文的框画出来的第一帧逐像素相同。长→短（视口横移）与短→短（视口不动）都测：
+    /// 前者靠「视口横移即落位」，后者靠「整段替换不是光标移动」，两条各管一边。
+    #[test]
+    fn replacing_whole_text_snaps_caret_without_sliding() {
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(true);
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        for from in ["WWWWWWWWWWWWWWWWWWWWWWWW", "WWWWWW"] {
+            let text = signal(from.to_string());
+            let mut ti = TextInput::new(text, "");
+            ti.cursor = ti.char_count();
+            text_frame(&ti, 1_000);
+            ti.replace_as_edit("WW", false);
+            let got = text_frame(&ti, 1_010);
+
+            let fresh = TextInput::new(signal("WW".to_string()), "");
+            let want = text_frame(&fresh, 1_010);
+            assert_eq!(frame_diff(&got, &want), 0, "{from} → WW：光标应直接落位");
+        }
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 视口横移时光标随正文一起落位：长文本停在末尾按 Home，正文瞬间跳回开头，光标不该
+    /// 再从右沿横穿整段字滑过去。
+    #[test]
+    fn caret_snaps_when_horizontal_scroll_jumps() {
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(true);
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let long = "WWWWWWWWWWWWWWWWWWWWWWWW";
+        let mut ti = TextInput::new(signal(long.to_string()), "");
+        text_frame(&ti, 1_000);
+        assert!(ti.scroll_x.get() > 0, "前提：停在末尾、已横向滚动");
+        ti.cursor = 0; // 等同 Home
+        ti.follow_cursor.set(true);
+        let got = text_frame(&ti, 1_010);
+
+        let mut fresh = TextInput::new(signal(long.to_string()), "");
+        fresh.cursor = 0;
+        let want = text_frame(&fresh, 1_010);
+        assert_eq!(frame_diff(&got, &want), 0, "视口跳回开头时光标应直接落位");
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 
     /// 临时把当前主题换成指定光标风格（thread_local，用完须还原）。
