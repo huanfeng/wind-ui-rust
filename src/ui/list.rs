@@ -17,8 +17,7 @@ use crate::style::Style;
 use crate::text::TextEngine;
 use crate::ui::{ImageContent, TextContent};
 
-/// 行高（逻辑 px）。
-pub const ROW_H: i32 = 36;
+/// 行内水平内边距（逻辑 px）。行高取主题 `metrics.row_h`。
 const PAD_X: i32 = 12;
 /// 行内图标与文字间距。
 const ICON_GAP: i32 = 8;
@@ -29,7 +28,6 @@ const ICON_GAP: i32 = 8;
 /// 圆角 pill 选中样式的内缩与圆角（逻辑 px）。侧栏导航等用，更贴近现代设计稿。
 const PILL_INSET_X: f32 = 6.0;
 const PILL_INSET_Y: f32 = 3.0;
-const PILL_RADIUS: f32 = 7.0;
 
 pub struct ListRow {
     /// 行标签。存 [`TextContent`]，paint 时现取——传 `t!` 进来换语言即跟随。
@@ -102,7 +100,7 @@ impl ListRow {
 
 impl Widget for ListRow {
     fn measure(&self, avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(avail.w.max(0), ROW_H)
+        Size::new(avail.w.max(0), crate::theme::current().metrics.row_h)
     }
 
     fn paint(
@@ -151,7 +149,7 @@ impl Widget for ListRow {
                     y + PILL_INSET_Y,
                     (w - 2.0 * PILL_INSET_X).max(0.0),
                     (h - 2.0 * PILL_INSET_Y).max(0.0),
-                    PILL_RADIUS,
+                    th.metrics.corner_md,
                     &Paint::fill(c),
                 );
             } else {
@@ -298,13 +296,13 @@ mod tests {
         let red = Image::from_rgba(4, 4, &[255u8, 0, 0, 255].repeat(4 * 4)).unwrap();
         let row = ListRow::new("Inbox", group, 0)
             .icon_content(ImageContent::new(Some(red)).fit(Fit::Fill));
-        let mut pm = Pixmap::new(200, ROW_H as u32).unwrap();
+        let mut pm = Pixmap::new(200, crate::theme::current().metrics.row_h as u32).unwrap();
         pm.fill(tiny_skia::Color::WHITE);
         {
             let mut c = SkiaCanvas::new(&mut pm);
             row.paint(
-                Rect::new(0, 0, 200, ROW_H),
-                Rect::new(0, 0, 200, ROW_H),
+                Rect::new(0, 0, 200, crate::theme::current().metrics.row_h),
+                Rect::new(0, 0, 200, crate::theme::current().metrics.row_h),
                 false,
                 true,
                 &mut c,
@@ -312,9 +310,12 @@ mod tests {
             );
         }
         // 图标方块中心（PAD_X 起、垂直居中）应为红色。
-        let side = ROW_H - 14;
+        let side = crate::theme::current().metrics.row_h - 14;
         let p = pm
-            .pixel((PAD_X + side / 2) as u32, (ROW_H / 2) as u32)
+            .pixel(
+                (PAD_X + side / 2) as u32,
+                (crate::theme::current().metrics.row_h / 2) as u32,
+            )
             .unwrap();
         assert!(
             p.red() > 180 && p.green() < 90,
@@ -348,23 +349,23 @@ mod overflow_tests {
     /// 选中索引指向不存在的行，免得别的墨混进来）。
     #[test]
     fn long_list_label_stays_in_its_row() {
-        assert_wraps_taller(LONG_LATIN, 14.0, 120, ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, crate::theme::current().metrics.row_h);
         // 根节点总被撑满窗口，显式宽要钉在下一层才生效。
         let list = Element::list(vec![LONG_LATIN, ""], signal(99usize));
         let el = Element::col().children([Element::col().width(120).height(150).children([list])]);
         let (pm, row) = paint_at(el, 200, 200, &[0, 0, 0]);
         assert_eq!(row.w, 120);
-        assert_eq!(row.h, ROW_H);
+        assert_eq!(row.h, crate::theme::current().metrics.row_h);
         assert_no_ink_outside(&pm, row, "列表行");
     }
 
     /// Wrap 宽：行宽取父给的可用宽（窄窗），同样只占一行。
     #[test]
     fn long_list_label_stays_in_its_row_wrap_width() {
-        assert_wraps_taller(LONG_LATIN, 14.0, 120, ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, crate::theme::current().metrics.row_h);
         let row = Element::base(Layout::None)
             .widget(ListRow::new(LONG_LATIN, signal(99usize), 0))
-            .height(ROW_H);
+            .height(crate::theme::current().metrics.row_h);
         let el = Element::col()
             .width_match()
             .children([row, Element::col().height(80).width_match()]);

@@ -22,8 +22,7 @@ use crate::text::TextEngine;
 use crate::ui::text_fit::SingleLine;
 use crate::ui::TextContent;
 
-/// 行高（逻辑 px），NavRow 与 CollapsibleHeader 共用。
-pub const NAV_ROW_H: i32 = 40;
+/// 行内水平内边距（逻辑 px）。行高取主题 `metrics.row_h`，NavRow 与 CollapsibleHeader 共用。
 const PAD_X: i32 = 12;
 /// 右侧箭头区宽度。
 const CHEVRON_W: i32 = 20;
@@ -208,7 +207,7 @@ impl NavRow {
 
 impl Widget for NavRow {
     fn measure(&self, avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(avail.w.max(0), NAV_ROW_H)
+        Size::new(avail.w.max(0), crate::theme::current().metrics.row_h)
     }
 
     fn paint(
@@ -365,7 +364,7 @@ impl CollapsibleHeader {
 
 impl Widget for CollapsibleHeader {
     fn measure(&self, avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(avail.w.max(0), NAV_ROW_H)
+        Size::new(avail.w.max(0), crate::theme::current().metrics.row_h)
     }
 
     /// 隐藏期间展开态被程序改过（标签页切走时改了选中面板）：内容那边已就地落定，
@@ -514,7 +513,7 @@ impl AccordionHeader {
 
 impl Widget for AccordionHeader {
     fn measure(&self, avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(avail.w.max(0), NAV_ROW_H)
+        Size::new(avail.w.max(0), crate::theme::current().metrics.row_h)
     }
 
     /// 隐藏期间展开态被程序改过（标签页切走时改了选中面板）：内容那边已就地落定，
@@ -787,7 +786,7 @@ mod overflow_tests {
     use crate::ui::Element;
 
     fn rows() -> Vec<(&'static str, Element)> {
-        let row = || Element::base(Layout::None).height(NAV_ROW_H);
+        let row = || Element::base(Layout::None).height(crate::theme::current().metrics.row_h);
         vec![
             ("NavRow", row().widget(NavRow::new(LONG_LATIN))),
             (
@@ -806,7 +805,7 @@ mod overflow_tests {
 
     #[test]
     fn long_nav_titles_stay_in_their_row_explicit_width() {
-        assert_wraps_taller(LONG_LATIN, 14.0, 120, NAV_ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, crate::theme::current().metrics.row_h);
         for (what, el) in rows() {
             let el =
                 Element::col().children([el.width(120), Element::col().height(80).width_match()]);
@@ -818,7 +817,7 @@ mod overflow_tests {
 
     #[test]
     fn long_nav_titles_stay_in_their_row_wrap_width() {
-        assert_wraps_taller(LONG_LATIN, 14.0, 120, NAV_ROW_H);
+        assert_wraps_taller(LONG_LATIN, 14.0, 120, crate::theme::current().metrics.row_h);
         for (what, el) in rows() {
             let el = Element::col()
                 .width_match()

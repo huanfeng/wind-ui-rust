@@ -46,7 +46,7 @@ pub const WEIGHT_NORMAL: u16 = 400;
 ///
 /// 收进一个结构体后，新增属性只是加一个字段，签名不动、调用点不动；对控件代码
 /// 反而更短——`&TextStyle::of(style)` 比原先的 `style.font_family.as_deref(),
-/// style.font_size` 少写一截，且字重与行高自动随行，不会漏传。
+/// style.font_size()` 少写一截，且字重与行高自动随行，不会漏传。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextStyle<'a> {
     /// 字族名。`None` 用引擎默认。
@@ -80,7 +80,7 @@ impl<'a> TextStyle<'a> {
     pub fn of(style: &'a crate::style::Style) -> Self {
         Self {
             family: or_default(style.font_family.as_deref()),
-            size: style.font_size,
+            size: style.font_size(),
             weight: style.font_weight,
             italic: style.font_italic,
             line_height: style.line_height,

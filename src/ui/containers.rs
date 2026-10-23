@@ -642,8 +642,8 @@ enum IconKind {
     Image(ImageContent),
 }
 
-/// 图标按钮默认方形边长与内边距（px）。Element 可用 `.size()` 覆盖。
-const ICON_BTN_SIZE: i32 = 30;
+/// 图标按钮内边距（px）。默认方形边长取主题 `metrics.control_h`，与按钮同高；
+/// Element 可用 `.size()` 覆盖。
 const ICON_BTN_PAD: i32 = 6;
 
 /// 纯图标按钮：无文字、方形、hover/press 半透明圆底 + 点击/键盘激活 + 手型光标。
@@ -694,10 +694,14 @@ impl Widget for IconButton {
                     &crate::text::TextStyle::of(style),
                     None,
                 );
-                let side = t.w.max(t.h).max(style.font_size as i32) + 2 * ICON_BTN_PAD;
-                Size::new(side.max(ICON_BTN_SIZE), side.max(ICON_BTN_SIZE))
+                let min = crate::theme::current().metrics.control_h;
+                let side = t.w.max(t.h).max(style.font_size() as i32) + 2 * ICON_BTN_PAD;
+                Size::new(side.max(min), side.max(min))
             }
-            IconKind::Image(_) => Size::new(ICON_BTN_SIZE, ICON_BTN_SIZE),
+            IconKind::Image(_) => {
+                let min = crate::theme::current().metrics.control_h;
+                Size::new(min, min)
+            }
         }
     }
     fn paint(

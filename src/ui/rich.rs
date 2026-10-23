@@ -927,7 +927,7 @@ impl Walker<'_> {
             .unwrap_or_default();
         let s = span.style.over(&named);
         FragStyle {
-            size: s.size.unwrap_or(base.font_size),
+            size: s.size.unwrap_or(base.font_size()),
             weight: s.weight.unwrap_or(base.font_weight),
             family: s.family.or_else(|| base.font_family.clone()),
             line_height: base.line_height,
@@ -1131,7 +1131,7 @@ impl Walker<'_> {
         sig: Signal<bool>,
     ) {
         let fs = FragStyle {
-            size: base.font_size,
+            size: base.font_size(),
             weight: base.font_weight,
             family: base.font_family.clone(),
             line_height: base.line_height,
@@ -1599,7 +1599,7 @@ impl RichText {
         LayoutKey {
             wrap_w,
             family: TextStyle::of(style).family.map(str::to_string),
-            size_bits: style.font_size.to_bits(),
+            size_bits: style.font_size().to_bits(),
             weight: style.font_weight,
             line_height_bits: style.line_height.map(f32::to_bits),
             scale_bits: scale.to_bits(),
@@ -1630,7 +1630,7 @@ impl RichText {
                 // 比的是**实际字族**（含主题默认）：只比 `style.font_family` 的话，换默认字族
                 // 时两边都是 `None`，命中旧布局。
                 && k.family.as_deref() == TextStyle::of(style).family
-                && k.size_bits == style.font_size.to_bits()
+                && k.size_bits == style.font_size().to_bits()
                 && k.weight == style.font_weight
                 && k.line_height_bits == style.line_height.map(f32::to_bits)
                 && k.scale_bits == scale.to_bits()

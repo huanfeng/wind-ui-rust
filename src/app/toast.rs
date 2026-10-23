@@ -11,8 +11,7 @@ use crate::theme::Theme;
 
 use super::UiHost;
 
-/// 轻提示浮层：字号、图标字号、内边距、图标与文字间距、淡入/淡出时长（ms）。
-const TOAST_FONT: f32 = 14.0;
+/// 轻提示浮层（正文字号取 `metrics.font_md`）：图标字号、内边距、图标与文字间距、淡入/淡出时长（ms）。
 const TOAST_ICON_FONT: f32 = 18.0;
 const TOAST_PAD_X: i32 = 16;
 const TOAST_PAD_Y: i32 = 11;
@@ -260,7 +259,7 @@ impl ToastHost {
             // 按 text_max_w 换行测量：短文本一行内即可测完，长文本自动折成多行。
             let ts = canvas.measure_text_wrapped(
                 &toast.req.text,
-                &TextStyle::new(TOAST_FONT),
+                &TextStyle::new(crate::theme::current().metrics.font_md),
                 text_max_w as f32,
             );
             let panel_w = (TOAST_PAD_X
@@ -313,7 +312,7 @@ impl ToastHost {
                 text_rect,
                 tt.text(pal).scale_alpha(alpha),
                 crate::spec::Align::Start,
-                &TextStyle::new(TOAST_FONT),
+                &TextStyle::new(crate::theme::current().metrics.font_md),
             );
             // ✕ 关闭：面板右侧固定宽区域。
             let close = Rect::new(
@@ -327,7 +326,7 @@ impl ToastHost {
                 close,
                 pal.text_muted.scale_alpha(alpha),
                 crate::spec::Align::Center,
-                &TextStyle::new(TOAST_FONT),
+                &TextStyle::new(crate::theme::current().metrics.font_md),
             );
             let panel = Rect::new(x, y, panel_w, panel_h);
             toast.hit = Some((panel, close));

@@ -117,8 +117,8 @@ impl CheckBox {
     }
     fn font_size(&self, style: &Style) -> f32 {
         match self.size {
-            CheckBoxSize::Normal => style.font_size,
-            CheckBoxSize::Small => (style.font_size - 2.0).max(10.0),
+            CheckBoxSize::Normal => style.font_size(),
+            CheckBoxSize::Small => (style.font_size() - 2.0).max(10.0),
         }
     }
     fn toggle(&mut self, ctx: &mut EventCtx) {
@@ -179,7 +179,7 @@ impl Widget for CheckBox {
             style.fg
         };
         let (bsz_i, gap_i, radius, stroke_w, check_stroke) = match self.size {
-            CheckBoxSize::Normal => (BOX_SIZE, GAP, 4.0_f32, 1.5_f32, 2.0_f32),
+            CheckBoxSize::Normal => (BOX_SIZE, GAP, th.metrics.corner_sm, 1.5_f32, 2.0_f32),
             CheckBoxSize::Small => (BOX_SIZE_SMALL, GAP_SMALL, 3.0_f32, 1.0_f32, 1.5_f32),
         };
         let cy = bounds.y + (bounds.h - bsz_i) / 2;
@@ -777,7 +777,7 @@ impl Widget for Slider {
         };
         // 高度略高于旋钮直径，留出文字空间（show_value 时取字号与旋钮直径的较大值）。
         let h = if self.show_value {
-            (2 * KNOB_R).max(style.font_size as i32 + 4)
+            (2 * KNOB_R).max(style.font_size() as i32 + 4)
         } else {
             2 * KNOB_R
         };
@@ -897,7 +897,8 @@ impl Widget for Slider {
 
 // ---------------- TextInput ----------------
 
-pub(crate) const TEXT_PAD: i32 = 10;
+/// 输入框内边距。与下拉框的 `PAD_X` 同为 12，同一列里文字左缘对齐。
+pub(crate) const TEXT_PAD: i32 = 12;
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -2047,12 +2048,14 @@ impl Widget for TextInput {
         let lh = text
             .measure("Ay", &crate::text::TextStyle::of(style), None)
             .h
-            .max(style.font_size as i32);
+            .max(style.font_size() as i32);
         // 多行默认约 5 行高（用户可 .height() 覆盖）；单行沿用紧凑高度。
         let h = if self.is_multiline() {
             lh * 5 + 2 * TEXT_PAD
         } else {
-            (style.font_size as i32) + 16
+            crate::theme::current()
+                .metrics
+                .control_height(style.font_size())
         };
         Size::new(160, h)
     }
@@ -2111,7 +2114,7 @@ impl Widget for TextInput {
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
         let vpad = if multiline { TEXT_PAD } else { 0 };
-        let lead = self.lead_inset(style.font_size);
+        let lead = self.lead_inset(style.font_size());
         let inner = Rect::new(
             bounds.x + TEXT_PAD + lead,
             bounds.y + vpad,
@@ -3909,7 +3912,7 @@ mod tests {
         let mut ti = dummy_input();
         ti.config.multiline = true;
         let style = Style {
-            font_size: 14.0,
+            font_size: Some(14.0),
             line_height: Some(2.0),
             ..Style::default()
         };
@@ -3972,7 +3975,7 @@ mod tests {
         crate::anim::set_enabled(true);
         crate::ui::caret::set_animated(false);
         let style = crate::style::Style {
-            font_size: 14.0,
+            font_size: Some(14.0),
             line_height: Some(2.0),
             ..crate::style::Style::default()
         };
@@ -4030,7 +4033,7 @@ mod tests {
         crate::anim::set_enabled(true);
         crate::ui::caret::set_animated(false);
         let style = crate::style::Style {
-            font_size: 13.0,
+            font_size: Some(13.0),
             ..crate::style::Style::default()
         };
         let s = 1.25f32;
@@ -4403,7 +4406,7 @@ mod slider_value_overflow_tests {
         let mut slider = super::Slider::new(signal(1.0f32));
         slider.set_show_value(true);
         let style = Style {
-            font_size: 24.0,
+            font_size: Some(24.0),
             ..Style::default()
         };
         let mut eng = engine();

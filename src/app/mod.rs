@@ -508,7 +508,7 @@ impl ThemeHandle {
     ///
     /// ```ignore
     /// th.update(|t| t.palette.accent = Color::hex(0x2E9E5B));   // 换强调色
-    /// th.update(|t| t.metrics.font_size += 1.0);                // 全局调大字号
+    /// th.update(|t| t.metrics.font_md += 1.0);                  // 全局调大正文字号
     /// ```
     pub fn update(&self, f: impl FnOnce(&mut Theme)) {
         let mut t: Theme = (**self.inner.borrow()).clone();
@@ -3211,12 +3211,15 @@ impl UiHost {
             self.damage.needs_full = true;
             self.damage.needs_relayout = true;
         }
-        let family_changed = theme.font_family != self.theme.font_family;
+        // 菜单的三档字号（正文 / 副标题 / 快捷键）来自 metrics，变了同样要重量宽度。
+        let (m0, m1) = (&self.theme.metrics, &theme.metrics);
+        let family_changed = theme.font_family != self.theme.font_family
+            || (m0.font_md, m0.font_sm, m0.font_xs) != (m1.font_md, m1.font_sm, m1.font_xs);
         self.lang_seen = Some(lang);
         self.theme = theme;
         crate::theme::set_current(self.theme.clone());
         // 菜单宽度只在打开时量一次；开着菜单换了默认字族（典型是粘滞的「字体」菜单项）
-        // 就按新字体重量。须在 `set_current` 之后：测量读的是线程局部的新主题。
+        // 或字号档位，就按新字体重量。须在 `set_current` 之后：测量读的是线程局部的新主题。
         if family_changed {
             self.remeasure_menu();
         }

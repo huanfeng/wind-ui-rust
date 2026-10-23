@@ -16,9 +16,9 @@ use crate::theme::Theme;
 use super::focus::FocusSource;
 use super::UiHost;
 
-pub(super) const MENU_ITEM_H: i32 = 30;
+pub(super) const MENU_ITEM_H: i32 = 32;
 /// 菜单滚轮：单次 `|delta| >= MENU_WHEEL_COARSE` 的事件照旧按 `max(|delta| / 3, MENU_ITEM_H)`
-/// 滚（win32 / X11 一格 = 120 → 40 像素；macOS 鼠标滚轮一行 = 40 单位 → 兜底 30 像素，
+/// 滚（win32 / X11 一格 = 120 → 40 像素；macOS 鼠标滚轮一行 = 40 单位 → 兜底一整项，
 /// 不兜底就只剩 13 像素、不到半项）。更小的量（高精度滚轮、触控板一帧几个单位）按每 120
 /// 单位 `MENU_WHEEL_PX` 像素比例换算、零头攒着——原先它们也兜底一整项，一抹就飞到底。
 const MENU_WHEEL_COARSE: i32 = 40;
@@ -29,12 +29,23 @@ const MENU_SEP_H: i32 = 9;
 pub(super) const MENU_PAD_X: i32 = 12;
 pub(super) const MENU_VPAD: i32 = 6;
 const MENU_MIN_W: i32 = 140;
+/// 菜单项字号：正文档（`metrics.font_md`），与控件里的文字同大。
+fn menu_font() -> f32 {
+    crate::theme::current().metrics.font_md
+}
+/// 双行项的副标题字号。
+fn menu_font_small() -> f32 {
+    crate::theme::current().metrics.font_xs
+}
+/// 快捷键提示字号。
+fn menu_font_shortcut() -> f32 {
+    crate::theme::current().metrics.font_sm
+}
 /// 滚动条命中区宽度。刻意宽于可见滑块（5px）：细滑块难点中，留出横向容错。
 /// 纵向不留容错——见 [`MenuLevel::scrollbar_geom`]。
 const SCROLLBAR_HIT_W: i32 = 16;
 /// 下拉菜单面板最大可视高度（超出后启用滚动）。
 const MENU_MAX_H: i32 = 320;
-const MENU_FONT: f32 = 13.5;
 /// 图标列宽（有图标项时预留），也用作尾随可点击图标的命中/绘制列宽。
 pub(super) const MENU_ICON_W: i32 = 18;
 /// 位图图标的边长（逻辑 px），居中放在图标列里。
@@ -539,13 +550,13 @@ impl UiHost {
             }
             max_label = max_label.max(
                 self.engine
-                    .measure(&it.label, &TextStyle::new(MENU_FONT), None)
+                    .measure(&it.label, &TextStyle::new(menu_font()), None)
                     .w,
             );
             if let Some(sub) = &it.subtitle {
                 max_label = max_label.max(
                     self.engine
-                        .measure(sub, &TextStyle::new(MENU_FONT - 2.5), None)
+                        .measure(sub, &TextStyle::new(menu_font_small()), None)
                         .w,
                 );
             }
@@ -553,14 +564,18 @@ impl UiHost {
                 10
             } else if let Some(s) = &it.shortcut {
                 self.engine
-                    .measure(s, &TextStyle::new(MENU_FONT - 2.0), None)
+                    .measure(s, &TextStyle::new(menu_font_shortcut()), None)
                     .w
             } else {
                 0
             };
             let mut total = tw;
             if let Some((text, _)) = &it.badge {
-                let bw = self.engine.measure(text, &TextStyle::new(12.0), None).w + 2 * BADGE_PAD_X;
+                let bw = self
+                    .engine
+                    .measure(text, &TextStyle::new(menu_font_small()), None)
+                    .w
+                    + 2 * BADGE_PAD_X;
                 total += if total > 0 { MENU_GAP } else { 0 } + bw;
             }
             if it.trailing_icon.is_some() {
@@ -1640,7 +1655,7 @@ impl MenuHost {
                 r.y as f32 + sh.dy,
                 r.w as f32,
                 r.h as f32,
-                10.0,
+                theme.metrics.corner_lg,
                 sh.blur,
                 sh.color,
             );
@@ -1649,7 +1664,7 @@ impl MenuHost {
                 r.y as f32,
                 r.w as f32,
                 r.h as f32,
-                10.0,
+                theme.metrics.corner_lg,
                 &Paint::fill(mt.bg(pal)),
             );
             canvas.stroke_round_rect(
@@ -1657,8 +1672,8 @@ impl MenuHost {
                 r.y as f32,
                 r.w as f32,
                 r.h as f32,
-                10.0,
-                1.0,
+                theme.metrics.corner_lg,
+                theme.metrics.border_width.to_logical(canvas.dpi_scale()),
                 &Paint::fill(mt.border(pal)),
             );
             let child_spawn = menu.levels.get(li + 1).and_then(|l| l.spawn);
@@ -1688,7 +1703,7 @@ impl MenuHost {
                         (top + 1) as f32,
                         (r.w - 8) as f32,
                         (h - 2) as f32,
-                        6.0,
+                        theme.metrics.corner_md,
                         &Paint::fill(mt.hover(pal)),
                     );
                 }
@@ -1709,7 +1724,7 @@ impl MenuHost {
                         Rect::new(r.x + MENU_PAD_X, top, MENU_CHECK_W, h),
                         if it.enabled { mt.accent(pal) } else { color },
                         crate::spec::Align::Center,
-                        &TextStyle::new(MENU_FONT),
+                        &TextStyle::new(menu_font()),
                     );
                 }
                 // 图标列：位图优先（按文字色着色，禁用 / 悬停与文字同步变色），否则字形。
@@ -1731,7 +1746,7 @@ impl MenuHost {
                         ir,
                         color,
                         crate::spec::Align::Center,
-                        &TextStyle::new(MENU_FONT),
+                        &TextStyle::new(menu_font()),
                     );
                 }
                 // 尾随区域从右向左依次收窄：可点击图标 → 徽章胶囊 → 剩余内容右边界。
@@ -1743,13 +1758,16 @@ impl MenuHost {
                         ir,
                         color,
                         crate::spec::Align::Center,
-                        &TextStyle::new(MENU_FONT),
+                        &TextStyle::new(menu_font()),
                     );
                     content_right -= MENU_ICON_W + MENU_GAP;
                 }
                 if let Some((text, intent)) = &it.badge {
                     let (fill, fg) = intent.badge_colors(pal);
-                    let bw = canvas.measure_text(text, &TextStyle::new(12.0)).w + 2 * BADGE_PAD_X;
+                    let bw = canvas
+                        .measure_text(text, &TextStyle::new(menu_font_small()))
+                        .w
+                        + 2 * BADGE_PAD_X;
                     let br = Rect::new(content_right - bw, top + (h - BADGE_H) / 2, bw, BADGE_H);
                     canvas.fill_round_rect(
                         br.x as f32,
@@ -1764,7 +1782,7 @@ impl MenuHost {
                         br,
                         fg,
                         crate::spec::Align::Center,
-                        &TextStyle::new(12.0),
+                        &TextStyle::new(menu_font_small()),
                     );
                     content_right -= bw + MENU_GAP;
                 }
@@ -1777,7 +1795,7 @@ impl MenuHost {
                         lr,
                         color,
                         crate::spec::Align::Start,
-                        &TextStyle::new(MENU_FONT),
+                        &TextStyle::new(menu_font()),
                     );
                     let sr = Rect::new(label_x, top + h / 2, label_w, h - h / 2);
                     canvas.draw_text(
@@ -1785,7 +1803,7 @@ impl MenuHost {
                         sr,
                         mt.text_disabled(pal),
                         crate::spec::Align::Start,
-                        &TextStyle::new(MENU_FONT - 2.5),
+                        &TextStyle::new(menu_font_small()),
                     );
                 } else {
                     let lr = Rect::new(label_x, top, label_w, h);
@@ -1794,7 +1812,7 @@ impl MenuHost {
                         lr,
                         color,
                         crate::spec::Align::Start,
-                        &TextStyle::new(MENU_FONT),
+                        &TextStyle::new(menu_font()),
                     );
                 }
                 // 助记字母下划线：标签里首个匹配字符的正下方一条细线。
@@ -1802,11 +1820,11 @@ impl MenuHost {
                     .mnemonic
                     .and_then(|m| crate::event::mnemonic_split(&it.label, m))
                 {
-                    let ts = TextStyle::new(MENU_FONT);
+                    let ts = TextStyle::new(menu_font());
                     let x0 = label_x + canvas.measure_text(pre, &ts).w;
                     let cw = canvas.measure_text(ch, &ts).w;
                     let line_h = if it.subtitle.is_some() { h / 2 } else { h };
-                    let y = top + (line_h + MENU_FONT as i32) / 2 + 1;
+                    let y = top + (line_h + menu_font() as i32) / 2 + 1;
                     canvas.fill_rect(x0 as f32, y as f32, cw as f32, 1.0, &Paint::fill(color));
                 }
                 // 尾随：子菜单箭头 › / 快捷键 / 勾选（收窄到 content_right，避免与徽章/图标重叠）。
@@ -1817,7 +1835,7 @@ impl MenuHost {
                         tr,
                         color,
                         crate::spec::Align::End,
-                        &TextStyle::new(MENU_FONT + 1.0),
+                        &TextStyle::new(menu_font() + 1.0),
                     );
                 } else if let Some(s) = &it.shortcut {
                     canvas.draw_text(
@@ -1825,7 +1843,7 @@ impl MenuHost {
                         tr,
                         mt.text_disabled(pal),
                         crate::spec::Align::End,
-                        &TextStyle::new(MENU_FONT - 2.0),
+                        &TextStyle::new(menu_font_shortcut()),
                     );
                 }
             }
@@ -2171,8 +2189,8 @@ mod tests {
         assert_eq!(wheel(120), 80, "向上一格");
         assert_eq!(
             wheel(-40),
-            110,
-            "macOS 鼠标滚轮一行（40 单位）仍兜底 30 像素"
+            80 + MENU_ITEM_H,
+            "macOS 鼠标滚轮一行（40 单位）仍兜底一整项"
         );
         assert_eq!(wheel(40), 80);
         let base = 80;
@@ -3720,7 +3738,7 @@ mod tests {
         let w = |h: &mut UiHost, f: &str| {
             let ts = TextStyle {
                 family: Some(f),
-                ..TextStyle::new(MENU_FONT)
+                ..TextStyle::new(menu_font())
             };
             h.engine.measure(&probe, &ts, None).w
         };

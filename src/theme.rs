@@ -288,7 +288,11 @@ impl Len {
     }
 }
 
-/// 全局基础度量（间距 / 圆角 / 字号）。
+/// 全局基础度量（间距 / 控件尺寸 / 圆角 / 字号）。
+///
+/// 这是一套**有档位的 token**：控件与组合构造器的默认尺寸都从这里取，而不是各写各的
+/// 数字——同一行里的按钮、输入框、下拉框因此天然等高，改一处全局生效。档位取值对齐
+/// Tailwind 的 4px 栅格（4/8/12/16/24），与默认配色同一路数。
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Metrics {
@@ -301,13 +305,41 @@ pub struct Metrics {
     /// 聚焦状态下的边框线宽（Dropdown 等有聚焦加粗行为的控件使用）。
     /// 默认比 `border_width` 略粗以突出焦点。
     pub border_width_focus: Len,
-    /// 基础间距单位。
-    pub spacing: i32,
-    /// 文本控件内边距。
-    pub text_pad: i32,
+    /// 间距档位：紧贴的图标与文字、徽章内距。
+    pub space_xs: i32,
+    /// 间距档位：同组控件之间（按钮组、选项组）。
+    pub space_sm: i32,
+    /// 间距档位：卡片内各块之间、表单行之间。
+    pub space_md: i32,
+    /// 间距档位：卡片 / 面板内边距、卡片之间。
+    pub space_lg: i32,
+    /// 间距档位：页面边距、对话框内边距。
+    pub space_xl: i32,
+    /// 标准控件高度：按钮、输入框、下拉框、分段控件、步进器共用，同一行里天然等高。
+    /// 字号调大时控件按文字自然增高，此值只是下限。
+    pub control_h: i32,
+    /// 小号控件高度（`ButtonSize::Small` 等密集工具栏用）。
+    pub control_h_sm: i32,
+    /// 列表类行高：list、nav_row、折叠标题行。
+    pub row_h: i32,
+    /// 字号档位：徽章、角标。
+    pub font_xs: f32,
+    /// 字号档位：说明文字、表头、tooltip。
     pub font_sm: f32,
+    /// 字号档位：正文（所有没显式设字号的文字的默认值）。
     pub font_md: f32,
+    /// 字号档位：卡片标题、对话框标题。
     pub font_lg: f32,
+    /// 字号档位：页面标题。
+    pub font_xl: f32,
+}
+
+impl Metrics {
+    /// 标准控件的高度：`max(control_h, 字号 + 16)`。默认字号下即 `control_h`；
+    /// 字号调大时按文字自然增高，不会把字挤出框。
+    pub fn control_height(&self, font_size: f32) -> i32 {
+        self.control_h.max(font_size.round() as i32 + 16)
+    }
 }
 
 impl Default for Metrics {
@@ -318,11 +350,19 @@ impl Default for Metrics {
             corner_lg: 10.0,
             border_width: Len::Dp(1.0),
             border_width_focus: Len::Dp(1.8),
-            spacing: 8,
-            text_pad: 10,
+            space_xs: 4,
+            space_sm: 8,
+            space_md: 12,
+            space_lg: 16,
+            space_xl: 24,
+            control_h: 32,
+            control_h_sm: 28,
+            row_h: 36,
+            font_xs: 12.0,
             font_sm: 13.0,
             font_md: 14.0,
             font_lg: 16.0,
+            font_xl: 20.0,
         }
     }
 }
@@ -616,7 +656,7 @@ impl TabTheme {
         self.indicator_h.unwrap_or(2.0)
     }
     pub fn height(&self) -> i32 {
-        self.height.unwrap_or(44)
+        self.height.unwrap_or(40)
     }
     pub fn selected_weight(&self) -> u16 {
         self.selected_weight.unwrap_or(600)
@@ -1300,7 +1340,7 @@ impl ColorPickerTheme {
         })
     }
     pub fn corner(&self, _p: &Palette) -> f32 {
-        self.corner.unwrap_or(4.0)
+        self.corner.unwrap_or_else(|| current().metrics.corner_sm)
     }
 }
 

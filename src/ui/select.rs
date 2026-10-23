@@ -355,17 +355,27 @@ impl Widget for Dropdown {
                         .measure(&it.label, &crate::text::TextStyle::of(style), None)
                         .w;
                     if let Some((btext, _)) = &it.badge {
-                        iw += text
-                            .measure(btext, &crate::text::TextStyle::new(12.0), None)
-                            .w
-                            + 2 * BADGE_PAD_X
-                            + BADGE_GAP;
+                        iw +=
+                            text.measure(
+                                btext,
+                                &crate::text::TextStyle::new(
+                                    crate::theme::current().metrics.font_xs,
+                                ),
+                                None,
+                            )
+                            .w + 2 * BADGE_PAD_X
+                                + BADGE_GAP;
                     }
                     w = w.max(iw);
                 }
             }),
         }
-        Size::new(w + 2 * PAD_X + CHEVRON_W, (style.font_size as i32) + 16)
+        Size::new(
+            w + 2 * PAD_X + CHEVRON_W,
+            crate::theme::current()
+                .metrics
+                .control_height(style.font_size()),
+        )
     }
 
     fn paint(
@@ -395,7 +405,10 @@ impl Widget for Dropdown {
             .as_ref()
             .map(|(text, _)| {
                 canvas
-                    .measure_text(text, &crate::text::TextStyle::new(12.0))
+                    .measure_text(
+                        text,
+                        &crate::text::TextStyle::new(crate::theme::current().metrics.font_xs),
+                    )
                     .w
                     + 2 * BADGE_PAD_X
             })
@@ -428,7 +441,7 @@ impl Widget for Dropdown {
                 br,
                 fg,
                 Align::Center,
-                &crate::text::TextStyle::new(12.0),
+                &crate::text::TextStyle::new(crate::theme::current().metrics.font_xs),
             );
         }
 
@@ -713,7 +726,12 @@ impl Widget for CheckMenu {
             .measure(&self.title.resolve(), &ts, None)
             .w
             .max(text.measure(&self.display_text(), &ts, None).w);
-        Size::new(w + 2 * PAD_X + CHEVRON_W, (style.font_size as i32) + 16)
+        Size::new(
+            w + 2 * PAD_X + CHEVRON_W,
+            crate::theme::current()
+                .metrics
+                .control_height(style.font_size()),
+        )
     }
 
     fn paint(

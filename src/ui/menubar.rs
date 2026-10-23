@@ -129,7 +129,7 @@ impl Widget for MenuBar {
             .iter()
             .map(|e| text.measure(&e.title.resolve(), &ts, None).w + 2 * TITLE_PAD_X)
             .sum();
-        Size::new(w, style.font_size as i32 + 14)
+        Size::new(w, style.font_size() as i32 + 14)
     }
 
     fn paint(
@@ -200,7 +200,7 @@ impl Widget for MenuBar {
                 let tw = canvas.measure_text(&title, &ts).w;
                 let x0 = r.x + (r.w - tw) / 2 + canvas.measure_text(pre, &ts).w;
                 let cw = canvas.measure_text(ch, &ts).w;
-                let y = r.y + (r.h + style.font_size as i32) / 2 + 1;
+                let y = r.y + (r.h + style.font_size() as i32) / 2 + 1;
                 canvas.fill_rect(x0 as f32, y as f32, cw as f32, 1.0, &Paint::fill(color));
             }
             rects.push(r);

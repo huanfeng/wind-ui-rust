@@ -230,7 +230,7 @@ fn header_cell(
     };
     // 标题占剩余宽度，单行 + 末尾省略号（空间不足时截断标题，不影响箭头）。
     let title_el = Element::label(title.to_string())
-        .font_size(13.0)
+        .font_size(crate::theme::current().metrics.font_sm)
         .font_weight(600)
         .fg_role(Role::TextMuted)
         .max_lines(1)
@@ -408,7 +408,7 @@ fn action_header_cell(title: &str, weight: f32) -> Element {
         .padding_xy(TABLE_CELL_PAD_X, TABLE_HEADER_PAD_Y)
         .child(
             Element::label(title.to_string())
-                .font_size(13.0)
+                .font_size(crate::theme::current().metrics.font_sm)
                 .font_weight(600)
                 .fg_role(Role::TextMuted)
                 .max_lines(1)
@@ -433,7 +433,7 @@ fn data_cell(
         Some(custom) => action_cell(custom, w),
         None => Element::table_cell_pad_lines(
             Element::label(cell.to_string())
-                .font_size(13.0)
+                .font_size(crate::theme::current().metrics.font_sm)
                 .max_lines(lines.max(1))
                 .truncate(Truncate::End),
             lines.max(1),

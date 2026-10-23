@@ -96,7 +96,12 @@ impl Widget for SegmentedControl {
             th = th.max(t.h);
         }
         let seg_w = tw + 2 * SEG_PAD_X;
-        let h = th.max(style.font_size as i32) + 14;
+        // 高度只看字号公式（与按钮、输入框同一个），不看实测行高——真实字体的行高约为
+        // 字号的 1.4 倍，按行高加留白会让大字号下各控件高低不齐。`th + 4` 只防极端字号溢出。
+        let h = crate::theme::current()
+            .metrics
+            .control_height(style.font_size())
+            .max(th + 4);
         Size::new(seg_w * self.len().max(1) as i32, h)
     }
 

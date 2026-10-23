@@ -975,7 +975,9 @@ fn trigger_chip_rect(bounds: Rect, scale: f32, show_text: bool) -> (f32, f32, f3
 
 impl Widget for ColorTrigger {
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
-        let h = (style.font_size as i32 + 14).max(28);
+        let h = crate::theme::current()
+            .metrics
+            .control_height(style.font_size());
         if !self.show_text {
             return Size::new(h + 12, h);
         }

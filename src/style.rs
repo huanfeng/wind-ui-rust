@@ -251,8 +251,10 @@ pub struct Style {
     /// `visible_when`，外加包住它们的容器也要带同样的判定（否则父容器仍为那个高度为 0 的
     /// 容器计入 spacing）——三个节点、两处判定，表达的是"这行字有两种颜色"。
     pub fg_role_signal: Option<Signal<Role>>,
-    /// 字号 px。
-    pub font_size: f32,
+    /// 字号 px。`None`（默认）= 跟随主题 `metrics.font_md`，于布局/绘制期解析——
+    /// 改主题字号或运行期换主题时，没显式设过字号的文字全部跟着变。
+    /// 读取一律经 [`Style::font_size`]。
+    pub font_size: Option<f32>,
     /// 字重（DirectWrite 数值：400=Normal、500=Medium、600=SemiBold、700=Bold）。
     pub font_weight: u16,
     /// 字体族（None = 系统默认）。
@@ -276,6 +278,14 @@ pub struct Style {
     pub opacity: f32,
 }
 
+impl Style {
+    /// 实际生效的字号：显式设过用自己的，否则取当前主题的 `metrics.font_md`。
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+            .unwrap_or_else(|| crate::theme::current().metrics.font_md)
+    }
+}
+
 impl Default for Style {
     fn default() -> Self {
         Self {
@@ -287,7 +297,7 @@ impl Default for Style {
             fg: Color::hex(0x1A1A1A),
             fg_role: Some(Role::Text),
             fg_role_signal: None,
-            font_size: 14.0,
+            font_size: None,
             font_weight: crate::text::WEIGHT_NORMAL,
             font_family: None,
             font_italic: false,

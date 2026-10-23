@@ -355,7 +355,12 @@ impl StepperButton {
 
 impl Widget for StepperButton {
     fn measure(&self, _avail: Size, style: &Style, _text: &mut dyn TextEngine) -> Size {
-        Size::new(BTN_W, (style.font_size as i32) + 16)
+        Size::new(
+            BTN_W,
+            crate::theme::current()
+                .metrics
+                .control_height(style.font_size()),
+        )
     }
 
     fn paint(

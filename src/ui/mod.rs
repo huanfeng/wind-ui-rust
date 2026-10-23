@@ -81,7 +81,6 @@ const TAB_SLIDE: i32 = 24;
 const TABLE_CELL_PAD_X: i32 = 14;
 const TABLE_CELL_PAD_Y: i32 = 9;
 const TABLE_HEADER_PAD_Y: i32 = 10;
-const TABLE_CELL_CORNER: f32 = 4.0;
 
 /// 文本溢出时的省略方式。对 [`Label`] 生效（静态文案与绑信号的一并适用）；
 /// 配合 `.max_lines(1)` 使用最为常见。
@@ -310,11 +309,17 @@ pub enum ButtonSize {
 }
 
 impl ButtonSize {
-    /// (横向总内边距, 纵向总内边距)（px）。
-    fn padding(self) -> (i32, i32) {
+    /// `(横向总内边距, 纵向最小总内边距, 高度下限)`（px）。
+    ///
+    /// 高度取 `max(高度下限, 文字高 + 纵向最小内边距)`：默认字号下落在主题的
+    /// `control_h` / `control_h_sm`，与输入框、下拉框同高；字号调大时随文字自然增高。
+    fn metrics(self, m: &crate::theme::Metrics, font: f32) -> (i32, i32, i32) {
         match self {
-            ButtonSize::Small => (20, 10),
-            ButtonSize::Medium => (32, 18),
+            ButtonSize::Small => (2 * m.space_md, 6, m.control_h_sm),
+            // 下限与输入框、下拉框同一个公式：任何字号下都与它们等高。纵向留白取 4 只防
+            // 极端字号溢出——按"实测行高 + 10"算的话，真实字体（行高 ≈ 1.4× 字号）下
+            // 大字号的按钮会比输入框高出几像素。
+            ButtonSize::Medium => (2 * m.space_lg, 4, m.control_height(font)),
         }
     }
 }
@@ -411,9 +416,11 @@ impl Widget for Button {
         } else {
             0
         };
-        // 按尺寸变体取内边距（Medium 左右16/上下9，Small 左右10/上下5）。
-        let (pad_w, pad_h) = self.size.padding();
-        Size::new(s.w + pad_w + icon_extra, s.h + pad_h)
+        let (pad_w, pad_h, min_h) = self
+            .size
+            .metrics(&crate::theme::current().metrics, style.font_size());
+        // 高度以下限为准（理由见 `ButtonSize::metrics`）；`s.h + pad_h` 只在下限装不下文字时起作用。
+        Size::new(s.w + pad_w + icon_extra, min_h.max(s.h + pad_h))
     }
     fn paint(
         &self,
@@ -886,7 +893,9 @@ impl Element {
             .cross(Align::Center)
             .padding_xy(9, 3)
             .corner(999.0);
-        let label = Element::label(text).font_size(12.0).font_weight(600);
+        let label = Element::label(text)
+            .font_size(crate::theme::current().metrics.font_xs)
+            .font_weight(600);
         match intent {
             Intent::Primary => shell
                 .bg_role_alpha(Role::Accent, 0.15)
@@ -2345,12 +2354,7 @@ impl Element {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
             let row = list::ListRow::new(it, selected, i);
-            scroll = scroll.child(
-                Self::base(Layout::None)
-                    .widget(row)
-                    .width_match()
-                    .height(list::ROW_H),
-            );
+            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match());
         }
         scroll
     }
@@ -2360,12 +2364,7 @@ impl Element {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
             let row = list::ListRow::new(it, selected, i).pill();
-            scroll = scroll.child(
-                Self::base(Layout::None)
-                    .widget(row)
-                    .width_match()
-                    .height(list::ROW_H),
-            );
+            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match());
         }
         scroll
     }
@@ -2650,12 +2649,7 @@ impl Element {
         let mut scroll = Self::scroll().fill();
         for (i, (label, icon)) in items.into_iter().enumerate() {
             let row = list::ListRow::new(label, selected, i).icon_content(icon);
-            scroll = scroll.child(
-                Self::base(Layout::None)
-                    .widget(row)
-                    .width_match()
-                    .height(list::ROW_H),
-            );
+            scroll = scroll.child(Self::base(Layout::None).widget(row).width_match());
         }
         scroll
     }
@@ -2666,7 +2660,6 @@ impl Element {
         Self::base(Layout::None)
             .widget(nav::NavRow::new(label))
             .width_match()
-            .height(nav::NAV_ROW_H)
     }
 
     /// 可折叠分组：点击标题行展开 / 收起 `body`。`expanded` 绑定展开状态，
@@ -2679,8 +2672,7 @@ impl Element {
     ) -> Self {
         let header = Self::base(Layout::None)
             .widget(nav::CollapsibleHeader::new(title, expanded))
-            .width_match()
-            .height(nav::NAV_ROW_H);
+            .width_match();
         let show = expanded;
         Element::col()
             .width_match()
@@ -2748,7 +2740,6 @@ impl Element {
             let header = Self::base(Layout::None)
                 .widget(nav::AccordionHeader::new(title, state.clone()))
                 .width_match()
-                .height(nav::NAV_ROW_H)
                 .bg_role(Role::AccordionHeaderBg);
             let show = state.clone();
             card = card
@@ -3039,7 +3030,7 @@ impl Element {
                     .fg_role(crate::style::Role::TextMuted)
                     // 右上角：stack 里一个 align 管两轴、End 只能是右下，故分轴给值。
                     .align_xy(Align::End, Align::Start)
-                    .margin(th.metrics.spacing)
+                    .margin(th.metrics.space_sm)
                     .on_click(click);
                 Element::stack().child(content).child(close)
             }
@@ -3263,7 +3254,7 @@ impl Element {
                     .spacing(8)
                     .child(
                         Element::label("HEX")
-                            .font_size(12.0)
+                            .font_size(crate::theme::current().metrics.font_xs)
                             .fg_role(crate::style::Role::TextMuted),
                     )
                     // 提示串跟着 alpha 走：开着透明度时 `Color::to_hex_string`
@@ -3580,7 +3571,7 @@ impl Element {
             .bg_role_alpha(Role::Accent, 0.14)
             .child(
                 Element::label(text)
-                    .font_size(12.5)
+                    .font_size(crate::theme::current().metrics.font_xs)
                     .fg_role(Role::AccentText)
                     .height(18),
             )
@@ -3615,7 +3606,7 @@ impl Element {
         if chips.is_empty() {
             row = row.child(
                 Element::label(placeholder.into())
-                    .font_size(13.0)
+                    .font_size(crate::theme::current().metrics.font_sm)
                     .fg_role(Role::Placeholder)
                     .weight(1.0)
                     .height(20),
@@ -3640,7 +3631,12 @@ impl Element {
             .into_iter()
             .map(|r| {
                 r.into_iter()
-                    .map(|c| Self::table_cell_pad(Element::label(c.into()).font_size(13.0)))
+                    .map(|c| {
+                        Self::table_cell_pad(
+                            Element::label(c.into())
+                                .font_size(crate::theme::current().metrics.font_sm),
+                        )
+                    })
                     .collect()
             })
             .collect();
@@ -3689,7 +3685,7 @@ impl Element {
                     .padding_xy(TABLE_CELL_PAD_X, TABLE_HEADER_PAD_Y)
                     .child(
                         Element::label(title.clone())
-                            .font_size(13.0)
+                            .font_size(crate::theme::current().metrics.font_sm)
                             .font_weight(600)
                             .fg_role(Role::TextMuted)
                             .width_match()
@@ -3757,11 +3753,11 @@ impl Element {
                         Element::stack()
                             .clickable()
                             .on_click(move |ctx| (cb.borrow_mut())(ctx, r, c))
-                            .corner(TABLE_CELL_CORNER)
+                            .corner(crate::theme::current().metrics.corner_sm)
                             .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
                             .child(
                                 Element::label_signal(sig)
-                                    .font_size(13.0)
+                                    .font_size(crate::theme::current().metrics.font_sm)
                                     .fg_role(crate::style::Role::Text)
                                     .width_match()
                                     .height(20),
@@ -4181,7 +4177,7 @@ impl Element {
             .child(Self::leaf().weight(1.0))
             .child(
                 Self::label_signal(page_text)
-                    .font_size(12.5)
+                    .font_size(crate::theme::current().metrics.font_sm)
                     .fg_role(Role::Text),
             )
             .child(Self::leaf().weight(1.0));
@@ -4192,7 +4188,7 @@ impl Element {
             .spacing(6)
             .child(
                 Self::label_signal(count_text)
-                    .font_size(12.5)
+                    .font_size(crate::theme::current().metrics.font_sm)
                     .fg_role(Role::TextMuted),
             )
             .child(Self::leaf().weight(1.0))
@@ -4203,7 +4199,7 @@ impl Element {
             .child(last)
             .child(
                 Self::label("跳至")
-                    .font_size(12.5)
+                    .font_size(crate::theme::current().metrics.font_sm)
                     .fg_role(Role::TextMuted)
                     .padding_xy(6, 0),
             )
@@ -4935,7 +4931,7 @@ impl Element {
         self
     }
     pub fn font_size(mut self, s: f32) -> Self {
-        self.style.font_size = s;
+        self.style.font_size = Some(s);
         self
     }
     /// 字重（400=常规、500=中、600=半粗、700=粗）。标题/强调文字加粗更接近设计稿。
@@ -5172,6 +5168,82 @@ mod tests {
         tree.root = Some(root);
         tree.layout_root(Size::new(200, 200), &mut crate::text::NullTextEngine);
         tree
+    }
+
+    /// 同一行里的按钮、输入框、下拉框、分段控件、图标按钮在**不设任何尺寸**时等高，
+    /// 且就是主题的 `control_h`。此前按钮 ≈37、分段 ≈33、输入框 30，并排时高低不齐。
+    #[test]
+    fn standard_controls_share_one_height_by_default() {
+        let row = Element::row()
+            .child(Element::button("保存"))
+            .child(Element::text_input(signal(String::new()), "名称"))
+            .child(Element::dropdown(vec!["甲", "乙"], signal(0usize)))
+            .child(Element::segmented(vec!["快", "慢"], signal(0usize)))
+            .child(Element::icon_button("⚙"));
+        let mut tree = Tree::new();
+        let root = row.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(800, 200), &mut crate::text::NullTextEngine);
+        let want = crate::theme::current().metrics.control_h;
+        let kids = tree.get(root).unwrap().children.clone();
+        assert_eq!(kids.len(), 5);
+        for (i, k) in kids.into_iter().enumerate() {
+            assert_eq!(
+                tree.abs_bounds(k).h,
+                want,
+                "第 {i} 个控件高度应为 control_h"
+            );
+        }
+    }
+
+    /// 改主题的 `font_md` / `control_h`，没显式设字号、高度的控件全部跟着变——
+    /// token 不是摆设。此前 `Style` 默认字号写死 14，改 `font_md` 毫无效果。
+    #[test]
+    fn metrics_tokens_drive_default_font_and_control_height() {
+        let _restore = ThemeRestore(crate::theme::current());
+        let mut th = crate::theme::Theme::default();
+        th.metrics.font_md = 18.0;
+        th.metrics.control_h = 40;
+        crate::theme::set_current(Rc::new(th));
+        assert_eq!(Style::default().font_size(), 18.0, "默认字号取 font_md");
+        assert_eq!(
+            Element::label("x").font_size(12.0).style.font_size(),
+            12.0,
+            "显式字号优先"
+        );
+        let mut tree = Tree::new();
+        let root = Element::row()
+            .child(Element::button("保存"))
+            .child(Element::text_input(signal(String::new()), ""))
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(800, 200), &mut crate::text::NullTextEngine);
+        for k in tree.get(root).unwrap().children.clone() {
+            assert_eq!(tree.abs_bounds(k).h, 40, "control_h 改了，控件高度跟着变");
+        }
+        // 字号大到 control_h 装不下时按文字增高（字号 + 16），而不是死守下限把字挤出框。
+        let mut th = crate::theme::Theme::default();
+        th.metrics.font_md = 28.0;
+        crate::theme::set_current(Rc::new(th));
+        let mut tree = Tree::new();
+        let root = Element::row()
+            .child(Element::button("保存"))
+            .child(Element::text_input(signal(String::new()), ""))
+            .child(Element::dropdown(vec!["甲"], signal(0usize)))
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(800, 200), &mut crate::text::NullTextEngine);
+        for k in tree.get(root).unwrap().children.clone() {
+            assert_eq!(tree.abs_bounds(k).h, 44, "大字号下按文字增高且彼此等高");
+        }
+    }
+
+    /// 测试里临时换主题后复位（panic 也复位，理由同 [`AnimOff`]）。
+    struct ThemeRestore(Rc<crate::theme::Theme>);
+    impl Drop for ThemeRestore {
+        fn drop(&mut self) {
+            crate::theme::set_current(self.0.clone());
+        }
     }
 
     // ---- 拖拽重排（reorder_list）：全部经真实 dispatch_pointer / layout_root 驱动 ----
@@ -6292,7 +6364,7 @@ mod tests {
             "副标题应为三级弱化文字色"
         );
         assert!(
-            left.children[1].style.font_size < left.children[0].style.font_size,
+            left.children[1].style.font_size() < left.children[0].style.font_size(),
             "副标题字号应小于标签"
         );
         // 无副标题时左块只有标签，不留空节点占位。
@@ -7989,7 +8061,7 @@ b",
         let mut want = tiny_skia::Pixmap::new(200, 100).unwrap();
         want.fill(tiny_skia::Color::WHITE);
         let style = Style {
-            font_size: 13.0,
+            font_size: Some(13.0),
             ..Style::default()
         };
         let fg = style.resolved_fg(&crate::theme::current());

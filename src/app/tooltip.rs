@@ -11,9 +11,8 @@ use crate::render::{Canvas, Paint};
 use crate::text::TextStyle;
 use crate::theme::Theme;
 
-/// 悬停提示：字号、内边距、相对指针的偏移。触发延时与换行宽度上限由宿主经
+/// 悬停提示：内边距、相对指针的偏移（字号取 `metrics.font_sm`）。触发延时与换行宽度上限由宿主经
 /// `Theme.tooltip.delay_ms` / `max_width` 配置（见 [`crate::theme::TooltipTheme`]）。
-const TOOLTIP_FONT: f32 = 13.0;
 const TOOLTIP_PAD_X: i32 = 8;
 const TOOLTIP_PAD_Y: i32 = 4;
 const TOOLTIP_CURSOR_DX: i32 = 12;
@@ -129,7 +128,11 @@ impl TooltipState {
         }
         self.shown.set(true);
         let tt = &theme.tooltip;
-        let ts = canvas.measure_text_wrapped(&text, &TextStyle::new(TOOLTIP_FONT), tt.max_width());
+        let ts = canvas.measure_text_wrapped(
+            &text,
+            &TextStyle::new(crate::theme::current().metrics.font_sm),
+            tt.max_width(),
+        );
         let size = Size::new(ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);
         let (w, h) = (size.w, size.h);
         let Point { x, y } = place(self.pos, size, ws);
@@ -179,7 +182,7 @@ impl TooltipState {
             tr,
             tt.text(pal),
             crate::spec::Align::Start,
-            &TextStyle::new(TOOLTIP_FONT),
+            &TextStyle::new(crate::theme::current().metrics.font_sm),
         );
     }
 }
