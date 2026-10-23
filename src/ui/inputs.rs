@@ -2690,6 +2690,20 @@ impl Widget for TextInput {
                 }
                 _ => false,
             },
+            // Alt+方向键 / Home / End 不是编辑键（系统编辑框同样不理），放给应用：
+            // 对话框拿它们做"切到左栏 / 右栏"这类快捷键。不放的话被当成裸方向键
+            // 移了光标，还算消费掉，`on_shortcut` 永远收不到。
+            Event::Key(k)
+                if k.pressed
+                    && k.alt
+                    && !k.ctrl
+                    && matches!(
+                        k.key,
+                        Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
+                    ) =>
+            {
+                false
+            }
             Event::Key(k) if k.pressed => {
                 // 正文可能已被程序改短：先把存着的光标 / 锚点钳进去，否则第一下 Left 从
                 // 越界处起算、看着没反应，Shift 扩选也从越界处起。`selection()` 读时虽也钳，
@@ -2999,6 +3013,37 @@ mod tests {
     fn run(s: &str, idx: usize) -> (usize, usize) {
         let chars: Vec<char> = s.chars().collect();
         word_run(&chars, idx)
+    }
+
+    /// Alt+方向键不归输入框：不移光标、不消费，好让应用的 `on_shortcut` 收到。
+    #[test]
+    fn alt_arrows_pass_through() {
+        use crate::core::Widget;
+        use crate::event::{Event, Key, KeyEvent};
+        let text = signal(String::from("abc"));
+        let mut ti = TextInput::new(text, String::new());
+        ti.cursor = 2;
+        let key = |key, alt| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                shift: false,
+                ctrl: false,
+                alt,
+                meta: false,
+            })
+        };
+        let mut consumed = true;
+        crate::testing::run_with_ctx(|ctx| {
+            consumed = ti.on_event(ctx, &key(Key::Left, true));
+        });
+        assert!(!consumed, "Alt+Left 不该被输入框消费");
+        assert_eq!(ti.cursor, 2, "Alt+Left 不该移动光标");
+        crate::testing::run_with_ctx(|ctx| {
+            consumed = ti.on_event(ctx, &key(Key::Left, false));
+        });
+        assert!(consumed);
+        assert_eq!(ti.cursor, 1, "裸 Left 照常移光标");
     }
 
     /// Escape 要能到达 `on_nav_key`：就地编辑框靠它取消。
