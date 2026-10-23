@@ -5,6 +5,43 @@
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-23
+
+### 新增
+
+- **`Element::combo_box(text, options)`**：可输入的下拉框——文本框右端带下拉箭头，既能直接输入，也能从
+  列表里选，选中后把该项文字写进 `text`。点箭头或按 ↓ 展开全部选项（当前值高亮打勾）；打字按前缀（不分
+  大小写）过滤并自动展开，无匹配或删空即收起；不预选，Enter 提交的始终是框里打的字，只有用 ↑↓ 挑中一项
+  才取它（指针悬停不算挑选，点下去才算）。Alt+↓ 同样展开；只读时不展开。列表开着时 Enter / Esc 先收起
+  列表，收起后与 `text_input` 一致。选中后光标默认落到正文末尾（与网页组合框一致），`.select_all_on_pick()`
+  改为全选（经典 Win32 做法，适合字号这类多半整体换掉的字段）。`.options_signal(..)` 绑定动态选项；
+  `on_commit` / `on_submit` 等 text_input 修饰符照常可用，从列表选中一项也算一次提交。列表是树内浮层而非
+  宿主菜单——宿主菜单开着时会把字符键当助记字母吃掉，边打字边过滤就做不成。
+- **`.on_segment_change(|ctx, i| ..)`**：分段控件选中变化后的副作用钩子（同 `on_switch_change`），选项即时
+  生效的场景（换主题配置、切视图）此前只能绕道。
+- fullshowcase「表单」页新增「文本光标」卡片：闪烁风格 / 粗细 / 圆角端 / 平滑移动即调即见（经 `ThemeHandle`
+  改 `theme.input.caret_*`，对整个窗口的输入框生效）。
+- **`.numeric()`**：`text_input` / `combo_box` 只允许输入数字（与 `stepper` 的数值框同一套过滤）。
+
+### 变更
+
+- 插入光标默认宽度 2 → **1.5** 逻辑 px：宽度向下吸附到整数物理像素，2 在 150% 下落成 3 像素偏粗；
+  1.5 为 100%/125% → 1、150% → 2、200% → 3 物理像素。要恒定 2 像素可配 `caret_width = { px = 2 }`。
+- **字段控件不再叠两圈焦点**：输入框、下拉框、复选菜单、组合框、步进器、取色器触发器聚焦时由外框表达
+  （强调色 + `border_width_focus` 加粗），键盘导航时宿主不再在外面加套焦点环——此前键盘聚焦比鼠标聚焦
+  粗出一大圈。新增 `Widget::frame_shows_focus()` 供自定义控件声明同样的行为；无框输入框仍画焦点环。
+- 步进器与取色器触发器的聚焦外框补上加粗（此前仍是 1px，与同一表单里的输入框、下拉框不一致）。
+- **破坏性（行为）**：`Element::popup` 的面板设 `.width_match()` 时改为与**触发器**同宽（原先是整个窗口宽，
+  文档里专门劝别这么写）。
+- **破坏性**：`TextConfig` 新增公开字段 `trail`（右侧留白），用结构体字面量构造 `TextConfig` 的代码需补上该字段
+  或改用 `..Default::default()`。
+
+### 修复
+
+- 单行输入框正文变短后（长文本整段换成短文本、删掉行尾）横向滚动不回收：短文本缩在视口左外侧、光标
+  贴在左沿，要等下一次移动光标才跳回。滚动量现在钳在「最长一行 − 视口宽」以内。
+- 视口横移（Home 跳回开头等）或整段替换正文时，光标不再从旧屏幕位置平滑滑过去，而是随正文一起落位。
+
 ## [0.29.0] - 2026-10-23
 
 ### 变更
@@ -3093,7 +3130,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.0...v0.27.1
