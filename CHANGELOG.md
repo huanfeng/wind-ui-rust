@@ -39,6 +39,8 @@
 - `Palette::hover_overlay()` / `press_overlay()` / `selected_soft()` 与常量 `theme::HOVER_ALPHA` /
   `PRESS_ALPHA` / `SELECTED_ALPHA`，自定义控件的交互态可直接复用。
 - `CardTheme::bordered`（默认 `true`）、`DropdownTheme::border_hover`、`text::WEIGHT_SEMIBOLD`。
+- `InputTheme::selection_text`（`[input] selection_text`）：选区上的字色，与选区底色 `selection` 成对；
+  默认不设，选中的字仍用正文色、外观不变。深色主题配不透明白底选区时用它把选中的字换成深色。
 - `dialog_panel` 的底部按钮行没设间距时自动补 `space_sm`（只认横排；`spacing(0)` 与未设分不出，要贴紧请用
   `spacing(1)`）。
 

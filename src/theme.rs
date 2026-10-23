@@ -444,6 +444,10 @@ pub struct InputTheme {
     pub placeholder: Option<Color>,
     /// 选区高亮（含 alpha）。
     pub selection: Option<Color>,
+    /// 选区上的字色，与 [`selection`](Self::selection)（底色）成对。`None` = 与未选中的
+    /// 正文同色（默认）。选区底改成不透明的实色（如深色主题里的白底）时配上它，
+    /// 否则选中的字与底同色读不出。对应 CSS `::selection { color }`、Qt `HighlightedText`。
+    pub selection_text: Option<Color>,
     /// 区间底色标记（[`Element::marks`](crate::ui::Element::marks)，查找命中涂黄）的默认底色，
     /// 含 alpha。默认 `palette.warning` 的 40% alpha（琥珀色）：叠在明暗两种底上字都读得清，
     /// 且与选区的强调色分得开；自定义调色板时跟着变。
@@ -486,6 +490,10 @@ impl InputTheme {
     pub fn selection(&self, p: &Palette) -> Color {
         self.selection
             .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x55))
+    }
+    /// 选区字色；`None` 表示不另给，选中的字仍用正文色。
+    pub fn selection_text(&self) -> Option<Color> {
+        self.selection_text
     }
     pub fn mark(&self, p: &Palette) -> Color {
         self.mark

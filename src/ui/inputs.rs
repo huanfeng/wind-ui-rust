@@ -2307,10 +2307,12 @@ impl Widget for TextInput {
         // 选区高亮（逐视觉行；跨行处延伸到行尾标示换行/折行被选中）。
         // `selection()` 给的是**逻辑**索引，而下面按视觉行切分用的是**显示串**索引——
         // 有合成串时两者差一个合成串长度，不换算就会整体偏移。
-        if let Some((s, e)) = self
+        let sel_disp = self
             .selection()
-            .map(|(s, e)| (self.to_display_index(s), self.to_display_index(e)))
-        {
+            .map(|(s, e)| (self.to_display_index(s), self.to_display_index(e)));
+        // 禁用态的字一律置灰，不另换选区字色。
+        let sel_fg = inp.selection_text().filter(|_| enabled);
+        if let Some((s, e)) = sel_disp {
             for (i, ln) in lay.lines.iter().enumerate() {
                 let ly = first_line_y + i as i32 * line_h;
                 if ly + line_h < inner.y || ly > inner.y + inner.h {
@@ -2340,7 +2342,8 @@ impl Widget for TextInput {
         }
 
         // 输入法给的合成串底色（TSF 的 `crBk`）。画在文字之前，与选区高亮同为铺满行盒。
-        let pe_pieces = self.preedit_span().map(|(ps, pe_end)| {
+        let pe_range = self.preedit_span();
+        let pe_pieces = pe_range.map(|(ps, pe_end)| {
             let pe = self.preedit.borrow();
             lay.lines
                 .iter()
@@ -2393,11 +2396,32 @@ impl Widget for TextInput {
                 if ln.end > ln.start {
                     let s: String = chars[ln.start..ln.end].iter().collect();
                     let tr = Rect::new(base_x, ly, NO_WRAP_W, line_h);
-                    let fg_runs = pe_pieces
+                    let mut fg_runs = pe_pieces
                         .as_ref()
                         .and_then(|p| p.get(i))
                         .map(|pieces| fg_runs(pieces, ln, base_x))
                         .unwrap_or_default();
+                    // 选区字色（`[input] selection_text`）与输入法字色走同一套分区描字。
+                    // 区间与上面的选区底同源，但不含行尾的换行示意宽度——那里没有字。
+                    // 合成串那段扣掉：它的底是输入法给的（压在选区底之上），字色也须由输入法
+                    // 或正文色决定；反向选区（锚点在右）下开始组字时，合成串整段落在选区里。
+                    if let (Some(c), Some((ss, se))) = (sel_fg, sel_disp) {
+                        let (a, b) = (ss.clamp(ln.start, ln.end), se.clamp(ln.start, ln.end));
+                        let (ps, pe) = pe_range.unwrap_or((b, b));
+                        for (l, r) in [(a, b.min(ps)), (a.max(pe), b)] {
+                            if r > l {
+                                fg_runs.push((
+                                    base_x + ln.x[l - ln.start],
+                                    base_x + ln.x[r - ln.start],
+                                    c,
+                                ));
+                            }
+                        }
+                        fg_runs.sort_by_key(|r| r.0);
+                    }
+                    // 下面的分色循环按起点推进，区间重叠时先开始的那段胜出、被包住的丢掉。
+                    // 选区段已扣掉合成串，故两类来源互不重叠；输入法自己的 span 来自平台，
+                    // 不保证不重叠，所以这里不断言。
                     if fg_runs.is_empty() {
                         canvas.draw_text(&s, tr, text_color, Align::Start, ts);
                     } else {
@@ -3750,6 +3774,87 @@ mod tests {
             red < base * 2 + 300,
             "换字色不应多出整块不透明底：默认 {base} vs 红字 {red}"
         );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// `[input] selection_text`：选中的字换成这一色，未选中的仍是正文色；不设时与以前一样。
+    /// 选区底设成不透明白（深色主题配白底黑字的用法），字形用平台文字引擎真实出墨。
+    #[test]
+    fn selection_text_recolors_only_the_selected_glyphs() {
+        use crate::core::Widget;
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let red = Color::rgb(255, 0, 0);
+        // 返回 (红色像素的最右 x, 深色正文像素的最右 x, 红色像素数)。
+        let render = |sel_text: Option<Color>| {
+            let mut t = crate::theme::Theme::default();
+            t.input.selection = Some(Color::WHITE);
+            t.input.selection_text = sel_text;
+            crate::theme::set_current(std::rc::Rc::new(t));
+            // 选中前 3 个字；光标停在左端，免得它的深色竖线混进右侧的统计。
+            let mut ti = input_with("WWWWWW", 0, Preedit::default());
+            ti.anchor = Some(3);
+            let b = crate::geometry::Rect::new(0, 0, 200, 30);
+            let mut pm = tiny_skia::Pixmap::new(200, 30).unwrap();
+            let mut eng = crate::ui::text_fit::ink::engine();
+            {
+                let mut c = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+                ti.paint(b, b, true, true, &mut c, &crate::style::Style::default());
+            }
+            // 只认不透明像素：数据是预乘的，圆角外缘的半透明像素数值也很小，会被当成深色。
+            let (mut red_max, mut dark_max, mut reds) = (-1i32, -1i32, 0usize);
+            for (i, px) in pm.data().chunks(4).enumerate() {
+                let x = (i % 200) as i32;
+                if px[0] > 180 && px[1] < 90 && px[2] < 90 {
+                    red_max = red_max.max(x);
+                    reds += 1;
+                } else if px[0] < 100 && px[1] < 100 && px[2] < 100 && px[3] == 255 {
+                    dark_max = dark_max.max(x);
+                }
+            }
+            (red_max, dark_max, reds)
+        };
+        let (_, dark_off, reds_off) = render(None);
+        assert_eq!(reds_off, 0, "不设 selection_text 时选中的字仍是正文色");
+        assert!(dark_off > 0, "前提：字形真实出墨");
+        let (red_max, dark_max, reds) = render(Some(red));
+        assert!(reds > 0, "选中的字应换成 selection_text");
+        assert!(
+            dark_max > red_max,
+            "未选中的字仍是正文色，且都在选区右侧：红到 x={red_max}，深色到 x={dark_max}"
+        );
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 反向选区（锚点在光标右侧）下开始组字，合成串整段落在选区的显示区间里。选区字色
+    /// 必须让出合成串：那段的字色归输入法，否则会盖掉输入法给的 crText。
+    #[test]
+    fn selection_text_yields_to_preedit_colors() {
+        use crate::core::Widget;
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let mut t = crate::theme::Theme::default();
+        t.input.selection = Some(Color::WHITE);
+        t.input.selection_text = Some(Color::rgb(255, 0, 0));
+        crate::theme::set_current(std::rc::Rc::new(t));
+        // 合成串第一段不给字色、第二段给蓝色：首段起点与选区起点重合，最容易被吞掉。
+        let blue = PreeditSpan {
+            fg: Some(Color::rgb(0, 0, 255)),
+            ..span((1, 3), UnderlineStyle::None)
+        };
+        let pe = styled("WWW", &[span((0, 1), UnderlineStyle::None), blue]);
+        let mut ti = input_with("WWWW", 0, pe);
+        ti.anchor = Some(4);
+        let b = crate::geometry::Rect::new(0, 0, 240, 30);
+        let mut pm = tiny_skia::Pixmap::new(240, 30).unwrap();
+        let mut eng = crate::ui::text_fit::ink::engine();
+        {
+            let mut c = crate::render::SkiaCanvas::with_text(&mut pm, &mut eng, 1.0);
+            ti.paint(b, b, true, true, &mut c, &crate::style::Style::default());
+        }
+        let count = |f: fn(&[u8]) -> bool| pm.data().chunks(4).filter(|p| f(p)).count();
+        let blues = count(|p| p[2] > 180 && p[0] < 90 && p[1] < 90);
+        let reds = count(|p| p[0] > 180 && p[1] < 90 && p[2] < 90);
+        assert!(blues > 0, "合成串里输入法给的字色不能被选区字色盖掉");
+        assert!(reds > 0, "合成串之外的选中正文仍换成 selection_text");
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }
 

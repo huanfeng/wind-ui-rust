@@ -643,6 +643,16 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
 `palette.surface_alt`），正文保持常规色；光标照常显示（键盘扩选要看得见起点，与 Win32 原生
 只读编辑框一致）。与 `disabled` 的区别：禁用不可聚焦、不可选择、正文置灰。
 
+**选区配色**：底色 `[input] selection`（默认强调色 33% alpha），字色 `[input] selection_text`
+（默认不设 = 与未选中的正文同色）。两者成对用：选区底改成不透明实色时要同时给字色，否则选中的
+字与底撞色读不出——典型是深色主题里的白底黑字：
+
+```toml
+[input]
+selection      = "#FFFFFF"
+selection_text = "#000000"
+```
+
 **插入光标**：默认 `Blink` 风格——亮/灭各半周期硬切换（跟随系统插入符设置），2px 宽、两端圆角；
 打字/移动光标/点击定位后保持实心 0.5s，停手才开始闪。四种风格与外观都走主题，
 `text_input` 与 `stepper`（中部内嵌的正是同一个输入框）共用同一份配置：
