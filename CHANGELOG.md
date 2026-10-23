@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-23
+
 ### 变更
 
 - **默认主题全面换新**（Tailwind / shadcn slate 风格），目标是"不手调任何参数，组合出来就是主流观感"：
@@ -43,6 +45,12 @@
   默认不设，选中的字仍用正文色、外观不变。深色主题配不透明白底选区时用它把选中的字换成深色。
 - `dialog_panel` 的底部按钮行没设间距时自动补 `space_sm`（只认横排；`spacing(0)` 与未设分不出，要贴紧请用
   `spacing(1)`）。
+
+### 修复
+
+- 输入框不再吞掉 Alt+方向键 / Alt+Home / Alt+End：这些组合不是编辑键（系统编辑框同样不理），此前移了光标
+  还算已消费，应用的 `on_shortcut` 收不到，对话框没法拿它们做切栏快捷键。现在交还给应用。
+- 表格单行文本格在被同行按钮、徽章撑高的行里竖直居中，原先贴在格子顶部（`table_virtual` 带操作列时最明显）。
 
 ## [0.28.0] - 2026-10-23
 
@@ -3085,7 +3093,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.26.0...v0.27.0
