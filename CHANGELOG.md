@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-23
+
 ### 新增
 
 - **`render::with_pixel_snap(mode, || ..)`**：在一段绘制里临时改用另一种像素对齐策略（线程局部、可嵌套、
@@ -17,6 +19,7 @@
     Qt / GTK / WinUI 一致），滚到头交给外层。
   - 触摸（Win32）：越过拖动阈值时按位移较大的一边锁定方向，平移与松手惯性、撞界回弹都沿该方向；
     那个方向在手指下没有可滚的容器时改锁另一边（只竖滚的页面上偏横的斜滑照样竖滚）。
+    触摸这一项只有单测覆盖，尚未在触摸屏真机上验证。
   - 焦点跟随（`scroll_into_view`）、锚定浮层的位置补偿都计入横向偏移。
   - `EventCtx::scroll_metrics_x` / `set_scroll_x` / `scroll_by_x` / `scroll_axis` / `scroll_bars_shown` /
     `hscrollbar_hit_zone`，`Tree::set_scroll_x` / `set_scroll_offset`。
@@ -3043,7 +3046,11 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.1...v0.28.0
+[0.27.1]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.22.0...v0.23.0
