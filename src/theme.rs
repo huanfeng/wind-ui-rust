@@ -104,7 +104,30 @@ impl Default for Palette {
     }
 }
 
+/// 交互态叠层的不透明度：hover / 按下 / 选中淡底。全库的悬停、按下、选中反馈都从这三档取，
+/// 不再各控件各配一个 alpha（此前有 0x12 / 0x18 / 0x22 / 5% / 6% / 8% 七种）。
+pub const HOVER_ALPHA: f32 = 0.06;
+/// 按下叠层不透明度，见 [`HOVER_ALPHA`]。
+pub const PRESS_ALPHA: f32 = 0.10;
+/// 选中淡底不透明度（强调色），见 [`HOVER_ALPHA`]。
+pub const SELECTED_ALPHA: f32 = 0.12;
+
 impl Palette {
+    /// 悬停叠层：文字色 × [`HOVER_ALPHA`]。叠在任何底色上都读得出来（亮底变灰、暗底变亮），
+    /// 不必为卡片 / 窗口底 / 斑马纹各配一个实色。
+    pub fn hover_overlay(&self) -> Color {
+        self.text.scale_alpha(HOVER_ALPHA)
+    }
+    /// 按下叠层：文字色 × [`PRESS_ALPHA`]。
+    pub fn press_overlay(&self) -> Color {
+        self.text.scale_alpha(PRESS_ALPHA)
+    }
+    /// 选中淡底：强调色 × [`SELECTED_ALPHA`]。列表、表格、菜单这类"一列里选一项"的选中态用它
+    /// 配 `accent_text` 字；分段控件、胶囊标签这类"几个里选一个"的强选择用 accent 实底。
+    pub fn selected_soft(&self) -> Color {
+        self.accent.scale_alpha(SELECTED_ALPHA)
+    }
+
     /// 强调色当前景用的取值：显式设了 `accent_text` 用它；否则亮色主题即 `accent`，
     /// 暗色主题把 `accent` 向白提亮 35%（blue-600 → 约 blue-400，在 slate-800 上 ≥ 4.5:1）。
     pub fn accent_text(&self) -> Color {
@@ -390,6 +413,8 @@ impl ButtonTheme {
     pub fn active(&self, p: &Palette) -> Color {
         self.active.unwrap_or(p.accent_active)
     }
+    /// 禁用态底色：`palette.track` 实色灰，配 `text_disabled` 字。不用半透明叠层——
+    /// 那与 Neutral 按钮常态（文字色 8%）几乎一样淡，禁用与可用只剩字色之差。
     pub fn disabled(&self, p: &Palette) -> Color {
         self.disabled.unwrap_or(p.track)
     }
@@ -520,12 +545,24 @@ pub struct DropdownTheme {
     pub bg: Option<Color>,
     pub border: Option<Color>,
     pub border_focus: Option<Color>,
+    /// 悬停边框。默认把 `border` 压深一档（暗色主题提亮一档）。
+    pub border_hover: Option<Color>,
     pub text: Option<Color>,
     pub chevron: Option<Color>,
     pub corner: Option<f32>,
 }
 
 impl DropdownTheme {
+    pub fn border_hover(&self, p: &Palette) -> Color {
+        self.border_hover.unwrap_or_else(|| {
+            let b = self.border(p);
+            if is_dark(p) {
+                b.lighten(0.15)
+            } else {
+                b.darken(0.15)
+            }
+        })
+    }
     pub fn bg(&self, p: &Palette) -> Color {
         self.bg.unwrap_or(p.surface)
     }
@@ -599,11 +636,12 @@ impl MenuTheme {
     pub fn text_disabled(&self, p: &Palette) -> Color {
         self.text_disabled.unwrap_or(p.text_disabled)
     }
+    /// 悬停 / 键盘当前项的底。取按下档（[`PRESS_ALPHA`]）而非 hover 档：菜单项悬停只换底、
+    /// 不换字色，键盘导航时"当前项"全靠这层底，太淡在暗色主题下几乎看不出。
     pub fn hover(&self, p: &Palette) -> Color {
-        self.hover
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+        self.hover.unwrap_or(p.press_overlay())
     }
-    /// 悬停 / 激活项的文字色（强调色当前景用）。
+    /// 勾选标记色（强调色当前景用）。悬停项不换字色，只换底（[`MenuTheme::hover`]）。
     pub fn accent(&self, p: &Palette) -> Color {
         self.accent.unwrap_or(p.accent_text())
     }
@@ -650,7 +688,7 @@ impl TabTheme {
     /// 刻意不取 accent——accent 已是选中态语义，hover 是临时态，用它会抢过选中项、
     /// 造成视觉层级倒置。
     pub fn hover_bg(&self, p: &Palette) -> Color {
-        self.hover_bg.unwrap_or(p.text.scale_alpha(0.08))
+        self.hover_bg.unwrap_or(p.hover_overlay())
     }
     pub fn indicator_h(&self) -> f32 {
         self.indicator_h.unwrap_or(2.0)
@@ -730,8 +768,7 @@ impl StepperTheme {
         self.button.unwrap_or(p.accent_text())
     }
     pub fn button_hover(&self, p: &Palette) -> Color {
-        self.button_hover
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x18))
+        self.button_hover.unwrap_or(p.hover_overlay())
     }
 }
 
@@ -750,14 +787,13 @@ impl ListTheme {
         self.text.unwrap_or(p.text)
     }
     pub fn selected_bg(&self, p: &Palette) -> Color {
-        self.selected_bg
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x22))
+        self.selected_bg.unwrap_or(p.selected_soft())
     }
     pub fn selected_text(&self, p: &Palette) -> Color {
         self.selected_text.unwrap_or(p.accent_text())
     }
     pub fn hover_bg(&self, p: &Palette) -> Color {
-        self.hover_bg.unwrap_or(p.surface_alt)
+        self.hover_bg.unwrap_or(p.hover_overlay())
     }
 }
 
@@ -937,8 +973,7 @@ impl SegmentTheme {
         self.text.unwrap_or(p.text_muted)
     }
     pub fn hover_bg(&self, p: &Palette) -> Color {
-        self.hover_bg
-            .unwrap_or(Color::rgba(p.accent.r, p.accent.g, p.accent.b, 0x12))
+        self.hover_bg.unwrap_or(p.hover_overlay())
     }
     pub fn divider(&self, p: &Palette) -> Color {
         self.divider.unwrap_or(p.divider)
@@ -1006,7 +1041,7 @@ impl NavTheme {
         self.text.unwrap_or(p.text)
     }
     pub fn hover_bg(&self, p: &Palette) -> Color {
-        self.hover_bg.unwrap_or(p.surface_alt)
+        self.hover_bg.unwrap_or(p.hover_overlay())
     }
     pub fn chevron(&self, p: &Palette) -> Color {
         self.chevron.unwrap_or(p.text_muted)

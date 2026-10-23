@@ -181,10 +181,9 @@ impl Widget for MenuBar {
                     &Paint::fill(mt.hover(pal)),
                 );
             }
+            // 激活项只换底、字保持正文色（与弹出菜单同一规则）。
             let color = if !enabled {
                 mt.text_disabled(pal)
-            } else if active {
-                mt.accent(pal)
             } else {
                 mt.text(pal)
             };

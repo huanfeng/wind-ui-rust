@@ -86,6 +86,10 @@ impl SegmentedControl {
 }
 
 impl Widget for SegmentedControl {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.segment.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         // 取最宽选项作为统一段宽，乘段数 → 等宽连体。
         let mut tw = 0;

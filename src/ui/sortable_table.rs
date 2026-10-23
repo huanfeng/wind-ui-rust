@@ -260,8 +260,8 @@ fn header_cell(
         .child(inner)
 }
 
-/// 正文行悬停高亮的叠层不透明度（叠层取主题文字色，明暗自适应；"轻微"故低于 clickable 的 0.06）。
-const ROW_HOVER_A: f32 = 0.05;
+/// 正文行悬停高亮的叠层不透明度（叠层取主题文字色，明暗自适应；与全库 hover 同一档）。
+const ROW_HOVER_A: f32 = crate::theme::HOVER_ALPHA;
 
 /// 只读表格正文行的悬停高亮 widget：悬停时在整行背景（斑马纹）之上、单元格内容之下绘制
 /// 一层轻微半透明叠层（主题文字色低 alpha，明暗自适应），带淡入淡出。无点击/焦点/手型，
@@ -851,7 +851,7 @@ const SELECT_COL_W: i32 = 40;
 /// 复选框方框边长 px（与 CheckBox 一致，便于自绘全选框视觉统一）。
 const SEL_BOX: i32 = 18;
 /// 选中行高亮叠层不透明度（accent 低 alpha；叠在斑马纹之上、悬停层之下）。
-const ROW_SELECTED_A: f32 = 0.12;
+const ROW_SELECTED_A: f32 = crate::theme::SELECTED_ALPHA;
 
 /// 首列复选框单元格：固定宽，内含绑定该行选择信号的复选框（水平居中 + 垂直居中）。
 fn select_cell(row_sel: Signal<bool>) -> Element {

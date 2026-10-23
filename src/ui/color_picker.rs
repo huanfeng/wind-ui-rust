@@ -974,6 +974,10 @@ fn trigger_chip_rect(bounds: Rect, scale: f32, show_text: bool) -> (f32, f32, f3
 }
 
 impl Widget for ColorTrigger {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.color_picker.corner(&th.palette))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let h = crate::theme::current()
             .metrics

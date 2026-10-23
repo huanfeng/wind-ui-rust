@@ -487,9 +487,9 @@ enum ClickState {
     Press,
 }
 
-/// hover/press 叠层不透明度（叠层取主题文字色，明暗主题均自适应）。
-const CLICK_HOVER_A: f32 = 0.06;
-const CLICK_PRESS_A: f32 = 0.11;
+/// hover/press 叠层不透明度（叠层取主题文字色，明暗主题均自适应）。与全库同一套档位。
+const CLICK_HOVER_A: f32 = crate::theme::HOVER_ALPHA;
+const CLICK_PRESS_A: f32 = crate::theme::PRESS_ALPHA;
 
 /// 通用可点击容器 widget：为任意容器（卡片 / 列表项 / 自定义行）补上 hover/press
 /// 视觉反馈 + 点击/键盘激活 + 手型光标。反馈用**主题自适应的半透明叠层**（绘制在节点
@@ -686,6 +686,10 @@ impl IconButton {
 }
 
 impl Widget for IconButton {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.button.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         match &self.kind {
             IconKind::Glyph(g) => {
@@ -734,10 +738,11 @@ impl Widget for IconButton {
         let a = ov.animate();
         self.overlay.set(ov);
         if a > 0.001 {
+            // 与按钮同一个圆角（含 `ButtonTheme.corner` 覆盖），并排时外形一致。
             let r = if style.corner_radius > 0.0 {
                 style.corner_radius
             } else {
-                th.metrics.corner_sm
+                th.button.corner(&th.metrics)
             };
             canvas.fill_round_rect(
                 bounds.x as f32,

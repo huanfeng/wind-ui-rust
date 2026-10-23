@@ -402,6 +402,10 @@ impl Button {
 }
 
 impl Widget for Button {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.button.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         // 绑了信号的按钮在这里现取当前文案，故换字必然改变按钮宽度——点击已把本帧
         // 顶成整窗帧（`DamageReq::Layout`），整窗帧必先 layout_root 重新 measure。

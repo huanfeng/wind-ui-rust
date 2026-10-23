@@ -121,9 +121,12 @@ fn paint_field_chrome(
         pal.text_disabled
     };
     canvas.fill_round_rect(x, y, w, h, corner, &Paint::fill(bg));
-    // 边框色补间：hover/focus 高亮淡变；首帧靠 primed 落定。
-    let target_border = if focused || hover {
+    // 边框色补间：首帧靠 primed 落定。聚焦取强调色；悬停只把边框压深一档——
+    // 强调色表示"焦点在这"，不表示"指针在这"。
+    let target_border = if focused {
         dd.border_focus(pal)
+    } else if hover {
+        dd.border_hover(pal)
     } else {
         dd.border(pal)
     };
@@ -341,6 +344,10 @@ impl Dropdown {
 }
 
 impl Widget for Dropdown {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.dropdown.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let mut w = 0;
         match &self.options {
@@ -719,6 +726,10 @@ impl CheckMenu {
 }
 
 impl Widget for CheckMenu {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        let th = crate::theme::current();
+        Some(th.dropdown.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         // 取标题与当前摘要中较宽者：摘要为空时回落到标题，宽度不至于塌缩。
         let ts = crate::text::TextStyle::of(style);

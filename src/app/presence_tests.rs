@@ -634,11 +634,15 @@ fn blue_top(pm: &Pixmap) -> Option<i32> {
 }
 
 /// 染了红的行数（沿 x=50）：白底上的红，不论淡入到几成（绿蓝两通道等量压低）。
+/// 要求红通道明显高出绿通道：标题行悬停后的淡灰叠层（≈240,241,243）也满足"绿蓝等量"，
+/// 只看绿 < 245 会把它误算成红。
 fn red_rows(pm: &Pixmap) -> usize {
     (0..H)
         .filter(|&y| {
             let p = pm.pixel(50, y as u32).unwrap();
-            p.red() > 200 && p.green() < 245 && (p.green() as i32 - p.blue() as i32).abs() < 10
+            p.red() > 200
+                && p.red() as i32 - p.green() as i32 > 8
+                && (p.green() as i32 - p.blue() as i32).abs() < 10
         })
         .count()
 }

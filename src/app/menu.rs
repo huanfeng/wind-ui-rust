@@ -29,6 +29,21 @@ const MENU_SEP_H: i32 = 9;
 pub(super) const MENU_PAD_X: i32 = 12;
 pub(super) const MENU_VPAD: i32 = 6;
 const MENU_MIN_W: i32 = 140;
+
+/// 菜单项文字色。优先级：禁用 > intent > 常规。与悬停无关——悬停只换底（中性叠层），
+/// 字保持原色，与 Windows 11 / shadcn 菜单一致；强调色留给勾选标记这类"状态"。
+/// intent 压过常规：危险项被指向时仍是红；禁用压过 intent：不可点的项不该还在喊危险。
+fn item_text_color(
+    it: &MenuItem,
+    mt: &crate::theme::MenuTheme,
+    pal: &crate::theme::Palette,
+) -> crate::geometry::Color {
+    match (it.enabled, it.intent) {
+        (false, _) => mt.text_disabled(pal),
+        (true, Some(intent)) => intent.badge_colors(pal).1,
+        _ => mt.text(pal),
+    }
+}
 /// 菜单项字号：正文档（`metrics.font_md`），与控件里的文字同大。
 fn menu_font() -> f32 {
     crate::theme::current().metrics.font_md
@@ -1707,15 +1722,8 @@ impl MenuHost {
                         &Paint::fill(mt.hover(pal)),
                     );
                 }
-                // 取色优先级：禁用 > intent > 悬停/勾选 > 常规。
-                // intent 压过悬停是有意的——危险项被指向时更该保持红，而不是变成与
-                // 「复制」同款的强调色；禁用压过 intent 也是——不可点的项不该还在喊危险。
-                let color = match (it.enabled, it.intent) {
-                    (false, _) => mt.text_disabled(pal),
-                    (true, Some(intent)) => intent.badge_colors(pal).1,
-                    _ if active => mt.accent(pal),
-                    _ => mt.text(pal),
-                };
+                // 取色规则见 `item_text_color`。
+                let color = item_text_color(it, mt, pal);
                 // 勾选列（在图标列之前）。整级一旦有勾选项就恒占这一列，未勾的项在
                 // 这里留白——让所有标签左沿对齐，而不是勾一个缩一格。
                 if level.has_checks && it.checked {
@@ -2576,39 +2584,23 @@ mod tests {
         );
     }
 
-    /// `danger()` 项用 palette.danger 上色，且**悬停时不退回强调色**；禁用则一律灰。
+    /// `danger()` 项用 palette.danger 上色（悬停不改字色，故悬停时同样是红）；禁用则一律灰。
     #[test]
-    fn danger_item_keeps_its_color_over_hover_but_not_over_disabled() {
+    fn danger_item_keeps_its_color_but_not_over_disabled() {
         let pal = crate::theme::Palette::default();
-        // 复刻绘制侧的取色规则（见菜单绘制处的 match）。
-        let pick = |it: &MenuItem, active: bool| match (it.enabled, it.intent) {
-            (false, _) => pal.text_disabled,
-            (true, Some(i)) => i.badge_colors(&pal).1,
-            _ if active => pal.accent_text(),
-            _ => pal.text,
-        };
+        let mt = crate::theme::MenuTheme::default();
         let del = MenuItem::run("删除", |_ctx| {}, false).danger();
-        assert_eq!(pick(&del, false), pal.danger, "常态应为危险色");
-        assert_eq!(
-            pick(&del, true),
-            pal.danger,
-            "悬停仍应是危险色，不该变成 accent"
-        );
+        assert_eq!(item_text_color(&del, &mt, &pal), pal.danger, "应为危险色");
         let del_off = MenuItem::run("删除", |_ctx| {}, false)
             .danger()
             .enabled(false);
         assert_eq!(
-            pick(&del_off, false),
+            item_text_color(&del_off, &mt, &pal),
             pal.text_disabled,
             "禁用胜过 intent——不可点的项不该还在喊危险"
         );
         let plain = MenuItem::run("复制", |_ctx| {}, false);
-        assert_eq!(pick(&plain, false), pal.text);
-        assert_eq!(
-            pick(&plain, true),
-            pal.accent_text(),
-            "普通项悬停仍走强调色（当前景的那一档）"
-        );
+        assert_eq!(item_text_color(&plain, &mt, &pal), pal.text);
     }
 
     /// 指针移出菜单面板后不留残影高亮。

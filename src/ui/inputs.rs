@@ -132,6 +132,10 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        // 节点含文字标签：环包住整行，取小圆角（不是方框也不是圆）。
+        Some(crate::theme::current().metrics.corner_sm)
+    }
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let (bsz, gap) = match self.size {
             CheckBoxSize::Normal => (BOX_SIZE, GAP),
@@ -476,6 +480,10 @@ impl Switch {
 }
 
 impl Widget for Switch {
+    fn frame_corner(&self, bounds: Rect) -> Option<f32> {
+        // 节点矩形就是胶囊轨道。
+        Some(bounds.h as f32 / 2.0)
+    }
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
         let (w, h) = self.size.dims();
         Size::new(w, h)
@@ -595,6 +603,9 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        Some(crate::theme::current().metrics.corner_sm)
+    }
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let t = text.measure(
             self.label.resolve().as_ref(),
@@ -2044,6 +2055,13 @@ fn draw_underline(
 }
 
 impl Widget for TextInput {
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        if self.config.frameless {
+            return None;
+        }
+        let th = crate::theme::current();
+        Some(th.input.corner(&th.metrics))
+    }
     fn measure(&self, _avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
         let lh = text
             .measure("Ay", &crate::text::TextStyle::of(style), None)
@@ -2098,8 +2116,14 @@ impl Widget for TextInput {
             } else {
                 inp.border(pal)
             };
-            let t = crate::theme::current();
-            let bw = t.metrics.border_width.to_logical(canvas.dpi_scale());
+            // 聚焦加粗与下拉框同一规则（`border_width_focus`），同一张表单里两者焦点态一致。
+            let m = &crate::theme::current().metrics;
+            let bw = if focused {
+                m.border_width_focus
+            } else {
+                m.border_width
+            }
+            .to_logical(canvas.dpi_scale());
             canvas.stroke_round_rect(x, y, w, h, corner, bw, &Paint::fill(border));
         }
 
@@ -4000,12 +4024,14 @@ mod tests {
                 &engine_frame(&text, &style, b, false, scale, o, (w, h)),
                 &engine_frame(&input(""), &style, b, false, scale, o, (w, h)),
             );
-            // 光标：同一个框聚焦与失焦之差，只取光标那一列附近（聚焦还会换描边色）。
+            // 光标：同一个框聚焦与失焦之差，只取光标那一列附近。聚焦还会换描边色、把描边
+            // 加粗到 `border_width_focus`，故上下各让开描边（含抗锯齿）那几行。
             let focused = engine_frame(&text, &style, b, true, scale, o, (w, h));
             let blurred = engine_frame(&text, &style, b, false, scale, o, (w, h));
             let (cx, ..) = text.caret_local.get().expect("聚焦帧应记下光标位置");
             let col = ((cx as f32 + 0.5) * scale) as u32;
-            let caret: Vec<u32> = (2..h - 2)
+            let edge = (3.0 * scale).ceil() as u32 + 1;
+            let caret: Vec<u32> = (edge..h - edge)
                 .filter(|&y| focused.pixel(col, y) != blurred.pixel(col, y))
                 .collect();
             let (g0, g1) = (glyphs[0], *glyphs.last().unwrap());

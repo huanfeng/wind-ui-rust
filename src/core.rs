@@ -345,6 +345,13 @@ pub trait Widget {
     /// 响应式控件在此检测绑定信号的版本变化，若有变化则通过 `ctx.tree_mut()` 重建子节点。
     /// 默认无操作；普通控件无需实现。
     fn on_update(&mut self, _ctx: &mut EventCtx) {}
+    /// 控件**自绘外框**的圆角（按钮底、输入框描边这类圆角来自主题而非节点样式的控件）。
+    /// 焦点环据此贴合外形：节点上没设 `.corner()` 时，环的圆角取这里的值。
+    /// `bounds` 是节点的绝对矩形（胶囊形控件据此返回 `h / 2`）。
+    /// 默认 `None`（直角，或圆角已由节点样式表达）。
+    fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        None
+    }
     /// 是否接收非左键（右/中键）的按下/抬起。默认 false——右键**不**作为单击，
     /// 符合桌面习惯。仅需右键交互的控件（如 TextInput 的上下文菜单）返回 true。
     fn wants_right_click(&self) -> bool {
@@ -2728,7 +2735,17 @@ impl Tree {
                         );
                         canvas.stroke_round_rect_corners(rx, ry, rw, rh, c, 2.0, &ring);
                     }
-                    None => canvas.stroke_round_rect(rx, ry, rw, rh, radius + 1.0, 2.0, &ring),
+                    None => {
+                        // 节点没设圆角时取控件自报的外框圆角（按钮、输入框的圆角来自主题，
+                        // 节点上是 0）——否则直角环套圆角控件，四角露出缝。
+                        let r = if radius > 0.0 {
+                            radius
+                        } else {
+                            n.widget.frame_corner(abs).unwrap_or(0.0)
+                        };
+                        let r = if r > 0.0 { r + 1.0 } else { 0.0 };
+                        canvas.stroke_round_rect(rx, ry, rw, rh, r, 2.0, &ring)
+                    }
                 }
             }
         }
@@ -5471,6 +5488,102 @@ mod tests {
         fn clip_rect(&mut self, _r: Rect) {
             self.depth = self.clips.len();
         }
+    }
+
+    /// 只记描边的 `(圆角, 线宽)`，用来认出焦点环（线宽 2）。
+    struct StrokeLogCanvas {
+        clips: Vec<()>,
+        depth: usize,
+        fills: Vec<(Color, usize)>,
+        strokes: Vec<(f32, f32)>,
+    }
+
+    impl crate::render::Canvas for StrokeLogCanvas {
+        fn dpi_scale(&self) -> f32 {
+            1.0
+        }
+        fn fill_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, p: &Paint) {
+            self.fills.push((p.color, self.depth));
+        }
+        fn fill_round_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _r: f32, p: &Paint) {
+            self.fills.push((p.color, self.depth));
+        }
+        fn stroke_round_rect(
+            &mut self,
+            _x: f32,
+            _y: f32,
+            _w: f32,
+            _h: f32,
+            r: f32,
+            lw: f32,
+            _p: &Paint,
+        ) {
+            self.strokes.push((r, lw));
+        }
+        fn draw_line(&mut self, _a: f32, _b: f32, _c: f32, _d: f32, _w: f32, _p: &Paint) {}
+        fn fill_circle(&mut self, _cx: f32, _cy: f32, _r: f32, _p: &Paint) {}
+        fn draw_shadow(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _r: f32, _b: f32, _c: Color) {
+        }
+        fn draw_image(
+            &mut self,
+            _i: &crate::render::image::Image,
+            _d: Rect,
+            _f: crate::render::image::Fit,
+            _r: f32,
+            _o: f32,
+        ) {
+        }
+        fn draw_text(
+            &mut self,
+            _t: &str,
+            _r: Rect,
+            _c: Color,
+            _a: crate::spec::Align,
+            _ts: &crate::text::TextStyle,
+        ) {
+        }
+        fn measure_text(&mut self, _t: &str, _ts: &crate::text::TextStyle) -> Size {
+            Size::ZERO
+        }
+        fn push_layer(&mut self, _o: f32) {}
+        fn pop_layer(&mut self) {}
+        fn save(&mut self) {
+            self.clips.push(());
+        }
+        fn restore(&mut self) {
+            self.clips.pop();
+            self.depth = self.clips.len();
+        }
+        fn clip_rect(&mut self, _r: Rect) {
+            self.depth = self.clips.len();
+        }
+    }
+
+    /// 焦点环贴合按钮的圆角。按钮圆角来自主题（节点 `corner_radius` 为 0），此前环取节点
+    /// 圆角，于是一个近乎直角的框套在 6px 圆角的按钮外，四角露出缝。
+    #[test]
+    fn focus_ring_follows_the_widgets_own_corner() {
+        let mut tree = Tree::new();
+        let root = crate::ui::Element::button("保存").build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(200, 100), &mut crate::text::NullTextEngine);
+        tree.set_focused(Some(root), None);
+        tree.focus_ring_visible = true;
+        let mut cv = StrokeLogCanvas {
+            clips: Vec::new(),
+            depth: 0,
+            fills: Vec::new(),
+            strokes: Vec::new(),
+        };
+        tree.paint(&mut cv);
+        let th = crate::theme::current();
+        let want = th.button.corner(&th.metrics) + 1.0;
+        let ring = cv
+            .strokes
+            .iter()
+            .find(|&&(_, lw)| lw == 2.0)
+            .expect("键盘焦点应画出焦点环");
+        assert_eq!(ring.0, want, "焦点环圆角 = 按钮圆角 + 外扩 1px");
     }
 
     /// 对话框弹出后，长在它**外面**的浮层不得再抢命中，并且会被收起。
