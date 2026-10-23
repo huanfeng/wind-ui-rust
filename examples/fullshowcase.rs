@@ -1258,7 +1258,7 @@ fn main() {
             line = line.child(
                 Element::label(format!("{}{}", (b'A' + c as u8) as char, r + 1))
                     .font_size(12.5)
-                    .align(Align::Center)
+                    .text_align(Align::Center)
                     .width(64)
                     .height(28)
                     .bg_role(Role::SurfaceAlt)
