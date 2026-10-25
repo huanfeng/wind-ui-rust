@@ -4470,6 +4470,10 @@ impl Tree {
         capture: &mut Option<NodeId>,
     ) -> DispatchResult {
         let mut res = DispatchResult::default();
+        // 本次事件的修饰键快照：`on_context_menu` 的构建器收不到事件，靠它区分
+        // 「Ctrl+右键」这类手势（见 `event::pointer_mods`）。必须在最早处写入，
+        // 让同一次分发里的菜单构建读到正确值。
+        crate::event::set_pointer_mods(ev.mods);
 
         // 轻量关闭：浮层外按下即收起。**在主事件之前**做，这样同一次按下里「关掉旧
         // 浮层」与「命中新控件」都能发生（点 A 的面板外的 B 按钮，面板收起且 B 被按到）。
@@ -9790,6 +9794,54 @@ mod tests {
         assert!(menu.items[1].separator);
         assert_eq!(menu.items[2].submenu.len(), 1, "子菜单项应携带级联项");
         assert!(!menu.items[2].is_actionable(), "子菜单父项不可直接执行");
+    }
+
+    /// 菜单构建器能读到触发它的那次指针事件的修饰键。
+    ///
+    /// 构建器签名是 `Fn() -> Vec<MenuItem>`，收不到 `PointerEvent`；没有这份快照，
+    /// 「Ctrl+右键」这类手势在构建器里无从表达（应用只能把菜单项写成恒定的，无法按修饰键
+    /// 切换内容）。这条同时钉住 **注入发生在构建之前**：若顺序反了，构建器读到的是上一次
+    /// 事件的残值。
+    #[test]
+    fn context_menu_builder_sees_the_pointer_modifiers() {
+        use crate::event::{MenuItem, Mods};
+        use crate::ui::Element;
+        use std::cell::Cell as StdCell;
+        let seen = Rc::new(StdCell::new(Mods::default()));
+        let (for_build, for_assert) = (seen.clone(), seen.clone());
+        let tree_el = Element::col().fill().on_context_menu(move || {
+            for_build.set(crate::event::pointer_mods());
+            vec![MenuItem::run("项", |_ctx| {}, false)]
+        });
+        let mut tree = layout(tree_el, 200, 200);
+        let (mut h, mut cap) = (None, None);
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(100, 100),
+            button: MouseButton::Right,
+            click_count: 1,
+            mods: Mods {
+                ctrl: true,
+                ..Default::default()
+            },
+        };
+        let res = tree.dispatch_pointer(down, &mut h, &mut cap);
+        assert!(res.menu.is_some(), "右键仍应弹菜单");
+        assert!(for_assert.get().ctrl, "构建器读不到本次事件的 Ctrl");
+
+        // 反向：裸右键读到的是 ctrl=false，不是上一次的残值。
+        let down = PointerEvent {
+            kind: PointerKind::Down,
+            pos: Point::new(100, 100),
+            button: MouseButton::Right,
+            click_count: 1,
+            mods: Mods::default(),
+        };
+        tree.dispatch_pointer(down, &mut h, &mut cap);
+        assert!(
+            !for_assert.get().ctrl,
+            "裸右键不得沿用上一次的 Ctrl（说明注入晚于构建）"
+        );
     }
 
     /// 上下文菜单必须把构建器一并交给宿主当重建器：粘滞项（菜单内的复选开关）点击后

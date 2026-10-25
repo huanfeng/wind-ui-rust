@@ -110,6 +110,30 @@ thread_local! {
     /// 与主题快照、帧时钟同一套路数）。
     static WINDOW_STATE: std::cell::Cell<WindowState> =
         const { std::cell::Cell::new(WindowState::UNKNOWN) };
+    /// 最近一次指针事件携带的修饰键。见 [`pointer_mods`]。
+    static POINTER_MODS: std::cell::Cell<Mods> = const { std::cell::Cell::new(Mods {
+        ctrl: false,
+        alt: false,
+        shift: false,
+        meta: false,
+    }) };
+}
+
+/// 最近一次指针事件的修饰键快照。
+///
+/// **给 `Element::on_context_menu` 的构建器用**：它的签名是 `Fn() -> Vec<MenuItem>`，
+/// 收不到 `PointerEvent`，于是「Ctrl+右键」这类区分手势在构建器里无从判断。宿主在每次
+/// 指针分发的**最开头**写入本次事件的 `mods`，因此菜单构建期间读到的一定是触发它的那一次。
+///
+/// ⚠️ 与 [`window_state`] 同一条纪律：只在事件回调 / 菜单构建期间有意义，事件之外读到的是
+/// 上一次的残值。需要「此刻按着什么」的长时间轮询请勿用它。
+pub fn pointer_mods() -> Mods {
+    POINTER_MODS.with(|m| m.get())
+}
+
+/// 注入本次指针事件的修饰键（`Tree::dispatch_pointer` 专用）。
+pub(crate) fn set_pointer_mods(m: Mods) {
+    POINTER_MODS.with(|c| c.set(m));
 }
 
 /// 当前窗口的状态与能力快照。
