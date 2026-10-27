@@ -501,11 +501,16 @@ mod tests {
             HICON(std::ptr::null_mut()),
             "提示",
         );
-        assert_eq!(nid.uFlags, NIF_ICON | NIF_MESSAGE | NIF_TIP);
-        assert_eq!(nid.uCallbackMessage, WM_TRAYICON, "漏了它则图标点了没反应");
-        assert_eq!(nid.uID, 1);
-        let tip: String = nid
-            .szTip
+        // `NOTIFYICONDATAW` 在 32 位 x86 上按 1 字节打包：`assert_eq!` 与 `.iter()` 会取字段
+        // 引用，未对齐即 E0793。先按值拷出再断言。
+        let flags = nid.uFlags;
+        let callback_message = nid.uCallbackMessage;
+        let id = nid.uID;
+        let tip_buffer = nid.szTip;
+        assert_eq!(flags, NIF_ICON | NIF_MESSAGE | NIF_TIP);
+        assert_eq!(callback_message, WM_TRAYICON, "漏了它则图标点了没反应");
+        assert_eq!(id, 1);
+        let tip: String = tip_buffer
             .iter()
             .take_while(|c| **c != 0)
             .map(|c| char::from_u32(*c as u32).unwrap())
@@ -525,9 +530,10 @@ mod tests {
             HICON(std::ptr::null_mut()),
             &long,
         );
-        let n = nid.szTip.len();
-        assert_eq!(nid.szTip[n - 1], 0, "定长缓冲必须以 NUL 收尾");
-        assert!(nid.szTip[..n - 1].iter().all(|c| *c != 0), "截断前应写满");
+        let tip_buffer = nid.szTip;
+        let n = tip_buffer.len();
+        assert_eq!(tip_buffer[n - 1], 0, "定长缓冲必须以 NUL 收尾");
+        assert!(tip_buffer[..n - 1].iter().all(|c| *c != 0), "截断前应写满");
     }
 
     /// 注册成功时按消息号精确匹配。
