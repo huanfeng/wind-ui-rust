@@ -5,8 +5,13 @@
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-10-27
+
 ### 新增
 
+- **`pointer_mods()`**：最近一次指针事件的修饰键快照（`Mods`）。给 `Element::on_context_menu` 的构建器
+  用——它的签名收不到 `PointerEvent`，「Ctrl+右键」这类区分手势此前在构建器里无从判断。只在事件回调 /
+  菜单构建期间有意义，事件之外读到的是上一次的残值。
 - **`Element::text_align` 对 `text_input` 生效**：单行输入框的 `Start` / `Center` / `End` 对齐此前
   只有内部配置字段、没有公开入口（`text_align` 链到输入框上被静默忽略）。
 
@@ -3140,7 +3145,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.27.1...v0.28.0
