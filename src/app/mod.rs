@@ -4695,6 +4695,39 @@ mod tests {
         );
     }
 
+    /// 「只收按键、不收文本」的自绘控件（录快捷键的格子）：能聚焦、不报光标、不覆盖
+    /// `accepts_ime`——焦点落上去就没有文本焦点，win32 据此摘掉输入法上下文，按键以
+    /// `WM_KEYDOWN` 的真实键位（`Key::Other(vk)`）送达，而不是被输入法吞成 `VK_PROCESSKEY`。
+    /// 不需要另开「摘输入法」的开关：不报光标就是声明。
+    #[test]
+    fn key_capture_widget_without_caret_is_not_a_text_focus() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        struct KeyCell;
+        impl crate::core::Widget for KeyCell {
+            fn focusable(&self) -> bool {
+                true
+            }
+        }
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .child(Element::leaf().width(100).height(40).widget(KeyCell)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        h.on_key(key_ev()(Key::Tab));
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        assert!(h.focus.current.is_some(), "前提：Tab 落到了 KeyCell");
+        assert_eq!(h.ime_caret(), None, "前提：控件没报光标");
+        assert_eq!(h.ime_field(), None, "不报光标的可聚焦控件不是文本焦点");
+    }
+
     /// win32 开始组合（`set_ime_composing(true)`）把输入框视口拉回光标：多行框光标在末行，
     /// 先把内容滚到顶（光标出了可视区），开始组合后下一帧光标回到框内。不设宽（Wrap 宽）。
     #[test]
