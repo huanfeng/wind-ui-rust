@@ -5166,8 +5166,14 @@ impl Element {
         self
     }
     /// 文字水平对齐。
+    ///
+    /// 作用于 `Element::text_input(..)`（含 `combo_box` 的输入框）时即单行输入框的对齐（`Start`/`Center`/`End`），
+    /// 只在整行放得下时生效，放不下交回水平滚动；多行忽略。
     pub fn text_align(mut self, a: Align) -> Self {
         self.style.text_align = a;
+        if let Some(ti) = self.widget.as_any_mut().and_then(text_input_of) {
+            ti.config_mut().align = a;
+        }
         self
     }
 

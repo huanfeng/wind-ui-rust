@@ -2233,12 +2233,17 @@ impl Widget for TextInput {
         }
         self.scroll_y.set(sy);
 
+        // 光标从字符边界向右延伸一个光标宽。文末光标的边界若正压在 `inner` 右沿（右对齐、
+        // 或滚动追随到视口右端），整条会被下面的 `clip_rect(inner)` 裁掉，故水平滚动与右对齐
+        // 都把可视宽度扣掉一个光标宽，用同一把尺子算。
+        let caret_w = inp.caret_width().to_logical(canvas.dpi_scale()).ceil() as i32;
+
         // 水平滚动：仅非软换行（单行 / 多行不换行）时按光标更新。
         let old_sx = self.scroll_x.get();
         let mut sx = old_sx;
         if !wrap {
-            if cx_in - sx > inner.w {
-                sx = cx_in - inner.w;
+            if cx_in - sx > inner.w - caret_w {
+                sx = cx_in - (inner.w - caret_w);
             }
             if cx_in - sx < 0 {
                 sx = cx_in;
@@ -2252,7 +2257,7 @@ impl Widget for TextInput {
                 .map(|ln| ln.x.last().copied().unwrap_or(0))
                 .max()
                 .unwrap_or(0);
-            sx = sx.min((content_w - inner.w).max(0)).max(0);
+            sx = sx.min((content_w + caret_w - inner.w).max(0)).max(0);
         } else {
             sx = 0;
         }
@@ -2284,7 +2289,7 @@ impl Widget for TextInput {
             let slack = inner.w - content_w;
             match self.config.align {
                 Align::Center => (slack / 2).max(0),
-                Align::End => slack.max(0),
+                Align::End => (slack - caret_w).max(0),
                 _ => 0,
             }
         };
@@ -4041,6 +4046,39 @@ mod tests {
             let fresh = TextInput::new(signal("WW".to_string()), "");
             let want = text_frame(&fresh, 1_010);
             assert_eq!(frame_diff(&got, &want), 0, "{from} → WW：光标应直接落位");
+        }
+        crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 回归：单行框里文末光标不能被 `clip_rect(inner)` 吃掉。光标从字符边界向右延伸一个
+    /// 光标宽，边界压在内框右沿时整条被裁成不可见。两条路径各一例：
+    /// 右对齐且放得下（靠对齐偏移让位）、长文本溢出（靠水平滚动追随让位，三种对齐都会踩）。
+    /// 比的是光标起点那一列的像素：没画出光标时那里是纯底色。
+    #[test]
+    fn end_of_text_caret_is_not_clipped() {
+        use crate::spec::Align;
+        crate::anim::set_enabled(true);
+        crate::ui::caret::set_animated(false);
+        with_caret_style(crate::ui::CaretStyle::Solid);
+        let long = "WWWWWWWWWWWWWWWWWWWWWWWW";
+        for (text, align) in [
+            ("WW", Align::End),
+            (long, Align::Start),
+            (long, Align::Center),
+            (long, Align::End),
+        ] {
+            let mut ti = TextInput::new(signal(text.to_string()), "");
+            ti.config_mut().align = align;
+            ti.cursor = ti.char_count();
+            let px = text_frame(&ti, 1_000);
+            let (x, y, h) = ti.caret_local.get().expect("聚焦后应记下光标位置");
+            let i = (((y + h / 2) * 120 + x) * 4) as usize;
+            assert!(
+                px[i] < 128,
+                "{}字 {align:?}：文末光标起点列 ({x},{}) 应是深色光标，而非底色",
+                text.len(),
+                y + h / 2
+            );
         }
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
     }

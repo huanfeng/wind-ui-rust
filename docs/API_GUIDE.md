@@ -597,6 +597,7 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .multiline()       // 多行
     .wrap(true)        // 多行时是否自动折行（默认 true）
     .read_only()       // 只读：可聚焦 / 选择 / 复制，拒绝一切编辑（与 disabled 不同：disabled 不可聚焦不可选）
+    .text_align(Align::End)  // 单行对齐 Start/Center/End（整行放得下才生效；右对齐会给文末光标让出一个光标宽）
     .leading_icon('\u{1F50D}')  // 前置图标字形（搜索框等）：左侧留图标区，文字/光标/命中相应右移
     .numeric()                  // 只允许输入数字：数字 / 打头的 `-` / 一个小数点（键入与粘贴同一把尺子）
     .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行 Enter 插入换行，不触发）
