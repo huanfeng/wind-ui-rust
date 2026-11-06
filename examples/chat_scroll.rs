@@ -41,6 +41,26 @@ fn main() {
     .corner(10.0)
     .border_role(Role::Border, 1);
 
+    // 底部多行输入框：Enter 发送（追加一条消息并清空），Shift+Enter 换行。
+    let draft = signal(String::new());
+    let input = Element::text_input(draft, "输入消息，Enter 发送，Shift+Enter 换行")
+        .multiline()
+        .submit_on_enter(true)
+        .on_submit(move |_| {
+            let text = draft.get();
+            if text.trim().is_empty() {
+                return;
+            }
+            let n = next_new.get();
+            next_new.set(n + 1);
+            let mut v = msgs.get();
+            v.push((n, text));
+            msgs.set(v);
+            draft.set(String::new());
+        })
+        .width_match()
+        .height(64);
+
     let ui = Element::col()
         .fill()
         .bg_role(Role::Bg)
@@ -70,7 +90,8 @@ fn main() {
                 }))
                 .child(Element::label_signal(status).fg_role(Role::TextMuted)),
         )
-        .child(list);
+        .child(list)
+        .child(input);
 
     App::new("windui — 聊天滚动", 360, 480)
         .icon(brand_icon())

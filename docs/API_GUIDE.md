@@ -600,7 +600,8 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .text_align(Align::End)  // 单行对齐 Start/Center/End（整行放得下才生效；右对齐会给文末光标让出一个光标宽）
     .leading_icon('\u{1F50D}')  // 前置图标字形（搜索框等）：左侧留图标区，文字/光标/命中相应右移
     .numeric()                  // 只允许输入数字：数字 / 打头的 `-` / 一个小数点（键入与粘贴同一把尺子）
-    .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行 Enter 插入换行，不触发）
+    .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行默认 Enter 插入换行、不触发）
+    .submit_on_enter(true)      // 多行：Enter 触发 on_submit，Shift+Enter 换行；输入法组字中的 Enter 不提交
     .on_commit(|ctx| ..)        // 「改完即提交」：改过之后 Enter 或用户失焦时触发一次
     .on_nav_key(|ctx, key| ..)  // 本控件未处理的 上/下 键（候选列表游标用）
     .on_click(|ctx| ..)         // 「这个框被点了」的旁路通知（仅左键）

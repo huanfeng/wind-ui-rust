@@ -990,6 +990,9 @@ pub struct TextConfig {
     /// 仍能点选、拖选、Ctrl+A / Ctrl+C 与右键「复制」，正文用常规色，底色换成
     /// [`InputTheme::bg_readonly`](crate::theme::InputTheme::bg_readonly) 以示不可编辑。
     pub read_only: bool,
+    /// 多行框 Enter 提交（见 [`crate::ui::Element::submit_on_enter`]）：Enter 触发
+    /// `on_submit`、Shift+Enter 换行。只对多行有意义。
+    pub submit_on_enter: bool,
 }
 
 impl Default for TextConfig {
@@ -1004,6 +1007,7 @@ impl Default for TextConfig {
             frameless: false,
             align: Align::Start,
             read_only: false,
+            submit_on_enter: false,
         }
     }
 }
@@ -2854,6 +2858,22 @@ impl Widget for TextInput {
                     // 于是能冒到 `App::on_shortcut`——那正是应用级「提交」该待的地方。
                     // 只读多行框没有换行可插：Enter 落到下面单行那条臂，交 `on_submit`
                     // 或照常上达 `on_shortcut`（对话框的默认按钮）。
+                    // 开启 `submit_on_enter` 后：裸 Enter 提交、Shift+Enter 才换行（落到下一条臂）。
+                    // 组字中（Linux/macOS 的 preedit、win32 的 composing）的 Enter 属于输入法，
+                    // 用来确认候选——此处吞掉，既不提交半截消息也不插换行。
+                    Key::Enter
+                        if self.is_multiline()
+                            && self.config.submit_on_enter
+                            && !k.ctrl
+                            && !k.shift
+                            && !self.config.read_only =>
+                    {
+                        if self.preedit.borrow().is_active() || self.composing.get() {
+                            return true;
+                        }
+                        self.fire_commit(ctx);
+                        self.fire_submit(ctx)
+                    }
                     Key::Enter if self.is_multiline() && !k.ctrl && !self.config.read_only => {
                         self.insert_newline(ctx);
                         true
@@ -3192,6 +3212,83 @@ mod tests {
         });
         let _ = consumed;
         assert_eq!(seen.get(), 1, "Escape 应转发给 on_nav_key");
+    }
+
+    /// 构造多行输入框（正文 "ab"、光标在末尾），可选开启 Enter 提交，返回 (输入框, 正文信号, 提交计数)。
+    fn submit_fixture(
+        submit_on_enter: bool,
+    ) -> (
+        TextInput,
+        crate::signal::Signal<String>,
+        std::rc::Rc<std::cell::Cell<u32>>,
+    ) {
+        let text = signal(String::from("ab"));
+        let mut ti = TextInput::new(text, String::new());
+        ti.config_mut().multiline = true;
+        ti.config_mut().submit_on_enter = submit_on_enter;
+        ti.cursor = 2;
+        let fired = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let f = fired.clone();
+        ti.set_on_submit(move |_| f.set(f.get() + 1));
+        (ti, text, fired)
+    }
+
+    /// 向输入框送一次 Enter（可带 Shift），返回是否被消费。
+    fn press_enter(ti: &mut TextInput, shift: bool) -> bool {
+        use crate::core::Widget;
+        use crate::event::{Event, Key, KeyEvent};
+        let ev = Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            shift,
+            ctrl: false,
+            alt: false,
+            meta: false,
+        });
+        let mut consumed = false;
+        crate::testing::run_with_ctx(|ctx| {
+            consumed = ti.on_event(ctx, &ev);
+        });
+        consumed
+    }
+
+    #[test]
+    fn enter_submits_multiline_when_enabled() {
+        let (mut ti, text, fired) = submit_fixture(true);
+        assert!(press_enter(&mut ti, false), "提交应报已消费");
+        assert_eq!(fired.get(), 1);
+        assert_eq!(text.get(), "ab", "提交时不插入换行");
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let (mut ti, text, fired) = submit_fixture(true);
+        press_enter(&mut ti, true);
+        assert_eq!(text.get(), "ab\n");
+        assert_eq!(fired.get(), 0);
+    }
+
+    #[test]
+    fn enter_during_preedit_does_not_submit() {
+        use crate::core::Widget;
+        let (mut ti, text, fired) = submit_fixture(true);
+        ti.set_preedit(&preedit("zhong", 5));
+        press_enter(&mut ti, false);
+        assert_eq!(fired.get(), 0, "组字中的 Enter 只属于输入法");
+        assert_eq!(text.get(), "ab", "也不该插入换行");
+        // win32 路径：系统输入法组合中（composing）同样不提交。
+        let (mut ti, _text, fired) = submit_fixture(true);
+        ti.set_composing(true);
+        press_enter(&mut ti, false);
+        assert_eq!(fired.get(), 0);
+    }
+
+    #[test]
+    fn multiline_without_flag_keeps_newline_behavior() {
+        let (mut ti, text, fired) = submit_fixture(false);
+        press_enter(&mut ti, false);
+        assert_eq!(text.get(), "ab\n");
+        assert_eq!(fired.get(), 0);
     }
 
     #[test]

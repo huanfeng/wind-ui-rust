@@ -1783,6 +1783,14 @@ impl Element {
     pub fn multiline(self) -> Self {
         self.config_text_input(|c| c.multiline = true)
     }
+    /// 多行输入的 Enter 提交：开启后 Enter 触发 [`on_submit`](Self::on_submit)（不插入
+    /// 换行），Shift+Enter 插入换行；输入法组字（preedit）期间的 Enter 只交给输入法确认
+    /// 候选，不提交。聊天输入框的标准键位。仅 `text_input(..).multiline()` 有意义；
+    /// 链到别处 debug 下 panic、release 下忽略。
+    #[track_caller]
+    pub fn submit_on_enter(self, on: bool) -> Self {
+        self.config_text_input(|c| c.submit_on_enter = on)
+    }
     /// 多行软换行开关（仅 multiline 生效）。
     #[track_caller]
     pub fn wrap(self, on: bool) -> Self {
@@ -1861,7 +1869,8 @@ impl Element {
     /// 那个是真冒泡）。于是「不消费」的后果不是「传给外层」而是**事件消失**：想在外层
     /// 容器挂 Widget 接 Enter 的写法编译通过、逻辑正确、永远不触发。
     ///
-    /// **多行输入不触发**：那里 Enter 是插入换行，编辑器的固有语义不该被应用截走。
+    /// **多行输入默认不触发**：那里 Enter 是插入换行，编辑器的固有语义不该被应用截走；
+    /// 开启 [`submit_on_enter(true)`](Self::submit_on_enter) 后才触发（Shift+Enter 换行）。
     ///
     /// 仅 `Element::text_input(..)` 可用（链到别处 debug 下 panic、release 下静默忽略）。
     ///
