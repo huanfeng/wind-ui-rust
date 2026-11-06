@@ -280,13 +280,26 @@ mod tests {
     fn without_display<R>(f: impl FnOnce() -> R) -> R {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os("DISPLAY");
-        std::env::remove_var("DISPLAY");
-        let r = f();
-        if let Some(v) = saved {
-            std::env::set_var("DISPLAY", v);
+        /// 出作用域（含 `f` panic）时还原被清掉的环境变量。
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (k, v) in self.0.drain(..) {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
         }
-        r
+        let _restore = Restore(
+            ["DISPLAY", "WINDUI_BACKEND"]
+                .map(|k| (k, std::env::var_os(k)))
+                .into(),
+        );
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("WINDUI_BACKEND");
+        f()
     }
 
     #[test]

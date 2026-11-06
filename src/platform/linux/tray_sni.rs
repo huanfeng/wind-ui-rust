@@ -20,8 +20,8 @@
 //! - **Watcher 可能晚到或重启**（会话早期启动的应用、shell 重启、扩展被重新启用）：另有一条
 //!   监视线程订阅 `NameOwnerChanged`（`arg0 = org.kde.StatusNotifierWatcher`），Watcher 上线
 //!   （含启动时已在场）就通知专职线程重新登记；可用性翻转经 [`TrayEvent::Availability`] 回到
-//!   UI 线程，触发 [`Tray::on_availability_changed`] 回调。监视线程阻塞在信号迭代器上，同样
-//!   零轮询。
+//!   UI 线程，触发 [`Tray::on_availability_changed`] 回调。监视线程阻塞在信号迭代器上，托盘释放时由 `SniLink` 关其连接把它唤醒，
+//!   同样零轮询。
 //!
 //! 菜单标签 / 勾选态 / 禁用态绑的是线程局部的 `Signal`，D-Bus 线程读不了，所以 UI 线程在每轮
 //! 事件循环末尾（[`TrayHost::refresh_menu`]）把它们**快照**进共享状态，快照变了才发
@@ -470,12 +470,34 @@ enum SniCmd {
 /// 与专职线程的通道。丢掉它 = 专职线程退出、连接关闭、图标从托盘消失。
 struct SniLink {
     tx: Sender<SniCmd>,
+    /// 监视线程的连接槽：drop 时据此关连接，叫醒阻塞在信号迭代器上的监视线程。
+    watch: Arc<Mutex<WatchSlot>>,
+    /// 两条线程的句柄，仅测试用来断言它们确实退出。
+    #[cfg(test)]
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+/// 监视线程与 [`SniLink`] 交接连接的槽。`stopped` 防「drop 先于监视线程建好连接」的竞态。
+#[derive(Default)]
+struct WatchSlot {
+    stopped: bool,
+    conn: Option<Connection>,
 }
 
 impl Drop for SniLink {
     fn drop(&mut self) {
         // 监视线程手里还有一份发送端，光靠「发送端全丢」收不了线程，得显式叫停。
         let _ = self.tx.send(SniCmd::Stop);
+        // 监视线程阻塞在信号迭代器上，Watcher 不变化就永远不返回：关掉它的连接，
+        // 读套接字出错 → zbus 清空订阅发送端 → 迭代器返回 None → 线程退出。
+        let conn = {
+            let mut slot = self.watch.lock().unwrap_or_else(|e| e.into_inner());
+            slot.stopped = true;
+            slot.conn.take()
+        };
+        if let Some(c) = conn {
+            let _ = c.close();
+        }
     }
 }
 
@@ -622,19 +644,31 @@ impl TrayHost {
 /// 起专职线程（连总线、挂接口、占名、发信号、向 Watcher 登记）与监视线程（盯 Watcher 上下线）。
 fn spawn_tray_threads(bus: &Bus, shared: &Arc<Shared>, service: &str) -> std::io::Result<SniLink> {
     let (tx, rx) = channel::<SniCmd>();
-    {
-        let (bus, shared, service) = (bus.clone(), shared.clone(), service.to_string());
-        std::thread::Builder::new()
-            .name("windui-tray".into())
-            .spawn(move || tray_thread(bus, shared, service, rx))?;
-    }
-    {
-        let (bus, shared, tx) = (bus.clone(), shared.clone(), tx.clone());
-        std::thread::Builder::new()
-            .name("windui-tray-watch".into())
-            .spawn(move || watch_watcher(bus, shared, tx))?;
-    }
-    Ok(SniLink { tx })
+    let watch = Arc::new(Mutex::new(WatchSlot::default()));
+    let (b, sh, svc) = (bus.clone(), shared.clone(), service.to_string());
+    let tray_handle = std::thread::Builder::new()
+        .name("windui-tray".into())
+        .spawn(move || tray_thread(b, sh, svc, rx))?;
+    let (b, sh, tx2, w) = (bus.clone(), shared.clone(), tx.clone(), watch.clone());
+    let watch_handle = std::thread::Builder::new()
+        .name("windui-tray-watch".into())
+        .spawn(move || watch_watcher(b, sh, tx2, w));
+    let watch_handle = match watch_handle {
+        Ok(h) => h,
+        Err(e) => {
+            // 专职线程已起：叫停它，免得空转。
+            let _ = tx.send(SniCmd::Stop);
+            return Err(e);
+        }
+    };
+    #[cfg(not(test))]
+    drop((tray_handle, watch_handle));
+    Ok(SniLink {
+        tx,
+        watch,
+        #[cfg(test)]
+        threads: vec![tray_handle, watch_handle],
+    })
 }
 
 /// 专职线程主体：对别的进程的同步调用都放在这条线程上，UI 线程不为它们停顿。
@@ -705,10 +739,18 @@ fn tray_thread(bus: Bus, shared: Arc<Shared>, service: String, rx: Receiver<SniC
 /// 监视线程主体：订阅 `NameOwnerChanged(arg0 = Watcher)`，Watcher 在场（含启动时已在）就让
 /// 专职线程（重新）登记；在场状态翻转时经 [`TrayEvent::Availability`] 通知 UI 线程。
 /// 用独立连接，免得它阻塞在迭代器上时拖住专职线程的连接生命周期（专职线程退出即释放服务名）。
-fn watch_watcher(bus: Bus, shared: Arc<Shared>, tx: Sender<SniCmd>) {
+fn watch_watcher(bus: Bus, shared: Arc<Shared>, tx: Sender<SniCmd>, slot: Arc<Mutex<WatchSlot>>) {
     let Ok(conn) = bus.connect() else {
         return; // 总线连不上：专职线程会报，这里不重复
     };
+    // 把连接交给 SniLink，drop 时由它关连接来叫醒下面的信号迭代器；已叫停就直接退。
+    {
+        let mut s = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if s.stopped {
+            return;
+        }
+        s.conn = Some(conn.clone());
+    }
     let Ok(proxy) = DBusProxy::new(&conn) else {
         return;
     };
@@ -1154,6 +1196,29 @@ mod tests {
             seen.borrow().last() == Some(&true)
         }));
         assert_eq!(*seen.borrow(), vec![true, false, true]);
+    }
+
+    /// Watcher 保持在线、不产生任何 NameOwnerChanged 时，释放托盘也要让两条线程退出。
+    #[test]
+    fn dropping_tray_stops_both_threads_while_watcher_stays_up() {
+        let pb = private_bus_or_skip!();
+        let (_w, reg) = start_watcher(&pb.bus());
+        let mut host = TrayHost::install(Tray::new(), &pb.bus());
+        let svc = host.service_name().to_string();
+        assert!(wait_for(|| reg.lock().unwrap().contains(&svc)));
+        std::thread::sleep(Duration::from_millis(200)); // 监视线程已阻塞在迭代器上
+
+        let mut link = host.link.take().expect("线程应已创建");
+        let threads = std::mem::take(&mut link.threads);
+        drop(link);
+        let end = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < end && !threads.iter().all(|t| t.is_finished()) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            threads.iter().all(|t| t.is_finished()),
+            "释放托盘后专职线程与监视线程应在 2 秒内退出"
+        );
     }
 
     /// 启动时 Watcher 已在场：登记照常，初始状态不当作「变化」。

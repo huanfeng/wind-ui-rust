@@ -433,7 +433,7 @@ impl Tray {
         self
     }
     /// 托盘可用性变化回调：`available` 为 `true` 表示托盘宿主（Linux 的
-    /// `org.kde.StatusNotifierWatcher`）上线、图标已（重新）登记，`false` 表示宿主下线、
+    /// `org.kde.StatusNotifierWatcher`）已上线、登记已发起，`false` 表示宿主下线、
     /// 图标不可见。在 UI 线程执行，`ctx` 的意图照常落地（例如宿主下线时 `open_window`
     /// 保证用户仍有入口，上线时 `close_window` 收起）。
     ///
