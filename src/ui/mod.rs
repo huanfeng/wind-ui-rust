@@ -738,6 +738,8 @@ pub struct Element {
     click: Option<ClickFn>,
     blur: Option<ClickFn>,
     on_drop: Option<DropFn>,
+    /// 滚动容器的跟随底部 / 头部锚定 / 边缘回调（见 [`Element::stick_to_bottom`] 等）。
+    scroll_ext: Option<Box<crate::core::ScrollExt>>,
     context_menu: Option<crate::core::MenuFn>,
     window_drag: bool,
     /// 声明式初始焦点（见 [`Element::autofocus`]）。
@@ -796,6 +798,7 @@ impl Element {
             click: None,
             blur: None,
             on_drop: None,
+            scroll_ext: None,
             context_menu: None,
             window_drag: false,
             autofocus: None,
@@ -2945,6 +2948,61 @@ impl Element {
             "scroll_axis() 只能用于 Element::scroll()"
         );
         self.scroll_axis = axis;
+        self
+    }
+
+    /// 跟随底部（聊天 / 日志视图）：首次布局滚到底；之后每次布局，若上一帧视口底边距内容
+    /// 底边 ≤ 4 逻辑像素（"在底部"），内容变高后仍保持在底部；用户向上翻看后保持 `scroll_y`
+    /// 不变，翻回底部即恢复跟随。
+    ///
+    /// 只能用于滚动容器（[`Element::scroll`] 与 [`Element::list_signal`]），链到别的元素上
+    /// debug 期 panic。
+    #[track_caller]
+    pub fn stick_to_bottom(mut self, on: bool) -> Self {
+        debug_assert!(
+            matches!(self.layout, Layout::Scroll),
+            "stick_to_bottom() 只能用于滚动容器（Element::scroll / list_signal）"
+        );
+        self.scroll_ext
+            .get_or_insert_with(Default::default)
+            .stick_to_bottom = on;
+        self
+    }
+
+    /// 头部插入锚定（聊天"加载更早消息"）：数据更新后若在原第一个可见行**之前**插入了新行，
+    /// `scroll_y` 随之增加，使原第一个可见行在视口中的位置不变。与 `stick_to_bottom` 同开时，
+    /// 在底部以跟随为准。锚点行靠键复用的节点认：该行本身被重建或删除则不调整。
+    ///
+    /// 只能用于 [`Element::list_signal`] 生成的滚动列表，链到别的元素上 debug 期 panic。
+    #[track_caller]
+    pub fn preserve_on_prepend(mut self, on: bool) -> Self {
+        debug_assert!(
+            matches!(self.layout, Layout::Scroll) && self.reactive,
+            "preserve_on_prepend() 只能用于 Element::list_signal(..)"
+        );
+        self.scroll_ext
+            .get_or_insert_with(Default::default)
+            .preserve_on_prepend = on;
+        self
+    }
+
+    /// 滚动边缘回调：到达顶部（`scroll_y == 0`）或底部（距底 ≤ 4 逻辑像素）时触发一次；
+    /// 离开该边缘超过 16 逻辑像素后重新武装。内容不足一屏不触发；初始就停在边缘不算"到达"
+    /// （首次看到可滚动内容只记基线）。回调在布局之后调用，其 `EventCtx` 副作用（toast 等）
+    /// 不上交，请在回调里改信号。
+    ///
+    /// 只能用于滚动容器（[`Element::scroll`] 与 [`Element::list_signal`]），链到别的元素上
+    /// debug 期 panic。
+    #[track_caller]
+    pub fn on_scroll_edge(
+        mut self,
+        f: impl FnMut(&mut EventCtx, crate::core::ScrollEdge) + 'static,
+    ) -> Self {
+        debug_assert!(
+            matches!(self.layout, Layout::Scroll),
+            "on_scroll_edge() 只能用于滚动容器（Element::scroll / list_signal）"
+        );
+        self.scroll_ext.get_or_insert_with(Default::default).on_edge = Some(Box::new(f));
         self
     }
 
@@ -5246,6 +5304,7 @@ impl Element {
             autofocus: self.autofocus,
             focus_when,
             reveal_when,
+            scroll_ext: self.scroll_ext,
             autofocus_done: false,
             focusable: self.focusable,
             tooltip: self.tooltip,
@@ -5314,6 +5373,7 @@ impl Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ScrollEdge;
     use crate::event::{KeyEvent, MouseButton, PointerEvent};
     use crate::geometry::Point;
     use crate::signal::signal;
@@ -6066,6 +6126,181 @@ mod tests {
         tree.dispatch_pointer(wheel, &mut h, &mut cap);
         tree.layout_root(Size::new(100, 100), &mut te);
         assert!(tree.get(root).unwrap().scroll_y > 0, "滚轮向下应滚动列表");
+    }
+
+    // ---- 滚动容器：跟随底部 / 头部插入锚定 / 边缘回调 ----
+
+    fn scroll_wheel(tree: &mut Tree, notches: i32) {
+        use crate::event::PointerKind;
+        // Wheel 正=向上；每格 120 → 48px。
+        let ev = PointerEvent::single(
+            PointerKind::Wheel(notches * 120),
+            Point::new(50, 50),
+            MouseButton::Left,
+        );
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(ev, &mut h, &mut cap);
+    }
+
+    /// 视口 200 高、`n` 个 50 高子项的滚动容器。
+    fn scroll_with_rows(n: usize, configure: impl FnOnce(Element) -> Element) -> (Tree, NodeId) {
+        let mut sc = Element::scroll().width(100).height(200);
+        for _ in 0..n {
+            sc = sc.child(Element::leaf().width_match().height(50));
+        }
+        let mut tree = Tree::new();
+        let root = configure(sc).build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        (tree, root)
+    }
+
+    fn append_rows(tree: &mut Tree, root: NodeId, n: usize) {
+        for _ in 0..n {
+            let c = Element::leaf().width_match().height(50).build(tree);
+            tree.add_child(root, c);
+        }
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+    }
+
+    #[test]
+    fn sticks_to_bottom_when_content_grows() {
+        let (mut tree, root) = scroll_with_rows(10, |e| e.stick_to_bottom(true));
+        assert_eq!(tree.get(root).unwrap().scroll_y, 300, "首次布局应滚到底");
+        append_rows(&mut tree, root, 2);
+        assert_eq!(
+            tree.get(root).unwrap().scroll_y,
+            400,
+            "在底部时内容变高应跟随"
+        );
+    }
+
+    #[test]
+    fn does_not_follow_when_scrolled_up() {
+        let (mut tree, root) = scroll_with_rows(10, |e| e.stick_to_bottom(true));
+        scroll_wheel(&mut tree, 1); // 向上 48px
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        let y = tree.get(root).unwrap().scroll_y;
+        assert_eq!(y, 252);
+        append_rows(&mut tree, root, 2);
+        assert_eq!(tree.get(root).unwrap().scroll_y, y, "离开底部后不应被拽回");
+    }
+
+    #[test]
+    fn follows_again_after_returning_to_bottom() {
+        let (mut tree, root) = scroll_with_rows(10, |e| e.stick_to_bottom(true));
+        scroll_wheel(&mut tree, 1);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        scroll_wheel(&mut tree, -1); // 回到底部
+        tree.layout_root(Size::new(100, 200), &mut te);
+        append_rows(&mut tree, root, 1);
+        assert_eq!(tree.get(root).unwrap().scroll_y, 350);
+    }
+
+    #[test]
+    fn stick_to_bottom_stays_within_four_px_tolerance() {
+        let (mut tree, root) = scroll_with_rows(10, |e| e.stick_to_bottom(true));
+        tree.get_mut(root).unwrap().scroll_y = 297; // 距底 3px，仍算"在底部"
+        append_rows(&mut tree, root, 1);
+        assert_eq!(tree.get(root).unwrap().scroll_y, 350);
+    }
+
+    fn prepend_list() -> (Tree, NodeId, Signal<Vec<u32>>) {
+        let data = signal((100..150).collect::<Vec<u32>>());
+        let mut tree = Tree::new();
+        let list = Element::list_signal(data, |n| *n, |_| Element::leaf().width_match().height(40))
+            .preserve_on_prepend(true)
+            .width(100)
+            .height(200);
+        let root = list.build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        (tree, root, data)
+    }
+
+    #[test]
+    fn prepend_keeps_first_visible_row_anchored() {
+        let (mut tree, root, data) = prepend_list();
+        let mut te = crate::text::NullTextEngine;
+        assert!(tree.set_scroll_y(root, 400), "第 10 行在顶");
+        tree.layout_root(Size::new(100, 200), &mut te);
+        let row10 = tree.get(root).unwrap().children[10];
+        let before = tree.abs_bounds(row10);
+        assert_eq!(before.y, 0);
+
+        let mut next: Vec<u32> = (0..5).collect();
+        next.extend(100..150);
+        data.set(next);
+        tree.layout_root(Size::new(100, 200), &mut te);
+
+        assert_eq!(tree.get(root).unwrap().scroll_y, 600);
+        let node = tree.get(root).unwrap().children[15];
+        assert_eq!(node, row10, "原行节点按键复用");
+        assert_eq!(tree.abs_bounds(row10), before, "原第一个可见行位置不变");
+    }
+
+    #[test]
+    fn append_does_not_move_scroll_when_preserving() {
+        let (mut tree, root, data) = prepend_list();
+        let mut te = crate::text::NullTextEngine;
+        tree.set_scroll_y(root, 400);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        let mut next: Vec<u32> = (100..150).collect();
+        next.push(999);
+        data.set(next);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(tree.get(root).unwrap().scroll_y, 400);
+    }
+
+    #[test]
+    fn scroll_edge_fires_once_and_rearms() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let log: Rc<RefCell<Vec<ScrollEdge>>> = Rc::default();
+        let sink = log.clone();
+        let (mut tree, _root) = scroll_with_rows(10, move |e| {
+            e.on_scroll_edge(move |_ctx, edge| sink.borrow_mut().push(edge))
+        });
+        let mut te = crate::text::NullTextEngine;
+        let mut step = |tree: &mut Tree, notches: i32| {
+            scroll_wheel(tree, notches);
+            tree.layout_root(Size::new(100, 200), &mut te);
+        };
+        assert!(log.borrow().is_empty(), "初始就在顶部不算\"到达\"");
+        step(&mut tree, -2); // 离开顶部 96px
+        assert!(log.borrow().is_empty());
+        step(&mut tree, 5); // 回顶
+        assert_eq!(*log.borrow(), [ScrollEdge::Top]);
+        step(&mut tree, 1); // 在顶部再滚
+        assert_eq!(*log.borrow(), [ScrollEdge::Top], "边缘上不重复触发");
+        step(&mut tree, -1); // 下滚 48 > 16，重新武装
+        step(&mut tree, 5);
+        assert_eq!(*log.borrow(), [ScrollEdge::Top, ScrollEdge::Top]);
+        step(&mut tree, -10); // 到底
+        assert_eq!(
+            *log.borrow(),
+            [ScrollEdge::Top, ScrollEdge::Top, ScrollEdge::Bottom]
+        );
+    }
+
+    #[test]
+    fn scroll_edge_ignores_content_shorter_than_viewport() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let n = Rc::new(Cell::new(0));
+        let sink = n.clone();
+        let (mut tree, _root) = scroll_with_rows(2, move |e| {
+            e.on_scroll_edge(move |_ctx, _edge| sink.set(sink.get() + 1))
+        });
+        scroll_wheel(&mut tree, -3);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(n.get(), 0);
     }
 
     #[test]

@@ -364,6 +364,8 @@ impl<T: Clone + PartialEq + 'static, K: Eq + Hash + Clone + 'static> Widget for 
         let ver = self.data.version();
         if ver != self.last_version {
             self.last_version = ver;
+            // 头部插入锚定：重建前记下第一个可见行（见 `Tree::record_scroll_anchor`）。
+            tree.record_scroll_anchor(self_id);
             let items = self.data.get();
             self.reconcile(tree, self_id, items);
             changed = true;

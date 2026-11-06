@@ -1256,6 +1256,27 @@ let sheet = Element::scroll()
 - 自定义控件在 `on_event` 里可用 `ctx.scroll_metrics_x()` / `ctx.set_scroll_x(..)` /
   `ctx.scroll_by_x(..)` 读写横向偏移，与竖向的 `scroll_metrics` / `set_scroll` / `scroll_by` 对应。
 
+**聊天 / 日志类视图**：三个修饰符挂在滚动容器（`Element::scroll()` 或 `list_signal`）上，示例见
+`examples/chat_scroll.rs`。
+
+```rust
+Element::list_signal(msgs, |m| m.id, |m| bubble(m))
+    .stick_to_bottom(true)        // 在底部时新内容进来自动跟随；翻看历史时不打断
+    .preserve_on_prepend(true)    // 头部插入更早的行后，视图停在原来看的那一行
+    .on_scroll_edge(move |_ctx, edge| {
+        if edge == ScrollEdge::Top { /* 加载更早 */ }
+    })
+```
+
+- `stick_to_bottom(on)`：首次布局滚到底；之后每次布局，若上一帧距底 ≤ 4 逻辑像素（"在底部"），
+  内容变高后仍贴底，否则保持 `scroll_y`。用户翻回底部即恢复跟随。`scroll()` 与 `list_signal` 均可。
+- `preserve_on_prepend(on)`：仅 `list_signal`。数据更新时记下第一个可见行（按键复用的节点），
+  布局后把 `scroll_y` 调整到它在视口中的原位置；该行自身被重建或删除则不调整。两者同开时，
+  在底部以跟随为准。
+- `on_scroll_edge(f)`：到达顶部（`scroll_y == 0`）/ 底部（距底 ≤ 4px）触发一次 `ScrollEdge::Top / Bottom`；
+  离开该边缘超过 16px 后重新武装。内容不足一屏不触发；初始就停在边缘不算"到达"。
+  回调在布局后调用，请在回调里改信号（其 `EventCtx` 的 toast 等副作用不上交）。
+
 ### 6.5 动态列表（数据驱动的子树重建）
 
 行数会变的列表——搜索结果、过滤后的任务、异步加载到的记录——**不要**在回调里手工增删节点。

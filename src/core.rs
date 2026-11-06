@@ -24,6 +24,43 @@ use crate::text::TextEngine;
 /// 点击/激活回调类型。
 pub type ClickFn = Box<dyn FnMut(&mut EventCtx)>;
 
+/// 滚动容器到达的边缘（见 `Element::on_scroll_edge`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollEdge {
+    /// 顶部（`scroll_y == 0`）。
+    Top,
+    /// 底部（距底 ≤ [`SCROLL_EDGE_NEAR`] 逻辑像素）。
+    Bottom,
+}
+
+/// 滚动边缘回调类型。
+pub type ScrollEdgeFn = Box<dyn FnMut(&mut EventCtx, ScrollEdge)>;
+
+/// 距底多少逻辑像素内算"在底部"（跟随底部与底边回调共用）。
+const SCROLL_EDGE_NEAR: i32 = 4;
+/// 离开边缘超过多少逻辑像素后边缘回调重新武装。
+const SCROLL_EDGE_REARM: i32 = 16;
+
+/// 滚动容器的可选扩展状态：只有用了跟随底部 / 头部锚定 / 边缘回调的节点才分配。
+#[derive(Default)]
+pub(crate) struct ScrollExt {
+    /// `Element::stick_to_bottom`。
+    pub stick_to_bottom: bool,
+    /// `Element::preserve_on_prepend`。
+    pub preserve_on_prepend: bool,
+    /// `Element::on_scroll_edge`。
+    pub on_edge: Option<ScrollEdgeFn>,
+    /// 上一次 arrange 结束时的最大滚动量（`None` = 尚未布局过）。判"上一帧是否在底部"用：
+    /// 本帧 measure 已把 `content_h` 更新成新值，只有这份记录还停在上一帧。
+    prev_max_y: Option<i32>,
+    /// 数据更新前记下的锚点行：(行节点, 它相对视口顶的偏移)。arrange 时消费。
+    pub anchor: Option<(NodeId, i32)>,
+    /// 边缘回调是否已有基线（首次看到可滚动内容时只记状态，不触发）。
+    edge_seeded: bool,
+    top_armed: bool,
+    bottom_armed: bool,
+}
+
 /// 文件拖放回调类型：收到落在本节点（或其子节点冒泡上来）的文件路径列表。
 pub type DropFn = Box<dyn FnMut(&mut EventCtx, &[PathBuf])>;
 /// 右键上下文菜单构建回调：返回该次菜单项（空 = 不弹）。
@@ -821,6 +858,8 @@ pub struct Node {
     pub focus_when: Option<FocusTrigger>,
     /// 滚进可视区的触发器（`Element::reveal_when`）。
     pub reveal_when: Option<RevealTrigger>,
+    /// 滚动容器的跟随底部 / 头部锚定 / 边缘回调状态。
+    pub(crate) scroll_ext: Option<Box<ScrollExt>>,
 }
 
 /// 一次布局同步里"哪些布局过渡节点被展开推着走"的索引（见 [`Tree::sync_layout_anims`]）。
@@ -1372,6 +1411,7 @@ impl Tree {
             );
             self.arrange(root, Rect::from_size(size));
         }
+        self.dispatch_scroll_edges();
         // 浮层必须排在整棵树 arrange **之后**：它的锚点取自父节点的绝对矩形，
         // 而那要等父级排完才成立。
         self.layout_overlays(size, text);
@@ -2262,6 +2302,138 @@ impl Tree {
         }
     }
 
+    /// 应用 [`ScrollExt`]：上一帧在底部（或首次布局）且开了跟随 → 滚到新的底；否则若有
+    /// 待消费的锚点行，让它回到记录时相对视口顶的位置。
+    fn apply_scroll_ext(&mut self, id: NodeId, max_y: i32) {
+        let Some(n) = self.get_mut(id) else { return };
+        let scroll_y = n.scroll_y;
+        let Some(e) = n.scroll_ext.as_mut() else {
+            return;
+        };
+        let following = e.stick_to_bottom
+            && e.prev_max_y
+                .is_none_or(|m| m - scroll_y <= SCROLL_EDGE_NEAR);
+        let anchor = e.anchor.take();
+        let next = if following {
+            Some(max_y)
+        } else {
+            anchor.and_then(|(row, off)| self.child_content_y(id, row).map(|y| y - off))
+        };
+        if let (Some(y), Some(n)) = (next, self.get_mut(id)) {
+            n.scroll_y = y;
+        }
+    }
+
+    /// 子节点 `target` 上沿在滚动内容坐标系里的纵坐标（按上一次 measure 的尺寸堆叠）。
+    fn child_content_y(&self, id: NodeId, target: NodeId) -> Option<i32> {
+        let mut y = 0;
+        for c in self.visible_children(id) {
+            let (cs, cm) = (self.measured_of(c), self.margin_of(c));
+            if c == target {
+                return Some(y + cm.top);
+            }
+            y += cs.h + cm.vertical();
+        }
+        None
+    }
+
+    /// 数据更新**之前**记下第一个可见行（`preserve_on_prepend` 用），供随后的 arrange 还原。
+    /// 位置取自上一帧的 measure 结果；已有未消费的锚点则保留（同一帧多次更新以最早的为准）。
+    pub(crate) fn record_scroll_anchor(&mut self, id: NodeId) {
+        let Some(n) = self.get(id) else { return };
+        let scroll_y = n.scroll_y;
+        match n.scroll_ext.as_deref() {
+            Some(e) if e.preserve_on_prepend && e.anchor.is_none() => {}
+            _ => return,
+        }
+        let mut y = 0;
+        let mut found = None;
+        for c in self.visible_children(id) {
+            let (cs, cm) = (self.measured_of(c), self.margin_of(c));
+            let top = y + cm.top;
+            if top + cs.h > scroll_y {
+                found = Some((c, top - scroll_y));
+                break;
+            }
+            y += cs.h + cm.vertical();
+        }
+        if let Some(e) = self.get_mut(id).and_then(|n| n.scroll_ext.as_mut()) {
+            e.anchor = found;
+        }
+    }
+
+    /// 布局完成后检查挂了 `on_scroll_edge` 的滚动容器：到达顶/底触发一次，离开超过
+    /// [`SCROLL_EDGE_REARM`] 后重新武装。内容不足一屏不触发。首次看到可滚动内容只记基线
+    /// （初始就停在边缘不算"到达"）。回调的副作用结果丢弃，回调里请改信号。
+    fn dispatch_scroll_edges(&mut self) {
+        let ids: Vec<NodeId> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.node
+                    .as_ref()
+                    .and_then(|n| n.scroll_ext.as_ref())
+                    .is_some_and(|e| e.on_edge.is_some())
+            })
+            .map(|(i, s)| NodeId {
+                index: i as u32,
+                generation: s.generation,
+            })
+            .collect();
+        for id in ids {
+            let Some(n) = self.get_mut(id) else { continue };
+            let (scroll_y, content_h, view_h) = (n.scroll_y, n.content_h, n.scroll_view().h);
+            let max_y = (content_h - view_h).max(0);
+            let Some(e) = n.scroll_ext.as_mut() else {
+                continue;
+            };
+            if max_y == 0 {
+                e.edge_seeded = false;
+                continue;
+            }
+            let (at_top, at_bottom) = (scroll_y <= 0, max_y - scroll_y <= SCROLL_EDGE_NEAR);
+            let mut fire = Vec::new();
+            if !e.edge_seeded {
+                e.edge_seeded = true;
+                e.top_armed = !at_top;
+                e.bottom_armed = !at_bottom;
+            } else {
+                if at_top && e.top_armed {
+                    e.top_armed = false;
+                    fire.push(ScrollEdge::Top);
+                } else if scroll_y > SCROLL_EDGE_REARM {
+                    e.top_armed = true;
+                }
+                if at_bottom && e.bottom_armed {
+                    e.bottom_armed = false;
+                    fire.push(ScrollEdge::Bottom);
+                } else if max_y - scroll_y > SCROLL_EDGE_REARM {
+                    e.bottom_armed = true;
+                }
+            }
+            for edge in fire {
+                let Some(mut cb) = self
+                    .get_mut(id)
+                    .and_then(|n| n.scroll_ext.as_mut())
+                    .and_then(|e| e.on_edge.take())
+                else {
+                    break;
+                };
+                let mut ctx = EventCtx {
+                    tree: self,
+                    self_id: id,
+                    out: EventOutcome::default(),
+                };
+                cb(&mut ctx, edge);
+                // 节点仍在才放回（同 `dispatch_files`）；回调里若换了新回调则以新的为准。
+                if let Some(e) = self.get_mut(id).and_then(|n| n.scroll_ext.as_mut()) {
+                    e.on_edge.get_or_insert(cb);
+                }
+            }
+        }
+    }
+
     fn arrange_scroll(&mut self, id: NodeId, inner: Rect) {
         let (axis, content_w, content_h, over_x, over_y) = {
             let n = self.get(id).unwrap();
@@ -2306,11 +2478,18 @@ impl Tree {
         } else {
             0
         };
+        // 跟随底部 / 头部锚定：在钳制前改写 scroll_y。
+        if axis.vertical() {
+            self.apply_scroll_ext(id, max_y);
+        }
         let (scroll_x, scroll_y) = {
             let n = self.get_mut(id).unwrap();
             n.scroll_y = n.scroll_y.clamp(0, max_y);
             n.scroll_x = n.scroll_x.clamp(0, max_x);
             n.scroll_bars = Size::new(bar_w, bar_h);
+            if let Some(e) = n.scroll_ext.as_mut() {
+                e.prev_max_y = Some(max_y);
+            }
             (n.scroll_x, n.scroll_y)
         };
         // 子节点从视口左上起纵向堆叠，整体上移 scroll_y、左移 scroll_x；
