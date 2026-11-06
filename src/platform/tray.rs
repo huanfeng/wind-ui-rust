@@ -121,8 +121,12 @@ impl TrayHandle {
     /// 弹出带标签的系统通知：用户点击它时，[`Tray::on_notification_click`] 的回调收到该标签
     /// （例如会话 id，用来打开对应窗口）。其余语义同 [`notify`](Self::notify)。
     ///
+    /// `tag` 原样回传：空字符串得到 `Some("")`，不会变成 `None`。
+    ///
     /// 点击回调的平台差异：Windows 只记**最近一条**通知的标签（Shell 气泡同一时间只有
-    /// 一条）；Linux 按通知 id 各记各的（最多保留最近 64 条），守护进程不支持 actions 时
+    /// 一条）——点击已被后续通知顶掉的旧通知（如操作中心残留项），回调拿到的是最新通知的
+    /// 标签，调用方不应假定 tag 一定对应被点的那条，点击只应激活界面并尽力定位，
+    /// 不做破坏性动作；气泡消失后再点旧项得到 `None`；Linux 按通知 id 各记各的（最多保留最近 64 条），守护进程不支持 actions 时
     /// 点击不回调；macOS 目前不回调。
     pub fn notify_tagged(
         &self,
@@ -478,13 +482,15 @@ impl Tray {
         self.on_availability = Some(Box::new(f));
         self
     }
-    /// 取指定下标菜单项的回调（平台层在模态菜单关闭后分发用）。
     /// 用户点击通知时回调，参数是发送该通知时给的标签（[`TrayHandle::notify_tagged`]；
     /// 普通 `notify` 发出的通知为 `None`）。回调里与其它托盘回调一样只能排意图
     /// （如 `ctx.open_window(..)`）。
     ///
-    /// Windows：点击气泡（`NIN_BALLOONUSERCLICK`），只认最近一条通知的标签。Linux：
-    /// 点击通知（`default` action），需通知守护进程支持 actions，否则不回调。macOS：不回调。
+    /// Windows：点击气泡（`NIN_BALLOONUSERCLICK`），只认最近一条通知的标签，气泡消失后
+    /// 再点（如操作中心残留项）得到 `None`。**点击一条已被后续通知顶掉的旧通知，拿到的是
+    /// 最新通知的标签**，调用方不应假定 tag 一定对应被点的那条：回调只应激活界面并尽力
+    /// 定位，不做破坏性动作。Linux：点击通知（`default` action），需通知守护进程支持
+    /// actions，否则不回调。macOS：不回调。
     pub fn on_notification_click(
         mut self,
         f: impl FnMut(&mut TrayCtx, Option<String>) + 'static,
@@ -501,6 +507,7 @@ impl Tray {
         }
         ctx.take_actions()
     }
+    /// 取指定下标菜单项的回调（平台层在模态菜单关闭后分发用）。
     pub(crate) fn item_callback(&mut self, idx: usize) -> Option<&mut TrayFn> {
         self.items.get_mut(idx)?.callback()
     }
@@ -679,7 +686,6 @@ mod tests {
         assert_eq!(handle.pending_ops().len(), 1, "对照：长度对得上的照常排队");
     }
 
-    /// 没有回调时不该凭空产生意图（左键未绑定的托盘图标点了应当什么都不发生）。
     #[test]
     fn notify_tagged_queues_op_with_tag() {
         let handle = TrayHandle::detached();
@@ -722,6 +728,7 @@ mod tests {
         assert!(Tray::new().notification_click(Some("x".into())).is_empty());
     }
 
+    /// 没有回调时不该凭空产生意图（左键未绑定的托盘图标点了应当什么都不发生）。
     #[test]
     fn absent_callback_yields_no_actions() {
         assert!(invoke(None).is_empty());

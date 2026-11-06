@@ -890,8 +890,16 @@ mod tests {
 
     impl PrivateBus {
         fn start() -> Option<Self> {
+            Self::start_with(&[])
+        }
+        /// 在固定地址上起（用来先让客户端连不上、之后才让总线出现）。
+        fn start_at(addr: &str) -> Option<Self> {
+            Self::start_with(&[format!("--address={addr}")])
+        }
+        fn start_with(extra: &[String]) -> Option<Self> {
             let mut child = Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--print-address=1"])
+                .args(extra)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
@@ -1384,6 +1392,49 @@ mod tests {
             !acts.is_empty()
         }));
         assert_eq!(acts, vec![TrayAction::Show]);
+    }
+
+    /// 首次发通知时总线不可达：监听线程退出，总线出现后的下一条通知应重新起监听，点击能回调。
+    #[test]
+    fn listener_is_retried_on_next_send_after_bus_was_unreachable() {
+        if Command::new("dbus-daemon")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("跳过：本机没有可用的 dbus-daemon");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("windui-notify-retry-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let addr = format!("unix:path={}", path.display());
+        let (cb, rx) = click_channel();
+        let mut n = Notifier::new(Bus::Address(addr.clone()), cb);
+
+        // 总线还不存在：监听线程连不上，直接退出。
+        n.send("t0", "b0", Some("lost"));
+        assert!(
+            wait_for(|| n.listener_finished()),
+            "总线不可达时监听线程应退出"
+        );
+
+        let Some(pb) = PrivateBus::start_at(&addr) else {
+            eprintln!("跳过：dbus-daemon 无法在指定地址启动");
+            return;
+        };
+        assert!(wait_for(|| path.exists()));
+        let (srv, got, _) = start_notification_server(&pb.bus());
+        n.send("t1", "b1", Some("conv1"));
+        assert!(wait_for(|| !got.lock().unwrap().is_empty()));
+        assert!(wait_for(|| n.has_tag(1)));
+        std::thread::sleep(Duration::from_millis(200)); // 监听订阅建好
+        emit_notification_signal(&srv, "ActionInvoked", &(1u32, "default"));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some("conv1".to_string()),
+            "重试起来的监听线程应能回调"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

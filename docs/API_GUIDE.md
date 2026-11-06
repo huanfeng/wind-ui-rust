@@ -868,7 +868,7 @@ App::new("…", w, h).tray(
 ```
 - **右键菜单走原生 `TrackPopupMenu`**（真 OS 弹出，显示在托盘旁）；支持**勾选项**（`check` 绑 `Signal<bool>`，弹出时按当前值显示对勾）与**分隔线**。勾选态/禁用态都是**弹出时现读**，所以在别处改信号，下次右键就能看到。托盘构建器因此是 `!Send` 的——信号存储线程局部，`Tray` 只能留在建它的 UI 线程，跨线程搬运编译期即失败。
 - 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。**拿不到窗口句柄**，理由同下文 `HotkeyCtx`：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（`AGENTS.md` 铁律 6）。这几个方法只记录意图，由平台层在借用释放后执行。
-- **通知点击回调**：`Tray::on_notification_click(|ctx, tag: Option<String>| ..)`。用户点击通知时以该通知的标签回调；标签由 `TrayHandle::notify_tagged(title, body, tag)` 给出（会话 id、任务 id 之类），普通 `notify` 发出的通知回调收到 `None`。回调里与其它托盘回调一样只排意图（如 `ctx.open_window(..)`）。平台差异：Windows 点击气泡（`NIN_BALLOONUSERCLICK`），Shell 同一时间只有一条气泡，故只认**最近一条**通知的标签；Linux 每条通知带 `default` action，监听 `ActionInvoked` 按通知 id 还原标签（最多记最近 64 条，`NotificationClosed` 时移除），通知守护进程不支持 actions 或不存在时点击不回调、也不报错；macOS 目前不回调。
+- **通知点击回调**：`Tray::on_notification_click(|ctx, tag: Option<String>| ..)`。用户点击通知时以该通知的标签回调；标签由 `TrayHandle::notify_tagged(title, body, tag)` 给出（会话 id、任务 id 之类），普通 `notify` 发出的通知回调收到 `None`，空字符串标签原样回传为 `Some("")`。回调里与其它托盘回调一样只排意图（如 `ctx.open_window(..)`）。平台差异：Windows 点击气泡（`NIN_BALLOONUSERCLICK`），Shell 同一时间只有一条气泡，故只认**最近一条**通知的标签（气泡超时 / 被收起后清空，再点得到 `None`）。**Windows 上点击一条已被后续通知顶掉的旧通知（如操作中心残留项），回调拿到的是最新通知的标签**——调用方不应假定 tag 一定对应被点的那条，点击只应激活界面并尽力定位，不做破坏性动作；Linux 每条通知带 `default` action，监听 `ActionInvoked` 按通知 id 还原标签（最多记最近 64 条，`NotificationClosed` 时移除；监听线程因总线不可达退出时，下次发通知会重试），通知守护进程不支持 actions 或不存在时点击不回调、也不报错；macOS 目前不回调。
 - 一个回调内可**按顺序调用多个**，逐条生效（如先 `notify(..)` 再 `show_window()`）。例外是 `quit()`：它之后的调用不再执行（窗口已销毁）。
 - `quit()` 是应用的真实出口，刻意**不受 `hide_on_close()` 影响**。
 - **Linux**：走 StatusNotifierItem（KDE 原生；GNOME 需 AppIndicator 扩展），菜单由宿主绘制；没有托盘宿主时不显示图标但程序照常运行，通知仍走 `org.freedesktop.Notifications`。用 `windui::platform::tray_supported()` 取托盘此刻是否可用（快照），用 `Tray::on_availability_changed(|ctx, up| ..)` 订阅之后的上下线（Linux 才会触发，Windows / macOS 恒可用、永不触发；初始状态不触发）；托盘宿主晚于应用启动或重启，图标会自动重新登记。细节与限制见 `docs/LINUX_PORTING.md` §7.1。
@@ -895,7 +895,7 @@ App::new("…", w, h).tray(
   `toolTip`）。
 - **从应用状态弹通知**：`tray.notify("同步完成", "已上传 3 个文件")`，与托盘菜单回调里的
   `TrayCtx::notify` 是同一条平台实现，只是不必先有一次托盘交互（后台任务完成、同步失败这类
-  场景）。排队与丢弃规则同 `set_tooltip`：没装托盘时丢弃；Linux 尚无托盘，一并丢弃。
+  场景）。排队与丢弃规则同 `set_tooltip`：没装托盘（未调 `App::tray`）时丢弃；Linux 上装了托盘配置即可发送，即使桌面没有托盘宿主，通知也照常走 `org.freedesktop.Notifications`。
 - **换图标**：`tray.set_icon_rgba(w, h, &rgba)`（像素口径同 `Tray::icon_rgba`），把状态挂在
   图标上——录制中把圆点变红、同步出错打个角标，提示文字要悬停才看得见。排队与丢弃规则同
   上；尺寸为 0 或 `rgba.len() != w*h*4` 时这次改动被丢弃（打一行警告），图标保持原样。Windows 上 shell

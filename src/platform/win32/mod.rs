@@ -3129,6 +3129,11 @@ unsafe fn on_tray_message(lparam: LPARAM) {
                 .unwrap_or_default();
             run_tray_actions(main, actions);
         }
+        tray::TrayEvent::NotificationGone => {
+            if let Some(ts) = app_host().and_then(|h| h.tray.as_mut()) {
+                tray::clear_notify_tag(ts);
+            }
+        }
         tray::TrayEvent::Other => {}
     }
     // 托盘回调与热键回调同属"不属于任何窗口"的入口，收尾也必须同一套：菜单项里

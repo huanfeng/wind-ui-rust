@@ -199,7 +199,9 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
   （独立连接，匹配规则订阅 `ActionInvoked` / `NotificationClosed`），按通知 id → 标签表
   （最多 64 条）还原标签，经 `TrayEvent::Notification` 回 UI 线程调 `on_notification_click`。
   监听线程阻塞在信号迭代器上，`Notifier` 释放时关其连接使它退出（同托盘监视线程）。
-  监听连接在第一条通知时建立，启动时总线不可达则这次监听放弃（点击不回调，通知照发）。
+  监听连接在第一条通知时建立；总线不可达 / 订阅建不起来时监听线程退出（点击不回调，通知照发），
+  **下次发通知时重试**（`Notifier::send` 发现线程已结束就重起）。已知良性竞态：订阅异步建立、
+  通知 id 入表前到达的 `ActionInvoked` 会被忽略——都要求用户在弹出后毫秒内点击，真人不可达。
 - **空闲零 CPU**：D-Bus 收发在 zbus 内部线程，处理函数把事件入队并写**唤醒管道**
   （`sys::wake`，本就在 `poll(2)` 集合里）；UI 线程睡在 `poll` 上被内核唤醒，不轮询。
   UI → D-Bus 的信号 / 通知经 `mpsc` 交给专职线程，线程阻塞在 `recv()`。实测常驻进程空闲

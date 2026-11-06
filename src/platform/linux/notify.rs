@@ -23,6 +23,13 @@
 //! 别的应用的通知 id 不在表里，信号被忽略。守护进程不存在或不支持 actions 时，
 //! 信号根本不会来：点击回调不触发，也不报错。
 //!
+//! 监听线程连不上总线 / 建不起订阅时直接退出；Notifier 看到它已结束，会在**下一次发通知时**
+//! 重新起一条重试（总线稍后才可达的场景，如会话启动早期）。
+//!
+//! 已知的良性竞态：订阅是异步建立的，订阅生效前到达的信号收不到；通知 id 在发送线程把它
+//! 写入标签表之前到达的 `ActionInvoked` 也会被当作「别的应用的通知」忽略。两者都要求用户
+//! 在通知刚弹出的毫秒内点击，真人速度不可达。
+//!
 //! 监听线程阻塞在信号迭代器上，Notifier 被丢掉时由 [`Listener`] 关闭它的连接把它唤醒退出
 //! （与托盘监视线程同一约定）。
 
@@ -96,9 +103,14 @@ struct ConnSlot {
 /// 监听线程的句柄。丢掉它 = 关闭监听连接 = 监听线程退出。
 struct Listener {
     slot: Arc<Mutex<ConnSlot>>,
-    /// 仅测试用来断言线程确实退出。
-    #[cfg(test)]
+    /// 判断监听线程是否已退出（失败重试），测试里也用来断言线程确实退出。
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Listener {
+    fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(|t| t.is_finished())
+    }
 }
 
 impl Drop for Listener {
@@ -137,6 +149,10 @@ impl Notifier {
 
     /// 入队一条通知（立即返回）。`tag` 在用户点击该通知时交给 `on_click`。
     pub(super) fn send(&mut self, title: &str, body: &str, tag: Option<&str>) {
+        // 监听线程没起来或已因总线不可达退出：丢掉旧句柄，趁这次发送重试。
+        if self.listener.as_ref().is_none_or(|l| l.is_finished()) {
+            self.listener = self.spawn_listener();
+        }
         let job = Job {
             title: title.to_string(),
             body: body.to_string(),
@@ -149,9 +165,6 @@ impl Notifier {
             }
             self.tx = None;
             return self.send(title, body, tag);
-        }
-        if self.listener.is_none() {
-            self.listener = self.spawn_listener();
         }
         let (tx, rx) = channel::<Job>();
         let bus = self.bus.clone();
@@ -207,10 +220,9 @@ impl Notifier {
             .name("windui-notify-listen".into())
             .spawn(move || listen(bus, tags, on_click, s2));
         match spawned {
-            Ok(_thread) => Some(Listener {
+            Ok(thread) => Some(Listener {
                 slot,
-                #[cfg(test)]
-                thread: Some(_thread),
+                thread: Some(thread),
             }),
             Err(e) => {
                 log::warn!("通知点击监听线程创建失败，点击通知将不回调：{e}");
@@ -224,6 +236,9 @@ impl Notifier {
 impl Notifier {
     pub(super) fn has_tag(&self, id: u32) -> bool {
         lock_tags(&self.tags).get(id).is_some()
+    }
+    pub(super) fn listener_finished(&self) -> bool {
+        self.listener.as_ref().is_some_and(|l| l.is_finished())
     }
     pub(super) fn take_listener(&mut self) -> Option<TestListener> {
         self.listener.take().map(TestListener)
@@ -242,7 +257,8 @@ impl TestListener {
 }
 
 /// 监听线程主体：订阅通知守护进程的两个信号，直到连接被关。
-/// 连不上总线就直接退出（发送线程会报同一个错，这里不重复）。
+/// 连不上总线 / 建不起订阅就直接退出（发送线程会报同一个错，这里不重复），
+/// 由 [`Notifier::send`] 在下次发通知时重试。
 fn listen(bus: Bus, tags: SharedTags, on_click: ClickFn, slot: Arc<Mutex<ConnSlot>>) {
     let Ok(conn) = bus.connect() else { return };
     {

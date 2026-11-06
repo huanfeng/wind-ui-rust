@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
+    NIM_MODIFY, NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
@@ -87,6 +87,9 @@ pub(crate) enum TrayEvent {
     RightClick,
     /// 用户点了气泡通知（`NIN_BALLOONUSERCLICK`）。
     NotificationClick,
+    /// 气泡消失（`NIN_BALLOONTIMEOUT` 超时 / `NIN_BALLOONHIDE` 被收起）：之后再点
+    /// 操作中心里的旧项不该拿到这条通知的标签。
+    NotificationGone,
     Other,
 }
 
@@ -97,6 +100,7 @@ pub(crate) fn classify(lparam: LPARAM) -> TrayEvent {
         WM_LBUTTONDBLCLK => TrayEvent::Click(ClickKind::Double),
         WM_RBUTTONUP => TrayEvent::RightClick,
         NIN_BALLOONUSERCLICK => TrayEvent::NotificationClick,
+        NIN_BALLOONTIMEOUT | NIN_BALLOONHIDE => TrayEvent::NotificationGone,
         _ => TrayEvent::Other,
     }
 }
@@ -116,7 +120,11 @@ pub(crate) struct TrayState {
     /// 应用，那就是显示一个早已改掉的快捷键。
     tooltip: String,
     /// 最近一条通知的标签。Shell 气泡同一时间只有一条，新的顶掉旧的，故只记一份；
-    /// 点击（`NIN_BALLOONUSERCLICK`）时取走交给 `on_notification_click`。
+    /// 点击（`NIN_BALLOONUSERCLICK`）时取走交给 `on_notification_click`，气泡消失
+    /// （`NIN_BALLOONTIMEOUT` / `NIN_BALLOONHIDE`）时清空。
+    ///
+    /// 局限：点击一条已被后续通知顶掉、却仍留在操作中心的旧通知，拿到的是**最新**那条的
+    /// 标签（Shell 不告诉我们点的是哪条）；故回调只应激活界面，不做破坏性动作。
     notify_tag: Option<String>,
 }
 
@@ -174,6 +182,11 @@ pub(crate) fn run_click(state: &mut TrayState, kind: ClickKind) -> Vec<TrayActio
         ClickKind::Double => state.tray.on_double_click.as_mut(),
     };
     invoke(cb)
+}
+
+/// 气泡消失：清掉记着的标签，之后再点旧项只会得到 `None`。
+pub(crate) fn clear_notify_tag(state: &mut TrayState) {
+    state.notify_tag = None;
 }
 
 /// 跑通知点击回调（标签取自最近一条通知），取回它声明的意图队列。
@@ -506,8 +519,8 @@ mod tests {
     use super::{add_nid, classify, is_taskbar_created, TrayEvent, WM_TRAYICON};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Foundation::LPARAM;
-    use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
     use windows::Win32::UI::Shell::{NIF_ICON, NIF_MESSAGE, NIF_TIP};
+    use windows::Win32::UI::Shell::{NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK};
     use windows::Win32::UI::WindowsAndMessaging::HICON;
 
     /// 登记数据必须三要素齐全。
@@ -583,5 +596,16 @@ mod tests {
             classify(LPARAM(0x0202)), // WM_LBUTTONUP
             TrayEvent::Click(_)
         ));
+    }
+
+    /// 气泡超时 / 被收起要被认出来，用来清掉记着的标签。
+    #[test]
+    fn 气泡消失被识别为通知消失() {
+        for code in [NIN_BALLOONTIMEOUT, NIN_BALLOONHIDE] {
+            assert!(matches!(
+                classify(LPARAM(code as isize)),
+                TrayEvent::NotificationGone
+            ));
+        }
     }
 }
