@@ -870,7 +870,7 @@ App::new("…", w, h).tray(
 - 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。**拿不到窗口句柄**，理由同下文 `HotkeyCtx`：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（`AGENTS.md` 铁律 6）。这几个方法只记录意图，由平台层在借用释放后执行。
 - 一个回调内可**按顺序调用多个**，逐条生效（如先 `notify(..)` 再 `show_window()`）。例外是 `quit()`：它之后的调用不再执行（窗口已销毁）。
 - `quit()` 是应用的真实出口，刻意**不受 `hide_on_close()` 影响**。
-- **Linux**：走 StatusNotifierItem（KDE 原生；GNOME 需 AppIndicator 扩展），菜单由宿主绘制；没有托盘宿主时不显示图标但程序照常运行，通知仍走 `org.freedesktop.Notifications`。用 `windui::platform::tray_supported()` 探测托盘是否可用。细节与限制见 `docs/LINUX_PORTING.md` §7.1。
+- **Linux**：走 StatusNotifierItem（KDE 原生；GNOME 需 AppIndicator 扩展），菜单由宿主绘制；没有托盘宿主时不显示图标但程序照常运行，通知仍走 `org.freedesktop.Notifications`。用 `windui::platform::tray_supported()` 取托盘此刻是否可用（快照），用 `Tray::on_availability_changed(|ctx, up| ..)` 订阅之后的上下线（Linux 才会触发，Windows / macOS 恒可用、永不触发；初始状态不触发）；托盘宿主晚于应用启动或重启，图标会自动重新登记。细节与限制见 `docs/LINUX_PORTING.md` §7.1。
 - 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
 - **`Tray` 三件套是平台无关的**（定义在 `windui::platform::tray`，两平台共用同一份类型与语义）。此前它在 win32 与 macOS 各有一份完整副本，跨平台性只是「两边方法名恰好一样」的巧合——`TrayCtx` 一个累积意图、一个持有 `NSWindow` 立即调 OS。现在两个后端只负责执行 `TrayAction`。
 - **回调可测**：`windui::testing::run_with_tray_ctx(item)` 借一个受控 `TrayCtx` 跑菜单项回调，返回它请求的 `Vec<TrayAction>`；`run_with_tray_ctx_fn(f)` 用于 `on_left_click` 这类直接持有的闭包。见 [9.2](#92-测试收-eventctx-的回调)。
@@ -974,7 +974,7 @@ let mut app = App::resident("清风词典")                // 不收窗口尺寸
 if !launched_for_tray {                                // 开机自启不弹窗，双击图标才开
     app = app.start_window(main_window());
 }
-app.run_resident();
+let started = app.run_resident();   // false = 没能启动（无 X 显示 / macOS 未实现 / 缺入口）或显示连接丢失；启动前可用 platform::resident_available() 探测
 ```
 
 - `TrayCtx::open_window` / `HotkeyCtx::open_window` 与控件里的 `EventCtx::open_window` 收同一个
@@ -3014,11 +3014,11 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 窗口 / 事件循环 / 文字 / 剪贴板 / 文件拖入 / 无边框窗口 | ✓ | ✓ | ✓ x11rb + 自带文字栈（fontconfig 选字，无复杂文字整形与彩色 emoji） |
 | 输入法（合成串内联绘制、候选窗跟随光标） | ✓ | ✓ | ✓ XIM（fcitx5 / ibus 的 XIM 前端，按 `XMODIFIERS` 连接） |
 | 触摸 / 惯性滚动 | ✓ | ✓ 系统动量 | ✗ 滚轮 / 触控板两指滚动可用，无触摸事件 |
-| 系统托盘 | ✓ | ✓ | ✗ 配置被忽略并记日志 |
+| 系统托盘 | ✓ | ✓ | ✓ StatusNotifierItem（X11 后端；无托盘宿主时降级为无图标，通知照常） |
 | 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） | ✓ 根窗口 `GrabKey`（Wayland 下受限，见「全局热键与启动即隐藏」） |
 | 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 | ✓ 同语义 |
 | 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
-| 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误并退出 | ✗ 同 macOS |
+| 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误，返回 `false` | ✓ 固定走 X11（经 XWayland），无 X 显示时返回 `false` |
 | 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |
 | 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送 |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） | ✓ 缺字面时合成加粗 |

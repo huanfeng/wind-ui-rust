@@ -30,7 +30,7 @@ pub(crate) fn run(
     mut handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-) {
+) -> bool {
     super::apply_motion_level(&cfg, os_reduce_motion);
     // 光标闪烁走**插入符**设置（`NSTextInsertionPointBlinkPeriod*`），不跟"减弱动态效果"
     // 走：两者在系统里本就是分开的开关。应用把动效强制关死时连它一起关。
@@ -43,7 +43,7 @@ pub(crate) fn run(
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 win32 后端共用）。
         super::run_offscreen(&cfg, &mut handler, &path);
-        return;
+        return true;
     }
     // TODO(macOS): 零窗口常驻模式（`App::run_resident`）尚未实现。
     //
@@ -61,7 +61,7 @@ pub(crate) fn run(
         eprintln!(
             "[windui] 常驻模式（App::run_resident）目前仅支持 Windows，macOS 尚未实现，进程退出"
         );
-        return;
+        return false;
     }
     // 单实例仲裁（应用若已在 main 里 claim_instance 过，这里直接放行）：二次实例把 argv
     // 转发给首实例后直接返回、不建窗口。
@@ -71,10 +71,11 @@ pub(crate) fn run(
     // 时失效。argv 的转发必须由这一层自己做，不能指望系统的单实例语义。
     if let Some(si) = &single {
         if !crate::single_instance::arbitrate(&si.app_id) {
-            return;
+            return true;
         }
     }
     window::run_windowed(cfg, handler, waker, single);
+    true
 }
 
 /// 把应用带到前台。**所有激活都必须走这里，不要直接 `app.activate()`。**

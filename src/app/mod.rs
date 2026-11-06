@@ -2278,10 +2278,23 @@ impl App {
     ///     .run_resident();
     /// ```
     ///
+    /// # 返回值
+    ///
+    /// `true` = 常驻模式正常运行，并由用户 / 程序（托盘「退出」）结束；`false` = **没能
+    /// 启动或显示连接丢失**：缺托盘与热键入口被拒绝、macOS 尚未实现、Linux 上没有可连的
+    /// X 显示（无头机器、没开 XWayland）、Windows 上消息宿主窗口建不起来，或运行中 X
+    /// 连接断开。调用方据此退化（例如改走 `run()` 开窗，或报错退出），而不是把起不来当成
+    /// 正常退出。启动前可用 [`platform::resident_available`](crate::platform::resident_available)
+    /// 探测。本方法不加 `#[must_use]`：忽略返回值的既有写法照常编译。
+    ///
     /// # 平台
     ///
-    /// **仅 Windows。** macOS 侧尚未实现（核心层 API 已就位，缺的是平台落地），
-    /// 在那里调用会打印一行错误并直接返回，不会建出任何窗口。
+    /// Windows 与 Linux（X11 后端，Wayland 会话经 XWayland）可用。Linux 上托盘经
+    /// StatusNotifierItem 显示，**没有托盘宿主时进程照常运行、通知照常发出**，宿主之后
+    /// 出现图标随即登记（可用性变化见
+    /// [`Tray::on_availability_changed`](crate::platform::Tray::on_availability_changed)）。
+    /// macOS 侧尚未实现（核心层 API 已就位，缺的是平台落地），在那里调用会打印一行错误并
+    /// 返回 `false`，不会建出任何窗口。
     ///
     /// # 误用的处理
     ///
@@ -2297,7 +2310,7 @@ impl App {
     ///   用户只剩任务管理器的「详细信息」页强杀一条路。
     ///
     /// 所以这条检查不能只在 debug 生效：release 才是用户真正跑到的那一份。
-    pub fn run_resident(mut self) {
+    pub fn run_resident(mut self) -> bool {
         // debug 下仍然 panic：开发期要的是一个能指回调用点的堆栈，而不是一行日志。
         debug_assert!(
             self.cfg.tray.is_some() || !self.cfg.hotkeys.is_empty(),
@@ -2310,10 +2323,10 @@ impl App {
                 "[windui] run_resident 需配合 tray 或 hotkey：零窗口进程没有任何入口，\
                  也没有任何出口（进程将无法退出），已拒绝启动"
             );
-            return;
+            return false;
         }
         self.cfg.resident = true;
-        self.launch();
+        self.launch()
     }
 
     /// `run` 与 `run_resident` 的公共尾段：装应用级设施、组装 handler、交给平台。
@@ -2321,7 +2334,7 @@ impl App {
     /// 主窗 handler 在常驻模式下用不上（平台层不建主窗），但仍然照常组装：平台入口的
     /// 签名是两条路共用的，为此把它改成 `Option` 只会把「有没有主窗」这件事复制到
     /// 第二个地方去表达。
-    fn launch(mut self) {
+    fn launch(mut self) -> bool {
         let single = self.single.take();
         let theme_src = match self.theme_src {
             Some(h) => h,
@@ -2397,13 +2410,12 @@ impl App {
                         // 的事，而截图这条路根本没有窗口登记表可查。
                         unreachable!("build_new_window 只会产出 NewWindow::Create")
                     };
-                    platform::run(
+                    return platform::run(
                         merge_screenshot_cfg(*win_cfg, &cfg),
                         win_handler,
                         waker,
                         single,
                     );
-                    return;
                 }
                 None => eprintln!(
                     "[windui] 常驻应用截图需要先指明对象（App::screenshot_window 或 \
@@ -2440,7 +2452,7 @@ impl App {
                 f: Box::new(|_, _| {}),
             })
         };
-        platform::run(cfg, handler, waker, single);
+        platform::run(cfg, handler, waker, single)
     }
 
     #[cfg(test)]

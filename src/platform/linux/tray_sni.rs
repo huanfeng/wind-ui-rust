@@ -15,7 +15,13 @@
 //!   `Signal`）仍只在 UI 线程执行，遵守 AGENTS.md 铁律 6。
 //! - **UI → D-Bus**：改提示 / 换图标 / 菜单变化只更新共享快照，再经 `mpsc` 通知专职线程发
 //!   `NewToolTip` 等信号；线程阻塞在 `recv()` 上。UI 线程从不做 D-Bus 往返。
-//! - 向 Watcher 注册（对别的进程的同步调用）也在那条线程上做，UI 线程启动时只碰总线本身。
+//! - 连总线、挂接口、占名、向 Watcher 登记（对别的进程的同步调用）全在专职线程上做，UI 线程
+//!   启动时只建一份共享状态，不做任何 D-Bus 往返。
+//! - **Watcher 可能晚到或重启**（会话早期启动的应用、shell 重启、扩展被重新启用）：另有一条
+//!   监视线程订阅 `NameOwnerChanged`（`arg0 = org.kde.StatusNotifierWatcher`），Watcher 上线
+//!   （含启动时已在场）就通知专职线程重新登记；可用性翻转经 [`TrayEvent::Availability`] 回到
+//!   UI 线程，触发 [`Tray::on_availability_changed`] 回调。监视线程阻塞在信号迭代器上，同样
+//!   零轮询。
 //!
 //! 菜单标签 / 勾选态 / 禁用态绑的是线程局部的 `Signal`，D-Bus 线程读不了，所以 UI 线程在每轮
 //! 事件循环末尾（[`TrayHost::refresh_menu`]）把它们**快照**进共享状态，快照变了才发
@@ -23,9 +29,10 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::{Connection, ConnectionBuilder};
 use zbus::zvariant::{Array, Dict, ObjectPath, OwnedValue, StructureBuilder, Value};
 
@@ -230,6 +237,8 @@ pub(crate) enum TrayEvent {
     Left,
     /// 菜单项被点（下标对应 `Tray::menu` 的顺序）。
     Menu(usize),
+    /// 托盘可用性翻转（Watcher 上线 / 下线）。
+    Availability(bool),
 }
 
 type Pixmap = Vec<(i32, i32, Vec<u8>)>;
@@ -278,7 +287,7 @@ impl Item {
     }
     #[zbus(property)]
     fn id(&self) -> String {
-        "windui".into()
+        super::notify::app_name()
     }
     #[zbus(property)]
     fn title(&self) -> String {
@@ -452,18 +461,22 @@ enum SniCmd {
     NewToolTip,
     NewIcon,
     LayoutUpdated(u32),
+    /// Watcher 在场（启动时已在，或新上线 / 换了主人）：（重新）登记。由监视线程发出。
+    RegisterWithWatcher,
+    /// 托盘被丢掉：专职线程退出。
+    Stop,
 }
 
-/// 已向总线登记的托盘项。丢掉它 = 通知线程退出、连接关闭、图标从托盘消失。
+/// 与专职线程的通道。丢掉它 = 专职线程退出、连接关闭、图标从托盘消失。
 struct SniLink {
     tx: Sender<SniCmd>,
 }
 
-#[derive(Debug)]
-enum SniError {
-    Bus(zbus::Error),
-    NoWatcher,
-    Thread(std::io::Error),
+impl Drop for SniLink {
+    fn drop(&mut self) {
+        // 监视线程手里还有一份发送端，光靠「发送端全丢」收不了线程，得显式叫停。
+        let _ = self.tx.send(SniCmd::Stop);
+    }
 }
 
 /// 托盘在 UI 线程的总管：持有 `Tray` 声明（回调只能在这里跑）、共享状态与通知发送端。
@@ -472,16 +485,17 @@ pub(super) struct TrayHost {
     shared: Arc<Shared>,
     link: Option<SniLink>,
     notifier: Notifier,
-    /// 登记在总线上的服务名（降级时为 `None`）。仅测试读取。
+    /// 本托盘项的总线服务名（何时真正登记取决于 Watcher 在不在场）。仅测试读取。
     #[cfg_attr(not(test), allow(dead_code))]
-    service: Option<String>,
+    service: String,
 }
 
 static SEQ: AtomicU32 = AtomicU32::new(1);
 
 impl TrayHost {
-    /// 安装托盘。**永不失败**：总线 / Watcher 不可用时记一次警告并降级为「无图标」，
-    /// 通知功能照常。
+    /// 安装托盘。**永不失败，也不做任何 D-Bus 往返**：UI 线程只建共享状态并起线程，
+    /// 连总线、占名、等 Watcher 都在后台——总线 / Watcher 不可用或晚到都不影响启动，
+    /// Watcher 之后上线图标随即出现（见模块文档）。通知功能与此无关，照常。
     pub(super) fn install(mut tray: Tray, bus: &Bus) -> Self {
         let icon = match tray.icon.take() {
             Some((w, h, rgba))
@@ -505,22 +519,11 @@ impl TrayHost {
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let (link, service) = match register(bus, &shared, &service) {
-            Ok(l) => (Some(l), Some(service)),
-            Err(SniError::NoWatcher) => {
-                eprintln!(
-                    "[windui] 会话总线上没有 StatusNotifierWatcher（GNOME 需装 AppIndicator 扩展），\
-                     不显示托盘图标；程序与桌面通知照常运行"
-                );
-                (None, None)
-            }
-            Err(SniError::Bus(e)) => {
-                eprintln!("[windui] 无法接入会话总线，不显示托盘图标：{e}");
-                (None, None)
-            }
-            Err(SniError::Thread(e)) => {
+        let link = match spawn_tray_threads(bus, &shared, &service) {
+            Ok(l) => Some(l),
+            Err(e) => {
                 eprintln!("[windui] 托盘线程创建失败，不显示托盘图标：{e}");
-                (None, None)
+                None
             }
         };
         Self {
@@ -543,6 +546,13 @@ impl TrayHost {
             match ev {
                 TrayEvent::Left => actions.extend(invoke(self.tray.on_left_click.as_mut())),
                 TrayEvent::Menu(i) => actions.extend(invoke(self.tray.item_callback(i))),
+                TrayEvent::Availability(up) => {
+                    if let Some(cb) = self.tray.on_availability.as_mut() {
+                        let mut ctx = crate::platform::tray::TrayCtx::default();
+                        cb(&mut ctx, up);
+                        actions.extend(ctx.take_actions());
+                    }
+                }
             }
         }
         actions
@@ -569,6 +579,14 @@ impl TrayHost {
             TrayOp::SetTooltip(s) => self.set_tooltip(s),
             TrayOp::Notify { title, body } => self.notifier.send(&title, &body),
             TrayOp::SetIcon { w, h, rgba } => {
+                // 与 install / `TrayHandle::set_icon_rgba` 同口径：对不上的像素数据丢弃。
+                if w == 0 || h == 0 || rgba.len() as u64 != w as u64 * h as u64 * 4 {
+                    log::warn!(
+                        "托盘 SetIcon：{w}×{h} 与像素数据 {} 字节对不上，已忽略",
+                        rgba.len()
+                    );
+                    return;
+                }
                 if let Ok(mut st) = self.shared.state.lock() {
                     st.icon = vec![(w as i32, h as i32, rgba_to_sni_argb(&rgba))];
                 }
@@ -594,85 +612,126 @@ impl TrayHost {
         }
     }
 
-    /// 托盘图标是否已登记到总线（降级时 false）。
+    /// 本托盘项的总线服务名。
     #[cfg(test)]
-    pub(super) fn registered_service(&self) -> Option<&str> {
-        self.service.as_deref()
+    pub(super) fn service_name(&self) -> &str {
+        &self.service
     }
 }
 
-/// 连总线、确认有 Watcher、挂接口、起专职线程并向 Watcher 登记。
-fn register(bus: &Bus, shared: &Arc<Shared>, service: &str) -> Result<SniLink, SniError> {
-    let conn = bus.connect().map_err(SniError::Bus)?;
-    if !watcher_present(&conn) {
-        return Err(SniError::NoWatcher);
+/// 起专职线程（连总线、挂接口、占名、发信号、向 Watcher 登记）与监视线程（盯 Watcher 上下线）。
+fn spawn_tray_threads(bus: &Bus, shared: &Arc<Shared>, service: &str) -> std::io::Result<SniLink> {
+    let (tx, rx) = channel::<SniCmd>();
+    {
+        let (bus, shared, service) = (bus.clone(), shared.clone(), service.to_string());
+        std::thread::Builder::new()
+            .name("windui-tray".into())
+            .spawn(move || tray_thread(bus, shared, service, rx))?;
     }
     {
+        let (bus, shared, tx) = (bus.clone(), shared.clone(), tx.clone());
+        std::thread::Builder::new()
+            .name("windui-tray-watch".into())
+            .spawn(move || watch_watcher(bus, shared, tx))?;
+    }
+    Ok(SniLink { tx })
+}
+
+/// 专职线程主体：对别的进程的同步调用都放在这条线程上，UI 线程不为它们停顿。
+fn tray_thread(bus: Bus, shared: Arc<Shared>, service: String, rx: Receiver<SniCmd>) {
+    let conn = match bus.connect() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[windui] 无法接入会话总线，不显示托盘图标：{e}");
+            return;
+        }
+    };
+    let setup = (|| -> zbus::Result<()> {
         let os = conn.object_server();
         os.at(
             ITEM_PATH,
             Item {
                 shared: shared.clone(),
             },
-        )
-        .map_err(SniError::Bus)?;
-        os.at(
-            MENU_PATH,
-            Menu {
-                shared: shared.clone(),
-            },
-        )
-        .map_err(SniError::Bus)?;
+        )?;
+        os.at(MENU_PATH, Menu { shared })?;
+        conn.request_name(service.as_str())
+    })();
+    if let Err(e) = setup {
+        eprintln!("[windui] 托盘接口挂接失败，不显示托盘图标：{e}");
+        return;
     }
-    conn.request_name(service).map_err(SniError::Bus)?;
+    // 阻塞等请求；收到 `Stop`（托盘被丢掉）或发送端全没了就退出。
+    while let Ok(cmd) = rx.recv() {
+        let r = match cmd {
+            SniCmd::Stop => break,
+            SniCmd::RegisterWithWatcher => conn
+                .call_method(
+                    Some(WATCHER_NAME),
+                    WATCHER_PATH,
+                    Some(WATCHER_NAME),
+                    "RegisterStatusNotifierItem",
+                    &(service.as_str(),),
+                )
+                .map(|_| ()),
+            SniCmd::NewToolTip => emit(
+                &conn,
+                ITEM_PATH,
+                "org.kde.StatusNotifierItem",
+                "NewToolTip",
+                &(),
+            ),
+            SniCmd::NewIcon => emit(
+                &conn,
+                ITEM_PATH,
+                "org.kde.StatusNotifierItem",
+                "NewIcon",
+                &(),
+            ),
+            SniCmd::LayoutUpdated(rev) => emit(
+                &conn,
+                MENU_PATH,
+                "com.canonical.dbusmenu",
+                "LayoutUpdated",
+                &(rev, 0i32),
+            ),
+        };
+        if let Err(e) = r {
+            log::warn!("托盘 D-Bus 调用失败：{e}");
+        }
+    }
+}
 
-    let (tx, rx) = channel::<SniCmd>();
-    let service = service.to_string();
-    std::thread::Builder::new()
-        .name("windui-tray".into())
-        .spawn(move || {
-            // 对别的进程的同步调用，放在这条线程上做：UI 线程不为它们停顿。
-            if let Err(e) = conn.call_method(
-                Some(WATCHER_NAME),
-                WATCHER_PATH,
-                Some(WATCHER_NAME),
-                "RegisterStatusNotifierItem",
-                &(service.as_str(),),
-            ) {
-                eprintln!("[windui] 向 StatusNotifierWatcher 登记托盘失败：{e}");
-            }
-            // 阻塞等 UI 线程的请求；发送端（`SniLink`）被丢掉时 `recv` 返回 Err，线程退出。
-            while let Ok(cmd) = rx.recv() {
-                let r = match cmd {
-                    SniCmd::NewToolTip => emit(
-                        &conn,
-                        ITEM_PATH,
-                        "org.kde.StatusNotifierItem",
-                        "NewToolTip",
-                        &(),
-                    ),
-                    SniCmd::NewIcon => emit(
-                        &conn,
-                        ITEM_PATH,
-                        "org.kde.StatusNotifierItem",
-                        "NewIcon",
-                        &(),
-                    ),
-                    SniCmd::LayoutUpdated(rev) => emit(
-                        &conn,
-                        MENU_PATH,
-                        "com.canonical.dbusmenu",
-                        "LayoutUpdated",
-                        &(rev, 0i32),
-                    ),
-                };
-                if let Err(e) = r {
-                    log::warn!("托盘信号发送失败：{e}");
-                }
-            }
-        })
-        .map_err(SniError::Thread)?;
-    Ok(SniLink { tx })
+/// 监视线程主体：订阅 `NameOwnerChanged(arg0 = Watcher)`，Watcher 在场（含启动时已在）就让
+/// 专职线程（重新）登记；在场状态翻转时经 [`TrayEvent::Availability`] 通知 UI 线程。
+/// 用独立连接，免得它阻塞在迭代器上时拖住专职线程的连接生命周期（专职线程退出即释放服务名）。
+fn watch_watcher(bus: Bus, shared: Arc<Shared>, tx: Sender<SniCmd>) {
+    let Ok(conn) = bus.connect() else {
+        return; // 总线连不上：专职线程会报，这里不重复
+    };
+    let Ok(proxy) = DBusProxy::new(&conn) else {
+        return;
+    };
+    // 先订阅、后查当前状态：反过来会漏掉两步之间发生的上线。
+    let Ok(signals) = proxy.receive_name_owner_changed_with_args(&[(0, WATCHER_NAME)]) else {
+        return;
+    };
+    let mut up = watcher_present(&conn);
+    if up && tx.send(SniCmd::RegisterWithWatcher).is_err() {
+        return;
+    }
+    for sig in signals {
+        let Ok(args) = sig.args() else { continue };
+        let now_up = args.new_owner().is_some();
+        // 新主人出现（含主人直接易手）都要重新登记：新 Watcher 不记得旧的登记。
+        if now_up && tx.send(SniCmd::RegisterWithWatcher).is_err() {
+            return;
+        }
+        if now_up != up {
+            up = now_up;
+            shared.push(TrayEvent::Availability(up));
+        }
+    }
 }
 
 fn emit<B>(conn: &Connection, path: &str, iface: &str, name: &str, body: &B) -> zbus::Result<()>
@@ -791,6 +850,7 @@ mod tests {
             let addr = line.trim().to_string();
             if addr.is_empty() {
                 let _ = child.kill();
+                let _ = child.wait();
                 return None;
             }
             Some(Self { child, addr })
@@ -924,7 +984,6 @@ mod tests {
         let bus = Bus::Address("unix:path=/nonexistent/windui-no-bus".into());
         let t0 = Instant::now();
         let mut host = TrayHost::install(Tray::new().tooltip("x"), &bus);
-        assert!(host.registered_service().is_none());
         // 降级后各操作都是安全的空转 / 丢弃。
         host.apply_op(TrayOp::SetTooltip("y".into()));
         host.apply_op(TrayOp::Notify {
@@ -941,7 +1000,11 @@ mod tests {
         let pb = private_bus_or_skip!();
         let (_srv, got) = start_notification_server(&pb.bus());
         let mut host = TrayHost::install(Tray::new(), &pb.bus());
-        assert!(host.registered_service().is_none(), "没有 Watcher 不登记");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            host.poll_actions().is_empty(),
+            "初始没有 Watcher 不算「变化」"
+        );
         host.notify("标题", "正文 <b>&");
         assert!(wait_for(|| !got.lock().unwrap().is_empty()));
         assert_eq!(
@@ -978,10 +1041,7 @@ mod tests {
                 TrayMenuItem::check("隐身", on, |ctx| ctx.quit()),
             ]);
         let mut host = TrayHost::install(tray, &pb.bus());
-        let svc = host
-            .registered_service()
-            .expect("有 Watcher 应登记")
-            .to_string();
+        let svc = host.service_name().to_string();
         assert!(wait_for(|| registered.lock().unwrap().contains(&svc)));
 
         // 模拟宿主（托盘面板）作为另一个客户端访问。
@@ -1051,5 +1111,79 @@ mod tests {
         assert_eq!(rev_of(&host), before + 1);
         host.refresh_menu();
         assert_eq!(rev_of(&host), before + 1, "没变化不再递增");
+    }
+
+    /// Watcher 晚于应用启动、中途下线再重启：每次上线都（重新）登记，可用性翻转触发回调。
+    #[test]
+    fn tray_registers_when_watcher_starts_late_and_after_restart() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let pb = private_bus_or_skip!();
+        let seen: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(Vec::new()));
+        let s2 = seen.clone();
+        let tray = Tray::new().on_availability_changed(move |_ctx, up| s2.borrow_mut().push(up));
+        let mut host = TrayHost::install(tray, &pb.bus());
+        let svc = host.service_name().to_string();
+
+        // 先装托盘、后起 Watcher。
+        std::thread::sleep(Duration::from_millis(200)); // 让监视线程先订阅上
+        let (w1, reg1) = start_watcher(&pb.bus());
+        assert!(
+            wait_for(|| reg1.lock().unwrap().contains(&svc)),
+            "晚启动的 Watcher 应收到登记"
+        );
+        assert!(wait_for(|| {
+            host.poll_actions();
+            seen.borrow().last() == Some(&true)
+        }));
+
+        // Watcher 掉线 → 可用性 false；重启 → 再次登记且回到 true。
+        drop(w1);
+        assert!(wait_for(|| {
+            host.poll_actions();
+            seen.borrow().last() == Some(&false)
+        }));
+        let (_w2, reg2) = start_watcher(&pb.bus());
+        assert!(
+            wait_for(|| reg2.lock().unwrap().contains(&svc)),
+            "重启后的 Watcher 应再次收到登记"
+        );
+        assert!(wait_for(|| {
+            host.poll_actions();
+            seen.borrow().last() == Some(&true)
+        }));
+        assert_eq!(*seen.borrow(), vec![true, false, true]);
+    }
+
+    /// 启动时 Watcher 已在场：登记照常，初始状态不当作「变化」。
+    #[test]
+    fn availability_callback_ignores_initial_state() {
+        let pb = private_bus_or_skip!();
+        let (_w, reg) = start_watcher(&pb.bus());
+        let mut host = TrayHost::install(
+            Tray::new().on_availability_changed(|_, _| panic!("初始状态不该触发")),
+            &pb.bus(),
+        );
+        let svc = host.service_name().to_string();
+        assert!(wait_for(|| reg.lock().unwrap().contains(&svc)));
+        host.poll_actions();
+    }
+
+    #[test]
+    fn set_icon_with_mismatched_pixels_is_ignored() {
+        let pb = private_bus_or_skip!();
+        let mut host = TrayHost::install(Tray::new().icon_rgba(1, 1, &[1, 2, 3, 4]), &pb.bus());
+        host.apply_op(TrayOp::SetIcon {
+            w: 2,
+            h: 2,
+            rgba: vec![0; 3],
+        });
+        let icon = host.shared.state.lock().unwrap().icon.clone();
+        assert_eq!(
+            icon,
+            vec![(1, 1, vec![4, 1, 2, 3])],
+            "非法像素数据不得覆盖原图标"
+        );
     }
 }

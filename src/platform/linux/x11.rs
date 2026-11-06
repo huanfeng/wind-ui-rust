@@ -205,13 +205,19 @@ struct X11 {
     alt_down: bool,
 }
 
-/// 连接 X 服务器并运行，阻塞至最后一个窗口关闭。
+/// 能否连上 X 服务器（连上即断开）。`display` 为 `None` 时按 `DISPLAY` 环境变量。
+pub(super) fn can_connect(display: Option<&str>) -> bool {
+    RustConnection::connect(display).is_ok()
+}
+
+/// 连接 X 服务器并运行，阻塞至最后一个窗口关闭。返回 `false` = 没能启动（连不上 / 初始化
+/// 失败）或运行中 X 连接丢失；窗口全关 / 托盘退出等正常结束为 `true`。
 pub(super) fn run_windowed(
     mut cfg: WindowConfig,
     handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-) {
+) -> bool {
     let (conn, screen_num) = match RustConnection::connect(None) {
         Ok(c) => c,
         Err(e) => {
@@ -219,12 +225,12 @@ pub(super) fn run_windowed(
                 "[windui] 无法连接 X 服务器（DISPLAY={:?}）：{e}。Wayland 会话需要启用 XWayland。",
                 std::env::var("DISPLAY").ok()
             );
-            return;
+            return false;
         }
     };
     let Some(mut x) = X11::new(conn, screen_num) else {
         eprintln!("[windui] X 服务器初始化失败（不支持的像素格式或原子请求失败）");
-        return;
+        return false;
     };
     if let Some(t) = cfg.tray.take() {
         x.tray = Some(TrayHost::install(t, &Bus::Session));
@@ -281,7 +287,7 @@ pub(super) fn run_windowed(
     if cfg.resident {
         x.run_callback_window_requests(0);
     }
-    x.run_loop(main);
+    x.run_loop(main)
 }
 
 impl X11 {
@@ -813,7 +819,8 @@ impl X11 {
 
     // ── 事件循环 ──────────────────────────────────────────────────────────
 
-    fn run_loop(&mut self, main: Window) {
+    /// 返回 `false` = X 连接断开（异常结束）；用户 / 程序退出为 `true`。
+    fn run_loop(&mut self, main: Window) -> bool {
         let xfd = self.conn.stream().as_raw_fd();
         let pipe = super::sys::pipe();
         let mut fds = vec![xfd];
@@ -828,7 +835,7 @@ impl X11 {
                     Ok(None) => break,
                     Err(e) => {
                         log::error!("X 连接断开：{e}");
-                        return;
+                        return false;
                     }
                 }
             }
@@ -865,14 +872,14 @@ impl X11 {
                 self.process_tray();
             }
             if self.quit {
-                return;
+                return true;
             }
             // 3. 定时器与动画。
             let timeout = self.tick_timers();
             // 4. 出帧。
             self.paint_dirty();
             if self.windows.is_empty() && !self.resident {
-                return;
+                return true;
             }
             // 本轮里任何回调排的托盘意图（改提示 / 换图标 / 通知）与菜单状态变化在此落地。
             self.apply_tray_ops();
@@ -1471,6 +1478,14 @@ impl X11 {
     /// 执行一条托盘意图；返回 false 表示应丢弃其后的意图（退出）。
     fn run_tray_action(&mut self, action: TrayAction) -> bool {
         let main = self.main;
+        if main == 0
+            && matches!(
+                action,
+                TrayAction::Show | TrayAction::Hide | TrayAction::Toggle
+            )
+        {
+            log::debug!("托盘意图 {action:?} 被忽略：常驻模式没有主窗（唤起界面请用 open_window）");
+        }
         match action {
             // 常驻模式没有主窗，显隐意图无处可施（唤起界面靠 `open_window`）。
             TrayAction::Show => self.apply_window_op(main, WindowOp::Show),

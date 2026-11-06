@@ -48,13 +48,14 @@ mod x11;
 use super::{AppHandler, WindowConfig};
 
 /// 运行应用：截屏模式离屏渲染存盘；否则按 [`choose_backend`] 连接合成器 / X 服务器，
-/// 创建窗口进入事件循环。
+/// 创建窗口进入事件循环。返回 `false` = 没能（继续）运行：连不上显示 / 显示连接丢失；
+/// 其余（含二次实例转发后退出、截图、用户退出）为 `true`。
 pub(crate) fn run(
     cfg: WindowConfig,
     mut handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-) {
+) -> bool {
     super::apply_motion_level(&cfg, system_reduces_motion);
     crate::ui::caret::set_blink_period_ms(if super::motion_forced_off(&cfg) {
         None
@@ -64,11 +65,11 @@ pub(crate) fn run(
 
     if let Some(path) = cfg.screenshot.clone() {
         super::run_offscreen(&cfg, &mut handler, &path);
-        return;
+        return true;
     }
     if let Some(si) = &single {
         if !crate::single_instance::arbitrate(&si.app_id) {
-            return;
+            return true;
         }
     }
     let forced = std::env::var("WINDUI_BACKEND").ok();
@@ -92,7 +93,10 @@ pub(crate) fn run(
     } else if choice == Choice::Wayland {
         #[cfg(feature = "wayland")]
         match wayland::connect() {
-            Ok(session) => return wayland::run_windowed(session, cfg, handler, waker, single),
+            Ok(session) => {
+                wayland::run_windowed(session, cfg, handler, waker, single);
+                return true;
+            }
             // 显式指定也回退：程序起不来比「还是 XWayland」糟得多。eprintln 而非只记日志，
             // 点名要 Wayland 的人需要看得见这次没如愿。
             Err(e) => {
@@ -100,13 +104,18 @@ pub(crate) fn run(
             }
         }
     }
-    x11::run_windowed(cfg, handler, waker, single);
+    x11::run_windowed(cfg, handler, waker, single)
 }
 
 /// 系统托盘此刻是否可用：会话总线上有 `org.kde.StatusNotifierWatcher`。
 /// 连不上总线、没有 Watcher（未装扩展的 GNOME、无头机器）都返回 `false`，不 panic。
 pub(crate) fn tray_supported() -> bool {
     tray_sni::supported_on(&tray_sni::Bus::Session)
+}
+
+/// 此刻能否连上 X 显示（常驻模式只走 X11，Wayland 会话经 XWayland）。连上即断开。
+pub(crate) fn resident_available() -> bool {
+    x11::can_connect(None)
 }
 
 /// 运行期选定的显示后端。
@@ -266,6 +275,35 @@ pub(crate) fn single_window_open(_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 在「没有 DISPLAY」的环境里跑 `f`，跑完还原。环境变量是进程级的，测试并行，故串行加锁。
+    fn without_display<R>(f: impl FnOnce() -> R) -> R {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("DISPLAY");
+        std::env::remove_var("DISPLAY");
+        let r = f();
+        if let Some(v) = saved {
+            std::env::set_var("DISPLAY", v);
+        }
+        r
+    }
+
+    #[test]
+    fn resident_unavailable_without_display() {
+        assert!(!without_display(resident_available));
+    }
+
+    #[test]
+    fn run_resident_returns_false_without_display() {
+        use crate::platform::Tray;
+        let started = without_display(|| {
+            crate::app::App::resident("t")
+                .tray(Tray::new())
+                .run_resident()
+        });
+        assert!(!started, "连不上 X 显示：必须告诉调用方没起来");
+    }
 
     #[test]
     fn unset_defaults_to_x11_even_with_wayland_compiled() {

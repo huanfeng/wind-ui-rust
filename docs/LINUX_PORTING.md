@@ -204,10 +204,14 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 - **降级**：没有会话总线或没有 `StatusNotifierWatcher`（未装 AppIndicator 扩展的 GNOME、
   无头机器）时不显示托盘、`eprintln` 一次、**不报错不退出**；通知独立走自己的连接，失败
   也只警告一次并丢弃这条。`windui::platform::tray_supported()` 供应用探测（视 Watcher 是否存在）。
-- **已知限制**：Watcher 晚于应用启动（开机自启早于面板）或中途重启时不会自动重新登记；
-  `on_double_click` 在 SNI 里没有对应事件（不触发）；仅 X11 后端接入——`WINDUI_BACKEND=wayland`
-  下窗口模式的托盘被忽略，常驻模式固定走 X11（经 XWayland）；无 `DISPLAY` 时常驻模式起不来
-  （应用应先自行判断并走无头路径）。
+- **Watcher 晚到 / 重启**：不论启动时 Watcher 在不在场，都挂接口、占名，另有监视线程订阅
+  `NameOwnerChanged(arg0 = org.kde.StatusNotifierWatcher)`；Watcher 在场（含启动时已在、
+  晚启动、重启、直接易手）就重新 `RegisterStatusNotifierItem`。可用性翻转经
+  `Tray::on_availability_changed` 回到 UI 线程。启动路径不做同步 D-Bus 往返。
+- **已知限制**：`on_double_click` 在 SNI 里没有对应事件（不触发）；仅 X11 后端接入——
+  `WINDUI_BACKEND=wayland` 下窗口模式的托盘被忽略，常驻模式固定走 X11（经 XWayland）；无
+  `DISPLAY` 时常驻模式起不来：`run_resident()` 返回 `false`，启动前可用
+  `platform::resident_available()` 探测。
 - **测试**：纯函数（像素格式、布局）与降级路径不需要总线；协议往返测试起私有
   `dbus-daemon --session`（本机没有该可执行文件时这几条测试打印「跳过」并直接返回）。
 

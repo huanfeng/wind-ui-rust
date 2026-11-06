@@ -119,7 +119,7 @@ fn call_notify(conn: &Connection, job: &Job) -> zbus::Result<()> {
 }
 
 /// 应用名：取可执行文件名（通知中心按它分组），取不到退回 `windui`。
-fn app_name() -> String {
+pub(super) fn app_name() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))

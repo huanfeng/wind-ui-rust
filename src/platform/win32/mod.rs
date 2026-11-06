@@ -790,7 +790,7 @@ pub(crate) fn run(
     mut handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-) {
+) -> bool {
     // 系统「显示动画」关掉即视为要求减弱动效（UWP 的 `UISettings.AnimationsEnabled` 读的也是它）。
     super::apply_motion_level(&cfg, || unsafe { !os_animations_enabled() });
     // 光标闪烁走**插入符**设置，不跟客户区动画走（见 `os_caret_blink_half_ms`）。
@@ -803,16 +803,16 @@ pub(crate) fn run(
     if let Some(path) = cfg.screenshot.clone() {
         // 离屏渲染走平台无关的共享实现（与 macOS 后端共用）。
         super::run_offscreen(&cfg, &mut handler, &path);
-        return;
+        return true;
     }
     // 单实例仲裁（应用若已在 main 里 claim_instance 过，这里直接放行）：二次实例把 argv
     // 转发给首实例后直接返回、不建窗口。
     if let Some(si) = &single {
         if !crate::single_instance::arbitrate(&si.app_id) {
-            return;
+            return true;
         }
     }
-    unsafe { run_windowed(cfg, handler, waker, single) };
+    unsafe { run_windowed(cfg, handler, waker, single) }
 }
 
 // ── 渲染后端接缝 ────────────────────────────────────────────────────────────
@@ -1691,7 +1691,7 @@ unsafe fn run_windowed(
     handler: Box<dyn AppHandler>,
     waker: Option<std::sync::Arc<crate::sync::WakerShared>>,
     single: Option<crate::single_instance::SingleInstance>,
-) {
+) -> bool {
     let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     let hmodule = GetModuleHandleW(None).expect("GetModuleHandleW 失败");
@@ -1720,7 +1720,7 @@ unsafe fn run_windowed(
         // 常驻模式下宿主窗口是唯一的落点：建不起来就既没有托盘也没有热键，进程会成为
         // 一个谁也看不见、谁也关不掉的僵尸。正常模式还有主窗兜底，故只在这里退出。
         eprintln!("[windui] 常驻模式启动失败：App 级消息宿主未能创建，进程退出");
-        return;
+        return false;
     }
 
     // 全局热键（若配置）：注册到 App 级宿主，状态存入 AppHost（drop 时自动注销）。
@@ -1793,6 +1793,7 @@ unsafe fn run_windowed(
     // 实测延迟可达 3–4 秒；此处提前释放可规避该问题。
     #[cfg(feature = "d2d")]
     d2d::release_shared_device();
+    true
 }
 
 /// 帧截止的上限（ms）：控件自报的"下次才需要"再长也不超过这个。

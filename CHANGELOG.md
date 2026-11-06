@@ -11,7 +11,23 @@
   StatusNotifierItem + dbusmenu 与 `org.freedesktop.Notifications`（X11 后端）；`App::run_resident`
   在 Linux 上可用（固定走 X11）。没有 `StatusNotifierWatcher` 时优雅降级（无图标、通知照常）。
 - **`windui::platform::tray_supported()`**：托盘此刻是否可用（Windows / macOS 恒 `true`，Linux 视
-  Watcher 是否存在），供应用决定退化策略。
+  Watcher 是否存在），供应用决定退化策略。是**此刻快照**，之后的变化用下面的回调。
+- **`Tray::on_availability_changed(|ctx, available| ..)`**：托盘可用性变化回调（Linux：StatusNotifierWatcher
+  上线 / 下线，只报变化、初始状态不触发；Windows / macOS 恒可用、永不触发）。
+- **`windui::platform::resident_available()`**：常驻模式此刻能否启动（Linux 探测 X 显示；Windows `true`；
+  macOS 尚未实现故 `false`），供下游启动前探测。
+
+### 变更
+
+- **`App::run_resident` 现在返回 `bool`**：`true` = 正常运行直至退出；`false` = 没能启动或显示连接丢失
+  （缺入口被拒绝、macOS 未实现、Linux 无可连的 X 显示、Windows 消息宿主建不起来、运行中 X 连接断开）。
+  不加 `#[must_use]`，既有的忽略返回值写法照常编译。
+
+### 修复
+
+- Linux 托盘在 StatusNotifierWatcher 晚于应用启动或中途重启后不再永不出现：监视 `NameOwnerChanged` 并重新登记；
+  托盘安装不再在 UI 线程做同步 D-Bus 往返。
+- Linux `TrayHandle::set_icon_rgba` 路径的 `SetIcon` 在平台层同样校验像素数；SNI `Id` 改用应用名。
 
 ## [0.31.0] - 2026-10-27
 

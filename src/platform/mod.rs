@@ -137,7 +137,8 @@ compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台"
 pub mod tray;
 pub use tray::{Tray, TrayAction, TrayCtx, TrayHandle, TrayMenuItem, TrayOp};
 
-/// 系统托盘此刻是否可用，供应用决定退化策略（例如托盘不可用时启动即开窗）。
+/// 系统托盘**此刻**是否可用（快照，不跟随变化），供应用决定退化策略（例如托盘不可用时
+/// 启动即开窗）。之后的上下线用 [`Tray::on_availability_changed`] 订阅。
 ///
 /// Windows / macOS 恒为 `true`。Linux 上取决于会话总线上有没有
 /// `org.kde.StatusNotifierWatcher`（KDE 有；GNOME 需 AppIndicator 扩展；无头机器没有）。
@@ -150,6 +151,23 @@ pub fn tray_supported() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         true
+    }
+}
+
+/// 零窗口常驻模式（[`App::run_resident`](crate::app::App::run_resident)）在此刻能否启动，
+/// 供下游启动前探测、决定退化策略（而不是启动后才发现 `run_resident` 返回 `false`）。
+///
+/// Linux 上尝试连接一次 X 显示（XWayland 也算）随即断开；Windows 恒为 `true`；macOS 的
+/// 常驻模式尚未实现，恒为 `false`。
+/// 会同步连一次 X 服务器，请在启动时调用而不是在每帧里调。
+pub fn resident_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::resident_available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cfg!(windows)
     }
 }
 

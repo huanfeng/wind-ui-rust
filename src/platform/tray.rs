@@ -293,6 +293,7 @@ impl TrayCtx {
 }
 
 pub(crate) type TrayFn = Box<dyn FnMut(&mut TrayCtx)>;
+pub(crate) type TrayAvailabilityFn = Box<dyn FnMut(&mut TrayCtx, bool)>;
 
 /// 借一个受控的 `TrayCtx` 跑回调，把它请求的意图交回来。
 ///
@@ -397,6 +398,9 @@ pub struct Tray {
     pub(crate) on_left_click: Option<TrayFn>,
     pub(crate) on_double_click: Option<TrayFn>,
     pub(crate) items: Vec<TrayMenuItem>,
+    /// 仅 Linux 读取：Windows / macOS 的托盘可用性恒为 true，不会触发。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) on_availability: Option<TrayAvailabilityFn>,
 }
 
 impl Tray {
@@ -426,6 +430,20 @@ impl Tray {
     /// 右键菜单项（普通/勾选/分隔线）。
     pub fn menu(mut self, items: Vec<TrayMenuItem>) -> Self {
         self.items = items;
+        self
+    }
+    /// 托盘可用性变化回调：`available` 为 `true` 表示托盘宿主（Linux 的
+    /// `org.kde.StatusNotifierWatcher`）上线、图标已（重新）登记，`false` 表示宿主下线、
+    /// 图标不可见。在 UI 线程执行，`ctx` 的意图照常落地（例如宿主下线时 `open_window`
+    /// 保证用户仍有入口，上线时 `close_window` 收起）。
+    ///
+    /// 语义（**只报变化**）：
+    /// - **Linux**：托盘装好后，每次可用性相对上一次状态翻转触发一次；初始状态不触发——
+    ///   启动时用 [`tray_supported`](crate::platform::tray_supported) 取此刻快照。Watcher
+    ///   在两次之间直接换主人（重启）算仍可用，不触发，但图标会自动重新登记。
+    /// - **Windows / macOS**：托盘恒可用，**永不触发**。
+    pub fn on_availability_changed(mut self, f: impl FnMut(&mut TrayCtx, bool) + 'static) -> Self {
+        self.on_availability = Some(Box::new(f));
         self
     }
     /// 取指定下标菜单项的回调（平台层在模态菜单关闭后分发用）。
