@@ -7,6 +7,9 @@
 //!   那一套留着一个隐藏的主窗（后备缓冲按物理像素一直挂着），这里窗口是真的销毁了，
 //!   渲染资源随 `WindowState` 的 drop 归还，内存回到"只有托盘"的水平。
 //!
+//! - 外部关闭：设环境变量 `RESIDENT_QUIT_AFTER=<秒>`，后台线程到点经 `App::channel` 回 UI 线程，
+//!   回调里 `TrayHandle::quit()`，`run_resident()` 随之正常返回（模拟 IPC 关闭命令 / SIGTERM 转发）。
+//!
 //! 与 `examples/tray.rs` 对比着看：那个是「有主窗 + 关闭转隐藏」的常驻写法。
 
 use windui::prelude::*;
@@ -57,11 +60,27 @@ fn main() {
             TrayMenuItem::item("退出", |ctx| ctx.quit()),
         ]);
 
-    App::resident("windui — 常驻")
+    let mut app = App::resident("windui — 常驻")
         .icon(brand_icon())
         .tray(tray)
         .hotkey(Hotkey::new(Key::Char('W')).ctrl().alt(), |ctx| {
             ctx.open_window(main_window())
-        })
-        .run_resident();
+        });
+
+    // 外部退出请求：`TrayHandle` 是 `!Send`，后台线程不能直接持有，
+    // 经 channel 把消息送回 UI 线程，在其回调里调 `quit()`。
+    let handle = app.tray_handle();
+    let tx = app.channel::<()>(move |_ctx, ()| handle.quit());
+    if let Some(secs) = std::env::var("RESIDENT_QUIT_AFTER")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            let _ = tx.send(());
+        });
+    }
+
+    let ok = app.run_resident();
+    println!("run_resident 返回 {ok}（Drop 清理已执行、托盘图标已移除）");
 }

@@ -2958,16 +2958,26 @@ unsafe fn materialize_window(item: NewWindow) {
 /// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
 /// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
 unsafe fn apply_tray_ops() {
-    let ops = crate::platform::tray::take_tray_ops();
-    if ops.is_empty() {
+    // 先在 `Quit` 处切开：退出不依赖托盘（没装托盘也要生效），其后的意图丢弃。
+    let (ops, quit) = crate::platform::tray::split_at_quit(crate::platform::tray::take_tray_ops());
+    if ops.is_empty() && !quit {
         return;
     }
     let target = app_host()
         .and_then(|h| h.tray.as_ref())
         .map(|ts| ts.notify_target());
-    let Some((h, uid)) = target else {
-        return;
-    };
+    if let Some((h, uid)) = target {
+        apply_tray_ops_to(h, uid, ops);
+    }
+    // 在前面所有 OS 调用与借用之后才退出：`quit_app` 同步销毁窗口、重入 `wnd_proc`。
+    // 与 `TrayAction::Quit` 共用 `quit_app`，两条退出路径同义。
+    if quit {
+        quit_app();
+    }
+}
+
+/// `apply_tray_ops` 的主体：把（已在 `Quit` 处截断的）意图投给托盘 `(h, uid)`。
+unsafe fn apply_tray_ops_to(h: HWND, uid: u32, ops: Vec<crate::platform::tray::TrayOp>) {
     for op in ops {
         match op {
             crate::platform::tray::TrayOp::SetTooltip(s) => {
@@ -3004,6 +3014,8 @@ unsafe fn apply_tray_ops() {
                     }
                 }
             }
+            // 已由 `apply_tray_ops` 切走，不会到这里。
+            crate::platform::tray::TrayOp::Quit => {}
         }
     }
 }

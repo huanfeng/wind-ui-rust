@@ -625,6 +625,8 @@ impl TrayHost {
                 }
                 self.signal(SniCmd::NewIcon);
             }
+            // 退出由 x11 事件循环按 `split_at_quit` 处理，不会交到托盘宿主。
+            TrayOp::Quit => {}
         }
     }
 

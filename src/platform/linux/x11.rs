@@ -886,6 +886,10 @@ impl X11 {
             if let Some(t) = &mut self.tray {
                 t.refresh_menu();
             }
+            // `TrayHandle::quit` 可能在上面的定时器 / 出帧回调里排队并在此落地。
+            if self.quit {
+                return true;
+            }
             let _ = self.conn.flush();
             // 出帧期间宿主可能已把新事件读进队列：有就不睡。
             if let Ok(Some(ev)) = self.conn.poll_for_event() {
@@ -1450,12 +1454,29 @@ impl X11 {
 
     /// 把运行期托盘意图（`TrayHandle`）交给托盘；没装托盘就丢弃（与 Windows 一致）。
     fn apply_tray_ops(&mut self) {
-        let ops = crate::platform::tray::take_tray_ops();
+        // 在 `Quit` 处切开：退出不依赖托盘，其后的意图丢弃。
+        let (ops, quit) =
+            crate::platform::tray::split_at_quit(crate::platform::tray::take_tray_ops());
         if let Some(t) = &mut self.tray {
             for op in ops {
                 t.apply_op(op);
             }
         }
+        if quit {
+            self.quit_all();
+        }
+    }
+
+    /// 退出应用：截断旁路队列、销毁全部窗口、置退出标志。托盘「退出」与
+    /// `TrayHandle::quit` 共用，两条退出路径同义。托盘图标随 `self.tray` 的 Drop 移除。
+    fn quit_all(&mut self) {
+        let _ = crate::event::take_callback_windows();
+        let _ = crate::event::take_callback_closes();
+        let ids: Vec<Window> = self.windows.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.close_window(id);
+        }
+        self.quit = true;
     }
 
     /// 跑托盘 / 菜单事件的回调并执行它们排的意图。
@@ -1531,13 +1552,7 @@ impl X11 {
             // 刻意绕过 `hide_on_close` 与各窗口的关闭确认：托盘「退出」是常驻应用唯一的出口。
             // 连旁路队列一起截断，免得退出途中又开出窗口。
             TrayAction::Quit => {
-                let _ = crate::event::take_callback_windows();
-                let _ = crate::event::take_callback_closes();
-                let ids: Vec<Window> = self.windows.iter().map(|w| w.id).collect();
-                for id in ids {
-                    self.close_window(id);
-                }
-                self.quit = true;
+                self.quit_all();
                 return false;
             }
         }

@@ -63,13 +63,25 @@ thread_local! {
 /// 没装托盘时意图被丢弃而不是攒着：一个没有托盘的应用改托盘提示是调用方的错，
 /// 攒起来只会让它在某天真装了托盘时突然生效，那更难查。
 pub(crate) fn apply_tray_ops() {
-    let ops = crate::platform::tray::take_tray_ops();
-    if ops.is_empty() {
+    // 先在 `Quit` 处切开：退出不依赖托盘，其后的意图丢弃。
+    let (ops, quit) = crate::platform::tray::split_at_quit(crate::platform::tray::take_tray_ops());
+    if ops.is_empty() && !quit {
         return;
     }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    apply_ops_to_item(mtm, ops);
+    if quit {
+        // 与 `TrayAction::Quit` 同一路径：截断旁路队列后 `terminate`（不返回）。
+        // 须在释放 `INSTALLED` 借用之后（上面的函数已返回）。
+        let _ = crate::event::take_callback_windows();
+        NSApplication::sharedApplication(mtm).terminate(None);
+    }
+}
+
+/// `apply_tray_ops` 的主体：把（已在 `Quit` 处截断的）意图投给状态栏图标。
+fn apply_ops_to_item(mtm: MainThreadMarker, ops: Vec<crate::platform::tray::TrayOp>) {
     INSTALLED.with(|cell| {
         let borrowed = cell.borrow();
         let Some(item) = borrowed.as_ref() else {
@@ -98,6 +110,8 @@ pub(crate) fn apply_tray_ops() {
                         button.setImage(Some(&img));
                     }
                 }
+                // 已由 `apply_tray_ops` 切走，不会到这里。
+                crate::platform::tray::TrayOp::Quit => {}
             }
         }
     });

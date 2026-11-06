@@ -14,6 +14,9 @@
   Watcher 是否存在），供应用决定退化策略。是**此刻快照**，之后的变化用下面的回调。
 - **`Tray::on_availability_changed(|ctx, available| ..)`**：托盘可用性变化回调（Linux：StatusNotifierWatcher
   上线 / 下线，只报变化、初始状态不触发；Windows / macOS 恒可用、永不触发）。
+- **`TrayHandle::quit()`**：从外部请求退出应用（含零窗口常驻模式），`run_resident()` 正常返回 `true`；
+  走与 `TrayCtx::quit()` 相同的退出路径（销毁全部窗口、移除托盘图标、绕过 `hide_on_close`）。`!Send`，
+  后台线程经 `App::channel` 回到 UI 线程调用。新增 `TrayOp::Quit`。
 - **`windui::platform::resident_available()`**：常驻模式此刻能否启动（Linux 探测 X 显示；Windows `true`；
   macOS 尚未实现故 `false`），供下游启动前探测。
 

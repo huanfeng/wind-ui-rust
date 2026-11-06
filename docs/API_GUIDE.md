@@ -900,6 +900,13 @@ App::new("…", w, h).tray(
   图标上——录制中把圆点变红、同步出错打个角标，提示文字要悬停才看得见。排队与丢弃规则同
   上；尺寸为 0 或 `rgba.len() != w*h*4` 时这次改动被丢弃（打一行警告），图标保持原样。Windows 上 shell
   重启（explorer 崩溃 / 重启）后按**新**图标恢复。
+- **从外部请求退出**：`tray.quit()`。零窗口常驻模式下退出原本只能经托盘回调里的
+  `TrayCtx::quit()`；守护进程收到外部关闭请求（IPC 关闭命令、SIGTERM 转发）时用它让
+  `run_resident()` 正常返回 `true`，Drop 清理照常执行、托盘图标被移除（Windows 不留幽灵图标）。
+  走与 `TrayCtx::quit()` 完全相同的退出路径（销毁全部窗口、绕过 `hide_on_close`），排在它之后的托盘意图被丢弃；
+  没装托盘时同样生效。**只能在 UI 线程调用**（`TrayHandle` 是 `!Send`）：后台线程用 `App::channel`
+  把消息送回，在 channel 回调里调 `handle.quit()`——回调跑在 UI 线程。完整写法见 `examples/resident.rs`
+  （`RESIDENT_QUIT_AFTER=5` 演示）。Wayland 后端尚无托盘与常驻模式，该意图在那里被丢弃。
 
 ### 全局热键与启动即隐藏
 

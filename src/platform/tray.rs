@@ -40,6 +40,23 @@ pub enum TrayOp {
     },
     /// 换图标。像素口径同 [`Tray::icon_rgba`]：非预乘 RGBA8，`rgba.len() == w*h*4`。
     SetIcon { w: u32, h: u32, rgba: Vec<u8> },
+    /// 退出应用。平台层执行与 [`TrayCtx::quit`] 完全相同的退出路径（销毁全部窗口、
+    /// 移除托盘图标、绕过 `hide_on_close`）；排在它**之后**的意图一律丢弃。
+    Quit,
+}
+
+/// 把意图队列在第一个 [`TrayOp::Quit`] 处切开：返回 `Quit` 之前的意图与「是否含 Quit」。
+///
+/// 各平台共用，保证「Quit 之后的意图丢弃」只有一份定义（与 `TrayAction::Quit` 之后 `break`
+/// 同义）。Quit 要在**没装托盘**时也生效，故各平台先切再按需取托盘目标。
+pub(crate) fn split_at_quit(mut ops: Vec<TrayOp>) -> (Vec<TrayOp>, bool) {
+    match ops.iter().position(|o| *o == TrayOp::Quit) {
+        Some(i) => {
+            ops.truncate(i);
+            (ops, true)
+        }
+        None => (ops, false),
+    }
 }
 
 thread_local! {
@@ -167,6 +184,30 @@ impl TrayHandle {
             rgba: rgba.to_vec(),
         });
         // 踢一帧的理由同 `set_tooltip`：换图标多由应用状态变化触发，之后未必再有事件。
+        crate::anim::request_repaint();
+    }
+
+    /// 请求退出应用：让 [`App::run_resident`](crate::app::App::run_resident) 正常返回 `true`
+    /// （窗口模式下 `run` 同样结束），以便执行 Drop 清理、移除托盘图标。
+    ///
+    /// 与托盘菜单里的 [`TrayCtx::quit`] 走**同一条退出路径**（销毁全部窗口、移除托盘图标、
+    /// 绕过 `hide_on_close`），区别只在发起方：外部关闭请求（IPC 关闭命令、SIGTERM 的转发）
+    /// 而非用户点了菜单。排在它之后的托盘意图被丢弃。没装托盘时同样生效。
+    ///
+    /// **线程**：`TrayHandle` 内含 `Rc`、是 `!Send`，只能在 UI 线程调用——后台线程收到关闭
+    /// 请求后，经 [`App::channel`](crate::app::App::channel) 把消息送回 UI 线程，在其回调里
+    /// 调本方法（channel 回调跑在 UI 线程）。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// use windui::platform::TrayOp;
+    /// let t = TrayHandle::detached();
+    /// t.quit();
+    /// assert_eq!(t.pending_ops(), vec![TrayOp::Quit]);
+    /// ```
+    pub fn quit(&self) {
+        self.queue.borrow_mut().push(TrayOp::Quit);
+        // 踢一帧的理由同 `set_tooltip`：常驻零窗口时之后未必再有事件，不踢就等不到消费。
         crate::anim::request_repaint();
     }
 
@@ -671,6 +712,23 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// `quit()` 入队 `TrayOp::Quit`；平台层按 `split_at_quit` 在它处截断，之后的意图丢弃。
+    #[test]
+    fn quit_is_queued_and_truncates_following_ops() {
+        let handle = TrayHandle::detached();
+        handle.set_tooltip("前");
+        handle.quit();
+        handle.set_tooltip("后");
+        let ops = handle.pending_ops();
+        assert_eq!(ops[1], TrayOp::Quit);
+        let (before, quit) = split_at_quit(ops);
+        assert!(quit);
+        assert_eq!(before, vec![TrayOp::SetTooltip("前".into())]);
+        let (all, quit) = split_at_quit(vec![TrayOp::SetTooltip("x".into())]);
+        assert!(!quit, "无 Quit 时不报退出");
+        assert_eq!(all.len(), 1);
     }
 
     /// 像素长度与尺寸对不上的换图标请求在入口就丢掉，不进队列——平台层按 i32 换算像素数，
