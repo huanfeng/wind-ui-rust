@@ -23,8 +23,11 @@
 //! - `sys`：`poll(2)` 与跨线程唤醒管道。
 //! - 文字渲染见 `crate::text::linux`。
 //!
+//! - `tray_sni` / `notify`：系统托盘（StatusNotifierItem + dbusmenu）与桌面通知
+//!   （`org.freedesktop.Notifications`），走会话总线；仅 X11 后端接入（见 `docs/LINUX_PORTING.md`）。
+//!
 //! 尚未实现（调用处均为空操作并记日志，API 形状与其它平台一致，下游不必分支）：
-//! 系统托盘、文件拖出、零窗口常驻模式、GPU 后端。
+//! 文件拖出、GPU 后端；原生 Wayland 后端下的托盘与零窗口常驻（常驻模式固定走 X11 / XWayland）。
 //! 现状与路线见 `docs/LINUX_PORTING.md`。
 
 pub mod clipboard;
@@ -34,8 +37,10 @@ mod host;
 mod hotkey;
 mod ime;
 mod keys;
+mod notify;
 pub(crate) mod startup;
 pub(crate) mod sys;
+mod tray_sni;
 #[cfg(feature = "wayland")]
 mod wayland;
 mod x11;
@@ -61,13 +66,6 @@ pub(crate) fn run(
         super::run_offscreen(&cfg, &mut handler, &path);
         return;
     }
-    // 与 macOS 同理：常驻模式尚未落地时明确拒绝，而不是退化成开一个窗口。
-    if cfg.resident {
-        eprintln!(
-            "[windui] 常驻模式（App::run_resident）目前仅支持 Windows，Linux 尚未实现，进程退出"
-        );
-        return;
-    }
     if let Some(si) = &single {
         if !crate::single_instance::arbitrate(&si.app_id) {
             return;
@@ -86,7 +84,12 @@ pub(crate) fn run(
         ),
         None => {}
     }
-    if choice == Choice::Wayland {
+    // 常驻（零窗口）模式与托盘目前只接入了 X11 后端：Wayland 会话经 XWayland 运行。
+    if choice == Choice::Wayland && cfg.resident {
+        eprintln!(
+            "[windui] 常驻模式暂只支持 X11 后端，忽略 WINDUI_BACKEND=wayland（经 XWayland 运行）"
+        );
+    } else if choice == Choice::Wayland {
         #[cfg(feature = "wayland")]
         match wayland::connect() {
             Ok(session) => return wayland::run_windowed(session, cfg, handler, waker, single),
@@ -98,6 +101,12 @@ pub(crate) fn run(
         }
     }
     x11::run_windowed(cfg, handler, waker, single);
+}
+
+/// 系统托盘此刻是否可用：会话总线上有 `org.kde.StatusNotifierWatcher`。
+/// 连不上总线、没有 Watcher（未装扩展的 GNOME、无头机器）都返回 `false`，不 panic。
+pub(crate) fn tray_supported() -> bool {
+    tray_sni::supported_on(&tray_sni::Bus::Session)
 }
 
 /// 运行期选定的显示后端。

@@ -870,6 +870,7 @@ App::new("…", w, h).tray(
 - 回调拿 `TrayCtx`：`show_window()` / `hide_window()` / `quit()` / `notify(title, body)`（气泡通知）。**拿不到窗口句柄**，理由同下文 `HotkeyCtx`：回调在平台层持有窗口状态借用期间执行，直接调 OS 窗口 API 会同步重入消息处理并造成 `&mut` 别名（`AGENTS.md` 铁律 6）。这几个方法只记录意图，由平台层在借用释放后执行。
 - 一个回调内可**按顺序调用多个**，逐条生效（如先 `notify(..)` 再 `show_window()`）。例外是 `quit()`：它之后的调用不再执行（窗口已销毁）。
 - `quit()` 是应用的真实出口，刻意**不受 `hide_on_close()` 影响**。
+- **Linux**：走 StatusNotifierItem（KDE 原生；GNOME 需 AppIndicator 扩展），菜单由宿主绘制；没有托盘宿主时不显示图标但程序照常运行，通知仍走 `org.freedesktop.Notifications`。用 `windui::platform::tray_supported()` 探测托盘是否可用。细节与限制见 `docs/LINUX_PORTING.md` §7.1。
 - 图标可 `.icon_rgba(w,h,&rgba)`（零依赖，从 RGBA 造 HICON），未设则用系统默认应用图标。窗口销毁时托盘自动清理。完整示例见 `examples/tray.rs`。
 - **`Tray` 三件套是平台无关的**（定义在 `windui::platform::tray`，两平台共用同一份类型与语义）。此前它在 win32 与 macOS 各有一份完整副本，跨平台性只是「两边方法名恰好一样」的巧合——`TrayCtx` 一个累积意图、一个持有 `NSWindow` 立即调 OS。现在两个后端只负责执行 `TrayAction`。
 - **回调可测**：`windui::testing::run_with_tray_ctx(item)` 借一个受控 `TrayCtx` 跑菜单项回调，返回它请求的 `Vec<TrayAction>`；`run_with_tray_ctx_fn(f)` 用于 `on_left_click` 这类直接持有的闭包。见 [9.2](#92-测试收-eventctx-的回调)。

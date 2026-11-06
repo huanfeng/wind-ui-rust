@@ -294,8 +294,7 @@ impl Requests {
             cursor: handler.cursor(),
             ime_caret: handler.ime_caret(),
         };
-        // 托盘操作：Linux 尚无托盘，取走丢弃以免队列无限增长。
-        let _ = crate::platform::tray::take_tray_ops();
+        // 运行期托盘意图不在这里取：X11 后端的 `after_event` 自行交给托盘，Wayland 后端丢弃。
         r
     }
 }

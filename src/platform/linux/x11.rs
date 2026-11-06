@@ -45,11 +45,12 @@ use super::host::{
 use super::hotkey::Hotkeys;
 use super::ime::{Ime, ImeOut};
 use super::keys::{self, Keymap};
+use super::tray_sni::{Bus, TrayHost};
 use crate::event::{
     CursorShape, Key, KeyEvent, MouseButton, PointerEvent, PointerKind, Preedit, WindowOp,
 };
 use crate::geometry::{Color, Point, Rect};
-use crate::platform::{AppHandler, NewWindow, WindowConfig};
+use crate::platform::{AppHandler, NewWindow, TrayAction, WindowConfig};
 
 x11rb::atom_manager! {
     pub(super) Atoms: AtomsCookie {
@@ -174,6 +175,14 @@ struct X11 {
     upload_buf: Vec<u8>,
     /// 主窗口：托盘 / 热键的「唤出窗口」指的是它。
     main: Window,
+    /// 零窗口常驻模式：没有主窗，窗口全关也不退出（见 `WindowConfig::resident`）。
+    resident: bool,
+    /// 托盘「退出」已执行：常驻模式靠它结束事件循环（那里窗口集合为空是常态）。
+    quit: bool,
+    /// 系统托盘（未配置为 `None`；总线 / Watcher 不可用时内部降级，见 `tray_sni`）。
+    tray: Option<TrayHost>,
+    /// 应用级周期回调（`App::on_interval`）：常驻模式下没有主窗可挂，归这里。
+    app_intervals: Intervals,
     atoms: Atoms,
     root: Window,
     screen_w: i32,
@@ -217,21 +226,35 @@ pub(super) fn run_windowed(
         eprintln!("[windui] X 服务器初始化失败（不支持的像素格式或原子请求失败）");
         return;
     };
-    if cfg.tray.is_some() {
-        log::warn!("Linux 后端暂不支持系统托盘，托盘配置被忽略");
+    if let Some(t) = cfg.tray.take() {
+        x.tray = Some(TrayHost::install(t, &Bus::Session));
     }
     if cfg.renderer.requires_gpu() {
         eprintln!("[windui] Renderer::Gpu 在 Linux 后端尚不可用，改用软件渲染");
     }
-    let main = x.create_window(&cfg, handler, None);
-    x.main = main;
+    x.resident = cfg.resident;
+    if cfg.resident {
+        x.app_intervals = Intervals::new(crate::app::app_interval_durations(), Instant::now());
+    }
+    // 常驻模式不建主窗（`main` 恒为 0，即「没有」），窗口日后由托盘 / 热键回调按需建出。
+    let main = if cfg.resident {
+        0
+    } else {
+        let main = x.create_window(&cfg, handler, None);
+        x.main = main;
+        main
+    };
     // 桌面启动器给的启动 id（见 `startup`）：映射前挂到主窗口上，映射后广播 remove——两者都是
     // 启动器停止转圈的信号（WM 认前者、启动器的监视端认后者）。隐藏启动也照发 remove。
-    let startup_id = super::startup::take(false);
+    let startup_id = if main != 0 {
+        super::startup::take(false)
+    } else {
+        None
+    };
     if let Some(id) = &startup_id {
         x.set_startup_id(main, id);
     }
-    if cfg.start_hidden {
+    if cfg.start_hidden && main != 0 {
         if let Some(i) = x.idx(main) {
             x.windows[i].hidden = true;
         }
@@ -240,7 +263,7 @@ pub(super) fn run_windowed(
         let bindings = std::mem::take(&mut cfg.hotkeys);
         x.hotkeys = Some(Hotkeys::install(&x.conn, x.root, &x.keymap, bindings));
     }
-    if !cfg.start_hidden {
+    if !cfg.start_hidden && main != 0 {
         let time = startup_id.as_deref().and_then(super::startup::timestamp);
         x.show_at(main, time.unwrap_or(CURRENT_TIME));
     }
@@ -253,6 +276,10 @@ pub(super) fn run_windowed(
     }
     if let Some(si) = single {
         crate::single_instance::install_listener(&si.app_id, main as isize, si.on_second);
+    }
+    // 常驻模式的「启动即开窗」（`App::start_window`）：请求已排在旁路队列上，进循环前取走建出来。
+    if cfg.resident {
+        x.run_callback_window_requests(0);
     }
     x.run_loop(main);
 }
@@ -296,6 +323,10 @@ impl X11 {
             ime,
             hotkeys: None,
             main: 0,
+            resident: false,
+            quit: false,
+            tray: None,
+            app_intervals: Intervals::new(Vec::new(), Instant::now()),
             dnd_atoms,
             drag: None,
             upload_buf: Vec::new(),
@@ -824,13 +855,29 @@ impl X11 {
                 for w in &mut self.windows {
                     w.needs_paint = true;
                 }
+                // 常驻模式没有窗口出帧就没人排空 `App::channel`：一个都没有能出帧的窗口时
+                // 走应用级路径（有窗口时通道随帧由持消费权的宿主排空，这里再排会消费两遍）。
+                if self.resident && !self.windows.iter().any(|w| w.mapped && !w.minimized) {
+                    let repaint = crate::app::drain_app_channels();
+                    self.apply_app_effects(repaint);
+                }
+                // 托盘 / 菜单事件：D-Bus 线程写完事件才写唤醒管道，所以到这里必能取到。
+                self.process_tray();
+            }
+            if self.quit {
+                return;
             }
             // 3. 定时器与动画。
             let timeout = self.tick_timers();
             // 4. 出帧。
             self.paint_dirty();
-            if self.windows.is_empty() {
+            if self.windows.is_empty() && !self.resident {
                 return;
+            }
+            // 本轮里任何回调排的托盘意图（改提示 / 换图标 / 通知）与菜单状态变化在此落地。
+            self.apply_tray_ops();
+            if let Some(t) = &mut self.tray {
+                t.refresh_menu();
             }
             let _ = self.conn.flush();
             // 出帧期间宿主可能已把新事件读进队列：有就不睡。
@@ -862,6 +909,15 @@ impl X11 {
                     .into_iter()
                     .map(|idx| (id, idx)),
             );
+        }
+        // 应用级周期回调（常驻模式）：与窗口定时器同一条截止线，睡眠时长一并收拢。
+        let app_fired = self.app_intervals.fire_due(now, &mut next);
+        if !app_fired.is_empty() {
+            let mut repaint = false;
+            for idx in app_fired {
+                repaint |= crate::app::dispatch_app_interval(idx);
+            }
+            self.apply_app_effects(repaint);
         }
         for (id, idx) in fired {
             let Some(wi) = self.idx(id) else { continue };
@@ -1334,31 +1390,143 @@ impl X11 {
             .filter_map(|w| w.single.clone())
             .collect();
         for item in crate::app::take_callback_windows(&|k| open.iter().any(|o| o == k)) {
-            match item {
-                NewWindow::Focus(key) => {
-                    if let Some(w) = self
-                        .windows
-                        .iter()
-                        .find(|w| w.single.as_deref() == Some(key.as_str()))
-                    {
-                        let wid = w.id;
-                        self.show(wid);
-                    }
+            self.realize_callback_window(item, owner);
+        }
+    }
+
+    /// 把一个托盘 / 热键回调要开的窗口落成真窗口（单例命中则前置已有的）。
+    fn realize_callback_window(&mut self, item: NewWindow, owner: Window) {
+        match item {
+            NewWindow::Focus(key) => {
+                if let Some(w) = self
+                    .windows
+                    .iter()
+                    .find(|w| w.single.as_deref() == Some(key.as_str()))
+                {
+                    let wid = w.id;
+                    self.show(wid);
                 }
-                NewWindow::Create(cfg, handler) => {
-                    let o = (cfg.owned || cfg.modal)
-                        .then_some(owner)
-                        .filter(|o| self.idx(*o).is_some());
-                    let modal = cfg.modal;
-                    let nid = self.create_window(&cfg, handler, o);
-                    self.show(nid);
-                    // 模态子窗挡住了父窗：父窗上的缩放光标当场收掉。
-                    if let (true, Some(o)) = (modal, o) {
-                        self.set_edge_hover(o, None);
-                    }
+            }
+            NewWindow::Create(cfg, handler) => {
+                let o = (cfg.owned || cfg.modal)
+                    .then_some(owner)
+                    .filter(|o| self.idx(*o).is_some());
+                let modal = cfg.modal;
+                let nid = self.create_window(&cfg, handler, o);
+                self.show(nid);
+                // 模态子窗挡住了父窗：父窗上的缩放光标当场收掉。
+                if let (true, Some(o)) = (modal, o) {
+                    self.set_edge_hover(o, None);
                 }
             }
         }
+    }
+
+    /// 落地**应用级**回调（通道、周期、托盘、热键）产生的副作用：运行期托盘 / 热键意图、
+    /// 关窗与开窗请求、跨窗口脏标记。对应 win32 的 `apply_app_effects`。
+    fn apply_app_effects(&mut self, repaint: bool) {
+        self.apply_tray_ops();
+        if let Some(hk) = &mut self.hotkeys {
+            for (hid, op) in crate::app::take_app_hotkey_ops() {
+                hk.apply(&self.conn, self.root, &self.keymap, hid, op);
+            }
+        }
+        let main = self.main;
+        self.run_callback_window_requests(main);
+        let dirty = crate::signal::take_cross_window_dirty();
+        if repaint || dirty {
+            for w in &mut self.windows {
+                w.needs_paint = true;
+            }
+        }
+    }
+
+    /// 把运行期托盘意图（`TrayHandle`）交给托盘；没装托盘就丢弃（与 Windows 一致）。
+    fn apply_tray_ops(&mut self) {
+        let ops = crate::platform::tray::take_tray_ops();
+        if let Some(t) = &mut self.tray {
+            for op in ops {
+                t.apply_op(op);
+            }
+        }
+    }
+
+    /// 跑托盘 / 菜单事件的回调并执行它们排的意图。
+    fn process_tray(&mut self) {
+        let Some(t) = &mut self.tray else { return };
+        let actions = t.poll_actions();
+        if actions.is_empty() {
+            return;
+        }
+        for a in actions {
+            if !self.run_tray_action(a) {
+                break;
+            }
+        }
+        if !self.quit {
+            self.apply_app_effects(false);
+        }
+    }
+
+    /// 执行一条托盘意图；返回 false 表示应丢弃其后的意图（退出）。
+    fn run_tray_action(&mut self, action: TrayAction) -> bool {
+        let main = self.main;
+        match action {
+            // 常驻模式没有主窗，显隐意图无处可施（唤起界面靠 `open_window`）。
+            TrayAction::Show => self.apply_window_op(main, WindowOp::Show),
+            TrayAction::Hide => self.apply_window_op(main, WindowOp::Hide),
+            TrayAction::Toggle => {
+                let visible = self
+                    .idx(main)
+                    .is_some_and(|i| self.windows[i].mapped && !self.windows[i].minimized);
+                let op = if visible {
+                    WindowOp::Hide
+                } else {
+                    WindowOp::Show
+                };
+                self.apply_window_op(main, op);
+            }
+            TrayAction::OpenWindow => {
+                let open: Vec<String> = self
+                    .windows
+                    .iter()
+                    .filter_map(|w| w.single.clone())
+                    .collect();
+                if let Some(item) =
+                    crate::app::take_callback_window(&|k| open.iter().any(|o| o == k))
+                {
+                    self.realize_callback_window(item, main);
+                }
+            }
+            TrayAction::CloseWindow(key) => {
+                if let Some(id) = self
+                    .windows
+                    .iter()
+                    .find(|w| w.single.as_deref() == Some(key.as_str()))
+                    .map(|w| w.id)
+                {
+                    self.request_close(id);
+                }
+            }
+            TrayAction::Notify { title, body } => {
+                if let Some(t) = &mut self.tray {
+                    t.notify(&title, &body);
+                }
+            }
+            // 刻意绕过 `hide_on_close` 与各窗口的关闭确认：托盘「退出」是常驻应用唯一的出口。
+            // 连旁路队列一起截断，免得退出途中又开出窗口。
+            TrayAction::Quit => {
+                let _ = crate::event::take_callback_windows();
+                let _ = crate::event::take_callback_closes();
+                let ids: Vec<Window> = self.windows.iter().map(|w| w.id).collect();
+                for id in ids {
+                    self.close_window(id);
+                }
+                self.quit = true;
+                return false;
+            }
+        }
+        true
     }
 
     /// 派发 XIM 回调的产出。
@@ -1739,6 +1907,7 @@ impl X11 {
 
     /// 事件分发后的收尾：窗口操作、标题、对话框、开窗、光标、关窗、跨窗口脏。
     fn after_event(&mut self, id: Window) {
+        self.apply_tray_ops();
         let Some(i) = self.idx(id) else { return };
         let open: Vec<String> = self
             .windows

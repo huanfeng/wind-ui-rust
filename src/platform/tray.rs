@@ -107,7 +107,8 @@ impl TrayHandle {
     /// 发起方：这里是**应用状态**变了（后台任务完成、同步失败），不必先有一次托盘交互。
     ///
     /// 通知挂在托盘图标上（Win32 的气泡本就是 `NOTIFYICONDATAW` 的一部分），故没装托盘时
-    /// 同样被丢弃；Linux 尚无托盘，也一并丢弃。
+    /// 同样被丢弃。Linux 上走 `org.freedesktop.Notifications`：装了托盘配置即可发送，
+    /// 即使桌面没有托盘宿主（无 StatusNotifierWatcher）通知也照常弹出。
     pub fn notify(&self, title: impl Into<String>, body: impl Into<String>) {
         self.queue.borrow_mut().push(TrayOp::Notify {
             title: title.into(),
@@ -305,8 +306,6 @@ pub(crate) fn invoke(cb: Option<&mut TrayFn>) -> Vec<TrayAction> {
     ctx.take_actions()
 }
 
-// Linux 后端尚无托盘，菜单项的标签 / 勾选态与按下标取回调在那里无人读取。
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub(crate) enum ItemKind {
     Action {
         /// 标签。收 [`TextContent`] 而不是 `String`，于是它能是一条待翻译消息
@@ -430,7 +429,6 @@ impl Tray {
         self
     }
     /// 取指定下标菜单项的回调（平台层在模态菜单关闭后分发用）。
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn item_callback(&mut self, idx: usize) -> Option<&mut TrayFn> {
         self.items.get_mut(idx)?.callback()
     }

@@ -928,7 +928,7 @@ pub(crate) fn dispatch_system_theme_changed(dark: bool) -> bool {
 }
 
 /// 应用级周期回调的间隔表（平台据此 `SetTimer`，下标即定时器 id - 1）。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn app_interval_durations() -> Vec<Duration> {
     APP_SERVICES.with(|s| {
         s.borrow()
@@ -939,7 +939,7 @@ pub(crate) fn app_interval_durations() -> Vec<Duration> {
 }
 
 /// 第 `idx` 个应用级周期回调到点。返回是否需要重绘。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn dispatch_app_interval(idx: usize) -> bool {
     // 同 `dispatch_system_theme_changed`：先摘出来，跑完放回。
     let Some(mut cb) = APP_SERVICES.with(|s| {
@@ -970,7 +970,7 @@ fn noop_cb() -> AppCallback {
 /// 常规路径是持消费权的窗口宿主每帧排空一次（见 `UiHost::pump_channels`）。本函数只在
 /// **一个窗口都没有**时由平台调用：那时既没有宿主也没有帧，消息会在通道里无限堆积到
 /// 用户开窗为止。调用方须自行保证"零窗口"这个前提，否则同一条消息可能被消费两遍。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn drain_app_channels() -> bool {
     let mut pumps = crate::sync::take_pumps();
     if pumps.is_empty() {
@@ -1002,7 +1002,7 @@ pub(crate) fn drain_app_channels() -> bool {
 ///
 /// 没有这条路时，`HotkeyHandle` 的改绑 / 启停在零窗口期间**永不落地**：它唯一的
 /// 消费点 `apply_hotkey_ops(hwnd)` 要有窗口才走得到。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn take_app_hotkey_ops() -> Vec<(usize, crate::event::HotkeyOp)> {
     APP_SERVICES.with(|s| {
         s.borrow()
@@ -1019,9 +1019,8 @@ pub(crate) fn take_app_hotkey_ops() -> Vec<(usize, crate::event::HotkeyOp)> {
 ///
 /// 逐个取而不是一次取完：托盘的 `TrayAction::OpenWindow` 是位置标记，执行到哪一个就
 /// 取哪一个，顺序才跟得上回调里的调用顺序。
-// macOS 尚未消费这两条路（见 `platform/macos` 里的 TODO），在那里它们暂时无人调用；
-// Linux 只有热键路径（取全部），逐个取的托盘路径无人调用。
-#[cfg_attr(not(windows), allow(dead_code))]
+// macOS 尚未消费这两条路（见 `platform/macos` 里的 TODO），在那里它们暂时无人调用。
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn take_callback_window(is_open: &dyn Fn(&str) -> bool) -> Option<NewWindow> {
     let req = crate::event::take_callback_window()?;
     make_callback_window(req, is_open)

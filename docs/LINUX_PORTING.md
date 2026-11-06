@@ -6,11 +6,12 @@
 > 当前状态：**基本可用**。窗口与事件循环、软件呈现、自带文字栈（fontconfig 选字）、
 > HiDPI、光标、滚轮、键盘（含快捷键）、剪贴板、XIM 输入法（合成串内联绘制）、
 > 无边框窗口（拖动 / 边缘缩放 / 双击最大化）、多窗口与模态、文件拖入、全局热键、
-> 单实例转发、`--screenshot` 离屏截图都已落地。`cargo build` / `cargo test`（默认与
+> 单实例转发、`--screenshot` 离屏截图、系统托盘与桌面通知、零窗口常驻（`App::run_resident`，
+> 仅 X11 后端）都已落地。`cargo build` / `cargo test`（默认与
 > `--features gpu` 两档）/ `cargo clippy` 在 Linux 上通过。
 >
-> 尚未实现：系统托盘、文件拖出、零窗口常驻（`App::run_resident`）、窗口模式下的
-> GPU 后端。这些入口都存在且不 panic——空操作并记日志，API 形状与另两个平台一致，
+> 尚未实现：文件拖出、窗口模式下的 GPU 后端、原生 Wayland 后端下的托盘与常驻（见 §7.1）。
+> 这些入口都存在且不 panic——空操作并记日志，API 形状与另两个平台一致，
 > 下游不必按平台分支。
 >
 > **原生 Wayland 后端已完成**（`wayland` feature，默认编入），但运行期默认仍走 X11，须
@@ -180,13 +181,35 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 
 按价值排序：
 
-1. **系统托盘**：StatusNotifierItem（D-Bus）是 KDE / GNOME 扩展的主流；老式 XEmbed
-   托盘可做纯 X11 实现但覆盖面在缩小。托盘菜单需要一个 override-redirect 弹出窗口
-   复用本库的菜单渲染。
+1. ~~系统托盘~~：已落地，见 §7.1。
 2. **MIT-SHM 呈现**：大窗口整窗帧下 `PutImage` 要把整帧过一遍 socket，SHM 可省掉这次拷贝。
 3. **窗口模式 GPU**：`src/render/gpu/` 已在 Linux 编译通过，差的是从 X 窗口建 wgpu surface。
 4. **Wayland 原生**：已完成（默认仍走 X11），见 §8；默认后端是否改为 Wayland 见 §8.1。
-5. **文件拖出**（XDND 源端）、**零窗口常驻**、运行期 DPI / 主题跟随。
+5. **文件拖出**（XDND 源端）、运行期 DPI / 主题跟随。
+
+### 7.1 系统托盘、桌面通知与零窗口常驻
+
+代码：`platform/linux/tray_sni.rs`（托盘）、`notify.rs`（通知），事件循环接入在 `x11.rs`。
+
+- **协议**：`org.kde.StatusNotifierItem`（图标走 `IconPixmap`，ARGB32 网络字节序）+
+  `com.canonical.dbusmenu`（右键菜单，宿主自己画；勾选 / 禁用 / 分隔线 / 动态刷新）；
+  通知走 `org.freedesktop.Notifications.Notify`。依赖 `zbus` 4（仅 Linux target、
+  `default-features = false` + `async-io`，不引 tokio；Windows 构建不含 zbus）。
+- **空闲零 CPU**：D-Bus 收发在 zbus 内部线程，处理函数把事件入队并写**唤醒管道**
+  （`sys::wake`，本就在 `poll(2)` 集合里）；UI 线程睡在 `poll` 上被内核唤醒，不轮询。
+  UI → D-Bus 的信号 / 通知经 `mpsc` 交给专职线程，线程阻塞在 `recv()`。实测常驻进程空闲
+  5 秒各线程的上下文切换计数为 0 增量。
+- **回调仍在 UI 线程**：菜单标签 / 勾选态绑的是线程局部 `Signal`，每轮事件循环末尾快照进
+  共享状态（变了才发 `LayoutUpdated`），D-Bus 线程只读快照。
+- **降级**：没有会话总线或没有 `StatusNotifierWatcher`（未装 AppIndicator 扩展的 GNOME、
+  无头机器）时不显示托盘、`eprintln` 一次、**不报错不退出**；通知独立走自己的连接，失败
+  也只警告一次并丢弃这条。`windui::platform::tray_supported()` 供应用探测（视 Watcher 是否存在）。
+- **已知限制**：Watcher 晚于应用启动（开机自启早于面板）或中途重启时不会自动重新登记；
+  `on_double_click` 在 SNI 里没有对应事件（不触发）；仅 X11 后端接入——`WINDUI_BACKEND=wayland`
+  下窗口模式的托盘被忽略，常驻模式固定走 X11（经 XWayland）；无 `DISPLAY` 时常驻模式起不来
+  （应用应先自行判断并走无头路径）。
+- **测试**：纯函数（像素格式、布局）与降级路径不需要总线；协议往返测试起私有
+  `dbus-daemon --session`（本机没有该可执行文件时这几条测试打印「跳过」并直接返回）。
 
 ## 8. Wayland 原生后端
 

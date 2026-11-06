@@ -1404,6 +1404,8 @@ impl Wl {
 
     /// 事件分发后的收尾：窗口操作、标题、光标、对话框、开窗、关窗、跨窗口脏。
     fn after_event(&mut self, key: u32) {
+        // Wayland 后端尚无托盘：取走运行期托盘意图丢弃，以免队列无限增长。
+        let _ = crate::platform::tray::take_tray_ops();
         let Some(i) = self.idx(key) else { return };
         let open: Vec<String> = self
             .windows

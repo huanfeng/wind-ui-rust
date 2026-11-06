@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Linux 系统托盘与桌面通知**：`App::tray(..)` / `TrayHandle::notify` 在 Linux 上经 D-Bus 接入
+  StatusNotifierItem + dbusmenu 与 `org.freedesktop.Notifications`（X11 后端）；`App::run_resident`
+  在 Linux 上可用（固定走 X11）。没有 `StatusNotifierWatcher` 时优雅降级（无图标、通知照常）。
+- **`windui::platform::tray_supported()`**：托盘此刻是否可用（Windows / macOS 恒 `true`，Linux 视
+  Watcher 是否存在），供应用决定退化策略。
+
 ## [0.31.0] - 2026-10-27
 
 ### 新增

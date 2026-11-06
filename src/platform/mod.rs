@@ -137,6 +137,22 @@ compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台"
 pub mod tray;
 pub use tray::{Tray, TrayAction, TrayCtx, TrayHandle, TrayMenuItem, TrayOp};
 
+/// 系统托盘此刻是否可用，供应用决定退化策略（例如托盘不可用时启动即开窗）。
+///
+/// Windows / macOS 恒为 `true`。Linux 上取决于会话总线上有没有
+/// `org.kde.StatusNotifierWatcher`（KDE 有；GNOME 需 AppIndicator 扩展；无头机器没有）。
+/// 会同步访问一次会话总线，请在启动时调用而不是在每帧里调。
+pub fn tray_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::tray_supported()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 use std::cell::Cell;
 use std::path::Path;
 use std::path::PathBuf;

@@ -153,6 +153,11 @@ wayland-cursor = { version = "0.31", optional = true }
 # 键盘映射：运行期 dlopen libxkbcommon（任何 Wayland 桌面必有），同 fontconfig 做法，
 # 编译期不要 -dev 包。取不到时键盘不可用（提示一次），指针照常。
 xkbcommon-dl = { version = "0.4", optional = true }
+# 系统托盘（StatusNotifierItem + dbusmenu）与桌面通知（org.freedesktop.Notifications）走会话
+# 总线，只用阻塞 API（zbus 4 的 `blocking` 模块无需 feature，`blocking-api` 是 zbus 5 才有的）。`default-features = false` + `async-io`（不引 tokio）：
+# `async-io` 让 zbus 自带一条内部执行器线程收发消息，对象服务端的方法调用在那条线程上跑，
+# 不占用 UI 线程，也不需要我们轮询。
+zbus = { version = "4", default-features = false, features = ["async-io"] }
 
 # ---- macOS 平台后端（Cocoa/AppKit + Core Text）----
 # objc2 生态（活跃维护、类型安全、自动内存管理）。框架子 crate 的类型按 feature 暴露，
