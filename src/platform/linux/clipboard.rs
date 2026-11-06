@@ -31,7 +31,7 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::CURRENT_TIME;
 
 use crate::core::ClipboardProvider;
-use crate::platform::clip_image::{png_to_rgba, rgba_to_png};
+use crate::platform::clip_image::{png_to_rgba, rgba_to_png, MAX_CLIP_BYTES};
 use crate::render::DecodedImage;
 
 /// 剪贴板实现，由 `UiHost` 注入 `Tree`。
@@ -61,7 +61,8 @@ impl ClipboardProvider for LinuxClipboard {
         }
         let (tx, rx) = mpsc::channel();
         send(Req::GetPng(tx))?;
-        // 比文本多留时间：大图要走 INCR 分段（`fetch_as` 内自带 3 秒总上限）。
+        // 比文本多留时间：大图要走 INCR 分段。工作线程侧初始等待 + INCR 合计 ≤3 秒
+        // （`IMAGE_FETCH_BUDGET`），小于这里的 3.5 秒，保证 UI 不会先于工作线程放弃。
         let png = rx
             .recv_timeout(Duration::from_millis(3500))
             .ok()
@@ -79,6 +80,11 @@ impl ClipboardProvider for LinuxClipboard {
         }
     }
 }
+
+/// 读图片的总时限（初始应答 + INCR 分段合计），须小于 UI 侧 `recv_timeout`。
+const IMAGE_FETCH_BUDGET: Duration = Duration::from_millis(3000);
+/// 读文本的时限。
+const TEXT_FETCH_BUDGET: Duration = Duration::from_millis(1000);
 
 /// 我们当前作为选区拥有者提供的内容（同一时刻只有一种）。
 enum Content {
@@ -179,7 +185,14 @@ fn run(conn: RustConnection, win: Window, atoms: Atoms, rx: mpsc::Receiver<Req>)
                     let png = match &owned {
                         Some(Content::Png(b)) => Some(b.clone()),
                         Some(Content::Text(_)) => None,
-                        None => fetch_as(&conn, win, &atoms, atoms.IMAGE_PNG, &mut owned),
+                        None => fetch_as(
+                            &conn,
+                            win,
+                            &atoms,
+                            atoms.IMAGE_PNG,
+                            IMAGE_FETCH_BUDGET,
+                            &mut owned,
+                        ),
                     };
                     let _ = reply.send(png);
                 }
@@ -240,19 +253,23 @@ fn answer(
                 || req.target == atoms.TEXT
                 || req.target == u32::from(AtomEnum::STRING),
         ) {
-            ok = conn
-                .change_property8(
-                    PropMode::REPLACE,
-                    req.requestor,
-                    prop,
-                    req.target,
-                    text.as_bytes(),
-                )
-                .is_ok();
+            let r = conn.change_property8(
+                PropMode::REPLACE,
+                req.requestor,
+                prop,
+                req.target,
+                text.as_bytes(),
+            );
+            ok = r.is_ok();
+            if let Err(e) = r {
+                log::warn!("应答剪贴板文本请求失败: {e}");
+            }
         } else if let (Content::Png(png), true) = (content, req.target == atoms.IMAGE_PNG) {
-            ok = conn
-                .change_property8(PropMode::REPLACE, req.requestor, prop, req.target, png)
-                .is_ok();
+            let r = conn.change_property8(PropMode::REPLACE, req.requestor, prop, req.target, png);
+            ok = r.is_ok();
+            if let Err(e) = r {
+                log::warn!("应答剪贴板图片请求失败: {e}");
+            }
         }
     }
     let notify = SelectionNotifyEvent {
@@ -276,7 +293,7 @@ fn fetch(
     owned: &mut Option<Content>,
 ) -> Option<String> {
     for target in [atoms.UTF8_STRING, u32::from(AtomEnum::STRING)] {
-        if let Some(t) = fetch_as(conn, win, atoms, target, owned) {
+        if let Some(t) = fetch_as(conn, win, atoms, target, TEXT_FETCH_BUDGET, owned) {
             return Some(String::from_utf8_lossy(&t).into_owned());
         }
     }
@@ -289,6 +306,7 @@ fn fetch_as(
     win: Window,
     atoms: &Atoms,
     target: Atom,
+    budget: Duration,
     owned: &mut Option<Content>,
 ) -> Option<Vec<u8>> {
     conn.convert_selection(
@@ -300,7 +318,7 @@ fn fetch_as(
     )
     .ok()?;
     conn.flush().ok()?;
-    let deadline = Instant::now() + Duration::from_millis(1000);
+    let deadline = Instant::now() + budget;
     loop {
         // 等应答期间照样要应答别人的请求（对方可能恰好在读我们的选区）。
         match conn.poll_for_event().ok()? {
@@ -308,18 +326,33 @@ fn fetch_as(
                 if n.property == u32::from(AtomEnum::NONE) {
                     return None;
                 }
+                // 取回长度设上限（单位 4 字节，+1 用来探测是否超限）。
                 let reply = conn
-                    .get_property(true, win, atoms.WINDUI_CLIP, AtomEnum::ANY, 0, u32::MAX / 4)
+                    .get_property(
+                        true,
+                        win,
+                        atoms.WINDUI_CLIP,
+                        AtomEnum::ANY,
+                        0,
+                        (MAX_CLIP_BYTES / 4 + 1) as u32,
+                    )
                     .ok()?
                     .reply()
                     .ok()?;
+                if reply.bytes_after > 0 {
+                    // 超限时服务器不会自动删除属性，这里手动删。
+                    let _ = conn.delete_property(win, atoms.WINDUI_CLIP);
+                    let _ = conn.flush();
+                    log::warn!("剪贴板内容超过 {MAX_CLIP_BYTES} 字节上限，放弃读取");
+                    return None;
+                }
                 if reply.type_ == atoms.INCR {
                     // 只有图片读取走 INCR（文本读取沿用既有的「不支持」）。
                     if target != atoms.IMAGE_PNG {
                         log::warn!("剪贴板内容过大（INCR 分段传输），暂不支持");
                         return None;
                     }
-                    return fetch_incr(conn, win, atoms, owned);
+                    return fetch_incr(conn, win, atoms, deadline, owned);
                 }
                 return Some(reply.value);
             }
@@ -336,15 +369,15 @@ fn fetch_as(
 
 /// INCR 分段接收：上面那次 `get_property(delete=true)` 已通知拥有者开始发送；之后每次
 /// 它把一段放进我们窗口的属性并触发 `PropertyNotify(NEW_VALUE)`，我们取走（顺带删除属性
-/// 以通知它发下一段），直到收到长度为 0 的一段。总时长与总量都设上限，防止对端拖死或撑爆内存。
+/// 以通知它发下一段），直到收到长度为 0 的一段。总时长（沿用调用方的 `deadline`，与初始
+/// 等待合计）与总量都设上限，防止对端拖死或撑爆内存。
 fn fetch_incr(
     conn: &RustConnection,
     win: Window,
     atoms: &Atoms,
+    deadline: Instant,
     owned: &mut Option<Content>,
 ) -> Option<Vec<u8>> {
-    const MAX_BYTES: usize = 64 * 1024 * 1024;
-    let deadline = Instant::now() + Duration::from_millis(3000);
     let mut data = Vec::new();
     loop {
         match conn.poll_for_event().ok()? {
@@ -353,19 +386,30 @@ fn fetch_incr(
                     && p.atom == atoms.WINDUI_CLIP
                     && p.state == xproto::Property::NEW_VALUE =>
             {
+                // 单段取回长度限制为剩余额度（单位 4 字节，+1 探测超限）。
+                let remain = MAX_CLIP_BYTES.saturating_sub(data.len());
                 let reply = conn
-                    .get_property(true, win, atoms.WINDUI_CLIP, AtomEnum::ANY, 0, u32::MAX / 4)
+                    .get_property(
+                        true,
+                        win,
+                        atoms.WINDUI_CLIP,
+                        AtomEnum::ANY,
+                        0,
+                        (remain / 4 + 1) as u32,
+                    )
                     .ok()?
                     .reply()
                     .ok()?;
                 if reply.value.is_empty() {
                     return Some(data);
                 }
-                data.extend_from_slice(&reply.value);
-                if data.len() > MAX_BYTES {
-                    log::warn!("剪贴板图片超过 {MAX_BYTES} 字节上限，放弃读取");
+                if reply.bytes_after > 0 || data.len() + reply.value.len() > MAX_CLIP_BYTES {
+                    let _ = conn.delete_property(win, atoms.WINDUI_CLIP);
+                    let _ = conn.flush();
+                    log::warn!("剪贴板图片超过 {MAX_CLIP_BYTES} 字节上限，放弃读取");
                     return None;
                 }
+                data.extend_from_slice(&reply.value);
             }
             Some(ev) => handle(conn, atoms, owned, ev),
             None => {

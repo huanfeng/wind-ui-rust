@@ -1,7 +1,7 @@
 //! Win32 剪贴板读写（CF_UNICODETEXT；图片：`"PNG"` 注册格式 + `CF_DIBV5` / `CF_DIB`）。
 
 use windows::core::w;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     RegisterClipboardFormatW, SetClipboardData,
@@ -11,7 +11,9 @@ use windows::Win32::System::Memory::{
 };
 
 use crate::core::ClipboardProvider;
-use crate::platform::clip_image::{dib_to_rgba, png_to_rgba, rgba_to_dib, rgba_to_png};
+use crate::platform::clip_image::{
+    dib_to_rgba, png_to_rgba, rgba_to_dib, rgba_to_png, MAX_CLIP_BYTES,
+};
 use crate::render::DecodedImage;
 
 const CF_UNICODETEXT: u32 = 13;
@@ -51,7 +53,7 @@ unsafe fn get_image() -> Option<DecodedImage> {
     if !has_any {
         return None; // 剪贴板上没有图片：不必打开剪贴板
     }
-    OpenClipboard(None).ok()?;
+    open_clipboard_retry().then_some(())?;
     let result = (|| {
         if png != 0 {
             if let Some(img) = read_format(png).and_then(|b| png_to_rgba(&b)) {
@@ -69,6 +71,19 @@ unsafe fn get_image() -> Option<DecodedImage> {
     result
 }
 
+/// 打开剪贴板：被别的进程占用时重试 3 次、间隔约 10ms。
+unsafe fn open_clipboard_retry() -> bool {
+    for i in 0..3 {
+        if OpenClipboard(None).is_ok() {
+            return true;
+        }
+        if i < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    false
+}
+
 /// 复制出某格式的整块字节（调用方须已 `OpenClipboard`）。
 /// 剪贴板是不可信的跨进程数据：长度取分配块大小，不信任内容自述。
 unsafe fn read_format(fmt: u32) -> Option<Vec<u8>> {
@@ -77,42 +92,58 @@ unsafe fn read_format(fmt: u32) -> Option<Vec<u8>> {
         return None;
     }
     let hg = HGLOBAL(h.0);
+    let size = GlobalSize(hg);
+    if size > MAX_CLIP_BYTES {
+        return None; // 超上限：不锁定、不复制
+    }
     let ptr = GlobalLock(hg) as *const u8;
     if ptr.is_null() {
         return None;
     }
-    let bytes = std::slice::from_raw_parts(ptr, GlobalSize(hg)).to_vec();
+    let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
     let _ = GlobalUnlock(hg);
     Some(bytes)
 }
 
 /// 写图片：同时放 `"PNG"`（保留透明度）与 `CF_DIB`（兼容只认位图的程序）。
+/// `SetClipboardData` 成功后内存归系统；其余路径（失败 / 未交出）一律 `GlobalFree`。
 unsafe fn set_image(img: &DecodedImage) -> bool {
     let (Some(png), Some(dib)) = (rgba_to_png(img), rgba_to_dib(img)) else {
         return false;
     };
     let png_fmt = png_format();
     // 先备好两块内存再清剪贴板：分配失败时不丢用户原有内容。
-    let (Some(h_png), Some(h_dib)) = (alloc_global(&png), alloc_global(&dib)) else {
+    let Some(h_dib) = alloc_global(&dib) else {
         return false;
     };
-    if OpenClipboard(None).is_err() {
+    let Some(h_png) = alloc_global(&png) else {
+        let _ = GlobalFree(Some(h_dib));
+        return false;
+    };
+    if !open_clipboard_retry() {
+        let _ = GlobalFree(Some(h_dib));
+        let _ = GlobalFree(Some(h_png));
         return false;
     }
     let _ = EmptyClipboard();
-    // 成功后系统接管内存；失败为极罕见路径，泄漏一次可忽略（同 `set_text`）。
     let ok_dib = SetClipboardData(CF_DIB, Some(HANDLE(h_dib.0))).is_ok();
-    if png_fmt != 0 {
-        let _ = SetClipboardData(png_fmt, Some(HANDLE(h_png.0)));
+    if !ok_dib {
+        let _ = GlobalFree(Some(h_dib));
+    }
+    // png 格式注册失败（0）或写入失败时，h_png 仍归我们，须释放。
+    if png_fmt == 0 || SetClipboardData(png_fmt, Some(HANDLE(h_png.0))).is_err() {
+        let _ = GlobalFree(Some(h_png));
     }
     let _ = CloseClipboard();
     ok_dib
 }
 
+/// 分配并填充一块可移动内存；失败时自行释放，不泄漏。
 unsafe fn alloc_global(bytes: &[u8]) -> Option<HGLOBAL> {
     let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).ok()?;
     let ptr = GlobalLock(hmem) as *mut u8;
     if ptr.is_null() {
+        let _ = GlobalFree(Some(hmem));
         return None;
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
