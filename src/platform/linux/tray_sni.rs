@@ -1352,9 +1352,13 @@ mod tests {
         let mut n = Notifier::new(pb.bus(), cb);
         n.send("t", "b", Some("old"));
         assert!(wait_for(|| n.has_tag(1)));
-        emit_notification_signal(&srv, "NotificationClosed", &(1u32, 2u32));
+        // Notify 回复到达并不保证监听线程的信号订阅已生效，单发一次可能被丢；
+        // Closed 幂等，所以反复补发直到标记被移除（订阅一旦生效，下一发必被处理）。
         assert!(
-            wait_for(|| !n.has_tag(1)),
+            wait_for(|| {
+                emit_notification_signal(&srv, "NotificationClosed", &(1u32, 2u32));
+                !n.has_tag(1)
+            }),
             "NotificationClosed 后映射应被移除"
         );
         // 已关闭的通知再被点：不回调。用第二条通知作哨兵，确认先到的那条被忽略。

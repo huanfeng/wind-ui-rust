@@ -76,6 +76,8 @@ pub(crate) fn apply_tray_ops() {
         // 与 `TrayAction::Quit` 同一路径：截断旁路队列后 `terminate`（不返回）。
         // 须在释放 `INSTALLED` 借用之后（上面的函数已返回）。
         let _ = crate::event::take_callback_windows();
+        // 关窗请求队列同样截断（与 win32 `quit_app` / X11 `quit_all` 一致）
+        let _ = crate::event::take_callback_closes();
         NSApplication::sharedApplication(mtm).terminate(None);
     }
 }
@@ -238,6 +240,8 @@ impl TrayTarget {
                     // 会在退出途中闪一个窗口出来——那时它看起来是个新 bug，发现的人要
                     // 把这整条推理重走一遍，而不是照着这行注释直接读懂。
                     let _ = crate::event::take_callback_windows();
+                    // 关窗请求队列同样截断：退出途中不再对正在销毁的窗口发关闭。
+                    let _ = crate::event::take_callback_closes();
                     if let Some(mtm) = MainThreadMarker::new() {
                         NSApplication::sharedApplication(mtm).terminate(None);
                     }

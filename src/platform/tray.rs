@@ -190,6 +190,9 @@ impl TrayHandle {
     /// 请求退出应用：让 [`App::run_resident`](crate::app::App::run_resident) 正常返回 `true`
     /// （窗口模式下 `run` 同样结束），以便执行 Drop 清理、移除托盘图标。
     ///
+    /// **macOS 例外**：退出走 `NSApp::terminate`，它不返回、直接结束进程，故 `run_resident()`
+    /// 不会返回 `true`，其后的 Drop 清理也不会执行；需要收尾的应用须在调用 `quit()` 之前完成。
+    ///
     /// 与托盘菜单里的 [`TrayCtx::quit`] 走**同一条退出路径**（销毁全部窗口、移除托盘图标、
     /// 绕过 `hide_on_close`），区别只在发起方：外部关闭请求（IPC 关闭命令、SIGTERM 的转发）
     /// 而非用户点了菜单。排在它之后的托盘意图被丢弃。没装托盘时同样生效。
@@ -729,6 +732,27 @@ mod tests {
         let (all, quit) = split_at_quit(vec![TrayOp::SetTooltip("x".into())]);
         assert!(!quit, "无 Quit 时不报退出");
         assert_eq!(all.len(), 1);
+    }
+
+    /// Quit 在队首：之前没有意图，之后的全部丢弃；两个 Quit 只在第一个处切开。
+    #[test]
+    fn split_at_quit_handles_leading_and_repeated_quit() {
+        let (before, quit) = split_at_quit(vec![TrayOp::Quit, TrayOp::SetTooltip("后".into())]);
+        assert!(quit);
+        assert!(before.is_empty(), "Quit 在队首时之前没有意图");
+
+        let (before, quit) = split_at_quit(vec![
+            TrayOp::SetTooltip("前".into()),
+            TrayOp::Quit,
+            TrayOp::SetTooltip("中".into()),
+            TrayOp::Quit,
+            TrayOp::SetTooltip("后".into()),
+        ]);
+        assert!(quit);
+        assert_eq!(before, vec![TrayOp::SetTooltip("前".into())]);
+
+        let (before, quit) = split_at_quit(Vec::new());
+        assert!(!quit && before.is_empty());
     }
 
     /// 像素长度与尺寸对不上的换图标请求在入口就丢掉，不进队列——平台层按 i32 换算像素数，

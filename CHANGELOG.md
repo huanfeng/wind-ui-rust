@@ -16,7 +16,8 @@
   上线 / 下线，只报变化、初始状态不触发；Windows / macOS 恒可用、永不触发）。
 - **`TrayHandle::quit()`**：从外部请求退出应用（含零窗口常驻模式），`run_resident()` 正常返回 `true`；
   走与 `TrayCtx::quit()` 相同的退出路径（销毁全部窗口、移除托盘图标、绕过 `hide_on_close`）。`!Send`，
-  后台线程经 `App::channel` 回到 UI 线程调用。新增 `TrayOp::Quit`。
+  后台线程经 `App::channel` 回到 UI 线程调用。新增 `TrayOp::Quit`。**macOS 例外**：退出走
+  `NSApp::terminate`（不返回），`run_resident()` 不会返回 `true`、其后的 Drop 清理也不会执行。
 - **`windui::platform::resident_available()`**：常驻模式此刻能否启动（Linux 探测 X 显示；Windows `true`；
   macOS 尚未实现故 `false`），供下游启动前探测。
 
