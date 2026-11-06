@@ -58,6 +58,10 @@ fn main() {
             msgs.set(v);
             draft.set(String::new());
         })
+        // 粘贴图片（如系统截图）：状态栏显示收到的尺寸。
+        .on_paste_image(move |_, img| {
+            status.set(format!("收到粘贴的图片：{}×{}", img.width, img.height));
+        })
         .width_match()
         .height(64);
 

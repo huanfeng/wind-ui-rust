@@ -181,6 +181,15 @@ pub mod scrollbar {
 pub trait ClipboardProvider {
     fn get_text(&self) -> Option<String>;
     fn set_text(&self, text: &str);
+    /// 读取剪贴板里的图片（非预乘 RGBA8）。默认实现恒返回 `None`：
+    /// 只有声明支持图片的后端（Windows、Linux X11）才覆盖它；Wayland 与 macOS 暂不支持。
+    fn get_image(&self) -> Option<crate::render::DecodedImage> {
+        None
+    }
+    /// 把图片写入剪贴板，成功返回 `true`。默认实现恒返回 `false`（同 [`get_image`](Self::get_image)）。
+    fn set_image(&self, _img: &crate::render::DecodedImage) -> bool {
+        false
+    }
 }
 
 /// 代际索引：删除节点后 generation 自增，旧 id 自然失效。
@@ -3472,6 +3481,17 @@ impl EventCtx<'_> {
         if let Some(c) = self.tree.clipboard.as_ref() {
             c.set_text(text);
         }
+    }
+    /// 读取剪贴板图片（无剪贴板实现或后端不支持图片时返回 None）。
+    pub fn clipboard_get_image(&self) -> Option<crate::render::DecodedImage> {
+        self.tree.clipboard.as_ref().and_then(|c| c.get_image())
+    }
+    /// 写入剪贴板图片；成功返回 `true`（无剪贴板实现或后端不支持图片时为 `false`）。
+    pub fn clipboard_set_image(&self, img: &crate::render::DecodedImage) -> bool {
+        self.tree
+            .clipboard
+            .as_ref()
+            .is_some_and(|c| c.set_image(img))
     }
     /// 请求在 `pos`（逻辑坐标）弹出浮层菜单。宿主接管渲染、命中与项激活。
     /// `min_width`：最小宽度（0=按内容，兜 140 的默认下限；大于 0 时以它为准）。
@@ -8445,6 +8465,93 @@ mod tests {
         tree.dispatch_key(k(Key::End, false), Some(input)); // 光标到末尾、清选区
         tree.dispatch_key(k(Key::Other(0x56), true), Some(input)); // Ctrl+V 粘贴
         assert_eq!(txt.get(), "hellohello", "粘贴应在光标处插入剪贴板文本");
+    }
+
+    /// 可同时塞文本与图片的剪贴板桩（图片只读）。
+    struct ImageClip {
+        text: Option<String>,
+        image: Option<(u32, u32)>,
+    }
+    impl ClipboardProvider for ImageClip {
+        fn get_text(&self) -> Option<String> {
+            self.text.clone()
+        }
+        fn set_text(&self, _: &str) {}
+        fn get_image(&self) -> Option<crate::render::DecodedImage> {
+            self.image.map(|(w, h)| crate::render::DecodedImage {
+                width: w,
+                height: h,
+                rgba: vec![7; (w * h * 4) as usize],
+            })
+        }
+    }
+
+    type SizeLog = Rc<RefCell<Vec<(u32, u32)>>>;
+
+    /// 造一个挂了 `on_paste_image` 的输入框；回调把收到的图片尺寸记进返回的 `Rc`。
+    fn paste_image_tree(
+        text: Option<&str>,
+        image: Option<(u32, u32)>,
+    ) -> (Tree, NodeId, Signal<String>, SizeLog) {
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let g = got.clone();
+        let txt = signal(String::new());
+        let root = Element::col().width(200).height(40).child(
+            Element::text_input(txt, "ph").on_paste_image(move |_, img| {
+                assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
+                g.borrow_mut().push((img.width, img.height));
+            }),
+        );
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 40), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        tree.clipboard = Some(Box::new(ImageClip {
+            text: text.map(str::to_string),
+            image,
+        }));
+        (tree, input, txt, got)
+    }
+
+    fn ctrl_v(tree: &mut Tree, input: NodeId) {
+        let k = KeyEvent {
+            key: Key::Other(0x56),
+            pressed: true,
+            shift: false,
+            ctrl: true,
+            alt: false,
+            meta: false,
+        };
+        tree.dispatch_key(k, Some(input));
+    }
+
+    #[test]
+    fn paste_image_callback_fires_when_clipboard_has_only_image() {
+        let (mut tree, input, txt, got) = paste_image_tree(None, Some((2, 2)));
+        ctrl_v(&mut tree, input);
+        assert_eq!(&*got.borrow(), &[(2, 2)], "回调应收到 2×2 图");
+        assert_eq!(txt.get(), "", "只有图片时文本不变");
+    }
+
+    #[test]
+    fn paste_prefers_text_when_both_present() {
+        let (mut tree, input, txt, got) = paste_image_tree(Some("x"), Some((2, 2)));
+        ctrl_v(&mut tree, input);
+        assert_eq!(txt.get(), "x", "文本与图片并存时粘贴文本");
+        assert!(got.borrow().is_empty(), "此时不应触发图片回调");
+    }
+
+    #[test]
+    fn paste_image_without_callback_is_noop() {
+        let (mut tree, input, txt) = input_tree("");
+        tree.clipboard = Some(Box::new(ImageClip {
+            text: None,
+            image: Some((2, 2)),
+        }));
+        ctrl_v(&mut tree, input);
+        assert_eq!(txt.get(), "", "没挂回调时图片被忽略");
     }
 
     #[test]

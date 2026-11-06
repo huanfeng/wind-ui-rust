@@ -31,7 +31,7 @@
 | 宿主簿记 | 与协议无关、两个后端共用：点击计数、定时器、帧配速、出帧、事件后意图 | `src/platform/linux/host.rs` |
 | 键位 | 核心协议键盘映射表 → keysym → `Key` | `src/platform/linux/keys.rs` |
 | 输入法 | XIM 客户端（合成串回调风格） | `src/platform/linux/ime.rs` |
-| `Clipboard` | 独立线程拥有 `CLIPBOARD` 选区 | `src/platform/linux/clipboard.rs` |
+| `Clipboard` | 独立线程拥有 `CLIPBOARD` 选区；X11 下另支持 `image/png` 图片读写（读支持 INCR；PNG 编解码在 `src/platform/clip_image.rs`），原生 Wayland 暂不支持图片 | `src/platform/linux/clipboard.rs` |
 | 文件拖入 | XDND v5 目标端 | `src/platform/linux/dnd.rs` |
 | 全局热键 | 根窗口 `GrabKey` | `src/platform/linux/hotkey.rs` |
 | 事件循环原语 | `poll(2)` + 唤醒 socketpair | `src/platform/linux/sys.rs` |

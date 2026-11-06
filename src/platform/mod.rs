@@ -11,6 +11,10 @@
 //! 平台无关的窗口配置 `WindowConfig` 也定义在本层。
 //! win32 模块名（而非 `windows`）以免与外部 `windows` crate 冲突。
 
+// 剪贴板图片的 PNG / DIB 格式转换（纯函数，Windows 与 Linux 后端共用）。
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) mod clip_image;
+
 // 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
 #[cfg(windows)]
 pub mod win32;

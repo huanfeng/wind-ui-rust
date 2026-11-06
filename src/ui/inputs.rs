@@ -1084,6 +1084,8 @@ pub struct TextInput {
     preedit: RefCell<Preedit>,
     /// 单行模式下 Enter 的出口（见 [`crate::ui::Element::on_submit`]）。
     on_submit: Option<SubmitFn>,
+    /// 粘贴时剪贴板只有图片（没有文本）的出口。
+    on_paste_image: Option<PasteImageFn>,
     /// "改完即提交"的出口：Enter 或用户失焦时、且自上次提交后被编辑过才触发
     /// （见 [`crate::ui::Element::on_commit`]）。
     on_commit: Option<SubmitFn>,
@@ -1144,6 +1146,8 @@ impl TextMark {
 
 /// 单行 Enter 回调。与 `on_click` 同形（`ctx` 在首位）。
 type SubmitFn = Box<dyn FnMut(&mut EventCtx)>;
+/// 粘贴图片回调（见 [`crate::ui::Element::on_paste_image`]）。
+type PasteImageFn = Box<dyn FnMut(&mut EventCtx, crate::render::DecodedImage)>;
 /// 导航键回调：收本控件未消费的导航键，返回是否消费。
 ///
 /// 收整个 `KeyEvent` 而不只是 `Key`：Tab 必须能区分 Shift——应用把 Tab 用作「接受补全」
@@ -1179,6 +1183,7 @@ impl TextInput {
             composing: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
             on_submit: None,
+            on_paste_image: None,
             on_commit: None,
             edited: false,
             commit_base: String::new(),
@@ -1254,6 +1259,13 @@ impl TextInput {
         self.fire_commit(ctx);
     }
 
+    /// 设置粘贴图片回调（供 Builder；下游用 [`crate::ui::Element::on_paste_image`]）。
+    pub fn set_on_paste_image(
+        &mut self,
+        f: impl FnMut(&mut EventCtx, crate::render::DecodedImage) + 'static,
+    ) {
+        self.on_paste_image = Some(Box::new(f));
+    }
     /// 设置单行 Enter 回调（供 Builder；下游用 [`crate::ui::Element::on_submit`]）。
     pub fn set_on_submit(&mut self, f: impl FnMut(&mut EventCtx) + 'static) {
         self.on_submit = Some(Box::new(f));
@@ -2989,8 +3001,19 @@ impl Widget for TextInput {
                         if self.config.read_only {
                             return true;
                         }
-                        if let Some(s) = ctx.clipboard_get() {
-                            self.paste(ctx, &s);
+                        match ctx.clipboard_get().filter(|s| !s.is_empty()) {
+                            // 有文本一律粘文本（浏览器复制的内容常是「文本 + 图片」并存）。
+                            Some(s) => self.paste(ctx, &s),
+                            // 没有文本才看图片；先查文本再查图片，没挂回调时不付读图的代价。
+                            None => {
+                                if self.on_paste_image.is_some() {
+                                    if let Some(img) = ctx.clipboard_get_image() {
+                                        if let Some(f) = &mut self.on_paste_image {
+                                            ctx.app_callback(|ctx| f(ctx, img));
+                                        }
+                                    }
+                                }
+                            }
                         }
                         true
                     }

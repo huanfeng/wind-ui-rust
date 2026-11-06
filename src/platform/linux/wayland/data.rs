@@ -543,6 +543,11 @@ fn process_token() -> u64 {
     h.finish()
 }
 
+/// Wayland 剪贴板是否在用（在用时图片读写不走 X11，也暂不支持）。
+pub(in super::super) fn active() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
+
 /// 读剪贴板文本。`None` = Wayland 剪贴板没在用，调用方走 X11；在用时一律 `Some`。
 pub(in super::super) fn get_text() -> Option<Option<String>> {
     enum Job {

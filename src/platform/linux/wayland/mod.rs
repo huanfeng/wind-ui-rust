@@ -77,7 +77,9 @@ use scale::Scale;
 use shm::{create_buffer, write_pixels, Damage, ShmBuffer, ShmSlots};
 use xkb::Xkb;
 
-pub(super) use data::{get_text as clipboard_get, set_text as clipboard_set};
+pub(super) use data::{
+    active as clipboard_active, get_text as clipboard_get, set_text as clipboard_set,
+};
 
 /// 动画帧之间至少隔多久（ms）。刷新率由 `frame` 回调配速——回调本就按显示器的节拍来，
 /// 再叠一道 `host::FRAME_MS` 会让「回调到了但还差一点点到 16ms」错过一个垂直同步、

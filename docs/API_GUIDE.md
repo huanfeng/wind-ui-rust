@@ -602,6 +602,7 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .numeric()                  // 只允许输入数字：数字 / 打头的 `-` / 一个小数点（键入与粘贴同一把尺子）
     .on_submit(|ctx| ..)        // 单行 Enter 的出口（多行默认 Enter 插入换行、不触发）
     .submit_on_enter(true)      // 多行：Enter 触发 on_submit，Shift+Enter 换行；输入法组字中的 Enter 不提交
+    .on_paste_image(|ctx, img| ..)  // 粘贴时剪贴板只有图片（无文本）：回调收到非预乘 RGBA8 的 DecodedImage（见下）
     .on_commit(|ctx| ..)        // 「改完即提交」：改过之后 Enter 或用户失焦时触发一次
     .on_nav_key(|ctx, key| ..)  // 本控件未处理的 上/下 键（候选列表游标用）
     .on_click(|ctx| ..)         // 「这个框被点了」的旁路通知（仅左键）
@@ -610,6 +611,13 @@ Element::text_input(text, "占位符")               // text: Signal<String>；�
     .select_without_focus_when(jump, range)  // 同上但焦点不动（查找栏：焦点留在查询框）
     .marks(hits)                // 按区间挂底色：hits: Signal<Vec<TextMark>>（查找命中涂黄）
 ```
+> **粘贴图片**：`on_paste_image` 在 Ctrl+V / Cmd+V / 右键「粘贴」时，剪贴板有图片且**没有**文本才触发
+> （同时有文本则照常粘文本）。`EventCtx::clipboard_get_image()` / `clipboard_set_image(&DecodedImage)`
+> 可在任意回调里直接读写剪贴板图片。支持：Windows（读 `"PNG"` → `CF_DIBV5` → `CF_DIB`，写 `"PNG"` + `CF_DIB`）、
+> Linux X11（`image/png`，读支持 INCR 分段）；**原生 Wayland 与 macOS 暂不支持**（读返回 `None`、写返回 `false`，
+> 回调永不触发）。自定义 `ClipboardProvider` 只需按需覆盖带默认实现的 `get_image` / `set_image`。
+> windui 不解码 PNG 以外的格式，其它格式由使用方经 `register_decoder` 自行处理。
+>
 > `on_submit` / `on_nav_key` 不是便捷糖而是**唯一出口**：按键分发不冒泡，没有它们
 > 这两类键就地消失，详见 [8.3 焦点与键盘](#83-焦点与键盘)。
 

@@ -1886,6 +1886,31 @@ impl Element {
         self.config_text_input_widget(|ti| ti.set_on_submit(f), "on_submit()")
     }
 
+    /// 粘贴图片回调：用户粘贴（Ctrl+V / Cmd+V / 右键菜单"粘贴"）时，若剪贴板里有图片且
+    /// **没有**文本，调用 `f` 并跳过文本粘贴；有文本时照常粘贴文本、不触发本回调。
+    /// 只读输入框不响应粘贴，也不触发。
+    ///
+    /// 图片为非预乘 RGBA8（[`DecodedImage`](crate::render::DecodedImage)）。支持范围：
+    /// Windows（`"PNG"` / `CF_DIBV5` / `CF_DIB`）与 Linux X11（`image/png`）；原生 Wayland
+    /// 与 macOS 暂不支持（剪贴板读不出图片，回调永不触发）。
+    ///
+    /// 仅 `Element::text_input(..)` 可用（链到别处 debug 下 panic、release 下静默忽略）。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let q = signal(String::new());
+    /// let ui = Element::text_input(q, "").on_paste_image(|ctx, img| {
+    ///     ctx.toast_ok(format!("粘贴了 {}×{} 的图片", img.width, img.height));
+    /// });
+    /// ```
+    #[track_caller]
+    pub fn on_paste_image(
+        self,
+        f: impl FnMut(&mut crate::core::EventCtx, crate::render::DecodedImage) + 'static,
+    ) -> Self {
+        self.config_text_input_widget(|ti| ti.set_on_paste_image(f), "on_paste_image()")
+    }
+
     /// **"改完即提交"的出口**：用户改过内容后按 Enter、或焦点离开时触发一次——网页
     /// `<input>` 的 `change` 事件。文档改名、设置面板里一行行的输入框用它。
     /// （`Element::stepper` 的数值框不支持：它自带"失焦即规整"的提交语义。）
