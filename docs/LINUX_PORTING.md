@@ -195,6 +195,11 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
   `com.canonical.dbusmenu`（右键菜单，宿主自己画；勾选 / 禁用 / 分隔线 / 动态刷新）；
   通知走 `org.freedesktop.Notifications.Notify`。依赖 `zbus` 4（仅 Linux target、
   `default-features = false` + `async-io`，不引 tokio；Windows 构建不含 zbus）。
+- **通知点击**：每条通知带 `default` action；`notify.rs` 在第一条通知时另起一条监听线程
+  （独立连接，匹配规则订阅 `ActionInvoked` / `NotificationClosed`），按通知 id → 标签表
+  （最多 64 条）还原标签，经 `TrayEvent::Notification` 回 UI 线程调 `on_notification_click`。
+  监听线程阻塞在信号迭代器上，`Notifier` 释放时关其连接使它退出（同托盘监视线程）。
+  监听连接在第一条通知时建立，启动时总线不可达则这次监听放弃（点击不回调，通知照发）。
 - **空闲零 CPU**：D-Bus 收发在 zbus 内部线程，处理函数把事件入队并写**唤醒管道**
   （`sys::wake`，本就在 `poll(2)` 集合里）；UI 线程睡在 `poll` 上被内核唤醒，不轮询。
   UI → D-Bus 的信号 / 通知经 `mpsc` 交给专职线程，线程阻塞在 `recv()`。实测常驻进程空闲

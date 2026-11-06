@@ -2978,9 +2978,13 @@ unsafe fn apply_tray_ops() {
                     ts.remember_tooltip(s);
                 }
             }
-            // 气泡是一次性的，shell 重启后无需重放，故不进 `TrayState`。
-            crate::platform::tray::TrayOp::Notify { title, body } => {
+            // 气泡是一次性的，shell 重启后无需重放；只有标签进 `TrayState`（点击时用）。
+            crate::platform::tray::TrayOp::Notify { title, body, tag } => {
                 tray::notify(h, uid, &title, &body);
+                // 记下标签供点击时回调；同样在 OS 调用之后才借宿主。
+                if let Some(ts) = app_host().and_then(|host| host.tray.as_mut()) {
+                    ts.remember_notify_tag(tag);
+                }
             }
             crate::platform::tray::TrayOp::SetIcon { w, h: ih, rgba } => {
                 // 像素长度已在 `TrayHandle::set_icon_rgba` 校验过，走到这里失败是 GDI 的事。
@@ -3118,6 +3122,13 @@ unsafe fn on_tray_message(lparam: LPARAM) {
             // 执行意图：已无借用。
             run_tray_actions(main, actions);
         }
+        tray::TrayEvent::NotificationClick => {
+            let actions = app_host()
+                .and_then(|h| h.tray.as_mut())
+                .map(tray::run_notification_click)
+                .unwrap_or_default();
+            run_tray_actions(main, actions);
+        }
         tray::TrayEvent::Other => {}
     }
     // 托盘回调与热键回调同属"不属于任何窗口"的入口，收尾也必须同一套：菜单项里
@@ -3189,12 +3200,15 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
                 break;
             }
             // 先取出投递目标释放借用，再调 Shell_NotifyIconW（它会跨线程发消息）。
-            tray::TrayAction::Notify { title, body } => {
+            tray::TrayAction::Notify { title, body, tag } => {
                 let target = app_host()
                     .and_then(|h| h.tray.as_ref())
                     .map(|ts| ts.notify_target());
                 if let Some((h, uid)) = target {
                     tray::notify(h, uid, &title, &body);
+                    if let Some(ts) = app_host().and_then(|host| host.tray.as_mut()) {
+                        ts.remember_notify_tag(tag);
+                    }
                 }
             }
         }

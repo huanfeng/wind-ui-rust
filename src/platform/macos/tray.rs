@@ -83,7 +83,7 @@ pub(crate) fn apply_tray_ops() {
                         button.setToolTip(Some(&NSString::from_str(&s)));
                     }
                 }
-                crate::platform::tray::TrayOp::Notify { title, body } => {
+                crate::platform::tray::TrayOp::Notify { title, body, .. } => {
                     deliver_notification(&title, &body);
                 }
                 crate::platform::tray::TrayOp::SetIcon { w, h, rgba } => {
@@ -229,7 +229,7 @@ impl TrayTarget {
                     }
                     break;
                 }
-                TrayAction::Notify { title, body } => deliver_notification(&title, &body),
+                TrayAction::Notify { title, body, .. } => deliver_notification(&title, &body),
                 // TODO(macOS): 落地托盘回调的开窗请求。
                 //
                 // 配置已经排在核心层的旁路队列里（`app::take_callback_window`），缺的只是

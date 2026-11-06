@@ -239,6 +239,8 @@ pub(crate) enum TrayEvent {
     Menu(usize),
     /// 托盘可用性翻转（Watcher 上线 / 下线）。
     Availability(bool),
+    /// 用户点了通知（带发送时给的标签）。
+    Notification(Option<String>),
 }
 
 type Pixmap = Vec<(i32, i32, Vec<u8>)>;
@@ -548,11 +550,15 @@ impl TrayHost {
                 None
             }
         };
+        let shared2 = shared.clone();
         Self {
             tray,
             shared,
             link,
-            notifier: Notifier::new(bus.clone()),
+            notifier: Notifier::new(
+                bus.clone(),
+                Arc::new(move |tag| shared2.push(TrayEvent::Notification(tag))),
+            ),
             service,
         }
     }
@@ -568,6 +574,9 @@ impl TrayHost {
             match ev {
                 TrayEvent::Left => actions.extend(invoke(self.tray.on_left_click.as_mut())),
                 TrayEvent::Menu(i) => actions.extend(invoke(self.tray.item_callback(i))),
+                TrayEvent::Notification(tag) => {
+                    actions.extend(self.tray.notification_click(tag));
+                }
                 TrayEvent::Availability(up) => {
                     if let Some(cb) = self.tray.on_availability.as_mut() {
                         let mut ctx = crate::platform::tray::TrayCtx::default();
@@ -599,7 +608,9 @@ impl TrayHost {
     pub(super) fn apply_op(&mut self, op: TrayOp) {
         match op {
             TrayOp::SetTooltip(s) => self.set_tooltip(s),
-            TrayOp::Notify { title, body } => self.notifier.send(&title, &body),
+            TrayOp::Notify { title, body, tag } => {
+                self.notifier.send(&title, &body, tag.as_deref())
+            }
             TrayOp::SetIcon { w, h, rgba } => {
                 // 与 install / `TrayHandle::set_icon_rgba` 同口径：对不上的像素数据丢弃。
                 if w == 0 || h == 0 || rgba.len() as u64 != w as u64 * h as u64 * 4 {
@@ -617,8 +628,8 @@ impl TrayHost {
         }
     }
 
-    pub(super) fn notify(&mut self, title: &str, body: &str) {
-        self.notifier.send(title, body);
+    pub(super) fn notify(&mut self, title: &str, body: &str, tag: Option<&str>) {
+        self.notifier.send(title, body, tag);
     }
 
     fn set_tooltip(&mut self, s: String) {
@@ -957,6 +968,9 @@ mod tests {
 
     struct FakeNotifications {
         got: Arc<Mutex<Vec<Note>>>,
+        /// 每次 Notify 收到的 actions。
+        actions: Arc<Mutex<Vec<Vec<String>>>>,
+        next_id: AtomicU32,
     }
 
     #[zbus::interface(name = "org.freedesktop.Notifications")]
@@ -969,30 +983,53 @@ mod tests {
             _icon: String,
             summary: String,
             body: String,
-            _actions: Vec<String>,
+            actions: Vec<String>,
             _hints: HashMap<String, OwnedValue>,
             _timeout: i32,
         ) -> u32 {
             self.got.lock().unwrap().push((summary, body));
-            1
+            self.actions.lock().unwrap().push(actions);
+            self.next_id.fetch_add(1, Ordering::Relaxed)
         }
     }
 
-    fn start_notification_server(bus: &Bus) -> (Connection, Arc<Mutex<Vec<Note>>>) {
+    type Actions = Arc<Mutex<Vec<Vec<String>>>>;
+
+    fn start_notification_server(bus: &Bus) -> (Connection, Arc<Mutex<Vec<Note>>>, Actions) {
         let got = Arc::new(Mutex::new(Vec::new()));
+        let actions: Actions = Arc::default();
         let Bus::Address(a) = bus else { unreachable!() };
         let conn = ConnectionBuilder::address(a.as_str())
             .unwrap()
             .serve_at(
                 "/org/freedesktop/Notifications",
-                FakeNotifications { got: got.clone() },
+                FakeNotifications {
+                    got: got.clone(),
+                    actions: actions.clone(),
+                    next_id: AtomicU32::new(1),
+                },
             )
             .unwrap()
             .name("org.freedesktop.Notifications")
             .unwrap()
             .build()
             .unwrap();
-        (conn, got)
+        (conn, got, actions)
+    }
+
+    /// 假通知服务端发信号。
+    fn emit_notification_signal<B>(srv: &Connection, name: &str, body: &B)
+    where
+        B: serde::ser::Serialize + zbus::zvariant::DynamicType,
+    {
+        emit(
+            srv,
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            name,
+            body,
+        )
+        .unwrap();
     }
 
     fn wait_for(mut cond: impl FnMut() -> bool) -> bool {
@@ -1031,6 +1068,7 @@ mod tests {
         host.apply_op(TrayOp::Notify {
             title: "t".into(),
             body: "b".into(),
+            tag: Some("c".into()),
         });
         host.refresh_menu();
         assert!(host.poll_actions().is_empty());
@@ -1040,14 +1078,14 @@ mod tests {
     #[test]
     fn install_degrades_without_watcher_but_notifications_still_flow() {
         let pb = private_bus_or_skip!();
-        let (_srv, got) = start_notification_server(&pb.bus());
+        let (_srv, got, _) = start_notification_server(&pb.bus());
         let mut host = TrayHost::install(Tray::new(), &pb.bus());
         std::thread::sleep(Duration::from_millis(200));
         assert!(
             host.poll_actions().is_empty(),
             "初始没有 Watcher 不算「变化」"
         );
-        host.notify("标题", "正文 <b>&");
+        host.notify("标题", "正文 <b>&", None);
         assert!(wait_for(|| !got.lock().unwrap().is_empty()));
         assert_eq!(
             got.lock().unwrap()[0],
@@ -1058,9 +1096,9 @@ mod tests {
     #[test]
     fn notify_without_daemon_does_not_block_or_panic() {
         let pb = private_bus_or_skip!();
-        let mut n = Notifier::new(pb.bus());
+        let mut n = Notifier::new(pb.bus(), Arc::new(|_| panic!("没有守护进程，不该有点击")));
         let t0 = Instant::now();
-        n.send("t", "b"); // 总线上没有通知守护进程
+        n.send("t", "b", Some("c")); // 总线上没有通知守护进程
         assert!(
             t0.elapsed() < Duration::from_millis(500),
             "入队必须立即返回"
@@ -1250,5 +1288,121 @@ mod tests {
             vec![(1, 1, vec![4, 1, 2, 3])],
             "非法像素数据不得覆盖原图标"
         );
+    }
+
+    use std::sync::mpsc;
+
+    fn click_channel() -> (ClickFn, mpsc::Receiver<Option<String>>) {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        (
+            Arc::new(move |tag| {
+                let _ = tx.lock().unwrap().send(tag);
+            }),
+            rx,
+        )
+    }
+
+    use super::super::notify::ClickFn;
+
+    #[test]
+    fn notify_carries_default_action_and_click_maps_back_to_tag() {
+        let pb = private_bus_or_skip!();
+        let (srv, got, actions) = start_notification_server(&pb.bus());
+        let (cb, rx) = click_channel();
+        let mut n = Notifier::new(pb.bus(), cb);
+        n.send("t", "b", Some("conv1"));
+        assert!(wait_for(|| !got.lock().unwrap().is_empty()));
+        assert!(
+            actions.lock().unwrap()[0].iter().any(|a| a == "default"),
+            "Notify 的 actions 必须含 default：{:?}",
+            actions.lock().unwrap()[0]
+        );
+        assert!(wait_for(|| n.has_tag(1)));
+
+        // 干扰信号：非 default 的 action、别的应用的通知 id —— 都不得回调。
+        emit_notification_signal(&srv, "ActionInvoked", &(1u32, "other"));
+        emit_notification_signal(&srv, "ActionInvoked", &(999u32, "default"));
+        emit_notification_signal(&srv, "ActionInvoked", &(1u32, "default"));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some("conv1".to_string())
+        );
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "干扰信号不该产生额外回调"
+        );
+    }
+
+    #[test]
+    fn closed_notification_is_removed_from_tag_table() {
+        let pb = private_bus_or_skip!();
+        let (srv, got, _) = start_notification_server(&pb.bus());
+        let (cb, rx) = click_channel();
+        let mut n = Notifier::new(pb.bus(), cb);
+        n.send("t", "b", Some("old"));
+        assert!(wait_for(|| n.has_tag(1)));
+        emit_notification_signal(&srv, "NotificationClosed", &(1u32, 2u32));
+        assert!(
+            wait_for(|| !n.has_tag(1)),
+            "NotificationClosed 后映射应被移除"
+        );
+        // 已关闭的通知再被点：不回调。用第二条通知作哨兵，确认先到的那条被忽略。
+        n.send("t2", "b2", None);
+        assert!(wait_for(|| got.lock().unwrap().len() == 2));
+        assert!(wait_for(|| n.has_tag(2)));
+        emit_notification_signal(&srv, "ActionInvoked", &(1u32, "default"));
+        emit_notification_signal(&srv, "ActionInvoked", &(2u32, "default"));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None,
+            "第一个回调应来自无标签的第二条通知"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn notification_click_reaches_tray_callback_on_ui_thread() {
+        let pb = private_bus_or_skip!();
+        let (srv, _got, _) = start_notification_server(&pb.bus());
+        let tray = Tray::new().on_notification_click(|ctx, tag| {
+            if tag.as_deref() == Some("conv1") {
+                ctx.show_window();
+            }
+        });
+        let mut host = TrayHost::install(tray, &pb.bus());
+        host.apply_op(TrayOp::Notify {
+            title: "t".into(),
+            body: "b".into(),
+            tag: Some("conv1".into()),
+        });
+        assert!(wait_for(|| host.notifier.has_tag(1)));
+        emit_notification_signal(&srv, "ActionInvoked", &(1u32, "default"));
+        let mut acts = Vec::new();
+        assert!(wait_for(|| {
+            acts.extend(host.poll_actions());
+            !acts.is_empty()
+        }));
+        assert_eq!(acts, vec![TrayAction::Show]);
+    }
+
+    #[test]
+    fn dropping_notifier_stops_listener_thread() {
+        let pb = private_bus_or_skip!();
+        let (_srv, got, _) = start_notification_server(&pb.bus());
+        let (cb, _rx) = click_channel();
+        let mut n = Notifier::new(pb.bus(), cb);
+        n.send("t", "b", None);
+        assert!(wait_for(|| !got.lock().unwrap().is_empty()));
+        std::thread::sleep(Duration::from_millis(200)); // 监听线程已阻塞在迭代器上
+
+        let mut listener = n.take_listener().expect("监听线程应已创建");
+        let thread = listener.take_thread();
+        drop(listener);
+        let end = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < end && !thread.is_finished() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(thread.is_finished(), "释放后监听线程应在 2 秒内退出");
     }
 }

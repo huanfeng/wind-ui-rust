@@ -1523,9 +1523,9 @@ impl X11 {
                     self.request_close(id);
                 }
             }
-            TrayAction::Notify { title, body } => {
+            TrayAction::Notify { title, body, tag } => {
                 if let Some(t) = &mut self.tray {
-                    t.notify(&title, &body);
+                    t.notify(&title, &body, tag.as_deref());
                 }
             }
             // 刻意绕过 `hide_on_close` 与各窗口的关闭确认：托盘「退出」是常驻应用唯一的出口。
