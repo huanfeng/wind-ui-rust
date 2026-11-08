@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-11-08
+
 ### 新增
 
 - **Linux 系统托盘与桌面通知**：`App::tray(..)` / `TrayHandle::notify` 在 Linux 上经 D-Bus 接入
@@ -3173,7 +3175,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.28.0...v0.29.0
