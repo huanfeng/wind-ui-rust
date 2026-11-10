@@ -205,6 +205,16 @@ impl NodeId {
     pub(crate) fn as_u64(self) -> u64 {
         (u64::from(self.generation) << 32) | u64::from(self.index)
     }
+
+    /// Arena slot index. The generation remains part of the identity.
+    pub fn index(self) -> u32 {
+        self.index
+    }
+
+    /// Arena generation. A changed generation invalidates providers for old nodes.
+    pub fn generation(self) -> u32 {
+        self.generation
+    }
 }
 
 /// 紧凑格式 `#12`（复用过的槽位带代际：`#12g2`）。
@@ -224,6 +234,18 @@ impl std::fmt::Debug for NodeId {
 
 /// 纯内容控件接口。不持有也不访问树。
 pub trait Widget {
+    /// Platform-neutral accessibility role. Pure layout widgets return `None`.
+    fn accessibility_role(&self) -> Option<crate::accessibility::AccessibilityRole> {
+        None
+    }
+    /// Current localized accessibility name. `None` means this widget has no semantic label.
+    fn accessibility_name(&self) -> Option<String> {
+        None
+    }
+    /// Optional localized accessibility help/description.
+    fn accessibility_description(&self) -> Option<String> {
+        None
+    }
     /// 内容固有尺寸（content box，不含 padding）。容器/空控件返回 ZERO。
     /// `text` 供需要测量文本的控件（如 Label）使用。
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {

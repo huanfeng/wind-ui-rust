@@ -4,6 +4,7 @@
 //! 「拷贝 + R/B 交换」进一块 BGRA 上传缓冲，再 `SetDIBitsToDevice` 拷屏。不在 pixmap 上
 //! 原地交换，是因为宿主的局部重绘要靠它保存上一帧画面。空闲时阻塞在 `GetMessageW`，零 CPU。
 
+mod accessibility;
 pub mod clipboard;
 #[cfg(feature = "d2d")]
 pub(super) mod d2d;
@@ -33,6 +34,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::UiaReturnRawElementProvider;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
@@ -1980,6 +1982,15 @@ unsafe fn window_frame_interval_ms(hwnd: HWND) -> u128 {
     (1000 / fps.max(1)) as u128
 }
 
+/// True only for the OS UIA root-object request (`UiaRootObjectId`).
+///
+/// Every other `WM_GETOBJECT` object id — notably the MSAA `OBJID_CLIENT` value — must continue
+/// to fall through to `DefWindowProcW` untouched, so this gate is deliberately exact rather than
+/// a range check.
+fn is_uia_root_object(lparam: LPARAM) -> bool {
+    lparam.0 == windows::Win32::UI::Accessibility::UiaRootObjectId as isize
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1997,6 +2008,42 @@ unsafe extern "system" fn wnd_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as _);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        accessibility::WM_APP_ACCESSIBILITY => {
+            let request = lparam.0 as *mut accessibility::BridgeRequest;
+            if request.is_null() {
+                return LRESULT(0);
+            }
+            let Some(state) = state_from(hwnd) else {
+                return LRESULT(0);
+            };
+            // SAFETY: the provider allocates this request on its stack and SendMessageW keeps
+            // it alive until this synchronous arm returns. The request never escapes here.
+            unsafe {
+                match (*request).operation {
+                    accessibility::BridgeOperation::Snapshot => {
+                        (*request).snapshot = state.handler.accessibility_snapshot();
+                    }
+                    accessibility::BridgeOperation::Action { id, action } => {
+                        (*request).action_result =
+                            Some(state.handler.accessibility_action(id, action));
+                    }
+                }
+                (*request).delivered = true;
+            }
+            LRESULT(1)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_GETOBJECT if is_uia_root_object(lparam) => {
+            // Check liveness before constructing the root provider, then end the WindowState
+            // borrow before calling the OS UIA hand-off routine.
+            if state_from(hwnd).is_none() {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            let provider = accessibility::root_provider(hwnd);
+            // SAFETY: `hwnd` is alive and owned by this thread, `wparam`/`lparam` are the
+            // unmodified WM_GETOBJECT parameters, and `provider` outlives the call. The
+            // borrow keeps the COM reference alive across the OS UIA hand-off.
+            UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider)
         }
         WM_PAINT => {
             if let Some(state) = state_from(hwnd) {
@@ -4803,6 +4850,18 @@ mod tests {
                 unsafe { frame_size_for_client(w, h, scale, dpi, false, Default::default()) };
             assert!(fw > want.0 && fh > want.1, "带框窗口应计入标题栏与边框");
         }
+    }
+
+    #[test]
+    fn only_the_uia_root_object_id_takes_the_accessibility_path() {
+        use super::{is_uia_root_object, LPARAM};
+        // The UIA root request is the single object id that may create a raw provider.
+        let root = LPARAM(windows::Win32::UI::Accessibility::UiaRootObjectId as isize);
+        assert!(is_uia_root_object(root));
+        // MSAA client (`OBJID_CLIENT` = -4) and the window object (`OBJID_WINDOW` = 0) are not
+        // UIA roots and must keep the legacy `DefWindowProcW` path.
+        assert!(!is_uia_root_object(LPARAM(-4)));
+        assert!(!is_uia_root_object(LPARAM(0)));
     }
 
     #[test]
