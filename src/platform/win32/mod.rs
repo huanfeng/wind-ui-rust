@@ -2005,22 +2005,8 @@ unsafe extern "system" fn wnd_proc(
             // 焦点文本控件的光标是**绘制时**才算出来的：输入法相关的同步放在绘制之后，
             // 读到的才是本帧的值。
             sync_ime(hwnd, true);
-            // 帧路径也消费意图：`App::channel` 的 `on_message` 与 `on_interval` 的回调都
-            // 拿得到 `EventCtx`，它们请求的窗口操作/对话框/关窗与热键改绑都产生在**帧内**
-            // （pump 在 render 起始排空，定时器回调靠 InvalidateRect 汇到这一帧），
-            // 事件路径的消费点等不到它们——不在此落地就要拖到用户下一次点键盘鼠标，
-            // 表现为"后台任务完成了却半天不关窗"。
-            //
-            // 顺序与指针路径一致：窗口操作（含热键队列）→ 对话框 → 关窗。三者都在
-            // `state` 借用之外执行（铁律 6）：run_window_op 与阻塞式对话框都会同步重入本函数。
-            apply_window_op(hwnd);
-            apply_dialog_request(hwnd);
-            if state_from(hwnd)
-                .map(|s| s.handler.wants_close())
-                .unwrap_or(false)
-            {
-                destroy_window(hwnd);
-            }
+            // 帧路径也消费意图，理由与顺序见 `apply_frame_effects`。
+            apply_frame_effects(hwnd);
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
@@ -2282,14 +2268,7 @@ unsafe extern "system" fn wnd_proc(
                 //
                 // 这条臂此前从没真正跑通过（旧位置在 App 级宿主上，那里收不到广播，且
                 // 指针类型是错的），所以收尾的缺失一直被掩盖着，搬过来才第一次成为活路径。
-                apply_window_op(hwnd);
-                apply_dialog_request(hwnd);
-                if state_from(hwnd)
-                    .map(|s| s.handler.wants_close())
-                    .unwrap_or(false)
-                {
-                    destroy_window(hwnd);
-                }
+                apply_frame_effects(hwnd);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
@@ -2322,6 +2301,13 @@ unsafe extern "system" fn wnd_proc(
                 .unwrap_or(false);
             if need {
                 let _ = InvalidateRect(Some(hwnd), None, false);
+                // 隐藏 / 最小化的窗口收不到 WM_PAINT，回调排下的意图（托盘提示与图标、
+                // `ctx.show_window()`、关窗……）就会一直搁到窗口再次露面——而托盘常驻
+                // 应用恰恰是在这时最需要它们。此处直接走收尾；之后窗口露面时那一帧
+                // 再跑一次也无妨，意图都是取走即清空的。
+                if !window_presents(hwnd) {
+                    apply_hidden_frame_effects(hwnd);
+                }
             }
             LRESULT(0)
         }
@@ -2810,6 +2796,60 @@ unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     LRESULT(ht as isize)
 }
 
+/// 窗口此刻能否出帧：`InvalidateRect` 投给隐藏或最小化的窗口不会产生 `WM_PAINT`。
+fn can_present(visible: bool, iconic: bool) -> bool {
+    visible && !iconic
+}
+
+/// 帧路径的意图收尾：`App::channel` 的 `on_message` 与 `on_interval` 的回调都拿得到
+/// `EventCtx`，它们请求的窗口操作 / 对话框 / 关窗与热键改绑都产生在**帧内**（pump 在
+/// render 起始排空，定时器回调靠 `InvalidateRect` 汇到这一帧），事件路径的消费点等不到
+/// 它们——不在此落地就要拖到用户下一次点键盘鼠标，表现为"后台任务完成了却半天不关窗"。
+///
+/// 顺序与指针路径一致：窗口操作（含热键与托盘队列）→ 对话框 → 关窗。三者都在 `state`
+/// 借用之外执行（铁律 6）：`run_window_op` 与阻塞式对话框都会同步重入 `wnd_proc`。
+///
+/// 调用点：`WM_PAINT` 之后、`WM_SETTINGCHANGE`；窗口出不了帧时的 `WM_TIMER` 走
+/// [`apply_hidden_frame_effects`]。
+unsafe fn apply_frame_effects(hwnd: HWND) {
+    apply_window_op(hwnd);
+    apply_dialog_request(hwnd);
+    close_if_requested(hwnd);
+}
+
+/// 窗口隐藏 / 最小化时的收尾：同 [`apply_frame_effects`]，但对话框通常留到窗口露面再弹。
+///
+/// 隐藏窗口名下的模态框很可能弹在别的窗口后面（定时器不是用户输入，拿不到前台激活权），
+/// 又没有任务栏按钮；而模态期间宿主被禁用，用户从托盘唤出的是一个点不动的窗口。所以
+/// 对话框留给窗口露面后的那一帧，两种情况除外：
+/// - 同一批意图里的 `show_window` 已经把窗口显示出来了；
+/// - 这一批还要关窗：关窗即销毁宿主，排着的请求再也等不到那一帧。`defer_blocking` 也走
+///   这条队列，「退出前保存」这类闭包若被跳过就是丢数据，故维持与帧路径相同的
+///   「对话框 → 关窗」次序。
+unsafe fn apply_hidden_frame_effects(hwnd: HWND) {
+    apply_window_op(hwnd);
+    if window_presents(hwnd) || wants_close(hwnd) {
+        apply_dialog_request(hwnd);
+    }
+    close_if_requested(hwnd);
+}
+
+unsafe fn wants_close(hwnd: HWND) -> bool {
+    state_from(hwnd)
+        .map(|s| s.handler.wants_close())
+        .unwrap_or(false)
+}
+
+unsafe fn close_if_requested(hwnd: HWND) {
+    if wants_close(hwnd) {
+        destroy_window(hwnd);
+    }
+}
+
+unsafe fn window_presents(hwnd: HWND) -> bool {
+    can_present(IsWindowVisible(hwnd).as_bool(), IsIconic(hwnd).as_bool())
+}
+
 /// 事件分发后执行待处理的窗口操作（自定义标题栏按钮、`EventCtx::hide_window` 等）。
 ///
 /// 两段式：`state_from` 的借用在取出 op 的那条语句结束时即释放，随后 `run_window_op`
@@ -2817,7 +2857,7 @@ unsafe fn handle_nchittest(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 unsafe fn apply_window_op(hwnd: HWND) {
     let op = state_from(hwnd).and_then(|s| s.handler.take_window_op());
     run_window_op(hwnd, op);
-    // 标题同点消费：本函数在事件路径与 WM_PAINT 两处都被调用，正是
+    // 标题同点消费：本函数在事件路径与帧收尾（`apply_frame_effects` 等）都被调用，正是
     // `take_window_title` 契约要求的两个时机（换语言可能发生在点击回调里，也可能
     // 发生在 on_interval 里）。
     apply_window_title(hwnd);
@@ -4428,7 +4468,17 @@ unsafe fn state_from<'a>(hwnd: HWND) -> Option<&'a mut WindowState> {
 
 #[cfg(test)]
 mod live_windows_tests {
-    use super::{copy_swap_rect, should_quit_on_last_window, LiveWindows, Rect};
+    use super::{can_present, copy_swap_rect, should_quit_on_last_window, LiveWindows, Rect};
+
+    /// 只有可见且未最小化的窗口能出帧。判反的后果是：托盘常驻应用收进托盘后，
+    /// `on_interval` 回调里改托盘提示、`ctx.show_window()` 这类意图全部搁置到窗口露面。
+    #[test]
+    fn only_visible_restored_window_presents() {
+        assert!(can_present(true, false));
+        assert!(!can_present(false, false), "隐藏（收进托盘）");
+        assert!(!can_present(true, true), "最小化");
+        assert!(!can_present(false, true));
+    }
 
     /// 常规模式：最后一个窗口关掉才退出，之前不退。
     #[test]
