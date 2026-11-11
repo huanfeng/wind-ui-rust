@@ -483,7 +483,7 @@ Element::color_picker_opts(color, ColorPickerOpts::default()
 //  面板 = SV 方块（饱和度×明度）+ 色相条 + 透明度条 + HEX 框 + 预设色，全部双向绑同一个信号；
 //  点面板外或按 ESC 收起。HSVA 存在控件内部，故把明度拖到黑再拖回来色相不会丢（RGB 反算会丢）。
 Element::list(vec!["行1", "行2"], selected)       // selected: Signal<usize>
-Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选中为内缩圆角 pill（侧栏导航）
+Element::list_pill(vec!["方案", "外观"], selected)         // 同 list，选中为内缩圆角 pill（侧栏导航）；选中底在行间滑动
 Element::list_icons(vec![("收件箱", icon), ..], selected)  // 带前置图标的行（icon: ImageContent）
 Element::progress(value)                          // value: Signal<f32> (确定进度)
 Element::progress_indeterminate()                 // 不确定进度（忙碌动画）
@@ -2826,6 +2826,12 @@ Element::col().animate_height()
     .child(summary)
     .child(details.visible_signal(more))   // more 一变，卡片高度平滑伸缩
 ```
+
+**滑动选中高亮**（`Element::slide_highlight()`）：容器在子节点之前画一块选中底，选中行换了时从旧行**滑**到新行
+（时长 `anim.normal()`、曲线 `anim.easing()`，随主题），而不是旧行淡出、新行淡入。选中行由后代控件经
+`Widget::slide_highlight()` 自报样式并不再自己画选中底，容器深度优先取第一个。`list_pill` 已接入；自写行控件要用，
+需实现该方法并在选中时不画自己的选中底。同一行因布局变化挪位置（手风琴展开、窗口缩放）时瞬时跟随，不补间；
+减弱动效下瞬时到位。
 
 **布局过渡**（`Element::animate_layout()`，即 FLIP）：节点的布局位置变了（前面的兄弟显隐、增删，
 换行布局重新折行），就从旧位置滑到新位置。只管位置，尺寸照常一帧到位。

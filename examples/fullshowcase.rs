@@ -1202,24 +1202,38 @@ fn main() {
             ),
     );
 
+    let nav_picked = signal(0usize);
     let cp_22 = Element::card(
         "列表",
-        Element::list(
-            vec![
-                "收件箱",
-                "已发送",
-                "草稿箱",
-                "垃圾邮件",
-                "归档",
-                "重要",
-                "已加星标",
-            ],
-            picked,
-        )
-        .height(160)
-        .width_match()
-        .bg_role(Role::SurfaceAlt)
-        .corner(8.0),
+        Element::col()
+            .width_match()
+            .spacing(12)
+            .child(
+                Element::list(
+                    vec![
+                        "收件箱",
+                        "已发送",
+                        "草稿箱",
+                        "垃圾邮件",
+                        "归档",
+                        "重要",
+                        "已加星标",
+                    ],
+                    picked,
+                )
+                .height(160)
+                .width_match()
+                .bg_role(Role::SurfaceAlt)
+                .corner(8.0),
+            )
+            // 侧栏导航风格：选中底在行间滑动（点不同行看过渡）。
+            .child(
+                Element::list_pill(vec!["概览", "输入", "外观", "词库", "高级"], nav_picked)
+                    .height(180)
+                    .width_match()
+                    .bg_role(Role::SurfaceAlt)
+                    .corner(8.0),
+            ),
     );
 
     let cp_23 = Element::card(

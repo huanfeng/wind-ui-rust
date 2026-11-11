@@ -22,6 +22,7 @@ pub mod rich;
 pub mod row_source;
 pub mod segmented;
 pub mod select;
+pub mod slide_highlight;
 pub mod sortable_table;
 pub mod split;
 pub mod stepper;
@@ -768,6 +769,7 @@ pub struct Element {
     opacity_cond: Option<Box<dyn Fn() -> f32>>,
     animate_style: bool,
     animate_layout: bool,
+    slide_highlight: bool,
 }
 
 impl Element {
@@ -819,6 +821,7 @@ impl Element {
             opacity_cond: None,
             animate_style: false,
             animate_layout: false,
+            slide_highlight: false,
         }
     }
 
@@ -2239,6 +2242,21 @@ impl Element {
         self
     }
 
+    /// 滑动选中高亮：容器在子节点**之前**画一块选中底，选中行换了时它从旧行**滑**到新行
+    /// （时长与曲线取主题 `anim.normal()` / `anim.easing()`），而不是旧行淡出、新行淡入。
+    ///
+    /// 选中行由后代控件自报（[`Widget::slide_highlight`](crate::core::Widget::slide_highlight)），
+    /// 容器深度优先找第一个；目前 [`list_pill`](Self::list_pill) 的行会报。选中的行自己不再
+    /// 画选中底，所以只给**报了的**行用——否则选中行没有底色。
+    ///
+    /// 同一行因布局变化（手风琴展开、窗口缩放）挪位置时瞬时跟随，不补间；减弱动效档位下
+    /// 瞬时到位。嵌套时最近的声明容器负责；容器与选中行之间别夹裁剪 / 透明度 / 进出场层。
+    /// 已知限制：容器被隐藏期间选中变了，重新显示时会补播一段滑动。
+    pub fn slide_highlight(mut self) -> Self {
+        self.slide_highlight = true;
+        self
+    }
+
     /// 列表项动效（Compose `animateItem`）：挂在 [`list_signal`](Self::list_signal) 的行上，
     /// 新增的行淡入展开、删除的行淡出收起（播完才真正移除）、重排时滑到新位置。
     ///
@@ -2556,13 +2574,15 @@ impl Element {
     }
 
     /// 同 `list`，但选中/悬停为内缩圆角 pill 底（无左缘强调条）。侧栏导航等现代样式用。
+    /// 选中底在行间**滑动**（见 [`slide_highlight`](Self::slide_highlight)）。
     pub fn list_pill(items: Vec<impl Into<TextContent>>, selected: Signal<usize>) -> Self {
         let mut scroll = Self::scroll().fill();
         for (i, it) in items.into_iter().enumerate() {
-            let row = list::ListRow::new(it, selected, i).pill();
+            let row = list::ListRow::new(it, selected, i).pill().sliding();
             scroll = scroll.child(Self::base(Layout::None).widget(row).width_match());
         }
-        scroll
+        // 选中底由容器统一画并在行间滑动；行只管悬停底与文字色。
+        scroll.slide_highlight()
     }
 
     /// 标记为响应式节点：build 后注册到框架，每次 layout 前收到 `Widget::on_update`。
@@ -5369,6 +5389,9 @@ impl Element {
             layout_anim: self
                 .animate_layout
                 .then(|| Box::new(presence::LayoutAnim::new())),
+            slide_hl: self
+                .slide_highlight
+                .then(|| Box::new(slide_highlight::SlideHighlight::new())),
         };
         // 带方向的过渡（标签页）只认自身显隐，初值同理，见 `PresenceState::own_only`。
         let shown = (pf.shown || self.presence_dir.is_some()) && node.effective_visible();

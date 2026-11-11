@@ -200,6 +200,12 @@ pub struct NodeId {
 }
 
 impl NodeId {
+    /// 测试里造一个不挂在树上的 id（只当不透明身份比较用）。
+    #[cfg(test)]
+    pub(crate) fn from_raw(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
     /// 把（槽位，代际）拼成一个整数：同一时刻不同节点必不同，槽位复用后代际变了也不同。
     /// 给平台层当不透明身份比较用（如输入法的焦点控件身份）。
     pub(crate) fn as_u64(self) -> u64 {
@@ -396,6 +402,22 @@ pub trait Widget {
     /// `bounds` 是节点的绝对矩形（胶囊形控件据此返回 `h / 2`）。
     /// 默认 `None`（直角，或圆角已由节点样式表达）。
     fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
+        None
+    }
+    /// 本控件当前是不是"选中行"，是的话回答高亮该画成什么样。
+    ///
+    /// 祖先容器声明了 [`Element::slide_highlight`](crate::ui::Element::slide_highlight) 时，
+    /// 由容器统一画一块在行间滑动的高亮；选中的行据此报上自己的样式，并**自己不再画选中底**。
+    /// 默认 `None`（不是选中行，或不参与）。
+    ///
+    /// 契约：
+    /// - 行的身份是 `NodeId`。行节点被重建（`list_signal` 刷新、整批重建）就是换了一行，
+    ///   高亮会从旧位置滑过来；要在刷新后保持不动，得让行节点存活。
+    /// - 与启用态无关：禁用的选中行也应返回 `Some`，否则它既不画底、容器也不画，选中看不出来。
+    /// - 容器与选中行之间**不要夹**裁剪、不透明度或进出场过渡的中间层：高亮画在容器层，
+    ///   不受它们作用。
+    /// - 最近的声明容器负责：嵌套时外层不会越过内层容器去找行。
+    fn slide_highlight(&self) -> Option<crate::ui::slide_highlight::HighlightSpec> {
         None
     }
     /// 控件的**外框自己表达焦点**（聚焦时换强调色并加粗到 `metrics.border_width_focus`）。
@@ -853,6 +875,8 @@ pub struct Node {
     pub(crate) style_anim: Option<Box<crate::ui::presence::StyleAnim>>,
     /// 布局过渡状态（`Element::animate_layout`）。只有声明了的节点才分配。
     pub(crate) layout_anim: Option<Box<crate::ui::presence::LayoutAnim>>,
+    /// 滑动选中高亮状态（`Element::slide_highlight`）。只有声明了的容器才分配。
+    pub(crate) slide_hl: Option<Box<crate::ui::slide_highlight::SlideHighlight>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -3025,6 +3049,95 @@ impl Tree {
         }
     }
 
+    /// 滑动选中高亮：在所有子节点之前画一块，位置取当前选中行（见
+    /// [`Widget::slide_highlight`]），换行时由 [`SlideHighlight`] 补间。
+    ///
+    /// 补间状态存**内容坐标**（含滚动偏移）：滚动是布局位移，不该让补间中的高亮漂走。
+    /// 脏区取整个容器——补间期每帧报一次，范围小（侧栏），换来不必算新旧两处矩形的并集。
+    fn paint_slide_highlight(
+        &self,
+        canvas: &mut dyn Canvas,
+        n: &Node,
+        origin: Point,
+        sh: &crate::ui::slide_highlight::SlideHighlight,
+    ) {
+        // 不看启用态：禁用的列表选中行也得看得出选中（与改动前一致，文字色另有禁用调制）。
+        let found = self.find_slide_target(n, origin);
+        let theme = crate::theme::current();
+        let (sx, sy) = (n.scroll_x as f32, n.scroll_y as f32);
+        let to_content = |r: Rect| {
+            [
+                (r.x - origin.x) as f32 + sx,
+                (r.y - origin.y) as f32 + sy,
+                r.w as f32,
+                r.h as f32,
+            ]
+        };
+        let target = found.map_or([0.0; 4], |(_, r, spec)| {
+            let (ix, iy) = (spec.inset_x, spec.inset_y);
+            let q = to_content(r);
+            [
+                q[0] + ix,
+                q[1] + iy,
+                (q[2] - 2.0 * ix).max(0.0),
+                (q[3] - 2.0 * iy).max(0.0),
+            ]
+        });
+        let (q, active) = sh.resolve(found.map(|(id, _, _)| id), target, &theme);
+        if active {
+            crate::anim::request_repaint_in(Rect::new(origin.x, origin.y, n.bounds.w, n.bounds.h));
+        }
+        let Some((_, _, spec)) = found else {
+            return;
+        };
+        canvas.fill_round_rect(
+            q[0] - sx + origin.x as f32,
+            q[1] - sy + origin.y as f32,
+            q[2],
+            q[3],
+            spec.corner,
+            &Paint::fill(spec.color),
+        );
+    }
+
+    /// 在 `n` 的后代里深度优先找第一个自称"选中行"的节点，连同它的绝对矩形。
+    /// `origin` 是 `n` 的子节点坐标系原点（即 `n` 的绝对左上角）。
+    fn find_slide_target(
+        &self,
+        n: &Node,
+        origin: Point,
+    ) -> Option<(NodeId, Rect, crate::ui::slide_highlight::HighlightSpec)> {
+        for &c in &n.children {
+            let Some(cn) = self
+                .get(c)
+                .filter(|cn| cn.overlay.is_none() && cn.effective_visible())
+            else {
+                continue;
+            };
+            // 内层容器自己声明了滑动高亮：它的行归它管，外层不越过去找（否则同一行画两块）。
+            if cn.slide_hl.is_some() {
+                continue;
+            }
+            let flip = cn
+                .layout_anim
+                .as_ref()
+                .map_or(Point::new(0, 0), |a| a.shift());
+            let abs = Rect::new(
+                origin.x + cn.bounds.x + cn.offset.x + flip.x,
+                origin.y + cn.bounds.y + cn.offset.y + flip.y,
+                cn.bounds.w,
+                cn.bounds.h,
+            );
+            if let Some(spec) = cn.widget.slide_highlight() {
+                return Some((c, abs, spec));
+            }
+            if let Some(hit) = self.find_slide_target(cn, Point::new(abs.x, abs.y)) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
     /// 绘制子节点：先非 `raised`、后 `raised`，各自保持原有相对顺序（稳定分区）。
     /// 与 [`Tree::hit_node`] 的倒序遍历互为镜像——那边先测 `raised`，两者对"谁在上层"
     /// 的判断必须一致，否则会出现"画在上面却点不到"。
@@ -3038,6 +3151,9 @@ impl Tree {
     ) {
         // 锚定浮层不在此列：它由 `Tree::paint` 在整棵树之后单独绘制。留在这里画的话
         // 它照样会被后续兄弟盖住，「浮层」二字就落空了。
+        if let Some(sh) = &n.slide_hl {
+            self.paint_slide_highlight(canvas, n, origin, sh);
+        }
         let ordinary = |c: NodeId| {
             self.get(c)
                 .map(|cn| cn.overlay.is_none() && !cn.raised)

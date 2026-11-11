@@ -38,6 +38,8 @@ pub struct ListRow {
     hover: bool,
     /// pill 样式：选中/悬停底色画成内缩圆角矩形、且不绘左缘强调条（侧栏导航用）。
     pill: bool,
+    /// 选中底由祖先容器的滑动高亮统一画：本行选中时不自己画底，只报样式（`Widget::slide_highlight`）。
+    sliding: bool,
     /// 行底色"存在量"补间（0..1）：对固定目标色缩 alpha 淡入淡出，避免从透明黑 lerp 过黑。
     bg_amt: Cell<Transition<f32>>,
     /// 记住的底色（选中/悬停色），淡出期沿用以保 RGB 不变。
@@ -58,6 +60,7 @@ impl ListRow {
             index,
             hover: false,
             pill: false,
+            sliding: false,
             bg_amt: Cell::new(Transition::new(on)),
             bg_color: Cell::new(Color::TRANSPARENT),
             sel: Cell::new(Transition::new(on)),
@@ -81,7 +84,21 @@ impl ListRow {
     /// 启用 pill 选中样式：选中/悬停底为内缩圆角矩形、去掉左缘强调条。
     pub fn pill(mut self) -> Self {
         self.pill = true;
+        // pill 不画左缘强调条：构造时按"选中=有条"初始化过，首帧会闪一下再淡出。
+        self.sel = Cell::new(Transition::new(0.0));
         self
+    }
+    /// 选中底交给祖先容器的滑动高亮（[`Element::slide_highlight`](crate::ui::Element::slide_highlight)）
+    /// 统一画：本行选中时不再自己画底。须配合 `pill()`，且祖先必须声明了滑动高亮，否则选中行没有底色。
+    pub(crate) fn sliding(mut self) -> Self {
+        self.sliding = true;
+        // 构造时按"选中=有底"初始化过，这里改回"选中不自己画底"。
+        self.bg_amt = Cell::new(Transition::new(0.0));
+        self
+    }
+    /// 本行自己要不要画选中底。
+    fn own_selected_bg(&self) -> bool {
+        self.selected() && !self.sliding
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
@@ -123,8 +140,9 @@ impl Widget for ListRow {
         );
         // 底色：选中 > 悬停 > 无。用"存在量"补间对固定目标色缩 alpha 淡入淡出——
         // 记住当前底色，淡出期沿用其 RGB（不从透明黑 lerp，避免中途变暗）。
-        let want = if sel {
-            Some(lt.selected_bg(pal))
+        let want = if self.selected() {
+            // sliding：选中底归容器，这里也不叠悬停底（否则点完一行它先深一下再变浅）。
+            (!self.sliding).then(|| lt.selected_bg(pal))
         } else if self.hover {
             Some(lt.hover_bg(pal))
         } else {
@@ -265,13 +283,26 @@ impl Widget for ListRow {
         }
     }
 
+    fn slide_highlight(&self) -> Option<super::slide_highlight::HighlightSpec> {
+        if !(self.sliding && self.selected()) {
+            return None;
+        }
+        let th = crate::theme::current();
+        Some(super::slide_highlight::HighlightSpec {
+            inset_x: PILL_INSET_X,
+            inset_y: PILL_INSET_Y,
+            corner: th.metrics.corner_md,
+            color: th.list.selected_bg(&th.palette),
+        })
+    }
+
     fn focusable(&self) -> bool {
         true
     }
     fn reset_interaction(&mut self) {
         // 清悬停并把底色/左缘补间瞬时落定到当前选中态（隐藏期不回放 hover 淡出）。
         self.hover = false;
-        let on = if self.selected() { 1.0 } else { 0.0 };
+        let on = if self.own_selected_bg() { 1.0 } else { 0.0 };
         self.bg_amt.set(Transition::new(on));
         self.sel
             .set(Transition::new(if self.selected() && !self.pill {
