@@ -50,6 +50,8 @@ mod layout_anim_tests;
 mod marks_tests;
 mod menu;
 #[cfg(test)]
+mod pin_crash_tests;
+#[cfg(test)]
 mod presence_tests;
 #[cfg(test)]
 mod switch_tests;
