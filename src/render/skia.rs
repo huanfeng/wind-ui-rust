@@ -761,6 +761,8 @@ impl Canvas for SkiaCanvas<'_> {
             }
             // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
             Fit::None => (self.scale, self.scale),
+            // 1 图片像素 = 1 物理 px：恒等缩放 + 整数落点 → 纯 blit，无插值。
+            Fit::Physical => (1.0, 1.0),
         };
         let (mut sx, mut sy) = (sx, sy);
         let (mut dw, mut dh) = (iw * sx, ih * sy);
@@ -2185,6 +2187,67 @@ mod tests {
             (255, 0, 0),
             "近 1:1 应吸附为纯 blit，实得 ({r},{g},{b})"
         );
+    }
+
+    /// Physical：1 图片像素 = 1 物理 px——不随 DPI 缩放（scale=1.5 下源 6×6 画 6×6
+    /// 物理，而非 ×1.5），恒等变换纯 blit、无插值灰边，dst 比图大时留白居中。
+    #[test]
+    fn draw_image_physical_is_dpi_independent_blit() {
+        let mut pm = Pixmap::new(30, 30).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 源 6×6 纯红。dst 逻辑 20×20（scale=1.5 → 物理 30×30），图 6×6 物理居中。
+        let img = Image::from_rgba(6, 6, &[255u8, 0, 0, 255].repeat(6 * 6)).unwrap();
+        {
+            let mut te = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut te, 1.5);
+            c.draw_image(&img, Rect::new(0, 0, 20, 20), Fit::Physical, 0.0, 1.0);
+        }
+        // 居中 6×6 落在物理 [12,18)。内部全红（无插值）。
+        for y in 12..18 {
+            for x in 12..18 {
+                let (r, g, b) = px(&pm, x, y);
+                assert_eq!(
+                    (r, g, b),
+                    (255, 0, 0),
+                    "({x},{y}) 应为纯红（1:1 无插值），实得 ({r},{g},{b})"
+                );
+            }
+        }
+        // 图外框内、框外相邻像素保持背景白，证明尺寸没有被 ×1.5 放大。
+        let (r, g, b) = px(&pm, 11, 14);
+        assert_eq!((r, g, b), (255, 255, 255), "图左应留白");
+        let (r, g, b) = px(&pm, 18, 14);
+        assert_eq!((r, g, b), (255, 255, 255), "图右应留白");
+        let (r, g, b) = px(&pm, 29, 29);
+        assert_eq!((r, g, b), (255, 255, 255), "dst 远端应留白");
+    }
+
+    /// Physical dst 物理框小于图片：与 None/Cover 同语义——居中裁剪溢出，不缩图。
+    #[test]
+    fn draw_image_physical_crops_when_dst_smaller() {
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 源 8×8 纯红。dst 逻辑 2×2（scale=1.5 → 物理 3×3 < 8×8）。
+        let img = Image::from_rgba(8, 8, &[255u8, 0, 0, 255].repeat(8 * 8)).unwrap();
+        {
+            let mut te = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut te, 1.5);
+            c.draw_image(&img, Rect::new(0, 0, 2, 2), Fit::Physical, 0.0, 1.0);
+        }
+        // 图 8×8 居中于 3×3 框：tx = round_half_up(-2.5) = -2，可见区 [0,3) 显示源列 [2,5)，
+        // 即图中心 3×3 一带。框内全红（无插值），框外全白。
+        for y in 0..3 {
+            for x in 0..3 {
+                let (r, g, b) = px(&pm, x, y);
+                assert_eq!(
+                    (r, g, b),
+                    (255, 0, 0),
+                    "({x},{y}) 应为图片色（居中裁剪），实得 ({r},{g},{b})"
+                );
+            }
+        }
+        let (r, g, b) = px(&pm, 3, 3);
+        assert_eq!((r, g, b), (255, 255, 255), "框外应保持白");
     }
 
     /// draw_image：大圆角半径把四角裁掉（角落像素保持背景白）。

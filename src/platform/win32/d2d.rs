@@ -1520,6 +1520,7 @@ impl Canvas for D2DCanvas<'_> {
         let (dw0, dh0) = (dst.w as f32, dst.h as f32);
         // 按 fit 求缩放因子（镜像 SkiaCanvas::draw_image 语义）。None 用 1.0：1 图片像素 = 1 逻辑 dp，
         // DPI 物理化交给 context 的 SetTransform（不像软路径 ×scale，那是因软路径直画物理 pixmap）。
+        let scale = self.scale;
         let (sx, sy) = match fit {
             Fit::Fill => (dw0 / iw, dh0 / ih),
             Fit::Contain => {
@@ -1531,12 +1532,14 @@ impl Canvas for D2DCanvas<'_> {
                 (s, s)
             }
             Fit::None => (1.0, 1.0),
+            // 1 图片像素 = 1 物理 px：逻辑缩放取 1/scale，经 ctx 的 SetTransform 物理化后
+            // 恰为 1:1（吸附分支 dw×scale == iw 精确命中），不随 DPI 缩放、无插值。
+            Fit::Physical => (1.0 / scale, 1.0 / scale),
         };
         let (mut dw, mut dh) = (iw * sx, ih * sy);
         // 物理尺寸与源图相差不足 1 像素时吸附为 1:1（镜像 SkiaCanvas::draw_image）：
         // DPI 感知的矢量图标经此免去一次双线性重采样。此处 dw/dh 是逻辑值，
-        // 故与源像素比较前要 ×scale。
-        let scale = self.scale;
+        // 故与源像素比较前要 ×scale。Physical 恰好精确命中（dw×scale == iw），动作无变化。
         if scale > 0.0 && (dw * scale - iw).abs() < 1.0 && (dh * scale - ih).abs() < 1.0 {
             dw = iw / scale;
             dh = ih / scale;
@@ -2246,6 +2249,53 @@ mod tests {
         });
         assert_eq!(px(&pm, 20, 20), [255, 0, 0, 255], "矩形内应是红，不是蓝");
         assert_eq!(px(&pm, 2, 2), [255, 255, 255, 255], "矩形外应保持背景白");
+    }
+
+    /// Physical：1 图片像素 = 1 物理 px——不随 DPI 缩放（scale=1.5 下源 6×6 画 6×6
+    /// 物理，而非 ×1.5），无插值，dst 比图大时留白居中；dst 比图小时与 None/Cover
+    /// 同语义居中裁剪。
+    #[test]
+    fn draw_image_physical_is_dpi_independent_blit() {
+        // 用例 1：scale=1.5，源 6×6 纯红。dst 逻辑 30×30 于 (5,5)，图 6 物理 px
+        // 居中 → 逻辑宽 4、tx=5+(30-4)/2=18 逻辑 → 物理 [27,33)，内部全红、图外白。
+        let img = || {
+            crate::render::image::Image::from_rgba(6, 6, &[255u8, 0, 0, 255].repeat(6 * 6)).unwrap()
+        };
+        let pm = render(60, 60, 1.5, |c| {
+            c.draw_image(
+                &img(),
+                Rect::new(5, 5, 30, 30),
+                crate::render::image::Fit::Physical,
+                0.0,
+                1.0,
+            );
+        });
+        for y in 27..33 {
+            for x in 27..33 {
+                assert_eq!(px(&pm, x, y), [255, 0, 0, 255], "({x},{y}) 应为纯红");
+            }
+        }
+        assert_eq!(px(&pm, 26, 29), [255, 255, 255, 255], "图左应留白");
+        assert_eq!(px(&pm, 33, 29), [255, 255, 255, 255], "图右应留白");
+        // 用例 2：dst 物理 3×3（逻辑 2×2）小于源 8×8 → 居中裁剪，框内全红、框外全白。
+        let img2 = || {
+            crate::render::image::Image::from_rgba(8, 8, &[255u8, 0, 0, 255].repeat(8 * 8)).unwrap()
+        };
+        let pm2 = render(20, 20, 1.5, |c| {
+            c.draw_image(
+                &img2(),
+                Rect::new(0, 0, 2, 2),
+                crate::render::image::Fit::Physical,
+                0.0,
+                1.0,
+            );
+        });
+        for y in 0..3 {
+            for x in 0..3 {
+                assert_eq!(px(&pm2, x, y), [255, 0, 0, 255], "({x},{y}) 应为图片色");
+            }
+        }
+        assert_eq!(px(&pm2, 3, 3), [255, 255, 255, 255], "框外应保持白");
     }
 
     /// 图片缓存按**字节**封顶，而不只是条数。

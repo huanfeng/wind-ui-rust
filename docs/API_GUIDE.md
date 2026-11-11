@@ -713,10 +713,17 @@ caret_smooth_move = true      # 同一视觉行内移动时滑行过去（换行
 Element::image("logo.png")                        // 文件路径（按字节嗅探格式）
 Element::image_bytes(include_bytes!("logo.png"))  // 嵌入字节
 Element::image_rgba(w, h, &rgba)                   // 原始非预乘 RGBA8（len==w*h*4）
-    .fit(Fit::Cover)   // Contain（默认）/ Cover / Fill / None
+    .fit(Fit::Cover)   // Contain（默认）/ Cover / Fill / None / Physical
     .corner(8.0)       // 圆角裁剪：复用 Style.corner_radius，与背景/边框同源圆角
 ```
 - **加载失败不 panic**：显示淡灰占位框（错误可见）；需严格处理可直接用 `Image::from_*` 拿 `Result`。
+- **`Fit::Physical`**：1 图片像素 = 1 屏幕物理像素——不随 DPI 缩放，绘制恒无插值直出，
+  适合「已按目标 DPI 光栅好」的位图（如按窗口 DPI 出图的预览图）与像素风格素材；
+  HiDPI 屏（125%/150%）下不再被插值放大模糊。布局尺寸的「`像素 ÷ DPI` 折算（向上取整）」
+  **仅对 SVG 矢量源生效**（折算的是光栅输出网格，不丢边）；位图源的固有逻辑尺寸仍按
+  「1 像素 = 1 dp」计（与 `None` 相同），固定框用法不受影响。与其它 fit 一样在框内居中、
+  框小于图时居中裁剪；分数 DPI（如 1.25）下不同后端的落点可差 1 物理像素（既有吸附
+  差异，Physical 继承之）。
 - **`.fit()` 是图片专属**修饰符（误用检测同 text_input）。圆角直接用通用 `.corner()`，无需新方法。
 - **可嵌入其它控件**：图片能力下沉为 `ImageContent` 内容原语，控件持有它即可长出图片。例如按钮图标：
   ```rust

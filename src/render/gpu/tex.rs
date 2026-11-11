@@ -159,6 +159,8 @@ pub(super) fn place_image(
         }
         // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
         Fit::None => (scale, scale),
+        // 1 图片像素 = 1 物理 px：恒等缩放，落点取整后走 nearest 纯 blit。
+        Fit::Physical => (1.0, 1.0),
     };
     let (mut dw, mut dh) = (iw * sx, ih * sy);
     // 物理尺寸与源图相差不足 1 像素时吸附为 1:1：DPI 感知的矢量图标经此走上纯 blit
@@ -624,6 +626,26 @@ mod tests {
         // None：1 图片像素 = 1 逻辑 dp，物理为 ×scale。
         let (q, _) = place_image(Fit::None, 4.0, 2.0, dst, 2.0);
         assert_eq!([q[2], q[3]], [8.0, 4.0]);
+    }
+
+    /// Physical：恒等缩放（quad = 图片像素数，与 scale 无关），恒走 nearest；dst 比图小
+    /// 时与 None/Cover 同语义——居中裁剪（溢出由圆角遮罩收口），不缩图。
+    #[test]
+    fn physical_mode_is_dpi_independent_nearest() {
+        let dst = [0.0, 0.0, 40.0, 40.0];
+        // scale=2.0：quad 尺寸 = 图片像素数，与 scale 无关；框大留白居中并取整。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, dst, 2.0);
+        assert_eq!(q, [16.0, 16.0, 8.0, 8.0], "scale=2 下仍应为图片像素数");
+        assert!(near, "Physical 恒 1:1，应走 nearest");
+        // scale=1.5 同样恒等：不吸附逻辑参与、尺寸即像素数。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, dst, 1.5);
+        assert_eq!(q, [16.0, 16.0, 8.0, 8.0]);
+        assert!(near);
+        // dst 物理框小于图片：居中裁剪。tx = f32::round(-2.5) = -3（半数远离零，
+        // 与软后端 `round_half_up` 的向 +∞ 方向不同，均为既有行为）。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, [0.0, 0.0, 3.0, 3.0], 1.5);
+        assert_eq!(q, [-3.0, -3.0, 8.0, 8.0]);
+        assert!(near);
     }
 
     /// 近 1:1 吸附：物理尺寸与源图差**不足 1 物理像素**时按 1:1 画，并走 nearest。
