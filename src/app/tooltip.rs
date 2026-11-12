@@ -39,7 +39,29 @@ pub(super) struct TooltipState {
     pub(super) shown: Cell<bool>,
 }
 
-/// 到点后第 `elapsed_ms` 毫秒的淡入不透明度。动画关闭时恒为 1；随 `WINDUI_ANIM_SCALE` 放慢。
+/// 弹出起始缩放：从这个倍数放大到原大。只能 ≤ 1——合成层缩放不带祖先裁剪，放大会越界。
+const POP_FROM: f32 = 0.9;
+
+/// 弹出进度 `p` 下的缩放倍数。减弱动效档位只淡入不缩放（缩放属位移类）。
+fn pop_scale(p: f32) -> f32 {
+    if crate::anim::movement_enabled() {
+        POP_FROM + (1.0 - POP_FROM) * p
+    } else {
+        1.0
+    }
+}
+
+/// 缩放支点：浮层上离指针最近的点。浮层默认落在指针右下，支点即左上角，看起来是从指针处
+/// "弹"出来；翻到上方时落在下边缘，贴边收缩时落在指针正下/上方。
+fn pop_pivot(pos: Point, r: Rect) -> (f32, f32) {
+    (
+        pos.x.clamp(r.x, r.x + r.w) as f32,
+        pos.y.clamp(r.y, r.y + r.h) as f32,
+    )
+}
+
+/// 到点后第 `elapsed_ms` 毫秒的弹出进度（0→1，减速曲线），同时驱动淡入与放大。
+/// 动画关闭时恒为 1；随 `WINDUI_ANIM_SCALE` 放慢。
 fn fade_in(elapsed_ms: u64, duration_ms: u32) -> f32 {
     if !crate::anim::enabled() || duration_ms == 0 {
         return 1.0;
@@ -136,16 +158,18 @@ impl TooltipState {
         let size = Size::new(ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);
         let (w, h) = (size.w, size.h);
         let Point { x, y } = place(self.pos, size, ws);
-        // 到点后淡入（只淡入：指针移开即消失，残影会挡住用户正要看的东西）。按"距到点
+        // 到点后弹出（只做入场、不做退场：指针移开即消失，残影会挡住用户正要看的东西）。按"距到点
         // 时刻"算而不存状态：到点那帧未必恰好落在延时边界上，起点仍是同一刻。
         let alpha = fade_in(
             now_ms.saturating_sub(self.since_ms + delay),
             theme.anim.fast(),
         );
         if alpha < 1.0 {
-            let area = Rect::new(x, y, w, h).inflate(2);
+            let rect = Rect::new(x, y, w, h);
+            let area = rect.inflate(2);
             crate::anim::request_repaint_in(area);
-            canvas.push_layer_in(alpha, area);
+            // 弹出：淡入的同时从指针旁的角放大到原大。缩放只缩小（≤1），合成不越出 area。
+            canvas.push_layer_scaled(alpha, area, pop_scale(alpha), pop_pivot(self.pos, rect));
         }
         self.paint_body(canvas, &text, Rect::new(x, y, w, h), theme);
         if alpha < 1.0 {
@@ -259,6 +283,62 @@ mod tests {
         crate::anim::set_motion_level(crate::anim::MotionLevel::Off);
         assert_eq!(at(0), done, "动画关闭时到点即完整显示");
         crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
+    }
+
+    /// 弹出：刚到点时浮层比最终小、且缩在指针旁的角上；淡入结束与"早就显示着"同大。
+    /// 减弱动效档位只淡入、不缩放。
+    #[test]
+    fn tooltip_pops_from_the_cursor_corner() {
+        let red = crate::geometry::Color::rgb(255, 0, 0);
+        let delay = Theme::default().tooltip.delay_ms();
+        // 非白像素的包围盒（描边红色，量得出浮层外框）。
+        let bbox = |pm: &tiny_skia::Pixmap| {
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+            for y in 0..pm.height() {
+                for x in 0..pm.width() {
+                    let p = pm.pixel(x, y).unwrap();
+                    if (p.red(), p.green(), p.blue()) != (255, 255, 255) {
+                        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                    }
+                }
+            }
+            (x0, y0, x1, y1)
+        };
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
+        let at = |dt: u64| bbox(&paint_tooltip_at(Some(red), delay + dt).0);
+        let (mid, done) = (at(3), at(10_000));
+        assert!(
+            mid.2 - mid.0 < done.2 - done.0 && mid.3 - mid.1 < done.3 - done.1,
+            "中途比最终小：{mid:?} vs {done:?}"
+        );
+        assert!(
+            mid.0.abs_diff(done.0) <= 1 && mid.1.abs_diff(done.1) <= 1,
+            "左上角（离指针最近）钉住不动：{mid:?} vs {done:?}"
+        );
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Reduced);
+        assert_eq!(at(3), done, "减弱动效只淡入，不缩放");
+        crate::anim::set_motion_level(crate::anim::MotionLevel::Full);
+    }
+
+    /// 支点：默认在左上角；翻到指针上方在下边缘；贴边时落在指针正对的边上。
+    #[test]
+    fn pop_pivot_is_the_point_nearest_the_cursor() {
+        let r = Rect::new(112, 120, 100, 30);
+        assert_eq!(
+            pop_pivot(Point::new(100, 100), r),
+            (112.0, 120.0),
+            "右下默认：左上角"
+        );
+        assert_eq!(
+            pop_pivot(Point::new(100, 200), r),
+            (112.0, 150.0),
+            "翻到上方：下边缘"
+        );
+        assert_eq!(
+            pop_pivot(Point::new(150, 100), r),
+            (150.0, 120.0),
+            "水平贴边：指针正上方"
+        );
     }
 
     /// 主题给了描边色才描，且默认 1 物理像素：125% 下左边沿一行只染 1 列，不被摊成两列灰。
