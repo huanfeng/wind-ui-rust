@@ -155,3 +155,59 @@ fn late_callback_guarded_by_try_set_survives_rebuild() {
     assert!(err.is_ok(), "try_set 门禁的迟到收尾不应 panic");
     assert_eq!(*wrote.borrow(), Some(false), "死句柄上 try_set 应报 false");
 }
+
+/// 对话框 show 被 detach 永不回收：登记表须跟遮罩节点走，整代重建后不得无界增长。
+#[test]
+fn modal_registry_does_not_grow_across_switcher_rebuilds() {
+    let _motion = MotionOff::on();
+    let gen = signal(0u64);
+    let app = App::new("t", W, H).content(Element::col().fill().bg(Color::WHITE).child(
+        Element::switcher(gen, move |_| {
+            let show = signal(false);
+            Element::dialog(show, Element::leaf().size(BLOCK_W, 60).bg(RED))
+        }),
+    ));
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    render(&mut h);
+    assert!(h.tree.modal_count() >= 1, "前提：对话框遮罩已登记");
+    // 新代先于旧代删除登记，稳态会多一条在途；以第 2 代为基线，之后不得再涨。
+    set(&mut h, gen, 1);
+    render(&mut h);
+    let base = h.tree.modal_count();
+    for g in 2..=9u64 {
+        set(&mut h, gen, g);
+        render(&mut h);
+    }
+    assert_eq!(h.tree.modal_count(), base, "登记表随重建增长");
+}
+
+/// 两个并列对话框同时打开，下面那个所在子树重建后，ESC 仍先关上面那个：
+/// 登记表的顺序即关闭顺序，重建只能原位换节点，不能把它挪到末尾。
+#[test]
+fn rebuilt_dialog_keeps_its_esc_order() {
+    let _motion = MotionOff::on();
+    let gen = signal(0u64);
+    let (lower, upper) = (signal(true), signal(true));
+    let app = App::new("t", W, H).content(
+        Element::col()
+            .fill()
+            .bg(Color::WHITE)
+            .child(Element::switcher(gen, move |_| {
+                Element::dialog(lower, Element::leaf().size(BLOCK_W, 60).bg(RED))
+            }))
+            .child(Element::dialog(
+                upper,
+                Element::leaf().size(BLOCK_W, 60).bg(RED),
+            )),
+    );
+    let mut h = app.into_handler_for_test();
+    h.set_scale(1.0);
+    render(&mut h);
+    set(&mut h, gen, 1);
+    render(&mut h);
+    render(&mut h);
+    assert!(h.tree.close_topmost_modal(), "应关掉一个对话框");
+    assert!(!upper.get(), "先关的应是上面那个");
+    assert!(lower.get(), "下面那个（重建过）应还开着");
+}

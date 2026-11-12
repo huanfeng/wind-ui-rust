@@ -1129,7 +1129,7 @@ pub struct Tree {
     ///
     /// 挂在树上而非线程全局：同线程跑多个窗口时，全局栈会让在 A 窗口按下的 ESC 关掉
     /// B 窗口的对话框。归属到树，每个宿主只看得见自己那棵树上的遮罩。
-    modals: Vec<Signal<bool>>,
+    modals: Vec<(NodeId, Signal<bool>)>,
     /// 本树上所有锚定浮层节点（见 [`Node::overlay`]），按插入先序登记。
     ///
     /// 需要这份登记而不是每次遍历全树找 `overlay` 节点：绘制、命中、轻量关闭三条
@@ -1210,23 +1210,39 @@ impl Tree {
         self.pending_dialog.take()
     }
 
-    /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
+    /// 登记一个对话框遮罩（节点 + 显示信号，`Element::build` 在插入遮罩节点时调用）。
     ///
-    /// 同一个信号重复登记会被忽略：子树重建会让同一个 `Element::dialog` 再走一次
-    /// `build`，不去重则栈随重建次数无界增长。
-    pub(crate) fn register_modal(&mut self, show: Signal<bool>) {
-        if !self.modals.contains(&show) {
-            self.modals.push(show);
+    /// 登记跟着遮罩节点的生命周期走、不跟信号走：`show` 常在比对话框长寿的作用域里创建，
+    /// 子树重建删掉旧遮罩后信号仍活着，只看信号存活会让本表越积越长。故登记时顺带剔除
+    /// 已删节点。同一个 `show` 重建后**原位**换成新节点：本表的顺序就是 ESC 的关闭顺序，
+    /// 追加到末尾会让重建过的对话框跳到并列对话框之上。
+    pub(crate) fn register_modal(&mut self, node: NodeId, show: Signal<bool>) {
+        if let Some(entry) = self.modals.iter_mut().find(|(_, s)| *s == show) {
+            entry.0 = node;
+        } else {
+            self.modals.push((node, show));
         }
+        self.prune_modals();
+    }
+
+    /// 剔除遮罩节点已被删除（`NodeId` 带代次，`get` 返回 None）或信号已失效的登记。
+    fn prune_modals(&mut self) {
+        let mut modals = std::mem::take(&mut self.modals);
+        modals.retain(|(n, s)| self.get(*n).is_some() && s.is_alive());
+        self.modals = modals;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn modal_count(&self) -> usize {
+        self.modals.len()
     }
 
     /// 关闭本树上最顶层（最内层）的可见对话框。返回是否确实关掉了一个。
     ///
-    /// 顺带清掉句柄已失效的登记（子树连同其信号一起被回收后留下的空壳），使反复重建
-    /// 带对话框的子树不会让本栈越积越长。
+    /// 顺带清掉遮罩节点已删除的登记，使反复重建带对话框的子树不会让本栈越积越长。
     pub(crate) fn close_topmost_modal(&mut self) -> bool {
-        self.modals.retain(|s| s.is_alive());
-        for sig in self.modals.iter().rev() {
+        self.prune_modals();
+        for (_, sig) in self.modals.iter().rev() {
             if sig.get() {
                 sig.set(false);
                 return true;
@@ -1782,7 +1798,11 @@ impl Tree {
     /// 鼠标移动的命中测试里都会被调用。绝大多数时候一个对话框都没开，那时只需扫一遍
     /// 长度通常为 0 的信号表。
     fn overlay_in_modal_scope(&self, id: NodeId) -> bool {
-        if !self.modals.iter().any(|s| s.is_alive() && s.get()) {
+        if !self
+            .modals
+            .iter()
+            .any(|(n, s)| self.get(*n).is_some() && s.is_alive() && s.get())
+        {
             return true;
         }
         let Some(scope) = self.topmost_modal() else {

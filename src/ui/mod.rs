@@ -5422,7 +5422,7 @@ impl Element {
         }
         // 对话框遮罩登记到树上（先序：父在前、子在后，故嵌套对话框中最内层落在栈顶）。
         if let Some(show) = modal {
-            tree.register_modal(show);
+            tree.register_modal(id, show);
         }
         for mut ce in children {
             // 自由摆放只有 stack 认：row/col/scroll 按自己的流排布，静默忽略会让人以为坐标写错了。
