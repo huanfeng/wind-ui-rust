@@ -2830,7 +2830,9 @@ Element::col().animate_height()
 **滑动选中高亮**（`Element::slide_highlight()`）：容器在子节点之前画一块选中底，选中行换了时从旧行**滑**到新行
 （时长 `anim.normal()`、曲线 `anim.easing()`，随主题），而不是旧行淡出、新行淡入。选中行由后代控件经
 `Widget::slide_highlight()` 自报样式并不再自己画选中底，容器深度优先取第一个。`list_pill` 已接入；自写行控件要用，
-需实现该方法并在选中时不画自己的选中底。同一行因布局变化挪位置（手风琴展开、窗口缩放）时瞬时跟随，不补间；
+需实现该方法并在选中时不画自己的选中底。自己用元素拼的行（图标 + 文字的侧栏项）不必写控件：给行元素挂
+`Element::slide_target(|| 选中时 Some(HighlightSpec{…}))`，颜色在闭包里读 `theme::current()` 以跟随换主题，
+选中行自己同样不画底（见 `examples/settings.rs` 侧栏）。同一行因布局变化挪位置（手风琴展开、窗口缩放）时瞬时跟随，不补间；
 减弱动效下瞬时到位。
 
 **布局过渡**（`Element::animate_layout()`，即 FLIP）：节点的布局位置变了（前面的兄弟显隐、增删，

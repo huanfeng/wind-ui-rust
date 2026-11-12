@@ -770,6 +770,7 @@ pub struct Element {
     animate_style: bool,
     animate_layout: bool,
     slide_highlight: bool,
+    slide_target: Option<Box<dyn Fn() -> Option<slide_highlight::HighlightSpec>>>,
 }
 
 impl Element {
@@ -822,6 +823,7 @@ impl Element {
             animate_style: false,
             animate_layout: false,
             slide_highlight: false,
+            slide_target: None,
         }
     }
 
@@ -2246,7 +2248,8 @@ impl Element {
     /// （时长与曲线取主题 `anim.normal()` / `anim.easing()`），而不是旧行淡出、新行淡入。
     ///
     /// 选中行由后代控件自报（[`Widget::slide_highlight`](crate::core::Widget::slide_highlight)），
-    /// 容器深度优先找第一个；目前 [`list_pill`](Self::list_pill) 的行会报。选中的行自己不再
+    /// 容器深度优先找第一个；目前 [`list_pill`](Self::list_pill) 的行会报；自己用元素拼的行用
+    /// [`slide_target`](Self::slide_target) 自报（同一节点两者都有时控件的回答优先）。选中的行自己不再
     /// 画选中底，所以只给**报了的**行用——否则选中行没有底色。
     ///
     /// 同一行因布局变化（手风琴展开、窗口缩放）挪位置时瞬时跟随，不补间；减弱动效档位下
@@ -2254,6 +2257,19 @@ impl Element {
     /// 已知限制：容器被隐藏期间选中变了，重新显示时会补播一段滑动。
     pub fn slide_highlight(mut self) -> Self {
         self.slide_highlight = true;
+        self
+    }
+
+    /// 让**任意元素**充当 [`slide_highlight`](Self::slide_highlight) 容器里的"行"：闭包在选中
+    /// 时返回高亮样式、否则 `None`。内置 `list` 行自带这层回答，自己拼的导航行（图标 + 文字）
+    /// 用它。闭包每帧求值，须是纯函数；颜色请在闭包里读 `theme::current()`，这样运行期换主题
+    /// 照常跟随。契约同 [`Widget::slide_highlight`](crate::core::Widget::slide_highlight)：
+    /// 选中时本行**不要自己再画底**，行的身份是节点，重建即视为换行。
+    pub fn slide_target(
+        mut self,
+        f: impl Fn() -> Option<slide_highlight::HighlightSpec> + 'static,
+    ) -> Self {
+        self.slide_target = Some(Box::new(f));
         self
     }
 
@@ -5389,6 +5405,7 @@ impl Element {
             layout_anim: self
                 .animate_layout
                 .then(|| Box::new(presence::LayoutAnim::new())),
+            slide_target: self.slide_target,
             slide_hl: self
                 .slide_highlight
                 .then(|| Box::new(slide_highlight::SlideHighlight::new())),

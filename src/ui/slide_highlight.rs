@@ -300,6 +300,70 @@ mod tests {
         }
     }
 
+    /// 自拼的行用 `Element::slide_target` 自报选中：高亮同样滑过去，而不是瞬移。
+    #[test]
+    fn custom_row_slide_target_slides_through_real_paint() {
+        use crate::core::Tree;
+        use crate::geometry::{Color, Size};
+        use crate::render::SkiaCanvas;
+        use crate::signal::signal;
+        use crate::ui::Element;
+
+        let th = setup();
+        let sel = signal(0usize);
+        let row = |i: usize| {
+            Element::leaf()
+                .width_match()
+                .height(40)
+                .slide_target(move || {
+                    (sel.get() == i).then(|| HighlightSpec {
+                        inset_x: 0.0,
+                        inset_y: 0.0,
+                        corner: 6.0,
+                        color: Color::rgb(0, 0, 0),
+                    })
+                })
+        };
+        let ui = Element::col()
+            .size(200, 200)
+            .slide_highlight()
+            .child(row(0))
+            .child(row(1))
+            .child(row(2));
+        let mut tree = Tree::new();
+        let root = ui.build(&mut tree);
+        tree.root = Some(root);
+        let mut eng = crate::text::NullTextEngine;
+        let mut frame = |tree: &mut Tree| {
+            tree.layout_root(Size::new(200, 200), &mut eng);
+            let mut pm = tiny_skia::Pixmap::new(200, 200).unwrap();
+            pm.fill(tiny_skia::Color::WHITE);
+            {
+                let mut eng2 = crate::text::NullTextEngine;
+                let mut cv = SkiaCanvas::with_text(&mut pm, &mut eng2, 1.0);
+                tree.paint(&mut cv);
+            }
+            ink(&pm).0
+        };
+        let y0 = frame(&mut tree);
+        sel.set(2);
+        set_clock_ms(2_000);
+        let y_start = frame(&mut tree);
+        assert!(
+            (y_start - y0).abs() < 1.0,
+            "刚切换时仍在旧行：{y0} → {y_start}"
+        );
+        set_clock_ms(2_000 + th.anim.normal() as u64 / 2);
+        let y_mid = frame(&mut tree);
+        set_clock_ms(2_000 + th.anim.normal() as u64 + 100);
+        let y_end = frame(&mut tree);
+        assert!(y_end > y0 + 40.0, "最终落在第 3 行：{y0} → {y_end}");
+        assert!(
+            y_mid > y0 + 5.0 && y_mid < y_end - 5.0,
+            "中途在两行之间：{y0} < {y_mid} < {y_end}"
+        );
+    }
+
     /// 整块 pixmap 的"暗度"总和（255 - 通道值），比墨量更能反映叠层加深。
     fn darkness(pm: &tiny_skia::Pixmap) -> u64 {
         pm.pixels()

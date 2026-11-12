@@ -877,6 +877,9 @@ pub struct Node {
     pub(crate) layout_anim: Option<Box<crate::ui::presence::LayoutAnim>>,
     /// 滑动选中高亮状态（`Element::slide_highlight`）。只有声明了的容器才分配。
     pub(crate) slide_hl: Option<Box<crate::ui::slide_highlight::SlideHighlight>>,
+    /// 自定义行的"我是选中行"自报（`Element::slide_target`），与 `Widget::slide_highlight` 并列生效。
+    pub(crate) slide_target:
+        Option<Box<dyn Fn() -> Option<crate::ui::slide_highlight::HighlightSpec>>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -3128,7 +3131,11 @@ impl Tree {
                 cn.bounds.w,
                 cn.bounds.h,
             );
-            if let Some(spec) = cn.widget.slide_highlight() {
+            if let Some(spec) = cn
+                .widget
+                .slide_highlight()
+                .or_else(|| cn.slide_target.as_ref().and_then(|f| f()))
+            {
                 return Some((c, abs, spec));
             }
             if let Some(hit) = self.find_slide_target(cn, Point::new(abs.x, abs.y)) {
