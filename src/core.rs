@@ -3517,6 +3517,7 @@ impl EventCtx<'_> {
     }
     /// 请求关闭指定 `Window::single` 键的窗口，不存在时无操作。
     /// 与热键的 `close_window` 共用延后关闭队列，遵循窗口关闭决策链。
+    /// macOS 暂未实现按键关闭窗口，此调用在那里无效。
     /// 不要在同一次回调中关闭并重开同一个键；关闭请求要等下一轮消息落地。
     pub fn close_window(&mut self, key: impl Into<String>) {
         crate::event::push_callback_close(key.into());

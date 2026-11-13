@@ -1013,7 +1013,7 @@ drop(sender); // 保持至少一个发送端存活到消息循环结束
 
 发送端全部提前丢弃时，启动检查仍拒绝无入口的常驻应用。运行期间宿主应先发退出消息再丢弃发送端；
 通道断开不会自动结束其他窗口或应用服务。通道回调中 `ctx.close_window("usage")`
-可收起指定单例原生窗口，遵循关闭决策链，不存在时无操作。`activate_on_show(false)` 仅在 Windows 生效，
+可收起指定单例原生窗口，遵循关闭决策链，不存在时无操作（macOS 暂未实现按键关闭，此调用无效）。`activate_on_show(false)` 仅在 Windows 生效，
 首次显示和同键单例重新显示均不抢键盘焦点；默认 `true` 保持原有激活行为。
 
 - `TrayCtx::open_window` / `HotkeyCtx::open_window` 与控件里的 `EventCtx::open_window` 收同一个
