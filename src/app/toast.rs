@@ -28,7 +28,7 @@ const TOAST_CLOSE_W: i32 = 22;
 /// 文字换行区最小宽度：即便窗口极窄，也保留基本可读宽度（宁可面板贴边也不塌缩为 0）。
 const TOAST_TEXT_MIN_W: i32 = 60;
 
-/// 活动轻提示：内容 + 起始时刻 + 悬停暂停累计。淡入淡出/过期均按「有效流逝」推算。
+/// 活动轻提示：内容 + 起始时刻 + 悬停暂停累计。淡出/过期按有效流逝推算，悬停使淡入直接完成。
 pub(super) struct ToastState {
     pub(super) req: ToastRequest,
     shown_at_ms: u64,
@@ -36,6 +36,8 @@ pub(super) struct ToastState {
     paused_at_ms: Option<u64>,
     /// 历史累计暂停总时长（ms）。
     paused_total_ms: u64,
+    /// 悬停使提示完全可读后，移出不再重播未完成的淡入。
+    fade_in_complete: bool,
     /// 上一帧算出的命中矩形 `(面板, ✕ 按钮)`（逻辑坐标）；未绘制过则 `None`。
     ///
     /// 跟着自己这一条走，而不是放在与 `items` 平行的另一个 `Vec` 里——平行数组
@@ -58,7 +60,10 @@ impl ToastState {
     /// 切换悬停：进入则起暂停，离开则把本段并入累计。
     fn set_hover(&mut self, now_ms: u64, hovered: bool) {
         match (hovered, self.paused_at_ms) {
-            (true, None) => self.paused_at_ms = Some(now_ms),
+            (true, None) => {
+                self.paused_at_ms = Some(now_ms);
+                self.fade_in_complete = true;
+            }
             (false, Some(p)) => {
                 self.paused_total_ms += now_ms.saturating_sub(p);
                 self.paused_at_ms = None;
@@ -72,9 +77,14 @@ impl ToastState {
     }
     /// 当前不透明度系数 [0,1]：前段淡入、末段淡出、中间恒 1。
     fn alpha(&self, now_ms: u64) -> f32 {
+        // 悬停暂停的是阅读倒计时，不应把淡入/淡出的半透明画面一起冻结。
+        if self.paused_at_ms.is_some() {
+            return 1.0;
+        }
         let e = self.active_elapsed(now_ms);
         let d = self.req.duration_ms;
-        if e < TOAST_FADE_IN_MS {
+        // 悬停已经补全淡入时，移出不重新从透明开始。
+        if !self.fade_in_complete && e < TOAST_FADE_IN_MS {
             return e as f32 / TOAST_FADE_IN_MS as f32;
         }
         let fade_out_start = d.saturating_sub(TOAST_FADE_OUT_MS);
@@ -148,6 +158,7 @@ impl UiHost {
             shown_at_ms: now_ms,
             paused_at_ms: None,
             paused_total_ms: 0,
+            fade_in_complete: false,
             hit: None, // 本帧尚未绘制，绘制后才可命中
         });
     }
@@ -344,6 +355,80 @@ mod tests {
     use crate::ui::Element;
 
     #[test]
+    fn clicking_a_toast_over_a_button_never_freezes_it_transparent() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        use crate::platform::AppHandler;
+        let app = App::new("t", 400, 300).content(Element::button("刷新用量"));
+        let mut app = app.into_handler_for_test();
+        // 将宿主流逝钉在零点：提示刚刚出现在按钮上方。
+        app.start = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        app.toast.items = vec![placed(
+            "已刷新",
+            Rect::new(0, 0, 300, 44),
+            Rect::new(280, 0, 20, 44),
+        )];
+        assert!(app.on_pointer(PointerEvent::single(
+            PointerKind::Down,
+            Point::new(30, 20),
+            MouseButton::Left
+        )));
+        let toast = &app.toast.items[0];
+        assert_eq!(
+            toast.active_elapsed(10_000),
+            0,
+            "hover still pauses the reading countdown"
+        );
+        assert_eq!(toast.alpha(10_000), 1.0, "a clicked/hovered toast must remain readable, not freeze near-transparent until pointer exit");
+        app.toast.items[0].set_hover(10_000, false);
+        assert_eq!(
+            app.toast.items[0].alpha(10_000),
+            1.0,
+            "leaving must resume countdown without replaying fade-in"
+        );
+        assert!(!app.toast.items[0].expired(10_999));
+        assert!(app.toast.items[0].expired(11_000));
+    }
+
+    #[test]
+    fn briefly_hovering_during_fade_in_does_not_dim_again_on_exit() {
+        let mut toast = placed(
+            "已刷新",
+            Rect::new(0, 0, 300, 44),
+            Rect::new(280, 0, 20, 44),
+        );
+        toast.set_hover(10, true);
+        assert_eq!(toast.alpha(20), 1.0);
+        toast.set_hover(30, false);
+        assert_eq!(
+            toast.alpha(30),
+            1.0,
+            "a brief hover must not replay the unfinished fade-in"
+        );
+        assert_eq!(
+            toast.active_elapsed(30),
+            10,
+            "only the twenty hovered milliseconds pause the countdown"
+        );
+    }
+
+    #[test]
+    fn hovering_a_fading_out_toast_restores_readability_and_keeps_remaining_time() {
+        let mut toast = placed(
+            "已刷新",
+            Rect::new(0, 0, 300, 44),
+            Rect::new(280, 0, 20, 44),
+        );
+        assert!(toast.alpha(950) < 0.2);
+        toast.set_hover(950, true);
+        assert_eq!(toast.alpha(10_000), 1.0);
+        assert!(!toast.expired(10_000));
+        toast.set_hover(10_000, false);
+        assert!(!toast.expired(10_049));
+        assert!(toast.expired(10_050));
+    }
+
+    #[test]
     fn toast_stack_caps_at_max_and_drops_oldest() {
         let app = App::new("t", 100, 100).content(Element::col());
         let mut app = app.into_handler_for_test();
@@ -377,6 +462,7 @@ mod tests {
             shown_at_ms: 100,
             paused_at_ms: None,
             paused_total_ms: 0,
+            fade_in_complete: false,
             hit: None,
         };
         assert_eq!(t.alpha(100), 0.0, "起点不可见");
@@ -398,6 +484,7 @@ mod tests {
             shown_at_ms: 0,
             paused_at_ms: None,
             paused_total_ms: 0,
+            fade_in_complete: false,
             hit: None,
         };
         // 200ms 时悬停，冻结；在 5000ms（远超 1000）仍不过期。
@@ -421,6 +508,7 @@ mod tests {
             shown_at_ms: 0,
             paused_at_ms: None,
             paused_total_ms: 0,
+            fade_in_complete: false,
             hit: Some((panel, close)),
         }
     }

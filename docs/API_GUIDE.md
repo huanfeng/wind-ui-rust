@@ -794,6 +794,7 @@ Element::button("复制").on_click(|ctx| ctx.toast_ok("已添加到剪贴板"));
 //  ctx.toast_with(text, ToastKind::Success, 1800)   完全指定语义与时长(ms)
 ```
 - 不绑定节点、无需状态：宿主接管渲染、计时与消失（深色面板，不随明暗主题翻转）。
+- 悬停暂停消失倒计时，并保持提示完全可读；即使在淡入或淡出时移入，也不会冻结为半透明。移出后继续剩余倒计时，不重播淡入。
 - 主题见 `ToastTheme`（bg/success/error/corner，可 TOML 覆盖）。
 
 ### 文件拖放
