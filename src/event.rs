@@ -1484,7 +1484,8 @@ pub struct WindowRequest {
     pub shortcut: Option<WindowShortcutHandler>,
     /// 单例键（`Window::single`）。`None` = 每次请求都开一个新窗口。
     ///
-    /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并把那个窗口激活到前台。
+    /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并重新显示那个窗口。
+    /// 默认激活到前台；Windows 遵循已有窗口的 `activate_on_show`。
     /// 判定放在平台层而非应用层，是因为"把已有窗口拉到前台"只有平台做得到。
     pub single: Option<String>,
     /// 窗口图标（`Window::icon`）。`None` 则跟随系统默认——子窗**不会**自动继承主窗
@@ -1494,6 +1495,8 @@ pub struct WindowRequest {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮（`Window::skip_taskbar`），各平台落地见 `WindowConfig::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 显示时是否激活窗口，默认 true。Windows 支持，其他平台暂忽略。
+    pub activate_on_show: bool,
     /// 无边框外框取色策略（`Window::window_outline`），见 `WindowOutline`。
     pub window_outline: crate::platform::WindowOutline,
 }

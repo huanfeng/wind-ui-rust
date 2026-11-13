@@ -75,17 +75,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
     SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
-    WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
-    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
-    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
-    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_THICKFRAME,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
+    WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED,
+    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN,
+    WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1035,6 +1035,7 @@ struct WindowState {
     touch: Touch,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
+    activate_on_show: bool,
     /// 无边框且 DWM 不在客户区上画边框（Win10）：未最大化时由宿主自己画 1px 外框，
     /// 见 `AppHandler::set_window_outline`。建窗时按圆角属性设没设成判定。
     self_outline: bool,
@@ -1184,6 +1185,7 @@ impl WindowState {
             last_click: ClickTracker::default(),
             touch: Touch::default(),
             frameless: false,
+            activate_on_show: true,
             mouse_tracked: false,
             pending_surrogate: None,
             ime_composing: false,
@@ -1341,6 +1343,7 @@ unsafe fn create_window(
     let hide_on_minimize = handler.hide_on_minimize();
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
+    state.activate_on_show = cfg.activate_on_show;
     state.min_w = cfg.min_width;
     state.min_h = cfg.min_height;
     let state_ptr = Box::into_raw(state);
@@ -1661,7 +1664,8 @@ unsafe fn create_window(
 
 /// 显示窗口。与创建分开：主窗要照顾 `start_hidden`，子窗建好即显。
 unsafe fn show_window(hwnd: HWND) {
-    let _ = ShowWindow(hwnd, SW_SHOW);
+    let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
+    let _ = ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
     let _ = UpdateWindow(hwnd);
 }
 
@@ -2866,6 +2870,11 @@ unsafe fn apply_window_op(hwnd: HWND) {
     apply_hotkey_ops(hwnd);
     // 运行期托盘操作同点消费（TrayHandle 排队 → 此处落地）。
     apply_tray_ops();
+    // 应用通道也可能由可见窗口的一帧消费，指定键的关闭不能只在 AppHost 收尾时落地。
+    // 此处没有 WindowState 借用；先排关闭，再建新窗，与应用级回调的顺序一致。
+    for key in crate::event::take_callback_closes() {
+        close_single_window(&key);
+    }
     // 开窗请求同点消费（`ctx.open_window` 排队 → 此处落地）。
     open_pending_windows(hwnd);
     // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。
@@ -3280,6 +3289,15 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
 /// 托盘点击同理（用户交互授予）。
 pub(crate) fn show_and_activate(hwnd: HWND) {
     unsafe {
+        let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
+        if !activate {
+            let was_hidden = !IsWindowVisible(hwnd).as_bool();
+            show_window(hwnd);
+            if was_hidden {
+                notify_shown(hwnd);
+            }
+            return;
+        }
         // 先问再显示：`ShowWindow` 之后 `IsWindowVisible` 恒为真，跃迁就无从判断了。
         let was_hidden = !IsWindowVisible(hwnd).as_bool();
         // 隐藏与最小化是**两个独立的位**，可以同时为真——`hide_on_minimize` 就是这么

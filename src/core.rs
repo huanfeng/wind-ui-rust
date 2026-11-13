@@ -3515,6 +3515,13 @@ impl EventCtx<'_> {
     pub fn open_window(&mut self, req: WindowRequest) {
         self.out.open_windows.push(req);
     }
+    /// 请求关闭指定 `Window::single` 键的窗口，不存在时无操作。
+    /// 与热键的 `close_window` 共用延后关闭队列，遵循窗口关闭决策链。
+    /// 不要在同一次回调中关闭并重开同一个键；关闭请求要等下一轮消息落地。
+    pub fn close_window(&mut self, key: impl Into<String>) {
+        crate::event::push_callback_close(key.into());
+    }
+
     /// 本窗口**实际在用**的渲染后端（[`Renderer::Auto`](crate::platform::Renderer::Auto)
     /// 落成了 GPU 还是回退了软光栅、运行中有没有降级），供「关于」页与诊断信息显示。
     pub fn active_renderer(&self) -> crate::platform::ActiveRenderer {

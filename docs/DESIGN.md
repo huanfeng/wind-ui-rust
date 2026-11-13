@@ -494,3 +494,10 @@ pub struct Theme { /* 语义色：primary/surface/on_surface/error... */ }
 | 呈现 | DIB + BitBlt | DIB + BitBlt（相同） |
 | 布局 | Linear/Frame/Flex/Grid… | MVP: Linear/Frame |
 | 内存 | 15–40MB | 2–5MB（目标） |
+
+### 外部宿主的原生浮窗
+
+常驻应用的入口也可以是 `App::channel`：构建器保存发送端的弱存活标记，启动时确认至少一个
+发送端仍存活。它不创建第二个托盘，不增加轮询；消息仍经应用级 waker 排到 message-only 宿主。
+宿主通过通道回调的 `TrayHandle::quit()` 明确退出。Windows 窗口的 `activate_on_show` 默认 true，
+设为 false 时创建与单例重现均使用非激活显示，不调用 `SetForegroundWindow`；点击操作仍由系统正常激活。

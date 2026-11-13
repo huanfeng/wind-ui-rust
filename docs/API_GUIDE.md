@@ -992,6 +992,30 @@ if !launched_for_tray {                                // 开机自启不弹窗�
 let started = app.run_resident();   // false = 没能启动（无 X 显示 / macOS 未实现 / 缺入口）或显示连接丢失；启动前可用 platform::resident_available() 探测
 ```
 
+由另一个 GUI 框架拥有托盘时，`App::channel` 的**存活发送端**也可作为常驻入口：
+
+```rust
+let mut app = App::resident("外部托盘的原生面板");
+let quit = app.tray_handle(); // 不创建托盘；仅借用应用级退出队列
+let sender = app.channel(move |ctx, show: bool| {
+    if show {
+        ctx.open_window(Window::new("用量", 440, 320)
+            .single("usage").skip_taskbar(true).activate_on_show(false)
+            .content(|| Element::label("订阅用量")));
+    } else { quit.quit(); }
+});
+// 把 sender 交给外部宿主；宿主保持发送端存活，退出时发送 false。
+let background = sender.clone();
+std::thread::spawn(move || { let _ = background.send(false); });
+app.run_resident();
+drop(sender); // 保持至少一个发送端存活到消息循环结束
+```
+
+发送端全部提前丢弃时，启动检查仍拒绝无入口的常驻应用。运行期间宿主应先发退出消息再丢弃发送端；
+通道断开不会自动结束其他窗口或应用服务。通道回调中 `ctx.close_window("usage")`
+可收起指定单例原生窗口，遵循关闭决策链，不存在时无操作。`activate_on_show(false)` 仅在 Windows 生效，
+首次显示和同键单例重新显示均不抢键盘焦点；默认 `true` 保持原有激活行为。
+
 - `TrayCtx::open_window` / `HotkeyCtx::open_window` 与控件里的 `EventCtx::open_window` 收同一个
   `WindowRequest`、走同一条延后建窗管线：回调**只排队意图**，平台在借用释放后才真正建窗（铁律 6）。
 - 常驻模式下 `show_window()` / `hide_window()` 无效（没有主窗可显隐），`content()` / `bg()` /
@@ -1015,8 +1039,8 @@ let started = app.run_resident();   // false = 没能启动（无 X 显示 / mac
   不指明只会得到一张**空图**。传的就是托盘/热键 `open_window` 用的那一份 `Window`——请出自
   同一个工厂函数，否则截图验的不是用户看到的那个界面。没给它但给了 `start_window` 时退而
   用后者；两个都没有会打一行提示，而不是默默交出空图。
-- **退出只有托盘的 `ctx.quit()` 一条路**。故 debug 期若既无托盘也无热键就 panic：那样的进程既没有
-  入口也没有出口。
+- 退出可用托盘的 `ctx.quit()`，也可在应用级回调中调用 `TrayHandle::quit()`。
+  无托盘、热键与存活通道发送端时拒绝启动（debug 先 panic）。
 - 空闲仍是零 CPU：零窗口时消息循环纯阻塞在 `GetMessage`，不参与帧配速。
 - **仅 Windows**。macOS 与 Linux 尚未实现，调用会打印一行错误并退出，不会悄悄退化成开一个窗口。
 

@@ -162,6 +162,7 @@ impl Window {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                activate_on_show: true,
                 window_outline: Default::default(),
             },
         }
@@ -194,6 +195,7 @@ impl Window {
     /// 把本窗口设为**单例**：同一个 `key` 同时只存在一个窗口。
     ///
     /// 已经开着同键窗口时，本次请求被丢弃，那个窗口被激活到前台（最小化的会还原）。
+    /// Windows 上已有窗口设了 `activate_on_show(false)` 时，只显示，不抢前台焦点。
     /// 设置页、关于框这类"再点一次应该跳到已开的那个"的窗口用它。
     ///
     /// 判定在平台层做，不是应用层自己拿 `Signal` 记一个"开着没有"：
@@ -333,6 +335,14 @@ impl Window {
     /// 不提供最小化。
     pub fn skip_taskbar(mut self, on: bool) -> Self {
         self.req.skip_taskbar = on;
+        self
+    }
+
+    /// 是否在显示或重新唤起时激活窗口（默认 `true`）。
+    /// Windows 悬停浮窗可设为 `false`：显示不会抢走前台应用的键盘焦点，
+    /// 用户仍可点击窗口激活并操作。其他平台目前忽略此选项。
+    pub fn activate_on_show(mut self, on: bool) -> Self {
+        self.req.activate_on_show = on;
         self
     }
 
@@ -647,6 +657,7 @@ fn build_new_window(
         // 默认值，症状是「设了却不生效」。
         position: req.position,
         skip_taskbar: req.skip_taskbar,
+        activate_on_show: req.activate_on_show,
         window_outline: req.window_outline,
         // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
         // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
@@ -1118,6 +1129,7 @@ pub struct App {
     theme_src: Option<ThemeHandle>,
     intervals: Vec<(Duration, AppCallback)>,
     waker_shared: Option<Arc<WakerShared>>,
+    channel_senders: Vec<std::sync::Weak<()>>,
     single: Option<crate::single_instance::SingleInstance>,
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
@@ -1186,6 +1198,7 @@ impl App {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                activate_on_show: true,
                 window_outline: Default::default(),
                 ime_interrupt: Default::default(),
                 ime_inline: false,
@@ -1196,6 +1209,7 @@ impl App {
             theme_src: None,
             intervals: Vec::new(),
             waker_shared: None,
+            channel_senders: Vec::new(),
             single: None,
             close_handler: None,
             show_handler: None,
@@ -2284,7 +2298,7 @@ impl App {
     ///
     /// `true` = 常驻模式正常运行，并由用户 / 程序（托盘「退出」）结束（macOS 例外：退出走
     /// `NSApp::terminate`，进程直接结束，本方法不会返回 `true`）；`false` = **没能
-    /// 启动或显示连接丢失**：缺托盘与热键入口被拒绝、macOS 尚未实现、Linux 上没有可连的
+    /// 启动或显示连接丢失**：缺托盘、热键与活动通道入口被拒绝、macOS 尚未实现、Linux 上没有可连的
     /// X 显示（无头机器、没开 XWayland）、Windows 上消息宿主窗口建不起来，或运行中 X
     /// 连接断开。调用方据此退化（例如改走 `run()` 开窗，或报错退出），而不是把起不来当成
     /// 正常退出。启动前可用 [`platform::resident_available`](crate::platform::resident_available)
@@ -2301,7 +2315,7 @@ impl App {
     ///
     /// # 误用的处理
     ///
-    /// 既无托盘图标也无全局热键时**打印一行并直接返回，不启动**（debug 下先 panic 指出
+    /// 既无托盘图标、全局热键，也无活动通道发送端时**打印一行并直接返回，不启动**（debug 下先 panic 指出
     /// 调用点）。这是 `run()` 那套 `start_hidden` / `hide_on_close` 防呆的加强版，因为
     /// 退化的后果不是一个量级：
     ///
@@ -2312,24 +2326,33 @@ impl App {
     ///   `WM_CLOSE` 都够不着它——那条消息要有窗口才收得到，而这个进程一个都没有。
     ///   用户只剩任务管理器的「详细信息」页强杀一条路。
     ///
+    /// 外部宿主可持有 [`App::channel`] 的发送端作为入口，无须另建托盘。启动时至少
+    /// 要有一个存活的发送端；宿主负责保持它存活，并经通道回调调用
+    /// [`TrayHandle::quit`](crate::platform::TrayHandle::quit) 结束消息循环。
     /// 所以这条检查不能只在 debug 生效：release 才是用户真正跑到的那一份。
     pub fn run_resident(mut self) -> bool {
         // debug 下仍然 panic：开发期要的是一个能指回调用点的堆栈，而不是一行日志。
         debug_assert!(
-            self.cfg.tray.is_some() || !self.cfg.hotkeys.is_empty(),
-            "run_resident 需配合 tray 或 hotkey：零窗口进程没有别的入口，也没有别的出口"
+            self.has_resident_entry(),
+            "run_resident 需配合 tray、hotkey 或活动的 channel：零窗口进程没有别的入口，也没有别的出口"
         );
-        if self.cfg.tray.is_none() && self.cfg.hotkeys.is_empty() {
+        if !self.has_resident_entry() {
             // 形状照抄 win32 `run_windowed` 里那道兜底（常驻模式下宿主窗口建不起来就退出）：
             // 常驻进程一旦失去全部入口就无法自救，宁可不启动，也不留一个杀不掉的空壳。
             eprintln!(
-                "[windui] run_resident 需配合 tray 或 hotkey：零窗口进程没有任何入口，\
+                "[windui] run_resident 需配合 tray、hotkey 或活动的 channel：零窗口进程没有任何入口，\
                  也没有任何出口（进程将无法退出），已拒绝启动"
             );
             return false;
         }
         self.cfg.resident = true;
         self.launch()
+    }
+
+    fn has_resident_entry(&self) -> bool {
+        self.cfg.tray.is_some()
+            || !self.cfg.hotkeys.is_empty()
+            || self.channel_senders.iter().any(|s| s.strong_count() > 0)
     }
 
     /// `run` 与 `run_resident` 的公共尾段：装应用级设施、组装 handler、交给平台。
@@ -2521,6 +2544,7 @@ impl App {
         let waker = self.shared_waker();
         let (tx, pump) = new_channel(waker, on_message);
         crate::sync::register_pump(pump);
+        self.channel_senders.push(tx.liveness());
         tx
     }
 
@@ -4986,6 +5010,7 @@ mod tests {
         let req = Window::new("贴图", 120, 80)
             .position(-1920, 40)
             .skip_taskbar(true)
+            .activate_on_show(false)
             .window_outline(crate::platform::WindowOutline::Off)
             .content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
@@ -4998,6 +5023,7 @@ mod tests {
             "副屏在左时坐标为负，原样传下去"
         );
         assert!(cfg.skip_taskbar);
+        assert!(!cfg.activate_on_show);
         assert_eq!(
             cfg.window_outline,
             crate::platform::WindowOutline::Off,
@@ -5011,6 +5037,7 @@ mod tests {
         };
         assert_eq!(cfg.position, None, "对照：不设就交给系统摆放");
         assert!(!cfg.skip_taskbar);
+        assert!(cfg.activate_on_show);
         assert_eq!(cfg.window_outline, crate::platform::WindowOutline::Auto);
     }
 
@@ -6004,6 +6031,81 @@ mod tests {
             !with_hotkey.cfg.hotkeys.is_empty(),
             "只有热键、没有托盘也算有入口：热键能唤出窗口，退出走窗口自己的关闭"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real native window; run with --ignored --test-threads=1"]
+    fn visible_channel_closes_a_keyed_window_without_apphost_timers() {
+        crate::sync::reset_pumps();
+        enum Message {
+            Close,
+            Quit,
+        }
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let mut app = App::resident("channel close regression");
+        let quit = app.tray_handle();
+        let sender = app.channel(move |ctx, message| match message {
+            Message::Close => ctx.close_window("visible-channel-test"),
+            Message::Quit => quit.quit(),
+        });
+        let background = sender.clone();
+        let worker = std::thread::spawn(move || {
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            background.send(Message::Close).unwrap();
+            let closed = closed_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            background.send(Message::Quit).unwrap();
+            closed
+        });
+        let request = Window::new("channel close regression", 200, 100)
+            .single("visible-channel-test")
+            .activate_on_show(false)
+            .skip_taskbar(true)
+            .on_close_request(move |_| {
+                let _ = closed_tx.send(());
+                true
+            })
+            .content(move || {
+                let _ = ready_tx.send(());
+                Element::label("channel close regression")
+            });
+        assert!(app.start_window(request).run_resident());
+        assert!(
+            worker.join().unwrap(),
+            "visible window must consume keyed close without another AppHost event"
+        );
+        drop(sender);
+        crate::sync::reset_pumps();
+    }
+
+    #[test]
+    fn resident_channel_can_close_a_keyed_window_without_a_host() {
+        crate::sync::reset_pumps();
+        let _ = crate::event::take_callback_closes();
+        let mut app = App::resident("external host");
+        let sender = app.channel(|ctx, key: String| ctx.close_window(key));
+        sender.send("usage".into()).unwrap();
+        drain_app_channels();
+        assert_eq!(crate::event::take_callback_closes(), vec!["usage"]);
+        assert!(crate::event::take_callback_closes().is_empty());
+        crate::sync::reset_pumps();
+    }
+
+    #[test]
+    fn resident_channel_requires_a_live_sender_and_accepts_clones() {
+        crate::sync::reset_pumps();
+        let mut app = App::resident("external host");
+        assert!(!app.has_resident_entry());
+        let sender = app.channel(|_: &mut EventCtx, _: ()| {});
+        assert!(app.has_resident_entry());
+        let clone = sender.clone();
+        drop(sender);
+        assert!(app.has_resident_entry());
+        drop(clone);
+        assert!(!app.has_resident_entry());
+        crate::sync::reset_pumps();
     }
 
     /// 应用级回调（主题变化 / 周期定时器）在**零窗口**时也要跑得起来，且回调里的

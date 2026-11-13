@@ -740,6 +740,8 @@ pub struct WindowConfig {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮，各平台落地见 `App::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 显示时是否激活窗口，默认 true。Windows 支持，其他平台暂忽略。
+    pub activate_on_show: bool,
     /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
     pub window_outline: WindowOutline,
     /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
@@ -821,6 +823,7 @@ impl Default for WindowConfig {
             icon: None,
             position: None,
             skip_taskbar: false,
+            activate_on_show: true,
             window_outline: WindowOutline::Auto,
             ime_interrupt: ImeInterrupt::Commit,
             ime_inline: false,
