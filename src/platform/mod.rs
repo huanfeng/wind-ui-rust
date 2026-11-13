@@ -928,6 +928,19 @@ pub trait AppHandler {
     fn on_key(&mut self, _ev: KeyEvent) -> bool {
         false
     }
+    /// Current owned semantic projection of the real WindUI tree, for platform accessibility
+    /// adapters. The default keeps existing non-UiHost handlers source-compatible.
+    fn accessibility_snapshot(&self) -> Option<crate::accessibility::AccessibilitySnapshot> {
+        None
+    }
+    /// Route a platform accessibility request back to the real WindUI event/focus path.
+    fn accessibility_action(
+        &mut self,
+        _id: crate::accessibility::AccessibilityNodeId,
+        _action: crate::accessibility::AccessibilityAction,
+    ) -> crate::accessibility::AccessibilityActionResult {
+        crate::accessibility::AccessibilityActionResult::UnsupportedAction
+    }
     /// 是否请求关闭窗口（事件处理后由平台查询）。
     fn wants_close(&self) -> bool {
         false

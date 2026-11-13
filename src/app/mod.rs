@@ -22,6 +22,9 @@ use std::time::Duration;
 
 use crate::sync::{new_channel, Sender, WakerShared};
 
+use crate::accessibility::{
+    AccessibilityAction, AccessibilityActionResult, AccessibilityNodeId, AccessibilitySnapshot,
+};
 use crate::core::{DamageReq, DispatchResult, EventCtx, NodeId, Tree};
 use crate::event::{
     CursorShape, Key, MouseButton, PointerEvent, PointerKind, WindowOp, WindowRequest,
@@ -3922,6 +3925,44 @@ impl AppHandler for UiHost {
         repaint
     }
 
+    fn accessibility_snapshot(&self) -> Option<AccessibilitySnapshot> {
+        Some(self.tree.accessibility_snapshot())
+    }
+
+    fn accessibility_action(
+        &mut self,
+        id: AccessibilityNodeId,
+        action: AccessibilityAction,
+    ) -> AccessibilityActionResult {
+        self.enter();
+        let node_id = id.node_id();
+        let (result, dispatch) = self.tree.dispatch_accessibility_action(id, action);
+        if result != AccessibilityActionResult::Performed {
+            return result;
+        }
+        match action {
+            AccessibilityAction::SetFocus => {
+                let old = self.focus.current;
+                self.tree.set_focused(Some(node_id), old);
+                self.focus.current = Some(node_id);
+                self.focus.visible = false;
+                self.tree.scroll_into_view(node_id);
+                self.damage.needs_relayout = true;
+                self.damage.needs_full = true;
+            }
+            AccessibilityAction::Invoke => {
+                let (repaint, damage, _) =
+                    self.apply_dispatch_effects(dispatch, FocusSource::Pointer, None);
+                self.apply_damage(damage);
+                self.damage.needs_relayout = true;
+                if repaint {
+                    self.damage.needs_full = true;
+                }
+            }
+        }
+        result
+    }
+
     fn wants_close(&self) -> bool {
         self.close
     }
@@ -4363,6 +4404,60 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accessibility_handler_routes_focus_and_invoke_through_real_host() {
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let invoked = crate::signal::signal(0);
+        let app = App::new("accessibility", 300, 160)
+            .content(Element::col().child(
+                Element::button("Invoke").on_click(move |_| invoked.set(invoked.get() + 1)),
+            ));
+        let mut handler = app.into_handler_for_test();
+        let mut pixmap = Pixmap::new(300, 160).unwrap();
+        handler.render(
+            &mut PixmapTarget {
+                pixmap: &mut pixmap,
+            },
+            Size::new(300, 160),
+        );
+
+        let snapshot = handler
+            .accessibility_snapshot()
+            .expect("UiHost must expose its owned semantic snapshot");
+        let button = snapshot
+            .nodes
+            .iter()
+            .find(|node| node.role == crate::accessibility::AccessibilityRole::Button)
+            .cloned()
+            .expect("button must be projected");
+        assert_eq!(
+            handler.accessibility_action(button.id, AccessibilityAction::Invoke),
+            AccessibilityActionResult::Performed
+        );
+        assert_eq!(
+            invoked.get(),
+            1,
+            "Invoke must use the normal callback exactly once"
+        );
+
+        assert_eq!(
+            handler.accessibility_action(button.id, AccessibilityAction::SetFocus),
+            AccessibilityActionResult::Performed
+        );
+        assert!(
+            handler
+                .accessibility_snapshot()
+                .unwrap()
+                .node(button.id)
+                .unwrap()
+                .focused,
+            "SetFocus must update the real tree snapshot"
+        );
+    }
 
     /// 标题栏宿主不是窗口：渲染它不认领通道消费权（否则消费权持有者关窗后可能落到它身上，
     /// 消息画进标题栏、开窗请求无人取走、只在悬停时才排空）。之后出帧的内容宿主照常认领。
