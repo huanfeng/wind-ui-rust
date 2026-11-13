@@ -6044,6 +6044,8 @@ mod tests {
         }
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_activation = activated.clone();
         let mut app = App::resident("channel close regression");
         let quit = app.tray_handle();
         let sender = app.channel(move |ctx, message| match message {
@@ -6054,15 +6056,30 @@ mod tests {
         let worker = std::thread::spawn(move || {
             ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
             std::thread::sleep(Duration::from_millis(150));
+            let nonactivating = unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    FindWindowW, GetForegroundWindow, IsWindowVisible,
+                };
+                FindWindowW(None, windows::core::w!("channel close regression")).is_ok_and(
+                    |popup| IsWindowVisible(popup).as_bool() && GetForegroundWindow() != popup,
+                )
+            };
             background.send(Message::Close).unwrap();
             let closed = closed_rx.recv_timeout(Duration::from_secs(3)).is_ok();
             background.send(Message::Quit).unwrap();
-            closed
+            (closed, nonactivating)
         });
         let request = Window::new("channel close regression", 200, 100)
             .single("visible-channel-test")
             .activate_on_show(false)
+            .frameless(true)
+            .centered(true)
             .skip_taskbar(true)
+            .on_window_activated(move |_, active| {
+                if active {
+                    seen_activation.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
             .on_close_request(move |_| {
                 let _ = closed_tx.send(());
                 true
@@ -6072,9 +6089,18 @@ mod tests {
                 Element::label("channel close regression")
             });
         assert!(app.start_window(request).run_resident());
+        let (closed, nonactivating) = worker.join().unwrap();
         assert!(
-            worker.join().unwrap(),
+            closed,
             "visible window must consume keyed close without another AppHost event"
+        );
+        assert!(
+            nonactivating,
+            "visible frameless popup must not become the foreground window"
+        );
+        assert!(
+            !activated.load(std::sync::atomic::Ordering::SeqCst),
+            "showing and positioning a frameless hover window must not activate it"
         );
         drop(sender);
         crate::sync::reset_pumps();

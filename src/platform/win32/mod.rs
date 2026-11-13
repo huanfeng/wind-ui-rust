@@ -1555,7 +1555,15 @@ unsafe fn create_window(
                 }
             }
         };
-        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 
     // 模态：禁用 owner 的输入直到本窗口关闭（见 `release_modal_owner`）。系统对被禁用
@@ -1648,6 +1656,7 @@ unsafe fn create_window(
             s.self_outline = !dwm_border;
         }
         push_window_state(hwnd);
+        // 建窗中的外框重算也会激活窗口；必须留到 show_window 按配置决定是否激活。
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -1655,7 +1664,7 @@ unsafe fn create_window(
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
         );
     }
 
