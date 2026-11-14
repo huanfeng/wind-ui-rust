@@ -14,6 +14,8 @@ const MAX_PIXELS: u64 = 40_000_000;
 
 /// 剪贴板单个格式允许读取的最大字节数：MAX_PIXELS 的 RGBA 大小加 64KB 头部余量。
 #[cfg(any(windows, target_os = "linux", test))]
+// macOS 的测试构建会编进来（`test`）但没有调用方，避免 dead_code。
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) const MAX_CLIP_BYTES: usize = MAX_PIXELS as usize * 4 + 64 * 1024;
 
 /// RGBA（非预乘）→ PNG 字节。尺寸为 0、像素长度不符或编码失败时返回 `None`。

@@ -8510,7 +8510,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn system_menu_is_not_taken_over_on_macos() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
