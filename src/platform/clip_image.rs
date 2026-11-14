@@ -186,12 +186,8 @@ mod tests {
         assert_eq!(&back.rgba[..12], &img.rgba[..12]);
         // 半透明像素预乘往返允许 ±1 误差，alpha 必须保持
         assert_eq!(back.rgba[15], 128);
-        for i in 12..15 {
-            assert!(
-                back.rgba[i].abs_diff(255) <= 1,
-                "通道 {i} = {}",
-                back.rgba[i]
-            );
+        for (i, c) in back.rgba[12..15].iter().enumerate() {
+            assert!(c.abs_diff(255) <= 1, "通道 {} = {c}", i + 12);
         }
     }
 
