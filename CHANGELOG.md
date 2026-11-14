@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-11-14
+
 ### 变更
 
 - **菜单交互对齐桌面惯例（按下 / 松开）**：菜单里的项改为**松开**时才执行，且须与按下是同一项；
@@ -34,8 +36,17 @@
 - **`testing::set_frame_clock_ms`**：裸 `Tree` 测试里推进动画时钟，让淡出等过渡能播完，测得到
   残影回收时序。
 
+- **`Window::activate_on_show(false)`**：显示或同键单例重新唤起时不激活窗口，悬停浮窗不会抢走前台应用的
+  键盘焦点，点击窗口仍可激活。仅 Windows 生效，其它平台忽略；默认 `true`，行为不变。
+- **`ctx.close_window(key)`**：在通道回调等处收起指定的单例窗口，遵循关闭决策链，窗口不存在时无操作。
+- **常驻应用可用存活的通道发送端作入口**：托盘由别的 GUI 框架持有时，`App::channel` 的发送端也算
+  常驻入口，无需另建托盘；全部提前丢弃时启动检查仍拒绝无入口的常驻应用。
+
 ### 修复
 
+- **无边框窗口初始化居中时不再抢占焦点**（Windows）：定位窗口时加上不激活标志，悬停浮窗显示不再
+  被激活。
+- **toast 悬停时透明度不再冻结**：悬停只暂停消失倒计时并补全淡入，不会让提示停在半透明状态。
 - **Windows：窗口隐藏或最小化时，`App::on_interval` 回调里的意图不再搁置**。此前这些意图只在
   `WM_PAINT` 后落地，而隐藏（`hide_on_close` / `hide_on_minimize` 收进托盘）或最小化的窗口收不到
   `WM_PAINT`——回调里 `TrayHandle::set_tooltip` / `set_icon_rgba`、`ctx.show_window()`、关窗等要等到
@@ -3215,7 +3226,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...v0.30.0

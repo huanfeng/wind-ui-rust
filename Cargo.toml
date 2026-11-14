@@ -6,7 +6,6 @@ description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口
 authors = ["huanfeng <huanfengf@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/huanfeng/wind-ui-rust"
-homepage = "https://github.com/huanfeng/wind-ui-rust"
 documentation = "https://docs.rs/windui"
 readme = "README.md"
 keywords = ["gui", "desktop", "windows", "macos", "linux"]
