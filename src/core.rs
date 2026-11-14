@@ -4895,7 +4895,11 @@ impl Tree {
                 res.open_windows.extend(o.open_windows);
                 // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
                 // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
-                if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
+                if secondary
+                    && ev.button == MouseButton::Right
+                    && matches!(ev.kind, PointerKind::Down)
+                    && res.menu.is_none()
+                {
                     if let Some(cb) = self.get(id).and_then(|n| n.context_menu.clone()) {
                         let items = cb();
                         if !items.is_empty() {
@@ -10155,10 +10159,11 @@ mod tests {
         let b = tree.abs_bounds(dd);
         let pos = Point::new(b.x + b.w / 2, b.y + b.h / 2);
         let (mut h, mut cap) = (None, None);
-        // 单击（Down+Up）展开：Up 产出菜单请求。
-        tree.dispatch_pointer(ptr(PointerKind::Down, pos), &mut h, &mut cap);
-        let res = tree.dispatch_pointer(ptr(PointerKind::Up, pos), &mut h, &mut cap);
-        let menu = res.menu.expect("下拉单击应弹出菜单");
+        // 按下即展开（原生下拉的手感，支持按住滑选）：Down 产出菜单请求，Up 不再产出。
+        let res = tree.dispatch_pointer(ptr(PointerKind::Down, pos), &mut h, &mut cap);
+        let menu = res.menu.expect("下拉按下应弹出菜单");
+        let up = tree.dispatch_pointer(ptr(PointerKind::Up, pos), &mut h, &mut cap);
+        assert!(up.menu.is_none(), "松开不该再弹一次");
         assert_eq!(menu.items.len(), 3, "三个选项");
         assert!(menu.items[0].checked, "当前项 A 应勾选");
         assert!(!menu.items[1].checked);

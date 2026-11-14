@@ -2589,13 +2589,12 @@ unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
 }
 
-/// 无边框窗口标题栏（HTCAPTION）上的右键：转成客户区右键**按下**交给控件树。
+/// 无边框窗口标题栏（HTCAPTION）上的右键：合成一次完整的客户区右键点击（`Down` + `Up`）。
 ///
-/// **在抬起时才弹、合成的却是 `Down`**——这处不对称是刻意的，别顺手改齐：
-/// - 抬起时弹是 Windows 惯例（原生标题栏系统菜单就是 `WM_NCRBUTTONUP` 才出），而且
-///   "右键按住在标题栏上移动"没有任何别的语义，按下即弹只会让菜单跟着乱跑；
-/// - 合成 `Down` 是因为框架的上下文菜单统一在 `Down` 上开（`Tree::dispatch_pointer`
-///   只在「非左键 + Down」时才建 `MenuRequest`）。合成 `Up` 什么也不会发生。
+/// `WM_NCRBUTTONDOWN` 被吞掉了（见 `wnd_proc`），到 `WM_NCRBUTTONUP` 才一次性补发两下：
+/// - `Down` 给 `on_context_menu`（框架的上下文菜单统一在 `Down` 上开）；
+/// - `Up` 让宿主放行暂存的菜单（`defer_right_click_menu`），与 Windows 原生标题栏
+///   "抬起才出菜单"一致。
 ///
 /// 坐标：NC 消息的 lParam 是**屏幕**坐标，客户区消息的是客户区坐标，两者不能混用。
 /// 转换后仍是物理像素，÷scale 由宿主 `on_pointer` 统一做——漏掉任一步的症状都是
@@ -2607,6 +2606,7 @@ unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
     };
     let _ = ScreenToClient(hwnd, &mut pt);
     handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
+    handle_pointer_at(hwnd, PointerKind::Up, MouseButton::Right, pt.x, pt.y);
 }
 
 /// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。

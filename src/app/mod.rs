@@ -2597,6 +2597,15 @@ impl AppHandler for ClosureHandler {
     }
 }
 
+/// 右键按下到松开允许的最大位移（逻辑像素）；超过视为拖开反悔，不弹菜单。
+const RIGHT_CLICK_SLOP: i32 = 8;
+
+/// 暂存的右键菜单：请求本身 + 按下位置。
+struct PendingMenu {
+    req: crate::event::MenuRequest,
+    down: Point,
+}
+
 /// 控件树交互宿主：渲染 + 事件分发 + 焦点管理。
 ///
 /// 自成一块的子职责（浮层、惯性、脏区仲裁、焦点）各自收进子模块的状态结构，
@@ -2658,6 +2667,8 @@ struct UiHost {
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
+    /// 右键按下时产生、等松开才弹的菜单（见 `defer_right_click_menu`）。
+    pending_menu: Option<PendingMenu>,
     /// 本宿主的序号，用于认领/释放通道消费权（见 `crate::sync` 的 App 级登记表）。
     ///
     /// 通道本身挂在应用上而非本宿主上：主窗关掉之后，别的窗口要能继续收后台数据。
@@ -2945,6 +2956,7 @@ impl UiHost {
             // 以建窗标题为起点：平台已经拿这一份建了窗，首次轮询不该把同样的字再推一遍。
             title_last: cfg.title.clone(),
             swallow_up: false,
+            pending_menu: None,
             host_id: crate::sync::next_host_id(),
             decoration: false,
             interval_cbs,
@@ -3034,6 +3046,54 @@ impl UiHost {
         // 菜单已经建在宿主里了却一直不上屏，直到下一次鼠标移动凑巧触发一帧。
         // 脏区那一半不用操心：`menu.is_open()` 会把本帧升成整窗（见 `damage.rs` 的 overlay）。
         res.repaint = true;
+    }
+
+    /// 右键菜单一律在**松开**时才弹（桌面惯例；原生标题栏、资源管理器皆如此）。
+    ///
+    /// 控件（TextInput 的编辑菜单）、`on_context_menu`、标题栏系统菜单都是在右键 `Down`
+    /// 上产出 `MenuRequest` 的——统一在这里截下来暂存，等配对的 `Up` 再放行，各处无需
+    /// 各改各的。按下仍照常生效（输入框的光标/选区落点），只是菜单延后。
+    ///
+    /// 松开处离按下处超过 `RIGHT_CLICK_SLOP` 则作罢（按住拖开再松 = 反悔）；比的是距离
+    /// 而不是命中节点——行里有图标/文字等子节点时，手抖一像素落到邻居上不该取消。
+    /// 无锚点的菜单位置取松开处。暂存只活到下一次任意按下，免得没等到 `Up`（捕获丢失）的残留串到后面。
+    fn defer_right_click_menu(
+        &mut self,
+        ev: crate::event::PointerEvent,
+        res: &mut crate::core::DispatchResult,
+    ) {
+        use crate::event::MouseButton;
+        if ev.kind == PointerKind::Down {
+            self.pending_menu = None;
+        }
+        if ev.button != MouseButton::Right {
+            return;
+        }
+        match ev.kind {
+            PointerKind::Down => {
+                if let Some(req) = res.menu.take() {
+                    self.pending_menu = Some(PendingMenu { req, down: ev.pos });
+                }
+            }
+            PointerKind::Up => {
+                let Some(p) = self.pending_menu.take() else {
+                    return;
+                };
+                let far =
+                    (ev.pos.x - p.down.x).abs().max((ev.pos.y - p.down.y).abs()) > RIGHT_CLICK_SLOP;
+                if far {
+                    return;
+                }
+                let mut req = p.req;
+                if req.anchor_top.is_none() {
+                    req.pos = ev.pos;
+                }
+                res.menu = Some(req);
+                res.consumed = true;
+                res.repaint = true;
+            }
+            _ => {}
+        }
     }
 
     /// 本宿主开始干活了：把**属于这个窗口**的状态注入线程局部。
@@ -3672,6 +3732,7 @@ impl AppHandler for UiHost {
         let mut capture = self.capture;
         let mut res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
         self.fill_system_menu(ev, &mut res);
+        self.defer_right_click_menu(ev, &mut res);
         // 诊断快照：命中的是哪个节点、有没有被消费。用 `hit_test` 而不是 `hover`——
         // 后者在 Up/Leave 上会被清掉，而我们要记的是「这一下点到哪儿了」。
         let hit = self.tree.hit_test(ev.pos);
@@ -3727,6 +3788,10 @@ impl AppHandler for UiHost {
         // 可参与失焦裁决的按下：Down 且事件前无捕获（拖动中的按下不算）。
         let blur_at = (ev.kind == PointerKind::Down && !had_capture).then_some(ev.pos);
         let (repaint, damage, _) = self.apply_dispatch_effects(res, FocusSource::Pointer, blur_at);
+        // 这一下按下打开了菜单：按键还按着，记下位置供「按住滑到某项上松开」判断。
+        if ev.kind == PointerKind::Down && self.menu.is_open() {
+            self.menu.held_open = Some(ev.pos);
+        }
         // hover/拖动（Move）自包含（控件自身视觉）→ 直接用其脏区走局部。
         // 点击等可能改变布局/显隐 → 置 needs_relayout：render 重排后用结构签名判定，
         // 签名不变才用控件脏区走局部，变了（对话框/切页等）自动升级整窗。
@@ -8037,6 +8102,84 @@ mod tests {
         ));
     }
 
+    /// 在客户区逻辑坐标处松开指定键。
+    fn release(host: &mut UiHost, x: i32, y: i32, button: crate::event::MouseButton) {
+        use crate::event::{PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            Point::new(x, y),
+            button,
+        ));
+    }
+
+    /// 完整的一次右键点击（按下 + 松开）。
+    fn right_click(host: &mut UiHost, x: i32, y: i32) {
+        press(host, x, y, crate::event::MouseButton::Right);
+        release(host, x, y, crate::event::MouseButton::Right);
+    }
+
+    /// 右键菜单在松开时才弹：输入框与 `on_context_menu` 同理；按下后拖到别的节点再松则作罢。
+    #[test]
+    fn context_menu_opens_on_right_release_not_press() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let text = crate::signal::signal(String::from("hello"));
+        let ui = Element::col()
+            .fill()
+            .child(
+                Element::row()
+                    .width_match()
+                    .height(32)
+                    .on_context_menu(|| vec![MenuItem::run("项", |_| {}, false)]),
+            )
+            .child(Element::text_input(text, "t").width(150));
+        let mut host = App::new("t", 200, 120).content(ui).into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Right);
+        // 顶部 32px 是带菜单的行，其下是输入框。
+        let (row_y, input_y) = (16, 48);
+        for (x, y) in [(40, input_y), (40, row_y)] {
+            host.on_pointer(at(PointerKind::Down, x, y));
+            assert!(!host.menu.is_open(), "按下时不该弹 ({x},{y})");
+            host.on_pointer(at(PointerKind::Up, x, y));
+            assert!(host.menu.is_open(), "松开才弹 ({x},{y})");
+            host.close_menu();
+        }
+        host.on_pointer(at(PointerKind::Down, 40, input_y));
+        host.on_pointer(at(PointerKind::Up, 40, row_y));
+        assert!(!host.menu.is_open(), "拖得远了再松，不弹");
+        // 手抖几像素仍算点击。
+        host.on_pointer(at(PointerKind::Down, 40, row_y));
+        host.on_pointer(at(PointerKind::Up, 43, row_y + 2));
+        assert!(host.menu.is_open(), "小位移内松开仍弹");
+    }
+
+    /// 标题栏右键按下时不弹，松开才弹；按下后移出拖动区再松开则作罢。
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn system_menu_opens_on_release_not_press() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "按下时不该弹");
+        release(&mut host, 60, 16, MouseButton::Right);
+        assert!(!menu_rows(&host).is_empty(), "松开才弹");
+
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        release(&mut host, 60, 90, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "松开时已移出拖动区，不弹");
+    }
+
     /// 标题栏（整条可拖）+ 正文的最小无边框界面。
     fn frameless_ui() -> Element {
         Element::col()
@@ -8086,13 +8229,12 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn frameless_drag_region_right_click_opens_system_menu() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
 
         let rows = menu_rows(&host);
         assert_eq!(
@@ -8145,39 +8287,36 @@ mod tests {
     /// 正文区右键不弹：系统菜单是"标题栏"的语义，不是"整个窗口"的。
     #[test]
     fn system_menu_only_on_the_drag_region() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 90, MouseButton::Right);
+        right_click(&mut host, 60, 90);
         assert!(menu_rows(&host).is_empty(), "正文区不该弹系统菜单");
     }
 
     /// 带系统标题栏的窗口不接管：那一下本就由系统自己处理。
     #[test]
     fn non_frameless_window_does_not_take_over() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "非 frameless 窗口不该接管右键");
     }
 
     /// 关掉开关后彻底不弹。
     #[test]
     fn system_menu_switch_turns_it_off() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .system_menu(false)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "system_menu(false) 后不该再弹");
     }
 
@@ -8186,7 +8325,7 @@ mod tests {
     /// 覆盖机制靠的是"补在分发之后"这个位置，不是另立的优先级规则——本测试钉住它。
     #[test]
     fn user_context_menu_wins_over_the_default() {
-        use crate::event::{MenuItem, MouseButton};
+        use crate::event::MenuItem;
         let ui = Element::col()
             .fill()
             .child(
@@ -8202,7 +8341,7 @@ mod tests {
             .content(ui)
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
 
         assert_eq!(
             menu_rows(&host)
@@ -8236,10 +8375,13 @@ mod tests {
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
         let down = PointerEvent::single(PointerKind::Down, Point::new(60, 16), MouseButton::Right);
-        assert!(host.on_pointer(down), "首次弹菜单应请求重绘");
+        let up = PointerEvent::single(PointerKind::Up, Point::new(60, 16), MouseButton::Right);
+        host.on_pointer(down);
+        assert!(host.on_pointer(up), "首次弹菜单应请求重绘");
         host.close_menu();
         layout_once(&mut host, 200, 120);
-        assert!(host.on_pointer(down), "同一点再弹一次也应请求重绘");
+        host.on_pointer(down);
+        assert!(host.on_pointer(up), "同一点再弹一次也应请求重绘");
         assert!(host.menu.is_open());
     }
 
@@ -8251,7 +8393,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn system_menu_close_goes_through_the_close_guard() {
-        use crate::event::{Key, KeyEvent, MouseButton};
+        use crate::event::{Key, KeyEvent};
         use crate::platform::AppHandler;
         use std::cell::Cell;
         let asked = std::rc::Rc::new(Cell::new(0u32));
@@ -8265,7 +8407,7 @@ mod tests {
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert_eq!(menu_rows(&host).len(), 5, "菜单应已弹出");
 
         let key = |k: Key| KeyEvent {
@@ -8295,7 +8437,7 @@ mod tests {
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "macOS 不该默认接管标题栏右键");
     }
 

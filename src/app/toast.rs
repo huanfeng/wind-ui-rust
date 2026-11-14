@@ -205,8 +205,8 @@ impl UiHost {
                 return true;
             }
         }
-        // 右键命中面板：弹「复制内容」菜单。
-        if ev.kind == PointerKind::Down && ev.button == MouseButton::Right {
+        // 右键命中面板：松开时弹「复制内容」菜单（与其它右键菜单一致）；按下只吞掉。
+        if ev.kind == PointerKind::Up && ev.button == MouseButton::Right {
             if let Some(i) = hit {
                 let text = self.toast.items[i].req.text.clone();
                 let item = MenuItem::run(

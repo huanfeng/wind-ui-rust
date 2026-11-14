@@ -495,6 +495,17 @@ struct MenuScrollbarDrag {
     thumb_h: f32,
 }
 
+/// 滑动选择的最小位移（逻辑像素）：小于它的松开视为原地点击，不执行。
+const MENU_SLIDE_SLOP: i32 = 4;
+
+/// 菜单里按下的目标：第几级面板、第几项、是否尾随图标。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MenuPress {
+    level: usize,
+    item: usize,
+    trailing: bool,
+}
+
 /// 宿主持有的菜单浮层状态：活动菜单 + 滚动条拖拽。
 #[derive(Default)]
 pub(super) struct MenuHost {
@@ -502,6 +513,11 @@ pub(super) struct MenuHost {
     pub(super) active: Option<ContextMenu>,
     /// 菜单滚动条拖拽状态（None=无）。
     scrollbar_drag: Option<MenuScrollbarDrag>,
+    /// 在某个可执行项上按下、等松开确认（见 `handle_menu_pointer`）。
+    press: Option<MenuPress>,
+    /// 菜单是被一次**仍按着**的按下打开的（菜单栏标题、下拉、右键），记下按下位置：
+    /// 按住拖到某项上松开即执行（系统菜单的滑动选择）；原地松开则只是点击，菜单留着。
+    pub(super) held_open: Option<Point>,
     /// 键盘激活的菜单栏（F10 / 单击 Alt）：某个标题高亮、**尚无面板展开**，←→ 换标题、
     /// ↓ / Enter 展开、Esc 退出——Windows 的菜单栏就是这两段式。与 `active` 互斥：
     /// 展开即清掉它。`current` 即高亮的标题。
@@ -861,6 +877,12 @@ impl UiHost {
     /// 脏区（如打开菜单时清 hover 触发的边框补间仍在跑），就会走局部重绘，只擦那一小块，
     /// 面板像素留在屏上。关闭浮层必经此处，勿直接写 `self.menu.active = None`。
     pub(super) fn close_menu(&mut self) {
+        // 按下 / 滑选 / 滚动条拖拽的中间态跟着菜单走：菜单被键盘关掉、或松开丢失时不留残余，
+        // 否则下一个菜单的第一次松开会拿到上一个菜单的记录。
+        self.menu.press = None;
+        self.menu.held_open = None;
+        self.menu.scrollbar_drag = None;
+        self.pending_menu = None;
         if let Some(m) = self.menu.active.take() {
             if let Some(bar) = m.bar {
                 bar.open.set(None);
@@ -1195,6 +1217,8 @@ impl UiHost {
                 self.menu_hover_update(ev.pos)
             }
             PointerKind::Down => {
+                self.menu.held_open = None;
+                self.menu.press = None;
                 // 菜单栏联动：点当前展开的标题收起；点别的标题切过去（指针没经过 Move
                 // 就落下的情形，如触摸）。都吞掉配对的 Up，不让它落回栏控件再开一次。
                 if let Some(link) = self.menu.active.as_ref().and_then(|m| m.bar.clone()) {
@@ -1204,6 +1228,7 @@ impl UiHost {
                             self.close_menu();
                         } else {
                             self.menu_bar_open(link, j, false);
+                            self.menu.held_open = Some(ev.pos);
                         }
                         return true;
                     }
@@ -1236,38 +1261,52 @@ impl UiHost {
                 };
                 // 同步悬停路径（保证子菜单按当前指针展开）。
                 self.menu_hover_update(ev.pos);
-                // 尾随可点击图标优先命中：独立于主项 action，点击只触发图标自己的回调
-                // （如"删除该项"），不触发本项被选中。
-                let trailing_hit = self
-                    .menu
-                    .active
-                    .as_ref()
-                    .and_then(|m| m.levels[k].trailing_icon_at(ev.pos))
-                    .and_then(|i| {
-                        self.menu.active.as_ref().unwrap().levels[k].items[i]
-                            .on_trailing_click
-                            .clone()
-                    });
-                if let Some(f) = trailing_hit {
-                    let target = self.menu.active.as_ref().map(|m| m.target);
-                    self.close_menu();
-                    self.run_menu_action(target, |ctx| f(ctx));
-                    return true;
-                }
-                // 命中项：叶子执行并关闭；子菜单父项/禁用项保持展开。
-                let hit = self.menu.active.as_ref().and_then(|m| {
-                    let lvl = &m.levels[k];
-                    lvl.item_at(ev.pos).map(|i| lvl.items[i].clone())
-                });
-                if let Some(item) = hit {
-                    return self.activate_menu_item(item);
+                // 命中可执行项：只记下「按在哪一项上」，松开时仍在这一项上才执行
+                // （原生菜单的惯例，也让按下后移开再松可以反悔）。
+                // 子菜单父项/禁用项/分隔线不记，保持展开。
+                self.menu.press = self.menu_press_target(k, ev.pos);
+                // 菜单仍开着，配对的 Up 由菜单自己处理，不需要吞。
+                if self.menu.press.is_some() {
+                    self.swallow_up = false;
                 }
                 true
             }
             PointerKind::Up => {
                 // 结束滚动条拖拽（若有）。
                 self.menu.scrollbar_drag = None;
-                true
+                // 松开：与按下时是同一项才执行。没有按下记录的 Up（打开菜单的那次右键的
+                // 松开、点外关闭后的残余）一律忽略——不然右键弹出菜单的那一下松开
+                // 会直接点中指针下的菜单项。
+                let held = self.menu.held_open.take();
+                let Some(press) = self.menu.press.take() else {
+                    // 滑动选择：菜单由按下打开、按键一直没松，拖出了点击范围再在某项上松开。
+                    let slid = held.filter(|o| {
+                        (o.x - ev.pos.x).abs().max((o.y - ev.pos.y).abs()) > MENU_SLIDE_SLOP
+                    });
+                    if slid.is_none() {
+                        return true;
+                    }
+                    let target = self
+                        .menu
+                        .active
+                        .as_ref()
+                        .and_then(|m| m.level_at(ev.pos))
+                        .and_then(|k| self.menu_press_target(k, ev.pos));
+                    return match target {
+                        Some(t) => self.menu_press_fire(t),
+                        None => true,
+                    };
+                };
+                let now = self
+                    .menu
+                    .active
+                    .as_ref()
+                    .and_then(|m| m.level_at(ev.pos))
+                    .and_then(|k| self.menu_press_target(k, ev.pos));
+                if now != Some(press) {
+                    return true;
+                }
+                self.menu_press_fire(press)
             }
             PointerKind::Wheel(delta) => {
                 // 滚轮在菜单面板内滚动：delta>0=上滚（内容下移，scroll 减小）。
@@ -1291,6 +1330,43 @@ impl UiHost {
             }
             _ => true, // 其余事件吞掉，避免穿透到下层
         }
+    }
+
+    /// 指针在第 `k` 级面板的 `pos` 处，按下会落在哪个可执行目标上（尾随图标优先于主项）。
+    fn menu_press_target(&self, k: usize, pos: Point) -> Option<MenuPress> {
+        let lvl = &self.menu.active.as_ref()?.levels[k];
+        if let Some(i) = lvl.trailing_icon_at(pos) {
+            if lvl.items[i].on_trailing_click.is_some() {
+                return Some(MenuPress {
+                    level: k,
+                    item: i,
+                    trailing: true,
+                });
+            }
+        }
+        let i = lvl.item_at(pos)?;
+        lvl.items[i].is_actionable().then_some(MenuPress {
+            level: k,
+            item: i,
+            trailing: false,
+        })
+    }
+
+    /// 执行松开确认过的目标。
+    fn menu_press_fire(&mut self, press: MenuPress) -> bool {
+        let Some(m) = self.menu.active.as_ref() else {
+            return true;
+        };
+        let target = m.target;
+        let item = m.levels[press.level].items[press.item].clone();
+        if press.trailing {
+            if let Some(f) = item.on_trailing_click.clone() {
+                self.close_menu();
+                self.run_menu_action(Some(target), |ctx| f(ctx));
+            }
+            return true;
+        }
+        self.activate_menu_item(item)
     }
 
     /// 执行一个菜单项：粘滞项原地刷新勾选态、菜单留在原处，其余关闭菜单后执行。
@@ -2148,11 +2224,9 @@ mod tests {
             "尾随图标矩形应命中该项"
         );
 
-        app.handle_menu_pointer(PointerEvent::single(
-            PointerKind::Down,
-            icon_pos,
-            MouseButton::Left,
-        ));
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            app.handle_menu_pointer(PointerEvent::single(kind, icon_pos, MouseButton::Left));
+        }
 
         assert!(trashed.get(), "点击尾随图标应触发其自身回调");
         assert!(!selected.get(), "点击尾随图标不应触发主项 action（选中）");
@@ -2215,6 +2289,142 @@ mod tests {
     }
 
     #[test]
+    fn menu_item_fires_on_release_over_same_item_only() {
+        // 菜单项松开才生效：按下不执行；松开时已移到别项/面板外不执行；
+        // 没有按下记录的松开（打开菜单那次右键的松开）也不执行。
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        let mut app = App::new("t", 400, 300)
+            .content(Element::col())
+            .into_handler_for_test();
+        let target = app.tree.root.unwrap();
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (h1, h2) = (hits.clone(), hits.clone());
+        let items = vec![
+            MenuItem::run("甲", move |_| h1.set(h1.get() + 1), false),
+            MenuItem::run("乙", move |_| h2.set(h2.get() + 10), false),
+        ];
+        let level = app.build_level(items, 20, 20, 0, None, None, false);
+        let rect = level.rect;
+        app.menu.active = Some(ContextMenu {
+            levels: vec![level],
+            target,
+            rebuild: None,
+            bar: None,
+            click_through: false,
+        });
+        let row = |i: i32| {
+            Point::new(
+                rect.x + 20,
+                rect.y + MENU_VPAD + i * MENU_ITEM_H + MENU_ITEM_H / 2,
+            )
+        };
+        let ev = |kind, p| PointerEvent::single(kind, p, MouseButton::Left);
+
+        app.handle_menu_pointer(ev(PointerKind::Up, row(0)));
+        assert_eq!(hits.get(), 0, "无按下记录的松开不得执行");
+        app.handle_menu_pointer(ev(PointerKind::Down, row(0)));
+        assert_eq!(hits.get(), 0, "按下时不得执行");
+        assert!(app.menu.is_open(), "按下后菜单仍开着");
+        app.handle_menu_pointer(ev(PointerKind::Up, row(1)));
+        assert_eq!(hits.get(), 0, "移到别项再松不得执行");
+        assert!(app.menu.is_open());
+        app.handle_menu_pointer(ev(PointerKind::Down, row(1)));
+        app.handle_menu_pointer(ev(PointerKind::Up, row(1)));
+        assert_eq!(hits.get(), 10, "同一项上松开才执行");
+        assert!(!app.menu.is_open());
+    }
+
+    #[test]
+    fn slide_select_fires_only_after_moving_from_the_opening_press() {
+        // 滑动选择：菜单由仍按着的按下打开，拖到某项上松开即执行；原地松开只是点击。
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        let mut app = App::new("t", 400, 300)
+            .content(Element::col())
+            .into_handler_for_test();
+        let target = app.tree.root.unwrap();
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let h = hits.clone();
+        let items = vec![MenuItem::run("甲", move |_| h.set(h.get() + 1), false)];
+        let level = app.build_level(items, 20, 20, 0, None, None, false);
+        let rect = level.rect;
+        let row = Point::new(rect.x + 20, rect.y + MENU_VPAD + MENU_ITEM_H / 2);
+        let open = |app: &mut UiHost, level, origin| {
+            app.menu.active = Some(ContextMenu {
+                levels: vec![level],
+                target,
+                rebuild: None,
+                bar: None,
+                click_through: false,
+            });
+            app.menu.held_open = Some(origin);
+        };
+        let up = |app: &mut UiHost, p| {
+            app.handle_menu_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left));
+        };
+
+        open(&mut app, level, Point::new(row.x, row.y + 1));
+        up(&mut app, row);
+        assert_eq!(hits.get(), 0, "原地松开只是点击，不执行");
+        assert!(app.menu.is_open());
+
+        let h = hits.clone();
+        let level = app.build_level(
+            vec![MenuItem::run("甲", move |_| h.set(h.get() + 1), false)],
+            20,
+            20,
+            0,
+            None,
+            None,
+            false,
+        );
+        open(&mut app, level, Point::new(row.x, row.y - 60));
+        up(&mut app, row);
+        assert_eq!(hits.get(), 1, "拖离按下位置后在项上松开应执行");
+        assert!(!app.menu.is_open());
+    }
+
+    #[test]
+    fn keyboard_close_clears_press_so_next_menu_slide_works() {
+        // 按住某项时被键盘关掉菜单、松开又丢失：旧的按下记录不能留给下一个菜单。
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+        let mut app = App::new("t", 400, 300)
+            .content(Element::col())
+            .into_handler_for_test();
+        let target = app.tree.root.unwrap();
+        let level = app.build_level(
+            vec![MenuItem::run("甲", |_| {}, false)],
+            20,
+            20,
+            0,
+            None,
+            None,
+            false,
+        );
+        let rect = level.rect;
+        app.menu.active = Some(ContextMenu {
+            levels: vec![level],
+            target,
+            rebuild: None,
+            bar: None,
+            click_through: false,
+        });
+        let row = Point::new(rect.x + 20, rect.y + MENU_VPAD + MENU_ITEM_H / 2);
+        app.handle_menu_pointer(PointerEvent::single(
+            PointerKind::Down,
+            row,
+            MouseButton::Left,
+        ));
+        assert!(app.menu.press.is_some());
+        app.close_menu();
+        assert!(app.menu.press.is_none() && app.menu.held_open.is_none());
+    }
+
+    #[test]
     fn sticky_item_keeps_menu_open_and_refreshes_checks() {
         // 复选菜单的核心回归：开关项点击后菜单**不关闭**、勾选态原地刷新，
         // 可连点多个；混排的动作项仍是"点了执行并关闭"。
@@ -2248,16 +2458,18 @@ mod tests {
             click_through: false,
         });
         macro_rules! click {
-            ($i:expr) => {
+            ($i:expr) => {{
+                let p = Point::new(
+                    rect.x + 20,
+                    rect.y + MENU_VPAD + $i * MENU_ITEM_H + MENU_ITEM_H / 2,
+                );
                 app.handle_menu_pointer(PointerEvent::single(
                     PointerKind::Down,
-                    Point::new(
-                        rect.x + 20,
-                        rect.y + MENU_VPAD + $i * MENU_ITEM_H + MENU_ITEM_H / 2,
-                    ),
+                    p,
                     MouseButton::Left,
-                ))
-            };
+                ));
+                app.handle_menu_pointer(PointerEvent::single(PointerKind::Up, p, MouseButton::Left))
+            }};
         }
 
         click!(0);
@@ -2382,11 +2594,10 @@ mod tests {
             bar: None,
             click_through: false,
         });
-        app.handle_menu_pointer(PointerEvent::single(
-            PointerKind::Down,
-            Point::new(rect.x + 20, rect.y + MENU_VPAD + MENU_ITEM_H / 2),
-            MouseButton::Left,
-        ));
+        let p = Point::new(rect.x + 20, rect.y + MENU_VPAD + MENU_ITEM_H / 2);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            app.handle_menu_pointer(PointerEvent::single(kind, p, MouseButton::Left));
+        }
 
         assert!(app.menu.active.is_none(), "动作项点击后菜单须关闭");
         assert_eq!(app.toast.items.len(), 1, "ctx.toast 应经宿主上屏");
@@ -2428,11 +2639,10 @@ mod tests {
             bar: None,
             click_through: false,
         });
-        app.handle_menu_pointer(PointerEvent::single(
-            PointerKind::Down,
-            Point::new(before.x + 20, before.y + MENU_VPAD + MENU_ITEM_H / 2),
-            MouseButton::Left,
-        ));
+        let p = Point::new(before.x + 20, before.y + MENU_VPAD + MENU_ITEM_H / 2);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            app.handle_menu_pointer(PointerEvent::single(kind, p, MouseButton::Left));
+        }
         assert!(wide.get());
         assert_eq!(
             app.menu.active.as_ref().unwrap().levels[0].rect,
@@ -2692,6 +2902,30 @@ mod tests {
                 .is_none(),
             "鼠标离开窗口（Move(-1,-1)）也应清掉菜单高亮"
         );
+    }
+
+    #[test]
+    fn dropdown_opens_on_plain_click_when_unfocused() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::{Point, Size};
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+        let sel = crate::signal::signal(0usize);
+        let app = App::new("t", 300, 200).content(
+            Element::col()
+                .padding(10)
+                .child(Element::dropdown(vec!["甲", "乙"], sel).width(200)),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 200).unwrap();
+        h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 200));
+        let p = Point::new(50, 22);
+        for kind in [PointerKind::Move, PointerKind::Down, PointerKind::Up] {
+            h.on_pointer(PointerEvent::single(kind, p, MouseButton::Left));
+        }
+        assert!(h.menu.is_open(), "未聚焦时单击下拉框应展开");
     }
 
     /// 回归：Dropdown 一直正确处理 Key::Space（select.rs 的 Key 分支），断的是宿主——
@@ -3307,6 +3541,11 @@ mod tests {
         let other = Point::new(60, 250);
         h.on_pointer(PointerEvent::single(
             PointerKind::Down,
+            other,
+            MouseButton::Right,
+        ));
+        h.on_pointer(PointerEvent::single(
+            PointerKind::Up,
             other,
             MouseButton::Right,
         ));

@@ -395,17 +395,16 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
     handler.set_active_renderer(off.active());
     off.frame(handler, size, cfg.bg);
-    // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
+    // 可选：合成一次右键点击（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
         let pos = Point::new(
             (lx as f32 * s).round() as i32,
             (ly as f32 * s).round() as i32,
         );
-        handler.on_pointer(PointerEvent::single(
-            PointerKind::Down,
-            pos,
-            MouseButton::Right,
-        ));
+        // 右键菜单在松开时才弹，故合成完整的按下 + 松开。
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            handler.on_pointer(PointerEvent::single(kind, pos, MouseButton::Right));
+        }
         off.frame(handler, size, cfg.bg);
     }
     // 可选：依次合成左键单击（Down+Up），捕获下拉展开等。多个 `--click` 按序回放，
