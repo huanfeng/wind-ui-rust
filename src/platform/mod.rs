@@ -703,6 +703,8 @@ pub struct WindowConfig {
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     /// 非 `frameless` 窗口上无意义——那时系统标题栏自己带原生菜单。
     pub system_menu: bool,
+    /// 右键菜单触发时机（默认随平台）。
+    pub menu_trigger: crate::event::ContextMenuTrigger,
     /// 强制动效档位：None=随系统（见 [`reduced_motion`](Self::reduced_motion)）；Some=强制。
     pub motion: Option<crate::anim::MotionLevel>,
     /// 系统要求减弱动效（"显示动画"关 / "减弱动态效果"开）时落到的档位，默认
@@ -810,6 +812,7 @@ impl Default for WindowConfig {
             resident: false,
             frameless: false,
             system_menu: true,
+            menu_trigger: Default::default(),
             motion: None,
             reduced_motion: crate::anim::MotionLevel::Reduced,
             screenshot_anim_at: None,
@@ -1224,6 +1227,12 @@ pub trait AppHandler {
     /// （自定义标题栏）。平台据此在 `WM_NCHITTEST` 返回 HTCAPTION 实现拖动。
     fn window_drag_at(&self, _pos: Point) -> bool {
         false
+    }
+
+    /// 右键菜单是否在**按下**时弹（否则松开时弹）。平台层自己弹窗口菜单时（Wayland 客户端
+    /// 标题栏的合成器菜单）据此决定时机，与控件树里的右键菜单保持一致。
+    fn context_menu_on_press(&self) -> bool {
+        crate::event::ContextMenuTrigger::Auto.on_press()
     }
 
     /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在交互控件（窗口按钮等）上。

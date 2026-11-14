@@ -1036,6 +1036,9 @@ struct WindowState {
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
     activate_on_show: bool,
+    /// 标题栏右键的 Down 已在 `WM_NCRBUTTONDOWN` 提前交出（「按下即弹」策略），
+    /// `WM_NCRBUTTONUP` 只需补 Up。
+    nc_down_sent: bool,
     /// 无边框且 DWM 不在客户区上画边框（Win10）：未最大化时由宿主自己画 1px 外框，
     /// 见 `AppHandler::set_window_outline`。建窗时按圆角属性设没设成判定。
     self_outline: bool,
@@ -1186,6 +1189,7 @@ impl WindowState {
             touch: Touch::default(),
             frameless: false,
             activate_on_show: true,
+            nc_down_sent: false,
             mouse_tracked: false,
             pending_surrogate: None,
             ime_composing: false,
@@ -2175,9 +2179,22 @@ unsafe extern "system" fn wnd_proc(
         // DefWindowProc 对 WM_NCRBUTTONUP 的默认处理就是弹系统的灰色原生菜单，与自绘
         // 标题栏视觉割裂。非 HTCAPTION 的部位（缩放边框）同样吞掉、不弹任何东西——
         // 无边框窗口没有系统外框，那里本就不该有系统菜单。
-        WM_NCRBUTTONDOWN if is_frameless(hwnd) => LRESULT(0),
+        WM_NCRBUTTONDOWN if is_frameless(hwnd) => {
+            // 策略是「按下即弹」时在这里就把 Down 交出去（菜单立刻出，且可按住滑选）；
+            // 否则等 `WM_NCRBUTTONUP` 一次补发完整的点击。
+            if wparam.0 as u32 == HTCAPTION && nc_menu_on_press(hwnd) {
+                nc_right_pointer(hwnd, lparam, PointerKind::Down);
+                if let Some(s) = state_from(hwnd) {
+                    s.nc_down_sent = true;
+                }
+            }
+            LRESULT(0)
+        }
         WM_NCRBUTTONUP if is_frameless(hwnd) => {
-            if wparam.0 as u32 == HTCAPTION {
+            let sent = state_from(hwnd).is_some_and(|s| std::mem::take(&mut s.nc_down_sent));
+            if sent {
+                nc_right_pointer(hwnd, lparam, PointerKind::Up);
+            } else if wparam.0 as u32 == HTCAPTION {
                 nc_right_click(hwnd, lparam);
             }
             LRESULT(0)
@@ -2600,13 +2617,23 @@ unsafe fn is_frameless(hwnd: HWND) -> bool {
 /// 转换后仍是物理像素，÷scale 由宿主 `on_pointer` 统一做——漏掉任一步的症状都是
 /// "高 DPI 下菜单弹在离光标几十像素的地方"。
 unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
+    nc_right_pointer(hwnd, lparam, PointerKind::Down);
+    nc_right_pointer(hwnd, lparam, PointerKind::Up);
+}
+
+/// 把一条 NC 右键消息（lParam 为屏幕坐标）转成客户区的一次右键指针事件。
+unsafe fn nc_right_pointer(hwnd: HWND, lparam: LPARAM, kind: PointerKind) {
     let mut pt = POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
         y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
     };
     let _ = ScreenToClient(hwnd, &mut pt);
-    handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
-    handle_pointer_at(hwnd, PointerKind::Up, MouseButton::Right, pt.x, pt.y);
+    handle_pointer_at(hwnd, kind, MouseButton::Right, pt.x, pt.y);
+}
+
+/// 右键菜单策略是否为「按下即弹」。读完即放开 state 借用（调用方随后才会进 `handle_pointer_at`）。
+unsafe fn nc_menu_on_press(hwnd: HWND) -> bool {
+    state_from(hwnd).is_some_and(|s| s.handler.context_menu_on_press())
 }
 
 /// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。

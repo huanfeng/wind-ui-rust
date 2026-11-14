@@ -963,6 +963,36 @@ pub enum MenuAction {
 /// 每一级面板（详见 [`MenuAction`]）。
 pub type MenuActionFn = std::rc::Rc<dyn Fn(&mut crate::core::EventCtx)>;
 
+/// 右键菜单何时弹出：按下时，还是松开时。
+///
+/// 各桌面的习惯不同：Windows 在**松开**时弹（原生标题栏、资源管理器皆如此）；macOS 与
+/// Linux 桌面（GTK / Qt）在**按下**时弹，并且按住滑到某项上松开即可直接选中。默认
+/// [`Auto`](Self::Auto) 各平台走各自的习惯，应用也可以固定一种。
+///
+/// 只管右键菜单（控件的编辑菜单、`on_context_menu`、标题栏系统菜单）；菜单项本身
+/// 一律在松开时执行，菜单栏与下拉框按下即展开。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContextMenuTrigger {
+    /// 随平台：Windows 松开时弹，其余平台按下时弹。
+    #[default]
+    Auto,
+    /// 按下右键就弹。
+    Press,
+    /// 松开右键才弹。
+    Release,
+}
+
+impl ContextMenuTrigger {
+    /// 解析后是否在按下时弹（`Auto` 按当前平台落定）。
+    pub fn on_press(self) -> bool {
+        match self {
+            Self::Press => true,
+            Self::Release => false,
+            Self::Auto => !cfg!(target_os = "windows"),
+        }
+    }
+}
+
 /// 一个浮层菜单/下拉项。支持图标、尾随快捷键、分隔线与级联子菜单。
 ///
 /// `#[non_exhaustive]`：字段全 `pub`，本版已因加字段破坏过两次（`intent` 让字面量构造
@@ -1457,6 +1487,8 @@ pub struct WindowRequest {
     pub frameless: bool,
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     pub system_menu: bool,
+    /// 右键菜单触发时机（默认随平台）。
+    pub menu_trigger: crate::event::ContextMenuTrigger,
     /// 最小客户区尺寸（逻辑 dp，0=不限制）。
     pub min_width: i32,
     pub min_height: i32,

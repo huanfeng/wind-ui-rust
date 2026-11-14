@@ -38,9 +38,9 @@ pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::core::ScrollEdge;
     pub use crate::event::{
-        pointer_mods, window_open, window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp,
-        ImeField, ImeHints, Key, MenuBarLink, MenuItem, MenuRequest, Mods, Preedit, PreeditSpan,
-        ToastKind, UnderlineStyle, WindowRequest, WindowState,
+        pointer_mods, window_open, window_state, ContextMenuTrigger, CursorShape, Hotkey,
+        HotkeyCtx, HotkeyOp, ImeField, ImeHints, Key, MenuBarLink, MenuItem, MenuRequest, Mods,
+        Preedit, PreeditSpan, ToastKind, UnderlineStyle, WindowRequest, WindowState,
     };
     pub use crate::geometry::{Color, Corners, Insets, Point, Rect, Size};
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};

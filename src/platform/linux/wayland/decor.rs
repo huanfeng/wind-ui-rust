@@ -340,8 +340,15 @@ impl Wl {
         }
         match button {
             MouseButton::Right => {
-                // 松开才弹：只上膛，见 `deco_release_menu`。
-                if let Some(d) = w.deco.as_mut() {
+                if w.handler.context_menu_on_press() {
+                    // 按下即弹的策略（Wayland 的 Auto 即此）。
+                    if let (Some(r), Some(seat)) = (&w.role, &self.g.seat) {
+                        let f = w.scale.factor;
+                        let lg = |v: i32| (v as f64 / f).round() as i32;
+                        r.top.show_window_menu(seat, serial, lg(p.x), lg(p.y));
+                    }
+                } else if let Some(d) = w.deco.as_mut() {
+                    // 松开才弹：只上膛，见 `deco_release_menu`。
                     d.pending_menu = Some(serial);
                 }
                 Some(None)

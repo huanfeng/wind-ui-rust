@@ -2087,7 +2087,7 @@ ctx.show_menu_request(req);
 `ctx.defer_blocking(..)`、`ctx.request_close()`（走关闭决策链）都能用。它是 `Fn` 不是 `FnMut`：项会被克隆进
 浮层的每一级面板、粘滞项还要重建后再执行同一份动作，要改状态请用 `Signal`。
 
-菜单的按下/松开语义（对齐桌面惯例）：菜单项在**松开**时执行（须与按下同一项）；下拉框与菜单栏按下即展开，按住滑到某项上松开直接选中。右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单）在**松开右键**时弹出。
+菜单的按下/松开语义（对齐桌面惯例）：菜单项在**松开**时执行（须与按下同一项）；下拉框与菜单栏按下即展开，按住滑到某项上松开直接选中。**右键菜单何时弹出**由 `App::context_menu_trigger(ContextMenuTrigger)`（子窗用 `Window::context_menu_trigger`）决定：默认 `Auto` 随平台——Windows 松开右键时弹，macOS / Linux 按下时弹（按住滑选同样可用）；也可固定 `Press` / `Release`。该策略只管右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单）。
 
 任意元素/容器挂菜单用 `Element::on_context_menu(build)`（命中沿父链冒泡到首个设了回调的节点）；
 **表格数据行**用 `Element::on_row_context_menu(|行下标| items)`——行是控件内部构建的，应用拿不到行元素：

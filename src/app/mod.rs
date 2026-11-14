@@ -147,6 +147,7 @@ impl Window {
                 modal: false,
                 frameless: false,
                 system_menu: true,
+                menu_trigger: Default::default(),
                 min_width: 0,
                 min_height: 0,
                 bg: None,
@@ -411,6 +412,12 @@ impl Window {
         self
     }
 
+    /// 右键菜单何时弹出，同 [`App::context_menu_trigger`]。
+    pub fn context_menu_trigger(mut self, t: crate::event::ContextMenuTrigger) -> Self {
+        self.req.menu_trigger = t;
+        self
+    }
+
     /// 最小客户区尺寸（逻辑 dp）。
     pub fn min_size(mut self, w: i32, h: i32) -> Self {
         self.req.min_width = w;
@@ -647,6 +654,7 @@ fn build_new_window(
         resizable: req.resizable,
         frameless: req.frameless,
         system_menu: req.system_menu,
+        menu_trigger: req.menu_trigger,
         min_width: req.min_width,
         min_height: req.min_height,
         single: req.single,
@@ -1183,6 +1191,7 @@ impl App {
                 resident: false,
                 frameless: false,
                 system_menu: true,
+                menu_trigger: Default::default(),
                 motion: None,
                 reduced_motion: crate::anim::MotionLevel::Reduced,
                 screenshot_anim_at: None,
@@ -1964,6 +1973,14 @@ impl App {
         self
     }
 
+    /// 右键菜单何时弹出：[`Auto`](crate::event::ContextMenuTrigger::Auto)（默认）随平台——
+    /// Windows 松开时弹，macOS / Linux 按下时弹；也可固定为 `Press` 或 `Release`。
+    /// 只管右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单）。
+    pub fn context_menu_trigger(mut self, t: crate::event::ContextMenuTrigger) -> Self {
+        self.cfg.menu_trigger = t;
+        self
+    }
+
     /// 单实例 + 二次运行激活/传参。`app_id` 唯一标识（建议含变体后缀，使 dev/release 互不干扰）。
     /// 仅首实例会被调用 `on_second_instance`（收到另一进程 argv 时，在 UI 线程）；
     /// 二次实例：argv 已转发给首实例，`run()` 直接返回、不建窗口。
@@ -2738,6 +2755,8 @@ struct UiHost {
     frameless: bool,
     /// 拖动区右键是否默认接管为系统菜单（`App::system_menu`）。
     system_menu: bool,
+    /// 右键菜单触发时机（`App::context_menu_trigger`）。
+    menu_trigger: crate::event::ContextMenuTrigger,
     /// 本窗口的状态与能力快照（平台经 `on_window_state` 推送）。
     ///
     /// 每次事件分发 / 绘制前注入线程局部供控件与菜单构建器读取。**必须每次都注**、
@@ -2981,6 +3000,7 @@ impl UiHost {
             last_present: None,
             frameless: cfg.frameless,
             system_menu: cfg.system_menu,
+            menu_trigger: cfg.menu_trigger,
             window_state,
         }
     }
@@ -3066,7 +3086,8 @@ impl UiHost {
         if ev.kind == PointerKind::Down {
             self.pending_menu = None;
         }
-        if ev.button != MouseButton::Right {
+        // 按下即弹的策略：什么都不用拦，菜单照常在 Down 上开（并由 `held_open` 支持滑选）。
+        if ev.button != MouseButton::Right || self.menu_trigger.on_press() {
             return;
         }
         match ev.kind {
@@ -3816,6 +3837,10 @@ impl AppHandler for UiHost {
 
     fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
         self.last_present
+    }
+
+    fn context_menu_on_press(&self) -> bool {
+        self.menu_trigger.on_press()
     }
 
     fn on_dismiss_overlays(&mut self) -> bool {
@@ -8119,6 +8144,55 @@ mod tests {
         release(host, x, y, crate::event::MouseButton::Right);
     }
 
+    /// 按下即弹的策略：右键 Down 就开菜单（macOS / Linux 的 Auto），原地松开菜单留着，
+    /// 按住滑到某项上松开则直接执行。
+    #[test]
+    fn press_policy_opens_on_down_and_supports_slide_select() {
+        use crate::event::{ContextMenuTrigger, MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let h = hits.clone();
+        let ui =
+            Element::col()
+                .fill()
+                .child(
+                    Element::row()
+                        .width_match()
+                        .height(32)
+                        .on_context_menu(move || {
+                            let h = h.clone();
+                            vec![MenuItem::run("项", move |_| h.set(h.get() + 1), false)]
+                        }),
+                );
+        let mut host = App::new("t", 200, 120)
+            .context_menu_trigger(ContextMenuTrigger::Press)
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Right);
+        host.on_pointer(at(PointerKind::Down, 40, 16));
+        assert!(host.menu.is_open(), "按下即弹");
+        host.on_pointer(at(PointerKind::Up, 40, 16));
+        assert!(host.menu.is_open(), "原地松开菜单留着");
+        host.close_menu();
+
+        host.on_pointer(at(PointerKind::Down, 40, 16));
+        let r = host.menu.active.as_ref().unwrap().levels[0].rect;
+        let item = Point::new(r.x + 20, r.y + 14);
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            item,
+            MouseButton::Right,
+        ));
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            item,
+            MouseButton::Right,
+        ));
+        assert_eq!(hits.get(), 1, "按住滑到项上松开应执行");
+        assert!(!host.menu.is_open());
+    }
+
     /// 右键菜单在松开时才弹：输入框与 `on_context_menu` 同理；按下后拖到别的节点再松则作罢。
     #[test]
     fn context_menu_opens_on_right_release_not_press() {
@@ -8134,7 +8208,10 @@ mod tests {
                     .on_context_menu(|| vec![MenuItem::run("项", |_| {}, false)]),
             )
             .child(Element::text_input(text, "t").width(150));
-        let mut host = App::new("t", 200, 120).content(ui).into_handler_for_test();
+        let mut host = App::new("t", 200, 120)
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
+            .content(ui)
+            .into_handler_for_test();
         layout_once(&mut host, 200, 120);
         let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Right);
         // 顶部 32px 是带菜单的行，其下是输入框。
@@ -8162,6 +8239,7 @@ mod tests {
         use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
@@ -8172,6 +8250,7 @@ mod tests {
 
         let mut host = App::new("t", 200, 120)
             .frameless()
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);

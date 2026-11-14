@@ -7,10 +7,14 @@
 
 ### 变更
 
-- **菜单交互对齐桌面惯例（按下 / 松开）**：右键菜单（输入框编辑菜单、`on_context_menu`、
-  标题栏系统菜单，含 Wayland 客户端标题栏）改为**松开右键**时才弹（松开处离按下处超过 8 逻辑像素
-  则作罢）；菜单里的项改为**松开**时才执行，且须与按下是同一项，移开再松可反悔。`Dropdown` /
-  `CheckMenu` 改为**按下即展开**，菜单栏、下拉框支持「按住滑到某项上松开」直接选中。
+- **菜单交互对齐桌面惯例（按下 / 松开）**：菜单里的项改为**松开**时才执行，且须与按下是同一项；
+  移开再松可反悔。`Dropdown` / `CheckMenu` 改为**按下即展开**，菜单栏、下拉框、按下即弹的右键菜单
+  支持「按住滑到某项上松开」直接选中。
+- **`ContextMenuTrigger` 与 `App::context_menu_trigger` / `Window::context_menu_trigger`**：
+  右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单，含 Wayland 客户端标题栏）
+  何时弹出的策略。默认 `Auto` 随平台——Windows 松开时弹（松开处离按下处超过 8 逻辑像素则作罢），
+  macOS / Linux 按下时弹；也可固定为 `Press` / `Release`。`AppHandler::context_menu_on_press`
+  供平台层自弹窗口菜单时对齐。
 
 ### 新增
 
