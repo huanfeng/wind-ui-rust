@@ -267,7 +267,9 @@ fn writing_marks_from_another_control_repaints_the_box() {
     render(&mut h);
     h.on_key(key_ev()(Key::Enter));
     render(&mut h);
-    drop(render);
+    // 释放闭包对 pm 的借用（后续直接用 pm 比对）。闭包不实现 Drop，clippy 新版
+    // 的 drop_non_drop 对 drop(closure) 报警；`let _ =` 同样立即结束借用。
+    let _ = render;
     // 与整窗重画逐像素比：只数「有没有标记色」分不出「整行都画了」与「只重画了边角」。
     h.damage.needs_full = true;
     let mut want = Pixmap::new(W as u32, H as u32).unwrap();
@@ -284,7 +286,9 @@ fn writing_marks_from_another_control_repaints_the_box() {
         |h: &mut UiHost| h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(W, H));
     click(&mut h, pc);
     render(&mut h);
-    drop(render);
+    // 释放闭包对 pm 的借用（后续直接用 pm 比对）。闭包不实现 Drop，clippy 新版
+    // 的 drop_non_drop 对 drop(closure) 报警；`let _ =` 同样立即结束借用。
+    let _ = render;
     assert!(mark_runs(&pm, big_r).is_empty(), "按钮清表 → 大框标记消失");
 }
 
