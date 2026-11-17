@@ -2673,6 +2673,24 @@ impl AppHandler for ClosureHandler {
 /// 右键按下到松开允许的最大位移（逻辑像素）；超过视为拖开反悔，不弹菜单。
 const RIGHT_CLICK_SLOP: i32 = 8;
 
+/// ESC / 快捷键的关闭裁定。bool 口径（是否放行）分不出「收了层」与「拦截器拒绝」，
+/// 而键盘路径 on_key 的返回值正是平台层要不要失效窗口的唯一依据——收层被当成
+/// 「没动界面」跳过重绘时，浮层信号已翻、`needs_full` 已置，屏幕上却赖着不走，
+/// 直到下一次鼠标移动才消失（真机暴露：verify_batch §6）。
+#[derive(Debug, PartialEq, Eq)]
+enum CloseDecision {
+    /// 没动界面：拦截器拒绝，或 `escape_cisses_window=false` 且没有层可收。
+    Nothing,
+    /// 收了一层（浮层 / 对话框）：界面动了，需重绘。
+    Peel,
+    /// 放行关窗：平台层接下来销毁窗口，重绘无意义。
+    Close,
+    /// 放行但 hide_on_close 转隐藏：Hide 意图已排（`pending_window_op`），平台层接手。
+    /// bool 口径（是否放行销毁）下它算 false——「关窗」被换成了「隐窗」，`self.close`
+    /// 不置；重绘同样无意义（窗口即将离开屏幕）。
+    Hide,
+}
+
 /// 暂存的右键菜单：请求本身 + 按下位置。
 struct PendingMenu {
     req: crate::event::MenuRequest,
@@ -2840,28 +2858,57 @@ impl UiHost {
     /// 借用期间被调用（win32 `WM_CLOSE` / macOS `windowShouldClose:`），此处碰 OS 会
     /// 同步重入（见 AGENTS.md 铁律 6）。
     fn resolve_close(&mut self) -> bool {
+        matches!(self.resolve_close_decision(), CloseDecision::Close)
+    }
+
+    /// ESC 的处理：收浮层 / 关对话框，都没有时按 [`App::escape_closes_window`] 决定要不要
+    /// 走关闭请求。
+    ///
+    /// `escape_closes_window=false` 时只收层、不碰窗口：此时连 `on_close_request` 也不问——
+    /// 那是「窗口要关了」的询问，而这一下根本不打算关。
+    fn resolve_escape(&mut self) -> CloseDecision {
+        if !self.escape_closes_window {
+            return match self.dismiss_top_layer() {
+                true => CloseDecision::Peel,
+                false => CloseDecision::Nothing,
+            };
+        }
+        self.resolve_close_decision()
+    }
+
+    /// ESC / 快捷键的关闭裁定：区分「收了层」（界面动了，必须重绘）与「拒绝 / 放行」
+    /// （界面没动，或平台层接手后重绘无意义）。[`Self::resolve_close`] 的 bool 口径
+    /// 分不出这两者，而键盘路径的返回值正是平台层要不要失效窗口的唯一依据——
+    /// 分不出时收层会被当成「没动界面」跳过重绘，浮层信号已翻、`needs_full` 已置，
+    /// 屏幕上却赖着不走，直到下一次鼠标移动才消失（真机暴露：verify_batch §6）。
+    fn resolve_close_decision(&mut self) -> CloseDecision {
         // 防自我递归：`on_close_request` 的回调里再调 `ctx.request_close()` 会经
         // `apply_app_effects` 回到这里。那种写法本就没有意义（正在回答"能不能关"），
         // 直接放行不再重入。
         if self.resolving_close {
-            return true;
+            return CloseDecision::Close;
         }
         self.resolving_close = true;
-        let out = self.resolve_close_inner();
+        let out = self.resolve_close_decision_inner();
         self.resolving_close = false;
         out
     }
 
-    /// ESC 的处理：收浮层 / 关对话框，都没有时按 [`App::escape_closes_window`] 决定要不要
-    /// 走关闭请求。返回是否要真关窗，口径同 [`Self::resolve_close`]。
-    fn resolve_escape(&mut self) -> bool {
-        if !self.escape_closes_window {
-            // 只收层、不碰窗口：此时连 `on_close_request` 也不问——那是「窗口要关了」的询问，
-            // 而这一下根本不打算关。
-            self.dismiss_top_layer();
-            return false;
+    fn resolve_close_decision_inner(&mut self) -> CloseDecision {
+        if self.dismiss_top_layer() {
+            return CloseDecision::Peel;
         }
-        self.resolve_close()
+        // 无层可收时询问 close_handler，默认允许关闭。
+        let allowed = self.ask_close_handler();
+        if allowed && self.hide_on_close {
+            self.pending_window_op = Some(WindowOp::Hide);
+            return CloseDecision::Hide;
+        }
+        if allowed {
+            CloseDecision::Close
+        } else {
+            CloseDecision::Nothing
+        }
     }
 
     /// 收起最顶层的一层：先锚定浮层，再对话框。收了一层返回 true（并升整窗重绘）。
@@ -2879,19 +2926,6 @@ impl UiHost {
             return true;
         }
         false
-    }
-
-    fn resolve_close_inner(&mut self) -> bool {
-        if self.dismiss_top_layer() {
-            return false;
-        }
-        // 无对话框时询问 close_handler，默认允许关闭。
-        let allowed = self.ask_close_handler();
-        if allowed && self.hide_on_close {
-            self.pending_window_op = Some(WindowOp::Hide);
-            return false;
-        }
-        allowed
     }
 
     /// 询问关闭请求拦截器（[`App::on_close_request`]），无拦截器时默认放行。
@@ -4053,8 +4087,15 @@ impl AppHandler for UiHost {
                     self.damage.needs_full = true;
                     repaint = true;
                 }
-                if sc.close && self.resolve_close() {
-                    self.close = true;
+                if sc.close {
+                    // 与 ESC 同源：先收层再问拦截器。收了层界面动了——必须让平台层
+                    // 知道要重绘（同 on_key 的 Escape 分支），否则浮层/对话框在屏幕
+                    // 上赖着不走。
+                    match self.resolve_close_decision() {
+                        CloseDecision::Peel => repaint = true,
+                        CloseDecision::Close => self.close = true,
+                        CloseDecision::Hide | CloseDecision::Nothing => {}
+                    }
                 }
             }
             if handled {
@@ -4087,7 +4128,15 @@ impl AppHandler for UiHost {
                         repaint = true;
                     }
                 }
-                Key::Escape if self.resolve_escape() => self.close = true,
+                Key::Escape => {
+                    match self.resolve_escape() {
+                        CloseDecision::Peel => repaint = true,
+                        CloseDecision::Close => self.close = true,
+                        // Hide：Hide 意图已排，平台层消费 pending_window_op——重绘与
+                        // close 都不适用。
+                        CloseDecision::Hide | CloseDecision::Nothing => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -5208,6 +5257,88 @@ mod tests {
         frame(&mut h);
         h.on_key(k(Key::Escape));
         assert!(!h.wants_close(), "第三下没有层可收，也不关窗");
+    }
+
+    /// ESC 收层必须让平台层知道要重绘：`on_key` 返回 true。
+    ///
+    /// 突变目标：on_key 的 Escape 分支去掉 `Peel => repaint = true` → 本测试红
+    ///（返回 false，平台层不失效窗口，浮层在屏幕上赖着不走）。
+    /// 对照组：无层可收时（flag=false）不请求重绘——界面没动就不该刷，钉住「无谓
+    /// 整窗」不引入。
+    #[test]
+    fn escape_peel_requests_repaint() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+
+        let open = crate::signal::signal(true);
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(
+                Element::col().width(100).height(30).popup(
+                    open,
+                    Element::col()
+                        .width(80)
+                        .height(60)
+                        .bg_role(crate::style::Role::Surface),
+                ),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let k = key_ev();
+
+        let repaint = h.on_key(k(Key::Escape));
+        assert!(repaint, "收浮层即界面动了，on_key 必须返回 true");
+        assert!(!open.get(), "浮层已收");
+        assert!(!h.wants_close());
+
+        // 对照组：没有层可收时 ESC（flag=false）界面没动，不请求重绘。
+        let mut h2 = App::new("t", 100, 100)
+            .escape_closes_window(false)
+            .content(Element::col())
+            .into_handler_for_test();
+        assert!(
+            !h2.on_key(k(Key::Escape)),
+            "没动界面就不请求重绘——无谓整窗是回归"
+        );
+        assert!(!h2.wants_close());
+    }
+
+    /// 快捷键路径的 close 语义（`on_shortcut` 置 `sc.close`）与 ESC 同源：先收层再问
+    /// 拦截器，收了层同样必须置 repaint。此前 `sc.close && resolve_close()` 的 bool
+    /// 口径把「收层」混进「拦截器拒绝」跳过了重绘——症状同 ESC 的缺口。
+    ///
+    /// 隔离要点：handler 必须返回 `false`、按键必须是非 Escape——否则 handled=true 会
+    /// 在快捷键块之后无条件 `return true`，repaint 断言与生产代码的 `Peel => repaint`
+    /// 臂脱钩，突变验证全绿（审查发现）。返回 false + 非 Escape 键让 on_key 的返回值
+    /// 只由快捷键块置上的 repaint 决定。
+    #[test]
+    fn shortcut_close_peel_requests_repaint() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+
+        let open = crate::signal::signal(true);
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(
+                Element::col().width(100).height(30).popup(
+                    open,
+                    Element::col()
+                        .width(80)
+                        .height(60)
+                        .bg_role(crate::style::Role::Surface),
+                ),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let k = key_ev();
+        h.shortcut = Some(Box::new(|sc, _ev| {
+            sc.close = true;
+            false // handled=false：不吞键，返回值才轮得到 repaint 说话
+        }));
+        let repaint = h.on_key(k(Key::Char('a')));
+        assert!(repaint, "快捷键 sc.close 收层后 on_key 必须返回 true");
+        assert!(!open.get(), "浮层已收");
+        assert!(!h.wants_close());
     }
 
     /// 文档承诺 flag=false 时 ESC「不再触碰窗口」——`hide_on_close` 下也不例外：

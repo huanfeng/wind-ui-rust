@@ -109,7 +109,15 @@ fn main() {
         Element::row()
             .spacing(10)
             .child(Element::text_input(signal(String::from("悬停我（I 形）")), "").width(180))
-            .child(Element::button("悬停我（手形）").on_click(|ctx| ctx.toast("点到了"))),
+            .child(
+                // 手形不是框架按钮的默认（原生按钮惯例是箭头，见 Element::cursor 文档），
+                // 要网页手感得显式挂上——上一版示例漏挂，标签却写着「悬停我（手形）」，
+                // 真机上表现为「手形没生效」。这里补上，顺带把 .cursor() 与 sync_cursor
+                //（指针静止时光标形状变化需要补发 WM_SETCURSOR）的链路一起验掉。
+                Element::button("悬停我（手形）")
+                    .cursor(CursorShape::Hand)
+                    .on_click(|ctx| ctx.toast("点到了")),
+            ),
     );
 
     // ② 光标隐藏

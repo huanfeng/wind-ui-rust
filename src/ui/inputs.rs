@@ -808,13 +808,43 @@ impl Slider {
         }
     }
 
+    /// 写值 + 按读者位置选择失效强度。
+    ///
+    /// 值的读者有两类：本节点内的（旋钮、`show_value` 的内部值标签）——局部脏区覆盖；
+    /// 节点外的（`dragging_signal` 用法里兄弟标签读同一信号显示百分比）——`mark_dirty`
+    /// 只重画滑块自己，标签停在旧值。真机（verify_batch §5）暴露的症状是「拖动时右侧
+    /// 百分比不更新，松手或晃一下鼠标才跳变」：Down/Up 走整窗掩盖了 Move 路径的缺口，
+    /// 拖动中每帧 Move 都只局部失效滑块自身。按共享状态有非局部读者的惯例升整窗（同
+    /// [`EventCtx::mark_dirty_all`] 文档、`RadioButton::select`）。
+    ///
+    /// 失效强度拿 `show_value` 当「读者是否全在节点内」的**代理**：`show_value=true`
+    /// 视为读者全在节点内（保留局部，拖动高频，能局部则局部）。已知限制——若
+    /// `show_value=true` 同时又把同一信号接给节点外的控件（罕见组合：show_value 自带
+    /// 百分比显示，再挂外部标签是冗余），外部读者不在局部脏区里，拖动中不实时刷新，
+    /// 要等下一次整窗重绘。治本等信号读者追踪（Signal Phase 2）。
+    ///
+    /// 值没变就不写信号也不失效：指针在已饱和区域里继续移动时不空转（写信号会连带
+    /// 跨窗口脏广播，高频拖动下是纯浪费）。
     fn set_from_pos(&self, ctx: &mut EventCtx, x: i32) {
         let b = ctx.bounds();
         let r = KNOB_R;
         let usable = (self.track_w(b.w) - 2 * r).max(1);
         let v = ((x - b.x - r) as f32 / usable as f32).clamp(0.0, 1.0);
-        self.value.set(v);
-        ctx.mark_dirty();
+        self.apply_value(ctx, v);
+    }
+
+    /// 拖动与键盘步进共用的写值落点：写信号 + 按读者位置选失效强度（理由与不变式见
+    /// `set_from_pos` 文档；键盘步进的外部标签读者与拖动完全同款，verify_batch §5
+    /// 同样中招）。
+    fn apply_value(&self, ctx: &mut EventCtx, v: f32) {
+        if (v - self.value.get()).abs() > f32::EPSILON {
+            self.value.set(v);
+            if self.show_value {
+                ctx.mark_dirty();
+            } else {
+                ctx.mark_dirty_all();
+            }
+        }
     }
 }
 
@@ -934,13 +964,11 @@ impl Widget for Slider {
                 let v = self.value.get();
                 match k.key {
                     Key::Left => {
-                        self.value.set((v - step).max(0.0));
-                        ctx.mark_dirty();
+                        self.apply_value(ctx, (v - step).max(0.0));
                         true
                     }
                     Key::Right => {
-                        self.value.set((v + step).min(1.0));
-                        ctx.mark_dirty();
+                        self.apply_value(ctx, (v + step).min(1.0));
                         true
                     }
                     _ => false,
@@ -5156,6 +5184,96 @@ mod modifier_and_click_tests {
         assert!(grabbed.get(), "前提：拖动中");
         tree.remove(root);
         assert!(!grabbed.get(), "节点被回收时拖动随之作废");
+    }
+
+    /// 拖动 / 键盘写值必须覆盖**节点外**的读者：非 show_value 滑块写值升整窗失效。
+    ///
+    /// 突变目标：`apply_value` 的非 show_value 分支改回 `ctx.mark_dirty()`（局部）→
+    /// 本测试红（damage 从 Full 降级为滑块自身的局部 Rect，兄弟标签读者漏刷）。
+    /// 对照组：show_value 的读者全在节点内，保留局部——同一操作断言**不**升整窗，
+    /// 钉住「能局部则局部」不被顺手回退。
+    #[test]
+    fn slider_value_writes_cover_external_readers() {
+        // 兄弟标签读同一信号：verify_batch §5「拖动时才显示百分比」的最小复现树。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let b = tree.abs_bounds(root);
+        let mut cap = None;
+        let at = |x| Point::new(b.x + x, b.y + b.h / 2);
+        let dptr = |tree: &mut Tree, cap: &mut Option<_>, pos| {
+            tree.dispatch_pointer(
+                PointerEvent::single(PointerKind::Move, pos, MouseButton::Left),
+                &mut None,
+                cap,
+            )
+        };
+        // Down 走 Layout（非 Move 事件）→ 本就是整窗；缺口在 Move：此前只局部失效滑块。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at(60), MouseButton::Left),
+            &mut None,
+            &mut cap,
+        );
+        let v0 = v.get();
+        let r = dptr(&mut tree, &mut cap, at(120));
+        assert!(v.get() > v0, "前提：拖动确实改了值");
+        assert_eq!(
+            r.damage,
+            crate::core::DamageReq::Full,
+            "拖动写值升整窗，节点外的标签读者才能跟着刷"
+        );
+        // 对照：show_value 的读者全在节点内——保留局部，不升整窗。
+        let v2 = signal(0.0f32);
+        let (mut tree, root) = build(Element::slider(v2).show_value(true));
+        let b = tree.abs_bounds(root);
+        let mut cap = None;
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Down,
+                Point::new(b.x + 60, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        let r = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(b.x + 120, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        assert!(v2.get() > 0.0, "前提：show_value 拖动同样改值");
+        assert_ne!(
+            r.damage,
+            crate::core::DamageReq::Full,
+            "show_value 读者在节点内，应保持局部失效"
+        );
+        // 值没变不失效：同一位置重复 Move，画面没变就不该产生任何脏区。
+        let r = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(b.x + 120, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        assert_eq!(
+            r.damage,
+            crate::core::DamageReq::None,
+            "值不变时不写信号不失效：同位置 Move 不空转"
+        );
+        // 键盘步进同口径：外部标签读者同样要跟上。
+        let vk = v2.get();
+        let rk = tree.dispatch_key(key(Key::Left), Some(root));
+        assert!(v2.get() < vk, "前提：键盘步进生效");
+        assert_ne!(
+            rk.damage,
+            crate::core::DamageReq::Full,
+            "show_value 的键盘步进同样保持局部"
+        );
     }
 
     #[test]
