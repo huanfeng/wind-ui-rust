@@ -745,6 +745,8 @@ pub struct WindowConfig {
     pub activate_on_show: bool,
     /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
     pub window_outline: WindowOutline,
+    /// 无边框窗口的圆角，见 [`WindowCorner`]。
+    pub window_corner: WindowCorner,
     /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
     pub ime_interrupt: ImeInterrupt,
     /// 输入法组合串由框架内联绘制（见 `App::ime_inline`）。应用级：子窗沿用主窗的设置。
@@ -773,9 +775,13 @@ pub enum ImeInterrupt {
 
 /// 无边框窗口自画 1px 外框的取色策略（`App::window_outline` / `Window::window_outline`）。
 ///
-/// 只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
+/// 取色只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
 /// win32 `win10_outline_color`）与 Linux 的无边框窗口；Windows 11 与 macOS 的边框是系统画的，
-/// 不受影响。最大化时各平台本就不画。
+/// 颜色不受影响。最大化时各平台本就不画。
+///
+/// 唯一的例外是 [`Off`](Self::Off)：在 **Windows 11** 上它还会把 DWM 画的那道 1px 边框一并
+/// 去掉（`DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`）——「不要外框」就是不要，不论这条线是谁画的。
+/// macOS 的系统边框仍不受影响。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum WindowOutline {
     /// 各平台默认：Windows 10 仿 Windows 11（失活 `#AAAAAA`、激活且系统开了「在标题栏和
@@ -786,8 +792,27 @@ pub enum WindowOutline {
     Theme,
     /// 固定颜色。
     Color(Color),
-    /// 不画。
+    /// 不画。Windows 11 上连 DWM 的 1px 边框也一并去掉；配合
+    /// [`WindowCorner::Square`] 可得到贴边、无线、直角的窗口。
     Off,
+}
+
+/// 无边框窗口的圆角（`App::window_corner` / `Window::window_corner`）。
+///
+/// **只在 Windows 11 生效**：那里圆角由 DWM 画，框架代为选档。Windows 10 没有圆角窗口的概念，
+/// macOS 与 Linux 的窗口形状由各自的平台层决定，这个设置在它们那里被忽略。
+///
+/// 典型用法：窗口要贴着工作区三边（任务栏停靠、侧栏式小工具）时，圆角会把四角切掉、露出
+/// 桌面——选 [`Square`](Self::Square)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowCorner {
+    /// 标准圆角（约 8px），与 Win11 系统窗口一致。
+    #[default]
+    Round,
+    /// 小圆角（约 4px）。
+    Small,
+    /// 直角。
+    Square,
 }
 
 impl Default for WindowConfig {
@@ -827,6 +852,7 @@ impl Default for WindowConfig {
             skip_taskbar: false,
             activate_on_show: true,
             window_outline: WindowOutline::Auto,
+            window_corner: WindowCorner::Round,
             ime_interrupt: ImeInterrupt::Commit,
             ime_inline: false,
         }

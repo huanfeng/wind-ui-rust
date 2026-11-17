@@ -22,8 +22,9 @@ use tiny_skia::Pixmap;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
-    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR,
+    DWMWA_COLOR_NONE, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
@@ -1630,7 +1631,11 @@ unsafe fn create_window(
         // 不认识这个属性号，返回 E_INVALIDARG——我们在此丢弃它，正好得到想要的降级
         // （Win10 本就没有圆角窗口一说）。属性号 33 在 Win10 上无任何合法属性占用，
         // 不存在误设成别的属性的风险，故无需 GetVersionEx 分支。
-        let pref = DWMWCP_ROUND;
+        let pref = match cfg.window_corner {
+            crate::platform::WindowCorner::Round => DWMWCP_ROUND,
+            crate::platform::WindowCorner::Small => DWMWCP_ROUNDSMALL,
+            crate::platform::WindowCorner::Square => DWMWCP_DONOTROUND,
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -1639,6 +1644,21 @@ unsafe fn create_window(
             // 日后有人改 `pref` 的类型时不会留下静默失配的尺寸参数。
             size_of_val(&pref) as u32,
         );
+        // `WindowOutline::Off`：Win11 上 DWM 会在客户区之上画一道 1px 边框，自绘的外框关掉了
+        // 它还在——「不要这圈线」得连它一起去掉。DWMWA_COLOR_NONE 即不画边框。
+        //
+        // 只在 Off 时设，别的策略不碰：该属性**只能 Set 不能 Get**，没法事后问回原值，
+        // 平白改写会让「恢复系统默认」无从谈起。Win10 不认这个属性，返回 E_INVALIDARG，
+        // 照样丢弃——那里的外框本来就是宿主自画、Off 已经关掉了。
+        if cfg.window_outline == crate::platform::WindowOutline::Off {
+            let none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &none as *const _ as *const c_void,
+                size_of_val(&none) as u32,
+            );
+        }
         // 外框由谁画：问 DWM 认不认"可见边框厚度"这个属性。认（Win11，22000 起）就说明
         // 它会在客户区之上给所有窗口画 1px 边框；不认（Win10，含 Server 2022、LTSC）查询
         // 失败——那里没有任何边框：普通窗口那条边画在非客户区里，而我们把非客户区整个

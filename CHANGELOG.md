@@ -14,6 +14,11 @@
 
 ### 新增
 
+- **`App::window_corner` / `Window::window_corner`（`WindowCorner`：`Round` / `Small` / `Square`）**：
+  Windows 11 上无边框窗口的圆角可选，默认 `Round` 与此前一致。窗口要贴着工作区边缘时选
+  `Square`，不再被切掉四角。
+- **`WindowOutline::Off` 在 Windows 11 上连 DWM 的 1px 边框一并去掉**：此前 `Off` 只关自绘线，
+  系统画的那道亮边仍在，等于没有「不要外框」的开关。别的取色策略不碰 DWM 边框。
 - **`Element::dismiss_swallows_click(bool)`**：浮层被「点外面」收起时，这一击是否到此为止。
   默认 `false`，与此前一致（同一击里既关面板、又按到底下的控件）；设 `true` 则只收起、不穿透，
   配对的抬起同样被吃掉。写在传给 `popup` 的面板上。

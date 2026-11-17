@@ -1537,6 +1537,8 @@ pub struct WindowRequest {
     pub activate_on_show: bool,
     /// 无边框外框取色策略（`Window::window_outline`），见 `WindowOutline`。
     pub window_outline: crate::platform::WindowOutline,
+    /// 无边框窗口圆角（`Window::window_corner`），见 `WindowCorner`。
+    pub window_corner: crate::platform::WindowCorner,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

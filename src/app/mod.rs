@@ -165,6 +165,7 @@ impl Window {
                 skip_taskbar: false,
                 activate_on_show: true,
                 window_outline: Default::default(),
+                window_corner: Default::default(),
             },
         }
     }
@@ -350,6 +351,12 @@ impl Window {
     /// 无边框窗口自画外框的取色策略，同 [`App::window_outline`]。
     pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
         self.req.window_outline = o;
+        self
+    }
+
+    /// 无边框窗口的圆角，同 [`App::window_corner`]。
+    pub fn window_corner(mut self, c: crate::platform::WindowCorner) -> Self {
+        self.req.window_corner = c;
         self
     }
 
@@ -667,6 +674,7 @@ fn build_new_window(
         skip_taskbar: req.skip_taskbar,
         activate_on_show: req.activate_on_show,
         window_outline: req.window_outline,
+        window_corner: req.window_corner,
         // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
         // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
         ..WindowConfig::default()
@@ -1209,6 +1217,7 @@ impl App {
                 skip_taskbar: false,
                 activate_on_show: true,
                 window_outline: Default::default(),
+                window_corner: Default::default(),
                 ime_interrupt: Default::default(),
                 ime_inline: false,
             },
@@ -1451,6 +1460,22 @@ impl App {
     /// [`WindowOutline::Off`]: crate::platform::WindowOutline::Off
     pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
         self.cfg.window_outline = o;
+        self
+    }
+
+    /// 无边框窗口的圆角（默认 [`WindowCorner::Round`]）。**只在 Windows 11 生效**——那里的
+    /// 圆角由 DWM 画；其余平台忽略。窗口要贴着工作区边缘（停靠、侧栏式小工具）时选
+    /// [`WindowCorner::Square`]，否则四角被切掉会露出桌面。
+    ///
+    /// 与 [`window_outline`](Self::window_outline) 配合：`WindowOutline::Off` 在 Windows 11
+    /// 上同时去掉 DWM 画的那道 1px 边框（见其文档）。
+    ///
+    /// 常驻应用请在 [`Window::window_corner`] 上设；这里只作用于 `App::run` 的主窗。
+    ///
+    /// [`WindowCorner::Round`]: crate::platform::WindowCorner::Round
+    /// [`WindowCorner::Square`]: crate::platform::WindowCorner::Square
+    pub fn window_corner(mut self, c: crate::platform::WindowCorner) -> Self {
+        self.cfg.window_corner = c;
         self
     }
 
@@ -5102,6 +5127,7 @@ mod tests {
             .skip_taskbar(true)
             .activate_on_show(false)
             .window_outline(crate::platform::WindowOutline::Off)
+            .window_corner(crate::platform::WindowCorner::Square)
             .content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
         else {
@@ -5119,6 +5145,11 @@ mod tests {
             crate::platform::WindowOutline::Off,
             "外框策略经 `..WindowConfig::default()` 时没搬就会被静默填成 Auto"
         );
+        assert_eq!(
+            cfg.window_corner,
+            crate::platform::WindowCorner::Square,
+            "圆角同理：没搬就会被静默填成 Round"
+        );
 
         let req = Window::new("设置", 120, 80).content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
@@ -5129,6 +5160,7 @@ mod tests {
         assert!(!cfg.skip_taskbar);
         assert!(cfg.activate_on_show);
         assert_eq!(cfg.window_outline, crate::platform::WindowOutline::Auto);
+        assert_eq!(cfg.window_corner, crate::platform::WindowCorner::Round);
     }
 
     /// 单例去重是在**开窗那一刻**按窗口登记表判的——这正是「同一个回调里对同一个键既关

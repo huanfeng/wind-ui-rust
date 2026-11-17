@@ -47,7 +47,7 @@ pub mod prelude {
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{
         ActiveRenderer, ImeInterrupt, PickDialog, Renderer, Tray, TrayCtx, TrayHandle,
-        TrayMenuItem, TrayOp, WindowOutline,
+        TrayMenuItem, TrayOp, WindowCorner, WindowOutline,
     };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixelSnap, PixmapTarget, RenderTarget};
