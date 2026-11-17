@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 构建
+
+- **示例图标嵌入改为可选 feature `example-icon`，默认关**：`embed-resource` 会拉
+  `vswhom-sys`，其 build.rs 需要 MSVC 的 C++ 编译器（`cl.exe`），导致只有 Rust + Windows SDK
+  的环境连 windui 本身都编不过。图标只服务本仓库示例，库与下游不再依赖它。要示例带图标：
+  `cargo run --example fullshowcase --features example-icon`。
+
 ### 修复
 
 - **`Slider` 不再吞带修饰键的方向键**：Shift/Ctrl/Alt/Meta + ←/→ 放行给 `App::on_shortcut`，

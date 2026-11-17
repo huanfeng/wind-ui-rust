@@ -30,13 +30,13 @@ fn main() {
 
     emit_gpu_cfg();
 
-    // host 非 Windows 时 embed-resource 根本没被拉进来（见 Cargo.toml 的
-    // `target.'cfg(windows)'.build-dependencies`），故用 host cfg 门控整段。
-    #[cfg(windows)]
+    // embed-resource 只在「host 是 Windows 且开了 `example-icon`」时才被拉进来（见
+    // Cargo.toml），故两个条件都要门控整段；默认不开，下游与本库的构建都不碰它。
+    #[cfg(all(windows, feature = "example-icon"))]
     embed_icon();
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "example-icon"))]
 fn embed_icon() {
     use std::path::Path;
 

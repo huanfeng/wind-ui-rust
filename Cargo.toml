@@ -39,12 +39,19 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
+# 把 assets/windui.ico 烙进**本仓库示例** exe 的资源（默认关；只在 Windows host 上有效，
+# 别处是空操作）。仅服务 `cargo run --example`，库本身与下游完全不需要。
+#
+# 默认关的原因：它会拉 `embed-resource` → `vswhom-sys`，后者的 build.rs 要用 MSVC 的
+# C++ 编译器（cl.exe）。只有 Rust + Windows SDK 导入库、没装 VS C++ 工具链的机器上，
+# 连 windui 本身都编不过——而这仅仅是为了给示例换一张图标。要示例带图标就显式开：
+# `cargo run --example fullshowcase --features example-icon`。
+example-icon = ["dep:embed-resource"]
 
-# 构建脚本依赖：把 assets/windui.ico 嵌进示例 exe 的资源（见 build.rs）。
-# 只在 host 为 Windows 时拉取——Win32 资源在别的 host 上无从编译，那里 build.rs
-# 整段被 cfg 关掉，不需要这个依赖。
+# 构建脚本依赖：仅 `example-icon` 开启时参与（见 build.rs）。
+# 只在 host 为 Windows 时声明——Win32 资源在别的 host 上无从编译。
 [target.'cfg(windows)'.build-dependencies]
-embed-resource = "3"
+embed-resource = { version = "3", optional = true }
 
 # 跨平台依赖（所有目标平台共用）。
 [dependencies]
