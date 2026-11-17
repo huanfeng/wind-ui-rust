@@ -290,7 +290,18 @@ pub trait Widget {
         None
     }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
-    fn take_click(&mut self, _f: ClickFn) {}
+    ///
+    /// 默认实现**不接收**：debug 构建下直接 panic 提示，release 下丢弃。回调被静默
+    /// 丢掉最难查（链上去不报错也不生效），所以不支持点击通知的控件宁可在开发期喊出来。
+    /// 已实现的：Button（含 icon_button）、CheckBox、RadioButton、Switch、TextInput（旁路
+    /// 通知）、Link、ComboBox、NavRow 与 `clickable()` 容器；清单以 `Element::on_click`
+    /// 的文档为准。Slider 没有「点击」语义，请改用绑定的 `Signal` 订阅变化。
+    fn take_click(&mut self, _f: ClickFn) {
+        debug_assert!(
+            false,
+            "on_click / on_toggle 挂在了不支持点击回调的控件上，回调会被丢弃（没加 .clickable() 的容器？见 Element::on_click 文档）"
+        );
+    }
     /// 显隐切换时重置交互态（hover/press → 静止，并令下次绘制的补间瞬时落定不动画）。
     /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
     /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。

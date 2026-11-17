@@ -446,9 +446,9 @@ Element::tag_field("输入…", vec![chip1, chip2])  // 多值标签字段（占
 Element::checkbox("启用", state)                 // state: Signal<bool>
 //  .danger() / .accent(color) / .accent_role(Role::X)   勾选强调色：危险红 / 自定义（浅底对勾自动转深）
 //  .on_toggle(|ctx| ...)        受控点击拦截：不自动翻转，交 app 决定（见 §8.1）
-Element::switch(state)                            // state: Signal<bool>
-Element::radio("选项", group, index)             // group: Signal<usize>
-Element::slider(value)                            // value: Signal<f32> (0..=1)
+Element::switch(state)                            // state: Signal<bool>；.on_click(|ctx| ..) 翻转后旁路通知（读 state 是新值）
+Element::radio("选项", group, index)             // group: Signal<usize>；.on_click(|ctx| ..) 选中后旁路通知
+Element::slider(value)                            // value: Signal<f32> (0..=1)；无 on_click（debug 下会 assert）；带修饰键的方向键放行给 on_shortcut
 Element::dropdown(vec!["A", "B"], selected)       // selected: Signal<usize>
 Element::dropdown_signal(options, selected)     // 选项也绑信号：options: Signal<Vec<String>>
 Element::dropdown_items(vec![item1, item2], selected)       // 富内容项（副标题/徽章/尾随图标）

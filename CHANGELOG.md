@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **`Slider` 不再吞带修饰键的方向键**：Shift/Ctrl/Alt/Meta + ←/→ 放行给 `App::on_shortcut`，
+  只有裸方向键调值。此前焦点落在滑条上时「上一集 / 下一集」这类快捷键永远收不到。
+- **`Element::radio(..).on_click(..)` 与 `Element::switch(..).on_click(..)` 不再静默失效**：
+  选中 / 翻转之后作为旁路通知触发（回调里读信号拿到的是新值）。
+
+### 变更
+
+- 把 `on_click` / `on_toggle` 挂到不支持点击回调的节点上，debug 构建下改为 `debug_assert`
+  失败，不再静默丢弃回调；release 行为不变。**影响面**：除 `slider` 外，还包括没加
+  `.clickable()` 的 `col` / `row` / `stack`、`label`、`dropdown`、`stepper` 等——此前它们
+  同样静默无效。容器想可点请写 `.clickable().on_click(..)`。
+
 ## [0.33.0] - 2026-11-14
 
 ### 变更

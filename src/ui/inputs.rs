@@ -441,6 +441,8 @@ pub struct Switch {
     size: SwitchSize,
     /// 见 [`SwitchChangeFn`]。`RefCell` 只为在 `&self` 的 `toggle` 里取用，不改内容。
     on_change: RefCell<Option<SwitchChangeFn>>,
+    /// `Element::on_click` 的旁路通知：翻转并跑完 `on_change` 之后触发。取用方式同上。
+    on_click: RefCell<Option<ClickFn>>,
 }
 
 impl Switch {
@@ -452,6 +454,7 @@ impl Switch {
             primed: Cell::new(false),
             size: SwitchSize::Normal,
             on_change: RefCell::new(None),
+            on_click: RefCell::new(None),
         }
     }
     /// 设置翻转后的副作用钩子（供 Builder 的 `.on_switch_change()` 调用）。
@@ -474,6 +477,11 @@ impl Switch {
         if let Some(f) = cb {
             f(ctx, now);
             *self.on_change.borrow_mut() = Some(f);
+        }
+        let click = self.on_click.borrow_mut().take();
+        if let Some(mut f) = click {
+            f(ctx);
+            *self.on_click.borrow_mut() = Some(f);
         }
         ctx.mark_dirty();
     }
@@ -555,6 +563,9 @@ impl Widget for Switch {
             _ => false,
         }
     }
+    fn take_click(&mut self, f: ClickFn) {
+        *self.on_click.borrow_mut() = Some(f);
+    }
     fn reset_interaction(&mut self) {
         self.primed.set(false); // 下次显示瞬时落定位置，不回放旧的开关滑动动画
     }
@@ -578,6 +589,8 @@ pub struct RadioButton {
     primed: Cell<bool>,
     /// 标签折行溢出 bounds 时的裁剪判定（自带排版缓存）。
     overflow: super::text_fit::WrapClip,
+    /// `Element::on_click` 的旁路通知：选中**之后**触发（见 `take_click`）。
+    on_click: Option<ClickFn>,
 }
 
 impl RadioButton {
@@ -590,15 +603,21 @@ impl RadioButton {
             sel: Cell::new(Transition::new(init)),
             primed: Cell::new(false),
             overflow: Default::default(),
+            on_click: None,
         }
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
     }
-    fn select(&self, ctx: &mut EventCtx) {
+    fn select(&mut self, ctx: &mut EventCtx) {
         self.group.set(self.index);
         // 共享 group 被同组其他单选按钮读取：选中变化会改其同伴视觉，属非局部 → 整窗失效。
         ctx.mark_dirty_all();
+        // 通知在 `set` 之后：回调里读 group 拿到的已是新值。已选中的再点一下也通知
+        // （与按钮一致，「被点了」不等于「值变了」）。
+        if let Some(f) = self.on_click.as_mut() {
+            f(ctx);
+        }
     }
 }
 
@@ -698,6 +717,9 @@ impl Widget for RadioButton {
             }
             _ => false,
         }
+    }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
     }
     fn reset_interaction(&mut self) {
         self.primed.set(false); // 下次显示瞬时落定选中态，不回放旧的单选动画
@@ -877,6 +899,10 @@ impl Widget for Slider {
                 }
                 _ => false,
             },
+            // 带修饰键的方向键（Shift+←、Ctrl+→…）是应用快捷键，不是调值：放行给
+            // `on_shortcut`。裸方向键才归滑块，否则「上一集 / 下一集」之类的组合键
+            // 一旦焦点落在滑条上就被它吞掉。
+            Event::Key(k) if k.pressed && (k.shift || k.ctrl || k.alt || k.meta) => false,
             Event::Key(k) if k.pressed => {
                 let step = 0.05;
                 let v = self.value.get();
@@ -4897,5 +4923,118 @@ mod slider_value_overflow_tests {
             let (pm, b) = paint_first_child(el, win_w, 150);
             assert_no_ink_outside(&pm, b, &format!("Slider 值标签 {what}"));
         }
+    }
+}
+
+/// Slider 对修饰键的让路，以及 Radio / Switch 的 `on_click` 旁路通知。
+///
+/// 两件事共同的毛病是「静默」：Shift+← 被滑块吞了 `on_shortcut` 永远收不到，
+/// `radio(..).on_click(..)` 链上去不报错也不生效。经真实的 `dispatch_key` /
+/// `dispatch_pointer` 验证，不 mock。
+#[cfg(test)]
+mod modifier_and_click_tests {
+    use crate::core::Tree;
+    use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+    use crate::geometry::{Point, Size};
+    use crate::signal::signal;
+    use crate::ui::Element;
+
+    /// 把 `el` 建成根节点（不设宽：Wrap 宽），返回树与根 id。
+    fn build(el: Element) -> (Tree, crate::core::NodeId) {
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 80), &mut crate::text::NullTextEngine);
+        (tree, root)
+    }
+
+    fn click_center(tree: &mut Tree, root: crate::core::NodeId) {
+        let b = tree.abs_bounds(root);
+        let pos = Point::new(b.x + 5, b.y + b.h / 2);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, pos, MouseButton::Left),
+                &mut None,
+                &mut None,
+            );
+        }
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent::pressed(k)
+    }
+
+    #[test]
+    fn slider_bare_arrow_still_adjusts() {
+        let v = signal(0.5f32);
+        let (mut tree, root) = build(Element::slider(v));
+        let r = tree.dispatch_key(key(Key::Right), Some(root));
+        assert!(r.consumed, "裸方向键归滑块");
+        assert!(
+            (v.get() - 0.55).abs() < 1e-4,
+            "值应 +0.05，实际 {}",
+            v.get()
+        );
+    }
+
+    #[test]
+    fn slider_lets_modified_arrows_through() {
+        type Mod = fn(&mut KeyEvent);
+        let mods: [(&str, Mod); 4] = [
+            ("shift", |k| k.shift = true),
+            ("ctrl", |k| k.ctrl = true),
+            ("alt", |k| k.alt = true),
+            ("meta", |k| k.meta = true),
+        ];
+        for (name, set) in mods {
+            for arrow in [Key::Left, Key::Right] {
+                let v = signal(0.5f32);
+                let (mut tree, root) = build(Element::slider(v));
+                let mut ev = key(arrow);
+                set(&mut ev);
+                let r = tree.dispatch_key(ev, Some(root));
+                assert!(
+                    !r.consumed,
+                    "{name}+{arrow:?} 不该被滑块消费，否则到不了 on_shortcut"
+                );
+                assert_eq!(v.get(), 0.5, "{name}+{arrow:?} 不该改值");
+            }
+        }
+    }
+
+    #[test]
+    fn radio_on_click_fires_after_select() {
+        let group = signal(0usize);
+        let seen = signal(usize::MAX);
+        let (mut tree, root) =
+            build(Element::radio("r", group, 1).on_click(move |_| seen.set(group.get())));
+        click_center(&mut tree, root);
+        assert_eq!(group.get(), 1, "前提：照常选中");
+        assert_eq!(seen.get(), 1, "回调触发，且读到的是已选中的新值");
+    }
+
+    #[test]
+    fn switch_on_click_fires_after_toggle() {
+        let on = signal(false);
+        let seen = signal(None::<bool>);
+        let (mut tree, root) =
+            build(Element::switch(on).on_click(move |_| seen.set(Some(on.get()))));
+        click_center(&mut tree, root);
+        assert!(on.get(), "前提：照常翻转");
+        assert_eq!(seen.get(), Some(true), "回调触发，且读到的是翻转后的值");
+        // 键盘激活同一条路径。
+        tree.dispatch_key(key(Key::Space), Some(root));
+        assert_eq!(seen.get(), Some(false));
+    }
+
+    /// 不支持点击回调的控件：debug 下喊出来，而不是静默丢弃。
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "on_click")]
+    fn on_click_on_unsupported_widget_panics_in_debug() {
+        let mut tree = Tree::new();
+        let _ = Element::slider(signal(0.0f32))
+            .on_click(|_| {})
+            .build(&mut tree);
     }
 }

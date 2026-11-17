@@ -1036,6 +1036,15 @@ impl Element {
 
     /// 点击/激活回调（按钮等交互控件）。
     ///
+    /// 支持的控件：`button` / `icon_button` / `checkbox` / `radio` / `switch` / `link` /
+    /// `text_input` / `combo_box` / `nav_row` 与 `clickable()` 容器。**其余一律不支持**——
+    /// 包括没加 `.clickable()` 的 `col` / `row` / `stack`、`label`、`dropdown`、`slider`、
+    /// `stepper` 等：debug 下 `debug_assert` 失败，不会静默丢弃（release 仍丢弃）。
+    /// 想让容器可点，写 `.clickable().on_click(..)`。
+    ///
+    /// 用在 [`Element::radio`] / [`Element::switch`] 上时同样是**旁路通知**：选中 / 翻转
+    /// 已经发生，回调里读绑定信号拿到的是新值。
+    ///
     /// 用在 [`Element::text_input`] 上时语义是**旁路通知**而非激活：输入框照常聚焦、
     /// 定位光标、起拖选，回调只是让宿主知道「这个框被点了」——例如重新展开一个被
     /// Escape 收起的补全/结果浮层。**仅左键**：右键（弹上下文菜单）、中键、
