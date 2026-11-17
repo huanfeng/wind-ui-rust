@@ -1805,6 +1805,21 @@ impl Element {
     pub fn submit_on_enter(self, on: bool) -> Self {
         self.config_text_input(|c| c.submit_on_enter = on)
     }
+    /// 输入框文字区的**左右内距**（逻辑 px，默认 12，负值按 0）。仅 `Element::text_input(..)`
+    /// 可用。
+    ///
+    /// 想让框更紧凑别用负外边距去顶——外边距会连命中区域一起改，点边缘会落到框外。这里改的
+    /// 只是文字区离框边的距离，命中、光标、选区、水平滚动都跟着同一个值走。
+    #[track_caller]
+    pub fn pad_x(self, px: i32) -> Self {
+        self.config_text_input(|c| c.pad_x = px.max(0))
+    }
+    /// 多行输入框文字区的**上下内距**（逻辑 px，默认 12，负值按 0）。**单行忽略**——
+    /// 单行文字在框内垂直居中。仅 `Element::text_input(..)` 可用。
+    #[track_caller]
+    pub fn pad_y(self, px: i32) -> Self {
+        self.config_text_input(|c| c.pad_y = px.max(0))
+    }
     /// 多行软换行开关（仅 multiline 生效）。
     #[track_caller]
     pub fn wrap(self, on: bool) -> Self {

@@ -14,6 +14,9 @@
 
 ### 新增
 
+- **`Element::pad_x` / `pad_y`（`TextConfig::pad_x` / `pad_y`）**：输入框文字区的左右 / 多行上下
+  内距可配，默认仍为 12。命中、光标、选区与水平滚动跟随同一个值，不必再用负外边距去顶
+  （那会连命中区域一起改）。单行忽略 `pad_y`（垂直居中）。
 - **`CursorShape::Hidden`**：隐藏指针（全屏播放器等「指针静止后藏起来」的场景）。Windows 用
   `SetCursor(None)`，macOS 用全透明光标（不用 `NSCursor::hide`，那个按次数计数、漏配对会让
   指针在整个系统里消失），X11 用空位图光标，Wayland 用 `set_cursor(None)`。
