@@ -25,6 +25,22 @@ fn arg_value(name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+/// 窗口状态 → 一行可读文本。UNKNOWN = 事件外快照读数（纪律使然）。
+fn fmt_state(s: &WindowState) -> String {
+    if *s == WindowState::UNKNOWN {
+        return "UNKNOWN（事件外快照不给读数）".into();
+    }
+    let f = |b: bool| if b { "是" } else { "否" };
+    format!(
+        "max={} min={} visible={} maxable={} minable={}",
+        f(s.maximized),
+        f(s.minimized),
+        f(s.visible),
+        f(s.maximizable),
+        f(s.minimizable),
+    )
+}
+
 /// 一节：标题 + 「应该看到什么」+ 内容。
 fn section(title: &str, expect: &str, body: Element) -> Element {
     Element::col()
@@ -84,6 +100,12 @@ fn main() {
     // —— Slider ——
     let volume = signal(0.4f32);
     let grabbed = signal(false);
+
+    // —— 主窗状态（⑦ 快照 vs 同步查询）——
+    let st_query = signal(String::from("…"));
+    let st_snap = signal(String::from("…"));
+    let st_event = signal(String::from("还没读过"));
+    let tick_seq = std::cell::Cell::new(0u32);
 
     let title_bar = Element::row()
         .width_match()
@@ -270,6 +292,49 @@ fn main() {
         },
         Element::label("在窗口里按 ESC 试试").fg_role(Role::TextMuted),
     );
+    // ⑦ 主窗状态：快照 vs 同步查询
+    // 真机核对清单：
+    // - 查询行：各转换后 ≤500ms 刷新（修复前隐藏后 visible 恒「是」）。
+    // - 快照行：事件外恒 UNKNOWN（纪律使然，不是缺陷）。
+    // - F9 热键每次按下都有效（修复前 visible 陈旧 → 第二次按无反应）。
+    // - 「事件期快照」读到的值 = 查询行。
+    let s7 = section(
+        "⑦ 主窗状态：快照 vs 同步查询",
+        "查询行随每个转换在半秒内刷新；快照行恒 UNKNOWN（事件外快照不给读数，纪律使然）。",
+        Element::col()
+            .spacing(8)
+            .child(
+                Element::row()
+                    .spacing(10)
+                    .cross(Align::Center)
+                    .child(Element::button("隐藏").on_click(|ctx| {
+                        ctx.hide_window();
+                    }))
+                    .child(Element::button("显示").on_click(|ctx| {
+                        ctx.show_window();
+                    }))
+                    .child(Element::button("最小化").on_click(|ctx| {
+                        ctx.minimize();
+                    }))
+                    .child(Element::button("还原").on_click(|ctx| {
+                        ctx.restore();
+                    }))
+                    .child(Element::button("事件期快照").on_click(move |_ctx| {
+                        st_event.set(fmt_state(&window_state()));
+                    })),
+            )
+            .child(Element::label(st_query).fg_role(Role::Text).width_match())
+            .child(
+                Element::label(st_snap)
+                    .fg_role(Role::TextMuted)
+                    .width_match(),
+            )
+            .child(
+                Element::label(st_event)
+                    .fg_role(Role::TextMuted)
+                    .width_match(),
+            ),
+    );
 
     let body = Element::scroll().fill().bg_role(Role::Surface).child(
         Element::col()
@@ -281,7 +346,8 @@ fn main() {
             .child(s3)
             .child(s4)
             .child(s5)
-            .child(s6),
+            .child(s6)
+            .child(s7),
     );
 
     // 隐藏期间盖一层全窗覆盖，光标形状取 Hidden（`clickable()` 让它参与命中）。
@@ -307,7 +373,36 @@ fn main() {
         .window_corner(corner)
         .window_outline(outline)
         .escape_closes_window(esc_closes)
+        .hotkey(Hotkey::new(Key::F(9)), move |ctx| {
+            // 热键回调里用仲裁读法判向（快照在窗口隐藏后停在旧值——正是要验的）。
+            let show = main_window_state().is_some_and(|s| !s.visible);
+            if show {
+                ctx.show_window();
+            } else {
+                ctx.hide_window();
+            }
+        })
         .on_interval(Duration::from_millis(TICK_MS), move |_| {
+            // ⑦ 状态行 500ms 刷新：值不变不写（空闲纪律）
+            let seq = tick_seq.get() + 1;
+            tick_seq.set(seq);
+            if seq.is_multiple_of(5) {
+                let q = main_window_state()
+                    .map(|s| fmt_state(&s))
+                    .unwrap_or_else(|| "None（无主窗）".into());
+                if st_query.get() != q {
+                    st_query.set(q);
+                }
+                let s = window_state();
+                let txt = if s == WindowState::UNKNOWN {
+                    "UNKNOWN（事件外快照不给读数）".to_string()
+                } else {
+                    fmt_state(&s)
+                };
+                if st_snap.get() != txt {
+                    st_snap.set(txt);
+                }
+            }
             let c = countdown.get();
             if c > 0 {
                 countdown.set(c - 1);
