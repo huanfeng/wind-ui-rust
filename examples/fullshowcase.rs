@@ -194,6 +194,7 @@ fn main() {
     let quality = signal(1usize);
     let lang = signal(0usize);
     let volume = signal(0.7f32);
+    let volume_grabbed = signal(false);
     let show_about = signal(std::env::args().any(|a| a == "--dialog"));
 
     // 520×560 时首屏只露得出一张半卡片，读起来像"截了一角"。760×700 是两头的折中：
@@ -404,9 +405,27 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(6)
+            // 抓住才显示：拖动期间右侧亮出百分比（`dragging_signal` 镜像「正在拖动」）。
             .child(Element::field(
                 "音量",
-                Element::slider(volume).width_match(),
+                // 定宽：`field` 的控件区是自适应宽度，`width_match` 在这里没有可匹配的对象。
+                Element::row()
+                    .width(260)
+                    .cross(Align::Center)
+                    .spacing(8)
+                    .child(
+                        Element::slider(volume)
+                            .dragging_signal(volume_grabbed)
+                            .weight(1.0),
+                    )
+                    // 标签的位置**常驻**：只让里面的文字显隐。若直接对标签 `visible_signal`，
+                    // 它不占布局，按下那一刻滑块被缩窄、旋钮会跳离指针。
+                    .child(
+                        Element::row().width(44).child(
+                            Element::label(volume.map(|v| format!("{:.0}%", v * 100.0)))
+                                .visible_signal(volume_grabbed),
+                        ),
+                    ),
             ))
             .child(Element::field(
                 "质量",

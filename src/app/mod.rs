@@ -166,6 +166,7 @@ impl Window {
                 activate_on_show: true,
                 window_outline: Default::default(),
                 window_corner: Default::default(),
+                escape_closes_window: true,
             },
         }
     }
@@ -351,6 +352,13 @@ impl Window {
     /// 无边框窗口自画外框的取色策略，同 [`App::window_outline`]。
     pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
         self.req.window_outline = o;
+        self
+    }
+
+    /// ESC 没有浮层 / 对话框可收时是否关闭本窗口（默认 `true`），语义同
+    /// [`App::escape_closes_window`]。
+    pub fn escape_closes_window(mut self, on: bool) -> Self {
+        self.req.escape_closes_window = on;
         self
     }
 
@@ -722,6 +730,7 @@ fn build_new_window(
     // （见 `AppHandler::take_window_title`）。子窗各有一份宿主，故各跟各的。
     host.title_src = req.title_src;
     host.activate_handler = req.activate_handler;
+    host.escape_closes_window = req.escape_closes_window;
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
 
@@ -1163,6 +1172,8 @@ pub struct App {
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
+    /// ESC 在没有浮层 / 对话框可收时是否关窗（默认 true）。见 [`App::escape_closes_window`]。
+    escape_closes_window: bool,
     /// 最小化转为隐藏窗口（收进托盘）。与 `hide_on_close` 不同，这一项**平台层要问**
     /// （`UiHost::hide_on_minimize`）：最小化可以由系统标题栏、任务栏、Win+Down 触发，
     /// 那些路径根本不经过核心层。
@@ -1238,6 +1249,7 @@ impl App {
             system_theme: None,
             hide_on_close: false,
             hide_on_minimize: false,
+            escape_closes_window: true,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
             title_src: None,
@@ -1972,6 +1984,23 @@ impl App {
         self
     }
 
+    /// ESC 在**没有浮层 / 对话框可收**时是否关闭窗口（默认 `true`）。
+    ///
+    /// 默认行为是：ESC 先收最顶层的锚定浮层，再关最顶层的对话框，都没有时按「关闭请求」
+    /// 走——问 [`on_close_request`](Self::on_close_request)、按 [`hide_on_close`](Self::hide_on_close)
+    /// 决定关还是隐。对只有一个主窗的应用，这等于**按一下 ESC 就退出**。设为 `false` 后 ESC 仍然
+    /// 收浮层、关对话框，但不再触碰窗口本身；要用 ESC 做别的事照旧写 [`on_shortcut`](Self::on_shortcut)。
+    ///
+    /// 与 `on_close_request` 的区别：后者拦的是**所有**关闭请求（点 × 也算），语义是「能不能关」；
+    /// 这里只管 ESC 这一个键的兜底，点 × 与 `ctx.request_close()` 不受影响。
+    ///
+    /// 常驻应用（`run_resident`）的窗口都由 [`Window`] 建，请在 [`Window::escape_closes_window`]
+    /// 上设；这里只作用于 `App::run` 的主窗。
+    pub fn escape_closes_window(mut self, on: bool) -> Self {
+        self.escape_closes_window = on;
+        self
+    }
+
     /// 配置系统托盘图标（图标 + 提示 + 左键/双击 + 原生右键菜单）。
     /// 窗口创建后安装，窗口销毁时自动清理。截屏模式下忽略。
     pub fn tray(mut self, tray: platform::Tray) -> Self {
@@ -2514,6 +2543,7 @@ impl App {
             host.title_src = self.title_src;
             host.activate_handler = self.activate_handler;
             host.hide_on_minimize = self.hide_on_minimize;
+            host.escape_closes_window = self.escape_closes_window;
             Box::new(host)
         } else {
             Box::new(ClosureHandler {
@@ -2546,6 +2576,7 @@ impl App {
         host.title_src = self.title_src;
         host.activate_handler = self.activate_handler;
         host.hide_on_minimize = self.hide_on_minimize;
+        host.escape_closes_window = self.escape_closes_window;
         host
     }
 
@@ -2744,6 +2775,8 @@ struct UiHost {
     system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
+    /// ESC 在没有浮层 / 对话框可收时是否关窗。默认 true，见 [`App::escape_closes_window`]。
+    escape_closes_window: bool,
     /// 最小化转为隐藏窗口。平台层经 `UiHost::hide_on_minimize` 拉取——最小化可以从
     /// 系统标题栏、任务栏、Win+Down 进来，那些路径不经过核心层。
     hide_on_minimize: bool,
@@ -2819,17 +2852,37 @@ impl UiHost {
         out
     }
 
-    fn resolve_close_inner(&mut self) -> bool {
+    /// ESC 的处理：收浮层 / 关对话框，都没有时按 [`App::escape_closes_window`] 决定要不要
+    /// 走关闭请求。返回是否要真关窗，口径同 [`Self::resolve_close`]。
+    fn resolve_escape(&mut self) -> bool {
+        if !self.escape_closes_window {
+            // 只收层、不碰窗口：此时连 `on_close_request` 也不问——那是「窗口要关了」的询问，
+            // 而这一下根本不打算关。
+            self.dismiss_top_layer();
+            return false;
+        }
+        self.resolve_close()
+    }
+
+    /// 收起最顶层的一层：先锚定浮层，再对话框。收了一层返回 true（并升整窗重绘）。
+    fn dismiss_top_layer(&mut self) -> bool {
         // 锚定浮层排在对话框之前：浮层多半是从对话框**内部**的控件展开的（设置对话框
         // 里的取色盘），先关对话框会把还开着的浮层一起吞掉，ESC 就少了一级。
         if self.tree.close_topmost_overlay() {
             self.damage.needs_full = true;
-            return false;
+            return true;
         }
         // 其次关闭本窗口最顶层的可见对话框（不退出窗口）。
         if self.tree.close_topmost_modal() {
             // 对话框被关闭，需要重绘以隐藏遮罩。
             self.damage.needs_full = true;
+            return true;
+        }
+        false
+    }
+
+    fn resolve_close_inner(&mut self) -> bool {
+        if self.dismiss_top_layer() {
             return false;
         }
         // 无对话框时询问 close_handler，默认允许关闭。
@@ -3016,6 +3069,7 @@ impl UiHost {
             hide_on_close,
             // 参数表已经有 12 个位置参数，这一项跟 `title_src` 一样建完再塞
             hide_on_minimize: false,
+            escape_closes_window: true,
             resolving_close: false,
             pending_windows: Vec::new(),
             scope: None,
@@ -4033,7 +4087,7 @@ impl AppHandler for UiHost {
                         repaint = true;
                     }
                 }
-                Key::Escape if self.resolve_close() => self.close = true,
+                Key::Escape if self.resolve_escape() => self.close = true,
                 _ => {}
             }
         }
@@ -5051,6 +5105,166 @@ mod tests {
         handler.on_key(k(Key::Escape));
         assert!(!show_dialog.get(), "第二次 ESC 才关对话框");
         assert!(!handler.wants_close(), "对话框还在时不该关窗口");
+    }
+
+    /// `escape_closes_window(false)`：ESC 没有浮层 / 对话框可收时不关窗，而点 × 照常。
+    ///
+    /// 默认（对照组）一次 ESC 就退出——单主窗应用的痛点。这里要同时钉住三件事：
+    /// 默认行为不变；关掉之后 ESC 仍然逐层收浮层与对话框（不能把「收层」也一起关了）；
+    /// 窗口本身的关闭请求（点 ×）不受这个开关影响。
+    #[test]
+    fn escape_closes_window_switch() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let host = |on: bool| {
+            let show = crate::signal::signal(true);
+            let app = App::new("t", 300, 300).escape_closes_window(on).content(
+                Element::col().child(Element::dialog(show, Element::col().width(80).height(40))),
+            );
+            (app.into_handler_for_test(), show)
+        };
+        let k = key_ev();
+
+        // 对照：默认下，对话框收起后再一次 ESC 关窗。
+        let (mut h, show) = host(true);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get() && !h.wants_close(), "第一次 ESC 只关对话框");
+        h.on_key(k(Key::Escape));
+        assert!(h.wants_close(), "默认：没有层可收时 ESC 关窗");
+
+        // 关掉开关：照样先收对话框，之后 ESC 不再关窗。
+        let (mut h, show) = host(false);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get(), "关掉开关后 ESC 仍要收对话框");
+        h.on_key(k(Key::Escape));
+        h.on_key(k(Key::Escape));
+        assert!(!h.wants_close(), "没有层可收时 ESC 不该关窗");
+        // 点 ×（关闭请求）不受影响。
+        assert!(h.on_close_request(), "窗口自己的关闭请求仍然放行");
+    }
+
+    /// 子窗口同样可配，且**必须经 `build_new_window` 搬到宿主上**：那条构造路径靠逐字段显式
+    /// 搬运，漏一个字段的症状就是「设了却不生效」，平台层收到的永远是默认值。
+    #[test]
+    fn window_escape_switch_reaches_the_child_host() {
+        use crate::app::test_support::key_ev;
+        let theme = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let mk = |on: Option<bool>| {
+            let mut w = Window::new("子窗", 120, 80);
+            if let Some(on) = on {
+                w = w.escape_closes_window(on);
+            }
+            let req = w.content(|| Element::col().fill());
+            let NewWindow::Create(_, mut host) =
+                build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
+            else {
+                panic!("build_new_window 只会产出 Create");
+            };
+            host.on_key(key_ev()(Key::Escape));
+            host.wants_close()
+        };
+        assert!(mk(None), "子窗默认：ESC 关窗（对话框式窗口的惯例）");
+        assert!(!mk(Some(false)), "显式关掉后 ESC 不关子窗");
+    }
+
+    /// flag=false 时层序不变：对话框里开着浮层，第一下收浮层，第二下关对话框，第三下什么也不做。
+    /// 浮层优先于对话框这条序在 flag=true 时已有测试，这里钉住「关掉开关没把它也关了」。
+    #[test]
+    fn escape_without_closing_still_peels_layers_in_order() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let (show, open) = (crate::signal::signal(true), crate::signal::signal(true));
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(Element::dialog(
+                show,
+                Element::col().width(200).height(160).child(
+                    Element::col().width(100).height(30).popup(
+                        open,
+                        Element::col()
+                            .width(80)
+                            .height(60)
+                            .bg_role(crate::style::Role::Surface),
+                    ),
+                ),
+            )),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        let mut frame =
+            |h: &mut UiHost| h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        frame(&mut h);
+        let k = key_ev();
+
+        h.on_key(k(Key::Escape));
+        assert!(!open.get() && show.get(), "第一下只收浮层");
+        frame(&mut h);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get(), "第二下关对话框");
+        frame(&mut h);
+        h.on_key(k(Key::Escape));
+        assert!(!h.wants_close(), "第三下没有层可收，也不关窗");
+    }
+
+    /// 文档承诺 flag=false 时 ESC「不再触碰窗口」——`hide_on_close` 下也不例外：
+    /// 不能把「关窗」换成「隐窗」，用户眼里一样是 ESC 把窗口弄没了。
+    #[test]
+    fn escape_without_closing_does_not_hide_the_window_either() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let mk = |on: bool| {
+            App::new("t", 100, 100)
+                .hide_on_close()
+                .escape_closes_window(on)
+                .content(Element::col())
+                .into_handler_for_test()
+        };
+        let mut h = mk(true);
+        h.on_key(key_ev()(Key::Escape));
+        assert!(
+            h.pending_window_op.is_some(),
+            "对照：默认下 hide_on_close 让 ESC 隐藏窗口"
+        );
+        let mut h = mk(false);
+        h.on_key(key_ev()(Key::Escape));
+        assert!(h.pending_window_op.is_none(), "关掉开关后 ESC 不隐藏窗口");
+        assert!(!h.wants_close());
+    }
+
+    /// 关掉开关后，ESC 不该去问 `on_close_request`：那是「窗口要关了」的询问，
+    /// 问了就会弹出「确认退出？」之类的对话，而这一下根本不打算关。
+    #[test]
+    fn escape_without_closing_does_not_consult_the_close_handler() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let asked = crate::signal::signal(0);
+        let mut h = App::new("t", 100, 100)
+            .escape_closes_window(false)
+            .on_close_request(move |_| {
+                asked.set(asked.get() + 1);
+                true
+            })
+            .content(Element::col())
+            .into_handler_for_test();
+        h.on_key(key_ev()(Key::Escape));
+        assert_eq!(asked.get(), 0, "ESC 不关窗，也就不该询问关闭拦截器");
+
+        // 对照组：默认下同样的 ESC 确实会走到拦截器。没有它，「ESC 压根没到兜底」这种退化
+        // 也会让上面的断言空过。
+        let asked = crate::signal::signal(0);
+        let mut h = App::new("t", 100, 100)
+            .on_close_request(move |_| {
+                asked.set(asked.get() + 1);
+                true
+            })
+            .content(Element::col())
+            .into_handler_for_test();
+        h.on_key(key_ev()(Key::Escape));
+        assert_eq!(asked.get(), 1, "对照：默认下 ESC 会询问关闭拦截器");
     }
 
     /// 托盘 / 热键建出来的窗口必须收得到**它自己声明**的快捷键。

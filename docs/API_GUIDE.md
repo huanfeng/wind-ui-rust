@@ -449,6 +449,8 @@ Element::checkbox("启用", state)                 // state: Signal<bool>
 Element::switch(state)                            // state: Signal<bool>；.on_click(|ctx| ..) 翻转后旁路通知（读 state 是新值）
 Element::radio("选项", group, index)             // group: Signal<usize>；.on_click(|ctx| ..) 选中后旁路通知
 Element::slider(value)                            // value: Signal<f32> (0..=1)；无 on_click（debug 下会 assert）；带修饰键的方向键放行给 on_shortcut
+//  .show_value(true)            旁边常驻显示百分比
+//  .dragging_signal(grabbed)    把「正在被鼠标拖动」镜像到 Signal<bool>（抓住才显示百分比：交给标签的 visible_signal）；键盘调值不算拖动
 Element::dropdown(vec!["A", "B"], selected)       // selected: Signal<usize>
 Element::dropdown_signal(options, selected)     // 选项也绑信号：options: Signal<Vec<String>>
 Element::dropdown_items(vec![item1, item2], selected)       // 富内容项（副标题/徽章/尾随图标）
@@ -957,7 +959,8 @@ App::new("查词", 480, 360)
   对」。快照在热键派发**之前**刷新，故这里读到的一定是新鲜的——全局热键是唯一能在窗口隐藏、
   毫无消息往来时抵达的输入，其余路径都以窗口可见为前提。读不到状态时按**可见**处理：
   反方向的失败模式是去「显示」一个本就显示着的窗口，按下去毫无反应，更难查。
-- `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏。它**优先级低于既有拦截链**：先关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
+- `hide_on_close()` 把 **ESC 与标题栏 ×** 都转为隐藏（ESC 一支受 `escape_closes_window` 约束，设为 `false` 时 ESC 不再隐藏窗口）。它**优先级低于既有拦截链**：先收锚定浮层 → 关最顶层对话框 → 再问 `on_close_request` → 拦截器放行后才轮到它决定关还是隐。故「有未保存数据时弹提示」与「关闭即隐藏」可并存。真正的退出留给托盘菜单的 `ctx.quit()`。拦截器收 `EventCtx`（`on_close_request(|ctx| -> bool)`），弹确认框的正确形状见 §8.7。
+- `escape_closes_window(false)`（`App` 与 `Window` 都有）：ESC 没有浮层 / 对话框可收时**不关窗**，默认 `true`。单主窗应用默认「按一下 ESC 就退出」，设为 `false` 后 ESC 仍逐层收浮层、关对话框，只是不再触碰窗口，也不去问 `on_close_request`；点 × 与 `ctx.request_close()` 不受影响。
 - `start_hidden()` / `hide_on_close()` 须配合托盘或热键——否则窗口隐藏后永远无法唤起，debug 期对此 panic。
 
 > **平台**：Windows 走 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`，Linux 走 X11 根窗口 `GrabKey`（Wayland 会话经 XWayland 时只在本程序有焦点时生效，协议所限）——三者都**不需要用户授权**，语义一致（全局生效、组合被占用则该热键静默失效、运行期可改绑与启停）。macOS 上另两条路（`CGEventTap`、`NSEvent` 全局监听）都要用户在「系统设置 → 隐私与安全性 → 辅助功能」手动授权，且后者只能监听不能拦截，故不采用。

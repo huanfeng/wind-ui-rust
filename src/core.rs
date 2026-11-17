@@ -306,6 +306,13 @@ pub trait Widget {
     /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
     /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。
     fn reset_interaction(&mut self) {}
+    /// 节点即将被 [`Tree::remove`] 回收（连同其控件一起销毁）前调用一次。
+    ///
+    /// 给「对外镜像了交互状态」的控件收尾用：拖动中的滑块若被整页切走 / 所在行被删掉，
+    /// 与之配对的 Up 再也派发不到它，镜像信号就会一直停在「拖动中」。`reset_interaction`
+    /// 管的是「变为不可见」，回收节点不经过它；写信号也不能放进 `Drop`（信号句柄那时可能已
+    /// 随作用域失效，debug 下写失效句柄会断言，`Drop` 里 panic 更会直接中止进程）。默认无操作。
+    fn on_removed(&mut self) {}
     /// 节点不在绘制路径上（被隐藏、或在被隐藏的祖先之下）时，每次结构变化后调用：把
     /// 跟随状态的补间就地落定到**当前**状态。
     ///
@@ -1335,6 +1342,9 @@ impl Tree {
         }
         if let Some(slot) = self.slots.get_mut(id.index as usize) {
             if slot.generation == id.generation {
+                if let Some(n) = slot.node.as_mut() {
+                    n.widget.on_removed();
+                }
                 slot.node = None;
                 slot.generation = slot.generation.wrapping_add(1);
                 self.free.push(id.index);

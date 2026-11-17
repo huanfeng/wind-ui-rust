@@ -750,6 +750,9 @@ pub(crate) fn value_label_w(text_w: i32) -> i32 {
 pub struct Slider {
     value: Signal<f32>, // 0.0..=1.0
     dragging: bool,
+    /// 「正在被鼠标拖动」的对外镜像（`Element::dragging_signal`）：按下置 true，抬起 / 被复位
+    /// 置 false。只反映指针拖动——键盘调值是瞬发动作，没有「正在」可言。
+    drag_signal: Option<Signal<bool>>,
     /// 是否在旋钮右侧显示当前值百分比（如 "65%"）。
     pub show_value: bool,
     /// 值标签宽度：`measure` 按当前字号实测 "100%" 后写入，`paint` 与指针换算读它——
@@ -765,6 +768,7 @@ impl Slider {
         Self {
             value,
             dragging: false,
+            drag_signal: None,
             show_value: false,
             label_w: Cell::new(VALUE_LABEL_W),
             value_fit: Default::default(),
@@ -773,6 +777,24 @@ impl Slider {
 
     pub fn set_show_value(&mut self, on: bool) {
         self.show_value = on;
+    }
+
+    /// 接上拖动态镜像信号（见 `drag_signal`）。**不在这里写信号**：构造期写会冲掉别处已置的
+    /// 值（几个滑块共用一个「任一在拖」信号时，拖动途中重建一个滑块就把 true 冲成 false）；
+    /// 信号的初值由调用方负责，通常就是 `signal(false)`。
+    pub fn set_drag_signal(&mut self, s: Signal<bool>) {
+        self.drag_signal = Some(s);
+    }
+
+    /// 改拖动态并同步镜像。值没变不写信号——写信号会触发依赖它的界面重绘；信号已失效
+    /// （所属作用域先于控件被回收）也不写，写失效句柄在 debug 下会断言。
+    fn set_dragging(&mut self, on: bool) {
+        self.dragging = on;
+        if let Some(s) = self.drag_signal {
+            if s.is_alive() && s.get() != on {
+                s.set(on);
+            }
+        }
     }
 
     /// 轨道占用的宽度：`show_value` 时右侧让给值标签。绘制与指针换算共用这一处，
@@ -883,7 +905,7 @@ impl Widget for Slider {
                 PointerKind::Down => {
                     ctx.request_focus();
                     ctx.capture();
-                    self.dragging = true;
+                    self.set_dragging(true);
                     self.set_from_pos(ctx, p.pos.x);
                     true
                 }
@@ -893,7 +915,11 @@ impl Widget for Slider {
                     true
                 }
                 PointerKind::Up => {
-                    self.dragging = false;
+                    // 只有自己在拖时才收尾：在别处按下、拖进来松开的 Up 不归本滑块管，
+                    // 否则会清掉共用信号里别的滑块置的 true。
+                    if self.dragging {
+                        self.set_dragging(false);
+                    }
                     ctx.release_capture();
                     true
                 }
@@ -922,6 +948,14 @@ impl Widget for Slider {
             }
             _ => false,
         }
+    }
+    fn reset_interaction(&mut self) {
+        // 被隐藏 / 禁用时拖动随之作废：没有 Up 会再来，不复位就一直卡在「拖动中」。
+        self.set_dragging(false);
+    }
+    fn on_removed(&mut self) {
+        // 拖动中节点被回收（整页切走、所在行被删）：同理没有 Up 会再来。
+        self.set_dragging(false);
     }
     fn focusable(&self) -> bool {
         true
@@ -5057,6 +5091,101 @@ mod modifier_and_click_tests {
                 assert_eq!(v.get(), 0.5, "{name}+{arrow:?} 不该改值");
             }
         }
+    }
+
+    /// 在滑块上依次派发指针事件（x 是相对滑块左缘的偏移）。
+    fn slider_ptr(
+        tree: &mut Tree,
+        root: crate::core::NodeId,
+        cap: &mut Option<crate::core::NodeId>,
+        kind: PointerKind,
+        dx: i32,
+    ) {
+        let b = tree.abs_bounds(root);
+        tree.dispatch_pointer(
+            PointerEvent::single(kind, Point::new(b.x + dx, b.y + b.h / 2), MouseButton::Left),
+            &mut None,
+            cap,
+        );
+    }
+
+    #[test]
+    fn slider_dragging_signal_follows_the_pointer() {
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        assert!(!grabbed.get(), "没按下时是 false");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "按下即拖动中");
+        let at_down = v.get();
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Move, 100);
+        assert!(grabbed.get(), "移动中保持");
+        assert!(v.get() > at_down, "前提：拖动确实改了值");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, 100);
+        assert!(!grabbed.get(), "抬起即结束");
+    }
+
+    #[test]
+    fn slider_dragging_signal_ignores_keyboard_adjustment() {
+        let (v, grabbed) = (signal(0.5f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        tree.dispatch_key(key(Key::Right), Some(root));
+        assert!(v.get() > 0.5, "前提：键盘调值生效");
+        assert!(!grabbed.get(), "键盘调值是瞬发动作，不算拖动");
+    }
+
+    #[test]
+    fn slider_dragging_signal_resets_when_the_slider_is_reset() {
+        // 被隐藏 / 禁用时没有 Up 会再来；不复位就一直卡在「拖动中」。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "前提：拖动中");
+        tree.get_mut(root).unwrap().widget.reset_interaction();
+        assert!(!grabbed.get());
+    }
+
+    #[test]
+    fn slider_dragging_signal_resets_when_the_node_is_removed() {
+        // 拖动中整页切走 / 所在行被删：配对的 Up 再也派发不到它，信号不能一直停在 true。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "前提：拖动中");
+        tree.remove(root);
+        assert!(!grabbed.get(), "节点被回收时拖动随之作废");
+    }
+
+    #[test]
+    fn slider_capture_lost_synthetic_up_ends_the_drag() {
+        // 失焦 / Alt-Tab 中松手：宿主给捕获节点派一个远处坐标的合成 Up 收尾。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get() && cap.is_some(), "前提：拖动中且持有捕获");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, -1_000_000);
+        assert!(!grabbed.get(), "合成 Up 应结束拖动");
+    }
+
+    #[test]
+    fn slider_up_without_its_own_press_does_not_clear_a_shared_flag() {
+        // 几个滑块共用一个「任一在拖」信号：别处按下、拖进来松开的 Up 不归这个滑块管。
+        let shared = signal(true); // 别的滑块正在拖
+        let (mut tree, root) = build(Element::slider(signal(0.0f32)).dragging_signal(shared));
+        assert!(shared.get(), "构造时不该去冲掉别处置的 true");
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, 60);
+        assert!(shared.get(), "没按下过的滑块收到 Up 不该清信号");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "dragging_signal")]
+    fn dragging_signal_on_a_non_slider_is_rejected_in_debug() {
+        let _ = Element::button("x").dragging_signal(signal(false));
     }
 
     #[test]

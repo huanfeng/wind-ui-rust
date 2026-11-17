@@ -1717,7 +1717,10 @@ impl Element {
             .and_then(|a| a.downcast_mut::<Slider>())
         {
             Some(s) => f(s),
-            None => debug_assert!(false, "show_value() 只能用于 Element::slider(..)"),
+            None => debug_assert!(
+                false,
+                "show_value() / dragging_signal() 只能用于 Element::slider(..)"
+            ),
         }
         self
     }
@@ -1767,6 +1770,31 @@ impl Element {
     #[track_caller]
     pub fn show_value(self, on: bool) -> Self {
         self.config_slider(|s| s.set_show_value(on))
+    }
+
+    /// 把滑块「正在被鼠标拖动」镜像到一个信号：按下置 `true`，抬起置 `false`。仅
+    /// `Element::slider(..)` 可用。
+    ///
+    /// 用来做「抓住才显示」之类的交互——比如拖动时才在旁边亮出百分比：把信号交给标签的
+    /// [`visible_signal`](Self::visible_signal) 即可。**但标签的位置要常驻**：隐藏的节点不占
+    /// 布局，标签直接显隐会让滑块在按下那一刻被缩窄、旋钮跳离指针；给标签套一个定宽容器、
+    /// 只显隐里面的文字（见 `fullshowcase` 的音量行）。
+    ///
+    /// 只反映**指针拖动**；键盘调值是瞬发动作，没有「正在」可言。信号的初值由调用方给
+    /// （通常是 `signal(false)`），控件构造时不会去写它。滑块被隐藏、禁用或节点被回收时拖动
+    /// 随之作废，信号回到 `false`。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let volume = signal(0.5);
+    /// let grabbed = signal(false);
+    /// let ui = Element::row()
+    ///     .child(Element::slider(volume).dragging_signal(grabbed))
+    ///     .child(Element::label("音量").visible_signal(grabbed));
+    /// ```
+    #[track_caller]
+    pub fn dragging_signal(self, dragging: Signal<bool>) -> Self {
+        self.config_slider(|s| s.set_drag_signal(dragging))
     }
 
     /// 单行文本输入（绑定 `Signal<String>`）。

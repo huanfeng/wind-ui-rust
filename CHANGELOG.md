@@ -14,6 +14,12 @@
 
 ### 新增
 
+- **`App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`**：ESC 在没有浮层 /
+  对话框可收时是否关窗，默认 `true`（与此前一致）。单主窗应用默认「按一下 ESC 就退出」，设为
+  `false` 后 ESC 仍逐层收浮层、关对话框，但不再触碰窗口，也不询问 `on_close_request`；点 × 与
+  `ctx.request_close()` 不受影响。此前下游只能在 `on_shortcut` 里恒消费 ESC 再自己收浮层。
+- **`Element::dragging_signal(Signal<bool>)`**（仅 `slider`）：把「正在被鼠标拖动」镜像到信号，
+  做「抓住才显示百分比」之类的交互；键盘调值不算拖动，滑块被隐藏 / 禁用时自动回到 `false`。
 - **`Element::number_input(value, min, max, step)`**：不带 ± 按钮的数值输入框，绑定 `Signal<f64>`。
   数值语义与 `stepper` 的中部输入框是同一份实现（键入准入、钳制、↑↓ 步进、Enter / 失焦规整、
   Esc 回退）；外观同 `text_input`、文字左对齐，`text_align` / `pad_x` / `pad_y` / `read_only`

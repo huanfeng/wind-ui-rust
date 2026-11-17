@@ -1539,6 +1539,8 @@ pub struct WindowRequest {
     pub window_outline: crate::platform::WindowOutline,
     /// 无边框窗口圆角（`Window::window_corner`），见 `WindowCorner`。
     pub window_corner: crate::platform::WindowCorner,
+    /// ESC 没有浮层 / 对话框可收时是否关闭本窗口（`Window::escape_closes_window`），默认 true。
+    pub escape_closes_window: bool,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。

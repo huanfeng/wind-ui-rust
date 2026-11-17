@@ -115,8 +115,8 @@
 | **滚动联动（声明式）** | 🟡 记账 | P2 | 同上反馈：`Tree::set_scroll_y` 是惯性滑动用的，不钳制也不标脏；下游要每 50ms DFS 内部树找 `Layout::Scroll`、手动跳过浮层内容节点、改完再 `mark_layout_dirty` + `mark_dirty_all`。方向：把 `scroll_y` 做成可绑定的 `Signal`，或提供 `linked_scroll` 一类的声明（两个滚动容器按比例 / 偏移联动）；须钳制并自动标脏 |
 | **纯数字输入框（无 ± 按钮）** | ✅ 已交付 | — | `Element::number_input(value, min, max, step)`，与 `stepper` 共用 `NumberField`；配套 `.decimals(n)` / `.unit(..)`。`stepper` 本身未改用同一内核（Shared 状态机的脏区与基线细节多，另起一轮） |
 | **查询主窗真实窗口状态** | 🟡 记账 | P3 | 同上反馈：`App::on_interval` 里 `window_state()` 恒为 `UNKNOWN`（注入本身有理由：不让已销毁窗口的旧快照残留），下游判最小化只能自己 `FindWindowW` + `IsIconic`。方向：给「查询主窗当前状态」的 API，或在 `WindowState::minimized` 文档里醒目标注 |
-| **Slider 暴露「拖动中」状态** | 🟡 记账 | P3 | 同上反馈：想做「抓住才显示百分比」做不到，只能常驻 `show_value`。方向：`Slider` 提供拖动态信号或 `on_drag_start/end` |
-| **ESC 兜底关窗的开关** | 🟡 记账 | P3 | 同上反馈：ESC 未被消费时宿主走关窗兜底，单主窗应用等于按一下就退出，下游得在 `on_shortcut` 里恒消费再自己收浮层。已有出口：`on_close_request` 返回 false 可拦，但语义是「关闭请求」而非「ESC 不关窗」；方向：`App::escape_closes_window(bool)` 之类的显式开关 |
+| **Slider 暴露「拖动中」状态** | ✅ 已交付 | — | `Element::slider(..).dragging_signal(Signal<bool>)`：按下置 true、抬起或被复位置 false，键盘调值不算 |
+| **ESC 兜底关窗的开关** | ✅ 已交付 | — | `App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`，默认 true；false 时 ESC 仍逐层收浮层与对话框，不关窗也不问 `on_close_request` |
 
 ### 架构演进
 | 项 | 评级 | 优先级 | 说明 |
@@ -162,4 +162,4 @@
 - **P2 增强**：全局热键 / 无边框标题栏 / 暗色感知 / 多窗口 / 轻量补间 / 撤销重做。
 - **已交付（v0.4.0）**：Signals（`Signal<T>` 状态原语）、脏矩形局部重绘、GPU/D2D opt-in 后端。
 - **已记账待做**：可编辑富文本、字距与数字等宽（见「功能能力」表，来自下游 2026-10 需求 R3 / R4）。
-- **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入、滚动联动、查询主窗真实窗口状态、Slider 拖动态、ESC 兜底关窗开关（见「功能能力」表）。同批反馈里的 Slider 修饰键、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、窗口圆角与 DWM 边框、浮层收起不穿透、示例图标可选 feature 已在 Unreleased 交付。
+- **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入、滚动联动、查询主窗真实窗口状态（见「功能能力」表）。同批反馈里的其余项（Slider 修饰键与拖动态、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、纯数字输入框、窗口圆角与 DWM 边框、浮层收起不穿透、ESC 兜底关窗开关、示例图标可选 feature）已在 Unreleased 交付。
