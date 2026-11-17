@@ -761,6 +761,8 @@ pub struct Element {
     reactive: bool,
     /// 锚定浮层的展开信号（见 [`Node::overlay`]）。由 [`Element::popup`] 设置。
     overlay: Option<Signal<bool>>,
+    /// 见 [`Node::overlay_swallow`]。由 [`Element::dismiss_swallows_click`] 设置。
+    dismiss_swallow: bool,
     presence: Option<presence::Presence>,
     /// 进出场滑动方向（标签页切换用）：显隐翻转时问一次，返回滑动量的符号。
     presence_dir: Option<Rc<dyn Fn(bool) -> i32>>,
@@ -815,6 +817,7 @@ impl Element {
             cursor: None,
             reactive: false,
             overlay: None,
+            dismiss_swallow: false,
             presence: None,
             presence_dir: None,
             animate_height: false,
@@ -3469,6 +3472,12 @@ impl Element {
     ///     .on_click(move |_| open.set(!open.get()))
     ///     .popup(open, panel);
     /// ```
+    ///
+    /// # 点在浮层外收起时，这一击要不要继续点到底下的控件
+    ///
+    /// 默认**继续**：同一击里既收起面板、又按到下面的按钮，一次操作办两件事。要「只收起、
+    /// 不误触」（面板盖在一排按钮上、点空白处只想关面板）就在 `content` 上写
+    /// [`dismiss_swallows_click(true)`](Self::dismiss_swallows_click)。
     pub fn popup(self, open: Signal<bool>, content: Element) -> Self {
         // 可见性直接绑 `open`：浮层的「展开」与「可见」是同一件事，分成两个开关只会
         // 制造出「登记为浮层却看不见」和「看得见却关不掉」两种半开状态。
@@ -3482,6 +3491,28 @@ impl Element {
         }
         .visible_signal(open);
         self.child(content)
+    }
+
+    /// 浮层的收起策略：在浮层与锚点之外按下而收起它时，这一击**到此为止**，不再命中底下的
+    /// 控件（配对的抬起同样被吃掉）。默认 `false`——同一击里既关面板又按到下层控件。
+    ///
+    /// 写在传给 [`popup`](Self::popup) 的 `content` 上；用在没经 `popup` 登记的元素上无效。
+    /// 只管「点外面收起」这一条路：点锚点本身仍交给触发器控件自己 toggle，ESC 收起本就不涉及
+    /// 点击。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let open = signal(false);
+    /// let panel = Element::col()
+    ///     .child(Element::label("面板"))
+    ///     .dismiss_swallows_click(true);
+    /// let _ = Element::button("展开")
+    ///     .on_click(move |_| open.set(!open.get()))
+    ///     .popup(open, panel);
+    /// ```
+    pub fn dismiss_swallows_click(mut self, on: bool) -> Self {
+        self.dismiss_swallow = on;
+        self
     }
 
     /// **颜色选择器**：一枚当前色的色块，点开是浮在内容之上的取色面板。
@@ -5417,6 +5448,7 @@ impl Element {
             offset: Point::new(0, 0),
             raised: false,
             overlay: self.overlay,
+            overlay_swallow: self.dismiss_swallow,
             presence: None,
             height_anim: self
                 .animate_height

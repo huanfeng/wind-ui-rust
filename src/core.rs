@@ -874,6 +874,10 @@ pub struct Node {
     /// 字段登记**。事后直接给已建好的节点赋值，会得到一个既被排除出父容器布局流、
     /// 又从不被排布/绘制/命中的幽灵节点——彻底消失，且没有任何提示。
     pub overlay: Option<Signal<bool>>,
+    /// 浮层被「外面按下」收起时，这一击是否**到此为止**（见
+    /// [`Element::dismiss_swallows_click`](crate::ui::Element::dismiss_swallows_click)）。
+    /// 默认 false：同一击里既收起浮层、又照常按到底下的控件。只对 `overlay` 节点有意义。
+    pub(crate) overlay_swallow: bool,
     /// 进出场过渡状态（`Element::transition`）。只有声明了过渡的节点才分配。
     pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
     /// 高度过渡状态（`Element::animate_height`）。只有声明了的节点才分配。
@@ -1062,6 +1066,8 @@ struct Slot {
 
 /// 节点树 + arena。
 pub struct Tree {
+    /// 浮层「收起即吞」吃掉了一次按下，等它配对的抬起（见 `dispatch_pointer`）。
+    swallow_up: bool,
     slots: Vec<Slot>,
     free: Vec<u32>,
     pub root: Option<NodeId>,
@@ -1161,6 +1167,7 @@ impl Default for Tree {
 impl Tree {
     pub fn new() -> Self {
         Self {
+            swallow_up: false,
             slots: Vec::new(),
             free: Vec::new(),
             held_accepts_text: None,
@@ -4448,8 +4455,12 @@ impl Tree {
     ///
     /// 锚点也要排除，否则「点触发器收起面板」会退化成无操作——核心先把它关掉，
     /// 触发器的 toggle 紧接着又把它打开。锚点上的开合一律交给触发器控件自己决定。
-    pub(crate) fn dismiss_overlays_outside(&mut self, p: Point) -> bool {
+    ///
+    /// 第二个返回值：被收起的浮层里是否有要求「这一击到此为止」的（`overlay_swallow`）。
+    /// 多个浮层同时被收起时任一要求吞就吞——宁可少触发一次底层控件，也不违背其中一方的声明。
+    pub(crate) fn dismiss_overlays_outside(&mut self, p: Point) -> (bool, bool) {
         let mut closed = false;
+        let mut swallow = false;
         for id in self.overlays.clone() {
             if !self.overlay_showing(id) {
                 continue;
@@ -4468,10 +4479,11 @@ impl Tree {
                 if sig.get() {
                     sig.set(false);
                     closed = true;
+                    swallow |= self.get(id).is_some_and(|n| n.overlay_swallow);
                 }
             }
         }
-        closed
+        (closed, swallow)
     }
 
     /// 收起最顶层（最后登记）的可见浮层。返回是否确实收起了一个。ESC 用。
@@ -4839,13 +4851,28 @@ impl Tree {
         // 轻量关闭：浮层外按下即收起。**在主事件之前**做，这样同一次按下里「关掉旧
         // 浮层」与「命中新控件」都能发生（点 A 的面板外的 B 按钮，面板收起且 B 被按到）。
         // 关闭改变显隐 → 无法局部化，直接升整窗。
-        if matches!(ev.kind, PointerKind::Down)
-            && capture.is_none()
-            && !self.overlays.is_empty()
-            && self.dismiss_overlays_outside(ev.pos)
-        {
-            res.repaint = true;
-            res.damage = res.damage.merge(DamageReq::Full);
+        // 上一次按下被「收起即吞」吃掉了：与之配对的抬起也得吃掉。否则底层控件会收到一个
+        // 没有按下的抬起——Switch / Radio 这类「抬起即激活」的控件照样被触发，吞了个寂寞。
+        // 新的按下清掉旧标记：配对的抬起若丢了（窗口失焦、取消），不能让它吞掉下一次真点击。
+        if matches!(ev.kind, PointerKind::Down) {
+            self.swallow_up = false;
+        }
+        if matches!(ev.kind, PointerKind::Up) && std::mem::take(&mut self.swallow_up) {
+            res.consumed = true;
+            return res;
+        }
+        if matches!(ev.kind, PointerKind::Down) && capture.is_none() && !self.overlays.is_empty() {
+            let (closed, swallow) = self.dismiss_overlays_outside(ev.pos);
+            if closed {
+                res.repaint = true;
+                res.damage = res.damage.merge(DamageReq::Full);
+                if swallow {
+                    // 只收起，不继续命中底层：这一击到此为止（配对的抬起见上）。
+                    self.swallow_up = true;
+                    res.consumed = true;
+                    return res;
+                }
+            }
         }
 
         // hover 进出（仅 Move 且无捕获时）：沿祖先链派发，使可点击容器也能收到 Enter/Leave。
@@ -5584,6 +5611,92 @@ mod tests {
         // 测试照样全绿，画面上却留着面板残影。故这里连脏区一起断言。
         assert_eq!(res.damage, DamageReq::Full, "收起浮层必须升整窗重绘");
         assert!(res.repaint);
+    }
+
+    /// 第 0 行是「抬起即激活」的开关（只收抬起就会翻转，正好检验配对的抬起被吃掉），
+    /// 第 1 行是锚点 + 浮层。点 (30, 10) 落在浮层与锚点之外、开关之上。
+    fn swallow_tree(
+        swallow: bool,
+        open: crate::signal::Signal<bool>,
+        on: crate::signal::Signal<bool>,
+    ) -> Tree {
+        let panel = Element::col()
+            .width(60)
+            .height(80)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(swallow);
+        layout(
+            Element::col()
+                .width(200)
+                .height(300)
+                .child(Element::switch(on).width(200).height(40))
+                .child(
+                    Element::col()
+                        .width(200)
+                        .child(Element::leaf().width(200).height(40).bg(Color::WHITE))
+                        .popup(open, panel),
+                ),
+            200,
+            300,
+        )
+    }
+
+    fn click_at(tree: &mut Tree, pos: Point) {
+        let (mut hover, mut capture) = (None, None);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, pos, MouseButton::Left),
+                &mut hover,
+                &mut capture,
+            );
+        }
+    }
+
+    #[test]
+    fn dismiss_by_default_still_hits_the_control_underneath() {
+        // 默认行为不变：同一击里既收起浮层，又按到底下的开关。
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(false, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(!open.get(), "前提：浮层被收起");
+        assert!(on.get(), "默认仍穿透：底下的开关被点到");
+    }
+
+    #[test]
+    fn dismiss_swallows_click_stops_at_closing_the_overlay() {
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(!open.get(), "前提：浮层照常收起");
+        assert!(!on.get(), "吞掉：按下与配对的抬起都不能到达底下的开关");
+        // 吞的只是那一次：下一次点击恢复正常，开关不能被残留的标记吃掉。
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "浮层已关，再点开关应当生效");
+    }
+
+    #[test]
+    fn swallow_does_not_apply_when_nothing_was_dismissed() {
+        // 浮层本来就是收着的：没有「收起」这回事，点击照常交给底下。
+        let (open, on) = (signal(false), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "没收起任何浮层就不该吞点击");
+    }
+
+    #[test]
+    fn a_lost_up_does_not_eat_the_next_real_click() {
+        // 吞了按下却没等到抬起（窗口失焦、取消）：下一次按下必须清掉残留标记。
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        let (mut hover, mut capture) = (None, None);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(30, 10), MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert!(!open.get());
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "丢了一次抬起，后面的完整点击仍应生效");
     }
 
     #[test]
