@@ -1782,7 +1782,7 @@ impl Element {
             Some(ti) => f(ti.config_mut()),
             None => debug_assert!(
                 false,
-                "password()/multiline()/wrap()/read_only() 只能用于 Element::text_input(..)"
+                "password()/multiline()/wrap()/read_only()/pad_x()/pad_y() 等 text_input 专属修饰符只能用于 Element::text_input(..)"
             ),
         }
         self
@@ -1815,7 +1815,16 @@ impl Element {
     /// 只是文字区离框边的距离，命中、光标、选区、水平滚动都跟着同一个值走。
     #[track_caller]
     pub fn pad_x(self, px: i32) -> Self {
-        self.config_text_input(|c| c.pad_x = px.max(0))
+        let mut el = self.config_text_input(|c| c.pad_x = px.max(0));
+        // 组合框的文字区右沿要让开下拉箭头，`trail` 依赖 `pad_x`，须随之重算。
+        if let Some(cf) = el
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<combo::ComboField>())
+        {
+            cf.keep_text_clear_of_chevron();
+        }
+        el
     }
     /// 多行输入框文字区的**上下内距**（逻辑 px，默认 12，负值按 0）。**单行忽略**——
     /// 单行文字在框内垂直居中。仅 `Element::text_input(..)` 可用。
@@ -6915,6 +6924,22 @@ mod tests {
         assert_eq!(row.h, 28);
         assert_eq!(kids[0].w, 60);
         crate::theme::set_current(std::rc::Rc::new(crate::theme::Theme::default()));
+    }
+
+    /// 组合框文字区右沿恒让开下拉箭头：`pad_x` 变了，`trail` 要反向补偿，两者之和不变。
+    /// 否则内距调小后文字与光标会压到箭头上。
+    #[test]
+    fn combo_box_text_stays_clear_of_the_chevron_when_pad_x_changes() {
+        let right_inset = |el: Element| {
+            let mut el = el;
+            let ti = text_input_of(el.widget.as_any_mut().unwrap()).unwrap();
+            let c = ti.config_mut();
+            c.pad_x + c.trail
+        };
+        let base = || Element::combo_box(signal(String::new()), vec!["a", "b"]);
+        let default = right_inset(base());
+        assert_eq!(right_inset(base().pad_x(2)), default, "pad_x(2) 后右沿不动");
+        assert_eq!(right_inset(base().pad_x(20)), default, "pad_x(20) 同理");
     }
 
     /// `setting_row` 的立身之本是「控件贴右缘」。左块靠 `weight(1.0)` 吃掉剩余宽度，

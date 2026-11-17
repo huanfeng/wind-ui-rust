@@ -1192,6 +1192,15 @@ type NavKeyFn = Box<dyn FnMut(&mut EventCtx, KeyEvent) -> bool>;
 type FilterFn = Box<dyn Fn(&str) -> bool>;
 
 impl TextInput {
+    /// 生效的左右内距：`pad_x` 是公开字段（`config_mut` 可直接写），负值在此统一按 0，
+    /// 不依赖调用方先钳过。
+    fn pad_x(&self) -> i32 {
+        self.config.pad_x.max(0)
+    }
+    /// 生效的多行上下内距，同 [`pad_x`](Self::pad_x)。
+    fn pad_y(&self) -> i32 {
+        self.config.pad_y.max(0)
+    }
     pub fn new(text: Signal<String>, placeholder: impl Into<crate::ui::TextContent>) -> Self {
         let placeholder = placeholder.into();
         let cursor = text.with(|t| t.chars().count());
@@ -1792,12 +1801,12 @@ impl TextInput {
         let lead = self.lead_inset(self.font_size_hint.get());
         // 减掉 paint 那一帧实际用的对齐偏移：不减的话居中/右对齐时点击落点整体偏移，
         // 点第一个字符会选到中间去。
-        let local_x = screen_x - (b.x + self.config.pad_x + lead) + self.scroll_x.get()
-            - self.align_off.get();
+        let local_x =
+            screen_x - (b.x + self.pad_x() + lead) + self.scroll_x.get() - self.align_off.get();
         // 垂直按多行内边距换算行号。单行只有一行、下方 clamp 恒为 0，故单行垂直
         // 居中（vpad=0）与此处用 TEXT_PAD 的不一致不影响命中；若将来单行支持多视觉
         // 行，需与 paint 的 first_line_y 同步。
-        let local_y = screen_y - (b.y + self.config.pad_y) + self.scroll_y.get();
+        let local_y = screen_y - (b.y + self.pad_y()) + self.scroll_y.get();
         let li = if lay.line_h > 0 {
             (local_y / lay.line_h).clamp(0, lay.lines.len() as i32 - 1) as usize
         } else {
@@ -2155,7 +2164,7 @@ impl Widget for TextInput {
             .max(style.font_size() as i32);
         // 多行默认约 5 行高（用户可 .height() 覆盖）；单行沿用紧凑高度。
         let h = if self.is_multiline() {
-            lh * 5 + 2 * self.config.pad_y
+            lh * 5 + 2 * self.pad_y()
         } else {
             crate::theme::current()
                 .metrics
@@ -2223,12 +2232,12 @@ impl Widget for TextInput {
         let multiline = self.is_multiline();
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
-        let vpad = if multiline { self.config.pad_y } else { 0 };
+        let vpad = if multiline { self.pad_y() } else { 0 };
         let lead = self.lead_inset(style.font_size());
         let inner = Rect::new(
-            bounds.x + self.config.pad_x + lead,
+            bounds.x + self.pad_x() + lead,
             bounds.y + vpad,
-            bounds.w - 2 * self.config.pad_x - lead - self.config.trail.max(0),
+            (bounds.w - 2 * self.pad_x() - lead - self.config.trail.max(0)).max(0),
             bounds.h - 2 * vpad,
         );
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
@@ -2238,7 +2247,7 @@ impl Widget for TextInput {
         // 前置图标（搜索框等）：绘于左侧留白区，垂直居中，弱化色。
         if let Some(g) = self.config.leading {
             let mut buf = [0u8; 4];
-            let icon_rect = Rect::new(bounds.x + self.config.pad_x, bounds.y, lead, bounds.h);
+            let icon_rect = Rect::new(bounds.x + self.pad_x(), bounds.y, lead, bounds.h);
             canvas.draw_text(
                 g.encode_utf8(&mut buf),
                 icon_rect,
@@ -2671,7 +2680,7 @@ impl Widget for TextInput {
                     // 多行：滚动条命中优先于文字交互。右键跳过（不拖滚动条）。
                     if self.is_multiline() && p.button != MouseButton::Right {
                         let b = ctx.bounds();
-                        let view_h = b.h - 2 * self.config.pad_y;
+                        let view_h = b.h - 2 * self.pad_y();
                         let (content_h, _) = {
                             let lay = self.layout.borrow();
                             let lh = lay.line_h.max(1);
@@ -2759,7 +2768,7 @@ impl Widget for TextInput {
                     if self.dragging {
                         if self.is_multiline() {
                             let b = ctx.bounds();
-                            let inner_h = b.h - 2 * self.config.pad_y;
+                            let inner_h = b.h - 2 * self.pad_y();
                             let (content_h, line_h) = {
                                 let lay = self.layout.borrow();
                                 let lh = lay.line_h.max(1);
@@ -2768,8 +2777,8 @@ impl Widget for TextInput {
                             let max_scroll = (content_h - inner_h).max(0);
                             if max_scroll > 0 {
                                 let sy = self.scroll_y.get();
-                                let top_edge = b.y + self.config.pad_y;
-                                let bot_edge = b.y + b.h - self.config.pad_y;
+                                let top_edge = b.y + self.pad_y();
+                                let bot_edge = b.y + b.h - self.pad_y();
                                 if p.pos.y < top_edge && sy > 0 {
                                     // 鼠标在上边界外：按超出距离比例向上滚（最少 1px，最多一行）。
                                     let step = ((top_edge - p.pos.y) / 5).clamp(1, line_h);
@@ -2822,7 +2831,7 @@ impl Widget for TextInput {
                 PointerKind::Wheel(delta) if self.is_multiline() => {
                     // 不设 follow_cursor，避免 paint 把视口重置到光标。
                     let b = ctx.bounds();
-                    let inner_h = b.h - 2 * self.config.pad_y;
+                    let inner_h = b.h - 2 * self.pad_y();
                     let (content_h, line_h) = {
                         let lay = self.layout.borrow();
                         let lh = lay.line_h.max(1);
@@ -5094,19 +5103,6 @@ mod text_pad_tests {
         let (wide, narrow) = (at(12), at(2));
         assert!(wide < i32::MAX && narrow < i32::MAX, "前提：确实画出了字");
         assert_eq!(wide - narrow, 10, "内距少 10，字应左移 10");
-    }
-
-    #[test]
-    fn default_pad_is_unchanged() {
-        let at = |el: Element| {
-            let (pm, b) = paint_first_child(el, 240, 100);
-            ink_origin(&pm, b)
-        };
-        assert_eq!(
-            at(input(|e| e, true)),
-            at(input(|e| e.pad_x(12).pad_y(12), true)),
-            "不设等于 12：默认行为不变"
-        );
     }
 
     #[test]

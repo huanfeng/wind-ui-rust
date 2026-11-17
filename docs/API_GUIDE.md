@@ -843,7 +843,7 @@ App::new("我的应用", 480, 360)
 - **exe 资源是另一条路，与本 API 互补**。Windows 的窗口类会从可执行文件资源里加载图标
   （见 `platform/win32` 的 `register_window_class`：先按名字找打包工具注入的 `MAINICON`，
   再回退到 `.rc` 烙入的序号 1），那是一份**多尺寸 `.ico`**，每档都是原生分辨率。本仓库的
-  示例两条都走：`build.rs` 把 `assets/windui.ico` 嵌进 examples，`App::icon` 再设一次
+  示例两条都走：`build.rs` 在开 `--features example-icon`（默认关）时把 `assets/windui.ico` 嵌进 examples，`App::icon` 再设一次
   运行时图标——后者覆盖前者，但保证了 macOS 上 Dock 也有图标。`.ico` 里的档位就是上面
   那张表的并集（16/20/24/28/32/40/48/56/64/80 + 128/256）：少一档，那个缩放比下系统
   就得拉伸最近的一档。

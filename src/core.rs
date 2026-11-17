@@ -1068,6 +1068,10 @@ struct Slot {
 pub struct Tree {
     /// 浮层「收起即吞」吃掉了一次按下，等它配对的抬起（见 `dispatch_pointer`）。
     swallow_up: bool,
+    /// 被「收起即吞」吃掉的按下次数，用来把紧随其后的连击计数还原：点击计数在平台层按
+    /// 时间 / 位置累计，它不知道第一下被吞了，于是双击的第二下带着 `click_count = 2` 到来，
+    /// 底层控件会把它当成双击（表格行激活、输入框选词）。见 `dispatch_pointer`。
+    swallowed_clicks: u8,
     slots: Vec<Slot>,
     free: Vec<u32>,
     pub root: Option<NodeId>,
@@ -1168,6 +1172,7 @@ impl Tree {
     pub fn new() -> Self {
         Self {
             swallow_up: false,
+            swallowed_clicks: 0,
             slots: Vec::new(),
             free: Vec::new(),
             held_accepts_text: None,
@@ -4838,7 +4843,7 @@ impl Tree {
     /// 分发指针事件：维护 hover/capture，冒泡处理，汇总副作用。
     pub fn dispatch_pointer(
         &mut self,
-        ev: PointerEvent,
+        mut ev: PointerEvent,
         hover: &mut Option<NodeId>,
         capture: &mut Option<NodeId>,
     ) -> DispatchResult {
@@ -4856,6 +4861,12 @@ impl Tree {
         // 新的按下清掉旧标记：配对的抬起若丢了（窗口失焦、取消），不能让它吞掉下一次真点击。
         if matches!(ev.kind, PointerKind::Down) {
             self.swallow_up = false;
+            // 连击里前面被吞掉的那几下不算数：双击的第二下到底下就是一次单击。
+            if ev.click_count >= 2 {
+                ev.click_count -= self.swallowed_clicks.min(ev.click_count - 1);
+            } else {
+                self.swallowed_clicks = 0;
+            }
         }
         if matches!(ev.kind, PointerKind::Up) && std::mem::take(&mut self.swallow_up) {
             res.consumed = true;
@@ -4869,6 +4880,7 @@ impl Tree {
                 if swallow {
                     // 只收起，不继续命中底层：这一击到此为止（配对的抬起见上）。
                     self.swallow_up = true;
+                    self.swallowed_clicks = self.swallowed_clicks.saturating_add(1);
                     res.consumed = true;
                     return res;
                 }
@@ -5672,6 +5684,66 @@ mod tests {
         // 吞的只是那一次：下一次点击恢复正常，开关不能被残留的标记吃掉。
         click_at(&mut tree, Point::new(30, 10));
         assert!(on.get(), "浮层已关，再点开关应当生效");
+    }
+
+    /// 记下最后一次按下收到的 `click_count`（被吞的那一击到不了这里）。
+    struct CountProbe(crate::signal::Signal<u8>);
+    impl Widget for CountProbe {
+        fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
+            if let Event::Pointer(p) = ev {
+                if p.kind == PointerKind::Down {
+                    self.0.set(p.click_count);
+                }
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn the_second_half_of_a_swallowed_double_click_is_a_single_click() {
+        // 平台按时间/位置给第二下记 click_count = 2；但第一下已被吞，底下的控件
+        // （表格行、输入框）不该把它当双击。
+        let (open, seen) = (signal(true), signal(0u8));
+        let panel = Element::col()
+            .width(60)
+            .height(80)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(true);
+        let mut tree = layout(
+            Element::col()
+                .width(200)
+                .height(300)
+                .child(
+                    Element::leaf()
+                        .width(200)
+                        .height(40)
+                        .widget(CountProbe(seen)),
+                )
+                .child(
+                    Element::col()
+                        .width(200)
+                        .child(Element::leaf().width(200).height(40).bg(Color::WHITE))
+                        .popup(open, panel),
+                ),
+            200,
+            300,
+        );
+        let (mut hover, mut capture) = (None, None);
+        let p = Point::new(30, 10);
+        let ev = |kind, count| PointerEvent {
+            click_count: count,
+            ..PointerEvent::single(kind, p, MouseButton::Left)
+        };
+        tree.dispatch_pointer(ev(PointerKind::Down, 1), &mut hover, &mut capture);
+        tree.dispatch_pointer(ev(PointerKind::Up, 1), &mut hover, &mut capture);
+        assert!(!open.get(), "前提：第一下收起了浮层");
+        assert_eq!(seen.get(), 0, "前提：第一下没到达底下的控件");
+        tree.dispatch_pointer(ev(PointerKind::Down, 2), &mut hover, &mut capture);
+        assert_eq!(seen.get(), 1, "第二下到底下只是一次单击，不是双击");
+        // 再点一下（平台记为 3）：相对底下的控件是第二下。
+        tree.dispatch_pointer(ev(PointerKind::Up, 1), &mut hover, &mut capture);
+        tree.dispatch_pointer(ev(PointerKind::Down, 3), &mut hover, &mut capture);
+        assert_eq!(seen.get(), 2);
     }
 
     #[test]

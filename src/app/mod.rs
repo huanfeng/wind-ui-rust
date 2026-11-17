@@ -3072,6 +3072,9 @@ impl UiHost {
             || ev.kind != PointerKind::Down
             || ev.button != crate::event::MouseButton::Right
             || res.menu.is_some()
+            // 这一按已被树层消费（浮层「收起即吞」）：到此为止，不再另弹菜单。拖动区本身
+            // 不消费按下（`drag_hit_at` 为真即不是控件），所以这条不会误伤正常的标题栏右键。
+            || res.consumed
             || !self.tree.drag_hit_at(ev.pos)
         {
             return;
@@ -8393,6 +8396,31 @@ mod tests {
             200,
             "带框窗口：缩放边在客户区外，滚动条贴边"
         );
+    }
+
+    /// 点在浮层外、被「收起即吞」吃掉的右键，不能再顺手弹系统菜单：浮层关了菜单也开了，
+    /// 就和「这一击到此为止」自相矛盾。
+    #[test]
+    fn swallowed_right_click_does_not_open_the_system_menu() {
+        let open = crate::signal::signal(true);
+        let panel = Element::col()
+            .width(60)
+            .height(40)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(true);
+        let ui = Element::col()
+            .fill()
+            .child(Element::row().width_match().height(32).window_drag())
+            .child(Element::col().width(100).height(30).popup(open, panel));
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        // (150, 16)：标题栏拖动区内，在锚点（x<100）与浮层之外。
+        right_click(&mut host, 150, 16);
+        assert!(!open.get(), "前提：浮层被点外面收起");
+        assert!(menu_rows(&host).is_empty(), "被吞的一击不该再弹系统菜单");
     }
 
     /// 正文区右键不弹：系统菜单是"标题栏"的语义，不是"整个窗口"的。

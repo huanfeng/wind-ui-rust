@@ -195,7 +195,8 @@ struct X11 {
     /// 的角没人混合会成黑块，此时退回方角（像素 alpha 全 255，不重建窗口也能正常显示）。
     composited: bool,
     scale: f32,
-    /// 前 6 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
+    /// 前 6 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`），
+    /// 最后一个（`HIDDEN_CURSOR`）是全透明光标，对应 `CursorShape::Hidden`。
     cursors: [xproto::Cursor; CURSOR_TOTAL],
     keymap: Keymap,
     windows: Vec<Win>,
@@ -2167,6 +2168,22 @@ fn create_cursors(conn: &RustConnection, root: Window) -> Option<[xproto::Cursor
 fn create_blank_cursor(conn: &RustConnection, root: Window) -> Option<xproto::Cursor> {
     let pix = conn.generate_id().ok()?;
     conn.create_pixmap(1, pix, root, 1, 1).ok()?;
+    // 新建 pixmap 的内容协议里是未定义的：显式清成 0（mask 全 0 即全透明），
+    // 否则热点处可能露出一个黑点。
+    let gc = conn.generate_id().ok()?;
+    conn.create_gc(gc, pix, &CreateGCAux::new().foreground(0))
+        .ok()?;
+    let _ = conn.poly_fill_rectangle(
+        pix,
+        gc,
+        &[xproto::Rectangle {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }],
+    );
+    let _ = conn.free_gc(gc);
     let cur = conn.generate_id().ok()?;
     let made = conn
         .create_cursor(cur, pix, pix, 0, 0, 0, 0, 0, 0, 0, 0)

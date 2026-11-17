@@ -90,7 +90,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, SendMessageW, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
+    DestroyIcon, SendMessageW, WindowFromPoint, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -1647,9 +1647,10 @@ unsafe fn create_window(
         // `WindowOutline::Off`：Win11 上 DWM 会在客户区之上画一道 1px 边框，自绘的外框关掉了
         // 它还在——「不要这圈线」得连它一起去掉。DWMWA_COLOR_NONE 即不画边框。
         //
-        // 只在 Off 时设，别的策略不碰：该属性**只能 Set 不能 Get**，没法事后问回原值，
-        // 平白改写会让「恢复系统默认」无从谈起。Win10 不认这个属性，返回 E_INVALIDARG，
-        // 照样丢弃——那里的外框本来就是宿主自画、Off 已经关掉了。
+        // 只在 Off 时设，别的策略不碰：该属性只能 Set 不能 Get，读不回原值；虽有
+        // `DWMWA_COLOR_DEFAULT` 可恢复系统默认，没必要在用户没要求时改写它。外框策略建窗后
+        // 不再变，所以这里一次设定即可。Win10 不认这个属性，返回 E_INVALIDARG，照样丢弃——
+        // 那里的外框本来就是宿主自画、Off 已经关掉了。
         if cfg.window_outline == crate::platform::WindowOutline::Off {
             let none = DWMWA_COLOR_NONE;
             let _ = DwmSetWindowAttribute(
@@ -2358,6 +2359,8 @@ unsafe extern "system" fn wnd_proc(
                 if !window_presents(hwnd) {
                     apply_hidden_frame_effects(hwnd);
                 }
+                // 定时器里改了光标形状，指针不动就不会有 WM_SETCURSOR（见 `sync_cursor`）。
+                sync_cursor(hwnd);
             }
             LRESULT(0)
         }
@@ -2548,6 +2551,33 @@ unsafe fn apply_window_icon(hwnd: HWND, src: &crate::icon::IconSource) {
         if let Some(old) = state.icons[slot].replace(hicon) {
             let _ = DestroyIcon(old);
         }
+    }
+}
+
+/// 让光标形状跟上应用刚改的状态，不等下一次 `WM_SETCURSOR`。
+///
+/// 系统只在指针**移动或点击**时发 `WM_SETCURSOR`；定时器、按键触发的形状变化（全屏播放器
+/// 「静止几秒后隐藏指针」、按键进入某种模式）在指针不动时看不到任何效果，等用户一动才
+/// 生效——对 `CursorShape::Hidden` 而言还会把时序弄反（动一下才藏起来，紧接着的移动又被
+/// 换回箭头）。做法是指针恰好在本窗口客户区内时，自己补发一条等价的 `WM_SETCURSOR`。
+///
+/// 调用方须已释放对 `state` 的借用：`SendMessageW` 同步重入 `wnd_proc`（铁律 6）。
+unsafe fn sync_cursor(hwnd: HWND) {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() || WindowFromPoint(pt) != hwnd {
+        return;
+    }
+    let pos = LPARAM(((pt.y as u16 as isize) << 16) | (pt.x as u16 as isize));
+    let hit = SendMessageW(hwnd, WM_NCHITTEST, None, Some(pos));
+    if hit.0 as u32 == HTCLIENT {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETCURSOR,
+            Some(WPARAM(hwnd.0 as usize)),
+            Some(LPARAM(
+                (HTCLIENT as isize) | ((WM_MOUSEMOVE as isize) << 16),
+            )),
+        );
     }
 }
 
@@ -3676,6 +3706,8 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     }
     // 点击可能换了焦点：输入法开关当场跟上，不等下一帧（见 `sync_ime`）。
     sync_ime(hwnd, false);
+    // 点击可能改了光标形状；Down / Up 之后系统不会补发 WM_SETCURSOR。
+    sync_cursor(hwnd);
     // 自定义标题栏按钮请求的窗口操作（最小化/最大化）；在可能的关窗之前执行。
     apply_window_op(hwnd);
     // 原生文件对话框请求：此时 OS 捕获已在上面同步完毕，才轮到这个阻塞调用。
