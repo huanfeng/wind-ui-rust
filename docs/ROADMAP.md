@@ -114,7 +114,7 @@
 | **外部 GPU 纹理接入（视频 / 摄像头预览）** | 🟡 记账 | P2 | 下游 2026-11 反馈（基于 0.33.0）：`native_window_handle()` 已公开，却拿不到内部那台 D3D11 设备，也没有把外部 GPU 纹理画进 `Canvas` 的口，视频帧只能搬回 CPU 再上传。要点：Windows 建设备加 `VIDEO_SUPPORT` 并给立即上下文挂 `ID3D10Multithread` 保护（跨线程共用同一上下文本就是未定义行为，普通 GUI 几乎零成本，可无条件默认开）；暴露设备句柄；`Canvas` 加「绘制外部纹理」原语，须三后端（D2D / wgpu / 软光栅）都有降级路径。需先出设计，涉及设备所有权与同步契约 |
 | **滚动联动（声明式）** | 🟡 记账 | P2 | 同上反馈：`Tree::set_scroll_y` 是惯性滑动用的，不钳制也不标脏；下游要每 50ms DFS 内部树找 `Layout::Scroll`、手动跳过浮层内容节点、改完再 `mark_layout_dirty` + `mark_dirty_all`。方向：把 `scroll_y` 做成可绑定的 `Signal`，或提供 `linked_scroll` 一类的声明（两个滚动容器按比例 / 偏移联动）；须钳制并自动标脏 |
 | **纯数字输入框（无 ± 按钮）** | ✅ 已交付 | — | `Element::number_input(value, min, max, step)`，与 `stepper` 共用 `NumberField`；配套 `.decimals(n)` / `.unit(..)`。`stepper` 本身未改用同一内核（Shared 状态机的脏区与基线细节多，另起一轮） |
-| **查询主窗真实窗口状态** | 🟡 记账 | P3 | 同上反馈：`App::on_interval` 里 `window_state()` 恒为 `UNKNOWN`（注入本身有理由：不让已销毁窗口的旧快照残留），下游判最小化只能自己 `FindWindowW` + `IsIconic`。方向：给「查询主窗当前状态」的 API，或在 `WindowState::minimized` 文档里醒目标注 |
+| **查询主窗真实窗口状态** | 🟡 记账（P0 代码已交付，转换矩阵真机核对待人工：`main_window_state()` 同步查询 Win/macOS、`WM_SHOWWINDOW` 推送臂修 `visible` 陈旧、字段文档补快照纪律；Linux 同步查询与 macOS 推送待做，设计见 docs/roadmap-three-designs.md §3） | P3 | 同上反馈：`App::on_interval` 里 `window_state()` 恒为 `UNKNOWN`（注入本身有理由：不让已销毁窗口的旧快照残留），下游判最小化只能自己 `FindWindowW` + `IsIconic`。方向：给「查询主窗当前状态」的 API，或在 `WindowState::minimized` 文档里醒目标注 |
 | **Slider 暴露「拖动中」状态** | ✅ 已交付 | — | `Element::slider(..).dragging_signal(Signal<bool>)`：按下置 true、抬起或被复位置 false，键盘调值不算 |
 | **ESC 兜底关窗的开关** | ✅ 已交付 | — | `App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`，默认 true；false 时 ESC 仍逐层收浮层与对话框，不关窗也不问 `on_close_request` |
 
@@ -162,4 +162,4 @@
 - **P2 增强**：全局热键 / 无边框标题栏 / 暗色感知 / 多窗口 / 轻量补间 / 撤销重做。
 - **已交付（v0.4.0）**：Signals（`Signal<T>` 状态原语）、脏矩形局部重绘、GPU/D2D opt-in 后端。
 - **已记账待做**：可编辑富文本、字距与数字等宽（见「功能能力」表，来自下游 2026-10 需求 R3 / R4）。
-- **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入、滚动联动、查询主窗真实窗口状态（见「功能能力」表）。同批反馈里的其余项（Slider 修饰键与拖动态、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、纯数字输入框、窗口圆角与 DWM 边框、浮层收起不穿透、ESC 兜底关窗开关、示例图标可选 feature）已在 Unreleased 交付。
+- **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入、滚动联动（设计见 docs/roadmap-three-designs.md，未实施）。查询主窗真实窗口状态的 P0 已交付（`main_window_state()` Win/macOS + `WM_SHOWWINDOW` 推送臂，随 Unreleased），Linux 同步查询与 macOS 推送待做。同批反馈里的其余项（Slider 修饰键与拖动态、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、纯数字输入框、窗口圆角与 DWM 边框、浮层收起不穿透、ESC 兜底关窗开关、示例图标可选 feature）已在 0.34.0 交付。

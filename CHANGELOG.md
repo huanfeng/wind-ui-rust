@@ -3,6 +3,29 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **`event::main_window_state()`**：查询**主窗**此刻的真实窗口状态。平台层同步查询，不走
+  线程局部快照，任何时机成立（`on_interval`、托盘 / 热键回调、显隐转换瞬间）；无主窗
+  （常驻模式）返回 `None`。与 `window_state()` 快照的分工：快照快、事件期内为真值，是
+  首选；本函数是任何时机的仲裁读法。Windows / macOS 实现同步读真值，Linux 暂未实现
+  （恒 `None`，平台表见 API_GUIDE §11）。
+- **`WindowState` 字段文档补快照纪律**：`minimized` / `visible` 标明仅事件回调 /
+  菜单构建 / `paint` 期间有效，指路 `main_window_state()`。
+
+### 修复
+
+- **Windows 上 `WindowState::visible` 在显隐转换后不再陈旧**：wnd_proc 此前只在建窗与
+  `WM_SIZE` 推送状态，`run_window_op` 的 Show/Hide（及任务栏等一切 `ShowWindow` 来源）
+  之后快照停在旧值——hide_on_minimize 的窗口推送完 minimized 后立即被藏，`visible` 恒
+  `true`，热键「露着就收起、藏着就唤起」恒走隐藏分支毫无反应。新增 `WM_SHOWWINDOW`
+  推送臂，一条消息收口一切显隐转换；前置消息语义下用 `wparam` 合成新值（`lparam` 0/1/3
+  档给出转换后的新可见性，2/4 档可见性不变保持 live 读），不必等下一次 `WM_SIZE` 或重排
+  顺手修正。示例 `verify_batch` 第 ⑦ 节提供真机核对卡片（各转换后「快照 == 查询」一致性
+  与 F9 热键显隐切换）。
+
 ## [0.34.0] - 2026-11-17
 
 ### 构建
