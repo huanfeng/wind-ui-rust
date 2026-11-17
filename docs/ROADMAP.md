@@ -111,6 +111,12 @@
 | 富文本 / 行内混排 | ✅ 只读已交付 | — | `RichText`（span 模型、行内胶囊 `SpanStyle::chip`、划选复制）。可编辑版见下一行 |
 | **可编辑富文本**（`TextInput` 字符区间挂样式 / 文本流里嵌不可编辑胶囊） | 🟡 记账 | P2 | 下游 2026-10 需求 R3：正文里把引用显示成可点、不参与编辑的胶囊，稿子照常打字。要点：样式区间随插删平移、胶囊作为原子字符（光标跨越、退格整删、复制出原文）、输入法组合串与区间共存；`TextInput` 现为纯文本 + 自绘视觉行布局，需引入区间表而非换控件。下游有退路（带底色文本 + 按区间反查点击），不催 |
 | **字距 letter-spacing 与数字等宽 tabular-nums** | 🟡 记账 | P2 | 下游 2026-10 需求 R4：大数字逐字对齐。`TextStyle` 加 `letter_spacing` 与 `tabular_nums`（OpenType `tnum`），须**四套文字栈同步**——DirectWrite（`SetCharacterSpacing` / typography `tnum`）、Core Text（`kCTKernAttributeName` / 字体特性）、Linux 自带栈（shaping 特性 + 逐字追加 advance）、GPU 字形缓存（缓存键纳入两项）；测量与绘制须同源，`text_advance` 契约测试跨引擎覆盖 |
+| **外部 GPU 纹理接入（视频 / 摄像头预览）** | 🟡 记账 | P2 | 下游 2026-11 反馈（基于 0.33.0）：`native_window_handle()` 已公开，却拿不到内部那台 D3D11 设备，也没有把外部 GPU 纹理画进 `Canvas` 的口，视频帧只能搬回 CPU 再上传。要点：Windows 建设备加 `VIDEO_SUPPORT` 并给立即上下文挂 `ID3D10Multithread` 保护（跨线程共用同一上下文本就是未定义行为，普通 GUI 几乎零成本，可无条件默认开）；暴露设备句柄；`Canvas` 加「绘制外部纹理」原语，须三后端（D2D / wgpu / 软光栅）都有降级路径。需先出设计，涉及设备所有权与同步契约 |
+| **滚动联动（声明式）** | 🟡 记账 | P2 | 同上反馈：`Tree::set_scroll_y` 是惯性滑动用的，不钳制也不标脏；下游要每 50ms DFS 内部树找 `Layout::Scroll`、手动跳过浮层内容节点、改完再 `mark_layout_dirty` + `mark_dirty_all`。方向：把 `scroll_y` 做成可绑定的 `Signal`，或提供 `linked_scroll` 一类的声明（两个滚动容器按比例 / 偏移联动）；须钳制并自动标脏 |
+| **纯数字输入框（无 ± 按钮）** | 🟡 记账 | P2 | 同上反馈：`stepper` 固定带 ±，只要数字框的场景得自己改内部。方向：`stepper` 加不带按钮的变体，或 `text_input(..).numeric()` 补齐数值语义（范围钳制、步进键、格式化）；与 `stepper` 共用 `NumberField` |
+| **查询主窗真实窗口状态** | 🟡 记账 | P3 | 同上反馈：`App::on_interval` 里 `window_state()` 恒为 `UNKNOWN`（注入本身有理由：不让已销毁窗口的旧快照残留），下游判最小化只能自己 `FindWindowW` + `IsIconic`。方向：给「查询主窗当前状态」的 API，或在 `WindowState::minimized` 文档里醒目标注 |
+| **Slider 暴露「拖动中」状态** | 🟡 记账 | P3 | 同上反馈：想做「抓住才显示百分比」做不到，只能常驻 `show_value`。方向：`Slider` 提供拖动态信号或 `on_drag_start/end` |
+| **ESC 兜底关窗的开关** | 🟡 记账 | P3 | 同上反馈：ESC 未被消费时宿主走关窗兜底，单主窗应用等于按一下就退出，下游得在 `on_shortcut` 里恒消费再自己收浮层。已有出口：`on_close_request` 返回 false 可拦，但语义是「关闭请求」而非「ESC 不关窗」；方向：`App::escape_closes_window(bool)` 之类的显式开关 |
 
 ### 架构演进
 | 项 | 评级 | 优先级 | 说明 |
@@ -156,3 +162,4 @@
 - **P2 增强**：全局热键 / 无边框标题栏 / 暗色感知 / 多窗口 / 轻量补间 / 撤销重做。
 - **已交付（v0.4.0）**：Signals（`Signal<T>` 状态原语）、脏矩形局部重绘、GPU/D2D opt-in 后端。
 - **已记账待做**：可编辑富文本、字距与数字等宽（见「功能能力」表，来自下游 2026-10 需求 R3 / R4）。
+- **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入、滚动联动、纯数字输入框、查询主窗真实窗口状态、Slider 拖动态、ESC 兜底关窗开关（见「功能能力」表）。同批反馈里的 Slider 修饰键、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、窗口圆角与 DWM 边框、浮层收起不穿透、示例图标可选 feature 已在 Unreleased 交付。
