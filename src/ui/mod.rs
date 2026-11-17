@@ -114,6 +114,11 @@ pub(crate) fn text_input_of(any: &mut dyn std::any::Any) -> Option<&mut TextInpu
     if any.is::<TextInput>() {
         return any.downcast_mut::<TextInput>();
     }
+    if any.is::<stepper::NumberField>() {
+        return any
+            .downcast_mut::<stepper::NumberField>()
+            .map(|n| n.inner_mut());
+    }
     any.downcast_mut::<combo::ComboField>()
         .map(|c| c.inner_mut())
 }
@@ -1040,7 +1045,7 @@ impl Element {
     /// 点击/激活回调（按钮等交互控件）。
     ///
     /// 支持的控件：`button` / `icon_button` / `checkbox` / `radio` / `switch` / `link` /
-    /// `text_input` / `combo_box` / `nav_row` 与 `clickable()` 容器。**其余一律不支持**——
+    /// `text_input` / `number_input` / `combo_box` / `nav_row` 与 `clickable()` 容器。**其余一律不支持**——
     /// 包括没加 `.clickable()` 的 `col` / `row` / `stack`、`label`、`dropdown`、`slider`、
     /// `stepper` 等：debug 下 `debug_assert` 失败，不会静默丢弃（release 仍丢弃）。
     /// 想让容器可点，写 `.clickable().on_click(..)`。
@@ -1789,7 +1794,8 @@ impl Element {
     }
     /// 密码输入：显示掩码圆点、禁止复制/剪切明文。强制单行（密码不应多行）。
     #[track_caller]
-    pub fn password(self) -> Self {
+    pub fn password(mut self) -> Self {
+        self.reject_on_number_field("password()");
         self.config_text_input(|c| {
             c.password = true;
             c.multiline = false;
@@ -1797,7 +1803,8 @@ impl Element {
     }
     /// 多行输入（编辑/换行行为见 P4）。
     #[track_caller]
-    pub fn multiline(self) -> Self {
+    pub fn multiline(mut self) -> Self {
+        self.reject_on_number_field("multiline()");
         self.config_text_input(|c| c.multiline = true)
     }
     /// 多行输入的 Enter 提交：开启后 Enter 触发 [`on_submit`](Self::on_submit)（不插入
@@ -1805,7 +1812,8 @@ impl Element {
     /// 候选，不提交。聊天输入框的标准键位。仅 `text_input(..).multiline()` 有意义；
     /// 链到别处 debug 下 panic、release 下忽略。
     #[track_caller]
-    pub fn submit_on_enter(self, on: bool) -> Self {
+    pub fn submit_on_enter(mut self, on: bool) -> Self {
+        self.reject_on_number_field("submit_on_enter()");
         self.config_text_input(|c| c.submit_on_enter = on)
     }
     /// 输入框文字区的**左右内距**（逻辑 px，默认 12，负值按 0）。仅 `Element::text_input(..)`
@@ -1834,7 +1842,8 @@ impl Element {
     }
     /// 多行软换行开关（仅 multiline 生效）。
     #[track_caller]
-    pub fn wrap(self, on: bool) -> Self {
+    pub fn wrap(mut self, on: bool) -> Self {
+        self.reject_on_number_field("wrap()");
         self.config_text_input(|c| c.wrap = on)
     }
     /// 只读：内容可看、可选、可复制，不可改。可与 `.multiline()` / `.wrap(..)` 组合，
@@ -1895,7 +1904,8 @@ impl Element {
     /// let ui = Element::text_input(port, "端口").numeric();
     /// ```
     #[track_caller]
-    pub fn numeric(self) -> Self {
+    pub fn numeric(mut self) -> Self {
+        self.reject_on_number_field("numeric()");
         self.config_text_input_widget(
             |ti| ti.set_filter(|s| stepper::accepts_number(s, true, true)),
             "numeric()",
@@ -1923,7 +1933,8 @@ impl Element {
     ///     .on_submit(move |ctx| ctx.toast_ok(format!("查 {}", q.get())));
     /// ```
     #[track_caller]
-    pub fn on_submit(self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+    pub fn on_submit(mut self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+        self.reject_on_number_field("on_submit()");
         self.config_text_input_widget(|ti| ti.set_on_submit(f), "on_submit()")
     }
 
@@ -1946,15 +1957,16 @@ impl Element {
     /// ```
     #[track_caller]
     pub fn on_paste_image(
-        self,
+        mut self,
         f: impl FnMut(&mut crate::core::EventCtx, crate::render::DecodedImage) + 'static,
     ) -> Self {
+        self.reject_on_number_field("on_paste_image()");
         self.config_text_input_widget(|ti| ti.set_on_paste_image(f), "on_paste_image()")
     }
 
     /// **"改完即提交"的出口**：用户改过内容后按 Enter、或焦点离开时触发一次——网页
     /// `<input>` 的 `change` 事件。文档改名、设置面板里一行行的输入框用它。
-    /// （`Element::stepper` 的数值框不支持：它自带"失焦即规整"的提交语义。）
+    /// （`Element::stepper` 的数值框与 `Element::number_input` 不支持：它们自带"失焦即规整"的提交语义。）
     ///
     /// 三条保证，都是"自己拿失焦拼"时最容易踩的坑：
     ///
@@ -1983,7 +1995,8 @@ impl Element {
     ///     .on_commit(move |ctx| ctx.toast_ok(format!("已改名为 {}", title.get())));
     /// ```
     #[track_caller]
-    pub fn on_commit(self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+    pub fn on_commit(mut self, f: impl FnMut(&mut crate::core::EventCtx) + 'static) -> Self {
+        self.reject_on_number_field("on_commit()");
         self.config_text_input_widget(|ti| ti.set_on_commit(f), "on_commit()")
     }
 
@@ -2159,10 +2172,32 @@ impl Element {
     /// ```
     #[track_caller]
     pub fn on_nav_key(
-        self,
+        mut self,
         f: impl FnMut(&mut crate::core::EventCtx, crate::event::KeyEvent) -> bool + 'static,
     ) -> Self {
+        self.reject_on_number_field("on_nav_key()");
         self.config_text_input_widget(|ti| ti.set_on_nav_key(f), "on_nav_key()")
+    }
+
+    /// 本元素是不是 [`number_input`](Self::number_input) 的数值框。
+    fn is_number_field(&mut self) -> bool {
+        self.widget
+            .as_any_mut()
+            .is_some_and(|a| a.is::<stepper::NumberField>())
+    }
+
+    /// 数值框不适用的 `text_input` 修饰符：debug 下报错，而不是静默装上又从不生效。
+    ///
+    /// `text_input_of` 认得 `NumberField`，所以这些修饰符**能**落到内部输入框上、不会触发
+    /// 「只能用于 text_input」的断言——但数值框的 Enter / 失焦 / 方向键由它自己接管，
+    /// 回调永远不会触发（`on_submit` / `on_commit`），或与数值语义冲突（`numeric` 会覆盖
+    /// 它的准入过滤、`password` / `multiline` / `wrap` 与单行数值框无关）。
+    #[track_caller]
+    fn reject_on_number_field(&mut self, what: &str) {
+        debug_assert!(
+            !self.is_number_field(),
+            "{what} 不适用于 Element::number_input(..)：数值框自带 Enter / 失焦规整与准入过滤"
+        );
     }
 
     /// 直接配置内含的 `TextInput`（回调类修饰符用；`TextConfig` 是 `Copy` 的纯数据，
@@ -2607,6 +2642,61 @@ impl Element {
     /// 重新分配，拿它当护栏只会得到一个更宽但中间照样是空的框。
     pub fn stepper(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
         stepper::build(value, min, max, step)
+    }
+
+    /// **数值输入框**：单个输入框，绑定 `Signal<f64>`，没有 ± 按钮。
+    ///
+    /// 数值语义与 [`stepper`](Self::stepper) 的中部输入框是同一份实现：只放行数字（`min < 0`
+    /// 时允许负号，步长带小数时允许小数点）；失焦或 Enter 时规整并钳进 `[min, max]`；
+    /// 编辑途中的半成品（空串、`-`、`1.`）不改 `value`；↑ / ↓ 按 `step` 步进；Esc 撤销本轮
+    /// 键入。小数位默认由步长推断，要显式指定用 [`decimals`](Self::decimals)。
+    ///
+    /// 与 `text_input(..).numeric()` 的分工：后者只管「能打进去什么」，绑定的是
+    /// `Signal<String>`，范围与规整要自己写；这里直接给出已钳制的 `f64`。
+    ///
+    /// 外观同 `text_input`，文字左对齐；右对齐用 [`text_align`](Self::text_align)，
+    /// 内距用 [`pad_x`](Self::pad_x)，单位后缀用 [`unit`](Self::unit)。默认宽 120。
+    ///
+    /// ```
+    /// # use windui::prelude::*;
+    /// let width = signal(1280.0);
+    /// let ui = Element::number_input(width, 100.0, 7680.0, 1.0)
+    ///     .unit("px")
+    ///     .text_align(Align::End);
+    /// ```
+    pub fn number_input(value: Signal<f64>, min: f64, max: f64, step: f64) -> Self {
+        stepper::build_input(value, min, max, step)
+    }
+
+    #[track_caller]
+    fn config_number_field(
+        mut self,
+        what: &str,
+        f: impl FnOnce(&mut stepper::NumberField),
+    ) -> Self {
+        match self
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<stepper::NumberField>())
+        {
+            Some(n) => f(n),
+            None => debug_assert!(false, "{what} 只能用于 Element::number_input(..)"),
+        }
+        self
+    }
+
+    /// 数值框的显示小数位（覆盖由步长推断的值，上限 10）。步长 1、显示两位小数这类组合
+    /// 只能靠它。`0` 表示只收整数。仅 `Element::number_input(..)` 可用。
+    #[track_caller]
+    pub fn decimals(self, n: usize) -> Self {
+        self.config_number_field("decimals()", |f| f.set_decimals(n))
+    }
+
+    /// 数值框的单位后缀（`"px"`、`"%"`）：画在框内右侧，弱化色，不参与编辑与取值。
+    /// 文字区随之让出相应宽度。仅 `Element::number_input(..)` 可用。
+    #[track_caller]
+    pub fn unit(self, unit: impl Into<String>) -> Self {
+        self.config_number_field("unit()", |f| f.set_unit(unit.into()))
     }
 
     /// 单选列表（绑定 `Signal<usize>` 选中索引 + 行标签）。可滚动；

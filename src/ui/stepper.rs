@@ -128,6 +128,14 @@ impl NumSpec {
         }
     }
 
+    /// 显式指定小数位（上限 10 位，再多 `f64` 也表达不了）。**只能比步长推断出的位数多，
+    /// 不能少**：步长 0.5 却只显示整数，↑ 一次 0 → 0.5 显示成 "0"、看着没动，失焦时又把
+    /// 值悄悄改成 0。低于推断值的请求按推断值处理。
+    fn with_decimals(mut self, n: usize) -> Self {
+        self.decimals = n.min(10).max(self.decimals);
+        self
+    }
+
     fn clamp(&self, v: f64) -> f64 {
         v.clamp(self.min, self.max)
     }
@@ -497,7 +505,7 @@ impl Widget for StepperButton {
 /// 只有节点自己才有的东西：`paint` 的 `focused` 参数——外框要据此变色，而外框自己
 /// 永远拿不到焦点。转发是逐方法的，命中/坐标/输入法全都还在同一个节点上，
 /// 不存在坐标换算——`TextInput` 的一切内部假设照旧成立。
-struct NumberField {
+pub(crate) struct NumberField {
     inner: TextInput,
     value: Signal<f64>,
     text: Signal<String>,
@@ -505,7 +513,17 @@ struct NumberField {
     shared: Rc<Shared>,
     /// 上一帧的焦点态：用来识别「刚获得焦点」与「刚失去焦点」两个瞬间。
     was_focused: Cell<bool>,
+    /// 独立使用（[`Element::number_input`]）：没有 `StepperFrame` 替它画外框与焦点边框，
+    /// 内部输入框自己画。为 false 时是 `stepper` 的中部输入框，行为与此前完全一致。
+    standalone: bool,
+    /// 单位后缀（仅独立使用）。画在文字区右侧，不参与编辑与取值。
+    unit: String,
+    /// 单位的实测宽度，`measure` 写、`paint` 读（同一份度量，两处不会各算各的）。
+    unit_w: Cell<i32>,
 }
+
+/// 单位与正文之间的间距。
+const UNIT_GAP: i32 = 4;
 
 impl NumberField {
     fn new(value: Signal<f64>, text: Signal<String>, spec: NumSpec, shared: Rc<Shared>) -> Self {
@@ -523,7 +541,46 @@ impl NumberField {
             spec,
             shared,
             was_focused: Cell::new(false),
+            standalone: false,
+            unit: String::new(),
+            unit_w: Cell::new(0),
         }
+    }
+
+    /// 独立的数值框：外框由内部输入框自己画，文字左对齐（与 `text_input` 并排时一致）。
+    fn new_standalone(
+        value: Signal<f64>,
+        text: Signal<String>,
+        spec: NumSpec,
+        shared: Rc<Shared>,
+    ) -> Self {
+        let mut me = Self::new(value, text, spec, shared);
+        let cfg = me.inner.config_mut();
+        cfg.frameless = false;
+        cfg.align = Align::Start;
+        me.standalone = true;
+        me
+    }
+
+    /// `Element::decimals` 的落点：改显示小数位，并让过滤器、正文跟着新口径走。
+    pub(crate) fn set_decimals(&mut self, n: usize) {
+        self.spec = self.spec.with_decimals(n);
+        let spec = self.spec;
+        self.inner.set_filter(move |s| spec.accepts(s));
+        let s = self.spec.format(self.value.get());
+        if self.text.with(|t| *t != s) {
+            self.text.set(s);
+        }
+        self.shared.mark_synced(self.value, self.text);
+    }
+
+    pub(crate) fn set_unit(&mut self, unit: String) {
+        self.unit = unit;
+    }
+
+    /// 内含的文本框（`text_input` 系修饰符经 `ui::text_input_of` 落到它身上）。
+    pub(crate) fn inner_mut(&mut self) -> &mut TextInput {
+        &mut self.inner
     }
 
     /// 把正文规整成 `value` 的标准写法（提交/失焦时用）。
@@ -607,6 +664,18 @@ impl NumberField {
 
 impl Widget for NumberField {
     fn measure(&self, avail: Size, style: &Style, text: &mut dyn TextEngine) -> Size {
+        if self.standalone {
+            // 单位宽度在这里实测一次，同时告诉输入框右侧让出多少；paint 读同一份。
+            let w = if self.unit.is_empty() {
+                0
+            } else {
+                text.measure(&self.unit, &crate::text::TextStyle::of(style), None)
+                    .w
+                    + UNIT_GAP
+            };
+            self.unit_w.set(w);
+            self.inner.set_trail_extra(w);
+        }
         self.inner.measure(avail, style, text)
     }
 
@@ -636,7 +705,8 @@ impl Widget for NumberField {
         // 也就是中部这一段，而要改色的是外框那一圈。局部帧以脏区为裁剪重绘，
         // 于是边框只有中段刷成 accent、± 按钮上下那两截仍是旧色，左右竖边永远不变
         // ——直到下一次整窗帧（切页/弹对话框/换主题）才碰巧补齐。
-        if self.shared.focused.get() != focused {
+        // 独立使用时没有外框要同步变色，输入框自己的边框随焦点重绘即可。
+        if !self.standalone && self.shared.focused.get() != focused {
             self.shared.focused.set(focused);
             // 读 `Shared::whole` 这个权威值，不再按「左右各一个 BTN_W」现算：那份算法
             // 把布局假设复制了一份，一旦排布改成别的样式（两个按钮都在右侧的 spinner）
@@ -652,9 +722,40 @@ impl Widget for NumberField {
         self.sync_text_from_value();
         self.inner
             .paint(bounds, content, focused, enabled, canvas, style);
+        if self.standalone
+            && self.unit_w.get() > 0
+            && crate::ui::inputs::extra_fits(self.unit_w.get(), bounds.w)
+        {
+            let th = crate::theme::current();
+            let color = if enabled {
+                th.palette.text_muted
+            } else {
+                th.palette.text_disabled
+            };
+            // 贴着右内距，右对齐：单位的右缘与内距线对齐，宽度已由 measure 让出。
+            let pad = self.inner.config_ref().pad_x.max(0);
+            let rect = Rect::new(
+                bounds.right() - pad - self.unit_w.get() + UNIT_GAP,
+                bounds.y,
+                self.unit_w.get() - UNIT_GAP,
+                bounds.h,
+            );
+            canvas.draw_text(
+                &self.unit,
+                rect,
+                color,
+                Align::End,
+                &crate::text::TextStyle::of(style),
+            );
+        }
     }
 
     fn on_event(&mut self, ctx: &mut EventCtx, ev: &Event) -> bool {
+        // 只读：↑↓ 步进、Enter 规整、Esc 回退都是在**改值**，一概不做；交给内部输入框，
+        // 它自己会拒绝一切改动正文的途径，选择与复制照常。
+        if self.inner.config_ref().read_only {
+            return self.inner.on_event(ctx, ev);
+        }
         if let Event::Key(k) = ev {
             if k.pressed && !k.ctrl {
                 match k.key {
@@ -736,10 +837,13 @@ impl Widget for NumberField {
     }
     /// 焦点由外层 `StepperFrame` 的整圈外框表达；焦点环若画在本节点上，只会圈住中间那段。
     fn frame_shows_focus(&self) -> bool {
-        true
+        // 独立使用时外框就是输入框自己的，交给它判断（无框才需要焦点环）。
+        !self.standalone || self.inner.frame_shows_focus()
     }
+    /// 返回 `self` 而不是内部输入框：`decimals` / `unit` 要找到本类型。`text_input` 系
+    /// 修饰符走 `ui::text_input_of`，它认得本类型并取出 [`Self::inner_mut`]。
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        self.inner.as_any_mut()
+        Some(self)
     }
     fn ime_caret(&self) -> Option<(i32, i32, i32)> {
         self.inner.ime_caret()
@@ -774,6 +878,10 @@ impl Widget for NumberField {
     }
     fn take_click(&mut self, f: crate::core::ClickFn) {
         self.inner.take_click(f);
+    }
+    fn focus_lost(&mut self) {
+        // 失焦收起选区：步进会全选正文，不转发的话失焦后整段数字一直亮着。
+        self.inner.focus_lost();
     }
     fn reset_interaction(&mut self) {
         // 一并清掉焦点记忆：隐藏期间节点不 paint，留着 `true` 会让重新显示的第一帧
@@ -826,6 +934,28 @@ pub(crate) fn build(value: Signal<f64>, min: f64, max: f64, step: f64) -> Elemen
                 .reactive(),
         )
         .child(btn(1))
+}
+
+/// 组装独立的数值框（见 [`crate::ui::Element::number_input`]）。
+///
+/// 与 [`build`] 共用 `NumberField` 与 `NumSpec`，所以键入准入、钳制、↑↓ 步进、Enter / 失焦
+/// 规整、Esc 回退与 `stepper` 的中部输入框是**同一份实现**，没有第二套数值逻辑。
+pub(crate) fn build_input(value: Signal<f64>, min: f64, max: f64, step: f64) -> Element {
+    let spec = NumSpec::new(min, max, step);
+    let v0 = spec.clamp(value.get());
+    if v0 != value.get() {
+        value.set(v0);
+    }
+    let text = signal(spec.format(v0));
+    let shared = Rc::new(Shared {
+        edit_origin: Cell::new(v0),
+        ..Default::default()
+    });
+    shared.mark_synced(value, text);
+    Element::leaf()
+        .widget(NumberField::new_standalone(value, text, spec, shared))
+        .width(DEFAULT_W)
+        .reactive()
 }
 
 #[cfg(test)]
@@ -1178,5 +1308,361 @@ mod tests {
         assert_eq!(s.parse("."), None);
         assert_eq!(s.parse("2.5"), Some(2.5));
         assert_eq!(s.parse(" 2 "), Some(2.0));
+    }
+
+    // ---------------- number_input：独立数值框 ----------------
+    //
+    // 走真实的 `build` / `layout_root` / `dispatch_key`，不碰内部状态：数值逻辑与 `stepper`
+    // 的中部输入框是同一份实现，这里要钉住的是「单独拿出来用时也成立」。
+
+    use crate::core::Tree;
+    use crate::event::KeyEvent;
+    use crate::text::NullTextEngine;
+
+    fn input_tree(el: Element) -> (Tree, crate::core::NodeId) {
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 80), &mut NullTextEngine);
+        (tree, root)
+    }
+
+    fn key_down(tree: &mut Tree, root: crate::core::NodeId, key: Key) -> bool {
+        let r = tree.dispatch_key(KeyEvent::pressed(key), Some(root));
+        tree.layout_root(Size::new(300, 80), &mut NullTextEngine);
+        r.consumed
+    }
+
+    #[test]
+    fn number_input_arrow_keys_step_and_clamp() {
+        let v = signal(5.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 10.0, 2.0));
+        key_down(&mut tree, root, Key::Up);
+        assert_eq!(v.get(), 7.0, "↑ 按步长加");
+        key_down(&mut tree, root, Key::Up);
+        key_down(&mut tree, root, Key::Up);
+        assert_eq!(v.get(), 10.0, "顶到 max 钳住，不越界");
+        key_down(&mut tree, root, Key::Down);
+        assert_eq!(v.get(), 8.0, "↓ 按步长减");
+    }
+
+    #[test]
+    fn number_input_typed_value_is_clamped_on_enter() {
+        let v = signal(5.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 10.0, 1.0));
+        // 步进会全选正文，接着键入即整体替换。
+        key_down(&mut tree, root, Key::Up);
+        key_down(&mut tree, root, Key::Char('9'));
+        key_down(&mut tree, root, Key::Char('9'));
+        assert_eq!(v.get(), 10.0, "越界的键入先钳进范围");
+        assert!(
+            key_down(&mut tree, root, Key::Enter),
+            "有待规整的改动，Enter 被消费"
+        );
+        assert!(
+            !key_down(&mut tree, root, Key::Enter),
+            "已规整、没有改动时 Enter 不消费，留给对话框默认按钮"
+        );
+    }
+
+    #[test]
+    fn number_input_filters_non_numeric_keys() {
+        let v = signal(5.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 10.0, 1.0));
+        key_down(&mut tree, root, Key::Up); // 全选 "6"
+        key_down(&mut tree, root, Key::Char('x'));
+        assert_eq!(v.get(), 6.0, "字母被过滤，值不变");
+        // min >= 0：不允许负号。
+        key_down(&mut tree, root, Key::Char('-'));
+        assert_eq!(v.get(), 6.0, "min 为非负时拒绝负号");
+    }
+
+    #[test]
+    fn number_input_escape_reverts_the_edit() {
+        let v = signal(5.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 100.0, 1.0));
+        key_down(&mut tree, root, Key::Up);
+        key_down(&mut tree, root, Key::Enter);
+        assert_eq!(v.get(), 6.0);
+        key_down(&mut tree, root, Key::Char('4'));
+        key_down(&mut tree, root, Key::Char('2'));
+        assert_eq!(v.get(), 42.0);
+        assert!(key_down(&mut tree, root, Key::Escape));
+        assert_eq!(v.get(), 6.0, "Esc 回到上次提交的值");
+    }
+
+    /// 在步进（全选）之后依次键入 `keys`，返回最终的 `value`。
+    fn type_after_step(el: Element, v: Signal<f64>, keys: &str) -> f64 {
+        let (mut tree, root) = input_tree(el);
+        key_down(&mut tree, root, Key::Up);
+        for c in keys.chars() {
+            key_down(&mut tree, root, Key::Char(c));
+        }
+        v.get()
+    }
+
+    #[test]
+    fn number_input_decimals_overrides_the_step_inference() {
+        // 步长 1 推断 0 位小数：`.` 被过滤，"1.5" 实际键入成 "15"，钳到 max=10。
+        let v = signal(0.0);
+        assert_eq!(
+            type_after_step(Element::number_input(v, 0.0, 10.0, 1.0), v, "1.5"),
+            10.0
+        );
+        // 显式两位小数：小数点放行，值就是 1.5。
+        let v = signal(0.0);
+        assert_eq!(
+            type_after_step(
+                Element::number_input(v, 0.0, 10.0, 1.0).decimals(2),
+                v,
+                "1.5"
+            ),
+            1.5
+        );
+    }
+
+    #[test]
+    fn number_input_decimals_changes_how_the_value_is_formatted() {
+        let v = signal(1.0);
+        let mut tree = Tree::new();
+        let root = Element::number_input(v, 0.0, 10.0, 1.0)
+            .decimals(2)
+            .build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 80), &mut NullTextEngine);
+        let n = tree
+            .get_mut(root)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<NumberField>())
+            .expect("独立数值框的根就是 NumberField");
+        assert_eq!(n.text.get(), "1.00", "步长 1 但显式两位小数");
+    }
+
+    #[test]
+    fn number_input_unit_reserves_room_on_the_right() {
+        let measure = |unit: Option<&str>| {
+            let mut el = Element::number_input(signal(1.0), 0.0, 10.0, 1.0);
+            if let Some(u) = unit {
+                el = el.unit(u);
+            }
+            let mut tree = Tree::new();
+            let root = el.build(&mut tree);
+            tree.root = Some(root);
+            tree.layout_root(Size::new(300, 80), &mut NullTextEngine);
+            let ti =
+                crate::ui::text_input_of(tree.get_mut(root).unwrap().widget.as_any_mut().unwrap())
+                    .unwrap();
+            ti.trail_extra_px()
+        };
+        assert_eq!(measure(None), 0, "没有单位就不让位");
+        assert!(measure(Some("px")) > 0, "有单位文字区右侧要让出位置");
+        assert!(
+            measure(Some("pixels")) > measure(Some("px")),
+            "越长的单位让得越多"
+        );
+    }
+
+    #[test]
+    fn text_input_modifiers_reach_the_number_input() {
+        let el = Element::number_input(signal(1.0), 0.0, 10.0, 1.0)
+            .text_align(Align::End)
+            .pad_x(4);
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        let ti = crate::ui::text_input_of(tree.get_mut(root).unwrap().widget.as_any_mut().unwrap())
+            .unwrap();
+        assert_eq!(ti.config_ref().align, Align::End);
+        assert_eq!(ti.config_ref().pad_x, 4);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "number_input")]
+    fn decimals_on_a_stepper_is_rejected_in_debug() {
+        let _ = Element::stepper(signal(1.0), 0.0, 10.0, 1.0).decimals(2);
+    }
+
+    // ---------------- 审查补充：只读 / 修饰符拒绝 / 小数位下限 / 单位绘制 ----------------
+
+    #[test]
+    fn number_input_read_only_refuses_every_way_to_change_the_value() {
+        // 每一步单独断言：Up / Down / Esc 连着按会恰好绕回原值，只看最终值抓不到回归。
+        let v = signal(5.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 10.0, 1.0).read_only());
+        key_down(&mut tree, root, Key::Up);
+        assert_eq!(v.get(), 5.0, "只读：↑ 不改值");
+        key_down(&mut tree, root, Key::Down);
+        assert_eq!(v.get(), 5.0, "只读：↓ 不改值");
+        key_down(&mut tree, root, Key::Char('9'));
+        assert_eq!(v.get(), 5.0, "只读：键入不改值");
+    }
+
+    #[test]
+    fn number_input_rejects_modifiers_that_would_silently_do_nothing() {
+        fn panics(f: impl FnOnce() -> Element) -> bool {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(f()))).is_err()
+        }
+        let n = || Element::number_input(signal(1.0), 0.0, 10.0, 1.0);
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        assert!(panics(|| n().on_submit(|_| {})), "on_submit 永远不会触发");
+        assert!(panics(|| n().on_commit(|_| {})), "on_commit 永远不会触发");
+        assert!(
+            panics(|| n().numeric()),
+            "numeric 会覆盖数值框自己的准入过滤"
+        );
+        assert!(panics(|| n().password()));
+        assert!(panics(|| n().multiline()));
+        assert!(panics(|| n().wrap(true)));
+        assert!(panics(|| n().submit_on_enter(true)));
+        // 对照：真正适用的修饰符不报错。
+        assert!(!panics(|| n().pad_x(4).text_align(Align::End).read_only()));
+        assert!(!panics(|| n().decimals(2).unit("px").on_click(|_| {})));
+    }
+
+    #[test]
+    fn number_input_decimals_never_go_below_what_the_step_needs() {
+        // 步长 0.5 推断 1 位小数；要求 0 位会让 ↑ 看着没动，按推断值处理。
+        let v = signal(0.0);
+        let (mut tree, root) = input_tree(Element::number_input(v, 0.0, 10.0, 0.5).decimals(0));
+        key_down(&mut tree, root, Key::Up);
+        assert_eq!(v.get(), 0.5);
+        let n = tree
+            .get_mut(root)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<NumberField>())
+            .unwrap();
+        assert_eq!(n.text.get(), "0.5", "显示不能把 0.5 吞成 \"0\"");
+    }
+
+    #[test]
+    fn number_input_with_negative_min_accepts_a_minus_sign() {
+        let v = signal(0.0);
+        assert_eq!(
+            type_after_step(Element::number_input(v, -10.0, 10.0, 1.0), v, "-5"),
+            -5.0
+        );
+    }
+
+    #[test]
+    fn number_input_escape_without_edits_is_not_consumed() {
+        // 没改过就让 Esc 冒泡出去关对话框，不能成黑洞。
+        let (mut tree, root) = input_tree(Element::number_input(signal(5.0), 0.0, 10.0, 1.0));
+        assert!(!key_down(&mut tree, root, Key::Escape));
+    }
+
+    #[test]
+    fn number_input_on_click_fires_on_a_left_click() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        let hits = signal(0);
+        let (mut tree, root) = input_tree(
+            Element::number_input(signal(5.0), 0.0, 10.0, 1.0)
+                .on_click(move |_| hits.set(hits.get() + 1)),
+        );
+        let b = tree.abs_bounds(root);
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Down,
+                crate::geometry::Point::new(b.x + 10, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut None,
+        );
+        assert_eq!(
+            hits.get(),
+            1,
+            "点数值框应通知宿主（旁路，与 text_input 同）"
+        );
+    }
+
+    #[test]
+    fn number_input_drops_the_selection_when_focus_leaves() {
+        let (mut tree, root) = input_tree(Element::number_input(signal(5.0), 0.0, 10.0, 1.0));
+        key_down(&mut tree, root, Key::Up); // 步进会全选
+        let w = &mut tree.get_mut(root).unwrap().widget;
+        // 无选区时返回光标处的空范围 (c, c)，所以「有没有选区」要看两端是否相等。
+        let (a, b) = w.selection_range().unwrap();
+        assert_ne!(a, b, "前提：步进后正文被全选");
+        w.focus_lost();
+        let (a, b) = w.selection_range().unwrap();
+        assert_eq!(a, b, "失焦后选区应收起，否则整段数字一直亮着");
+    }
+}
+
+/// 单位后缀的**绘制侧**：让位（`TextInput::paint`）与绘制（数值框画单位）两端口径一致。
+///
+/// 用墨量而非配置值验证——「measure 写了个大于 0 的数」测不到有没有人读它。拉丁字符，免得
+/// CI 没有 CJK 字体时空跑。
+#[cfg(test)]
+mod unit_paint_tests {
+    use crate::geometry::Rect;
+    use crate::signal::signal;
+    use crate::spec::Align;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn field(unit: Option<&str>, w: i32) -> Element {
+        let mut el = Element::number_input(signal(1234.0), 0.0, 99999.0, 1.0)
+            .text_align(Align::End)
+            .width(w)
+            .height(40);
+        if let Some(u) = unit {
+            el = el.unit(u);
+        }
+        Element::col().children([el, Element::col().height(20).width_match()])
+    }
+
+    /// 框内（去掉边框）各列是否有墨。
+    fn ink_cols(pm: &tiny_skia::Pixmap, b: Rect) -> Vec<i32> {
+        (b.x + 3..b.right() - 3)
+            .filter(|&x| ink_in(pm, Rect::new(x, b.y + 5, 1, b.h - 10)) > 0)
+            .collect()
+    }
+
+    /// 相邻有墨列之间最宽的空隙。
+    fn widest_gap(cols: &[i32]) -> i32 {
+        cols.windows(2).map(|w| w[1] - w[0] - 1).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn unit_sits_at_the_right_inset_and_text_clears_it() {
+        let (pm, b) = paint_first_child(field(Some("px"), 200), 240, 100);
+        let with = ink_cols(&pm, b);
+        let (pm0, b0) = paint_first_child(field(None, 200), 240, 100);
+        let without = ink_cols(&pm0, b0);
+        assert!(!with.is_empty() && !without.is_empty(), "前提：画出了字");
+
+        let pad = crate::ui::inputs::TEXT_PAD;
+        let last = *with.last().unwrap();
+        assert!(
+            (b.right() - pad - 6..=b.right() - pad).contains(&last),
+            "单位的右缘应贴着右内距：最后一列墨在 {last}，右内距线在 {}",
+            b.right() - pad
+        );
+        // 正文右缘与单位之间要有一道空隙；让位若失效（正文贴到右内距），两者叠在一起，
+        // 最宽空隙就退回数字之间那点字距。
+        assert!(
+            widest_gap(&with) > widest_gap(&without) + 1,
+            "正文没有给单位让位：有单位时最宽空隙 {}，无单位时 {}",
+            widest_gap(&with),
+            widest_gap(&without)
+        );
+    }
+
+    #[test]
+    fn a_unit_too_wide_for_the_box_is_dropped_not_painted_outside() {
+        let (pm, b) = paint_first_child(field(Some("milliseconds"), 70), 240, 100);
+        // 单位放不下就整个放弃：框外不能有墨，框内的数字仍然看得见。
+        assert_no_ink_outside(&pm, b, "窄框 + 超长单位");
+        assert!(
+            !ink_cols(&pm, b).is_empty(),
+            "数字不能被超长的单位挤到看不见"
+        );
     }
 }

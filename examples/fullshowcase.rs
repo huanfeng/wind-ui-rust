@@ -1032,6 +1032,8 @@ fn main() {
             .child(Element::progress_indeterminate().width_match()),
     );
 
+    let num_width = signal(1280.0);
+    let num_alpha = signal(85.5);
     let cp_21 = Element::card(
         "数字步进",
         Element::col()
@@ -1044,6 +1046,21 @@ fn main() {
             .child(Element::field(
                 "缩放",
                 Element::stepper(zoom, 0.5, 3.0, 0.25).width(120),
+            ))
+            // 不带 ± 的数值框：同一份数值语义（钳制 / ↑↓ 步进 / 失焦规整 / Esc 回退）。
+            .child(Element::field(
+                "宽度",
+                Element::number_input(num_width, 100.0, 7680.0, 1.0)
+                    .unit("px")
+                    .text_align(Align::End)
+                    .width(120),
+            ))
+            .child(Element::field(
+                "不透明度",
+                Element::number_input(num_alpha, 0.0, 100.0, 1.0)
+                    .decimals(1)
+                    .unit("%")
+                    .width(120),
             )),
     );
 

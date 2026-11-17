@@ -936,6 +936,15 @@ impl Widget for Slider {
 
 /// 输入框内边距。与下拉框的 `PAD_X` 同为 12，同一列里文字左缘对齐。
 pub(crate) const TEXT_PAD: i32 = 12;
+
+/// 宿主控件在右侧让出的额外宽度（`trail_extra`，如单位后缀）是否放得进这个框。
+///
+/// 超过框宽的一半就**整个放弃**：框很窄而单位很长时，硬让会把文字区压成 0 宽、数字完全
+/// 看不见，比没有单位糟得多。让位方（`TextInput::paint`）与绘制方（数值框画单位）必须
+/// 用同一个判据——一边让了位、另一边没画，或反过来，都会留下一块空白或叠在一起的字。
+pub(crate) fn extra_fits(extra: i32, box_w: i32) -> bool {
+    extra * 2 <= box_w
+}
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -1096,6 +1105,10 @@ pub struct TextInput {
     /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
     /// 滚轮滚动不设置，避免 paint 每帧重置 scroll_y。
     follow_cursor: Cell<bool>,
+    /// 宿主控件在文字区**右侧**额外占用的宽度（逻辑 px），在 `config.trail` 之外另加。
+    /// 与 `trail` 的区别是它由 `measure` 实测得出（如数值框的单位后缀，宽度取决于字体），
+    /// 而 `measure` 只有 `&self`，所以用 `Cell`；`trail` 是配置期写死的整数。
+    trail_extra: Cell<i32>,
     /// 鼠标当前悬停在滚动条命中区内（影响光标形状）。
     hover_in_scrollbar: Cell<bool>,
     /// 最近一帧 paint 用的字号快照：供无 style 的命中路径换算前置图标左偏移。
@@ -1221,6 +1234,7 @@ impl TextInput {
             triple: crate::event::TripleClick::default(),
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
+            trail_extra: Cell::new(0),
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
             align_off: Cell::new(0),
@@ -1323,6 +1337,22 @@ impl TextInput {
     /// 设置导航键回调（供 Builder；下游用 [`crate::ui::Element::on_nav_key`]）。
     pub fn set_on_nav_key(&mut self, f: impl FnMut(&mut EventCtx, KeyEvent) -> bool + 'static) {
         self.on_nav_key = Some(Box::new(f));
+    }
+
+    /// 只读访问配置（`config_mut` 的只读对应，给持有 `&self` 的宿主控件用）。
+    pub(crate) fn config_ref(&self) -> &TextConfig {
+        &self.config
+    }
+
+    /// 当前的额外右侧占用宽度（见 `trail_extra`）。
+    #[cfg(test)]
+    pub(crate) fn trail_extra_px(&self) -> i32 {
+        self.trail_extra.get()
+    }
+
+    /// 设置文字区右侧的额外占用宽度（见 `trail_extra`）。
+    pub(crate) fn set_trail_extra(&self, px: i32) {
+        self.trail_extra.set(px.max(0));
     }
 
     /// 设置输入准入过滤（见 [`Self::filter`]）。入参是改动后的完整正文。
@@ -2237,7 +2267,16 @@ impl Widget for TextInput {
         let inner = Rect::new(
             bounds.x + self.pad_x() + lead,
             bounds.y + vpad,
-            (bounds.w - 2 * self.pad_x() - lead - self.config.trail.max(0)).max(0),
+            (bounds.w
+                - 2 * self.pad_x()
+                - lead
+                - self.config.trail.max(0)
+                - if extra_fits(self.trail_extra.get(), bounds.w) {
+                    self.trail_extra.get()
+                } else {
+                    0
+                })
+            .max(0),
             bounds.h - 2 * vpad,
         );
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。

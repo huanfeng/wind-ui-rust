@@ -148,7 +148,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `radio` / `dropdown` / `segmented` / `list` / `list_pill` / `tabs` / `tabs_pill` | `Signal<usize>` | 选中索引 |
 | `accordion` | `Signal<Option<usize>>` | 选中面板，`None` = 全收起 |
 | `slider` / `progress` | `Signal<f32>` | 0.0–1.0 |
-| `stepper` | `Signal<f64>` | 数值 |
+| `stepper` / `number_input` | `Signal<f64>` | 数值 |
 | `color_picker` | `Signal<Color>` | 颜色（含 alpha） |
 | `text_input` / `combo_box` / `label_signal` / `rich_signal` | `Signal<String>`（`rich_signal` 为 `Signal<RichDoc>`） | 文本 |
 | `label` / `button` / `link` / `badge` / `checkbox` / `radio` / `nav_row` / `icon_button` 的**文案参数** | `Signal<String>`（可选，也可给 `&str`） | 跟随状态变化的文案，见 §5「动态文案」 |
@@ -472,6 +472,13 @@ Element::stepper(value, min, max, step)           // value: Signal<f64>；min/ma
 //  中部是完整的文本输入框（可拖选/双击选词/Ctrl+A·C·X·V/右键菜单/输入法，与 text_input 同源）；
 //  ↑↓ 步进、Enter 提交并全选、Esc 撤销本轮编辑、失焦自动提交（越界钳回、按步长小数位规整）；
 //  非数字键入与粘贴一律拒绝。返回的是行容器 [−][输入框][+]，默认宽 120，.width()/.disabled() 照旧
+Element::number_input(value, min, max, step)      // 不带 ± 的数值框：Signal<f64>，数值语义与 stepper 的输入框同一份实现
+//  外观同 text_input（左对齐；.text_align(Align::End) 改右对齐），默认宽 120；可用的 text_input 修饰符：
+//  pad_x / pad_y / read_only（只读时 ↑↓、键入、Esc 都不改值）/ on_click。on_submit / on_commit / numeric /
+//  password / multiline / wrap / submit_on_enter / on_nav_key 不适用（数值框自带 Enter / 失焦规整与准入过滤），debug 下断言失败
+//  .decimals(n)   显式小数位（步长 1 显示两位小数就靠它）；不能少于步长推断的位数，少了按推断值处理
+//  .unit("px")    框内右侧的弱化单位后缀，不参与编辑与取值；框窄到放不下就整个不显示
+//  与 text_input(..).numeric() 的分工：后者只管「能打进去什么」，绑 Signal<String>；这里直接给钳制好的 f64
 Element::color_picker(color)                      // color: Signal<Color>；色块触发器 + 锚定下拉取色面板
 Element::color_picker_opts(color, ColorPickerOpts::default()
     .alpha(false)            // 去掉透明度条（输出恒不透明）

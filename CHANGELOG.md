@@ -14,6 +14,16 @@
 
 ### 新增
 
+- **`Element::number_input(value, min, max, step)`**：不带 ± 按钮的数值输入框，绑定 `Signal<f64>`。
+  数值语义与 `stepper` 的中部输入框是同一份实现（键入准入、钳制、↑↓ 步进、Enter / 失焦规整、
+  Esc 回退）；外观同 `text_input`、文字左对齐，`text_align` / `pad_x` / `pad_y` / `read_only`
+  （只读时 ↑↓ / 键入 / Esc 都不改值）/ `on_click` 可用。配套 `.decimals(n)`（显式小数位；
+  不能少于步长推断的位数，少了按推断值处理）与 `.unit("px")`（框内右侧的弱化单位后缀，不参与
+  编辑与取值；框窄到放不下就整个不显示）。与 `text_input(..).numeric()` 的分工：后者只管
+  「能打进去什么」、绑 `Signal<String>`；这里直接给出已钳制的 `f64`。
+  数值框自带 Enter / 失焦规整与准入过滤，`on_submit` / `on_commit` / `numeric` / `password` /
+  `multiline` / `wrap` / `submit_on_enter` / `on_nav_key` / `on_paste_image` 挂上去在 debug 下
+  断言失败，而不是静默装上又从不生效。
 - **`App::window_corner` / `Window::window_corner`（`WindowCorner`：`Round` / `Small` / `Square`）**：
   Windows 11 上无边框窗口的圆角可选，默认 `Round` 与此前一致。窗口要贴着工作区边缘时选
   `Square`，不再被切掉四角。
