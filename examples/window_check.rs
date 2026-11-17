@@ -127,7 +127,12 @@ fn main() {
 
     let ui = Element::stack()
         .fill()
-        .child(Element::col().fill().child(title_bar).child(body.weight(1.0)))
+        .child(
+            Element::col()
+                .fill()
+                .child(title_bar)
+                .child(body.weight(1.0)),
+        )
         .child(cover);
 
     App::new("windui — window_check", 560, 420)
