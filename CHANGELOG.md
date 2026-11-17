@@ -12,6 +12,12 @@
   的环境连 windui 本身都编不过。图标只服务本仓库示例，库与下游不再依赖它。要示例带图标：
   `cargo run --example fullshowcase --features example-icon`。
 
+### 新增
+
+- **`CursorShape::Hidden`**：隐藏指针（全屏播放器等「指针静止后藏起来」的场景）。Windows 用
+  `SetCursor(None)`，macOS 用全透明光标（不用 `NSCursor::hide`，那个按次数计数、漏配对会让
+  指针在整个系统里消失），X11 用空位图光标，Wayland 用 `set_cursor(None)`。
+
 ### 修复
 
 - **`Slider` 不再吞带修饰键的方向键**：Shift/Ctrl/Alt/Meta + ←/→ 放行给 `App::on_shortcut`，

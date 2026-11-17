@@ -2080,9 +2080,26 @@ impl ContentView {
             crate::event::CursorShape::SizeNS => NSCursor::resizeUpDownCursor(),
             crate::event::CursorShape::SizeAll => move_cursor(),
             crate::event::CursorShape::Arrow => NSCursor::arrowCursor(),
+            crate::event::CursorShape::Hidden => blank_cursor(),
         };
         cursor.set();
     }
+}
+
+/// 全透明光标，用来实现 `CursorShape::Hidden`。
+///
+/// 不用 `NSCursor::hide()`：它按次数计数，必须与 `unhide()` 严格配对，而光标形状是每次
+/// 悬停都重算的无状态映射——窗口失焦、指针离开时漏一次 `unhide` 就让指针在整个系统里
+/// 消失。换一张空图的光标则随 `set()` 自然切走，没有需要配平的状态。
+fn blank_cursor() -> Retained<NSCursor> {
+    thread_local! {
+        static BLANK: Retained<NSCursor> = {
+            // 没有任何 representation 的 1×1 图像：绘制时什么都不出。
+            let image = NSImage::initWithSize(NSImage::alloc(), NSSize::new(1.0, 1.0));
+            NSCursor::initWithImage_hotSpot(NSCursor::alloc(), &image, NSPoint::new(0.0, 0.0))
+        };
+    }
+    BLANK.with(|c| c.clone())
 }
 
 /// 四向移动光标（CSS `cursor: move`）。

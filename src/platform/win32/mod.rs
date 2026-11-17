@@ -2534,6 +2534,11 @@ unsafe fn apply_window_icon(hwnd: HWND, src: &crate::icon::IconSource) {
 /// 按形状加载并设置系统光标（应答 WM_SETCURSOR）。加载失败时静默退回类光标。
 unsafe fn apply_cursor(shape: CursorShape) {
     let id = match shape {
+        // `SetCursor(None)` 即不画光标；WM_SETCURSOR 已应答，系统不会再覆盖回类光标。
+        CursorShape::Hidden => {
+            let _ = SetCursor(None);
+            return;
+        }
         CursorShape::Hand => IDC_HAND,
         CursorShape::Text => IDC_IBEAM,
         CursorShape::SizeWE => IDC_SIZEWE,
