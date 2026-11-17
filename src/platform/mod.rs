@@ -85,6 +85,8 @@ pub fn system_locales() -> Vec<String> {
 #[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]
+pub(crate) use win32::query_main_window_state;
+#[cfg(windows)]
 pub(crate) use win32::run;
 #[cfg(windows)]
 pub(crate) use win32::single_window_open;
@@ -102,7 +104,18 @@ pub(crate) use macos::run;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::system_prefers_dark;
 #[cfg(target_os = "macos")]
+pub(crate) use macos::window::query_main_window_state;
+#[cfg(target_os = "macos")]
 pub use macos::{drag_files, drag_files_with};
+
+/// 见 Windows 版（`win32::query_main_window_state`）：Linux 的窗口表由 `run()` 函数
+/// 局部持有（无全局连接指针），同步查询没有现成通道——先返回 `None`，X11 的
+/// `_NET_WM_STATE` round-trip 留待后续（见 docs/roadmap-three-designs.md §3.4）。
+/// 平台差异与 `single_window_open` 的 macOS 版同一口径：文档写明，不加第二层返回。
+#[cfg(target_os = "linux")]
+pub(crate) fn query_main_window_state() -> Option<crate::event::WindowState> {
+    None
+}
 
 /// 见 Windows 版（`win32::single_window_open`）：macOS 的窗口登记表还没接上常驻模式，
 /// 这里恒为 `false`。

@@ -84,9 +84,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN,
     WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -273,6 +273,13 @@ const APP_HOST_CLASS: PCWSTR = w!("WindUiAppHostClass");
 thread_local! {
     /// App 级消息宿主窗口句柄（0=未创建）。
     static APP_HOST_HWND: Cell<isize> = const { Cell::new(0) };
+    /// 主窗句柄（0=无）。独立于 `AppHost::main` 登记：`main_window_state()` 在热键 /
+    /// interval / 托盘回调里被调用时，`app_host()` 的 `&mut AppHost` 借用可能正活着
+    /// （WM_HOTKEY 臂在借用内跑用户回调），再走 `app_host()` 就是两个活 `&mut`——
+    /// 实践无害、按 Stacked Borrows 属技术性 UB。thread_local 的 `Cell<isize>` 只做
+    /// Copy 读写，无借用可言。跨线程自然为 0（每线程独立）→ 查询返回 `None`，与文档
+    /// 口径一致。主窗销毁后清 0（见主窗 `WM_DESTROY`），悬空句柄上再兜一层 `IsWindow`。
+    static MAIN_HWND: Cell<isize> = const { Cell::new(0) };
     /// 常驻（零窗口）模式：窗口全部销毁后**不**结束消息循环。见 `WindowConfig::resident`。
     ///
     /// 与 `AppHost::main.is_none()` 是两件事，故单独一位：主窗有没有是"启动时建没建"，
@@ -375,6 +382,8 @@ unsafe fn create_app_host(hinst: HINSTANCE, main: Option<HWND>, renderer: Render
                 allow_taskbar_created(h, taskbar_created);
             }
             APP_HOST_HWND.with(|c| c.set(h.0 as isize));
+            // 主窗句柄独立登记（见 MAIN_HWND 文档）。
+            MAIN_HWND.with(|c| c.set(main.map(|h| h.0 as isize).unwrap_or(0)));
         }
         Err(e) => {
             // 建不起来就回收状态：没有宿主窗口，托盘与热键随后都不会安装（见
@@ -2077,6 +2086,32 @@ unsafe extern "system" fn wnd_proc(
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_SHOWWINDOW => {
+            // 显隐转换的真值推送，一条消息收口一切显隐来源（框架 op、hide_on_minimize 的
+            // SW_HIDE、用户经任务栏 / 快捷键的显隐）——它们最终都经过 ShowWindow。
+            //
+            // ⚠️ 这是**前置**消息（"about to be hidden or shown"）：WS_VISIBLE 位要等
+            // DefWindowProcW 处理完才翻转，臂内 IsWindowVisible 读到的还是旧值——
+            // 直接推 live 值等于没修（hide 方向推的还是 true，热键「露着就收起」依旧
+            // 无反应）。visible 从 wparam 合成：lparam==0 来自 ShowWindow；lparam 为
+            // SW_PARENTCLOSING/OPENING（1/3）时 owner 最小化/还原连带藏/显本窗（owned/
+            // modal 子窗会遇到），这两档 wparam 同样给出转换后的新可见性；唯独
+            // SW_OTHERZOOM/UNZOOM（2/4，MDI 被别窗盖住，窗口并未真藏）可见性不变，
+            // 保持 live 读。maximized/minimized/能力位不受显隐影响，此刻仍是真值
+            //（min/max 转换随后必有 WM_SIZE 推送收敛）。
+            //
+            // 缺口的由来：此前常规推送点只有建窗与 WM_SIZE（热键臂还有一处，等价于
+            // WM_SIZE 语义）。hide_on_minimize 在 WM_SIZE 里
+            // 推送完 minimized=true 之后立即 SW_HIDE，从此 visible 恒真——热键「露着就
+            // 收起、藏着就唤起」恒走隐藏分支毫无反应（设计调研发现，见
+            // docs/roadmap-three-designs.md §3）。
+            let mut st = read_window_state(hwnd);
+            if matches!(lparam.0, 0 | 1 | 3) {
+                st.visible = wparam.0 != 0;
+            }
+            push_window_state_with(hwnd, st);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_SIZE => {
             // 状态推送在最小化早退**之前**：最小化本身就是一次状态变化，跳过它，
             // 宿主眼里窗口就永远没最小化过。
@@ -2466,6 +2501,13 @@ unsafe extern "system" fn wnd_proc(
             // 兜底：不经 `destroy_window` 的销毁（owner 关闭时系统级联销毁归属窗口）
             // 也要把 owner 的输入还回去；正常关窗路径这里已是空操作。
             release_modal_owner(hwnd);
+            // 关的是主窗本体：清 MAIN_HWND。AppHost::main 的悬空句柄清不了（它是启动时
+            // 的 Option<HWND>，只写一次），MAIN_HWND 清掉后热键路径随之对已关窗口
+            // no-op，查询返回 None——与 macOS windowWillClose 清 MAIN_WINDOW 同口径：
+            // 主窗没了 = 无主窗，不报全 false 的假状态。
+            if MAIN_HWND.with(|c| c.get()) == hwnd.0 as isize {
+                MAIN_HWND.with(|c| c.set(0));
+            }
             // 最后一个窗口关闭才结束消息循环：多窗口下关掉设置子窗不该把整个应用带走。
             //
             // 常驻模式下连"最后一个"也不退出：零窗口正是那个模式的常态，退出只能由
@@ -2723,21 +2765,52 @@ pub(crate) fn system_prefers_dark() -> bool {
 /// 能力位从**样式位**读而不是缓存 `cfg.resizable`：两者建窗时一致，但样式位是运行期的
 /// 真值。将来若加运行期改可缩放的能力，缓存那份会悄悄过期，而这里不会。
 ///
-/// 两段式（铁律 6）：四个 OS 查询先做完，再借 `state_from` 写入。查询本身不重入，
-/// 但"OS 调用不留在借用里"是这一层的统一纪律——留一个例外，下一个人就得重新判断一遍。
+/// 两段式（铁律 6）：OS 查询先做完，再借 `state_from` 写入。
 unsafe fn push_window_state(hwnd: HWND) {
+    let st = read_window_state(hwnd);
+    push_window_state_with(hwnd, st);
+}
+
+/// 推送一份**现成的**状态（`WM_SHOWWINDOW` 臂用：它要在读到的真值上替换单个字段）。
+unsafe fn push_window_state_with(hwnd: HWND, st: crate::event::WindowState) {
+    if let Some(state) = state_from(hwnd) {
+        state.handler.on_window_state(st);
+    }
+    sync_outline(hwnd);
+}
+
+/// 读一组窗口状态的 OS 真值（推送与同步查询共用同一集合，保证两个读法口径一致）。
+///
+/// 四个 OS 查询（IsZoomed/IsIconic/IsWindowVisible/GetWindowLongPtrW）不派发消息、
+/// 不重入 wnd_proc——与 `single_window_open` 读登记表同一性质，任何时机成立。
+unsafe fn read_window_state(hwnd: HWND) -> crate::event::WindowState {
     let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-    let st = crate::event::WindowState {
+    crate::event::WindowState {
         maximized: IsZoomed(hwnd).as_bool(),
         minimized: IsIconic(hwnd).as_bool(),
         visible: IsWindowVisible(hwnd).as_bool(),
         maximizable: style & WS_MAXIMIZEBOX.0 != 0,
         minimizable: style & WS_MINIMIZEBOX.0 != 0,
-    };
-    if let Some(state) = state_from(hwnd) {
-        state.handler.on_window_state(st);
     }
-    sync_outline(hwnd);
+}
+
+/// [`crate::event::main_window_state`] 的 win32 落地：对主窗做一组不派发消息的同步查询，
+/// 任何时机成立——热键 / interval / 托盘回调里读到的都是此刻真值，不依赖快照纪律。
+///
+/// 无主窗（常驻模式）返回 `None`——「无窗可谈状态」是事实陈述，不是失败。
+pub(crate) fn query_main_window_state() -> Option<crate::event::WindowState> {
+    // 不走 `app_host()`（MAIN_HWND 文档说明的借用问题），主窗句柄从独立登记读；
+    // 跨线程每线程独立 → 0 → None，与文档口径一致。
+    let hwnd = MAIN_HWND.with(|c| c.get());
+    if hwnd == 0 {
+        return None;
+    }
+    // 主窗已销毁：句柄悬空。IsWindow 对失效句柄返回 false——主窗没了 = 无主窗
+    //（None），不报全 false 的假状态（与 macOS 同口径）。
+    if !unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool() {
+        return None;
+    }
+    Some(unsafe { read_window_state(HWND(hwnd as *mut _)) })
 }
 
 /// Win10 无边框窗口的外框色，仿 Win11 DWM 给所有窗口画的那圈边：灰色；激活且开了

@@ -1095,6 +1095,7 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
   ```
   **Windows 与 Linux**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
 - 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
+  快照纪律：`window_state()` 仅事件回调 / 菜单构建 / `paint` 期间为真值，**事件期外（`on_interval`、托盘 / 热键回调、显隐转换瞬间）读 `windui::event::main_window_state()`**——平台层同步查询，任何时机成立；无主窗（常驻模式）返回 `None`（诚实语义；常驻模式下判显隐请用 `window_open(key)`）。Linux 暂未实现（恒 `None`），平台表见 §11。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **Win10 / Linux 的 1px 外框**：Win10 的无边框窗口没有 DWM 画的边，Linux 无边框窗口也没有，windui 在
   四边自画 1px 外框（最大化时不画）。取色由 `App::window_outline(WindowOutline::…)`（子窗
@@ -3090,7 +3091,7 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
 | 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误，返回 `false` | ✓ 固定走 X11（经 XWayland），无 X 显示时返回 `false` |
 | 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |
-| 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ `WM_SIZE` + 建窗后各推一次，读 `WS_MAXIMIZEBOX`/`WS_MINIMIZEBOX` 样式位 | ✗ 未实现。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false` | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送 |
+| 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ 建窗 + `WM_SIZE` + `WM_SHOWWINDOW`（显隐收口）各推一次，读样式位；另有 `main_window_state()` 同步查询 | ✗ 未实现推送。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false`；`main_window_state()` 可用（同步读 NSWindow 属性，非主线程 `None`） | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送；`main_window_state()` 恒 `None`（同步查询暂未实现） |
 | `font_weight` | ✓ | ✗ 传入非 400 的值不报错但无视觉变化（CoreText 路径未接字重） | ✓ 缺字面时合成加粗 |
 | 私用区回退字体（`text::register_private_use_font`） | ✓ | ✗ 函数**不存在**（`#[cfg(windows)]`），跨平台代码需自行 `cfg` 分支 | ✗ 同 macOS |
 | 字体查询（`text::family_available` / `text::font_coverage`，见 §7.5） | ✓ | ✗ 函数**不存在**（`#[cfg(windows)]`） | ✗ 同 macOS |

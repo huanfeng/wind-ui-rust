@@ -153,6 +153,26 @@ pub(super) fn run_window_op_on_main(op: WindowOp) {
     apply_window_op(&win, op, mtm);
 }
 
+/// [`crate::event::main_window_state`] 的 macOS 落地：读主窗 NSWindow 的属性
+/// （isZoomed / isMiniaturized / isVisible / styleMask），任何时机成立。
+///
+/// 非主线程返回 `None`（AppKit 只在主线程可用）；无主窗（常驻模式）同样返回 `None`
+/// ——「无窗可谈状态」是事实陈述，不是失败。
+pub(crate) fn query_main_window_state() -> Option<crate::event::WindowState> {
+    let win = MAIN_WINDOW.with(|w| w.borrow().clone())?;
+    Some(crate::event::WindowState {
+        maximized: win.isZoomed(),
+        minimized: win.isMiniaturized(),
+        visible: win.isVisible(),
+        // win32 的 WS_MAXIMIZEBOX 与 macOS styleMask 的 Resizable 是同一能力的两面
+        // （win32 的 resizable(false) 同时剥掉 WS_THICKFRAME 与 WS_MAXIMIZEBOX；macOS
+        // 的 zoom 恒可用，缩放/最大化能力都随 Resizable 位）。口径与 x11 的 report_state
+        //（maximizable: w.resizable）一致。
+        maximizable: win.styleMask().contains(NSWindowStyleMask::Resizable),
+        minimizable: win.styleMask().contains(NSWindowStyleMask::Miniaturizable),
+    })
+}
+
 /// 在某个具体窗口上落地一个 [`WindowOp`]——**窗口操作语义的唯一实现**。
 ///
 /// 两条入口（托盘/热键走 [`run_window_op_on_main`]、控件请求走视图的 `after_event`）此前
@@ -854,6 +874,16 @@ define_class!(
                 debug_assert!(false, "windowWillClose: 取不到 window，窗口无法注销");
                 return;
             };
+            // 关的是主窗本体：把 MAIN_WINDOW 置回 None。Retained 是强引用，不清的话
+            // 已关窗口的对象会一直活着，`main_window_state()` 与全局热键路径照样能读
+            // 它的属性、执行操作——状态是过时的，热键还会把僵尸窗重新唤出。对照 win32：
+            // WM_DESTROY 时销毁的是窗口本身，`AppHost::main` 里悬空的 HWND 由
+            // IsWindow 语义兜底；这边对象不死，必须显式清。
+            if MAIN_WINDOW.with(|w| {
+                w.borrow().as_ref().map(Retained::as_ptr) == Some(Retained::as_ptr(&win))
+            }) {
+                MAIN_WINDOW.with(|w| *w.borrow_mut() = None);
+            }
             // 模态对话框关闭：owner 重新接收输入；owner 关闭：阻断作废。
             modal_release(&win);
             // owner 关闭时连带关掉归属窗口（对照 Windows 销毁 owner 时级联销毁 owned

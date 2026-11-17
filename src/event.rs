@@ -46,6 +46,10 @@ pub struct WindowState {
     /// 当前已最大化。
     pub maximized: bool,
     /// 当前已最小化。
+    ///
+    /// ⚠️ 快照纪律与 [`window_state()`](window_state) 相同：仅事件回调 / 菜单构建 /
+    /// `paint` 期间有效。任何时机的仲裁读法用
+    /// [`main_window_state()`](main_window_state)。
     pub minimized: bool,
     /// 窗口当前可见（未被隐藏）。
     ///
@@ -56,6 +60,10 @@ pub struct WindowState {
     ///
     /// 与 [`minimized`](Self::minimized) 是两件事：最小化的窗口仍然「可见」（在任务栏上、
     /// 能被还原），隐藏的窗口则从任务栏与 Alt-Tab 里整个消失。
+    ///
+    /// ⚠️ 快照纪律：仅事件回调 / 菜单构建 / `paint` 期间有效——显隐转换（hide_on_minimize、
+    /// `WindowOp::Hide`、任务栏操作）之后到下一次推送之间，快照可能仍停在旧值。任何时机的
+    /// 仲裁读法用 [`main_window_state()`](main_window_state)。
     pub visible: bool,
     /// 可最大化。win32 下等价于窗口带 `WS_MAXIMIZEBOX`（`App::resizable(false)` 会剥掉它）。
     pub maximizable: bool,
@@ -184,6 +192,24 @@ pub(crate) fn set_window_state(st: WindowState) {
 /// ——与 `run_resident` 在该平台的现状一致（它在那里直接返回，不建任何窗口）。
 pub fn window_open(key: &str) -> bool {
     crate::platform::single_window_open(key)
+}
+
+/// 查询**主窗**此刻的真实窗口状态。平台层同步查询，不走线程局部快照，任何时机成立
+/// ——热键 / `on_interval` / 托盘回调、显隐转换瞬间、对快照不信任时都用它。
+///
+/// 无主窗（常驻模式 [`App::run_resident`](crate::app::App::run_resident)）返回 `None`
+/// ——「无窗可谈状态」是事实陈述，不是失败。
+///
+/// 与 [`window_state()`](Self::window_state) 的分工：快照快、事件期内为真值，是首选；
+/// 本函数是任何时机的仲裁读法。两者并存不互斥，各自失败模式见各自文档。
+///
+/// # 平台
+///
+/// - Windows / macOS：同步读真值（win32 句柄登记为线程局部，非 UI 线程返回 `None`；
+///   macOS 读 NSWindow 属性，非主线程返回 `None`）。
+/// - Linux：暂未实现，恒返回 `None`（`window_state()` 快照不受影响，事件期内照常可用）。
+pub fn main_window_state() -> Option<WindowState> {
+    crate::platform::query_main_window_state()
 }
 
 /// 系统是否偏好**暗色**外观。
@@ -1616,6 +1642,34 @@ mod tests {
         ctx.close_window("settings");
         assert_eq!(take_callback_closes(), vec!["main", "settings"]);
         assert!(take_callback_closes().is_empty(), "取走一次就该空了");
+    }
+
+    /// 快照注入契约：宿主注入什么，`window_state()` 就读到什么；`UNKNOWN` 的字段取值
+    /// 全 false（visible=true 除外）也一并钉住——那是「错得显眼」设计的一部分。
+    ///
+    /// 事件期外的残值行为（读到上一次注入）是文档口径，不是这里要验的。
+    #[test]
+    fn window_state_snapshot_roundtrip() {
+        let st = WindowState {
+            maximized: true,
+            minimized: false,
+            visible: false,
+            maximizable: false,
+            minimizable: true,
+        };
+        set_window_state(st);
+        assert_eq!(window_state(), st);
+        // 恢复 UNKNOWN，避免污染同进程内其它测试的线程局部。
+        set_window_state(WindowState::UNKNOWN);
+        assert_eq!(window_state(), WindowState::UNKNOWN);
+    }
+
+    /// 平台门契约：未实现同步查询的平台（Linux）恒返回 None。
+    /// X11 的 round-trip 实现落地时，这条测试改成断言真值集合。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn main_window_state_is_none_where_not_implemented() {
+        assert!(main_window_state().is_none());
     }
 
     /// 撞键检测的**三个方向都要钉**，而后两个比第一个重要：一个见谁都喊的提示，三天后
