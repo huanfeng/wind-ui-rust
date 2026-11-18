@@ -3193,6 +3193,41 @@ impl Element {
         self
     }
 
+    /// 把滚动位置双向绑定到信号（`scroll_y`，`i32` 直绑，与 `Node.scroll_y` 同形）：
+    /// - 容器侧变化（滚轮 / 触摸平移 / 惯性 / 钳制 / `stick_to_bottom` 的改写）→ 下一帧
+    ///   布局前写回信号；
+    /// - 外部写信号 → 下一次布局的同步相位消费（arrange 钳制后生效）。
+    ///
+    /// 消费与写回都做值/版本比较防抖：无事即不标脏。多个容器绑同一个信号 = 等偏移联动
+    /// （同帧收敛）。初始位置请**先 `set` 再 build**——首帧按「外部写入」消费，预设值生效。
+    ///
+    /// 只能用于**纵向**滚动容器（[`Element::scroll`] 与 [`Element::list_signal`]），
+    /// 链到别的元素上 debug 期 panic。钳制不在绑定层做：越界值由 arrange 钳回、下一帧
+    /// 写回真值（晚 1-2 帧对齐，无正确性问题）。与 `stick_to_bottom` / `preserve_on_prepend`
+    /// 正交可同开——那些是容器自洽行为，绑定是容器↔应用的双向通道。
+    ///
+    /// **绑定期间信号须保持存活**：容器节点活着而信号被 `dispose`（手动或
+    /// `SignalScope` 早收），每次布局读到死句柄会 panic——症状离因很远，别提前回收。
+    #[track_caller]
+    pub fn scroll_position(mut self, s: Signal<i32>) -> Self {
+        debug_assert!(
+            matches!(self.layout, Layout::Scroll),
+            "scroll_position() 只能用于滚动容器（Element::scroll / list_signal）"
+        );
+        debug_assert!(
+            !s.is_derived(),
+            "scroll_position() 需要可写信号；Signal::map 的派生信号只读"
+        );
+        debug_assert!(
+            self.scroll_axis.vertical(),
+            "scroll_position() 一期仅支持纵向滚动容器"
+        );
+        self.scroll_ext
+            .get_or_insert_with(Default::default)
+            .scroll_bound = Some(crate::core::ScrollBind::new(s));
+        self
+    }
+
     /// 头部插入锚定（聊天"加载更早消息"）：数据更新后若在原第一个可见行**之前**插入了新行，
     /// `scroll_y` 随之增加，使原第一个可见行在视口中的位置不变。与 `stick_to_bottom` 同开时，
     /// 在底部以跟随为准。锚点行靠键复用的节点认：该行本身被重建或删除则不调整。
@@ -5603,6 +5638,8 @@ impl Element {
         if is_reactive {
             tree.register_reactive(id);
         }
+        // 滚动位置绑定：登记进同步相位注册表（Tree::sync_scroll_bindings 每帧两遍扫描）。
+        tree.register_scroll_bound(id);
         // 对话框遮罩登记到树上（先序：父在前、子在后，故嵌套对话框中最内层落在栈顶）。
         if let Some(show) = modal {
             tree.register_modal(id, show);
@@ -7805,6 +7842,29 @@ mod tests {
     #[should_panic(expected = "该节点已有控件")]
     fn widget_rejects_replacing_a_composed_container_widget() {
         let _ = Element::scroll().widget(Probe);
+    }
+
+    /// `scroll_position` 三条 debug 守卫的回归钉子（同 `widget_rejects_*` 惯例）：
+    /// 误用必须当场炸出来，而不是布局期才表现出「信号不动」之类的无声症状。
+    #[test]
+    #[should_panic(expected = "scroll_position() 只能用于滚动容器")]
+    fn scroll_position_rejects_non_scroll_container() {
+        let _ = Element::col().scroll_position(signal(0i32));
+    }
+
+    #[test]
+    #[should_panic(expected = "scroll_position() 需要可写信号")]
+    fn scroll_position_rejects_derived_signal() {
+        let src = signal(0i32);
+        let _ = Element::scroll().scroll_position(src.map(|v| *v));
+    }
+
+    #[test]
+    #[should_panic(expected = "scroll_position() 一期仅支持纵向滚动容器")]
+    fn scroll_position_rejects_horizontal_container() {
+        let _ = Element::scroll()
+            .scroll_axis(crate::spec::ScrollAxis::Horizontal)
+            .scroll_position(signal(0i32));
     }
 
     /// 无静态 tooltip 的自绘控件，未命中时不应弹出空提示。

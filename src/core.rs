@@ -41,6 +41,28 @@ const SCROLL_EDGE_NEAR: i32 = 4;
 /// 离开边缘超过多少逻辑像素后边缘回调重新武装。
 const SCROLL_EDGE_REARM: i32 = 16;
 
+/// 滚动位置绑定（`Element::scroll_position`）的轨道状态。
+pub(crate) struct ScrollBind {
+    pub sig: Signal<i32>,
+    /// 上次见到/写回的信号版本。同步相位判据：版本变了 = 有外部写入尚未消费，
+    /// 此刻容器**只消费不写回**（否则会用旧值覆盖外部刚写入的新值）。
+    pub seen_version: u64,
+    /// 首帧只消费不写回（初始化对齐）：应用「先 `set` 预设位置再 build」的写法，
+    /// 若首帧按常规判据走，会把节点的初始 0 写回信号、预设位置丢失。
+    pub first: bool,
+}
+
+impl ScrollBind {
+    pub fn new(sig: Signal<i32>) -> Self {
+        let seen_version = sig.version();
+        Self {
+            sig,
+            seen_version,
+            first: true,
+        }
+    }
+}
+
 /// 滚动容器的可选扩展状态：只有用了跟随底部 / 头部锚定 / 边缘回调的节点才分配。
 #[derive(Default)]
 pub(crate) struct ScrollExt {
@@ -50,6 +72,8 @@ pub(crate) struct ScrollExt {
     pub preserve_on_prepend: bool,
     /// `Element::on_scroll_edge`。
     pub on_edge: Option<ScrollEdgeFn>,
+    /// `Element::scroll_position`。
+    pub scroll_bound: Option<ScrollBind>,
     /// 上一次 arrange 结束时的最大滚动量（`None` = 尚未布局过）。判"上一帧是否在底部"用：
     /// 本帧 measure 已把 `content_h` 更新成新值，只有这份记录还停在上一帧。
     prev_max_y: Option<i32>,
@@ -1096,6 +1120,10 @@ pub struct Tree {
     pub(crate) scroll_edge_inset: i32,
     /// 响应式节点列表：每次 `layout_root` 前广播 `on_update`，允许控件重建子节点。
     reactive_nodes: Vec<NodeId>,
+    /// 绑定了滚动位置信号的节点（`Element::scroll_position`）：同步相位每帧两遍扫描，
+    /// 见 [`Tree::sync_scroll_bindings`]。登记/剔除机制对齐 `reactive_nodes`——绑定容器
+    /// 通常 0-2 个，注册表让相位成本与树大小解耦。
+    scroll_bound: Vec<NodeId>,
     /// on_update（响应式相位）里控件请求的 toast 暂存区。该相位在 `call_on_update` 后
     /// 丢弃整个 `EventOutcome`，其中的 toast 无处上交宿主；单独在此累积，由宿主在
     /// layout 后 `take_pending_toasts` 取走上屏（否则 `toast_sink` 等经信号触发的提示全被吞）。
@@ -1188,6 +1216,7 @@ impl Tree {
             clipboard: None,
             scroll_edge_inset: scrollbar::WINDOW_EDGE_INSET,
             reactive_nodes: Vec::new(),
+            scroll_bound: Vec::new(),
             pending_toasts: Vec::new(),
             pending_focus: None,
             pending_release: Vec::new(),
@@ -1363,6 +1392,79 @@ impl Tree {
         }
     }
 
+    /// 登记 `Element::scroll_position` 的滚动绑定（无绑定的节点是空操作）。
+    /// 由 `Element::build` 在节点落树后自动调用。
+    pub(crate) fn register_scroll_bound(&mut self, id: NodeId) {
+        let bound = self
+            .get(id)
+            .and_then(|n| n.scroll_ext.as_ref())
+            .is_some_and(|e| e.scroll_bound.is_some());
+        if bound && !self.scroll_bound.contains(&id) {
+            self.scroll_bound.push(id);
+        }
+    }
+
+    /// 滚动绑定同步相位：`scroll_position` 信号 ↔ `scroll_y` 双向对齐，两遍扫描。
+    ///
+    /// 一句话判据：**版本脏 → 只消费不写回；版本干净且值不等 → 写回**。
+    ///
+    /// 两遍的必要性：单遍时先扫到的一方会用**旧值**覆盖后扫方的容器侧更新——A 刚滚到
+    /// 100、B 还停在 50，B 先扫会写 s=50、A 反被消费 50，A 的滚动丢失。两遍保证容器侧
+    /// 更新先全体广播（Pass1）、再全体消费（Pass2），同帧收敛且与注册表顺序无关。
+    ///
+    /// 只在 layout 路径跑：外部写信号 → notify → 请求重绘 → 帧管线补 layout——这条链
+    /// 缺了外部写入就静止在信号里无人消费。钳制**不**在这里做（钳制恒归 arrange 的
+    /// 单一真值点；外部写超界值本帧消费、arrange 钳回，下一帧 Pass1 广播真值，晚 1-2 帧
+    /// 对齐但无正确性问题）。
+    fn sync_scroll_bindings(&mut self) {
+        if self.scroll_bound.is_empty() {
+            return;
+        }
+        // Pass1（容器→信号）：容器值与信号不等、且版本干净（上次见过的版本没变）→ 写回。
+        // 首帧跳过：first 节点走 Pass2 的初始化消费（防初始 0 覆盖应用预设的位置）。
+        // 写回后本节点的 seen_version 留给 Pass2 统一更新（Pass2 会看到自己刚写的脏版本，
+        // 消费的是等值——幂等）。
+        for &id in &self.scroll_bound {
+            let Some(n) = self.get(id) else { continue };
+            let Some(b) = n.scroll_ext.as_ref().and_then(|e| e.scroll_bound.as_ref()) else {
+                continue;
+            };
+            if b.first {
+                continue;
+            }
+            let (cur, ver, val) = (n.scroll_y, b.sig.version(), b.sig.get());
+            if ver == b.seen_version && val != cur {
+                b.sig.set(cur);
+            }
+        }
+        // Pass2（信号→容器）：版本脏（外部写入或 Pass1 刚写回）→ 消费进容器。
+        // 消费**不钳制**，越界值由本帧 arrange 钳回。借用切分：先收集再统一写节点。
+        let mut consume: Vec<(NodeId, i32, u64)> = Vec::new();
+        for &id in &self.scroll_bound {
+            let Some(n) = self.get(id) else { continue };
+            let Some(b) = n.scroll_ext.as_ref().and_then(|e| e.scroll_bound.as_ref()) else {
+                continue;
+            };
+            let ver = b.sig.version();
+            if b.first || ver != b.seen_version {
+                consume.push((id, b.sig.get(), ver));
+            }
+        }
+        for (id, val, ver) in consume {
+            let Some(n) = self.get_mut(id) else { continue };
+            let Some(b) = n.scroll_ext.as_mut().and_then(|e| e.scroll_bound.as_mut()) else {
+                continue;
+            };
+            n.scroll_y = val;
+            b.seen_version = ver;
+            b.first = false;
+        }
+        // 剔除已删节点（同 dispatch_reactive_updates 的 retain 口径）。
+        let mut live = std::mem::take(&mut self.scroll_bound);
+        live.retain(|&id| self.get(id).is_some());
+        self.scroll_bound = live;
+    }
+
     /// 调用单个响应式节点的 `on_update`（与 call_on_event 同款 widget swap 模式）。
     fn call_on_update(&mut self, id: NodeId) {
         if !self.node_enabled(id) {
@@ -1487,6 +1589,9 @@ impl Tree {
         self.layout_size = size;
         // 先让响应式节点重建子树结构，再 measure/arrange
         self.dispatch_reactive_updates();
+        // 滚动绑定同步相位：on_update 可能改 scroll_y 或写绑定信号，先广播完再对齐，
+        // 本帧 measure/arrange 拿到的就是已收敛的偏移。
+        self.sync_scroll_bindings();
         if let Some(root) = self.root {
             self.measure(
                 root,
@@ -7711,6 +7816,213 @@ mod tests {
         }
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
+    }
+
+    /// 外部写信号 → 同步相位消费进容器（含越界钳制与钳制真值下一帧写回）；
+    /// 预设位置（先 set 再 build）首帧按「外部写入」消费，不被初始 0 覆盖。
+    #[test]
+    fn scroll_position_consumes_external_write() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll().width(100).height(100).scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "初始对齐");
+
+        // 外部写超界值：本帧消费、arrange 钳回最大滚动量（content 300 - view 100）。
+        s.set(9999);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            200,
+            "外部写入消费并钳制到 max"
+        );
+
+        // 钳制传播：下一帧同步相位把钳制后的真值写回信号（晚一帧对齐）。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(s.get(), 200, "钳制真值下一帧写回信号");
+
+        // 预设位置：先 set 再 build，首帧消费生效、初始 0 不覆盖预设。
+        let s2 = signal(0i32);
+        s2.set(60);
+        let mut sc2 = Element::scroll().width(100).height(100).scroll_position(s2);
+        for _ in 0..10 {
+            sc2 = sc2.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree2 = Tree::new();
+        let id2 = sc2.build(&mut tree2);
+        tree2.root = Some(id2);
+        tree2.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree2.get(id2).unwrap().scroll_y, 60, "预设位置首帧消费生效");
+        assert_eq!(s2.get(), 60, "首帧不把初始 0 写回覆盖预设");
+    }
+
+    /// 容器侧滚动（真实滚轮 dispatch）→ 下一帧同步相位写回信号。
+    #[test]
+    fn scroll_position_write_back_after_wheel() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll().width(100).height(100).scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
+        };
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let y = tree.get(id).unwrap().scroll_y;
+        assert!(y > 0, "滚轮应已滚动");
+        assert_eq!(s.get(), y, "容器侧滚动下一帧写回信号");
+
+        // 版本判据：外部写后容器不再覆盖（只消费）——外部写 0 并消费，随后滚轮前的
+        // 版本已脏，滚轮若发生将正常写回（此处只验外部写不被 stale 写回冲掉）。
+        s.set(0);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "外部写入消费");
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            0,
+            "稳态无事不写不消费（值等版本净）"
+        );
+    }
+
+    /// 双容器绑同一信号 = 等偏移联动：A 滚动同帧 B 对齐；外部写同帧双双消费。
+    /// A 显式宽、B 走父约束（width_match）——同功能覆盖两档宽度（AGENTS §5）。
+    #[test]
+    fn scroll_position_links_two_containers_same_frame() {
+        let s = signal(0i32);
+        let mut a = Element::scroll().width(100).height(100).scroll_position(s);
+        let mut b = Element::scroll()
+            .width_match()
+            .height(100)
+            .scroll_position(s);
+        for _ in 0..10 {
+            a = a.child(Element::leaf().width_match().height(30));
+            b = b.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let root = Element::col().width(100).child(a).child(b).build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 220), &mut te);
+        let (ida, idb) = {
+            let kids = tree.get(root).unwrap().children.clone();
+            (kids[0], kids[1])
+        };
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
+        };
+        let (mut h, mut cap) = (None, None);
+        // A 滚动 → 同一帧布局后 B 对齐（容器侧更新先全体广播再全体消费）。
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 220), &mut te);
+        let ya = tree.get(ida).unwrap().scroll_y;
+        let yb = tree.get(idb).unwrap().scroll_y;
+        assert!(ya > 0, "A 应已滚动");
+        assert_eq!(ya, yb, "联动容器同帧对齐");
+        assert_eq!(s.get(), ya, "信号值为联动真值");
+
+        // 外部写 → 两容器同帧消费。
+        s.set(150);
+        tree.layout_root(Size::new(100, 220), &mut te);
+        assert_eq!(tree.get(ida).unwrap().scroll_y, 150);
+        assert_eq!(tree.get(idb).unwrap().scroll_y, 150);
+    }
+
+    /// 与 stick_to_bottom 同开：跟随底部的改写经 Pass1 写回信号；外部写入视为用户位置
+    /// （翻离底部后跟随不再自动接管——prev_max - scroll_y 超出近底阈值）。
+    #[test]
+    fn scroll_position_with_stick_to_bottom() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll()
+            .width(100)
+            .height(100)
+            .stick_to_bottom(true)
+            .scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        // 首帧：同步相位消费初始 0，随后 stick_to_bottom 跟随到底。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 200, "首次布局跟随到底");
+        // 第二帧：跟随改写的 200 经 Pass1 写回信号。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(s.get(), 200, "stick_to_bottom 改写写回信号");
+        // 外部写 0：消费后不在底部，跟随不再接管（视为用户翻看位置）。
+        s.set(0);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "外部写入消费");
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "翻离底部后跟随不接管");
+    }
+
+    /// 绑定容器经响应式重建（`host_signal` 数据切换 → 旧节点删除、新节点走 build）
+    /// 后绑定仍生效：旧注册表条目被 retain 剔除，新节点经 build 重新登记且首帧消费
+    /// 当前信号值（重建不丢滚动位置）。
+    #[test]
+    fn scroll_bound_survives_reactive_rebuild() {
+        let s = signal(0i32);
+        let s_bind = s;
+        let page = signal(vec![0u8]);
+        let content = Element::host_signal(page, move |_| {
+            let mut sc = Element::scroll()
+                .width(100)
+                .height(100)
+                .scroll_position(s_bind);
+            for _ in 0..10 {
+                sc = sc.child(Element::leaf().width_match().height(30));
+            }
+            sc
+        });
+        let mut tree = Tree::new();
+        let root = content.build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        let scroll1 = tree.get(root).unwrap().children[0];
+
+        // 初次绑定生效：外部写消费。
+        s.set(80);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(tree.get(scroll1).unwrap().scroll_y, 80);
+
+        // 换页触发响应式重建：旧节点删除、新节点经 build 重新登记并首帧消费当前值
+        //（继承滚动位置——重建不因绑定丢失而归零）。
+        page.set(vec![1]);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert!(tree.get(scroll1).is_none(), "旧滚动节点已随重建删除");
+        let scroll2 = tree.get(root).unwrap().children[0];
+        assert_ne!(scroll2, scroll1, "重建产生新节点");
+        assert_eq!(
+            tree.get(scroll2).unwrap().scroll_y,
+            80,
+            "新节点首帧消费当前值"
+        );
+
+        // 重建后的绑定继续工作：外部写照常消费。
+        s.set(60);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(
+            tree.get(scroll2).unwrap().scroll_y,
+            60,
+            "重建后绑定继续生效"
+        );
     }
 
     /// 亚格滚轮量（Wayland 的 `axis_value120`、触控板连续量）按比例累加；整格与改动前一样

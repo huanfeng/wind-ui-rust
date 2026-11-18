@@ -39,6 +39,8 @@ mod checkbox_motion_tests;
 mod combo_tests;
 mod damage;
 mod fling;
+#[cfg(test)]
+mod fling_bind_tests;
 mod focus;
 #[cfg(test)]
 mod key_damage_tests;
