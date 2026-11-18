@@ -162,6 +162,10 @@ impl LiveWindows {
         self.wins.iter().map(|w| w.id).collect()
     }
 
+    fn is_empty(&self) -> bool {
+        self.wins.is_empty()
+    }
+
     /// 找出带指定单例键的窗口（`Window::single`）。
     ///
     /// 键随窗口注销一并消失，故找到的那个必然还活着——单例判定不需要额外的存活校验，
@@ -193,6 +197,14 @@ unsafe fn find_single_window(key: &str) -> Option<HWND> {
 /// （同 `open_pending_windows` 里那条注释）。
 pub(crate) fn single_window_open(key: &str) -> bool {
     LIVE_WINDOWS.with(|w| w.borrow().find_single(key).is_some())
+}
+
+#[cfg(feature = "d2d")]
+pub fn release_shared_device_if_idle() -> bool {
+    if !LIVE_WINDOWS.with(|w| w.borrow().is_empty()) {
+        return false;
+    }
+    d2d::release_shared_device()
 }
 
 /// 关掉带这个单例键的窗口（托盘 / 热键回调的 `close_window` 意图）。
@@ -1843,7 +1855,7 @@ unsafe fn run_windowed(
     // 推迟到线程析构才 Release 会触发 GPU 命令队列排空 + DWrite 字体缓存全局清理，
     // 实测延迟可达 3–4 秒；此处提前释放可规避该问题。
     #[cfg(feature = "d2d")]
-    d2d::release_shared_device();
+    let _ = d2d::release_shared_device();
     true
 }
 
