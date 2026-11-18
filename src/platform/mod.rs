@@ -27,6 +27,16 @@ pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
 pub use win32::dragdrop::{drag_files, drag_files_with};
 
+#[cfg(all(windows, feature = "d2d"))]
+pub fn release_shared_device_if_idle() -> bool {
+    win32::release_shared_device_if_idle()
+}
+
+#[cfg(not(all(windows, feature = "d2d")))]
+pub fn release_shared_device_if_idle() -> bool {
+    false
+}
+
 /// 当前活跃窗口的原生句柄（Windows：HWND；其它平台暂无，返回 `None`）。
 ///
 /// 给需要直接跟系统打交道的下游用：Shell 上下文菜单、属性对话框、缩略图提取这些

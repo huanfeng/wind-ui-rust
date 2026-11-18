@@ -287,10 +287,8 @@ unsafe fn shared_device() -> Option<SharedDevice> {
 /// 消息循环结束后显式释放共享设备链，避免推迟到线程析构阶段才释放。
 /// ID3D11Device 最后一次 Release 需等 GPU 命令队列排空；DWRITE_FACTORY_TYPE_SHARED 最后一次
 /// Release 触发系统字体缓存全局清理——两者在线程析构时延迟可达数秒，显式调用可规避。
-pub(super) fn release_shared_device() {
-    SHARED_DEVICE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+pub(super) fn release_shared_device() -> bool {
+    SHARED_DEVICE.with(|cell| cell.borrow_mut().take().is_some())
 }
 
 /// 设备丢失后失效共享设备：**仅当缓存代际 == 调用方代际**才清空。多窗下首个检测到丢失者清并
