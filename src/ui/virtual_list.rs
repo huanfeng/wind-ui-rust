@@ -815,7 +815,7 @@ mod tests {
         let table = tree.get(root).unwrap().children[0];
         let header = tree.get(table).unwrap().children[0];
         assert_eq!(
-            tree.get(header).unwrap().children.len(),
+            crate::ui::table_cols::header_cells(&tree, header).len(),
             3,
             "表头应为 2 数据列 + 1 操作列"
         );
@@ -826,7 +826,7 @@ mod tests {
             "正文行也应为 2 数据列 + 1 操作列"
         );
         // 逐列对齐：表头与正文的每一列左右边界必须重合。
-        let hcols = tree.get(header).unwrap().children.clone();
+        let hcols = crate::ui::table_cols::header_cells(&tree, header);
         let bcols = tree.get(tr).unwrap().children.clone();
         for (ci, (&h, &b)) in hcols.iter().zip(bcols.iter()).enumerate() {
             let (hb, bb) = (tree.abs_bounds(h), tree.abs_bounds(b));
@@ -1221,7 +1221,7 @@ mod tests {
         let table = tree.get(root).unwrap().children[0];
         let header = tree.get(table).unwrap().children[0];
         assert_eq!(
-            tree.get(header).unwrap().children.len(),
+            crate::ui::table_cols::header_cells(&tree, header).len(),
             3,
             "表头应为 2 数据列 + 1 操作列"
         );
@@ -1247,7 +1247,7 @@ mod tests {
         );
         let table = tree.get(root).unwrap().children[0];
         let header = tree.get(table).unwrap().children[0];
-        let hcols = tree.get(header).unwrap().children.clone();
+        let hcols = crate::ui::table_cols::header_cells(&tree, header);
         let bcols = tree.get(tr).unwrap().children.clone();
         for (ci, (&hc, &bc)) in hcols.iter().zip(bcols.iter()).enumerate() {
             let (hb, bb) = (tree.abs_bounds(hc), tree.abs_bounds(bc));

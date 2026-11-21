@@ -135,7 +135,7 @@ fn main() {
 | Container | `scroll` (vertical / horizontal / both; wheel/touch + clip + scrollbar) / `tabs` / `tabs_pill` / `divider` / `dialog` (modal) / `dialog_panel` (titled) / `visible_when` |
 | Navigation | `menu_bar` (native-feel menu bar: slide between menus, ←→ across menus, F10 / Alt activation, mnemonics) / `segmented` / `nav_row` (drill-in) / `collapsible` / `accordion` · `accordion_multi`; the selection highlight slides between rows (`slide_highlight`, used by `list_pill`) |
 | List | `list` / `list_pill` (sidebar style) / `list_icons` (single-select / scroll / highlight / icons / disabled state) / `list_signal` (data-driven dynamic list) / `reorder_list` (drag to reorder) |
-| Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select) |
+| Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select); drag header boundaries to resize columns (weights persistable) |
 | Image | `image` / `image_svg` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
 | System | System tray (icon + left/double click + native context menu; StatusNotifierItem on Linux) and desktop notifications, global hotkeys, multi-window (`ctx.open_window`, incl. singleton windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
 

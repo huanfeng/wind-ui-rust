@@ -486,6 +486,14 @@ pub trait Widget {
     fn hit_opaque(&self) -> bool {
         true
     }
+    /// 命中区在节点矩形之外**额外**外扩的量（不影响布局与绘制）。默认零。
+    ///
+    /// 给「视觉上要细、手上要好抓」的东西用：表格列宽手柄是插在两列之间的零宽节点，
+    /// 不占任何布局宽度，靠这里向两侧各扩几个像素才抓得住。外扩部分会与相邻兄弟重叠——
+    /// 想让它压过兄弟，节点还须设 `raised`（先于普通兄弟受测、后于它们绘制）。
+    fn hit_slop(&self) -> Insets {
+        Insets::default()
+    }
     /// 本节点在**窗口拖动区判定**（`Tree::drag_hit_at`）中是否透明。true（仅模态遮罩）
     /// = 拖动判定时穿透到其下层兄弟，使无边框窗口的自绘标题栏在对话框弹出后仍可拖窗。
     /// 只影响 `WM_NCHITTEST` 侧的 HTCAPTION 判定，**不影响事件分发与交互控件判定**——
@@ -586,6 +594,31 @@ impl Node {
         } else {
             content
         }
+    }
+
+    /// [`clip_outline`](Self::clip_outline) 的裁剪外形（`abs` 为本节点绝对矩形）：
+    /// 边框内侧的矩形 + 相应收小的四角半径。没有边框时就是节点外框与它自己的圆角。
+    ///
+    /// 只扣存在的那几条边：缺边描边（`border_edges`）的缺口那侧内容可以贴到外框。
+    /// 半径同步收小一个线宽——内容的圆角与描边内缘同心，否则四角露出一线底色。
+    pub fn outline_clip(&self, abs: Rect) -> (Rect, crate::geometry::Corners) {
+        let bw = match &self.style.border {
+            Some((_, w)) if *w > 0 => *w,
+            _ => 0,
+        };
+        let e = self.style.border_edges;
+        let edge = |on: bool| if on { bw } else { 0 };
+        let r = abs.inset(Insets {
+            left: edge(e.left),
+            top: edge(e.top),
+            right: edge(e.right),
+            bottom: edge(e.bottom),
+        });
+        let radii = self
+            .style
+            .corner_radii
+            .unwrap_or(crate::geometry::Corners::all(self.style.corner_radius));
+        (r, radii.offset(-(bw as f32)))
     }
 
     /// 滚动容器的视口尺寸：内容区扣掉 arrange 预留的滚动条（基于上一帧布局）。
@@ -849,6 +882,13 @@ pub struct Node {
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
     pub clip_children: bool,
+    /// 是否把子节点裁剪到自身**外形**：描边内侧的圆角矩形（`Element::clip`）。
+    ///
+    /// 与 `clip_children` 正交、可叠加：后者裁到内容区（扣掉 padding）的直角矩形，这个
+    /// 裁到边框内侧（不扣 padding）并保住圆角——CSS `overflow: hidden` 的语义。两者都设时
+    /// 取交集。为「贴边内容放进圆角卡片」而设：没有它，表头底色、斑马纹、图片这些直角
+    /// 内容会盖出卡片的圆角与描边。
+    pub clip_outline: bool,
     /// 滚动容器可滚动的方向（仅 `Layout::Scroll` 有意义）。
     pub scroll_axis: crate::spec::ScrollAxis,
     /// 垂直滚动偏移（Scroll 容器）。
@@ -2956,7 +2996,9 @@ impl Tree {
             n.bounds.w,
             n.bounds.h,
         );
-        if abs.is_empty() {
+        // 空矩形不画——除非控件声明了命中外扩（`Widget::hit_slop`）：那类节点（零宽的
+        // 列宽手柄）本就靠矩形之外的那一带交互与显示悬停反馈。
+        if abs.is_empty() && n.widget.hit_slop() == Insets::default() {
             return;
         }
         if let Some(a) = n.layout_anim.as_ref().filter(|a| a.is_active()) {
@@ -3141,9 +3183,16 @@ impl Tree {
         let child_origin = Point::new(abs.x, abs.y);
         // 子节点分两趟绘制：先普通、后 `raised`。拖拽浮起的行须画在其余兄弟之上，
         // 否则会被排在它后面的行盖住。绝大多数容器没有 raised 子节点，第二趟是空转。
-        if n.clip_children {
+        if n.clip_children || n.clip_outline {
             canvas.save();
-            canvas.clip_rect(n.child_clip(content));
+            // 先外形（圆角）后内容区（直角）：两者取交集，嵌套 clip_rect 保住外层圆角。
+            if n.clip_outline {
+                let (r, radii) = n.outline_clip(abs);
+                canvas.clip_round_rect(r, radii);
+            }
+            if n.clip_children {
+                canvas.clip_rect(n.child_clip(content));
+            }
             self.paint_children(canvas, n, child_origin, enabled, shown);
             canvas.restore();
         } else {
@@ -4646,7 +4695,14 @@ impl Tree {
             n.bounds.w,
             n.bounds.h,
         );
-        if !abs.contains(p) {
+        let slop = n.widget.hit_slop();
+        let hit_area = Rect::new(
+            abs.x - slop.left,
+            abs.y - slop.top,
+            abs.w + slop.horizontal(),
+            abs.h + slop.vertical(),
+        );
+        if !hit_area.contains(p) {
             return None;
         }
         // 滚动条区域优先命中滚动容器自身（用于拖动滚动条，而非下方内容）。
@@ -4665,7 +4721,7 @@ impl Tree {
             n.child_clip(abs.inset(n.padding)).contains(p)
         } else {
             true
-        };
+        } && (!n.clip_outline || n.outline_clip(abs).0.contains(p));
         if in_content {
             // 倒序遍历子节点：后绘制者在上层，优先命中。`raised` 子节点整体后绘制
             // （见 `Tree::paint_children`），故先倒序测它们，再倒序测其余。

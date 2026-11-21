@@ -137,7 +137,7 @@ fn main() {
 | 容器 | `scroll`（竖向 / 横向 / 双向；滚轮/触摸+裁剪+滚动条）/ `tabs` / `tabs_pill` / `divider` / `dialog`（模态）/ `dialog_panel`（带标题栏）/ `visible_when`（条件可见） |
 | 导航 | `menu_bar`（原生手感菜单栏：滑动切换、←→ 跨菜单、F10 / Alt 激活、助记键）/ `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴）；选中高亮在行间滑动（`slide_highlight`，`list_pill` 已接入） |
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
-| 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
+| 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选）；表头拖动调列宽（权重可持久化） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
 | 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单；Linux 经 StatusNotifierItem）与桌面通知、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
 

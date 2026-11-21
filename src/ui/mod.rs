@@ -26,6 +26,7 @@ pub mod slide_highlight;
 pub mod sortable_table;
 pub mod split;
 pub mod stepper;
+mod table_cols;
 pub mod text_content;
 mod text_fit;
 pub mod virtual_list;
@@ -740,6 +741,10 @@ pub struct Element {
     weight_fn: Option<Box<dyn Fn() -> f32>>,
     place: Option<crate::core::Placement>,
     clip_children: bool,
+    /// 按自身圆角外形裁子树，见 [`Element::clip`]。
+    clip_outline: bool,
+    /// 先于普通兄弟受测、后于它们绘制（见 `Node::raised`）。crate 内部用（列宽手柄）。
+    raised: bool,
     scroll_axis: crate::spec::ScrollAxis,
     click: Option<ClickFn>,
     blur: Option<ClickFn>,
@@ -804,6 +809,8 @@ impl Element {
             weight_fn: None,
             place: None,
             clip_children: false,
+            clip_outline: false,
+            raised: false,
             scroll_axis: crate::spec::ScrollAxis::Vertical,
             click: None,
             blur: None,
@@ -4209,33 +4216,58 @@ impl Element {
     /// 由 [`table_custom`](Self::table_custom) 与 [`table_virtual`](Self::table_virtual)
     /// 共用——两者正文的构建方式完全不同（全量 vs 虚拟），表头却必须逐像素一致，
     /// 否则列宽会与正文错开。
-    fn table_header(columns: &[(String, f32)]) -> Self {
+    fn table_header(titles: &[String], cols: &table_cols::TableCols) -> Self {
         let mut header = Element::row()
             .width_match()
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
-        for (title, w) in columns {
-            header = header.child(
-                Element::stack()
-                    .weight(*w)
-                    .padding_xy(TABLE_CELL_PAD_X, TABLE_HEADER_PAD_Y)
-                    .child(
-                        Element::label(title.clone())
-                            .font_size(crate::theme::current().metrics.font_sm)
-                            .font_weight(600)
-                            .fg_role(Role::TextMuted)
-                            .width_match()
-                            .height(18),
-                    ),
-            );
+        let n = titles.len();
+        for (ci, title) in titles.iter().enumerate() {
+            let cell = Element::stack()
+                .padding_xy(TABLE_CELL_PAD_X, TABLE_HEADER_PAD_Y)
+                .child(
+                    Element::label(title.clone())
+                        .font_size(crate::theme::current().metrics.font_sm)
+                        .font_weight(600)
+                        .fg_role(Role::TextMuted)
+                        .max_lines(1)
+                        .truncate(Truncate::End)
+                        .width_match()
+                        .height(18),
+                );
+            header = header.child(cols.header_cell(cell, ci));
+            // 两列之间插零宽拖动手柄（不占布局，见 `TableCols::handle`）。
+            if ci + 1 < n {
+                header = header.child(cols.handle(ci));
+            }
         }
         header
+    }
+
+    /// 表格骨架 `col[ 表头, 分隔线, 正文 ]`，根节点挂 [`table_cols::TableRoot`]——构建后链上的
+    /// 列宽修饰符（[`column_weights`](Self::column_weights) 等）靠它找到列句柄。
+    /// 八种表格共用，`actions` / `sort_indicator` 等修饰符据此结构按下标定位表头与正文。
+    fn table_frame(header: Element, body: Element, cols: table_cols::TableCols) -> Self {
+        let mut root = Element::col()
+            .width_match()
+            .child(header)
+            .child(Element::divider())
+            .child(body.weight(1.0));
+        root.set_widget(Box::new(table_cols::TableRoot { cols }));
+        root
+    }
+
+    /// 拆出列标题与列宽句柄。
+    fn table_cols(columns: Vec<(String, f32)>) -> (Vec<String>, table_cols::TableCols) {
+        let (titles, weights): (Vec<String>, Vec<f32>) = columns.into_iter().unzip();
+        (titles, table_cols::TableCols::new(weights))
     }
 
     /// 数据表格（自定义单元格）：同 [`Element::table`]，但每个单元格是任意 `Element`
     /// （可放 `clickable`/`text_input` 等实现选中/编辑）。`columns` 为 (列标题, 权重)。
     pub fn table_custom(columns: Vec<(String, f32)>, rows: Vec<Vec<Element>>) -> Self {
-        let header = Self::table_header(&columns);
+        let (titles, cols) = Self::table_cols(columns);
+        let header = Self::table_header(&titles, &cols);
         // 正文：逐行，斑马纹 + 行下分隔线。`cross(Stretch)` 让单元格撑满行高（便于整格高亮）；
         // 行本身不设内边距——内边距在各单元格内部（见 table_cell_pad / table_editable）。
         let mut scroll = Element::scroll().fill();
@@ -4245,8 +4277,7 @@ impl Element {
                 tr = tr.bg_role(Role::SurfaceAlt);
             }
             for (ci, cell) in cells.into_iter().enumerate() {
-                let w = columns.get(ci).map(|c| c.1).unwrap_or(1.0);
-                tr = tr.child(cell.weight(w));
+                tr = tr.child(cols.weigh(cell, ci));
             }
             // 整行悬停轻微高亮（叠层在斑马纹之上、单元格之下；可编辑单元格的 clickable 叠层叠加其上）。
             tr.set_widget(Box::new(sortable_table::HoverRow::new()));
@@ -4257,11 +4288,7 @@ impl Element {
                     .child(Element::divider()),
             );
         }
-        Element::col()
-            .width_match()
-            .child(header)
-            .child(Element::divider())
-            .child(scroll.weight(1.0))
+        Self::table_frame(header, scroll, cols)
     }
 
     /// 可编辑数据表格：单元格数据用 `Signal<String>` 承载（显示自动跟随），点单元格触发
@@ -4325,12 +4352,12 @@ impl Element {
         rows: Vec<Vec<impl Into<String>>>,
         sort: Signal<Option<SortKey>>,
     ) -> Self {
-        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
         let data: Vec<Vec<String>> = rows
             .into_iter()
             .map(|r| r.into_iter().map(Into::into).collect())
             .collect();
-        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
 
         // 表头：响应式。单元格由 SortableHeader 首次布局时构建（见其 on_update），
         // 故 .sort_indicator(..) 覆盖能在 build 前设入并被采纳。客户端模式无回调。
@@ -4339,7 +4366,10 @@ impl Element {
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
         header.set_widget(Box::new(sortable_table::SortableHeader::new(
-            cols, sort, None,
+            titles,
+            cols.clone(),
+            sort,
+            None,
         )));
         header.reactive = true;
 
@@ -4349,20 +4379,17 @@ impl Element {
         let mut body = Element::col().width_match();
         for (disp, &ri) in order.iter().enumerate() {
             body = body.child(sortable_table::body_row(
-                disp, ri, &data[ri], &weights, None, None, 1, None, None,
+                disp, ri, &data[ri], &cols, None, None, 1, None, None,
             ));
         }
         body.set_widget(Box::new(sortable_table::SortableBody::new(
-            data, weights, sort,
+            data,
+            cols.clone(),
+            sort,
         )));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
-
-        Element::col()
-            .width_match()
-            .child(header)
-            .child(Element::divider())
-            .child(scroll.weight(1.0))
+        Self::table_frame(header, scroll, cols)
     }
 
     /// 服务端排序表格（受控数据 + 排序意图回调）：适合大数据集分页——**前端不排序**，
@@ -4390,8 +4417,8 @@ impl Element {
         sort: Signal<Option<SortKey>>,
         on_sort: impl FnMut(&mut EventCtx, Option<SortKey>) + 'static,
     ) -> Self {
-        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
-        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
         let on_sort: sortable_table::OnSort = Rc::new(RefCell::new(on_sort));
 
         // 表头：响应式，单元格由 SortableHeader 首次布局构建（透传排序意图回调）。
@@ -4400,7 +4427,8 @@ impl Element {
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
         header.set_widget(Box::new(sortable_table::SortableHeader::new(
-            cols,
+            titles,
+            cols.clone(),
             sort,
             Some(on_sort),
         )));
@@ -4412,18 +4440,13 @@ impl Element {
         let mut body = Element::col().width_match();
         for (disp, row) in initial.iter().enumerate() {
             body = body.child(sortable_table::body_row(
-                disp, disp, row, &weights, None, None, 1, None, None,
+                disp, disp, row, &cols, None, None, 1, None, None,
             ));
         }
-        body.set_widget(Box::new(sortable_table::PagedBody::new(rows, weights)));
+        body.set_widget(Box::new(sortable_table::PagedBody::new(rows, cols.clone())));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
-
-        Element::col()
-            .width_match()
-            .child(header)
-            .child(Element::divider())
-            .child(scroll.weight(1.0))
+        Self::table_frame(header, scroll, cols)
     }
 
     /// 虚拟滚动列表：只构建**视口内**的行，容量与行数无关——十万行与一百行的每帧成本
@@ -4512,21 +4535,18 @@ impl Element {
         rows: Signal<Vec<Vec<String>>>,
         row_height: i32,
     ) -> Self {
-        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
-        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
-        let header = Self::table_header(&cols);
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
+        let header = Self::table_header(&titles, &cols);
 
         let mut body = Self::col().width_match();
         body.set_widget(Box::new(sortable_table::VirtualTableBody::new(
-            rows, weights, row_height,
+            rows,
+            cols.clone(),
+            row_height,
         )));
         body.reactive = true;
-
-        Self::col()
-            .width_match()
-            .child(header)
-            .child(Self::divider())
-            .child(Self::scroll().fill().child(body).weight(1.0))
+        Self::table_frame(header, Self::scroll().fill().child(body), cols)
     }
 
     /// 虚拟滚动 + **服务端分页**表格：整份数据在后端，前端只按滚动位置按段取。
@@ -4581,8 +4601,8 @@ impl Element {
         row_height: i32,
         on_need: impl FnMut(&mut EventCtx, row_source::RowRequest) + 'static,
     ) -> Self {
-        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
-        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
 
         // 表头：响应式，绑定行源自己的排序信号。这里不传 on_sort——点表头只改信号，
         // 作废缓存与按新排序重新请求由正文接手（见 VirtualServerBody::on_update）。
@@ -4591,7 +4611,8 @@ impl Element {
             .cross(Align::Stretch)
             .bg_role(Role::SurfaceAlt);
         header.set_widget(Box::new(sortable_table::SortableHeader::new(
-            cols,
+            titles,
+            cols.clone(),
             source.sort(),
             None,
         )));
@@ -4599,15 +4620,13 @@ impl Element {
 
         let mut body = Self::col().width_match();
         body.set_widget(Box::new(sortable_table::VirtualServerBody::new(
-            source, weights, row_height, on_need,
+            source,
+            cols.clone(),
+            row_height,
+            on_need,
         )));
         body.reactive = true;
-
-        Self::col()
-            .width_match()
-            .child(header)
-            .child(Self::divider())
-            .child(Self::scroll().fill().child(body).weight(1.0))
+        Self::table_frame(header, Self::scroll().fill().child(body), cols)
     }
 
     /// 分页操作栏：条目总数 + 当前页 + 首/上/下/末页 + 跳转框。
@@ -4780,12 +4799,12 @@ impl Element {
         selected: Vec<Signal<bool>>,
         sort: Signal<Option<SortKey>>,
     ) -> Self {
-        let cols: Vec<(String, f32)> = columns.into_iter().map(|(t, w)| (t.into(), w)).collect();
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
         let data: Vec<Vec<String>> = rows
             .into_iter()
             .map(|r| r.into_iter().map(Into::into).collect())
             .collect();
-        let weights: Vec<f32> = cols.iter().map(|c| c.1).collect();
         let scw = sortable_table::select_col_w();
 
         // 表头：[全选列] + [可排序数据列子行]，与正文的 [复选框列] + [数据列] 逐列对齐
@@ -4795,7 +4814,10 @@ impl Element {
             .widget(sortable_table::SelectAllCheck::new(selected.clone()));
         let mut subrow = Element::row().weight(1.0).cross(Align::Stretch);
         subrow.set_widget(Box::new(sortable_table::SortableHeader::new(
-            cols, sort, None,
+            titles,
+            cols.clone(),
+            sort,
+            None,
         )));
         subrow.reactive = true;
         let header = Element::row()
@@ -4808,16 +4830,78 @@ impl Element {
         // 正文：滚动容器保留内置 ScrollWidget；SelectableBody 挂在其内部 col 上，首次布局构建行。
         let mut body = Element::col().width_match();
         body.set_widget(Box::new(sortable_table::SelectableBody::new(
-            data, weights, selected, sort,
+            data,
+            cols.clone(),
+            selected,
+            sort,
         )));
         body.reactive = true;
         let scroll = Element::scroll().fill().child(body);
+        Self::table_frame(header, scroll, cols)
+    }
 
-        Element::col()
-            .width_match()
-            .child(header)
-            .child(Element::divider())
-            .child(scroll.weight(1.0))
+    /// 取表格的列宽句柄；不是表格元素时 debug 期 panic（链错了元素）。
+    #[track_caller]
+    fn table_cols_or_panic(&mut self, who: &str) -> Option<table_cols::TableCols> {
+        let cols = table_cols::cols_of(self);
+        debug_assert!(
+            cols.is_some(),
+            "{who}() 只能用于 Element::table*(..) 构造的表格"
+        );
+        cols
+    }
+
+    /// 把表格的列宽绑定到应用持有的信号——**持久化列宽**用这个。
+    ///
+    /// 列宽是权重（与构造器里 `(标题, 权重)` 同语义），与窗口尺寸、DPI 无关，可原样存盘。
+    /// 用户拖动表头分界时信号随之改写；应用也可随时 `set` 新权重（如「恢复默认列宽」）。
+    /// 信号里已有的值**优先**——那是上次存下的列宽；长度与列数不符（首次运行的空 `Vec`、
+    /// 升级后增减了列）或含非正值时，先写回构造器给的默认权重，避免列宽错位到别的列。
+    ///
+    /// 拖动过程中信号每帧都在变；要在**松手时**落盘，配 [`on_columns_resized`](Self::on_columns_resized)。
+    ///
+    /// 外部改写须在事件回调里（点击、按键、`on_interval` 等宿主会随之重排的路径）；在其它
+    /// 线程或事件之外直接 `set` 只触发重绘、不重排，列宽要到下一次重排才生效——契约同
+    /// [`weight_when`](Self::weight_when)。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// # fn load_saved_widths() -> Vec<f32> { Vec::new() }
+    /// let widths = signal(load_saved_widths()); // 首次运行为空 Vec，会被填成默认权重
+    /// Element::table(vec![("名称", 3.0), ("大小", 1.0)], vec![vec!["a.txt", "12"]])
+    ///     .column_weights(widths)
+    ///     .on_columns_resized(|_ctx, w| println!("存盘: {w:?}"))
+    ///     .height(240);
+    /// ```
+    #[track_caller]
+    pub fn column_weights(mut self, weights: Signal<Vec<f32>>) -> Self {
+        if let Some(cols) = self.table_cols_or_panic("column_weights") {
+            cols.bind(weights);
+        }
+        self
+    }
+
+    /// 用户拖动表头分界、**松手**时回调一次，参数为调整后的整组列权重——落盘的时机。
+    /// 单击手柄没拖动不触发。拖动中的实时值请读 [`column_weights`](Self::column_weights)
+    /// 绑定的信号。
+    #[track_caller]
+    pub fn on_columns_resized(mut self, f: impl FnMut(&mut EventCtx, &[f32]) + 'static) -> Self {
+        if let Some(cols) = self.table_cols_or_panic("on_columns_resized") {
+            cols.set_on_resized(Rc::new(RefCell::new(f)));
+        }
+        self
+    }
+
+    /// 是否允许拖动表头分界调整列宽（默认 `true`）。关掉后分界上的手柄不参与命中与绘制，
+    /// 表头单元格边缘的点击（排序）也就不会被手柄吞掉。
+    ///
+    /// 只有数据列之间可拖；多选表的复选框列、[`actions`](Self::actions) 操作列宽度固定。
+    #[track_caller]
+    pub fn resizable_columns(mut self, on: bool) -> Self {
+        if let Some(cols) = self.table_cols_or_panic("resizable_columns") {
+            cols.set_resizable(on);
+        }
+        self
     }
 
     /// 覆盖排序表格的排序指示器样式（字形/字号/颜色/槽宽/间距/位置）。仅对
@@ -5405,6 +5489,28 @@ impl Element {
         self.style.corner_radii = Some(c);
         self
     }
+    /// 把子树裁剪到本节点的**外形**：描边内侧、带圆角（CSS `overflow: hidden`）。
+    ///
+    /// 贴边内容放进圆角容器时用：表头底色、斑马纹、图片都是直角的，不裁就会盖出容器
+    /// 的圆角与描边。裁剪区是边框内侧（不扣 padding），四角半径随 [`corner`](Self::corner)
+    /// / [`corners`](Self::corners) 并收小一个线宽，与描边内缘同心。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// // 无内边距的圆角卡片里放表格：表头与斑马纹顺着卡片的圆角收边。
+    /// Element::col()
+    ///     .corner(10.0)
+    ///     .border_role(Role::Border, 1)
+    ///     .clip()
+    ///     .child(Element::table(vec![("名称", 2.0), ("大小", 1.0)], vec![vec!["a", "1"]]).height(160));
+    /// ```
+    ///
+    /// 代价：软件后端每帧为裁剪区建一块整窗 mask（与滚动容器同量级），只给真需要的容器加。
+    /// 文字按外框矩形裁剪、不扣圆角——内容有内边距时字落不进四角，故不影响常规布局。
+    pub fn clip(mut self) -> Self {
+        self.clip_outline = true;
+        self
+    }
     pub fn fg(mut self, c: Color) -> Self {
         self.style.fg = c;
         self.style.fg_role = None;
@@ -5598,6 +5704,7 @@ impl Element {
             cursor: self.cursor,
             focused: false,
             clip_children: self.clip_children,
+            clip_outline: self.clip_outline,
             scroll_axis: self.scroll_axis,
             scroll_y: 0,
             content_h: 0,
@@ -5608,7 +5715,7 @@ impl Element {
             scroll_bars: Size::ZERO,
             prev_visible: Cell::new(true),
             offset: Point::new(0, 0),
-            raised: false,
+            raised: self.raised,
             overlay: self.overlay,
             overlay_swallow: self.dismiss_swallow,
             presence: None,
@@ -7270,6 +7377,56 @@ mod tests {
         assert_eq!(top.len(), 3, "表格 = 表头 + 分隔线 + 滚动正文");
         let scroll = top[2];
         assert_eq!(tree.get(scroll).unwrap().children.len(), 2, "正文应有 2 行");
+    }
+
+    /// `.clip()`：无内边距的圆角描边容器里，贴边的直角内容（表头底色这类）不得盖出
+    /// 圆角与描边。经真实 build → layout → paint，取四角与描边处的像素。
+    #[test]
+    fn clip_keeps_flush_content_inside_rounded_border() {
+        use crate::render::skia::SkiaCanvas;
+        const RED: Color = Color::rgb(255, 0, 0);
+        let render = |clip: bool| {
+            let inner = Element::col().width_match().weight(1.0).bg(RED);
+            let mut card = Element::col()
+                .width_match()
+                .weight(1.0)
+                .bg(Color::rgb(255, 255, 255))
+                .corner(16.0)
+                .border(Color::rgb(0, 0, 255), 2)
+                .child(inner);
+            if clip {
+                card = card.clip();
+            }
+            let root = Element::col()
+                .fill()
+                .bg(Color::rgb(0, 255, 0))
+                .padding(10)
+                .child(card);
+            let tree = layout(root);
+            let mut pm = tiny_skia::Pixmap::new(200, 200).unwrap();
+            {
+                let mut c = SkiaCanvas::new(&mut pm);
+                tree.paint(&mut c);
+            }
+            pm
+        };
+        let rgb = |pm: &tiny_skia::Pixmap, x, y| {
+            let p = pm.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue())
+        };
+        // 对照组：不裁时红底盖住左上圆角外（应是外层绿）与左边描边（应是蓝）。
+        let raw = render(false);
+        assert_eq!(
+            rgb(&raw, 11, 11),
+            (255, 0, 0),
+            "对照组前提：不裁时红底应盖出圆角"
+        );
+        let pm = render(true);
+        assert_eq!(rgb(&pm, 11, 11), (0, 255, 0), "圆角外应露出外层底色");
+        assert_eq!(rgb(&pm, 188, 188), (0, 255, 0), "右下圆角外应露出外层底色");
+        assert_eq!(rgb(&pm, 10, 100), (0, 0, 255), "左边描边不得被内容盖住");
+        assert_eq!(rgb(&pm, 100, 189), (0, 0, 255), "底边描边不得被内容盖住");
+        assert_eq!(rgb(&pm, 100, 100), (255, 0, 0), "内容区照常绘制");
     }
 
     #[test]

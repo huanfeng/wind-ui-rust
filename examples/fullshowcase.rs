@@ -1679,6 +1679,56 @@ fn main() {
         .height(240),
     );
 
+    // 列宽拖动 + 持久化 + 圆角贴边：列宽权重放在应用持有的信号里（真实应用从配置读、
+    // 松手时写回）；表格贴边放进无内边距的圆角容器，靠 `.clip()` 让表头底色与斑马纹顺着圆角收边。
+    let tb_8 = {
+        let default_w: Vec<f32> = file_cols().iter().map(|c| c.1).collect();
+        let widths = signal(Vec::<f32>::new()); // 首次运行为空，会被填成默认权重
+        let shown = widths.map(|w| {
+            let s: Vec<String> = w.iter().map(|x| format!("{x:.2}")).collect();
+            format!("当前列权重：[{}]", s.join(", "))
+        });
+        Element::card(
+            "列宽拖动 + 圆角贴边 .clip()（拖表头分界调列宽，松手回调存盘；贴边表格不出角）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(
+                    Element::col()
+                        .width_match()
+                        .corner(10.0)
+                        .bg_role(Role::Surface)
+                        .border_role(Role::Border, 1)
+                        .clip()
+                        .child(
+                            Element::table_sortable(file_cols(), file_rows(), signal(None))
+                                .column_weights(widths)
+                                .on_columns_resized(|ctx, w| {
+                                    ctx.toast(format!("列宽已保存（{} 列）", w.len()))
+                                })
+                                .height(180),
+                        ),
+                )
+                .child(
+                    Element::hstack()
+                        .width_match()
+                        .child(
+                            Element::label_signal(shown)
+                                .font_size(12.5)
+                                .fg_role(Role::TextMuted)
+                                .weight(1.0),
+                        )
+                        .child(
+                            Element::button("恢复默认列宽")
+                                .neutral()
+                                .outline()
+                                .small()
+                                .on_click(move |_| widths.set(default_w.clone())),
+                        ),
+                ),
+        )
+    };
+
     // ── 按控件族分组装页 ──
     // 卡片的 `let` 顺序与重排前完全一致（闭包捕获的 move 语义因此不变），
     // 分类只体现在下面的组装：原先「控件」一页塞了 26 张卡片，从拖拽重排到标签省略
@@ -1855,7 +1905,8 @@ fn main() {
             .child(tb_4)
             .child(tb_5)
             .child(tb_6)
-            .child(tb_7),
+            .child(tb_7)
+            .child(tb_8),
     );
 
     let im_poly = Element::card(
