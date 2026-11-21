@@ -25,11 +25,12 @@ run() {
 run cargo clippy --all-targets -- -D warnings || exit 1
 run cargo test || exit 1
 run cargo clippy --no-default-features --all-targets -- -D warnings || exit 1
-run cargo clippy --all-targets --features gpu -- -D warnings || exit 1
+# 可选图片格式搭 gpu 档一起检查（与 CI 一致，见 ci.yml 同名步骤的注释）。
+run cargo clippy --all-targets --features gpu,image-formats -- -D warnings || exit 1
 # gpu 档只跑 `--lib`（CI 上是全量）。差的是 doctest，而 doctest 与本 feature 无关——上面
 # 默认档那一步已经把它们全跑过一遍。在 gpu 档重跑的代价却很实在：每条 doctest 单独链接
 # 一次完整的 wgpu 依赖树，开发机上会撞 `LINK : fatal error LNK1102: 内存不足`，门禁于是
 # 红在与改动毫无关系的地方。假红比漏跑更伤——它教人 `--no-verify`。
-run cargo test --features gpu --lib || exit 1
+run cargo test --features gpu,image-formats --lib || exit 1
 
 echo "[pre-push] ✓ 三档 feature 的 clippy + 测试全部通过"

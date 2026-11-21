@@ -82,12 +82,15 @@ jobs:
       # 拿不到适配器时 GPU 用例会打印「跳过」后返回——绿灯不等于跑了，怀疑时进日志搜
       # 「跳过：本机没有可用的 wgpu 适配器」。Linux 上这一档守的主要是「能编译」：
       # Linux 平台层尚未接 GPU 呈现，但 `src/render/gpu/` 在那里照样要编得过。
-      - name: Clippy（gpu feature，非 macOS）
+      #
+      # 可选图片格式（`image-formats`，默认关）搭这一档一起跑：纯 Rust、与平台无关，
+      # 不必单开一档多编一遍；没有它，src/render/formats/ 的解码器与测试在 CI 里完全不编译。
+      - name: Clippy（gpu + image-formats，非 macOS）
         if: runner.os != 'macOS'
-        run: cargo clippy --all-targets --features gpu -- -D warnings
-      - name: Test（gpu feature，非 macOS）
+        run: cargo clippy --all-targets --features gpu,image-formats -- -D warnings
+      - name: Test（gpu + image-formats，非 macOS）
         if: runner.os != 'macOS'
-        run: cargo test --features gpu
+        run: cargo test --features gpu,image-formats
         env:
           WINDUI_REQUIRE_XKB: ${{ runner.os == 'Linux' && '1' || '' }}
 

@@ -44,8 +44,8 @@ cargo test                               # 单元测试（须全绿）
 # 非默认档：CI 跑，本地默认档编译不到。改 src/render/gpu/、src/platform/、或任何会被
 # 后端缓存键引用的类型（TextStyle、Image…）时必跑——漏过两次真实缺陷，见 CONTRIBUTING。
 cargo clippy --no-default-features --all-targets
-cargo clippy --all-targets --features gpu
-cargo test --features gpu --lib
+cargo clippy --all-targets --features gpu,image-formats   # 可选图片格式搭 gpu 档一起检查
+cargo test --features gpu,image-formats --lib
 
 cargo run --release --example fullshowcase           # 运行综合示例窗口
 # Windows 上要示例 exe 带图标：加 `--features example-icon`（默认关，它需要 MSVC C++ 工具链）
