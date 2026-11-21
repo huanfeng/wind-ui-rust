@@ -39,6 +39,17 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
+# 可选图片格式（默认全关，需要哪种开哪种）。都挂进 `ImageDecoder` 默认注册表，
+# `Image::from_bytes` / `Element::image*` 按文件头自动识别，公共 API 不变。
+# 动图（GIF / WebP）只取首帧。各 feature 的体积增量见 docs/API_GUIDE.md 图片一节。
+jpeg = ["dep:zune-jpeg"]
+gif = ["dep:gif"]
+webp = ["dep:image-webp"]
+# BMP 与 ICO 自写解码，零依赖。ICO 的条目可以是 DIB（BMP 去掉文件头），故依赖 bmp。
+bmp = []
+ico = ["bmp"]
+# 一次开全部可选格式。
+image-formats = ["jpeg", "gif", "webp", "bmp", "ico"]
 # 把 assets/windui.ico 烙进**本仓库示例** exe 的资源（默认关；只在 Windows host 上有效，
 # 别处是空操作）。仅服务 `cargo run --example`，库本身与下游完全不需要。
 #
@@ -62,6 +73,11 @@ rfd = { version = "0.17", default-features = false }
 # SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
 # 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
 resvg = { version = "0.50", optional = true, default-features = false }
+# 可选图片格式的解码库（见 [features] 的 jpeg / gif / webp），都是纯 Rust。
+# gif 关默认特性以去掉编码用的 color_quant。
+zune-jpeg = { version = "0.5", optional = true }
+gif = { version = "0.14", optional = true, default-features = false, features = ["std"] }
+image-webp = { version = "0.2", optional = true }
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"

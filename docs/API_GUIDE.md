@@ -797,7 +797,20 @@ Element::image_content(pic);
 ```
 > **禁用是核心级通用能力**：`.enabled(bool)` / `.enabled_signal(Signal<bool>)` / `.enabled_when(|| ...)` / `.disabled(bool)`（= `enabled(!v)`）可用于**任意控件或容器**。启用轴与可见轴形态一一对应（`visible` / `visible_signal` / `visible_when`），三形态可叠加、取与。核心统一拦事件、跳 Tab，并把启用态传入控件 paint 令其置灰；**禁用沿父链继承**——禁用一个容器即禁用其全部子节点（适合按条件禁用整个表单区）。各表单控件（Button/CheckBox/Switch/RadioButton/Slider/Dropdown/Stepper/TextInput/ColorPicker）均已实现置灰。
 
-> **格式扩展**：核心仅内置 PNG（零依赖）。需要 JPEG/WebP 等时，实现 `ImageDecoder` trait 并 `windui::render::image::register_decoder(...)` 注册；`Element::image*` 会按魔数自动分发，核心代码与 API 零改动。
+> **图片格式**：核心内置 PNG（零依赖）与 SVG（`svg` feature，默认开）。其它常用格式各有一个可选 feature，默认全关，需要哪种开哪种；开启后 `Image::from_bytes` / `from_file` / `Element::image*` 按文件头自动识别，API 不变：
+>
+> | feature | 格式 | 实现 | 体积增量* | 说明 |
+> |---|---|---|---|---|
+> | `jpeg` | JPEG | zune-jpeg | ~137KB | 按 EXIF Orientation 自动转正（手机竖拍照片） |
+> | `gif` | GIF | gif | ~24KB | 只取首帧 |
+> | `webp` | WebP | image-webp | ~149KB | 有损 + 无损；动图只取首帧 |
+> | `bmp` | BMP | 自写 | ~6KB | 1/4/8/16/24/32 位，含位域；不支持 RLE 压缩 |
+> | `ico` | ICO | 自写 | ~9KB | 条目为 PNG 或 BMP；默认取最大尺寸，按显示尺寸挑用 `Image::from_ico_bytes(bytes, Some(物理像素边长))`。会连带开启 `bmp` |
+> | `image-formats` | 以上全部 | | ~319KB | |
+>
+> \* Linux x86_64 release 实测，各平台略有出入。单张图片上限 4000 万像素，超过直接报错（防止构造的小文件声明巨大尺寸）。
+>
+> 以上之外的格式（AVIF、HEIC、TIFF 等）仍可实现 `ImageDecoder` trait，再用 `windui::render::image::register_decoder(...)` 注册；后注册者优先，也可以覆盖内置实现。
 
 ### 链接
 ```rust

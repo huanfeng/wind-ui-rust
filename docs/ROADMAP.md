@@ -118,7 +118,7 @@
 | **Slider 暴露「拖动中」状态** | ✅ 已交付 | — | `Element::slider(..).dragging_signal(Signal<bool>)`：按下置 true、抬起或被复位置 false，键盘调值不算 |
 | **ESC 兜底关窗的开关** | ✅ 已交付 | — | `App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`，默认 true；false 时 ESC 仍逐层收浮层与对话框，不关窗也不问 `on_close_request` |
 | **X11 输入法重启后 XIM 自动重连** | 🟡 记账 | P3 | 现状：只在启动时连一次 XIM，输入法（fcitx5 / ibus）重启后须重开应用才能重新输入中文。XIM 前端已失效、只剩过期登记时，启动预检会记一条日志并跳过 XIM，不再无声挂起（2026-11-21 在 Deepin 25 真机上实际碰到）。方向：仿 Xlib `XRegisterIMInstantiateCallback`，监听根窗口 `XIM_SERVERS` 属性变化与 `@server=<名>` 选区易主，丢弃旧 IC、重新握手并为已有窗口补建 IC。现在 Linux 桌面上 XIM 用得少（Qt/GTK 程序多走 D-Bus 前端），等有用户反馈再做 |
-| **常用图片格式（可选 feature）** | 🟢 规划 | P1 | issue #26。`jpeg`（zune-jpeg，自处理 EXIF 方向）/ `gif` / `webp`（首帧）/ `bmp`、`ico`（自写，零依赖）各一个 feature，默认关，`image-formats` 总开关。走现有 `ImageDecoder` 注册表，不改公共 API。详见 docs/issue26-plan.md §1 |
+| **常用图片格式（可选 feature）** | ✅ 已交付（随 Unreleased） | — | issue #26。`jpeg`（zune-jpeg，自处理 EXIF 方向）/ `gif` / `webp`（首帧）/ `bmp`、`ico`（自写，零依赖）各一个 feature，默认关，`image-formats` 总开关。走现有 `ImageDecoder` 注册表，不改公共 API。详见 docs/issue26-plan.md §1 |
 | **文件图标 `platform::file_icon(path, size)`** | 🟢 规划 | P1 | issue #26（取 exe 图标）。Windows `IShellItemImageFactory`、macOS `NSWorkspace::iconForFile`；Linux 需实现 XDG 图标主题查找，第一版返回 `None`。详见 docs/issue26-plan.md §1 |
 | **文件拖出 macOS / Linux** | 🟡 规划 | P2 | issue #26。Windows 已有 `drag_files`；macOS `NSDraggingSession` + 嵌套事件循环满足阻塞契约；X11 补 XDND 源端（后端被借用，需 thread-local 连接 + 待处理事件队列）；Wayland `start_drag` + 专用 EventQueue。顺序 macOS → X11 → Wayland。详见 docs/issue26-plan.md §2 |
 | **Linux GPU 后端** | 🟡 待验证 | P3 | issue #26。渲染器已跨平台，缺窗口 surface 与 Linux 文字栈的 `GlyphSource`。卡点：wgpu 要 libxcb / libwayland 的指针，需运行期 dlopen（X11 另开 XCB 连接，Wayland 整体切 system 后端）。先在有真实显卡的机器上做 X11 + Vulkan 技术验证，用数据决定是否做完整版。详见 docs/issue26-plan.md §3 |

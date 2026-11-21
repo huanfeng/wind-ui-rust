@@ -5,6 +5,8 @@
 
 ## 1. 常用图片格式（可选 feature）
 
+> **已交付**（随 Unreleased）：五个 feature 与 `image-formats` 总开关、`Image::from_ico_bytes`。实现在 `src/render/formats/`。
+
 ### 现状
 
 - 内置 PNG（tiny-skia 原生解码）和 SVG（`svg` feature，默认开）。

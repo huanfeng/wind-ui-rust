@@ -4,8 +4,8 @@
 //! - `Image`：解码后的不可变资源（内部 `Rc<Pixmap>`，构建期一次性解码，paint 期零解码）。
 //! - 解码框架：`ImageDecoder` trait + thread-local 注册表。核心内置 `PngDecoder`
 //!   （零新依赖，走 tiny-skia 原生 PNG 解码）；启用 `svg` feature（默认开）再内置
-//!   `SvgDecoder`（resvg 光栅化）；JPEG/WebP 等由使用方 `register_decoder` 注入，
-//!   核心代码与公共 API 零破坏。
+//!   `SvgDecoder`（resvg 光栅化）；JPEG / GIF / WebP / BMP / ICO 各有一个可选 feature
+//!   （默认关，见 `render::formats`）；其它格式由使用方 `register_decoder` 注入。
 //!
 //! 注册表照搬 `theme` 的 thread-local 模式（UI 单线程，免加锁），PNG 预置，
 //! 保证 `from_png_bytes` 永远可用。
@@ -123,7 +123,7 @@ pub trait ImageDecoder {
 }
 
 /// 内置 PNG 解码器：走 tiny-skia 原生 `decode_png`，再反预乘为 RGBA8 入 `DecodedImage`。
-struct PngDecoder;
+pub(crate) struct PngDecoder;
 
 /// PNG 文件头魔数。
 const PNG_MAGIC: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -236,12 +236,14 @@ impl ImageDecoder for SvgDecoder {
 }
 
 thread_local! {
-    /// 解码器注册表，PNG 预置（启用 `svg` feature 时追加 SVG）。后注册者优先级更高（覆盖在前）。
+    /// 解码器注册表，PNG 预置（启用 `svg` feature 时追加 SVG，再追加已启用的可选格式，
+    /// 见 `render::formats`）。后注册者优先级更高（覆盖在前）。
     static DECODERS: RefCell<Vec<Box<dyn ImageDecoder>>> = RefCell::new({
         #[allow(unused_mut)]
         let mut v: Vec<Box<dyn ImageDecoder>> = vec![Box::new(PngDecoder)];
         #[cfg(feature = "svg")]
         v.push(Box::new(SvgDecoder));
+        super::formats::register_builtin(&mut v);
         v
     });
 }
@@ -307,6 +309,16 @@ impl Image {
     #[cfg(feature = "svg")]
     pub fn from_svg_bytes(bytes: &[u8], target_width: Option<u32>) -> Result<Self, ImageError> {
         Self::from_decoded(SvgDecoder::rasterize(bytes, target_width)?)
+    }
+
+    /// 从 ICO 字节解码，按显示边长挑条目（`ico` feature）。
+    ///
+    /// ICO 里通常有同一图标的多个尺寸。`target=Some(边长)` 取不小于它的最小条目（都比它小
+    /// 时取最大的），`None` 取最大的。`from_bytes` / `from_file` 也能识别 ICO，按 `None` 处理。
+    /// HiDPI 下按物理像素传，例如 32 逻辑像素在 200% 缩放下传 `Some(64)`。
+    #[cfg(feature = "ico")]
+    pub fn from_ico_bytes(bytes: &[u8], target: Option<u32>) -> Result<Self, ImageError> {
+        Self::from_decoded(super::formats::ico::decode(bytes, target)?)
     }
 
     /// 从原始非预乘 RGBA8 构造。`rgba.len()` 须等于 `width*height*4`。

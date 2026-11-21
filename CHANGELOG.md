@@ -7,6 +7,11 @@
 
 ### 新增
 
+- **可选图片格式 feature**（issue #26）：`jpeg`（zune-jpeg，按 EXIF Orientation 自动转正）、
+  `gif`（首帧）、`webp`（有损 + 无损，首帧）、`bmp`、`ico`（后两者自写、零依赖），总开关
+  `image-formats`，默认全关。开启后挂进现有解码器注册表，`Image::from_bytes` / `from_file` /
+  `Element::image*` 按文件头自动识别，公共 API 不变；另新增 `Image::from_ico_bytes(bytes, target)`
+  按显示尺寸挑 ICO 条目。单张图片上限 4000 万像素。体积增量见 API_GUIDE 图片一节（全开约 +319KB）。
 - **表格列宽拖动 + 持久化**：八种表格的表头相邻两列分界均可拖动调列宽（默认开启）。
   列宽仍是权重，拖动只在相邻两列间转移、总和不变（表格始终撑满、不出横向滚动），每列
   至少 48px；表头与正文（含排序 / 虚拟表重建出的行）读同一个权重信号，拖动不重建任何行。
