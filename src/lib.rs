@@ -6,6 +6,7 @@
 // 图形绘制 API 以标量坐标传参（x,y,w,h,radius,width,paint）是有意设计，放宽该 lint。
 #![allow(clippy::too_many_arguments)]
 
+pub mod accessibility;
 /// 本 crate 的版本号（取自 `Cargo.toml`），供应用的「关于」页显示所用框架版本。
 ///
 /// 下游读不到依赖的 `Cargo.toml`，`env!("CARGO_PKG_VERSION")` 在应用里展开的是应用自己的
@@ -34,6 +35,10 @@ pub mod theme;
 pub mod ui;
 
 pub mod prelude {
+    pub use crate::accessibility::{
+        AccessibilityAction, AccessibilityNode, AccessibilityNodeId, AccessibilityRole,
+        AccessibilitySnapshot,
+    };
     pub use crate::anim::MotionLevel;
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::core::ScrollEdge;

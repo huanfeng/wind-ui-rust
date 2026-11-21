@@ -7,6 +7,14 @@
 
 ### 新增
 
+- **Windows：UI Automation 无障碍支持**。窗口向讲述人、NVDA 等屏幕阅读器暴露语义树（`Window` /
+  `Text` / `Button`），提供名称、角色、包围盒、焦点与 Invoke 模式；聚焦与点击经正常事件路径执行，
+  之后照常重绘、同步输入法、执行窗口操作与关窗检查。语义树每次查询现取真实控件树，隐藏子树不出现，
+  无角色的容器被拍平。新增 `windui::accessibility` 模块（`AccessibilitySnapshot`、`AccessibilityNode`、
+  `AccessibilityNodeId`、`AccessibilityRole`、`AccessibilityAction`、`AccessibilityActionResult`，
+  前五个进 prelude）、`Tree::accessibility_snapshot()`，以及 `Widget` 的三个可选方法
+  `accessibility_role` / `accessibility_name` / `accessibility_description`（有默认实现，既有控件
+  源码兼容）。手动冒烟见 `examples/uia_smoke.rs`。
 - **表格列宽拖动 + 持久化**：八种表格的表头相邻两列分界均可拖动调列宽（默认开启）。
   列宽仍是权重，拖动只在相邻两列间转移、总和不变（表格始终撑满、不出横向滚动），每列
   至少 48px；表头与正文（含排序 / 虚拟表重建出的行）读同一个权重信号，拖动不重建任何行。

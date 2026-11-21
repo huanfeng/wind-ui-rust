@@ -235,6 +235,16 @@ impl NodeId {
     pub(crate) fn as_u64(self) -> u64 {
         (u64::from(self.generation) << 32) | u64::from(self.index)
     }
+
+    /// arena 槽位下标。代际仍是身份的一部分。
+    pub(crate) fn index(self) -> u32 {
+        self.index
+    }
+
+    /// arena 代际。代际一变，指向旧节点的无障碍 provider 随之失效。
+    pub(crate) fn generation(self) -> u32 {
+        self.generation
+    }
 }
 
 /// 紧凑格式 `#12`（复用过的槽位带代际：`#12g2`）。
@@ -254,6 +264,18 @@ impl std::fmt::Debug for NodeId {
 
 /// 纯内容控件接口。不持有也不访问树。
 pub trait Widget {
+    /// 平台无关的无障碍角色。纯布局控件返回 `None`，在无障碍树里被拍平。
+    fn accessibility_role(&self) -> Option<crate::accessibility::AccessibilityRole> {
+        None
+    }
+    /// 当前的无障碍名称（已本地化）。`None` 表示这个控件没有语义标签。
+    fn accessibility_name(&self) -> Option<String> {
+        None
+    }
+    /// 可选的无障碍补充说明（已本地化）。节点挂了悬停提示时以提示为准。
+    fn accessibility_description(&self) -> Option<String> {
+        None
+    }
     /// 内容固有尺寸（content box，不含 padding）。容器/空控件返回 ZERO。
     /// `text` 供需要测量文本的控件（如 Label）使用。
     fn measure(&self, _avail: Size, _style: &Style, _text: &mut dyn TextEngine) -> Size {
