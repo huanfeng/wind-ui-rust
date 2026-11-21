@@ -59,6 +59,8 @@ For small tools, Electron easily costs hundreds of MB, and Go GUIs need 15–40M
 - **DPI / Retina aware** — widget tree in logical coordinates, paint layer uniformly scales to physical pixels, text rendered at physical font size (measure and draw share one path), staying sharp at high DPI (1.5x/2x/Retina).
 - **Clean focus ring** — the focus ring shows only during keyboard Tab navigation, never on mouse-only interaction.
 - **Complete widget set** — layout, text, buttons, form inputs, container navigation, lists, images, tray.
+- **Platform-native menu feel** — the right-click menu opens on release on Windows and on press on macOS / Linux by default (`App::context_menu_trigger` overrides it); menu items fire on release and can be backed out of by moving away; dropdowns and menu bars support press-drag-release to pick an item directly.
+- **Internationalization** — `Locales` switch languages at runtime; the framework's own strings (context menus, window system menu) ship in Chinese and English and can be overridden by the app.
 - **Touch / trackpad** — pan scrolling + fling inertia + edge bounce.
 - **Optional GPU acceleration (both platforms)** — large windows can opt in with `App::renderer(Renderer::Auto)`: Direct2D on Windows, wgpu/Metal on macOS (compiled in by default, no feature flag needed). Geometry, gradients and shadows run on the GPU while text is still rasterized by the platform stack (DirectWrite / Core Text), so fonts and metrics are unchanged. Software rendering stays the default; RDP sessions, machines without a GPU and off-screen screenshots fall back automatically, and a device loss at runtime is recovered by rebuilding — or, failing that, by switching that window back to software rendering. It never panics.
 - **Automatic screenshots** — `--screenshot` renders one frame off-screen to PNG (`--scale 1.5` for high-DPI), ideal for automated regression.
@@ -125,17 +127,17 @@ fn main() {
 
 | Category | Widgets |
 |----------|---------|
-| Layout | `col` / `row` (LinearLayout, with weight), `stack` (FrameLayout), `grid` (equal-width grid), `flex_spacer` |
+| Layout | `col` / `row` (LinearLayout, with weight), `stack` (FrameLayout), `grid` (equal-width grid), `split` (draggable split pane), `flex_spacer` |
 | Text | `label` (auto-wrap), `label_signal` (signal-bound), `link` (clickable), `rich` (rich text: styled spans / collapsible sections) |
 | Button | `button` (hover/press/focus states + click/Enter/Space activation), `icon_button` |
-| Form | `checkbox` / `switch` / `radio` (exclusive group) / `slider` (drag+keyboard) / `text_input` (CJK editing + password + multiline) / `dropdown` / `check_menu` / `stepper` / `chip` / `tag_field` |
+| Form | `checkbox` / `switch` / `radio` (exclusive group) / `slider` (drag+keyboard) / `text_input` (CJK editing + password + multiline) / `dropdown` / `combo_box` (editable dropdown) / `check_menu` / `stepper` / `chip` / `tag_field` / `color_picker` |
 | Feedback | `progress` (determinate/indeterminate) / `tooltip` / `toast` (centered transient overlay) / `badge` |
-| Container | `scroll` (wheel/touch + clip + scrollbar) / `tabs` / `tabs_pill` / `divider` / `dialog` (modal) / `dialog_panel` (titled) / `visible_when` |
-| Navigation | `segmented` / `nav_row` (drill-in) / `collapsible` / `accordion` · `accordion_multi` |
+| Container | `scroll` (vertical / horizontal / both; wheel/touch + clip + scrollbar) / `tabs` / `tabs_pill` / `divider` / `dialog` (modal) / `dialog_panel` (titled) / `visible_when` |
+| Navigation | `menu_bar` (native-feel menu bar: slide between menus, ←→ across menus, F10 / Alt activation, mnemonics) / `segmented` / `nav_row` (drill-in) / `collapsible` / `accordion` · `accordion_multi`; the selection highlight slides between rows (`slide_highlight`, used by `list_pill`) |
 | List | `list` / `list_pill` (sidebar style) / `list_icons` (single-select / scroll / highlight / icons / disabled state) / `list_signal` (data-driven dynamic list) / `reorder_list` (drag to reorder) |
-| Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select) |
+| Table | `table` (read-only) / `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server` (server-side sort + paging) / `table_selectable` (multi-select); drag header boundaries to resize columns (weights persistable) |
 | Image | `image` / `image_svg` / `image_view` (PNG/SVG, state modulation/tinting/rounding) |
-| System | System tray (icon + left/double click + native context menu), global hotkeys, multi-window (`ctx.open_window`, incl. singleton windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
+| System | System tray (icon + left/double click + native context menu; StatusNotifierItem on Linux) and desktop notifications, global hotkeys, multi-window (`ctx.open_window`, incl. singleton windows), start hidden, close-to-hide, frameless window (custom title bar), file drop, clipboard |
 
 Widget state binds uniformly to `Signal<T>` — a `Copy` handle created by `signal(initial)`:
 `checkbox` / `switch` take `Signal<bool>`, `dropdown` / `list` / `tabs` take `Signal<usize>`,
@@ -157,8 +159,8 @@ Examples fall into four groups:
 | Group | Examples |
 |-------|----------|
 | **Complete apps** | `settings` (settings window: title bar + icon sidebar + content + action bar + two dialogs), `about` (about page), `ime_settings` (IME settings scenario), `light_titlebar` (installer-style light title bar) |
-| **Widgets & capabilities** | `fullshowcase` (widget tour, seven tabs), `theming` (TOML themes + runtime reskin), `font_switch` (runtime UI font switch + font queries), `image` (images/SVG), `animation`, `emoji` (color emoji), `caret` (four caret styles) |
-| **Data display** | `virtual_list` (virtual list + table), `virtual_table_server` (server-side paging), `table_pager` (pager bar), `dyn_list` (data-driven dynamic list), `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline` |
+| **Widgets & capabilities** | `fullshowcase` (widget tour, seven tabs), `theming` (TOML themes + runtime reskin), `font_switch` (runtime UI font switch + font queries), `image` (images/SVG), `animation`, `emoji` (color emoji), `caret` (four caret styles), `menubar` (menu bar), `i18n` (multi-language), `color_picker`, `palette` (keyboard-only command palette) |
+| **Data display** | `virtual_list` (virtual list + table), `virtual_table_server` (server-side paging), `table_pager` (pager bar), `dyn_list` (data-driven dynamic list), `chat_scroll` (chat-style scrolling: stick to bottom / anchor on prepend), `list`, `dropdown`, `tabs_pill`, `toast`, `progress`, `multiline` |
 | **System integration** | `tray` (system tray), `hotkey` (global hotkeys + start hidden), `multi_window` (child windows + shared state), `file_drop`, `frameless` (custom title bar + system menu), `background_task` (cross-thread updates), `ime` |
 
 Plus `phase0`–`phase5` staged demos and the `perfprobe` performance probe, used for development and regression comparison.
@@ -180,7 +182,7 @@ Key design: nodes live in a **generational arena** (not `Rc<RefCell>`); the `Wid
 
 ## Status
 
-Windows and macOS are supported. Linux is usable: the X11 backend is the default, and the native Wayland backend (text-input-v3 IME, client-side title bar, xdg-activation) has passed the real-desktop regression checklist on GNOME 42 (and on Deepin 25 Treeland it was confirmed not to draw a second title bar under server-side decorations) but must currently be enabled with `WINDUI_BACKEND=wayland`. System tray, dragging files out, zero-window resident mode and windowed GPU rendering are not implemented yet, and global hotkeys are unavailable under native Wayland — see [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) (Chinese). The MVP widget set is complete and actively being refined.
+Windows and macOS are supported. Linux is usable: the X11 backend is the default, and the native Wayland backend (text-input-v3 IME, client-side title bar, xdg-activation) has passed the real-desktop regression checklist on GNOME 42 (and on Deepin 25 Treeland it was confirmed not to draw a second title bar under server-side decorations) but must currently be enabled with `WINDUI_BACKEND=wayland`. System tray and desktop notifications (over D-Bus, on the X11 path) and zero-window resident mode are implemented; dragging files out and windowed GPU rendering are not yet, and the tray, resident mode and global hotkeys are unavailable under native Wayland — see [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md) (Chinese). The MVP widget set is complete and actively being refined.
 
 ## Documentation
 

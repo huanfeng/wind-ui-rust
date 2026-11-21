@@ -1,12 +1,11 @@
 [package]
 name = "windui"
-version = "0.32.0"
+version = "0.34.0"
 edition = "2021"
 description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText；Linux: X11/Wayland+fontconfig）"
 authors = ["huanfeng <huanfengf@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/huanfeng/wind-ui-rust"
-homepage = "https://github.com/huanfeng/wind-ui-rust"
 documentation = "https://docs.rs/windui"
 readme = "README.md"
 keywords = ["gui", "desktop", "windows", "macos", "linux"]
@@ -40,22 +39,29 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 # SVG 内嵌文字渲染（默认关）：开 resvg 文字栈 + 系统字体加载。代价是依赖体积增大、首次解码
 # SVG 时扫描系统字体——纯图标场景无需开启，需要时 `--features svg-text` 显式启用。
 svg-text = ["svg", "resvg/text", "resvg/system-fonts"]
+# 把 assets/windui.ico 烙进**本仓库示例** exe 的资源（默认关；只在 Windows host 上有效，
+# 别处是空操作）。仅服务 `cargo run --example`，库本身与下游完全不需要。
+#
+# 默认关的原因：它会拉 `embed-resource` → `vswhom-sys`，后者的 build.rs 要用 MSVC 的
+# C++ 编译器（cl.exe）。只有 Rust + Windows SDK 导入库、没装 VS C++ 工具链的机器上，
+# 连 windui 本身都编不过——而这仅仅是为了给示例换一张图标。要示例带图标就显式开：
+# `cargo run --example fullshowcase --features example-icon`。
+example-icon = ["dep:embed-resource"]
 
-# 构建脚本依赖：把 assets/windui.ico 嵌进示例 exe 的资源（见 build.rs）。
-# 只在 host 为 Windows 时拉取——Win32 资源在别的 host 上无从编译，那里 build.rs
-# 整段被 cfg 关掉，不需要这个依赖。
+# 构建脚本依赖：仅 `example-icon` 开启时参与（见 build.rs）。
+# 只在 host 为 Windows 时声明——Win32 资源在别的 host 上无从编译。
 [target.'cfg(windows)'.build-dependencies]
-embed-resource = "3"
+embed-resource = { version = "3", optional = true }
 
 # 跨平台依赖（所有目标平台共用）。
 [dependencies]
-# 与 resvg 0.48 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
+# 与 resvg 0.50 对齐到同一 tiny-skia 版本，避免依赖树编译两份。
 tiny-skia = "0.12"
 # 系统原生文件/目录选择对话框（PickDialog）。仅用阻塞 API，禁用异步 feature。
 rfd = { version = "0.17", default-features = false }
 # SVG 光栅化：resvg 渲染后端即 tiny-skia（与本项目同源）。关默认特性以剔除字体/栅格图等重依赖，
 # 只保留矢量路径渲染（含文字的 SVG 不渲染文字，图标场景足够）。
-resvg = { version = "0.48", optional = true, default-features = false }
+resvg = { version = "0.50", optional = true, default-features = false }
 # 主题配置（TOML 映射）。
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -131,11 +137,11 @@ windows = { version = "0.62", features = [
 # 在运行期 dlopen 系统的 libfontconfig——编译期不需要任何 -dev 包，运行期没有 fontconfig
 # 也能退回扫字体目录。Wayland 会话经 XWayland 运行。详见 docs/LINUX_PORTING.md。
 [target.'cfg(target_os = "linux")'.dependencies]
-# 0.13 而非最新：与 xim（XIM 输入法协议）依赖的大版本对齐，两者共用同一个连接类型。
+# x11rb 与 xim（XIM 输入法协议）的大版本必须同步升级：两者共用同一个连接类型。
 # xfixes：监听合成器选区（`_NET_WM_CM_S<屏>`）的出现 / 消失，无边框窗口的圆角随之开关。
-x11rb = { version = "0.13", features = ["xfixes"] }
+x11rb = { version = "0.14", features = ["xfixes"] }
 # XIM 客户端：与 fcitx5 / ibus 的 XIM 前端通话（合成串回调 + 提交）。
-xim = { version = "0.5", default-features = false, features = ["x11rb-client"] }
+xim = { version = "0.6", default-features = false, features = ["x11rb-client"] }
 ttf-parser = "0.25"
 ab_glyph_rasterizer = "0.1"
 # rfd 在 Linux 上必须选一个后端：xdg-portal 走 D-Bus 门户（无门户时回退 zenity），

@@ -203,10 +203,8 @@ fn nav_item(name: &'static str, glyph: &'static str, i: usize, sel: Signal<usize
     let on = Element::hstack()
         .width_match()
         .height(38)
-        .corner(9.0)
         .padding_xy(10, 0)
-        // 淡底而非实底：实底 accent 会把整条侧栏拉成一块高饱和色斑，压过右侧内容。
-        .bg_role_alpha(Role::Accent, 0.12)
+        // 选中底不在这里画：由侧栏容器统一画一块在行间滑动的淡底（见下方 `slide_target`）。
         .child(chip(true))
         .child(
             Element::label(name)
@@ -248,11 +246,25 @@ fn nav_item(name: &'static str, glyph: &'static str, i: usize, sel: Signal<usize
                 .corner(1.5)
                 .bg_role(Role::Accent),
         )
+        // 底块在滑，指示条若瞬移会和它脱节；淡入淡出让它跟着"换了一行"过渡。
+        .transition(Presence::fade())
         .visible_when(move || sel.get() == i);
 
+    // 选中时自报给 `nav_col` 的滑动高亮。淡底而非实底：实底 accent 会把整条侧栏拉成一块
+    // 高饱和色斑，压过右侧内容。颜色在闭包里取，运行期换主题照常跟随。
     Element::stack()
         .width_match()
         .height(38)
+        .slide_target(move || {
+            (sel.get() == i).then(|| HighlightSpec {
+                inset_x: 0.0,
+                inset_y: 0.0,
+                corner: 9.0,
+                color: Role::Accent
+                    .resolve(&windui::theme::current())
+                    .scale_alpha(0.12),
+            })
+        })
         .child(on)
         .child(off)
         .child(indicator)
@@ -316,7 +328,7 @@ fn main() {
         ("统计", "\u{25A6}"),
         ("关于", "\u{24D8}"),
     ];
-    let mut nav_col = Element::col().width_match().spacing(3);
+    let mut nav_col = Element::col().width_match().spacing(3).slide_highlight();
     for (i, (name, glyph)) in NAV.iter().enumerate() {
         nav_col = nav_col.child(nav_item(name, glyph, i, nav));
     }

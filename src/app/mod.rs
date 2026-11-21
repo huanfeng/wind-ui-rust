@@ -42,6 +42,8 @@ mod checkbox_motion_tests;
 mod combo_tests;
 mod damage;
 mod fling;
+#[cfg(test)]
+mod fling_bind_tests;
 mod focus;
 #[cfg(test)]
 mod key_damage_tests;
@@ -52,6 +54,8 @@ mod layout_anim_tests;
 #[cfg(test)]
 mod marks_tests;
 mod menu;
+#[cfg(test)]
+mod pin_crash_tests;
 #[cfg(test)]
 mod presence_tests;
 #[cfg(test)]
@@ -148,6 +152,7 @@ impl Window {
                 modal: false,
                 frameless: false,
                 system_menu: true,
+                menu_trigger: Default::default(),
                 min_width: 0,
                 min_height: 0,
                 bg: None,
@@ -163,7 +168,10 @@ impl Window {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                activate_on_show: true,
                 window_outline: Default::default(),
+                window_corner: Default::default(),
+                escape_closes_window: true,
             },
         }
     }
@@ -195,6 +203,7 @@ impl Window {
     /// 把本窗口设为**单例**：同一个 `key` 同时只存在一个窗口。
     ///
     /// 已经开着同键窗口时，本次请求被丢弃，那个窗口被激活到前台（最小化的会还原）。
+    /// Windows 上已有窗口设了 `activate_on_show(false)` 时，只显示，不抢前台焦点。
     /// 设置页、关于框这类"再点一次应该跳到已开的那个"的窗口用它。
     ///
     /// 判定在平台层做，不是应用层自己拿 `Signal` 记一个"开着没有"：
@@ -337,9 +346,30 @@ impl Window {
         self
     }
 
+    /// 是否在显示或重新唤起时激活窗口（默认 `true`）。
+    /// Windows 悬停浮窗可设为 `false`：显示不会抢走前台应用的键盘焦点，
+    /// 用户仍可点击窗口激活并操作。其他平台目前忽略此选项。
+    pub fn activate_on_show(mut self, on: bool) -> Self {
+        self.req.activate_on_show = on;
+        self
+    }
+
     /// 无边框窗口自画外框的取色策略，同 [`App::window_outline`]。
     pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
         self.req.window_outline = o;
+        self
+    }
+
+    /// ESC 没有浮层 / 对话框可收时是否关闭本窗口（默认 `true`），语义同
+    /// [`App::escape_closes_window`]。
+    pub fn escape_closes_window(mut self, on: bool) -> Self {
+        self.req.escape_closes_window = on;
+        self
+    }
+
+    /// 无边框窗口的圆角，同 [`App::window_corner`]。
+    pub fn window_corner(mut self, c: crate::platform::WindowCorner) -> Self {
+        self.req.window_corner = c;
         self
     }
 
@@ -399,6 +429,12 @@ impl Window {
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单，同 [`App::system_menu`]。
     pub fn system_menu(mut self, on: bool) -> Self {
         self.req.system_menu = on;
+        self
+    }
+
+    /// 右键菜单何时弹出，同 [`App::context_menu_trigger`]。
+    pub fn context_menu_trigger(mut self, t: crate::event::ContextMenuTrigger) -> Self {
+        self.req.menu_trigger = t;
         self
     }
 
@@ -638,6 +674,7 @@ fn build_new_window(
         resizable: req.resizable,
         frameless: req.frameless,
         system_menu: req.system_menu,
+        menu_trigger: req.menu_trigger,
         min_width: req.min_width,
         min_height: req.min_height,
         single: req.single,
@@ -648,7 +685,9 @@ fn build_new_window(
         // 默认值，症状是「设了却不生效」。
         position: req.position,
         skip_taskbar: req.skip_taskbar,
+        activate_on_show: req.activate_on_show,
         window_outline: req.window_outline,
+        window_corner: req.window_corner,
         // 渲染后端由平台按主窗那次的选择填（子窗不该比主窗更慢或更快）。
         // 其余字段（托盘/热键/截图/单实例）对子窗一律无意义，保持默认。
         ..WindowConfig::default()
@@ -696,6 +735,7 @@ fn build_new_window(
     // （见 `AppHandler::take_window_title`）。子窗各有一份宿主，故各跟各的。
     host.title_src = req.title_src;
     host.activate_handler = req.activate_handler;
+    host.escape_closes_window = req.escape_closes_window;
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
 
@@ -1119,6 +1159,7 @@ pub struct App {
     theme_src: Option<ThemeHandle>,
     intervals: Vec<(Duration, AppCallback)>,
     waker_shared: Option<Arc<WakerShared>>,
+    channel_senders: Vec<std::sync::Weak<()>>,
     single: Option<crate::single_instance::SingleInstance>,
     close_handler: Option<CloseHandler>,
     /// 窗口从隐藏态被唤起时的回调（见 [`App::on_show`]）。
@@ -1136,6 +1177,8 @@ pub struct App {
     /// 关闭请求转为隐藏窗口。与 `close_handler` 同属核心层的关闭决策链输入，
     /// 平台层对此无感知，故不放 `WindowConfig`。
     hide_on_close: bool,
+    /// ESC 在没有浮层 / 对话框可收时是否关窗（默认 true）。见 [`App::escape_closes_window`]。
+    escape_closes_window: bool,
     /// 最小化转为隐藏窗口（收进托盘）。与 `hide_on_close` 不同，这一项**平台层要问**
     /// （`UiHost::hide_on_minimize`）：最小化可以由系统标题栏、任务栏、Win+Down 触发，
     /// 那些路径根本不经过核心层。
@@ -1172,6 +1215,7 @@ impl App {
                 resident: false,
                 frameless: false,
                 system_menu: true,
+                menu_trigger: Default::default(),
                 motion: None,
                 reduced_motion: crate::anim::MotionLevel::Reduced,
                 screenshot_anim_at: None,
@@ -1187,7 +1231,9 @@ impl App {
                 icon: None,
                 position: None,
                 skip_taskbar: false,
+                activate_on_show: true,
                 window_outline: Default::default(),
+                window_corner: Default::default(),
                 ime_interrupt: Default::default(),
                 ime_inline: false,
             },
@@ -1197,6 +1243,7 @@ impl App {
             theme_src: None,
             intervals: Vec::new(),
             waker_shared: None,
+            channel_senders: Vec::new(),
             single: None,
             close_handler: None,
             show_handler: None,
@@ -1207,6 +1254,7 @@ impl App {
             system_theme: None,
             hide_on_close: false,
             hide_on_minimize: false,
+            escape_closes_window: true,
             bg_explicit: false,
             hotkey_ops: Rc::new(RefCell::new(Vec::new())),
             title_src: None,
@@ -1429,6 +1477,22 @@ impl App {
     /// [`WindowOutline::Off`]: crate::platform::WindowOutline::Off
     pub fn window_outline(mut self, o: crate::platform::WindowOutline) -> Self {
         self.cfg.window_outline = o;
+        self
+    }
+
+    /// 无边框窗口的圆角（默认 [`WindowCorner::Round`]）。**只在 Windows 11 生效**——那里的
+    /// 圆角由 DWM 画；其余平台忽略。窗口要贴着工作区边缘（停靠、侧栏式小工具）时选
+    /// [`WindowCorner::Square`]，否则四角被切掉会露出桌面。
+    ///
+    /// 与 [`window_outline`](Self::window_outline) 配合：`WindowOutline::Off` 在 Windows 11
+    /// 上同时去掉 DWM 画的那道 1px 边框（见其文档）。
+    ///
+    /// 常驻应用请在 [`Window::window_corner`] 上设；这里只作用于 `App::run` 的主窗。
+    ///
+    /// [`WindowCorner::Round`]: crate::platform::WindowCorner::Round
+    /// [`WindowCorner::Square`]: crate::platform::WindowCorner::Square
+    pub fn window_corner(mut self, c: crate::platform::WindowCorner) -> Self {
+        self.cfg.window_corner = c;
         self
     }
 
@@ -1925,6 +1989,23 @@ impl App {
         self
     }
 
+    /// ESC 在**没有浮层 / 对话框可收**时是否关闭窗口（默认 `true`）。
+    ///
+    /// 默认行为是：ESC 先收最顶层的锚定浮层，再关最顶层的对话框，都没有时按「关闭请求」
+    /// 走——问 [`on_close_request`](Self::on_close_request)、按 [`hide_on_close`](Self::hide_on_close)
+    /// 决定关还是隐。对只有一个主窗的应用，这等于**按一下 ESC 就退出**。设为 `false` 后 ESC 仍然
+    /// 收浮层、关对话框，但不再触碰窗口本身；要用 ESC 做别的事照旧写 [`on_shortcut`](Self::on_shortcut)。
+    ///
+    /// 与 `on_close_request` 的区别：后者拦的是**所有**关闭请求（点 × 也算），语义是「能不能关」；
+    /// 这里只管 ESC 这一个键的兜底，点 × 与 `ctx.request_close()` 不受影响。
+    ///
+    /// 常驻应用（`run_resident`）的窗口都由 [`Window`] 建，请在 [`Window::escape_closes_window`]
+    /// 上设；这里只作用于 `App::run` 的主窗。
+    pub fn escape_closes_window(mut self, on: bool) -> Self {
+        self.escape_closes_window = on;
+        self
+    }
+
     /// 配置系统托盘图标（图标 + 提示 + 左键/双击 + 原生右键菜单）。
     /// 窗口创建后安装，窗口销毁时自动清理。截屏模式下忽略。
     pub fn tray(mut self, tray: platform::Tray) -> Self {
@@ -1948,6 +2029,14 @@ impl App {
     /// （用户菜单优先，宿主不再插手）；整个不要才关掉它。
     pub fn system_menu(mut self, on: bool) -> Self {
         self.cfg.system_menu = on;
+        self
+    }
+
+    /// 右键菜单何时弹出：[`Auto`](crate::event::ContextMenuTrigger::Auto)（默认）随平台——
+    /// Windows 松开时弹，macOS / Linux 按下时弹；也可固定为 `Press` 或 `Release`。
+    /// 只管右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单）。
+    pub fn context_menu_trigger(mut self, t: crate::event::ContextMenuTrigger) -> Self {
+        self.cfg.menu_trigger = t;
         self
     }
 
@@ -2285,7 +2374,7 @@ impl App {
     ///
     /// `true` = 常驻模式正常运行，并由用户 / 程序（托盘「退出」）结束（macOS 例外：退出走
     /// `NSApp::terminate`，进程直接结束，本方法不会返回 `true`）；`false` = **没能
-    /// 启动或显示连接丢失**：缺托盘与热键入口被拒绝、macOS 尚未实现、Linux 上没有可连的
+    /// 启动或显示连接丢失**：缺托盘、热键与活动通道入口被拒绝、macOS 尚未实现、Linux 上没有可连的
     /// X 显示（无头机器、没开 XWayland）、Windows 上消息宿主窗口建不起来，或运行中 X
     /// 连接断开。调用方据此退化（例如改走 `run()` 开窗，或报错退出），而不是把起不来当成
     /// 正常退出。启动前可用 [`platform::resident_available`](crate::platform::resident_available)
@@ -2302,7 +2391,7 @@ impl App {
     ///
     /// # 误用的处理
     ///
-    /// 既无托盘图标也无全局热键时**打印一行并直接返回，不启动**（debug 下先 panic 指出
+    /// 既无托盘图标、全局热键，也无活动通道发送端时**打印一行并直接返回，不启动**（debug 下先 panic 指出
     /// 调用点）。这是 `run()` 那套 `start_hidden` / `hide_on_close` 防呆的加强版，因为
     /// 退化的后果不是一个量级：
     ///
@@ -2313,24 +2402,33 @@ impl App {
     ///   `WM_CLOSE` 都够不着它——那条消息要有窗口才收得到，而这个进程一个都没有。
     ///   用户只剩任务管理器的「详细信息」页强杀一条路。
     ///
+    /// 外部宿主可持有 [`App::channel`] 的发送端作为入口，无须另建托盘。启动时至少
+    /// 要有一个存活的发送端；宿主负责保持它存活，并经通道回调调用
+    /// [`TrayHandle::quit`](crate::platform::TrayHandle::quit) 结束消息循环。
     /// 所以这条检查不能只在 debug 生效：release 才是用户真正跑到的那一份。
     pub fn run_resident(mut self) -> bool {
         // debug 下仍然 panic：开发期要的是一个能指回调用点的堆栈，而不是一行日志。
         debug_assert!(
-            self.cfg.tray.is_some() || !self.cfg.hotkeys.is_empty(),
-            "run_resident 需配合 tray 或 hotkey：零窗口进程没有别的入口，也没有别的出口"
+            self.has_resident_entry(),
+            "run_resident 需配合 tray、hotkey 或活动的 channel：零窗口进程没有别的入口，也没有别的出口"
         );
-        if self.cfg.tray.is_none() && self.cfg.hotkeys.is_empty() {
+        if !self.has_resident_entry() {
             // 形状照抄 win32 `run_windowed` 里那道兜底（常驻模式下宿主窗口建不起来就退出）：
             // 常驻进程一旦失去全部入口就无法自救，宁可不启动，也不留一个杀不掉的空壳。
             eprintln!(
-                "[windui] run_resident 需配合 tray 或 hotkey：零窗口进程没有任何入口，\
+                "[windui] run_resident 需配合 tray、hotkey 或活动的 channel：零窗口进程没有任何入口，\
                  也没有任何出口（进程将无法退出），已拒绝启动"
             );
             return false;
         }
         self.cfg.resident = true;
         self.launch()
+    }
+
+    fn has_resident_entry(&self) -> bool {
+        self.cfg.tray.is_some()
+            || !self.cfg.hotkeys.is_empty()
+            || self.channel_senders.iter().any(|s| s.strong_count() > 0)
     }
 
     /// `run` 与 `run_resident` 的公共尾段：装应用级设施、组装 handler、交给平台。
@@ -2450,6 +2548,7 @@ impl App {
             host.title_src = self.title_src;
             host.activate_handler = self.activate_handler;
             host.hide_on_minimize = self.hide_on_minimize;
+            host.escape_closes_window = self.escape_closes_window;
             Box::new(host)
         } else {
             Box::new(ClosureHandler {
@@ -2482,6 +2581,7 @@ impl App {
         host.title_src = self.title_src;
         host.activate_handler = self.activate_handler;
         host.hide_on_minimize = self.hide_on_minimize;
+        host.escape_closes_window = self.escape_closes_window;
         host
     }
 
@@ -2522,6 +2622,7 @@ impl App {
         let waker = self.shared_waker();
         let (tx, pump) = new_channel(waker, on_message);
         crate::sync::register_pump(pump);
+        self.channel_senders.push(tx.liveness());
         tx
     }
 
@@ -2572,6 +2673,33 @@ impl AppHandler for ClosureHandler {
     fn render(&mut self, target: &mut dyn crate::render::RenderTarget, size: Size) {
         (self.f)(target, size);
     }
+}
+
+/// 右键按下到松开允许的最大位移（逻辑像素）；超过视为拖开反悔，不弹菜单。
+const RIGHT_CLICK_SLOP: i32 = 8;
+
+/// ESC / 快捷键的关闭裁定。bool 口径（是否放行）分不出「收了层」与「拦截器拒绝」，
+/// 而键盘路径 on_key 的返回值正是平台层要不要失效窗口的唯一依据——收层被当成
+/// 「没动界面」跳过重绘时，浮层信号已翻、`needs_full` 已置，屏幕上却赖着不走，
+/// 直到下一次鼠标移动才消失（真机暴露：verify_batch §6）。
+#[derive(Debug, PartialEq, Eq)]
+enum CloseDecision {
+    /// 没动界面：拦截器拒绝，或 `escape_cisses_window=false` 且没有层可收。
+    Nothing,
+    /// 收了一层（浮层 / 对话框）：界面动了，需重绘。
+    Peel,
+    /// 放行关窗：平台层接下来销毁窗口，重绘无意义。
+    Close,
+    /// 放行但 hide_on_close 转隐藏：Hide 意图已排（`pending_window_op`），平台层接手。
+    /// bool 口径（是否放行销毁）下它算 false——「关窗」被换成了「隐窗」，`self.close`
+    /// 不置；重绘同样无意义（窗口即将离开屏幕）。
+    Hide,
+}
+
+/// 暂存的右键菜单：请求本身 + 按下位置。
+struct PendingMenu {
+    req: crate::event::MenuRequest,
+    down: Point,
 }
 
 /// 控件树交互宿主：渲染 + 事件分发 + 焦点管理。
@@ -2635,6 +2763,8 @@ struct UiHost {
     /// 一次「按下关闭浮层」后，吞掉随之而来的 Up：避免该 Up 下发到控件树重新激活
     /// 浮层下方控件（典型：下拉按钮点一下又弹一遍——Down 关、Up 再开）。
     swallow_up: bool,
+    /// 右键按下时产生、等松开才弹的菜单（见 `defer_right_click_menu`）。
+    pending_menu: Option<PendingMenu>,
     /// 本宿主的序号，用于认领/释放通道消费权（见 `crate::sync` 的 App 级登记表）。
     ///
     /// 通道本身挂在应用上而非本宿主上：主窗关掉之后，别的窗口要能继续收后台数据。
@@ -2668,6 +2798,8 @@ struct UiHost {
     system_theme: Option<SystemThemeHandler>,
     /// 关闭请求转为隐藏窗口（常驻托盘类应用）。
     hide_on_close: bool,
+    /// ESC 在没有浮层 / 对话框可收时是否关窗。默认 true，见 [`App::escape_closes_window`]。
+    escape_closes_window: bool,
     /// 最小化转为隐藏窗口。平台层经 `UiHost::hide_on_minimize` 拉取——最小化可以从
     /// 系统标题栏、任务栏、Win+Down 进来，那些路径不经过核心层。
     hide_on_minimize: bool,
@@ -2704,6 +2836,8 @@ struct UiHost {
     frameless: bool,
     /// 拖动区右键是否默认接管为系统菜单（`App::system_menu`）。
     system_menu: bool,
+    /// 右键菜单触发时机（`App::context_menu_trigger`）。
+    menu_trigger: crate::event::ContextMenuTrigger,
     /// 本窗口的状态与能力快照（平台经 `on_window_state` 推送）。
     ///
     /// 每次事件分发 / 绘制前注入线程局部供控件与菜单构建器读取。**必须每次都注**、
@@ -2729,38 +2863,74 @@ impl UiHost {
     /// 借用期间被调用（win32 `WM_CLOSE` / macOS `windowShouldClose:`），此处碰 OS 会
     /// 同步重入（见 AGENTS.md 铁律 6）。
     fn resolve_close(&mut self) -> bool {
+        matches!(self.resolve_close_decision(), CloseDecision::Close)
+    }
+
+    /// ESC 的处理：收浮层 / 关对话框，都没有时按 [`App::escape_closes_window`] 决定要不要
+    /// 走关闭请求。
+    ///
+    /// `escape_closes_window=false` 时只收层、不碰窗口：此时连 `on_close_request` 也不问——
+    /// 那是「窗口要关了」的询问，而这一下根本不打算关。
+    fn resolve_escape(&mut self) -> CloseDecision {
+        if !self.escape_closes_window {
+            return match self.dismiss_top_layer() {
+                true => CloseDecision::Peel,
+                false => CloseDecision::Nothing,
+            };
+        }
+        self.resolve_close_decision()
+    }
+
+    /// ESC / 快捷键的关闭裁定：区分「收了层」（界面动了，必须重绘）与「拒绝 / 放行」
+    /// （界面没动，或平台层接手后重绘无意义）。[`Self::resolve_close`] 的 bool 口径
+    /// 分不出这两者，而键盘路径的返回值正是平台层要不要失效窗口的唯一依据——
+    /// 分不出时收层会被当成「没动界面」跳过重绘，浮层信号已翻、`needs_full` 已置，
+    /// 屏幕上却赖着不走，直到下一次鼠标移动才消失（真机暴露：verify_batch §6）。
+    fn resolve_close_decision(&mut self) -> CloseDecision {
         // 防自我递归：`on_close_request` 的回调里再调 `ctx.request_close()` 会经
         // `apply_app_effects` 回到这里。那种写法本就没有意义（正在回答"能不能关"），
         // 直接放行不再重入。
         if self.resolving_close {
-            return true;
+            return CloseDecision::Close;
         }
         self.resolving_close = true;
-        let out = self.resolve_close_inner();
+        let out = self.resolve_close_decision_inner();
         self.resolving_close = false;
         out
     }
 
-    fn resolve_close_inner(&mut self) -> bool {
+    fn resolve_close_decision_inner(&mut self) -> CloseDecision {
+        if self.dismiss_top_layer() {
+            return CloseDecision::Peel;
+        }
+        // 无层可收时询问 close_handler，默认允许关闭。
+        let allowed = self.ask_close_handler();
+        if allowed && self.hide_on_close {
+            self.pending_window_op = Some(WindowOp::Hide);
+            return CloseDecision::Hide;
+        }
+        if allowed {
+            CloseDecision::Close
+        } else {
+            CloseDecision::Nothing
+        }
+    }
+
+    /// 收起最顶层的一层：先锚定浮层，再对话框。收了一层返回 true（并升整窗重绘）。
+    fn dismiss_top_layer(&mut self) -> bool {
         // 锚定浮层排在对话框之前：浮层多半是从对话框**内部**的控件展开的（设置对话框
         // 里的取色盘），先关对话框会把还开着的浮层一起吞掉，ESC 就少了一级。
         if self.tree.close_topmost_overlay() {
             self.damage.needs_full = true;
-            return false;
+            return true;
         }
         // 其次关闭本窗口最顶层的可见对话框（不退出窗口）。
         if self.tree.close_topmost_modal() {
             // 对话框被关闭，需要重绘以隐藏遮罩。
             self.damage.needs_full = true;
-            return false;
+            return true;
         }
-        // 无对话框时询问 close_handler，默认允许关闭。
-        let allowed = self.ask_close_handler();
-        if allowed && self.hide_on_close {
-            self.pending_window_op = Some(WindowOp::Hide);
-            return false;
-        }
-        allowed
+        false
     }
 
     /// 询问关闭请求拦截器（[`App::on_close_request`]），无拦截器时默认放行。
@@ -2922,6 +3092,7 @@ impl UiHost {
             // 以建窗标题为起点：平台已经拿这一份建了窗，首次轮询不该把同样的字再推一遍。
             title_last: cfg.title.clone(),
             swallow_up: false,
+            pending_menu: None,
             host_id: crate::sync::next_host_id(),
             decoration: false,
             interval_cbs,
@@ -2937,6 +3108,7 @@ impl UiHost {
             hide_on_close,
             // 参数表已经有 12 个位置参数，这一项跟 `title_src` 一样建完再塞
             hide_on_minimize: false,
+            escape_closes_window: true,
             resolving_close: false,
             pending_windows: Vec::new(),
             scope: None,
@@ -2946,6 +3118,7 @@ impl UiHost {
             last_present: None,
             frameless: cfg.frameless,
             system_menu: cfg.system_menu,
+            menu_trigger: cfg.menu_trigger,
             window_state,
         }
     }
@@ -2992,6 +3165,9 @@ impl UiHost {
             || ev.kind != PointerKind::Down
             || ev.button != crate::event::MouseButton::Right
             || res.menu.is_some()
+            // 这一按已被树层消费（浮层「收起即吞」）：到此为止，不再另弹菜单。拖动区本身
+            // 不消费按下（`drag_hit_at` 为真即不是控件），所以这条不会误伤正常的标题栏右键。
+            || res.consumed
             || !self.tree.drag_hit_at(ev.pos)
         {
             return;
@@ -3011,6 +3187,55 @@ impl UiHost {
         // 菜单已经建在宿主里了却一直不上屏，直到下一次鼠标移动凑巧触发一帧。
         // 脏区那一半不用操心：`menu.is_open()` 会把本帧升成整窗（见 `damage.rs` 的 overlay）。
         res.repaint = true;
+    }
+
+    /// 右键菜单一律在**松开**时才弹（桌面惯例；原生标题栏、资源管理器皆如此）。
+    ///
+    /// 控件（TextInput 的编辑菜单）、`on_context_menu`、标题栏系统菜单都是在右键 `Down`
+    /// 上产出 `MenuRequest` 的——统一在这里截下来暂存，等配对的 `Up` 再放行，各处无需
+    /// 各改各的。按下仍照常生效（输入框的光标/选区落点），只是菜单延后。
+    ///
+    /// 松开处离按下处超过 `RIGHT_CLICK_SLOP` 则作罢（按住拖开再松 = 反悔）；比的是距离
+    /// 而不是命中节点——行里有图标/文字等子节点时，手抖一像素落到邻居上不该取消。
+    /// 无锚点的菜单位置取松开处。暂存只活到下一次任意按下，免得没等到 `Up`（捕获丢失）的残留串到后面。
+    fn defer_right_click_menu(
+        &mut self,
+        ev: crate::event::PointerEvent,
+        res: &mut crate::core::DispatchResult,
+    ) {
+        use crate::event::MouseButton;
+        if ev.kind == PointerKind::Down {
+            self.pending_menu = None;
+        }
+        // 按下即弹的策略：什么都不用拦，菜单照常在 Down 上开（并由 `held_open` 支持滑选）。
+        if ev.button != MouseButton::Right || self.menu_trigger.on_press() {
+            return;
+        }
+        match ev.kind {
+            PointerKind::Down => {
+                if let Some(req) = res.menu.take() {
+                    self.pending_menu = Some(PendingMenu { req, down: ev.pos });
+                }
+            }
+            PointerKind::Up => {
+                let Some(p) = self.pending_menu.take() else {
+                    return;
+                };
+                let far =
+                    (ev.pos.x - p.down.x).abs().max((ev.pos.y - p.down.y).abs()) > RIGHT_CLICK_SLOP;
+                if far {
+                    return;
+                }
+                let mut req = p.req;
+                if req.anchor_top.is_none() {
+                    req.pos = ev.pos;
+                }
+                res.menu = Some(req);
+                res.consumed = true;
+                res.repaint = true;
+            }
+            _ => {}
+        }
     }
 
     /// 本宿主开始干活了：把**属于这个窗口**的状态注入线程局部。
@@ -3649,6 +3874,7 @@ impl AppHandler for UiHost {
         let mut capture = self.capture;
         let mut res = self.tree.dispatch_pointer(ev, &mut hover, &mut capture);
         self.fill_system_menu(ev, &mut res);
+        self.defer_right_click_menu(ev, &mut res);
         // 诊断快照：命中的是哪个节点、有没有被消费。用 `hit_test` 而不是 `hover`——
         // 后者在 Up/Leave 上会被清掉，而我们要记的是「这一下点到哪儿了」。
         let hit = self.tree.hit_test(ev.pos);
@@ -3704,6 +3930,10 @@ impl AppHandler for UiHost {
         // 可参与失焦裁决的按下：Down 且事件前无捕获（拖动中的按下不算）。
         let blur_at = (ev.kind == PointerKind::Down && !had_capture).then_some(ev.pos);
         let (repaint, damage, _) = self.apply_dispatch_effects(res, FocusSource::Pointer, blur_at);
+        // 这一下按下打开了菜单：按键还按着，记下位置供「按住滑到某项上松开」判断。
+        if ev.kind == PointerKind::Down && self.menu.is_open() {
+            self.menu.held_open = Some(ev.pos);
+        }
         // hover/拖动（Move）自包含（控件自身视觉）→ 直接用其脏区走局部。
         // 点击等可能改变布局/显隐 → 置 needs_relayout：render 重排后用结构签名判定，
         // 签名不变才用控件脏区走局部，变了（对话框/切页等）自动升级整窗。
@@ -3728,6 +3958,10 @@ impl AppHandler for UiHost {
 
     fn last_frame_damage(&self) -> Option<crate::geometry::Rect> {
         self.last_present
+    }
+
+    fn context_menu_on_press(&self) -> bool {
+        self.menu_trigger.on_press()
     }
 
     fn on_dismiss_overlays(&mut self) -> bool {
@@ -3858,8 +4092,15 @@ impl AppHandler for UiHost {
                     self.damage.needs_full = true;
                     repaint = true;
                 }
-                if sc.close && self.resolve_close() {
-                    self.close = true;
+                if sc.close {
+                    // 与 ESC 同源：先收层再问拦截器。收了层界面动了——必须让平台层
+                    // 知道要重绘（同 on_key 的 Escape 分支），否则浮层/对话框在屏幕
+                    // 上赖着不走。
+                    match self.resolve_close_decision() {
+                        CloseDecision::Peel => repaint = true,
+                        CloseDecision::Close => self.close = true,
+                        CloseDecision::Hide | CloseDecision::Nothing => {}
+                    }
                 }
             }
             if handled {
@@ -3892,7 +4133,15 @@ impl AppHandler for UiHost {
                         repaint = true;
                     }
                 }
-                Key::Escape if self.resolve_close() => self.close = true,
+                Key::Escape => {
+                    match self.resolve_escape() {
+                        CloseDecision::Peel => repaint = true,
+                        CloseDecision::Close => self.close = true,
+                        // Hide：Hide 意图已排，平台层消费 pending_window_op——重绘与
+                        // close 都不适用。
+                        CloseDecision::Hide | CloseDecision::Nothing => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -5001,6 +5250,248 @@ mod tests {
         assert!(!handler.wants_close(), "对话框还在时不该关窗口");
     }
 
+    /// `escape_closes_window(false)`：ESC 没有浮层 / 对话框可收时不关窗，而点 × 照常。
+    ///
+    /// 默认（对照组）一次 ESC 就退出——单主窗应用的痛点。这里要同时钉住三件事：
+    /// 默认行为不变；关掉之后 ESC 仍然逐层收浮层与对话框（不能把「收层」也一起关了）；
+    /// 窗口本身的关闭请求（点 ×）不受这个开关影响。
+    #[test]
+    fn escape_closes_window_switch() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let host = |on: bool| {
+            let show = crate::signal::signal(true);
+            let app = App::new("t", 300, 300).escape_closes_window(on).content(
+                Element::col().child(Element::dialog(show, Element::col().width(80).height(40))),
+            );
+            (app.into_handler_for_test(), show)
+        };
+        let k = key_ev();
+
+        // 对照：默认下，对话框收起后再一次 ESC 关窗。
+        let (mut h, show) = host(true);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get() && !h.wants_close(), "第一次 ESC 只关对话框");
+        h.on_key(k(Key::Escape));
+        assert!(h.wants_close(), "默认：没有层可收时 ESC 关窗");
+
+        // 关掉开关：照样先收对话框，之后 ESC 不再关窗。
+        let (mut h, show) = host(false);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get(), "关掉开关后 ESC 仍要收对话框");
+        h.on_key(k(Key::Escape));
+        h.on_key(k(Key::Escape));
+        assert!(!h.wants_close(), "没有层可收时 ESC 不该关窗");
+        // 点 ×（关闭请求）不受影响。
+        assert!(h.on_close_request(), "窗口自己的关闭请求仍然放行");
+    }
+
+    /// 子窗口同样可配，且**必须经 `build_new_window` 搬到宿主上**：那条构造路径靠逐字段显式
+    /// 搬运，漏一个字段的症状就是「设了却不生效」，平台层收到的永远是默认值。
+    #[test]
+    fn window_escape_switch_reaches_the_child_host() {
+        use crate::app::test_support::key_ev;
+        let theme = ThemeHandle::new(Rc::new(Theme::default()));
+        let ops: HotkeyOpQueue = Rc::new(RefCell::new(Vec::new()));
+        let mk = |on: Option<bool>| {
+            let mut w = Window::new("子窗", 120, 80);
+            if let Some(on) = on {
+                w = w.escape_closes_window(on);
+            }
+            let req = w.content(|| Element::col().fill());
+            let NewWindow::Create(_, mut host) =
+                build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
+            else {
+                panic!("build_new_window 只会产出 Create");
+            };
+            host.on_key(key_ev()(Key::Escape));
+            host.wants_close()
+        };
+        assert!(mk(None), "子窗默认：ESC 关窗（对话框式窗口的惯例）");
+        assert!(!mk(Some(false)), "显式关掉后 ESC 不关子窗");
+    }
+
+    /// flag=false 时层序不变：对话框里开着浮层，第一下收浮层，第二下关对话框，第三下什么也不做。
+    /// 浮层优先于对话框这条序在 flag=true 时已有测试，这里钉住「关掉开关没把它也关了」。
+    #[test]
+    fn escape_without_closing_still_peels_layers_in_order() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        use crate::render::PixmapTarget;
+        use tiny_skia::Pixmap;
+
+        let (show, open) = (crate::signal::signal(true), crate::signal::signal(true));
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(Element::dialog(
+                show,
+                Element::col().width(200).height(160).child(
+                    Element::col().width(100).height(30).popup(
+                        open,
+                        Element::col()
+                            .width(80)
+                            .height(60)
+                            .bg_role(crate::style::Role::Surface),
+                    ),
+                ),
+            )),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let mut pm = Pixmap::new(300, 300).unwrap();
+        let mut frame =
+            |h: &mut UiHost| h.render(&mut PixmapTarget { pixmap: &mut pm }, Size::new(300, 300));
+        frame(&mut h);
+        let k = key_ev();
+
+        h.on_key(k(Key::Escape));
+        assert!(!open.get() && show.get(), "第一下只收浮层");
+        frame(&mut h);
+        h.on_key(k(Key::Escape));
+        assert!(!show.get(), "第二下关对话框");
+        frame(&mut h);
+        h.on_key(k(Key::Escape));
+        assert!(!h.wants_close(), "第三下没有层可收，也不关窗");
+    }
+
+    /// ESC 收层必须让平台层知道要重绘：`on_key` 返回 true。
+    ///
+    /// 突变目标：on_key 的 Escape 分支去掉 `Peel => repaint = true` → 本测试红
+    ///（返回 false，平台层不失效窗口，浮层在屏幕上赖着不走）。
+    /// 对照组：无层可收时（flag=false）不请求重绘——界面没动就不该刷，钉住「无谓
+    /// 整窗」不引入。
+    #[test]
+    fn escape_peel_requests_repaint() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+
+        let open = crate::signal::signal(true);
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(
+                Element::col().width(100).height(30).popup(
+                    open,
+                    Element::col()
+                        .width(80)
+                        .height(60)
+                        .bg_role(crate::style::Role::Surface),
+                ),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let k = key_ev();
+
+        let repaint = h.on_key(k(Key::Escape));
+        assert!(repaint, "收浮层即界面动了，on_key 必须返回 true");
+        assert!(!open.get(), "浮层已收");
+        assert!(!h.wants_close());
+
+        // 对照组：没有层可收时 ESC（flag=false）界面没动，不请求重绘。
+        let mut h2 = App::new("t", 100, 100)
+            .escape_closes_window(false)
+            .content(Element::col())
+            .into_handler_for_test();
+        assert!(
+            !h2.on_key(k(Key::Escape)),
+            "没动界面就不请求重绘——无谓整窗是回归"
+        );
+        assert!(!h2.wants_close());
+    }
+
+    /// 快捷键路径的 close 语义（`on_shortcut` 置 `sc.close`）与 ESC 同源：先收层再问
+    /// 拦截器，收了层同样必须置 repaint。此前 `sc.close && resolve_close()` 的 bool
+    /// 口径把「收层」混进「拦截器拒绝」跳过了重绘——症状同 ESC 的缺口。
+    ///
+    /// 隔离要点：handler 必须返回 `false`、按键必须是非 Escape——否则 handled=true 会
+    /// 在快捷键块之后无条件 `return true`，repaint 断言与生产代码的 `Peel => repaint`
+    /// 臂脱钩，突变验证全绿（审查发现）。返回 false + 非 Escape 键让 on_key 的返回值
+    /// 只由快捷键块置上的 repaint 决定。
+    #[test]
+    fn shortcut_close_peel_requests_repaint() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+
+        let open = crate::signal::signal(true);
+        let app = App::new("t", 300, 300).escape_closes_window(false).content(
+            Element::stack().fill().child(
+                Element::col().width(100).height(30).popup(
+                    open,
+                    Element::col()
+                        .width(80)
+                        .height(60)
+                        .bg_role(crate::style::Role::Surface),
+                ),
+            ),
+        );
+        let mut h = app.into_handler_for_test();
+        h.set_scale(1.0);
+        let k = key_ev();
+        h.shortcut = Some(Box::new(|sc, _ev| {
+            sc.close = true;
+            false // handled=false：不吞键，返回值才轮得到 repaint 说话
+        }));
+        let repaint = h.on_key(k(Key::Char('a')));
+        assert!(repaint, "快捷键 sc.close 收层后 on_key 必须返回 true");
+        assert!(!open.get(), "浮层已收");
+        assert!(!h.wants_close());
+    }
+
+    /// 文档承诺 flag=false 时 ESC「不再触碰窗口」——`hide_on_close` 下也不例外：
+    /// 不能把「关窗」换成「隐窗」，用户眼里一样是 ESC 把窗口弄没了。
+    #[test]
+    fn escape_without_closing_does_not_hide_the_window_either() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let mk = |on: bool| {
+            App::new("t", 100, 100)
+                .hide_on_close()
+                .escape_closes_window(on)
+                .content(Element::col())
+                .into_handler_for_test()
+        };
+        let mut h = mk(true);
+        h.on_key(key_ev()(Key::Escape));
+        assert!(
+            h.pending_window_op.is_some(),
+            "对照：默认下 hide_on_close 让 ESC 隐藏窗口"
+        );
+        let mut h = mk(false);
+        h.on_key(key_ev()(Key::Escape));
+        assert!(h.pending_window_op.is_none(), "关掉开关后 ESC 不隐藏窗口");
+        assert!(!h.wants_close());
+    }
+
+    /// 关掉开关后，ESC 不该去问 `on_close_request`：那是「窗口要关了」的询问，
+    /// 问了就会弹出「确认退出？」之类的对话，而这一下根本不打算关。
+    #[test]
+    fn escape_without_closing_does_not_consult_the_close_handler() {
+        use crate::app::test_support::key_ev;
+        use crate::platform::AppHandler;
+        let asked = crate::signal::signal(0);
+        let mut h = App::new("t", 100, 100)
+            .escape_closes_window(false)
+            .on_close_request(move |_| {
+                asked.set(asked.get() + 1);
+                true
+            })
+            .content(Element::col())
+            .into_handler_for_test();
+        h.on_key(key_ev()(Key::Escape));
+        assert_eq!(asked.get(), 0, "ESC 不关窗，也就不该询问关闭拦截器");
+
+        // 对照组：默认下同样的 ESC 确实会走到拦截器。没有它，「ESC 压根没到兜底」这种退化
+        // 也会让上面的断言空过。
+        let asked = crate::signal::signal(0);
+        let mut h = App::new("t", 100, 100)
+            .on_close_request(move |_| {
+                asked.set(asked.get() + 1);
+                true
+            })
+            .content(Element::col())
+            .into_handler_for_test();
+        h.on_key(key_ev()(Key::Escape));
+        assert_eq!(asked.get(), 1, "对照：默认下 ESC 会询问关闭拦截器");
+    }
+
     /// 托盘 / 热键建出来的窗口必须收得到**它自己声明**的快捷键。
     ///
     /// 常驻模式（`run_resident`）下界面全由这条路建出来，而 `App::on_shortcut` 那一份
@@ -5076,7 +5567,9 @@ mod tests {
         let req = Window::new("贴图", 120, 80)
             .position(-1920, 40)
             .skip_taskbar(true)
+            .activate_on_show(false)
             .window_outline(crate::platform::WindowOutline::Off)
+            .window_corner(crate::platform::WindowCorner::Square)
             .content(|| Element::col().fill());
         let NewWindow::Create(cfg, _) = build_new_window(req, &theme, &ops, Color::hex(0xFFFFFF))
         else {
@@ -5088,10 +5581,16 @@ mod tests {
             "副屏在左时坐标为负，原样传下去"
         );
         assert!(cfg.skip_taskbar);
+        assert!(!cfg.activate_on_show);
         assert_eq!(
             cfg.window_outline,
             crate::platform::WindowOutline::Off,
             "外框策略经 `..WindowConfig::default()` 时没搬就会被静默填成 Auto"
+        );
+        assert_eq!(
+            cfg.window_corner,
+            crate::platform::WindowCorner::Square,
+            "圆角同理：没搬就会被静默填成 Round"
         );
 
         let req = Window::new("设置", 120, 80).content(|| Element::col().fill());
@@ -5101,7 +5600,9 @@ mod tests {
         };
         assert_eq!(cfg.position, None, "对照：不设就交给系统摆放");
         assert!(!cfg.skip_taskbar);
+        assert!(cfg.activate_on_show);
         assert_eq!(cfg.window_outline, crate::platform::WindowOutline::Auto);
+        assert_eq!(cfg.window_corner, crate::platform::WindowCorner::Round);
     }
 
     /// 单例去重是在**开窗那一刻**按窗口登记表判的——这正是「同一个回调里对同一个键既关
@@ -6094,6 +6595,107 @@ mod tests {
             !with_hotkey.cfg.hotkeys.is_empty(),
             "只有热键、没有托盘也算有入口：热键能唤出窗口，退出走窗口自己的关闭"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "creates a real native window; run with --ignored --test-threads=1"]
+    fn visible_channel_closes_a_keyed_window_without_apphost_timers() {
+        crate::sync::reset_pumps();
+        enum Message {
+            Close,
+            Quit,
+        }
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let activated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen_activation = activated.clone();
+        let mut app = App::resident("channel close regression");
+        let quit = app.tray_handle();
+        let sender = app.channel(move |ctx, message| match message {
+            Message::Close => ctx.close_window("visible-channel-test"),
+            Message::Quit => quit.quit(),
+        });
+        let background = sender.clone();
+        let worker = std::thread::spawn(move || {
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            let nonactivating = unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    FindWindowW, GetForegroundWindow, IsWindowVisible,
+                };
+                FindWindowW(None, windows::core::w!("channel close regression")).is_ok_and(
+                    |popup| IsWindowVisible(popup).as_bool() && GetForegroundWindow() != popup,
+                )
+            };
+            background.send(Message::Close).unwrap();
+            let closed = closed_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            background.send(Message::Quit).unwrap();
+            (closed, nonactivating)
+        });
+        let request = Window::new("channel close regression", 200, 100)
+            .single("visible-channel-test")
+            .activate_on_show(false)
+            .frameless(true)
+            .centered(true)
+            .skip_taskbar(true)
+            .on_window_activated(move |_, active| {
+                if active {
+                    seen_activation.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+            .on_close_request(move |_| {
+                let _ = closed_tx.send(());
+                true
+            })
+            .content(move || {
+                let _ = ready_tx.send(());
+                Element::label("channel close regression")
+            });
+        assert!(app.start_window(request).run_resident());
+        let (closed, nonactivating) = worker.join().unwrap();
+        assert!(
+            closed,
+            "visible window must consume keyed close without another AppHost event"
+        );
+        assert!(
+            nonactivating,
+            "visible frameless popup must not become the foreground window"
+        );
+        assert!(
+            !activated.load(std::sync::atomic::Ordering::SeqCst),
+            "showing and positioning a frameless hover window must not activate it"
+        );
+        drop(sender);
+        crate::sync::reset_pumps();
+    }
+
+    #[test]
+    fn resident_channel_can_close_a_keyed_window_without_a_host() {
+        crate::sync::reset_pumps();
+        let _ = crate::event::take_callback_closes();
+        let mut app = App::resident("external host");
+        let sender = app.channel(|ctx, key: String| ctx.close_window(key));
+        sender.send("usage".into()).unwrap();
+        drain_app_channels();
+        assert_eq!(crate::event::take_callback_closes(), vec!["usage"]);
+        assert!(crate::event::take_callback_closes().is_empty());
+        crate::sync::reset_pumps();
+    }
+
+    #[test]
+    fn resident_channel_requires_a_live_sender_and_accepts_clones() {
+        crate::sync::reset_pumps();
+        let mut app = App::resident("external host");
+        assert!(!app.has_resident_entry());
+        let sender = app.channel(|_: &mut EventCtx, _: ()| {});
+        assert!(app.has_resident_entry());
+        let clone = sender.clone();
+        drop(sender);
+        assert!(app.has_resident_entry());
+        drop(clone);
+        assert!(!app.has_resident_entry());
+        crate::sync::reset_pumps();
     }
 
     /// 应用级回调（主题变化 / 周期定时器）在**零窗口**时也要跑得起来，且回调里的
@@ -7999,6 +8601,138 @@ mod tests {
         ));
     }
 
+    /// 在客户区逻辑坐标处松开指定键。
+    fn release(host: &mut UiHost, x: i32, y: i32, button: crate::event::MouseButton) {
+        use crate::event::{PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            Point::new(x, y),
+            button,
+        ));
+    }
+
+    /// 完整的一次右键点击（按下 + 松开）。
+    fn right_click(host: &mut UiHost, x: i32, y: i32) {
+        press(host, x, y, crate::event::MouseButton::Right);
+        release(host, x, y, crate::event::MouseButton::Right);
+    }
+
+    /// 按下即弹的策略：右键 Down 就开菜单（macOS / Linux 的 Auto），原地松开菜单留着，
+    /// 按住滑到某项上松开则直接执行。
+    #[test]
+    fn press_policy_opens_on_down_and_supports_slide_select() {
+        use crate::event::{ContextMenuTrigger, MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let h = hits.clone();
+        let ui =
+            Element::col()
+                .fill()
+                .child(
+                    Element::row()
+                        .width_match()
+                        .height(32)
+                        .on_context_menu(move || {
+                            let h = h.clone();
+                            vec![MenuItem::run("项", move |_| h.set(h.get() + 1), false)]
+                        }),
+                );
+        let mut host = App::new("t", 200, 120)
+            .context_menu_trigger(ContextMenuTrigger::Press)
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Right);
+        host.on_pointer(at(PointerKind::Down, 40, 16));
+        assert!(host.menu.is_open(), "按下即弹");
+        host.on_pointer(at(PointerKind::Up, 40, 16));
+        assert!(host.menu.is_open(), "原地松开菜单留着");
+        host.close_menu();
+
+        host.on_pointer(at(PointerKind::Down, 40, 16));
+        let r = host.menu.active.as_ref().unwrap().levels[0].rect;
+        let item = Point::new(r.x + 20, r.y + 14);
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Move,
+            item,
+            MouseButton::Right,
+        ));
+        host.on_pointer(PointerEvent::single(
+            PointerKind::Up,
+            item,
+            MouseButton::Right,
+        ));
+        assert_eq!(hits.get(), 1, "按住滑到项上松开应执行");
+        assert!(!host.menu.is_open());
+    }
+
+    /// 右键菜单在松开时才弹：输入框与 `on_context_menu` 同理；按下后拖到别的节点再松则作罢。
+    #[test]
+    fn context_menu_opens_on_right_release_not_press() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let text = crate::signal::signal(String::from("hello"));
+        let ui = Element::col()
+            .fill()
+            .child(
+                Element::row()
+                    .width_match()
+                    .height(32)
+                    .on_context_menu(|| vec![MenuItem::run("项", |_| {}, false)]),
+            )
+            .child(Element::text_input(text, "t").width(150));
+        let mut host = App::new("t", 200, 120)
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Right);
+        // 顶部 32px 是带菜单的行，其下是输入框。
+        let (row_y, input_y) = (16, 48);
+        for (x, y) in [(40, input_y), (40, row_y)] {
+            host.on_pointer(at(PointerKind::Down, x, y));
+            assert!(!host.menu.is_open(), "按下时不该弹 ({x},{y})");
+            host.on_pointer(at(PointerKind::Up, x, y));
+            assert!(host.menu.is_open(), "松开才弹 ({x},{y})");
+            host.close_menu();
+        }
+        host.on_pointer(at(PointerKind::Down, 40, input_y));
+        host.on_pointer(at(PointerKind::Up, 40, row_y));
+        assert!(!host.menu.is_open(), "拖得远了再松，不弹");
+        // 手抖几像素仍算点击。
+        host.on_pointer(at(PointerKind::Down, 40, row_y));
+        host.on_pointer(at(PointerKind::Up, 43, row_y + 2));
+        assert!(host.menu.is_open(), "小位移内松开仍弹");
+    }
+
+    /// 标题栏右键按下时不弹，松开才弹；按下后移出拖动区再松开则作罢。
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn system_menu_opens_on_release_not_press() {
+        use crate::event::MouseButton;
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "按下时不该弹");
+        release(&mut host, 60, 16, MouseButton::Right);
+        assert!(!menu_rows(&host).is_empty(), "松开才弹");
+
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Release)
+            .content(frameless_ui())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        press(&mut host, 60, 16, MouseButton::Right);
+        release(&mut host, 60, 90, MouseButton::Right);
+        assert!(menu_rows(&host).is_empty(), "松开时已移出拖动区，不弹");
+    }
+
     /// 标题栏（整条可拖）+ 正文的最小无边框界面。
     fn frameless_ui() -> Element {
         Element::col()
@@ -8048,13 +8782,12 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn frameless_drag_region_right_click_opens_system_menu() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
 
         let rows = menu_rows(&host);
         assert_eq!(
@@ -8104,42 +8837,64 @@ mod tests {
         );
     }
 
+    /// 点在浮层外、被「收起即吞」吃掉的右键，不能再顺手弹系统菜单：浮层关了菜单也开了，
+    /// 就和「这一击到此为止」自相矛盾。
+    #[test]
+    fn swallowed_right_click_does_not_open_the_system_menu() {
+        let open = crate::signal::signal(true);
+        let panel = Element::col()
+            .width(60)
+            .height(40)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(true);
+        let ui = Element::col()
+            .fill()
+            .child(Element::row().width_match().height(32).window_drag())
+            .child(Element::col().width(100).height(30).popup(open, panel));
+        let mut host = App::new("t", 200, 120)
+            .frameless()
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 120);
+        // (150, 16)：标题栏拖动区内，在锚点（x<100）与浮层之外。
+        right_click(&mut host, 150, 16);
+        assert!(!open.get(), "前提：浮层被点外面收起");
+        assert!(menu_rows(&host).is_empty(), "被吞的一击不该再弹系统菜单");
+    }
+
     /// 正文区右键不弹：系统菜单是"标题栏"的语义，不是"整个窗口"的。
     #[test]
     fn system_menu_only_on_the_drag_region() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 90, MouseButton::Right);
+        right_click(&mut host, 60, 90);
         assert!(menu_rows(&host).is_empty(), "正文区不该弹系统菜单");
     }
 
     /// 带系统标题栏的窗口不接管：那一下本就由系统自己处理。
     #[test]
     fn non_frameless_window_does_not_take_over() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "非 frameless 窗口不该接管右键");
     }
 
     /// 关掉开关后彻底不弹。
     #[test]
     fn system_menu_switch_turns_it_off() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .system_menu(false)
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "system_menu(false) 后不该再弹");
     }
 
@@ -8148,7 +8903,7 @@ mod tests {
     /// 覆盖机制靠的是"补在分发之后"这个位置，不是另立的优先级规则——本测试钉住它。
     #[test]
     fn user_context_menu_wins_over_the_default() {
-        use crate::event::{MenuItem, MouseButton};
+        use crate::event::MenuItem;
         let ui = Element::col()
             .fill()
             .child(
@@ -8164,7 +8919,7 @@ mod tests {
             .content(ui)
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
 
         assert_eq!(
             menu_rows(&host)
@@ -8198,10 +8953,13 @@ mod tests {
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
         let down = PointerEvent::single(PointerKind::Down, Point::new(60, 16), MouseButton::Right);
-        assert!(host.on_pointer(down), "首次弹菜单应请求重绘");
+        let up = PointerEvent::single(PointerKind::Up, Point::new(60, 16), MouseButton::Right);
+        host.on_pointer(down);
+        assert!(host.on_pointer(up), "首次弹菜单应请求重绘");
         host.close_menu();
         layout_once(&mut host, 200, 120);
-        assert!(host.on_pointer(down), "同一点再弹一次也应请求重绘");
+        host.on_pointer(down);
+        assert!(host.on_pointer(up), "同一点再弹一次也应请求重绘");
         assert!(host.menu.is_open());
     }
 
@@ -8213,7 +8971,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn system_menu_close_goes_through_the_close_guard() {
-        use crate::event::{Key, KeyEvent, MouseButton};
+        use crate::event::{Key, KeyEvent};
         use crate::platform::AppHandler;
         use std::cell::Cell;
         let asked = std::rc::Rc::new(Cell::new(0u32));
@@ -8227,7 +8985,7 @@ mod tests {
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert_eq!(menu_rows(&host).len(), 5, "菜单应已弹出");
 
         let key = |k: Key| KeyEvent {
@@ -8251,13 +9009,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn system_menu_is_not_taken_over_on_macos() {
-        use crate::event::MouseButton;
         let mut host = App::new("t", 200, 120)
             .frameless()
             .content(frameless_ui())
             .into_handler_for_test();
         layout_once(&mut host, 200, 120);
-        press(&mut host, 60, 16, MouseButton::Right);
+        right_click(&mut host, 60, 16);
         assert!(menu_rows(&host).is_empty(), "macOS 不该默认接管标题栏右键");
     }
 

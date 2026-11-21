@@ -58,6 +58,11 @@ jobs:
       # 关闭时的门控疏漏一路溜到发布版才被发现（0.11.0 即如此）。
       - name: Clippy（关闭默认 feature）
         run: cargo clippy --no-default-features --all-targets -- -D warnings
+      # 示例图标嵌入（默认关，见 Cargo.toml 的 `example-icon`）。build.rs 里那段只在
+      # Windows host + 该 feature 下才编译，别的档位碰不到——没有这条，它改坏了没人知道。
+      - name: Build（example-icon，仅 Windows）
+        if: runner.os == 'Windows'
+        run: cargo build --examples --features example-icon
       # 32 位 Windows。windows-rs 在 x86 上有两处与 64 位不同的形状：`NOTIFYICONDATAW`
       # 是 packed(1)（对字段取引用即 E0793），`SetWindowLongPtrW` 收 i32。本矩阵的
       # windows-latest 只编 x86_64，没有这条就只能等下游用户撞上（#17、#9 各一次）。

@@ -190,7 +190,7 @@ impl TexRef {
     }
 }
 
-/// 文字四边形的实例数据（64 B）。坐标是**物理**像素——与几何管线相反，理由见 `text.wgsl`。
+/// 文字四边形的实例数据（96 B）。坐标是**物理**像素——与几何管线相反，理由见 `text.wgsl`。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct TextInstance {
@@ -202,12 +202,16 @@ struct TextInstance {
     clip: [f32; 4],
     /// 非预乘 RGBA（0..1）。
     color: [f32; 4],
+    /// 圆角裁剪外框（物理 x0,y0,x1,y1）与四角半径，见 `prim::GpuClip`。
+    clip_rr: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
 impl TextInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
-            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+            0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+            4 => Float32x4, 5 => Float32x4
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TextInstance>() as u64,
@@ -775,15 +779,17 @@ impl TextRenderer {
 pub(super) fn text_item(
     tex: Arc<RunTexture>,
     quad: [f32; 4],
-    clip: [f32; 4],
+    clip: super::prim::GpuClip,
     color: Color,
 ) -> TextItem {
     TextItem {
         inst: TextInstance {
             quad,
             uv: [0.0, 0.0, 1.0, 1.0],
-            clip,
+            clip: clip.rect,
             color: super::prim::color_f32(color),
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
         },
         tex: TexRef::Run(tex),
     }
@@ -794,15 +800,17 @@ pub(super) fn glyph_item(
     bind: Arc<wgpu::BindGroup>,
     quad: [f32; 4],
     uv: [f32; 4],
-    clip: [f32; 4],
+    clip: super::prim::GpuClip,
     color: Color,
 ) -> TextItem {
     TextItem {
         inst: TextInstance {
             quad,
             uv,
-            clip,
+            clip: clip.rect,
             color: super::prim::color_f32(color),
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
         },
         tex: TexRef::Atlas(bind),
     }
@@ -1466,11 +1474,11 @@ mod tests {
 
     /// 实例布局的字节数必须与 shader 的属性偏移对得上（同 `prim.rs` 的同款判据）。
     ///
-    /// 64 B = quad + uv + clip + color 四个 `vec4`。加 uv 那一栏是为了让同一条管线
-    /// 同时服务整段 run（uv 取满）与 atlas（uv 取自己那一格）。
+    /// 96 B = quad + uv + clip + color + 圆角裁剪（外框 + 四角半径）六个 `vec4`。加 uv 那一栏
+    /// 是为了让同一条管线同时服务整段 run（uv 取满）与 atlas（uv 取自己那一格）。
     #[test]
-    fn text_instance_is_64_bytes() {
-        assert_eq!(std::mem::size_of::<TextInstance>(), 64);
+    fn text_instance_is_96_bytes() {
+        assert_eq!(std::mem::size_of::<TextInstance>(), 96);
     }
 
     /// mock 的 mask：ink 恰好落在文本块内、pad 环全 0。放置断言全靠这条性质。

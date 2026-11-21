@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use super::device::SharedGpu;
 use super::layer::LayerTexture;
-use super::prim::{PrimBatch, PrimRenderer, MAX_BATCH};
+use super::prim::{GpuClip, PrimBatch, PrimRenderer, MAX_BATCH};
 use super::tex::{image_item, place_image, ImageItem, MAX_IMAGE_BATCH};
 use super::text::{glyph_item, text_item, RunKey, TextItem, MAX_TEXT_BATCH};
 use crate::geometry::{Color, Corners, Rect, Size};
@@ -214,8 +214,9 @@ pub struct WgpuCanvas<'a> {
     scissor: Option<[u32; 4]>,
     size: (u32, u32),
     scale: f32,
-    /// 裁剪栈：存**逻辑**矩形，每一层已是各级交集（只会收窄）。
-    clips: Vec<Rect>,
+    /// 裁剪栈：每层存**逻辑**矩形（已是各级交集，只会收窄）+ 生效的最内层圆角裁剪
+    /// （逻辑外框与四角半径；嵌套 `clip_rect` 原样继承，见 [`GpuClip`]）。
+    clips: Vec<(Rect, Option<(Rect, Corners)>)>,
     /// `save()` 记下的栈深，`restore()` 据此回弹。
     saves: Vec<usize>,
     /// 离屏层栈（P3）。栈顶即当前绘制目标。
@@ -276,19 +277,45 @@ impl WgpuCanvas<'_> {
     /// 取整在这里做完（而不是留给 shader）：软后端的裁剪 mask 是
     /// `Rect::scaled` 之后的整数矩形且**不抗锯齿**，先取整再缩放和先缩放再取整在
     /// 非整数 DPI 下会差一个像素列。
-    fn clip_phys(&self) -> [f32; 4] {
+    fn clip_phys(&self) -> GpuClip {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         let bounds = Rect::new(0, 0, w, h);
         let r = match self.clips.last() {
-            Some(c) => c.scaled(self.scale).intersect(&bounds),
+            Some((c, _)) => c.scaled(self.scale).intersect(&bounds),
             None => bounds,
         };
-        [
+        let rect = [
             r.x as f32,
             r.y as f32,
             (r.x + r.w) as f32,
             (r.y + r.h) as f32,
-        ]
+        ];
+        match self.clips.last().and_then(|(_, round)| *round) {
+            None => GpuClip::rect(rect),
+            Some((rr, k)) => {
+                // 外框与矩形裁剪同一套物理取整（软后端建 mask 也用 `Rect::scaled`），
+                // 半径按 scale 放大后再收进外框（`Corners::fit`，与软后端路径同源）。
+                let p = rr.scaled(self.scale);
+                let s = self.scale;
+                let k = Corners::new(
+                    k.top_left * s,
+                    k.top_right * s,
+                    k.bottom_right * s,
+                    k.bottom_left * s,
+                )
+                .fit(p.w as f32, p.h as f32);
+                GpuClip {
+                    rect,
+                    rr: [
+                        p.x as f32,
+                        p.y as f32,
+                        (p.x + p.w) as f32,
+                        (p.y + p.h) as f32,
+                    ],
+                    radii: [k.top_left, k.top_right, k.bottom_right, k.bottom_left],
+                }
+            }
+        }
     }
 
     /// 外包框的抗锯齿余量（逻辑长度）。SDF 的过渡带是 1 个物理像素，留 1.5 个足够，
@@ -404,7 +431,7 @@ impl WgpuCanvas<'_> {
         sr: &crate::text::ShapedRun,
         prect: Rect,
         align: Align,
-        clip: [f32; 4],
+        clip: GpuClip,
         color: Color,
     ) -> bool {
         if sr.glyphs.is_empty() {
@@ -761,10 +788,10 @@ impl Canvas for WgpuCanvas<'_> {
         let clip = self.clip_phys();
         // 剔除：dst 与裁剪矩形无交集就别上传纹理了（对标 `draw_text` 开头那次剔除）。
         let clip_rect = Rect::new(
-            clip[0] as i32,
-            clip[1] as i32,
-            (clip[2] - clip[0]) as i32,
-            (clip[3] - clip[1]) as i32,
+            clip.rect[0] as i32,
+            clip.rect[1] as i32,
+            (clip.rect[2] - clip.rect[0]) as i32,
+            (clip.rect[3] - clip.rect[1]) as i32,
         );
         if pdst.intersect(&clip_rect).is_empty() {
             return;
@@ -831,10 +858,10 @@ impl Canvas for WgpuCanvas<'_> {
         // 与 pixmap 边界的相交判断——滚动列表里绝大多数行都走这条路）。留 4px 余量
         // 兜住字形出挑与整数取整。
         let clip_rect = Rect::new(
-            clip[0] as i32,
-            clip[1] as i32,
-            (clip[2] - clip[0]) as i32,
-            (clip[3] - clip[1]) as i32,
+            clip.rect[0] as i32,
+            clip.rect[1] as i32,
+            (clip.rect[2] - clip.rect[0]) as i32,
+            (clip.rect[3] - clip.rect[1]) as i32,
         );
         // 剔除看字形可能范围而非 rect 本身：装不下时字会向下溢出 rect，见 `text_cull_rect`。
         let cull = crate::render::text_cull_rect(rect, ts).scaled(s);
@@ -1020,7 +1047,7 @@ impl Canvas for WgpuCanvas<'_> {
             top.bound(),
             quad,
             quad,
-            full,
+            GpuClip::rect(full),
             0.0,
             top.opacity,
             nearest,
@@ -1050,11 +1077,30 @@ impl Canvas for WgpuCanvas<'_> {
             "clip_rect 必须在 save() 之后调用，以与 restore() 配对"
         );
         // 各级求交（裁剪只会收窄），逻辑空间算——与软后端 `Clip::rect` 同源。
+        // 圆角裁剪原样继承：圆角卡片里的滚动视口仍要扣掉卡片四角。
         let eff = match self.clips.last() {
-            Some(c) => c.intersect(&r),
-            None => r,
+            Some((c, round)) => (c.intersect(&r), *round),
+            None => (r, None),
         };
         self.clips.push(eff);
+    }
+
+    fn clip_round_rect(&mut self, r: Rect, radii: Corners) {
+        debug_assert!(
+            !self.saves.is_empty(),
+            "clip_round_rect 必须在 save() 之后调用，以与 restore() 配对"
+        );
+        let (eff, outer) = match self.clips.last() {
+            Some((c, round)) => (c.intersect(&r), *round),
+            None => (r, None),
+        };
+        // 四角全 0 即矩形裁剪：保留外层的圆角，不拿一个直角框把它顶掉。
+        let round = if radii.max() > 0.0 {
+            Some((r, radii))
+        } else {
+            outer
+        };
+        self.clips.push((eff, round));
     }
 }
 
@@ -3373,5 +3419,170 @@ mod tests {
                 );
             });
         }
+    }
+
+    // ---- 圆角裁剪（clip_round_rect）：与软后端 `round_clip_*` 同一组判据 ----
+
+    fn is_white(p: [u8; 4]) -> bool {
+        p[0] > 240 && p[1] > 240 && p[2] > 240
+    }
+    fn is_red(p: [u8; 4]) -> bool {
+        p[0] > 180 && p[1] < 100 && p[2] < 100
+    }
+    fn round_box() -> (Rect, Corners) {
+        (Rect::new(10, 10, 40, 40), Corners::all(12.0))
+    }
+
+    #[test]
+    fn round_clip_cuts_corners_of_fill() {
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+        }) else {
+            return;
+        };
+        for (x, y) in [(11, 11), (48, 11), (48, 48), (11, 48)] {
+            assert!(
+                is_white(px(&pm, x, y)),
+                "({x},{y}) 在圆角外应留白，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        for (x, y) in [(10, 30), (30, 10), (49, 30), (30, 30)] {
+            assert!(
+                is_red(px(&pm, x, y)),
+                "({x},{y}) 应为红，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        assert!(is_white(px(&pm, 5, 30)), "外框外应裁掉");
+    }
+
+    /// 嵌套 clip_rect（圆角卡片里的滚动视口）保住外层圆角。
+    #[test]
+    fn nested_clip_rect_keeps_outer_round_corners() {
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.save();
+            c.clip_rect(Rect::new(0, 30, 60, 30));
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+            c.restore();
+        }) else {
+            return;
+        };
+        assert!(
+            is_white(px(&pm, 11, 48)) && is_white(px(&pm, 48, 48)),
+            "嵌套矩形裁剪丢了外层圆角"
+        );
+        assert!(is_white(px(&pm, 30, 20)), "嵌套矩形裁剪之外应留白");
+        assert!(is_red(px(&pm, 30, 45)), "交集内应落笔");
+    }
+
+    #[test]
+    fn round_clip_honours_per_corner_radii() {
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            c.save();
+            c.clip_round_rect(Rect::new(10, 10, 40, 40), Corners::new(12.0, 0.0, 0.0, 0.0));
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+        }) else {
+            return;
+        };
+        assert!(is_white(px(&pm, 11, 11)), "左上是圆角");
+        assert!(is_red(px(&pm, 49, 10)), "右上是直角，角点应落笔");
+        assert!(
+            is_red(px(&pm, 49, 49)) && is_red(px(&pm, 10, 49)),
+            "下面两角是直角"
+        );
+    }
+
+    /// 图片管线也要乘圆角覆盖率。
+    #[test]
+    fn round_clip_cuts_corners_of_image() {
+        let red = [220u8, 60, 50, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.draw_image(&img, Rect::new(0, 0, 60, 60), Fit::Fill, 0.0, 1.0);
+            c.restore();
+        }) else {
+            return;
+        };
+        assert!(
+            is_white(px(&pm, 11, 11)),
+            "图片画进了圆角外，实得 {:?}",
+            px(&pm, 11, 11)
+        );
+        assert!(is_red(px(&pm, 30, 30)));
+    }
+
+    /// 文字管线也要乘圆角覆盖率（mock 字形是实心块）。
+    #[test]
+    fn round_clip_cuts_corners_of_text() {
+        let mut eng = MockGlyphEngine::new((30, 30));
+        let Some(pm) = render_gpu_text(60, 60, 1.0, WHITE, &mut eng, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.draw_text(
+                "x",
+                Rect::new(10, 10, 40, 30),
+                BLACK,
+                Align::Start,
+                &TextStyle::new(12.0),
+            );
+            c.restore();
+        }) else {
+            return;
+        };
+        assert!(
+            is_white(px(&pm, 11, 11)),
+            "文字画进了圆角外，实得 {:?}",
+            px(&pm, 11, 11)
+        );
+        let mid = px(&pm, 25, 25);
+        assert!(mid[0] < 40, "字块中部应落墨，实得 {mid:?}");
+    }
+
+    #[test]
+    fn restore_drops_round_clip() {
+        let Some(pm) = render_gpu(60, 60, 1.0, WHITE, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.restore();
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+        }) else {
+            return;
+        };
+        assert!(is_red(px(&pm, 11, 11)) && is_red(px(&pm, 2, 2)));
+    }
+
+    /// 2x：半径按物理放大（逻辑 12 → 物理 24）。
+    #[test]
+    fn round_clip_scales_radius_with_dpi() {
+        let Some(pm) = render_gpu(120, 120, 2.0, WHITE, &|c| {
+            let (r, k) = round_box();
+            c.save();
+            c.clip_round_rect(r, k);
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+        }) else {
+            return;
+        };
+        assert!(
+            is_white(px(&pm, 24, 24)),
+            "2x 下圆角应按物理半径裁，实得 {:?}",
+            px(&pm, 24, 24)
+        );
+        assert!(is_red(px(&pm, 60, 20)), "直边中点应落笔");
     }
 }

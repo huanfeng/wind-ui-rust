@@ -59,16 +59,30 @@ use crate::geometry::{Color, Point, Rect};
 use crate::spec::Align;
 use crate::text::TextEngine;
 
-/// 裁剪层：有效裁剪矩形（各级交集）+ 对应 alpha mask。
+/// 裁剪层：有效裁剪矩形（各级交集）+ 对应 alpha mask + 栈内生效的圆角裁剪。
 ///
-/// **不变量：`mask` 恒是 `rect` 对应的轴对齐矩形**（`clip_rect` 是唯一的入栈处，
-/// 那里用 `push_rect` 填充、且不开抗锯齿）。`SkiaCanvas::fast_fill_rect` 依赖这一点
-/// 直接对 `rect` 求交而**不读 `mask`**。若将来新增 `clip_path` 之类的非矩形裁剪，
-/// 必须同时让快路认得出它并退回通用路径——否则那条路会静默画错：不报错、不 panic，
-/// 只是裁剪失效，多出来的部分照画。
+/// **不变量：`rounds` 为空时 `mask` 恒是 `rect` 对应的轴对齐矩形**（不开抗锯齿）。
+/// 各条快路（`fast_fill_rect`、投影的 `shadow_inside`、`draw_image` 的 O(dst) 求交、
+/// 文字的矩形裁剪）依赖这一点直接对 `rect` 求交而**不读 `mask`**。
+///
+/// 有圆角裁剪时（`rounds` 非空），`mask` 还扣掉了各圆角外的四角，与 `rect` 只在
+/// [`zones`](Self::zones)（四角区）里不同——快路落笔范围碰到四角区就必须退回读 mask
+/// 的通用路径，否则那条路会静默画错：不报错、不 panic，只是四角照画、圆角失效。
 struct Clip {
     rect: Rect,
     mask: Mask,
+    /// 栈内所有生效的圆角裁剪（逻辑外框 + 四角半径），自外向内。嵌套 `clip_rect` 原样继承，
+    /// 于是圆角卡片里的滚动视口建 mask 时仍会把卡片四角扣掉。
+    rounds: Vec<(Rect, crate::geometry::Corners)>,
+    /// `rounds` 的四角区（逻辑坐标，见 [`super::corner_zones`]）。区外 mask 与 `rect` 同集。
+    zones: Vec<Rect>,
+}
+
+impl Clip {
+    /// 逻辑矩形 `r` 范围内 mask 是否就是 `rect`（即不碰任何圆角四角区）。
+    fn rect_exact_in(&self, r: Rect) -> bool {
+        self.zones.iter().all(|z| z.intersect(&r).is_empty())
+    }
 }
 
 /// 离屏合成层：只覆盖内容所在范围的透明子缓冲 + 整体不透明度。
@@ -305,9 +319,20 @@ impl<'a> SkiaCanvas<'a> {
             .min((rx1 - rx0) as f32 * 0.5)
             .min((ry1 - ry0) as f32 * 0.5)
             .max(0.0);
-        // 裁剪求交：`clip_rect` 是唯一的裁剪入口，且只产生轴对齐的矩形 mask，
-        // 故 `Clip.rect` 已精确表达裁剪范围——快路无需读 mask。
+        // 裁剪求交：没有圆角裁剪、或落笔范围不碰圆角四角区时，`Clip.rect` 已精确表达
+        // 裁剪范围——快路无需读 mask。碰到四角区就交回读 mask 的通用路径（见 `Clip`）。
         if let Some(c) = self.clips.last() {
+            if !c.zones.is_empty() {
+                let logical = Rect::new(
+                    x.floor() as i32,
+                    y.floor() as i32,
+                    (x + w).ceil() as i32 - x.floor() as i32,
+                    (y + h).ceil() as i32 - y.floor() as i32,
+                );
+                if !c.rect_exact_in(logical) {
+                    return false;
+                }
+            }
             let pc = c.rect.offset(-self.offset.x, -self.offset.y).scaled(s);
             x0 = x0.max(pc.x);
             y0 = y0.max(pc.y);
@@ -691,6 +716,8 @@ impl Canvas for SkiaCanvas<'_> {
         // 性能：阴影物理边界完全落在当前裁剪矩形内时，mask 裁不掉任何东西——跳过带 mask 的
         // 慢合成路径（大阴影 + 全窗 mask 的逐像素采样是卡顿主因），仅在跨裁剪边界时才用 mask。
         let shadow_inside = match self.clips.last() {
+            // 圆角裁剪下 mask 不再是矩形，矩形判据失效，一律走带 mask 的合成。
+            Some(c) if !c.zones.is_empty() => false,
             Some(c) => {
                 let cr = c
                     .rect
@@ -761,6 +788,8 @@ impl Canvas for SkiaCanvas<'_> {
             }
             // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
             Fit::None => (self.scale, self.scale),
+            // 1 图片像素 = 1 物理 px：恒等缩放 + 整数落点 → 纯 blit，无插值。
+            Fit::Physical => (1.0, 1.0),
         };
         let (mut sx, mut sy) = (sx, sy);
         let (mut dw, mut dh) = (iw * sx, ih * sy);
@@ -849,6 +878,18 @@ impl Canvas for SkiaCanvas<'_> {
                     data[row + bx0 as usize..row + l as usize].fill(0);
                     let r = cx1.clamp(bx0, bx1);
                     data[row + r as usize..row + bx1 as usize].fill(0);
+                }
+            }
+            // 圆角裁剪：dst 碰到四角区时，dst 范围内再乘上裁剪 mask（仍是 O(dst)）。
+            if !c.rect_exact_in(dst) && bx1 > bx0 && by1 > by0 {
+                let stride = mw as usize;
+                let clip = c.mask.data();
+                let data = mask.data_mut();
+                for y in by0..by1 {
+                    let row = y as usize * stride;
+                    for i in row + bx0 as usize..row + bx1 as usize {
+                        data[i] = mul255(data[i] as u32, clip[i] as u32) as u8;
+                    }
                 }
             }
         }
@@ -970,8 +1011,8 @@ impl Canvas for SkiaCanvas<'_> {
     fn push_layer_in(&mut self, opacity: f32, bounds: Rect) {
         // 先与裁剪求交再按网格外扩：原点必须落在网格上（否则分数缩放下合成回去要重采样），
         // 外扩出裁剪的那一圈由下面在层内重建的裁剪兜住。
-        let clip = self.clips.last().map(|c| c.rect);
-        let raw = match clip {
+        let clip = self.clips.last().map(|c| (c.rect, c.rounds.clone()));
+        let raw = match clip.as_ref().map(|c| c.0) {
             Some(c) => bounds.intersect(&c),
             None => bounds,
         };
@@ -1021,8 +1062,8 @@ impl Canvas for SkiaCanvas<'_> {
         };
         self.offset = layer.origin;
         self.layers.push(layer);
-        if let (Some(c), false) = (clip, empty) {
-            self.push_clip(c);
+        if let (Some((c, rounds)), false) = (clip, empty) {
+            self.push_clip(c, rounds);
         }
     }
 
@@ -1112,25 +1153,52 @@ impl Canvas for SkiaCanvas<'_> {
             !self.saves.is_empty(),
             "clip_rect 必须在 save() 之后调用，以与 restore() 配对"
         );
-        // 与当前裁剪区求交，构造矩形 mask。
-        let eff = match self.clips.last() {
-            Some(c) => c.rect.intersect(&r),
-            None => r,
+        // 与当前裁剪区求交；栈内的圆角裁剪原样继承——除非新的裁剪区完全避开了四角区：
+        // 那时区内 mask 与矩形同集，其下所有嵌套裁剪也只会更小，圆角可以整个丢掉，
+        // 省掉每层一次整窗 `intersect_path` 并让快路恢复可用。
+        let (eff, rounds) = match self.clips.last() {
+            Some(c) => {
+                let eff = c.rect.intersect(&r);
+                let rounds = if c.rect_exact_in(eff) {
+                    Vec::new()
+                } else {
+                    c.rounds.clone()
+                };
+                (eff, rounds)
+            }
+            None => (r, Vec::new()),
         };
-        self.push_clip(eff);
+        self.push_clip(eff, rounds);
+    }
+
+    fn clip_round_rect(&mut self, r: Rect, radii: crate::geometry::Corners) {
+        let _g = super::prof::scope(super::prof::CLIP);
+        debug_assert!(
+            !self.saves.is_empty(),
+            "clip_round_rect 必须在 save() 之后调用，以与 restore() 配对"
+        );
+        let (eff, mut rounds) = match self.clips.last() {
+            Some(c) => (c.rect.intersect(&r), c.rounds.clone()),
+            None => (r, Vec::new()),
+        };
+        // 四角全 0 就是矩形裁剪，不必付圆角 mask 与快路退化的代价。
+        if radii.max() > 0.0 {
+            rounds.push((r, radii));
+        }
+        self.push_clip(eff, rounds);
     }
 }
 
 impl SkiaCanvas<'_> {
     /// 按逻辑矩形 `eff` 为当前绘制目标造一块裁剪 mask 并入栈（不再与栈顶求交）。
-    fn push_clip(&mut self, eff: Rect) {
+    /// `rounds` 非空时 mask 再与每个圆角矩形求交（抗锯齿）。
+    fn push_clip(&mut self, eff: Rect, rounds: Vec<(Rect, crate::geometry::Corners)>) {
         let (pw, ph) = self.target_size();
         if let Some(mut mask) = Mask::new(pw, ph) {
             // mask 用物理整数矩形（与文字 clip 的 rect.scaled 同源），消除取整分歧。
             // 局部重绘时减 offset（逻辑）再物理化，使 mask 落入子 pixmap。
-            let peff = eff
-                .offset(-self.offset.x, -self.offset.y)
-                .scaled(self.scale);
+            let to_phys = |r: Rect| r.offset(-self.offset.x, -self.offset.y).scaled(self.scale);
+            let peff = to_phys(eff);
             if !peff.is_empty() {
                 if let Some(rect) = tiny_skia::Rect::from_xywh(
                     peff.x as f32,
@@ -1144,9 +1212,46 @@ impl SkiaCanvas<'_> {
                         mask.fill_path(&path, FillRule::Winding, false, Transform::identity());
                     }
                 }
+                // 圆角：外框与填充同一套物理取整（`Rect::scaled`），半径按 scale 放大。
+                // 这是整幅 mask 的操作（O(窗口)），只在声明了圆角裁剪的子树里发生。
+                for (r, radii) in &rounds {
+                    let pr = to_phys(*r);
+                    let s = self.scale;
+                    let k = crate::geometry::Corners::new(
+                        radii.top_left * s,
+                        radii.top_right * s,
+                        radii.bottom_right * s,
+                        radii.bottom_left * s,
+                    );
+                    match super::corners_rect_path(
+                        pr.x as f32,
+                        pr.y as f32,
+                        pr.w as f32,
+                        pr.h as f32,
+                        k,
+                    ) {
+                        Some(path) => mask.intersect_path(
+                            &path,
+                            FillRule::Winding,
+                            true,
+                            Transform::identity(),
+                        ),
+                        // 外框退化为空：圆角区域什么都不剩。
+                        None => mask.clear(),
+                    }
+                }
             }
+            let zones = rounds
+                .iter()
+                .flat_map(|(r, k)| super::corner_zones(*r, *k))
+                .collect();
             // clips 存逻辑矩形（intersect 在逻辑空间）。
-            self.clips.push(Clip { rect: eff, mask });
+            self.clips.push(Clip {
+                rect: eff,
+                mask,
+                rounds,
+                zones,
+            });
         }
     }
 }
@@ -2187,6 +2292,67 @@ mod tests {
         );
     }
 
+    /// Physical：1 图片像素 = 1 物理 px——不随 DPI 缩放（scale=1.5 下源 6×6 画 6×6
+    /// 物理，而非 ×1.5），恒等变换纯 blit、无插值灰边，dst 比图大时留白居中。
+    #[test]
+    fn draw_image_physical_is_dpi_independent_blit() {
+        let mut pm = Pixmap::new(30, 30).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 源 6×6 纯红。dst 逻辑 20×20（scale=1.5 → 物理 30×30），图 6×6 物理居中。
+        let img = Image::from_rgba(6, 6, &[255u8, 0, 0, 255].repeat(6 * 6)).unwrap();
+        {
+            let mut te = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut te, 1.5);
+            c.draw_image(&img, Rect::new(0, 0, 20, 20), Fit::Physical, 0.0, 1.0);
+        }
+        // 居中 6×6 落在物理 [12,18)。内部全红（无插值）。
+        for y in 12..18 {
+            for x in 12..18 {
+                let (r, g, b) = px(&pm, x, y);
+                assert_eq!(
+                    (r, g, b),
+                    (255, 0, 0),
+                    "({x},{y}) 应为纯红（1:1 无插值），实得 ({r},{g},{b})"
+                );
+            }
+        }
+        // 图外框内、框外相邻像素保持背景白，证明尺寸没有被 ×1.5 放大。
+        let (r, g, b) = px(&pm, 11, 14);
+        assert_eq!((r, g, b), (255, 255, 255), "图左应留白");
+        let (r, g, b) = px(&pm, 18, 14);
+        assert_eq!((r, g, b), (255, 255, 255), "图右应留白");
+        let (r, g, b) = px(&pm, 29, 29);
+        assert_eq!((r, g, b), (255, 255, 255), "dst 远端应留白");
+    }
+
+    /// Physical dst 物理框小于图片：与 None/Cover 同语义——居中裁剪溢出，不缩图。
+    #[test]
+    fn draw_image_physical_crops_when_dst_smaller() {
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        // 源 8×8 纯红。dst 逻辑 2×2（scale=1.5 → 物理 3×3 < 8×8）。
+        let img = Image::from_rgba(8, 8, &[255u8, 0, 0, 255].repeat(8 * 8)).unwrap();
+        {
+            let mut te = crate::text::NullTextEngine;
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut te, 1.5);
+            c.draw_image(&img, Rect::new(0, 0, 2, 2), Fit::Physical, 0.0, 1.0);
+        }
+        // 图 8×8 居中于 3×3 框：tx = round_half_up(-2.5) = -2，可见区 [0,3) 显示源列 [2,5)，
+        // 即图中心 3×3 一带。框内全红（无插值），框外全白。
+        for y in 0..3 {
+            for x in 0..3 {
+                let (r, g, b) = px(&pm, x, y);
+                assert_eq!(
+                    (r, g, b),
+                    (255, 0, 0),
+                    "({x},{y}) 应为图片色（居中裁剪），实得 ({r},{g},{b})"
+                );
+            }
+        }
+        let (r, g, b) = px(&pm, 3, 3);
+        assert_eq!((r, g, b), (255, 255, 255), "框外应保持白");
+    }
+
     /// draw_image：大圆角半径把四角裁掉（角落像素保持背景白）。
     #[test]
     fn draw_image_rounded_clips_corners() {
@@ -3043,5 +3209,230 @@ mod tests {
             );
             assert_eq!(at(11.0, 11.0), blank, "s={s}：左上是圆角，外顶点留白");
         }
+    }
+
+    // ---- 圆角裁剪（clip_round_rect）----
+
+    fn is_white((r, g, b): (u8, u8, u8)) -> bool {
+        r > 240 && g > 240 && b > 240
+    }
+    fn is_red((r, g, b): (u8, u8, u8)) -> bool {
+        r > 200 && g < 60 && b < 60
+    }
+
+    /// 在 60×60 白底上：圆角裁剪 (10,10,40,40) r=12 内执行 `draw`，返回画布。
+    fn round_clipped(
+        radii: crate::geometry::Corners,
+        draw: impl FnOnce(&mut SkiaCanvas),
+    ) -> Pixmap {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.save();
+            c.clip_round_rect(Rect::new(10, 10, 40, 40), radii);
+            draw(&mut c);
+            c.restore();
+        }
+        pm
+    }
+
+    const RED: Color = Color::rgb(255, 0, 0);
+
+    /// 不透明纯色走 `fast_fill_rect` 快路：四角区必须退回读 mask，角点留白。
+    #[test]
+    fn round_clip_cuts_corners_of_opaque_fast_fill() {
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+        });
+        for (x, y) in [(11, 11), (48, 11), (48, 48), (11, 48)] {
+            assert!(
+                is_white(px(&pm, x, y)),
+                "({x},{y}) 在圆角外应留白，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        // 直边中点与中心照常落笔；外框之外照常裁掉。
+        for (x, y) in [(10, 30), (30, 10), (49, 30), (30, 30)] {
+            assert!(
+                is_red(px(&pm, x, y)),
+                "({x},{y}) 应为红，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        assert!(is_white(px(&pm, 5, 30)), "外框外应裁掉");
+    }
+
+    /// 半透明纯色走快路的另一支（整数域 source-over），同样要认出四角区。
+    #[test]
+    fn round_clip_cuts_corners_of_translucent_fast_fill() {
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.fill_rect(
+                0.0,
+                0.0,
+                60.0,
+                60.0,
+                &Paint::fill(Color::rgba(255, 0, 0, 128)),
+            );
+        });
+        assert!(is_white(px(&pm, 11, 11)), "半透明填充也不得画进圆角外");
+        let (r, g, _) = px(&pm, 30, 30);
+        assert!(
+            r > 240 && g < 160,
+            "中心应是半透明红，实得 {:?}",
+            px(&pm, 30, 30)
+        );
+    }
+
+    /// 只碰直边、不碰四角区的填充仍走快路且结果正确（判据不能误伤）。
+    #[test]
+    fn round_clip_fill_away_from_corners_is_exact() {
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.fill_rect(0.0, 25.0, 60.0, 10.0, &Paint::fill(RED));
+        });
+        assert!(
+            is_red(px(&pm, 10, 30)) && is_red(px(&pm, 49, 30)),
+            "直边处应落笔到外框边"
+        );
+        assert!(
+            is_white(px(&pm, 9, 30)) && is_white(px(&pm, 50, 30)),
+            "外框外应裁掉"
+        );
+    }
+
+    /// 圆角卡片里的滚动视口：其后嵌套的 clip_rect 必须保住外层圆角。
+    #[test]
+    fn nested_clip_rect_keeps_outer_round_corners() {
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.save();
+            // 视口下半截：左下、右下两角仍须是圆的。
+            c.clip_rect(Rect::new(0, 30, 60, 30));
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+        });
+        assert!(
+            is_white(px(&pm, 11, 48)) && is_white(px(&pm, 48, 48)),
+            "嵌套矩形裁剪丢了外层圆角"
+        );
+        assert!(is_white(px(&pm, 30, 20)), "嵌套矩形裁剪之外应留白");
+        assert!(is_red(px(&pm, 30, 45)), "交集内应落笔");
+    }
+
+    /// 四角各异：只圆左上角时，右上角照常落笔。
+    #[test]
+    fn round_clip_honours_per_corner_radii() {
+        let pm = round_clipped(crate::geometry::Corners::new(12.0, 0.0, 0.0, 0.0), |c| {
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+        });
+        assert!(is_white(px(&pm, 11, 11)), "左上是圆角");
+        assert!(is_red(px(&pm, 49, 10)), "右上是直角，角点应落笔");
+    }
+
+    /// 离屏层（子树 opacity）在层内重建裁剪时须带上圆角。
+    #[test]
+    fn round_clip_survives_into_layer() {
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.push_layer_in(0.5, Rect::new(0, 0, 60, 60));
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.pop_layer();
+        });
+        assert!(
+            is_white(px(&pm, 11, 11)),
+            "层内绘制漏出了圆角，实得 {:?}",
+            px(&pm, 11, 11)
+        );
+        let (r, g, _) = px(&pm, 30, 30);
+        assert!(
+            r > 240 && g < 160,
+            "层内容应按 0.5 合成，实得 {:?}",
+            px(&pm, 30, 30)
+        );
+    }
+
+    /// 图片走自己的 O(dst) 裁剪 mask，碰到四角区时要乘上圆角 mask。
+    #[test]
+    fn round_clip_cuts_corners_of_image() {
+        let red = [255u8, 0, 0, 255].repeat(4 * 4);
+        let img = Image::from_rgba(4, 4, &red).unwrap();
+        let pm = round_clipped(crate::geometry::Corners::all(12.0), |c| {
+            c.draw_image(&img, Rect::new(0, 0, 60, 60), Fit::Fill, 0.0, 1.0);
+        });
+        assert!(
+            is_white(px(&pm, 11, 11)),
+            "图片画进了圆角外，实得 {:?}",
+            px(&pm, 11, 11)
+        );
+        assert!(is_red(px(&pm, 30, 30)));
+    }
+
+    /// restore 撤销圆角裁剪：之后的绘制回到无裁剪。
+    #[test]
+    fn restore_drops_round_clip() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        {
+            let mut c = SkiaCanvas::new(&mut pm);
+            c.save();
+            c.clip_round_rect(
+                Rect::new(10, 10, 40, 40),
+                crate::geometry::Corners::all(12.0),
+            );
+            c.restore();
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+        }
+        assert!(is_red(px(&pm, 11, 11)) && is_red(px(&pm, 2, 2)));
+    }
+
+    /// 高 DPI：半径按 scale 放大（2x 下逻辑 r=12 → 物理 24）。
+    #[test]
+    fn round_clip_scales_radius_with_dpi() {
+        let mut pm = Pixmap::new(120, 120).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let mut engine = crate::text::NullTextEngine;
+        {
+            let mut c = SkiaCanvas::with_text(&mut pm, &mut engine, 2.0);
+            c.save();
+            c.clip_round_rect(
+                Rect::new(10, 10, 40, 40),
+                crate::geometry::Corners::all(12.0),
+            );
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(RED));
+            c.restore();
+        }
+        // 物理 (24,24) 离外框角 (20,20) 仅 4px，在 24px 圆角之外。
+        assert!(
+            is_white(px(&pm, 24, 24)),
+            "2x 下圆角应按物理半径裁，实得 {:?}",
+            px(&pm, 24, 24)
+        );
+        assert!(is_red(px(&pm, 60, 20)), "直边中点应落笔");
+    }
+
+    /// 嵌套裁剪完全避开四角区时丢掉圆角（性能）；碰到四角区时仍保住圆角（正确性）。
+    #[test]
+    fn nested_clip_away_from_corners_drops_rounds() {
+        let mut pm = Pixmap::new(60, 60).unwrap();
+        let mut c = SkiaCanvas::new(&mut pm);
+        c.save();
+        c.clip_round_rect(
+            Rect::new(10, 10, 40, 40),
+            crate::geometry::Corners::all(12.0),
+        );
+        c.save();
+        c.clip_rect(Rect::new(25, 25, 10, 10));
+        assert!(
+            c.clips.last().unwrap().rounds.is_empty(),
+            "中心小块不碰四角区，应丢掉圆角"
+        );
+        c.restore();
+        c.save();
+        c.clip_rect(Rect::new(0, 30, 60, 30));
+        assert_eq!(
+            c.clips.last().unwrap().rounds.len(),
+            1,
+            "碰到下方两角，须保住圆角"
+        );
+        c.restore();
+        c.restore();
     }
 }

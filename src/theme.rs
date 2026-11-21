@@ -1012,6 +1012,8 @@ pub struct TableTheme {
     pub sort_gap: Option<i32>,
     /// 箭头置于标题左侧（默认 false = 右侧）。
     pub sort_leading: Option<bool>,
+    /// 表头列宽拖动手柄悬停/拖动时的分界线颜色（默认 `accent`）。
+    pub resize_line: Option<Color>,
 }
 
 impl TableTheme {
@@ -1032,6 +1034,9 @@ impl TableTheme {
     }
     pub fn sort_leading(&self) -> bool {
         self.sort_leading.unwrap_or(false)
+    }
+    pub fn resize_line(&self, p: &Palette) -> Color {
+        self.resize_line.unwrap_or(p.accent)
     }
 }
 

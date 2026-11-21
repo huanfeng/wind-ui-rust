@@ -31,7 +31,7 @@ use crate::signal::{signal, Signal};
 use crate::spec::Align;
 use crate::style::Style;
 use crate::text::{TextEngine, TextStyle};
-use crate::ui::inputs::{TextInput, TEXT_PAD};
+use crate::ui::inputs::TextInput;
 use crate::ui::{Element, TextContent};
 
 /// 下拉箭头区宽（自右沿量起）：右留白 12 + 箭头 18，与 `Dropdown` 的箭头同位置。
@@ -211,16 +211,23 @@ pub struct ComboField {
 
 impl ComboField {
     fn new(text: Signal<String>, state: Rc<ComboState>) -> Self {
-        let mut inner = TextInput::new(text, String::new());
-        // 文字在箭头左侧留 4px 截止。
-        inner.config_mut().trail = CHEVRON_ZONE - TEXT_PAD + 4;
-        Self {
-            inner,
+        let mut me = Self {
+            inner: TextInput::new(text, String::new()),
             state,
             over_chevron: Cell::new(false),
             chevron_down: false,
             select_all_on_pick: false,
-        }
+        };
+        me.keep_text_clear_of_chevron();
+        me
+    }
+
+    /// 文字在箭头左侧留 4px 截止。文字区右沿 = 右边 − `pad_x` − `trail`，所以 `trail` 要
+    /// 随 `pad_x` 反向取值，右沿才恒在 `CHEVRON_ZONE + 4` 处；`pad_x` 变了必须重算
+    /// （`Element::pad_x` 会调它），否则内距小于默认时文字压到箭头上。
+    pub(crate) fn keep_text_clear_of_chevron(&mut self) {
+        let pad = self.inner.config_mut().pad_x;
+        self.inner.config_mut().trail = (CHEVRON_ZONE + 4 - pad).max(0);
     }
 
     /// 内含的文本框（`Element` 上的 text_input 修饰符经它落到组合框里）。

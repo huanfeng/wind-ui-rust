@@ -194,6 +194,7 @@ fn main() {
     let quality = signal(1usize);
     let lang = signal(0usize);
     let volume = signal(0.7f32);
+    let volume_grabbed = signal(false);
     let show_about = signal(std::env::args().any(|a| a == "--dialog"));
 
     // 520×560 时首屏只露得出一张半卡片，读起来像"截了一角"。760×700 是两头的折中：
@@ -404,9 +405,27 @@ fn main() {
         Element::col()
             .width_match()
             .spacing(6)
+            // 抓住才显示：拖动期间右侧亮出百分比（`dragging_signal` 镜像「正在拖动」）。
             .child(Element::field(
                 "音量",
-                Element::slider(volume).width_match(),
+                // 定宽：`field` 的控件区是自适应宽度，`width_match` 在这里没有可匹配的对象。
+                Element::row()
+                    .width(260)
+                    .cross(Align::Center)
+                    .spacing(8)
+                    .child(
+                        Element::slider(volume)
+                            .dragging_signal(volume_grabbed)
+                            .weight(1.0),
+                    )
+                    // 标签的位置**常驻**：只让里面的文字显隐。若直接对标签 `visible_signal`，
+                    // 它不占布局，按下那一刻滑块被缩窄、旋钮会跳离指针。
+                    .child(
+                        Element::row().width(44).child(
+                            Element::label(volume.map(|v| format!("{:.0}%", v * 100.0)))
+                                .visible_signal(volume_grabbed),
+                        ),
+                    ),
             ))
             .child(Element::field(
                 "质量",
@@ -1032,6 +1051,8 @@ fn main() {
             .child(Element::progress_indeterminate().width_match()),
     );
 
+    let num_width = signal(1280.0);
+    let num_alpha = signal(85.5);
     let cp_21 = Element::card(
         "数字步进",
         Element::col()
@@ -1044,6 +1065,21 @@ fn main() {
             .child(Element::field(
                 "缩放",
                 Element::stepper(zoom, 0.5, 3.0, 0.25).width(120),
+            ))
+            // 不带 ± 的数值框：同一份数值语义（钳制 / ↑↓ 步进 / 失焦规整 / Esc 回退）。
+            .child(Element::field(
+                "宽度",
+                Element::number_input(num_width, 100.0, 7680.0, 1.0)
+                    .unit("px")
+                    .text_align(Align::End)
+                    .width(120),
+            ))
+            .child(Element::field(
+                "不透明度",
+                Element::number_input(num_alpha, 0.0, 100.0, 1.0)
+                    .decimals(1)
+                    .unit("%")
+                    .width(120),
             )),
     );
 
@@ -1202,24 +1238,38 @@ fn main() {
             ),
     );
 
+    let nav_picked = signal(0usize);
     let cp_22 = Element::card(
         "列表",
-        Element::list(
-            vec![
-                "收件箱",
-                "已发送",
-                "草稿箱",
-                "垃圾邮件",
-                "归档",
-                "重要",
-                "已加星标",
-            ],
-            picked,
-        )
-        .height(160)
-        .width_match()
-        .bg_role(Role::SurfaceAlt)
-        .corner(8.0),
+        Element::col()
+            .width_match()
+            .spacing(12)
+            .child(
+                Element::list(
+                    vec![
+                        "收件箱",
+                        "已发送",
+                        "草稿箱",
+                        "垃圾邮件",
+                        "归档",
+                        "重要",
+                        "已加星标",
+                    ],
+                    picked,
+                )
+                .height(160)
+                .width_match()
+                .bg_role(Role::SurfaceAlt)
+                .corner(8.0),
+            )
+            // 侧栏导航风格：选中底在行间滑动（点不同行看过渡）。
+            .child(
+                Element::list_pill(vec!["概览", "输入", "外观", "词库", "高级"], nav_picked)
+                    .height(180)
+                    .width_match()
+                    .bg_role(Role::SurfaceAlt)
+                    .corner(8.0),
+            ),
     );
 
     let cp_23 = Element::card(
@@ -1629,6 +1679,56 @@ fn main() {
         .height(240),
     );
 
+    // 列宽拖动 + 持久化 + 圆角贴边：列宽权重放在应用持有的信号里（真实应用从配置读、
+    // 松手时写回）；表格贴边放进无内边距的圆角容器，靠 `.clip()` 让表头底色与斑马纹顺着圆角收边。
+    let tb_8 = {
+        let default_w: Vec<f32> = file_cols().iter().map(|c| c.1).collect();
+        let widths = signal(Vec::<f32>::new()); // 首次运行为空，会被填成默认权重
+        let shown = widths.map(|w| {
+            let s: Vec<String> = w.iter().map(|x| format!("{x:.2}")).collect();
+            format!("当前列权重：[{}]", s.join(", "))
+        });
+        Element::card(
+            "列宽拖动 + 圆角贴边 .clip()（拖表头分界调列宽，松手回调存盘；贴边表格不出角）",
+            Element::col()
+                .width_match()
+                .spacing(8)
+                .child(
+                    Element::col()
+                        .width_match()
+                        .corner(10.0)
+                        .bg_role(Role::Surface)
+                        .border_role(Role::Border, 1)
+                        .clip()
+                        .child(
+                            Element::table_sortable(file_cols(), file_rows(), signal(None))
+                                .column_weights(widths)
+                                .on_columns_resized(|ctx, w| {
+                                    ctx.toast(format!("列宽已保存（{} 列）", w.len()))
+                                })
+                                .height(180),
+                        ),
+                )
+                .child(
+                    Element::hstack()
+                        .width_match()
+                        .child(
+                            Element::label_signal(shown)
+                                .font_size(12.5)
+                                .fg_role(Role::TextMuted)
+                                .weight(1.0),
+                        )
+                        .child(
+                            Element::button("恢复默认列宽")
+                                .neutral()
+                                .outline()
+                                .small()
+                                .on_click(move |_| widths.set(default_w.clone())),
+                        ),
+                ),
+        )
+    };
+
     // ── 按控件族分组装页 ──
     // 卡片的 `let` 顺序与重排前完全一致（闭包捕获的 move 语义因此不变），
     // 分类只体现在下面的组装：原先「控件」一页塞了 26 张卡片，从拖拽重排到标签省略
@@ -1805,7 +1905,8 @@ fn main() {
             .child(tb_4)
             .child(tb_5)
             .child(tb_6)
-            .child(tb_7),
+            .child(tb_7)
+            .child(tb_8),
     );
 
     let im_poly = Element::card(

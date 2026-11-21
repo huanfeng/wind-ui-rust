@@ -85,6 +85,8 @@ pub fn system_locales() -> Vec<String> {
 #[cfg(windows)]
 pub use win32::open_url;
 #[cfg(windows)]
+pub(crate) use win32::query_main_window_state;
+#[cfg(windows)]
 pub(crate) use win32::run;
 #[cfg(windows)]
 pub(crate) use win32::single_window_open;
@@ -102,7 +104,18 @@ pub(crate) use macos::run;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::system_prefers_dark;
 #[cfg(target_os = "macos")]
+pub(crate) use macos::window::query_main_window_state;
+#[cfg(target_os = "macos")]
 pub use macos::{drag_files, drag_files_with};
+
+/// 见 Windows 版（`win32::query_main_window_state`）：Linux 的窗口表由 `run()` 函数
+/// 局部持有（无全局连接指针），同步查询没有现成通道——先返回 `None`，X11 的
+/// `_NET_WM_STATE` round-trip 留待后续（见 docs/roadmap-three-designs.md §3.4）。
+/// 平台差异与 `single_window_open` 的 macOS 版同一口径：文档写明，不加第二层返回。
+#[cfg(target_os = "linux")]
+pub(crate) fn query_main_window_state() -> Option<crate::event::WindowState> {
+    None
+}
 
 /// 见 Windows 版（`win32::single_window_open`）：macOS 的窗口登记表还没接上常驻模式，
 /// 这里恒为 `false`。
@@ -395,17 +408,16 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
     let mut off = Offscreen::new(pw as u32, ph as u32, cfg.renderer);
     handler.set_active_renderer(off.active());
     off.frame(handler, size, cfg.bg);
-    // 可选：合成一次右键按下（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
+    // 可选：合成一次右键点击（先渲染暖布局，再派发事件，再重绘以捕获菜单）。
     if let Some((lx, ly)) = cfg.screenshot_rclick {
         let pos = Point::new(
             (lx as f32 * s).round() as i32,
             (ly as f32 * s).round() as i32,
         );
-        handler.on_pointer(PointerEvent::single(
-            PointerKind::Down,
-            pos,
-            MouseButton::Right,
-        ));
+        // 右键菜单在松开时才弹，故合成完整的按下 + 松开。
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            handler.on_pointer(PointerEvent::single(kind, pos, MouseButton::Right));
+        }
         off.frame(handler, size, cfg.bg);
     }
     // 可选：依次合成左键单击（Down+Up），捕获下拉展开等。多个 `--click` 按序回放，
@@ -704,6 +716,8 @@ pub struct WindowConfig {
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     /// 非 `frameless` 窗口上无意义——那时系统标题栏自己带原生菜单。
     pub system_menu: bool,
+    /// 右键菜单触发时机（默认随平台）。
+    pub menu_trigger: crate::event::ContextMenuTrigger,
     /// 强制动效档位：None=随系统（见 [`reduced_motion`](Self::reduced_motion)）；Some=强制。
     pub motion: Option<crate::anim::MotionLevel>,
     /// 系统要求减弱动效（"显示动画"关 / "减弱动态效果"开）时落到的档位，默认
@@ -740,8 +754,12 @@ pub struct WindowConfig {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮，各平台落地见 `App::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 显示时是否激活窗口，默认 true。Windows 支持，其他平台暂忽略。
+    pub activate_on_show: bool,
     /// 无边框窗口自画外框的取色策略，见 [`WindowOutline`]。
     pub window_outline: WindowOutline,
+    /// 无边框窗口的圆角，见 [`WindowCorner`]。
+    pub window_corner: WindowCorner,
     /// 输入法组合中按下鼠标时怎么处理未上屏的串，见 [`ImeInterrupt`]。应用级：子窗沿用主窗的设置。
     pub ime_interrupt: ImeInterrupt,
     /// 输入法组合串由框架内联绘制（见 `App::ime_inline`）。应用级：子窗沿用主窗的设置。
@@ -770,9 +788,13 @@ pub enum ImeInterrupt {
 
 /// 无边框窗口自画 1px 外框的取色策略（`App::window_outline` / `Window::window_outline`）。
 ///
-/// 只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
+/// 取色只在平台需要宿主自己画外框时起作用：Windows 10 的无边框窗口（DWM 不给它画边，见
 /// win32 `win10_outline_color`）与 Linux 的无边框窗口；Windows 11 与 macOS 的边框是系统画的，
-/// 不受影响。最大化时各平台本就不画。
+/// 颜色不受影响。最大化时各平台本就不画。
+///
+/// 唯一的例外是 [`Off`](Self::Off)：在 **Windows 11** 上它还会把 DWM 画的那道 1px 边框一并
+/// 去掉（`DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`）——「不要外框」就是不要，不论这条线是谁画的。
+/// macOS 的系统边框仍不受影响。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum WindowOutline {
     /// 各平台默认：Windows 10 仿 Windows 11（失活 `#AAAAAA`、激活且系统开了「在标题栏和
@@ -783,8 +805,28 @@ pub enum WindowOutline {
     Theme,
     /// 固定颜色。
     Color(Color),
-    /// 不画。
+    /// 不画。Windows 11 上连 DWM 的 1px 边框也一并去掉；配合
+    /// [`WindowCorner::Square`] 可得到贴边、无线、直角的窗口。
     Off,
+}
+
+/// 无边框窗口的圆角（`App::window_corner` / `Window::window_corner`）。
+///
+/// **只在 Windows 11 生效**：那里圆角由 DWM 画，框架代为选档。Windows 10 没有圆角窗口的概念；
+/// macOS 的窗口形状由系统决定；Linux 的无边框窗口圆角是框架自己画的（固定为圆角），暂不支持
+/// 切换。这个设置在它们那里被忽略。
+///
+/// 典型用法：窗口要贴着工作区三边（任务栏停靠、侧栏式小工具）时，圆角会把四角切掉、露出
+/// 桌面——选 [`Square`](Self::Square)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowCorner {
+    /// 标准圆角（约 8px），与 Win11 系统窗口一致。
+    #[default]
+    Round,
+    /// 小圆角（约 4px）。
+    Small,
+    /// 直角。
+    Square,
 }
 
 impl Default for WindowConfig {
@@ -809,6 +851,7 @@ impl Default for WindowConfig {
             resident: false,
             frameless: false,
             system_menu: true,
+            menu_trigger: Default::default(),
             motion: None,
             reduced_motion: crate::anim::MotionLevel::Reduced,
             screenshot_anim_at: None,
@@ -821,7 +864,9 @@ impl Default for WindowConfig {
             icon: None,
             position: None,
             skip_taskbar: false,
+            activate_on_show: true,
             window_outline: WindowOutline::Auto,
+            window_corner: WindowCorner::Round,
             ime_interrupt: ImeInterrupt::Commit,
             ime_inline: false,
         }
@@ -1241,6 +1286,12 @@ pub trait AppHandler {
     /// （自定义标题栏）。平台据此在 `WM_NCHITTEST` 返回 HTCAPTION 实现拖动。
     fn window_drag_at(&self, _pos: Point) -> bool {
         false
+    }
+
+    /// 右键菜单是否在**按下**时弹（否则松开时弹）。平台层自己弹窗口菜单时（Wayland 客户端
+    /// 标题栏的合成器菜单）据此决定时机，与控件树里的右键菜单保持一致。
+    fn context_menu_on_press(&self) -> bool {
+        crate::event::ContextMenuTrigger::Auto.on_press()
     }
 
     /// 无边框窗口命中测试：`pos`（**物理像素**，相对客户区）是否落在交互控件（窗口按钮等）上。

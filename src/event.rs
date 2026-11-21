@@ -46,6 +46,10 @@ pub struct WindowState {
     /// 当前已最大化。
     pub maximized: bool,
     /// 当前已最小化。
+    ///
+    /// ⚠️ 快照纪律与 [`window_state()`](window_state) 相同：仅事件回调 / 菜单构建 /
+    /// `paint` 期间有效。任何时机的仲裁读法用
+    /// [`main_window_state()`](main_window_state)。
     pub minimized: bool,
     /// 窗口当前可见（未被隐藏）。
     ///
@@ -56,6 +60,10 @@ pub struct WindowState {
     ///
     /// 与 [`minimized`](Self::minimized) 是两件事：最小化的窗口仍然「可见」（在任务栏上、
     /// 能被还原），隐藏的窗口则从任务栏与 Alt-Tab 里整个消失。
+    ///
+    /// ⚠️ 快照纪律：仅事件回调 / 菜单构建 / `paint` 期间有效——显隐转换（hide_on_minimize、
+    /// `WindowOp::Hide`、任务栏操作）之后到下一次推送之间，快照可能仍停在旧值。任何时机的
+    /// 仲裁读法用 [`main_window_state()`](main_window_state)。
     pub visible: bool,
     /// 可最大化。win32 下等价于窗口带 `WS_MAXIMIZEBOX`（`App::resizable(false)` 会剥掉它）。
     pub maximizable: bool,
@@ -184,6 +192,24 @@ pub(crate) fn set_window_state(st: WindowState) {
 /// ——与 `run_resident` 在该平台的现状一致（它在那里直接返回，不建任何窗口）。
 pub fn window_open(key: &str) -> bool {
     crate::platform::single_window_open(key)
+}
+
+/// 查询**主窗**此刻的真实窗口状态。平台层同步查询，不走线程局部快照，任何时机成立
+/// ——热键 / `on_interval` / 托盘回调、显隐转换瞬间、对快照不信任时都用它。
+///
+/// 无主窗（常驻模式 [`App::run_resident`](crate::app::App::run_resident)）返回 `None`
+/// ——「无窗可谈状态」是事实陈述，不是失败。
+///
+/// 与 [`window_state()`](Self::window_state) 的分工：快照快、事件期内为真值，是首选；
+/// 本函数是任何时机的仲裁读法。两者并存不互斥，各自失败模式见各自文档。
+///
+/// # 平台
+///
+/// - Windows / macOS：同步读真值（win32 句柄登记为线程局部，非 UI 线程返回 `None`；
+///   macOS 读 NSWindow 属性，非主线程返回 `None`）。
+/// - Linux：暂未实现，恒返回 `None`（`window_state()` 快照不受影响，事件期内照常可用）。
+pub fn main_window_state() -> Option<WindowState> {
+    crate::platform::query_main_window_state()
 }
 
 /// 系统是否偏好**暗色**外观。
@@ -576,6 +602,12 @@ pub enum CursorShape {
     /// 它说的是「按住这里，整块跟着走」。macOS 没有公开的四向箭头 API，取系统自带的
     /// HIServices `move` 光标资源，读不到时退回张开的手。
     SizeAll,
+    /// 隐藏指针。全屏视频播放器、演示模式等「指针静止一会就藏起来」的场景。
+    ///
+    /// 只在指针**停在本窗口客户区内**时生效；移出窗口、移到系统标题栏或缩放边上，系统
+    /// 光标照常出现（无边框窗口的缩放边光标同理，是平台层自己的事）。应用负责在指针再次
+    /// 移动时换回别的形状——框架不替你做「一动就显示」。
+    Hidden,
 }
 
 /// 滚轮量 → 像素位移的换算，**留着不足 1 像素的零头**给下一次。
@@ -962,6 +994,36 @@ pub enum MenuAction {
 /// 菜单项动作闭包：与控件回调同形（`ctx` 在首位），`Rc` 是因为项会被克隆进浮层的
 /// 每一级面板（详见 [`MenuAction`]）。
 pub type MenuActionFn = std::rc::Rc<dyn Fn(&mut crate::core::EventCtx)>;
+
+/// 右键菜单何时弹出：按下时，还是松开时。
+///
+/// 各桌面的习惯不同：Windows 在**松开**时弹（原生标题栏、资源管理器皆如此）；macOS 与
+/// Linux 桌面（GTK / Qt）在**按下**时弹，并且按住滑到某项上松开即可直接选中。默认
+/// [`Auto`](Self::Auto) 各平台走各自的习惯，应用也可以固定一种。
+///
+/// 只管右键菜单（控件的编辑菜单、`on_context_menu`、标题栏系统菜单）；菜单项本身
+/// 一律在松开时执行，菜单栏与下拉框按下即展开。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContextMenuTrigger {
+    /// 随平台：Windows 松开时弹，其余平台按下时弹。
+    #[default]
+    Auto,
+    /// 按下右键就弹。
+    Press,
+    /// 松开右键才弹。
+    Release,
+}
+
+impl ContextMenuTrigger {
+    /// 解析后是否在按下时弹（`Auto` 按当前平台落定）。
+    pub fn on_press(self) -> bool {
+        match self {
+            Self::Press => true,
+            Self::Release => false,
+            Self::Auto => !cfg!(target_os = "windows"),
+        }
+    }
+}
 
 /// 一个浮层菜单/下拉项。支持图标、尾随快捷键、分隔线与级联子菜单。
 ///
@@ -1457,6 +1519,8 @@ pub struct WindowRequest {
     pub frameless: bool,
     /// 自绘标题栏的拖动区右键是否弹出窗口系统菜单（默认 true）。
     pub system_menu: bool,
+    /// 右键菜单触发时机（默认随平台）。
+    pub menu_trigger: crate::event::ContextMenuTrigger,
     /// 最小客户区尺寸（逻辑 dp，0=不限制）。
     pub min_width: i32,
     pub min_height: i32,
@@ -1484,7 +1548,8 @@ pub struct WindowRequest {
     pub shortcut: Option<WindowShortcutHandler>,
     /// 单例键（`Window::single`）。`None` = 每次请求都开一个新窗口。
     ///
-    /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并把那个窗口激活到前台。
+    /// 有键时平台先查窗口登记表：已有同键窗口就**丢弃本次请求**并重新显示那个窗口。
+    /// 默认激活到前台；Windows 遵循已有窗口的 `activate_on_show`。
     /// 判定放在平台层而非应用层，是因为"把已有窗口拉到前台"只有平台做得到。
     pub single: Option<String>,
     /// 窗口图标（`Window::icon`）。`None` 则跟随系统默认——子窗**不会**自动继承主窗
@@ -1494,8 +1559,14 @@ pub struct WindowRequest {
     pub position: Option<(i32, i32)>,
     /// 不在任务栏占按钮（`Window::skip_taskbar`），各平台落地见 `WindowConfig::skip_taskbar`。
     pub skip_taskbar: bool,
+    /// 显示时是否激活窗口，默认 true。Windows 支持，其他平台暂忽略。
+    pub activate_on_show: bool,
     /// 无边框外框取色策略（`Window::window_outline`），见 `WindowOutline`。
     pub window_outline: crate::platform::WindowOutline,
+    /// 无边框窗口圆角（`Window::window_corner`），见 `WindowCorner`。
+    pub window_corner: crate::platform::WindowCorner,
+    /// ESC 没有浮层 / 对话框可收时是否关闭本窗口（`Window::escape_closes_window`），默认 true。
+    pub escape_closes_window: bool,
 }
 
 /// 窗口关闭拦截器：返回 `true` 放行、`false` 取消。
@@ -1571,6 +1642,34 @@ mod tests {
         ctx.close_window("settings");
         assert_eq!(take_callback_closes(), vec!["main", "settings"]);
         assert!(take_callback_closes().is_empty(), "取走一次就该空了");
+    }
+
+    /// 快照注入契约：宿主注入什么，`window_state()` 就读到什么；`UNKNOWN` 的字段取值
+    /// 全 false（visible=true 除外）也一并钉住——那是「错得显眼」设计的一部分。
+    ///
+    /// 事件期外的残值行为（读到上一次注入）是文档口径，不是这里要验的。
+    #[test]
+    fn window_state_snapshot_roundtrip() {
+        let st = WindowState {
+            maximized: true,
+            minimized: false,
+            visible: false,
+            maximizable: false,
+            minimizable: true,
+        };
+        set_window_state(st);
+        assert_eq!(window_state(), st);
+        // 恢复 UNKNOWN，避免污染同进程内其它测试的线程局部。
+        set_window_state(WindowState::UNKNOWN);
+        assert_eq!(window_state(), WindowState::UNKNOWN);
+    }
+
+    /// 平台门契约：未实现同步查询的平台（Linux）恒返回 None。
+    /// X11 的 round-trip 实现落地时，这条测试改成断言真值集合。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn main_window_state_is_none_where_not_implemented() {
+        assert!(main_window_state().is_none());
     }
 
     /// 撞键检测的**三个方向都要钉**，而后两个比第一个重要：一个见谁都喊的提示，三天后

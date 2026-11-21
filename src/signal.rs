@@ -558,10 +558,14 @@ impl<T: 'static> Signal<T> {
     /// 所以这里选择就地炸掉。若该句柄**可能**已被回收（比如它来自一个会重建的列表行，
     /// 而当前代码活得比那一行久），用 [`try_with`](Self::try_with) 显式处理缺失。
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        self.try_with(f).expect(
-            "signal 句柄已失效：槽位已被回收（SignalScope/dispose）。\
-             可能失效的句柄请改用 try_with/try_get",
-        )
+        // 消息只在失败路径格式化：`expect(&format!(..))` 会在每次成功读取时也白拼一次串。
+        self.try_with(f).unwrap_or_else(|| {
+            panic!(
+                "signal 句柄已失效（类型 {}）：槽位已被回收（SignalScope/dispose）。\
+                 可能失效的句柄请改用 try_with/try_get",
+                std::any::type_name::<T>()
+            )
+        })
     }
 
     /// 借用读取，句柄已失效时返回 `None` 而不是 panic。
@@ -696,20 +700,25 @@ impl<T: 'static> Signal<T> {
     /// [`Signal::with`] 的 panic 不对称：写进一块已经没人看的状态是一次定义良好的空操作，
     /// 而读它没有值可返回。这个不对称让"控件子树刚被重建、其上一次点击排队的回调才跑到"
     /// 这类竞态在 release 里退化为无害的丢弃，而不是崩溃。
+    #[track_caller]
     pub fn set(&self, value: T) {
-        self.write_raw(value);
+        // `#[track_caller]` 不跨层透传：write_raw 自己拿 `Location::caller()` 只会拿到
+        // 这一行。显式把本函数收到的调用点（=真正的业务写出点）传下去。
+        self.write_raw(value, std::panic::Location::caller());
         notify_changed();
     }
 
     /// 写值但**不**触发任何重绘通知（不置跨窗口脏、不请求续帧）。只给平台层驱动的、自己
     /// 负责重画的小宿主用（客户端装饰标题栏的标题 / 激活态）：普通的 `set` 在事件期外会让
     /// 所有窗口整窗重画。失效语义同 [`Signal::set`]。
+    #[track_caller]
     pub(crate) fn set_quiet(&self, value: T) {
-        self.write_raw(value);
+        self.write_raw(value, std::panic::Location::caller());
     }
 
-    /// 只写值、版本号自增，不发通知。[`Signal::set`] 与 [`Signal::set_quiet`] 共用。
-    fn write_raw(&self, value: T) {
+    /// 只写值、版本号自增，不发通知。`caller` 由 [`Self::set`] / [`Self::set_quiet`]
+    /// 传入（它们的 `#[track_caller]` 隐式参数），死句柄断言据此报出业务写出点。
+    fn write_raw(&self, value: T, caller: &'static std::panic::Location<'static>) {
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
@@ -722,7 +731,12 @@ impl<T: 'static> Signal<T> {
                 slot.value = Some(Box::new(value));
                 slot.version = slot.version.wrapping_add(1);
             } else {
-                debug_assert!(false, "signal 句柄已失效");
+                debug_assert!(
+                    false,
+                    "signal 句柄已失效（类型 {}，写出点 {}），写出点请先 is_alive/try_set 探活",
+                    std::any::type_name::<T>(),
+                    caller
+                );
             }
         });
     }
@@ -730,7 +744,10 @@ impl<T: 'static> Signal<T> {
     /// 原地修改并触发重绘（避免 get→改→set 的一次 clone）。
     ///
     /// 失效语义同 [`Signal::set`]。
+    #[track_caller]
     pub fn update(&self, f: impl FnOnce(&mut T)) {
+        // 闭包不继承 track_caller：写出点必须在进 `RT.with` 之前取。
+        let caller = std::panic::Location::caller();
         RT.with(|rt| {
             let mut rt = rt.borrow_mut();
             if let Some(slot) = rt.slot_mut(self.key) {
@@ -746,10 +763,84 @@ impl<T: 'static> Signal<T> {
                     debug_assert!(false, "signal 值类型与句柄不符");
                 }
             } else {
-                debug_assert!(false, "signal 句柄已失效");
+                debug_assert!(
+                    false,
+                    "signal 句柄已失效（类型 {}，写出点 {}），写出点请先 is_alive/try_set 探活",
+                    std::any::type_name::<T>(),
+                    caller
+                );
             }
         });
         notify_changed();
+    }
+
+    /// 写入新值并触发重绘，句柄已失效时为**无操作**并返回 `false`。
+    ///
+    /// `set`/`update` 对失效句柄是 debug 断言失败（release 静默丢弃）——那个不对称是给
+    /// 「写进没人看的状态 = 定义良好的空操作」定的性。本方法把「可能已死」写进了类型：
+    /// 迟到回调（后台任务完成回调持有行内信号句柄，页重建把旧页连同信号一起回收）收尾
+    /// 前先用它探活，失效即返回 `false` 并**放弃整条收尾**——收尾里往往还有读取
+    /// （`get`/`with` 对失效句柄是 panic，见 [`try_get`](Self::try_get)），只把某一次
+    /// 写换成 try_ 变体挡不住后面的读。
+    ///
+    /// 活句柄上与 `set` 完全一致（含事件期内标记 touched）；派生信号（[`map`](Self::map)
+    /// 派生的只读信号）与 `set` 一样 debug 断言，只是额外返回 `false`。唯一的语义差在
+    /// 死句柄：`set`（release 档）写完才发通知，`try_set` 没写就不发——后者更精确，
+    /// 且这正是把「可能已死」写进返回值的用意。
+    pub fn try_set(&self, value: T) -> bool {
+        let wrote = RT.with(|rt| {
+            let mut rt = rt.borrow_mut();
+            if let Some(slot) = rt.slot_mut(self.key) {
+                // 理由同 [`Signal::set`]。
+                if slot.derived.is_some() {
+                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
+                    return false;
+                }
+                slot.value = Some(Box::new(value));
+                slot.version = slot.version.wrapping_add(1);
+                true
+            } else {
+                false
+            }
+        });
+        if wrote {
+            notify_changed();
+        }
+        wrote
+    }
+
+    /// 原地修改并触发重绘，句柄已失效时 `f` 不执行、返回 `false`。
+    ///
+    /// 给「读当前值→写新值」的迟到收尾用：死句柄上先 `get` 再 `set` 会在 `get` 就炸，
+    /// 本方法把读改写原子化。活句柄上与 [`update`](Self::update) 完全一致。
+    ///
+    /// ⚠ `f` 在信号运行时的独占借用内执行，**不能**在里面读写任何信号（含别的信号），
+    /// 否则借用冲突 panic。需要别的信号的值，先在外面读好再捕获进来。
+    pub fn try_update(&self, f: impl FnOnce(&mut T)) -> bool {
+        let wrote = RT.with(|rt| {
+            let mut rt = rt.borrow_mut();
+            if let Some(slot) = rt.slot_mut(self.key) {
+                // 理由同 [`Signal::set`]。
+                if slot.derived.is_some() {
+                    debug_assert!(false, "派生信号（Signal::map）只读，请改源信号");
+                    return false;
+                }
+                if let Some(v) = slot.value.as_mut().and_then(|b| b.downcast_mut::<T>()) {
+                    f(v);
+                    slot.version = slot.version.wrapping_add(1);
+                } else {
+                    debug_assert!(false, "signal 值类型与句柄不符");
+                    return false;
+                }
+            } else {
+                return false;
+            }
+            true
+        });
+        if wrote {
+            notify_changed();
+        }
+        wrote
     }
 }
 
@@ -881,6 +972,42 @@ mod tests {
         let s = signal(1i32);
         s.dispose();
         let _ = s.get();
+    }
+
+    #[test]
+    fn try_write_on_live_handle_matches_set_update() {
+        let s = signal(1i32);
+        let v0 = s.version();
+        assert!(s.try_set(7));
+        assert_eq!(s.get(), 7);
+        assert_eq!(
+            s.version(),
+            v0 + 1,
+            "活句柄 try_set 应与 set 一样推进版本号"
+        );
+        assert!(s.try_update(|v| *v += 3));
+        assert_eq!(s.get(), 10);
+        assert_eq!(s.version(), v0 + 2, "try_update 也应推进版本号");
+    }
+
+    #[test]
+    fn try_write_on_disposed_handle_is_noop_false() {
+        let s = signal(1i32);
+        s.dispose();
+        assert!(!s.try_set(7), "回收后 try_set 应无操作并返回 false");
+        assert!(
+            !s.try_update(|v| *v += 3),
+            "回收后 try_update 应无操作、f 不执行"
+        );
+        assert_eq!(s.try_get(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "派生信号（Signal::map）只读")]
+    fn try_write_on_derived_signal_debug_asserts() {
+        let src = signal(1i32);
+        let derived = src.map(|v: &i32| *v as u64);
+        let _ = derived.try_set(7u64);
     }
 
     #[test]

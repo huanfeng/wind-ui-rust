@@ -42,6 +42,9 @@ pub(super) struct Deco {
     /// 右键在拖动区按下、已弹合成器窗口菜单：配对的右键松开吞掉（不经左键的 `DragGate`，
     /// 免得把左键那次的「吞松开」标志冲掉）。
     pub swallow_right_up: bool,
+    /// 右键在拖动区按下、等松开时弹合成器窗口菜单：记的是**按下**事件的 serial——合成器
+    /// （Mutter）拿它与隐式抓取的 serial 比对，松开事件的 serial 会被当作无效请求丢掉。
+    pub pending_menu: Option<u32>,
 }
 
 impl Deco {
@@ -55,6 +58,7 @@ impl Deco {
             hover: false,
             captured: false,
             swallow_right_up: false,
+            pending_menu: None,
             last_anim: std::time::Instant::now(),
         };
         d.host.handler.set_scale(scale as f32);
@@ -300,6 +304,25 @@ impl Wl {
         d.pointer(ev);
     }
 
+    /// 右键在标题栏松开：取走上膛的按下 serial（无论松开在哪都要清，免得残留到下一次），
+    /// 若松开处仍是拖动区就弹合成器窗口菜单。`p` 是表面物理坐标；`on_bar` 为松开是否在标题栏。
+    pub(super) fn deco_release_menu(&mut self, i: usize, p: Option<Point>) {
+        let w = &mut self.windows[i];
+        let Some(d) = w.deco.as_mut() else { return };
+        let Some(serial) = d.pending_menu.take() else {
+            return;
+        };
+        let Some(p) = p else { return };
+        if !d.host.handler.window_drag_at(p) || d.host.handler.interactive_at(p) {
+            return;
+        }
+        if let (Some(r), Some(seat)) = (&w.role, &self.g.seat) {
+            let f = w.scale.factor;
+            let lg = |v: i32| (v as f64 / f).round() as i32;
+            r.top.show_window_menu(seat, serial, lg(p.x), lg(p.y));
+        }
+    }
+
     /// 标题栏空白处按下：拖动 / 双击最大化 / 右键窗口菜单。返回 `Some` = 这一下被接管（内含
     /// 待定拖动，双击与右键菜单时为 `None`）。`p` 是表面物理坐标。
     pub(super) fn deco_press(
@@ -317,10 +340,16 @@ impl Wl {
         }
         match button {
             MouseButton::Right => {
-                if let (Some(r), Some(seat)) = (&w.role, &self.g.seat) {
-                    let f = w.scale.factor;
-                    let lg = |v: i32| (v as f64 / f).round() as i32;
-                    r.top.show_window_menu(seat, serial, lg(p.x), lg(p.y));
+                if w.handler.context_menu_on_press() {
+                    // 按下即弹的策略（Wayland 的 Auto 即此）。
+                    if let (Some(r), Some(seat)) = (&w.role, &self.g.seat) {
+                        let f = w.scale.factor;
+                        let lg = |v: i32| (v as f64 / f).round() as i32;
+                        r.top.show_window_menu(seat, serial, lg(p.x), lg(p.y));
+                    }
+                } else if let Some(d) = w.deco.as_mut() {
+                    // 松开才弹：只上膛，见 `deco_release_menu`。
+                    d.pending_menu = Some(serial);
                 }
                 Some(None)
             }

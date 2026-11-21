@@ -195,8 +195,9 @@ struct X11 {
     /// 的角没人混合会成黑块，此时退回方角（像素 alpha 全 255，不重建窗口也能正常显示）。
     composited: bool,
     scale: f32,
-    /// 前 6 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`）。
-    cursors: [xproto::Cursor; CURSOR_COUNT],
+    /// 前 6 个按 `cursor_index` 对应 `CursorShape`，其后 8 个是缩放边方向（`RESIZE_CURSOR_BASE + dir`），
+    /// 最后一个（`HIDDEN_CURSOR`）是全透明光标，对应 `CursorShape::Hidden`。
+    cursors: [xproto::Cursor; CURSOR_TOTAL],
     keymap: Keymap,
     windows: Vec<Win>,
     last_anim_frame: Instant,
@@ -320,7 +321,7 @@ impl X11 {
         conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))
             .ok()?;
         let scale = detect_scale(&conn, root, &atoms);
-        let cursors = create_cursors(&conn).unwrap_or([0; CURSOR_COUNT]);
+        let cursors = create_cursors(&conn, root).unwrap_or([0; CURSOR_TOTAL]);
         let argb = argb_visual(&conn, screen_num);
         let conn = Rc::new(conn);
         let ime = Ime::connect(conn.clone(), screen_num);
@@ -2031,6 +2032,7 @@ fn cursor_index(s: CursorShape) -> usize {
         CursorShape::SizeWE => 3,
         CursorShape::SizeNS => 4,
         CursorShape::SizeAll => 5,
+        CursorShape::Hidden => HIDDEN_CURSOR,
     }
 }
 
@@ -2131,20 +2133,24 @@ fn argb_visual(conn: &RustConnection, screen_num: usize) -> Option<ArgbVisual> {
 /// `cursors` 里缩放边光标的起始下标与总数。
 const RESIZE_CURSOR_BASE: usize = 6;
 const CURSOR_COUNT: usize = RESIZE_CURSOR_BASE + 8;
+/// 全透明光标（`CursorShape::Hidden`）排在字体光标之后：它不是字形，建法不同，
+/// 也就不进 `CURSOR_GLYPHS`。
+const HIDDEN_CURSOR: usize = CURSOR_COUNT;
+const CURSOR_TOTAL: usize = CURSOR_COUNT + 1;
 
 /// `cursor` 字体里的字形号，下标即 `cursors` 的下标（排列见 `create_cursors` 的注释）。
 const CURSOR_GLYPHS: [u16; CURSOR_COUNT] =
     [68, 60, 152, 108, 116, 52, 134, 138, 136, 96, 14, 16, 12, 70];
 
 /// 核心协议的 `cursor` 字体光标（不依赖 Xcursor 主题，所有 X 服务器都有）。
-fn create_cursors(conn: &RustConnection) -> Option<[xproto::Cursor; CURSOR_COUNT]> {
+fn create_cursors(conn: &RustConnection, root: Window) -> Option<[xproto::Cursor; CURSOR_TOTAL]> {
     let font = conn.generate_id().ok()?;
     conn.open_font(font, b"cursor").ok()?;
     // XC_left_ptr, XC_hand2, XC_xterm, XC_sb_h_double_arrow, XC_sb_v_double_arrow, XC_fleur，
     // 然后按方向码 0..8（左上起顺时针）：XC_top_left_corner, XC_top_side,
     // XC_top_right_corner, XC_right_side, XC_bottom_right_corner, XC_bottom_side,
     // XC_bottom_left_corner, XC_left_side——与 WM 画缩放边时用的是同一组。
-    let mut out = [0u32; CURSOR_COUNT];
+    let mut out = [0u32; CURSOR_TOTAL];
     for (i, g) in CURSOR_GLYPHS.iter().enumerate() {
         let c = conn.generate_id().ok()?;
         conn.create_glyph_cursor(c, font, font, *g, g + 1, 0, 0, 0, 0xffff, 0xffff, 0xffff)
@@ -2152,7 +2158,39 @@ fn create_cursors(conn: &RustConnection) -> Option<[xproto::Cursor; CURSOR_COUNT
         out[i] = c;
     }
     let _ = conn.close_font(font);
+    // 全透明光标：1×1、1 位深的空位图作 source 与 mask，xcb 的惯用做法。建不成就退回
+    // 箭头，宁可光标没藏住也别让它变成 0（无光标 = 继承父窗口，同样是显示）。
+    out[HIDDEN_CURSOR] = create_blank_cursor(conn, root).unwrap_or(out[0]);
     Some(out)
+}
+
+/// 全透明光标：1×1、1 位深的空位图同时作 source 与 mask，不画任何像素。
+fn create_blank_cursor(conn: &RustConnection, root: Window) -> Option<xproto::Cursor> {
+    let pix = conn.generate_id().ok()?;
+    conn.create_pixmap(1, pix, root, 1, 1).ok()?;
+    // 新建 pixmap 的内容协议里是未定义的：显式清成 0（mask 全 0 即全透明），
+    // 否则热点处可能露出一个黑点。
+    let gc = conn.generate_id().ok()?;
+    conn.create_gc(gc, pix, &CreateGCAux::new().foreground(0))
+        .ok()?;
+    let _ = conn.poly_fill_rectangle(
+        pix,
+        gc,
+        &[xproto::Rectangle {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }],
+    );
+    let _ = conn.free_gc(gc);
+    let cur = conn.generate_id().ok()?;
+    let made = conn
+        .create_cursor(cur, pix, pix, 0, 0, 0, 0, 0, 0, 0, 0)
+        .ok()
+        .map(|c| c.check().is_ok());
+    let _ = conn.free_pixmap(pix);
+    (made == Some(true)).then_some(cur)
 }
 
 /// DPI 缩放：`WINDUI_SCALE` 环境变量优先，其次 X 资源库里的 `Xft.dpi`（桌面环境的
@@ -2233,6 +2271,24 @@ mod tests {
             70,
             "XC_left_side 收尾"
         );
+    }
+
+    /// 透明光标排在字体光标之后，不与任何字形或缩放边光标共用下标。
+    #[test]
+    fn hidden_cursor_has_its_own_slot() {
+        let i = cursor_index(CursorShape::Hidden);
+        assert_eq!(i, CURSOR_COUNT);
+        assert!(i < CURSOR_TOTAL);
+        for s in [
+            CursorShape::Arrow,
+            CursorShape::Hand,
+            CursorShape::Text,
+            CursorShape::SizeWE,
+            CursorShape::SizeNS,
+            CursorShape::SizeAll,
+        ] {
+            assert_ne!(cursor_index(s), i, "{s:?}");
+        }
     }
 
     #[test]

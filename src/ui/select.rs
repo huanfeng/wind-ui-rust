@@ -487,18 +487,16 @@ impl Widget for Dropdown {
                     ctx.mark_dirty();
                     true
                 }
+                // 按下即展开（原生下拉框的手感）：按住不放可直接滑到某项上松开选中，
+                // 原地松开则菜单留着。松开不再由控件处理——宿主接手（见 `handle_menu_pointer`）。
                 PointerKind::Down => {
                     ctx.request_focus();
+                    // 打开后宿主独占指针，控件收不到 Leave；提前清 hover 避免边框残留。
+                    self.hover = false;
+                    self.open(ctx);
                     true
                 }
-                PointerKind::Up => {
-                    if ctx.bounds().contains(p.pos) {
-                        // 打开后宿主独占指针，控件收不到 Leave；提前清 hover 避免边框残留。
-                        self.hover = false;
-                        self.open(ctx);
-                    }
-                    true
-                }
+                PointerKind::Up => true,
                 _ => false,
             },
             // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行 Enter
@@ -798,18 +796,16 @@ impl Widget for CheckMenu {
                     ctx.mark_dirty();
                     true
                 }
+                // 按下即展开（原生下拉框的手感）：按住不放可直接滑到某项上松开选中，
+                // 原地松开则菜单留着。松开不再由控件处理——宿主接手（见 `handle_menu_pointer`）。
                 PointerKind::Down => {
                     ctx.request_focus();
+                    // 同 Dropdown：宿主打开后独占指针，控件收不到 Leave。
+                    self.hover = false;
+                    self.open(ctx);
                     true
                 }
-                PointerKind::Up => {
-                    if ctx.bounds().contains(p.pos) {
-                        // 同 Dropdown：宿主打开后独占指针，控件收不到 Leave。
-                        self.hover = false;
-                        self.open(ctx);
-                    }
-                    true
-                }
+                PointerKind::Up => true,
                 _ => false,
             },
             // `!k.ctrl`：Ctrl+Enter 是应用级的「提交」通道（见 `TextInput` 里多行 Enter

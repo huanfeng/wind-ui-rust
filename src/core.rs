@@ -41,6 +41,28 @@ const SCROLL_EDGE_NEAR: i32 = 4;
 /// 离开边缘超过多少逻辑像素后边缘回调重新武装。
 const SCROLL_EDGE_REARM: i32 = 16;
 
+/// 滚动位置绑定（`Element::scroll_position`）的轨道状态。
+pub(crate) struct ScrollBind {
+    pub sig: Signal<i32>,
+    /// 上次见到/写回的信号版本。同步相位判据：版本变了 = 有外部写入尚未消费，
+    /// 此刻容器**只消费不写回**（否则会用旧值覆盖外部刚写入的新值）。
+    pub seen_version: u64,
+    /// 首帧只消费不写回（初始化对齐）：应用「先 `set` 预设位置再 build」的写法，
+    /// 若首帧按常规判据走，会把节点的初始 0 写回信号、预设位置丢失。
+    pub first: bool,
+}
+
+impl ScrollBind {
+    pub fn new(sig: Signal<i32>) -> Self {
+        let seen_version = sig.version();
+        Self {
+            sig,
+            seen_version,
+            first: true,
+        }
+    }
+}
+
 /// 滚动容器的可选扩展状态：只有用了跟随底部 / 头部锚定 / 边缘回调的节点才分配。
 #[derive(Default)]
 pub(crate) struct ScrollExt {
@@ -50,6 +72,8 @@ pub(crate) struct ScrollExt {
     pub preserve_on_prepend: bool,
     /// `Element::on_scroll_edge`。
     pub on_edge: Option<ScrollEdgeFn>,
+    /// `Element::scroll_position`。
+    pub scroll_bound: Option<ScrollBind>,
     /// 上一次 arrange 结束时的最大滚动量（`None` = 尚未布局过）。判"上一帧是否在底部"用：
     /// 本帧 measure 已把 `content_h` 更新成新值，只有这份记录还停在上一帧。
     prev_max_y: Option<i32>,
@@ -200,6 +224,12 @@ pub struct NodeId {
 }
 
 impl NodeId {
+    /// 测试里造一个不挂在树上的 id（只当不透明身份比较用）。
+    #[cfg(test)]
+    pub(crate) fn from_raw(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
     /// 把（槽位，代际）拼成一个整数：同一时刻不同节点必不同，槽位复用后代际变了也不同。
     /// 给平台层当不透明身份比较用（如输入法的焦点控件身份）。
     pub(crate) fn as_u64(self) -> u64 {
@@ -306,11 +336,29 @@ pub trait Widget {
         None
     }
     /// 接收 Builder 传入的点击回调（仅交互控件实现）。
-    fn take_click(&mut self, _f: ClickFn) {}
+    ///
+    /// 默认实现**不接收**：debug 构建下直接 panic 提示，release 下丢弃。回调被静默
+    /// 丢掉最难查（链上去不报错也不生效），所以不支持点击通知的控件宁可在开发期喊出来。
+    /// 已实现的：Button（含 icon_button）、CheckBox、RadioButton、Switch、TextInput（旁路
+    /// 通知）、Link、ComboBox、NavRow 与 `clickable()` 容器；清单以 `Element::on_click`
+    /// 的文档为准。Slider 没有「点击」语义，请改用绑定的 `Signal` 订阅变化。
+    fn take_click(&mut self, _f: ClickFn) {
+        debug_assert!(
+            false,
+            "on_click / on_toggle 挂在了不支持点击回调的控件上，回调会被丢弃（没加 .clickable() 的容器？见 Element::on_click 文档）"
+        );
+    }
     /// 显隐切换时重置交互态（hover/press → 静止，并令下次绘制的补间瞬时落定不动画）。
     /// 框架在节点 `effective_visible` 翻转时调用——避免控件"按下/悬停未释放就被隐藏"，
     /// 其状态/补间冻结、下次显示瞬间闪出旧的按下/悬停态。默认无操作。
     fn reset_interaction(&mut self) {}
+    /// 节点即将被 [`Tree::remove`] 回收（连同其控件一起销毁）前调用一次。
+    ///
+    /// 给「对外镜像了交互状态」的控件收尾用：拖动中的滑块若被整页切走 / 所在行被删掉，
+    /// 与之配对的 Up 再也派发不到它，镜像信号就会一直停在「拖动中」。`reset_interaction`
+    /// 管的是「变为不可见」，回收节点不经过它；写信号也不能放进 `Drop`（信号句柄那时可能已
+    /// 随作用域失效，debug 下写失效句柄会断言，`Drop` 里 panic 更会直接中止进程）。默认无操作。
+    fn on_removed(&mut self) {}
     /// 节点不在绘制路径上（被隐藏、或在被隐藏的祖先之下）时，每次结构变化后调用：把
     /// 跟随状态的补间就地落定到**当前**状态。
     ///
@@ -420,6 +468,22 @@ pub trait Widget {
     fn frame_corner(&self, _bounds: Rect) -> Option<f32> {
         None
     }
+    /// 本控件当前是不是"选中行"，是的话回答高亮该画成什么样。
+    ///
+    /// 祖先容器声明了 [`Element::slide_highlight`](crate::ui::Element::slide_highlight) 时，
+    /// 由容器统一画一块在行间滑动的高亮；选中的行据此报上自己的样式，并**自己不再画选中底**。
+    /// 默认 `None`（不是选中行，或不参与）。
+    ///
+    /// 契约：
+    /// - 行的身份是 `NodeId`。行节点被重建（`list_signal` 刷新、整批重建）就是换了一行，
+    ///   高亮会从旧位置滑过来；要在刷新后保持不动，得让行节点存活。
+    /// - 与启用态无关：禁用的选中行也应返回 `Some`，否则它既不画底、容器也不画，选中看不出来。
+    /// - 容器与选中行之间**不要夹**裁剪、不透明度或进出场过渡的中间层：高亮画在容器层，
+    ///   不受它们作用。
+    /// - 最近的声明容器负责：嵌套时外层不会越过内层容器去找行。
+    fn slide_highlight(&self) -> Option<crate::ui::slide_highlight::HighlightSpec> {
+        None
+    }
     /// 控件的**外框自己表达焦点**（聚焦时换强调色并加粗到 `metrics.border_width_focus`）。
     /// 为真时宿主不再在键盘导航时外套焦点环——两圈叠在一起，键盘聚焦反而比鼠标聚焦
     /// 粗出一大圈。输入框、下拉框、步进器、取色器触发器这类「字段」控件返回 true：
@@ -443,6 +507,14 @@ pub trait Widget {
     /// 节点级的背景/滚动/拖窗/拖放等仍由命中逻辑单独判为「吞命中」（见 `hit_node`）。
     fn hit_opaque(&self) -> bool {
         true
+    }
+    /// 命中区在节点矩形之外**额外**外扩的量（不影响布局与绘制）。默认零。
+    ///
+    /// 给「视觉上要细、手上要好抓」的东西用：表格列宽手柄是插在两列之间的零宽节点，
+    /// 不占任何布局宽度，靠这里向两侧各扩几个像素才抓得住。外扩部分会与相邻兄弟重叠——
+    /// 想让它压过兄弟，节点还须设 `raised`（先于普通兄弟受测、后于它们绘制）。
+    fn hit_slop(&self) -> Insets {
+        Insets::default()
     }
     /// 本节点在**窗口拖动区判定**（`Tree::drag_hit_at`）中是否透明。true（仅模态遮罩）
     /// = 拖动判定时穿透到其下层兄弟，使无边框窗口的自绘标题栏在对话框弹出后仍可拖窗。
@@ -544,6 +616,31 @@ impl Node {
         } else {
             content
         }
+    }
+
+    /// [`clip_outline`](Self::clip_outline) 的裁剪外形（`abs` 为本节点绝对矩形）：
+    /// 边框内侧的矩形 + 相应收小的四角半径。没有边框时就是节点外框与它自己的圆角。
+    ///
+    /// 只扣存在的那几条边：缺边描边（`border_edges`）的缺口那侧内容可以贴到外框。
+    /// 半径同步收小一个线宽——内容的圆角与描边内缘同心，否则四角露出一线底色。
+    pub fn outline_clip(&self, abs: Rect) -> (Rect, crate::geometry::Corners) {
+        let bw = match &self.style.border {
+            Some((_, w)) if *w > 0 => *w,
+            _ => 0,
+        };
+        let e = self.style.border_edges;
+        let edge = |on: bool| if on { bw } else { 0 };
+        let r = abs.inset(Insets {
+            left: edge(e.left),
+            top: edge(e.top),
+            right: edge(e.right),
+            bottom: edge(e.bottom),
+        });
+        let radii = self
+            .style
+            .corner_radii
+            .unwrap_or(crate::geometry::Corners::all(self.style.corner_radius));
+        (r, radii.offset(-(bw as f32)))
     }
 
     /// 滚动容器的视口尺寸：内容区扣掉 arrange 预留的滚动条（基于上一帧布局）。
@@ -807,6 +904,13 @@ pub struct Node {
     pub focused: bool,
     /// 是否把子节点裁剪到自身内容区（滚动容器等）。
     pub clip_children: bool,
+    /// 是否把子节点裁剪到自身**外形**：描边内侧的圆角矩形（`Element::clip`）。
+    ///
+    /// 与 `clip_children` 正交、可叠加：后者裁到内容区（扣掉 padding）的直角矩形，这个
+    /// 裁到边框内侧（不扣 padding）并保住圆角——CSS `overflow: hidden` 的语义。两者都设时
+    /// 取交集。为「贴边内容放进圆角卡片」而设：没有它，表头底色、斑马纹、图片这些直角
+    /// 内容会盖出卡片的圆角与描边。
+    pub clip_outline: bool,
     /// 滚动容器可滚动的方向（仅 `Layout::Scroll` 有意义）。
     pub scroll_axis: crate::spec::ScrollAxis,
     /// 垂直滚动偏移（Scroll 容器）。
@@ -863,6 +967,10 @@ pub struct Node {
     /// 字段登记**。事后直接给已建好的节点赋值，会得到一个既被排除出父容器布局流、
     /// 又从不被排布/绘制/命中的幽灵节点——彻底消失，且没有任何提示。
     pub overlay: Option<Signal<bool>>,
+    /// 浮层被「外面按下」收起时，这一击是否**到此为止**（见
+    /// [`Element::dismiss_swallows_click`](crate::ui::Element::dismiss_swallows_click)）。
+    /// 默认 false：同一击里既收起浮层、又照常按到底下的控件。只对 `overlay` 节点有意义。
+    pub(crate) overlay_swallow: bool,
     /// 进出场过渡状态（`Element::transition`）。只有声明了过渡的节点才分配。
     pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
     /// 高度过渡状态（`Element::animate_height`）。只有声明了的节点才分配。
@@ -875,6 +983,11 @@ pub struct Node {
     pub(crate) style_anim: Option<Box<crate::ui::presence::StyleAnim>>,
     /// 布局过渡状态（`Element::animate_layout`）。只有声明了的节点才分配。
     pub(crate) layout_anim: Option<Box<crate::ui::presence::LayoutAnim>>,
+    /// 滑动选中高亮状态（`Element::slide_highlight`）。只有声明了的容器才分配。
+    pub(crate) slide_hl: Option<Box<crate::ui::slide_highlight::SlideHighlight>>,
+    /// 自定义行的"我是选中行"自报（`Element::slide_target`），与 `Widget::slide_highlight` 并列生效。
+    pub(crate) slide_target:
+        Option<Box<dyn Fn() -> Option<crate::ui::slide_highlight::HighlightSpec>>>,
     /// 声明式初始焦点（`None`=不参与）。宿主在布局稳定后**一次性**兑现，见
     /// [`Autofocus`] 与 `UiHost::refresh_focus`。
     pub autofocus: Option<Autofocus>,
@@ -1046,6 +1159,12 @@ struct Slot {
 
 /// 节点树 + arena。
 pub struct Tree {
+    /// 浮层「收起即吞」吃掉了一次按下，等它配对的抬起（见 `dispatch_pointer`）。
+    swallow_up: bool,
+    /// 被「收起即吞」吃掉的按下次数，用来把紧随其后的连击计数还原：点击计数在平台层按
+    /// 时间 / 位置累计，它不知道第一下被吞了，于是双击的第二下带着 `click_count = 2` 到来，
+    /// 底层控件会把它当成双击（表格行激活、输入框选词）。见 `dispatch_pointer`。
+    swallowed_clicks: u8,
     slots: Vec<Slot>,
     free: Vec<u32>,
     pub root: Option<NodeId>,
@@ -1063,6 +1182,10 @@ pub struct Tree {
     pub(crate) scroll_edge_inset: i32,
     /// 响应式节点列表：每次 `layout_root` 前广播 `on_update`，允许控件重建子节点。
     reactive_nodes: Vec<NodeId>,
+    /// 绑定了滚动位置信号的节点（`Element::scroll_position`）：同步相位每帧两遍扫描，
+    /// 见 [`Tree::sync_scroll_bindings`]。登记/剔除机制对齐 `reactive_nodes`——绑定容器
+    /// 通常 0-2 个，注册表让相位成本与树大小解耦。
+    scroll_bound: Vec<NodeId>,
     /// on_update（响应式相位）里控件请求的 toast 暂存区。该相位在 `call_on_update` 后
     /// 丢弃整个 `EventOutcome`，其中的 toast 无处上交宿主；单独在此累积，由宿主在
     /// layout 后 `take_pending_toasts` 取走上屏（否则 `toast_sink` 等经信号触发的提示全被吞）。
@@ -1124,7 +1247,7 @@ pub struct Tree {
     ///
     /// 挂在树上而非线程全局：同线程跑多个窗口时，全局栈会让在 A 窗口按下的 ESC 关掉
     /// B 窗口的对话框。归属到树，每个宿主只看得见自己那棵树上的遮罩。
-    modals: Vec<Signal<bool>>,
+    modals: Vec<(NodeId, Signal<bool>)>,
     /// 本树上所有锚定浮层节点（见 [`Node::overlay`]），按插入先序登记。
     ///
     /// 需要这份登记而不是每次遍历全树找 `overlay` 节点：绘制、命中、轻量关闭三条
@@ -1145,6 +1268,8 @@ impl Default for Tree {
 impl Tree {
     pub fn new() -> Self {
         Self {
+            swallow_up: false,
+            swallowed_clicks: 0,
             slots: Vec::new(),
             free: Vec::new(),
             held_accepts_text: None,
@@ -1153,6 +1278,7 @@ impl Tree {
             clipboard: None,
             scroll_edge_inset: scrollbar::WINDOW_EDGE_INSET,
             reactive_nodes: Vec::new(),
+            scroll_bound: Vec::new(),
             pending_toasts: Vec::new(),
             pending_focus: None,
             pending_release: Vec::new(),
@@ -1205,23 +1331,39 @@ impl Tree {
         self.pending_dialog.take()
     }
 
-    /// 登记一个对话框遮罩的显示信号（`Element::build` 在插入遮罩节点时调用）。
+    /// 登记一个对话框遮罩（节点 + 显示信号，`Element::build` 在插入遮罩节点时调用）。
     ///
-    /// 同一个信号重复登记会被忽略：子树重建会让同一个 `Element::dialog` 再走一次
-    /// `build`，不去重则栈随重建次数无界增长。
-    pub(crate) fn register_modal(&mut self, show: Signal<bool>) {
-        if !self.modals.contains(&show) {
-            self.modals.push(show);
+    /// 登记跟着遮罩节点的生命周期走、不跟信号走：`show` 常在比对话框长寿的作用域里创建，
+    /// 子树重建删掉旧遮罩后信号仍活着，只看信号存活会让本表越积越长。故登记时顺带剔除
+    /// 已删节点。同一个 `show` 重建后**原位**换成新节点：本表的顺序就是 ESC 的关闭顺序，
+    /// 追加到末尾会让重建过的对话框跳到并列对话框之上。
+    pub(crate) fn register_modal(&mut self, node: NodeId, show: Signal<bool>) {
+        if let Some(entry) = self.modals.iter_mut().find(|(_, s)| *s == show) {
+            entry.0 = node;
+        } else {
+            self.modals.push((node, show));
         }
+        self.prune_modals();
+    }
+
+    /// 剔除遮罩节点已被删除（`NodeId` 带代次，`get` 返回 None）或信号已失效的登记。
+    fn prune_modals(&mut self) {
+        let mut modals = std::mem::take(&mut self.modals);
+        modals.retain(|(n, s)| self.get(*n).is_some() && s.is_alive());
+        self.modals = modals;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn modal_count(&self) -> usize {
+        self.modals.len()
     }
 
     /// 关闭本树上最顶层（最内层）的可见对话框。返回是否确实关掉了一个。
     ///
-    /// 顺带清掉句柄已失效的登记（子树连同其信号一起被回收后留下的空壳），使反复重建
-    /// 带对话框的子树不会让本栈越积越长。
+    /// 顺带清掉遮罩节点已删除的登记，使反复重建带对话框的子树不会让本栈越积越长。
     pub(crate) fn close_topmost_modal(&mut self) -> bool {
-        self.modals.retain(|s| s.is_alive());
-        for sig in self.modals.iter().rev() {
+        self.prune_modals();
+        for (_, sig) in self.modals.iter().rev() {
             if sig.get() {
                 sig.set(false);
                 return true;
@@ -1291,6 +1433,9 @@ impl Tree {
         }
         if let Some(slot) = self.slots.get_mut(id.index as usize) {
             if slot.generation == id.generation {
+                if let Some(n) = slot.node.as_mut() {
+                    n.widget.on_removed();
+                }
                 slot.node = None;
                 slot.generation = slot.generation.wrapping_add(1);
                 self.free.push(id.index);
@@ -1307,6 +1452,79 @@ impl Tree {
         if !self.reactive_nodes.contains(&id) {
             self.reactive_nodes.push(id);
         }
+    }
+
+    /// 登记 `Element::scroll_position` 的滚动绑定（无绑定的节点是空操作）。
+    /// 由 `Element::build` 在节点落树后自动调用。
+    pub(crate) fn register_scroll_bound(&mut self, id: NodeId) {
+        let bound = self
+            .get(id)
+            .and_then(|n| n.scroll_ext.as_ref())
+            .is_some_and(|e| e.scroll_bound.is_some());
+        if bound && !self.scroll_bound.contains(&id) {
+            self.scroll_bound.push(id);
+        }
+    }
+
+    /// 滚动绑定同步相位：`scroll_position` 信号 ↔ `scroll_y` 双向对齐，两遍扫描。
+    ///
+    /// 一句话判据：**版本脏 → 只消费不写回；版本干净且值不等 → 写回**。
+    ///
+    /// 两遍的必要性：单遍时先扫到的一方会用**旧值**覆盖后扫方的容器侧更新——A 刚滚到
+    /// 100、B 还停在 50，B 先扫会写 s=50、A 反被消费 50，A 的滚动丢失。两遍保证容器侧
+    /// 更新先全体广播（Pass1）、再全体消费（Pass2），同帧收敛且与注册表顺序无关。
+    ///
+    /// 只在 layout 路径跑：外部写信号 → notify → 请求重绘 → 帧管线补 layout——这条链
+    /// 缺了外部写入就静止在信号里无人消费。钳制**不**在这里做（钳制恒归 arrange 的
+    /// 单一真值点；外部写超界值本帧消费、arrange 钳回，下一帧 Pass1 广播真值，晚 1-2 帧
+    /// 对齐但无正确性问题）。
+    fn sync_scroll_bindings(&mut self) {
+        if self.scroll_bound.is_empty() {
+            return;
+        }
+        // Pass1（容器→信号）：容器值与信号不等、且版本干净（上次见过的版本没变）→ 写回。
+        // 首帧跳过：first 节点走 Pass2 的初始化消费（防初始 0 覆盖应用预设的位置）。
+        // 写回后本节点的 seen_version 留给 Pass2 统一更新（Pass2 会看到自己刚写的脏版本，
+        // 消费的是等值——幂等）。
+        for &id in &self.scroll_bound {
+            let Some(n) = self.get(id) else { continue };
+            let Some(b) = n.scroll_ext.as_ref().and_then(|e| e.scroll_bound.as_ref()) else {
+                continue;
+            };
+            if b.first {
+                continue;
+            }
+            let (cur, ver, val) = (n.scroll_y, b.sig.version(), b.sig.get());
+            if ver == b.seen_version && val != cur {
+                b.sig.set(cur);
+            }
+        }
+        // Pass2（信号→容器）：版本脏（外部写入或 Pass1 刚写回）→ 消费进容器。
+        // 消费**不钳制**，越界值由本帧 arrange 钳回。借用切分：先收集再统一写节点。
+        let mut consume: Vec<(NodeId, i32, u64)> = Vec::new();
+        for &id in &self.scroll_bound {
+            let Some(n) = self.get(id) else { continue };
+            let Some(b) = n.scroll_ext.as_ref().and_then(|e| e.scroll_bound.as_ref()) else {
+                continue;
+            };
+            let ver = b.sig.version();
+            if b.first || ver != b.seen_version {
+                consume.push((id, b.sig.get(), ver));
+            }
+        }
+        for (id, val, ver) in consume {
+            let Some(n) = self.get_mut(id) else { continue };
+            let Some(b) = n.scroll_ext.as_mut().and_then(|e| e.scroll_bound.as_mut()) else {
+                continue;
+            };
+            n.scroll_y = val;
+            b.seen_version = ver;
+            b.first = false;
+        }
+        // 剔除已删节点（同 dispatch_reactive_updates 的 retain 口径）。
+        let mut live = std::mem::take(&mut self.scroll_bound);
+        live.retain(|&id| self.get(id).is_some());
+        self.scroll_bound = live;
     }
 
     /// 调用单个响应式节点的 `on_update`（与 call_on_event 同款 widget swap 模式）。
@@ -1433,6 +1651,9 @@ impl Tree {
         self.layout_size = size;
         // 先让响应式节点重建子树结构，再 measure/arrange
         self.dispatch_reactive_updates();
+        // 滚动绑定同步相位：on_update 可能改 scroll_y 或写绑定信号，先广播完再对齐，
+        // 本帧 measure/arrange 拿到的就是已收敛的偏移。
+        self.sync_scroll_bindings();
         if let Some(root) = self.root {
             self.measure(
                 root,
@@ -1777,7 +1998,11 @@ impl Tree {
     /// 鼠标移动的命中测试里都会被调用。绝大多数时候一个对话框都没开，那时只需扫一遍
     /// 长度通常为 0 的信号表。
     fn overlay_in_modal_scope(&self, id: NodeId) -> bool {
-        if !self.modals.iter().any(|s| s.is_alive() && s.get()) {
+        if !self
+            .modals
+            .iter()
+            .any(|(n, s)| self.get(*n).is_some() && s.is_alive() && s.get())
+        {
             return true;
         }
         let Some(scope) = self.topmost_modal() else {
@@ -2793,7 +3018,9 @@ impl Tree {
             n.bounds.w,
             n.bounds.h,
         );
-        if abs.is_empty() {
+        // 空矩形不画——除非控件声明了命中外扩（`Widget::hit_slop`）：那类节点（零宽的
+        // 列宽手柄）本就靠矩形之外的那一带交互与显示悬停反馈。
+        if abs.is_empty() && n.widget.hit_slop() == Insets::default() {
             return;
         }
         if let Some(a) = n.layout_anim.as_ref().filter(|a| a.is_active()) {
@@ -2978,9 +3205,16 @@ impl Tree {
         let child_origin = Point::new(abs.x, abs.y);
         // 子节点分两趟绘制：先普通、后 `raised`。拖拽浮起的行须画在其余兄弟之上，
         // 否则会被排在它后面的行盖住。绝大多数容器没有 raised 子节点，第二趟是空转。
-        if n.clip_children {
+        if n.clip_children || n.clip_outline {
             canvas.save();
-            canvas.clip_rect(n.child_clip(content));
+            // 先外形（圆角）后内容区（直角）：两者取交集，嵌套 clip_rect 保住外层圆角。
+            if n.clip_outline {
+                let (r, radii) = n.outline_clip(abs);
+                canvas.clip_round_rect(r, radii);
+            }
+            if n.clip_children {
+                canvas.clip_rect(n.child_clip(content));
+            }
             self.paint_children(canvas, n, child_origin, enabled, shown);
             canvas.restore();
         } else {
@@ -3047,6 +3281,99 @@ impl Tree {
         }
     }
 
+    /// 滑动选中高亮：在所有子节点之前画一块，位置取当前选中行（见
+    /// [`Widget::slide_highlight`]），换行时由 [`SlideHighlight`] 补间。
+    ///
+    /// 补间状态存**内容坐标**（含滚动偏移）：滚动是布局位移，不该让补间中的高亮漂走。
+    /// 脏区取整个容器——补间期每帧报一次，范围小（侧栏），换来不必算新旧两处矩形的并集。
+    fn paint_slide_highlight(
+        &self,
+        canvas: &mut dyn Canvas,
+        n: &Node,
+        origin: Point,
+        sh: &crate::ui::slide_highlight::SlideHighlight,
+    ) {
+        // 不看启用态：禁用的列表选中行也得看得出选中（与改动前一致，文字色另有禁用调制）。
+        let found = self.find_slide_target(n, origin);
+        let theme = crate::theme::current();
+        let (sx, sy) = (n.scroll_x as f32, n.scroll_y as f32);
+        let to_content = |r: Rect| {
+            [
+                (r.x - origin.x) as f32 + sx,
+                (r.y - origin.y) as f32 + sy,
+                r.w as f32,
+                r.h as f32,
+            ]
+        };
+        let target = found.map_or([0.0; 4], |(_, r, spec)| {
+            let (ix, iy) = (spec.inset_x, spec.inset_y);
+            let q = to_content(r);
+            [
+                q[0] + ix,
+                q[1] + iy,
+                (q[2] - 2.0 * ix).max(0.0),
+                (q[3] - 2.0 * iy).max(0.0),
+            ]
+        });
+        let (q, active) = sh.resolve(found.map(|(id, _, _)| id), target, &theme);
+        if active {
+            crate::anim::request_repaint_in(Rect::new(origin.x, origin.y, n.bounds.w, n.bounds.h));
+        }
+        let Some((_, _, spec)) = found else {
+            return;
+        };
+        canvas.fill_round_rect(
+            q[0] - sx + origin.x as f32,
+            q[1] - sy + origin.y as f32,
+            q[2],
+            q[3],
+            spec.corner,
+            &Paint::fill(spec.color),
+        );
+    }
+
+    /// 在 `n` 的后代里深度优先找第一个自称"选中行"的节点，连同它的绝对矩形。
+    /// `origin` 是 `n` 的子节点坐标系原点（即 `n` 的绝对左上角）。
+    fn find_slide_target(
+        &self,
+        n: &Node,
+        origin: Point,
+    ) -> Option<(NodeId, Rect, crate::ui::slide_highlight::HighlightSpec)> {
+        for &c in &n.children {
+            let Some(cn) = self
+                .get(c)
+                .filter(|cn| cn.overlay.is_none() && cn.effective_visible())
+            else {
+                continue;
+            };
+            // 内层容器自己声明了滑动高亮：它的行归它管，外层不越过去找（否则同一行画两块）。
+            if cn.slide_hl.is_some() {
+                continue;
+            }
+            let flip = cn
+                .layout_anim
+                .as_ref()
+                .map_or(Point::new(0, 0), |a| a.shift());
+            let abs = Rect::new(
+                origin.x + cn.bounds.x + cn.offset.x + flip.x,
+                origin.y + cn.bounds.y + cn.offset.y + flip.y,
+                cn.bounds.w,
+                cn.bounds.h,
+            );
+            if let Some(spec) = cn
+                .widget
+                .slide_highlight()
+                .or_else(|| cn.slide_target.as_ref().and_then(|f| f()))
+            {
+                return Some((c, abs, spec));
+            }
+            if let Some(hit) = self.find_slide_target(cn, Point::new(abs.x, abs.y)) {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
     /// 绘制子节点：先非 `raised`、后 `raised`，各自保持原有相对顺序（稳定分区）。
     /// 与 [`Tree::hit_node`] 的倒序遍历互为镜像——那边先测 `raised`，两者对"谁在上层"
     /// 的判断必须一致，否则会出现"画在上面却点不到"。
@@ -3060,6 +3387,9 @@ impl Tree {
     ) {
         // 锚定浮层不在此列：它由 `Tree::paint` 在整棵树之后单独绘制。留在这里画的话
         // 它照样会被后续兄弟盖住，「浮层」二字就落空了。
+        if let Some(sh) = &n.slide_hl {
+            self.paint_slide_highlight(canvas, n, origin, sh);
+        }
         let ordinary = |c: NodeId| {
             self.get(c)
                 .map(|cn| cn.overlay.is_none() && !cn.raised)
@@ -3394,6 +3724,14 @@ impl EventCtx<'_> {
     pub fn open_window(&mut self, req: WindowRequest) {
         self.out.open_windows.push(req);
     }
+    /// 请求关闭指定 `Window::single` 键的窗口，不存在时无操作。
+    /// 与热键的 `close_window` 共用延后关闭队列，遵循窗口关闭决策链。
+    /// macOS 暂未实现按键关闭窗口，此调用在那里无效。
+    /// 不要在同一次回调中关闭并重开同一个键；关闭请求要等下一轮消息落地。
+    pub fn close_window(&mut self, key: impl Into<String>) {
+        crate::event::push_callback_close(key.into());
+    }
+
     /// 本窗口**实际在用**的渲染后端（[`Renderer::Auto`](crate::platform::Renderer::Auto)
     /// 落成了 GPU 还是回退了软光栅、运行中有没有降级），供「关于」页与诊断信息显示。
     pub fn active_renderer(&self) -> crate::platform::ActiveRenderer {
@@ -4308,8 +4646,12 @@ impl Tree {
     ///
     /// 锚点也要排除，否则「点触发器收起面板」会退化成无操作——核心先把它关掉，
     /// 触发器的 toggle 紧接着又把它打开。锚点上的开合一律交给触发器控件自己决定。
-    pub(crate) fn dismiss_overlays_outside(&mut self, p: Point) -> bool {
+    ///
+    /// 第二个返回值：被收起的浮层里是否有要求「这一击到此为止」的（`overlay_swallow`）。
+    /// 多个浮层同时被收起时任一要求吞就吞——宁可少触发一次底层控件，也不违背其中一方的声明。
+    pub(crate) fn dismiss_overlays_outside(&mut self, p: Point) -> (bool, bool) {
         let mut closed = false;
+        let mut swallow = false;
         for id in self.overlays.clone() {
             if !self.overlay_showing(id) {
                 continue;
@@ -4328,10 +4670,11 @@ impl Tree {
                 if sig.get() {
                     sig.set(false);
                     closed = true;
+                    swallow |= self.get(id).is_some_and(|n| n.overlay_swallow);
                 }
             }
         }
-        closed
+        (closed, swallow)
     }
 
     /// 收起最顶层（最后登记）的可见浮层。返回是否确实收起了一个。ESC 用。
@@ -4374,7 +4717,14 @@ impl Tree {
             n.bounds.w,
             n.bounds.h,
         );
-        if !abs.contains(p) {
+        let slop = n.widget.hit_slop();
+        let hit_area = Rect::new(
+            abs.x - slop.left,
+            abs.y - slop.top,
+            abs.w + slop.horizontal(),
+            abs.h + slop.vertical(),
+        );
+        if !hit_area.contains(p) {
             return None;
         }
         // 滚动条区域优先命中滚动容器自身（用于拖动滚动条，而非下方内容）。
@@ -4393,7 +4743,7 @@ impl Tree {
             n.child_clip(abs.inset(n.padding)).contains(p)
         } else {
             true
-        };
+        } && (!n.clip_outline || n.outline_clip(abs).0.contains(p));
         if in_content {
             // 倒序遍历子节点：后绘制者在上层，优先命中。`raised` 子节点整体后绘制
             // （见 `Tree::paint_children`），故先倒序测它们，再倒序测其余。
@@ -4686,7 +5036,7 @@ impl Tree {
     /// 分发指针事件：维护 hover/capture，冒泡处理，汇总副作用。
     pub fn dispatch_pointer(
         &mut self,
-        ev: PointerEvent,
+        mut ev: PointerEvent,
         hover: &mut Option<NodeId>,
         capture: &mut Option<NodeId>,
     ) -> DispatchResult {
@@ -4699,13 +5049,35 @@ impl Tree {
         // 轻量关闭：浮层外按下即收起。**在主事件之前**做，这样同一次按下里「关掉旧
         // 浮层」与「命中新控件」都能发生（点 A 的面板外的 B 按钮，面板收起且 B 被按到）。
         // 关闭改变显隐 → 无法局部化，直接升整窗。
-        if matches!(ev.kind, PointerKind::Down)
-            && capture.is_none()
-            && !self.overlays.is_empty()
-            && self.dismiss_overlays_outside(ev.pos)
-        {
-            res.repaint = true;
-            res.damage = res.damage.merge(DamageReq::Full);
+        // 上一次按下被「收起即吞」吃掉了：与之配对的抬起也得吃掉。否则底层控件会收到一个
+        // 没有按下的抬起——Switch / Radio 这类「抬起即激活」的控件照样被触发，吞了个寂寞。
+        // 新的按下清掉旧标记：配对的抬起若丢了（窗口失焦、取消），不能让它吞掉下一次真点击。
+        if matches!(ev.kind, PointerKind::Down) {
+            self.swallow_up = false;
+            // 连击里前面被吞掉的那几下不算数：双击的第二下到底下就是一次单击。
+            if ev.click_count >= 2 {
+                ev.click_count -= self.swallowed_clicks.min(ev.click_count - 1);
+            } else {
+                self.swallowed_clicks = 0;
+            }
+        }
+        if matches!(ev.kind, PointerKind::Up) && std::mem::take(&mut self.swallow_up) {
+            res.consumed = true;
+            return res;
+        }
+        if matches!(ev.kind, PointerKind::Down) && capture.is_none() && !self.overlays.is_empty() {
+            let (closed, swallow) = self.dismiss_overlays_outside(ev.pos);
+            if closed {
+                res.repaint = true;
+                res.damage = res.damage.merge(DamageReq::Full);
+                if swallow {
+                    // 只收起，不继续命中底层：这一击到此为止（配对的抬起见上）。
+                    self.swallow_up = true;
+                    self.swallowed_clicks = self.swallowed_clicks.saturating_add(1);
+                    res.consumed = true;
+                    return res;
+                }
+            }
         }
 
         // hover 进出（仅 Move 且无捕获时）：沿祖先链派发，使可点击容器也能收到 Enter/Leave。
@@ -4766,7 +5138,11 @@ impl Tree {
                 res.open_windows.extend(o.open_windows);
                 // 右键上下文菜单：节点设了 context_menu 且 widget 未自行弹菜单时，
                 // 构建项并请求级联浮层（沿父链冒泡，命中一个即止）。
-                if secondary && matches!(ev.kind, PointerKind::Down) && res.menu.is_none() {
+                if secondary
+                    && ev.button == MouseButton::Right
+                    && matches!(ev.kind, PointerKind::Down)
+                    && res.menu.is_none()
+                {
                     if let Some(cb) = self.get(id).and_then(|n| n.context_menu.clone()) {
                         let items = cb();
                         if !items.is_empty() {
@@ -5440,6 +5816,152 @@ mod tests {
         // 测试照样全绿，画面上却留着面板残影。故这里连脏区一起断言。
         assert_eq!(res.damage, DamageReq::Full, "收起浮层必须升整窗重绘");
         assert!(res.repaint);
+    }
+
+    /// 第 0 行是「抬起即激活」的开关（只收抬起就会翻转，正好检验配对的抬起被吃掉），
+    /// 第 1 行是锚点 + 浮层。点 (30, 10) 落在浮层与锚点之外、开关之上。
+    fn swallow_tree(
+        swallow: bool,
+        open: crate::signal::Signal<bool>,
+        on: crate::signal::Signal<bool>,
+    ) -> Tree {
+        let panel = Element::col()
+            .width(60)
+            .height(80)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(swallow);
+        layout(
+            Element::col()
+                .width(200)
+                .height(300)
+                .child(Element::switch(on).width(200).height(40))
+                .child(
+                    Element::col()
+                        .width(200)
+                        .child(Element::leaf().width(200).height(40).bg(Color::WHITE))
+                        .popup(open, panel),
+                ),
+            200,
+            300,
+        )
+    }
+
+    fn click_at(tree: &mut Tree, pos: Point) {
+        let (mut hover, mut capture) = (None, None);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, pos, MouseButton::Left),
+                &mut hover,
+                &mut capture,
+            );
+        }
+    }
+
+    #[test]
+    fn dismiss_by_default_still_hits_the_control_underneath() {
+        // 默认行为不变：同一击里既收起浮层，又按到底下的开关。
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(false, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(!open.get(), "前提：浮层被收起");
+        assert!(on.get(), "默认仍穿透：底下的开关被点到");
+    }
+
+    #[test]
+    fn dismiss_swallows_click_stops_at_closing_the_overlay() {
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(!open.get(), "前提：浮层照常收起");
+        assert!(!on.get(), "吞掉：按下与配对的抬起都不能到达底下的开关");
+        // 吞的只是那一次：下一次点击恢复正常，开关不能被残留的标记吃掉。
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "浮层已关，再点开关应当生效");
+    }
+
+    /// 记下最后一次按下收到的 `click_count`（被吞的那一击到不了这里）。
+    struct CountProbe(crate::signal::Signal<u8>);
+    impl Widget for CountProbe {
+        fn on_event(&mut self, _ctx: &mut EventCtx, ev: &Event) -> bool {
+            if let Event::Pointer(p) = ev {
+                if p.kind == PointerKind::Down {
+                    self.0.set(p.click_count);
+                }
+            }
+            true
+        }
+    }
+
+    #[test]
+    fn the_second_half_of_a_swallowed_double_click_is_a_single_click() {
+        // 平台按时间/位置给第二下记 click_count = 2；但第一下已被吞，底下的控件
+        // （表格行、输入框）不该把它当双击。
+        let (open, seen) = (signal(true), signal(0u8));
+        let panel = Element::col()
+            .width(60)
+            .height(80)
+            .bg(Color::WHITE)
+            .dismiss_swallows_click(true);
+        let mut tree = layout(
+            Element::col()
+                .width(200)
+                .height(300)
+                .child(
+                    Element::leaf()
+                        .width(200)
+                        .height(40)
+                        .widget(CountProbe(seen)),
+                )
+                .child(
+                    Element::col()
+                        .width(200)
+                        .child(Element::leaf().width(200).height(40).bg(Color::WHITE))
+                        .popup(open, panel),
+                ),
+            200,
+            300,
+        );
+        let (mut hover, mut capture) = (None, None);
+        let p = Point::new(30, 10);
+        let ev = |kind, count| PointerEvent {
+            click_count: count,
+            ..PointerEvent::single(kind, p, MouseButton::Left)
+        };
+        tree.dispatch_pointer(ev(PointerKind::Down, 1), &mut hover, &mut capture);
+        tree.dispatch_pointer(ev(PointerKind::Up, 1), &mut hover, &mut capture);
+        assert!(!open.get(), "前提：第一下收起了浮层");
+        assert_eq!(seen.get(), 0, "前提：第一下没到达底下的控件");
+        tree.dispatch_pointer(ev(PointerKind::Down, 2), &mut hover, &mut capture);
+        assert_eq!(seen.get(), 1, "第二下到底下只是一次单击，不是双击");
+        // 再点一下（平台记为 3）：相对底下的控件是第二下。
+        tree.dispatch_pointer(ev(PointerKind::Up, 1), &mut hover, &mut capture);
+        tree.dispatch_pointer(ev(PointerKind::Down, 3), &mut hover, &mut capture);
+        assert_eq!(seen.get(), 2);
+    }
+
+    #[test]
+    fn swallow_does_not_apply_when_nothing_was_dismissed() {
+        // 浮层本来就是收着的：没有「收起」这回事，点击照常交给底下。
+        let (open, on) = (signal(false), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "没收起任何浮层就不该吞点击");
+    }
+
+    #[test]
+    fn a_lost_up_does_not_eat_the_next_real_click() {
+        // 吞了按下却没等到抬起（窗口失焦、取消）：下一次按下必须清掉残留标记。
+        let (open, on) = (signal(true), signal(false));
+        let mut tree = swallow_tree(true, open, on);
+        let (mut hover, mut capture) = (None, None);
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, Point::new(30, 10), MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert!(!open.get());
+        click_at(&mut tree, Point::new(30, 10));
+        assert!(on.get(), "丢了一次抬起，后面的完整点击仍应生效");
     }
 
     #[test]
@@ -7372,6 +7894,213 @@ mod tests {
         }
         tree.layout_root(Size::new(100, 100), &mut te);
         assert_eq!(tree.get(id).unwrap().scroll_y, 200, "应钳制到最大滚动量");
+    }
+
+    /// 外部写信号 → 同步相位消费进容器（含越界钳制与钳制真值下一帧写回）；
+    /// 预设位置（先 set 再 build）首帧按「外部写入」消费，不被初始 0 覆盖。
+    #[test]
+    fn scroll_position_consumes_external_write() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll().width(100).height(100).scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "初始对齐");
+
+        // 外部写超界值：本帧消费、arrange 钳回最大滚动量（content 300 - view 100）。
+        s.set(9999);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            200,
+            "外部写入消费并钳制到 max"
+        );
+
+        // 钳制传播：下一帧同步相位把钳制后的真值写回信号（晚一帧对齐）。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(s.get(), 200, "钳制真值下一帧写回信号");
+
+        // 预设位置：先 set 再 build，首帧消费生效、初始 0 不覆盖预设。
+        let s2 = signal(0i32);
+        s2.set(60);
+        let mut sc2 = Element::scroll().width(100).height(100).scroll_position(s2);
+        for _ in 0..10 {
+            sc2 = sc2.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree2 = Tree::new();
+        let id2 = sc2.build(&mut tree2);
+        tree2.root = Some(id2);
+        tree2.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree2.get(id2).unwrap().scroll_y, 60, "预设位置首帧消费生效");
+        assert_eq!(s2.get(), 60, "首帧不把初始 0 写回覆盖预设");
+    }
+
+    /// 容器侧滚动（真实滚轮 dispatch）→ 下一帧同步相位写回信号。
+    #[test]
+    fn scroll_position_write_back_after_wheel() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll().width(100).height(100).scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
+        };
+        let (mut h, mut cap) = (None, None);
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        let y = tree.get(id).unwrap().scroll_y;
+        assert!(y > 0, "滚轮应已滚动");
+        assert_eq!(s.get(), y, "容器侧滚动下一帧写回信号");
+
+        // 版本判据：外部写后容器不再覆盖（只消费）——外部写 0 并消费，随后滚轮前的
+        // 版本已脏，滚轮若发生将正常写回（此处只验外部写不被 stale 写回冲掉）。
+        s.set(0);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "外部写入消费");
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(
+            tree.get(id).unwrap().scroll_y,
+            0,
+            "稳态无事不写不消费（值等版本净）"
+        );
+    }
+
+    /// 双容器绑同一信号 = 等偏移联动：A 滚动同帧 B 对齐；外部写同帧双双消费。
+    /// A 显式宽、B 走父约束（width_match）——同功能覆盖两档宽度（AGENTS §5）。
+    #[test]
+    fn scroll_position_links_two_containers_same_frame() {
+        let s = signal(0i32);
+        let mut a = Element::scroll().width(100).height(100).scroll_position(s);
+        let mut b = Element::scroll()
+            .width_match()
+            .height(100)
+            .scroll_position(s);
+        for _ in 0..10 {
+            a = a.child(Element::leaf().width_match().height(30));
+            b = b.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let root = Element::col().width(100).child(a).child(b).build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 220), &mut te);
+        let (ida, idb) = {
+            let kids = tree.get(root).unwrap().children.clone();
+            (kids[0], kids[1])
+        };
+        let wheel = |d: i32| {
+            PointerEvent::single(PointerKind::Wheel(d), Point::new(50, 50), MouseButton::Left)
+        };
+        let (mut h, mut cap) = (None, None);
+        // A 滚动 → 同一帧布局后 B 对齐（容器侧更新先全体广播再全体消费）。
+        tree.dispatch_pointer(wheel(-120), &mut h, &mut cap);
+        tree.layout_root(Size::new(100, 220), &mut te);
+        let ya = tree.get(ida).unwrap().scroll_y;
+        let yb = tree.get(idb).unwrap().scroll_y;
+        assert!(ya > 0, "A 应已滚动");
+        assert_eq!(ya, yb, "联动容器同帧对齐");
+        assert_eq!(s.get(), ya, "信号值为联动真值");
+
+        // 外部写 → 两容器同帧消费。
+        s.set(150);
+        tree.layout_root(Size::new(100, 220), &mut te);
+        assert_eq!(tree.get(ida).unwrap().scroll_y, 150);
+        assert_eq!(tree.get(idb).unwrap().scroll_y, 150);
+    }
+
+    /// 与 stick_to_bottom 同开：跟随底部的改写经 Pass1 写回信号；外部写入视为用户位置
+    /// （翻离底部后跟随不再自动接管——prev_max - scroll_y 超出近底阈值）。
+    #[test]
+    fn scroll_position_with_stick_to_bottom() {
+        let s = signal(0i32);
+        let mut sc = Element::scroll()
+            .width(100)
+            .height(100)
+            .stick_to_bottom(true)
+            .scroll_position(s);
+        for _ in 0..10 {
+            sc = sc.child(Element::leaf().width_match().height(30));
+        }
+        let mut tree = Tree::new();
+        let id = sc.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        // 首帧：同步相位消费初始 0，随后 stick_to_bottom 跟随到底。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 200, "首次布局跟随到底");
+        // 第二帧：跟随改写的 200 经 Pass1 写回信号。
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(s.get(), 200, "stick_to_bottom 改写写回信号");
+        // 外部写 0：消费后不在底部，跟随不再接管（视为用户翻看位置）。
+        s.set(0);
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "外部写入消费");
+        tree.layout_root(Size::new(100, 100), &mut te);
+        assert_eq!(tree.get(id).unwrap().scroll_y, 0, "翻离底部后跟随不接管");
+    }
+
+    /// 绑定容器经响应式重建（`host_signal` 数据切换 → 旧节点删除、新节点走 build）
+    /// 后绑定仍生效：旧注册表条目被 retain 剔除，新节点经 build 重新登记且首帧消费
+    /// 当前信号值（重建不丢滚动位置）。
+    #[test]
+    fn scroll_bound_survives_reactive_rebuild() {
+        let s = signal(0i32);
+        let s_bind = s;
+        let page = signal(vec![0u8]);
+        let content = Element::host_signal(page, move |_| {
+            let mut sc = Element::scroll()
+                .width(100)
+                .height(100)
+                .scroll_position(s_bind);
+            for _ in 0..10 {
+                sc = sc.child(Element::leaf().width_match().height(30));
+            }
+            sc
+        });
+        let mut tree = Tree::new();
+        let root = content.build(&mut tree);
+        tree.root = Some(root);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(100, 200), &mut te);
+        let scroll1 = tree.get(root).unwrap().children[0];
+
+        // 初次绑定生效：外部写消费。
+        s.set(80);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(tree.get(scroll1).unwrap().scroll_y, 80);
+
+        // 换页触发响应式重建：旧节点删除、新节点经 build 重新登记并首帧消费当前值
+        //（继承滚动位置——重建不因绑定丢失而归零）。
+        page.set(vec![1]);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert!(tree.get(scroll1).is_none(), "旧滚动节点已随重建删除");
+        let scroll2 = tree.get(root).unwrap().children[0];
+        assert_ne!(scroll2, scroll1, "重建产生新节点");
+        assert_eq!(
+            tree.get(scroll2).unwrap().scroll_y,
+            80,
+            "新节点首帧消费当前值"
+        );
+
+        // 重建后的绑定继续工作：外部写照常消费。
+        s.set(60);
+        tree.layout_root(Size::new(100, 200), &mut te);
+        assert_eq!(
+            tree.get(scroll2).unwrap().scroll_y,
+            60,
+            "重建后绑定继续生效"
+        );
     }
 
     /// 亚格滚轮量（Wayland 的 `axis_value120`、触控板连续量）按比例累加；整格与改动前一样
@@ -10026,10 +10755,11 @@ mod tests {
         let b = tree.abs_bounds(dd);
         let pos = Point::new(b.x + b.w / 2, b.y + b.h / 2);
         let (mut h, mut cap) = (None, None);
-        // 单击（Down+Up）展开：Up 产出菜单请求。
-        tree.dispatch_pointer(ptr(PointerKind::Down, pos), &mut h, &mut cap);
-        let res = tree.dispatch_pointer(ptr(PointerKind::Up, pos), &mut h, &mut cap);
-        let menu = res.menu.expect("下拉单击应弹出菜单");
+        // 按下即展开（原生下拉的手感，支持按住滑选）：Down 产出菜单请求，Up 不再产出。
+        let res = tree.dispatch_pointer(ptr(PointerKind::Down, pos), &mut h, &mut cap);
+        let menu = res.menu.expect("下拉按下应弹出菜单");
+        let up = tree.dispatch_pointer(ptr(PointerKind::Up, pos), &mut h, &mut cap);
+        assert!(up.menu.is_none(), "松开不该再弹一次");
         assert_eq!(menu.items.len(), 3, "三个选项");
         assert!(menu.items[0].checked, "当前项 A 应勾选");
         assert!(!menu.items[1].checked);

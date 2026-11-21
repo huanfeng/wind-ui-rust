@@ -14,6 +14,7 @@ pub use std::sync::mpsc::SendError;
 pub struct Sender<Msg> {
     tx: std::sync::mpsc::Sender<Msg>,
     waker: Waker,
+    live: Arc<()>,
 }
 
 impl<Msg> Clone for Sender<Msg> {
@@ -21,11 +22,16 @@ impl<Msg> Clone for Sender<Msg> {
         Self {
             tx: self.tx.clone(),
             waker: self.waker.clone(),
+            live: self.live.clone(),
         }
     }
 }
 
 impl<Msg> Sender<Msg> {
+    pub(crate) fn liveness(&self) -> std::sync::Weak<()> {
+        Arc::downgrade(&self.live)
+    }
+
     /// 入队一条消息并唤醒 UI 一帧。接收端（窗口）已关闭时返回 Err。
     pub fn send(&self, msg: Msg) -> Result<(), SendError<Msg>> {
         self.tx.send(msg)?;
@@ -147,7 +153,14 @@ pub(crate) fn new_channel<Msg: Send + 'static>(
         }
         out
     });
-    (Sender { tx, waker }, pump)
+    (
+        Sender {
+            tx,
+            waker,
+            live: Arc::new(()),
+        },
+        pump,
+    )
 }
 
 pub(crate) struct WakerShared {

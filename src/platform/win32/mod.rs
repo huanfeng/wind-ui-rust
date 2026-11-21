@@ -23,8 +23,9 @@ use tiny_skia::Pixmap;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
-    DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR,
+    DWMWA_COLOR_NONE, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetDC, GetDeviceCaps, GetMonitorInfoW, InvalidateRect, MonitorFromPoint,
@@ -77,22 +78,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
     SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
     SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
-    WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
     WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
     WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
     WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_THICKFRAME,
+    WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, SendMessageW, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
+    DestroyIcon, SendMessageW, WindowFromPoint, HICON, ICON_BIG, ICON_SMALL, SM_CXICON, SM_CXSMICON,
 };
 // 只用于 d2d 后端选择（RDP 远程会话下强制软渲染），随该 feature 一起门控。
 #[cfg(feature = "d2d")]
@@ -275,6 +276,13 @@ const APP_HOST_CLASS: PCWSTR = w!("WindUiAppHostClass");
 thread_local! {
     /// App 级消息宿主窗口句柄（0=未创建）。
     static APP_HOST_HWND: Cell<isize> = const { Cell::new(0) };
+    /// 主窗句柄（0=无）。独立于 `AppHost::main` 登记：`main_window_state()` 在热键 /
+    /// interval / 托盘回调里被调用时，`app_host()` 的 `&mut AppHost` 借用可能正活着
+    /// （WM_HOTKEY 臂在借用内跑用户回调），再走 `app_host()` 就是两个活 `&mut`——
+    /// 实践无害、按 Stacked Borrows 属技术性 UB。thread_local 的 `Cell<isize>` 只做
+    /// Copy 读写，无借用可言。跨线程自然为 0（每线程独立）→ 查询返回 `None`，与文档
+    /// 口径一致。主窗销毁后清 0（见主窗 `WM_DESTROY`），悬空句柄上再兜一层 `IsWindow`。
+    static MAIN_HWND: Cell<isize> = const { Cell::new(0) };
     /// 常驻（零窗口）模式：窗口全部销毁后**不**结束消息循环。见 `WindowConfig::resident`。
     ///
     /// 与 `AppHost::main.is_none()` 是两件事，故单独一位：主窗有没有是"启动时建没建"，
@@ -377,6 +385,8 @@ unsafe fn create_app_host(hinst: HINSTANCE, main: Option<HWND>, renderer: Render
                 allow_taskbar_created(h, taskbar_created);
             }
             APP_HOST_HWND.with(|c| c.set(h.0 as isize));
+            // 主窗句柄独立登记（见 MAIN_HWND 文档）。
+            MAIN_HWND.with(|c| c.set(main.map(|h| h.0 as isize).unwrap_or(0)));
         }
         Err(e) => {
             // 建不起来就回收状态：没有宿主窗口，托盘与热键随后都不会安装（见
@@ -1038,6 +1048,10 @@ struct WindowState {
     touch: Touch,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
+    activate_on_show: bool,
+    /// 标题栏右键的 Down 已在 `WM_NCRBUTTONDOWN` 提前交出（「按下即弹」策略），
+    /// `WM_NCRBUTTONUP` 只需补 Up。
+    nc_down_sent: bool,
     /// 无边框且 DWM 不在客户区上画边框（Win10）：未最大化时由宿主自己画 1px 外框，
     /// 见 `AppHandler::set_window_outline`。建窗时按圆角属性设没设成判定。
     self_outline: bool,
@@ -1187,6 +1201,8 @@ impl WindowState {
             last_click: ClickTracker::default(),
             touch: Touch::default(),
             frameless: false,
+            activate_on_show: true,
+            nc_down_sent: false,
             mouse_tracked: false,
             pending_surrogate: None,
             ime_composing: false,
@@ -1344,6 +1360,7 @@ unsafe fn create_window(
     let hide_on_minimize = handler.hide_on_minimize();
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
+    state.activate_on_show = cfg.activate_on_show;
     state.min_w = cfg.min_width;
     state.min_h = cfg.min_height;
     let state_ptr = Box::into_raw(state);
@@ -1555,7 +1572,15 @@ unsafe fn create_window(
                 }
             }
         };
-        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
     }
 
     // 模态：禁用 owner 的输入直到本窗口关闭（见 `release_modal_owner`）。系统对被禁用
@@ -1618,7 +1643,11 @@ unsafe fn create_window(
         // 不认识这个属性号，返回 E_INVALIDARG——我们在此丢弃它，正好得到想要的降级
         // （Win10 本就没有圆角窗口一说）。属性号 33 在 Win10 上无任何合法属性占用，
         // 不存在误设成别的属性的风险，故无需 GetVersionEx 分支。
-        let pref = DWMWCP_ROUND;
+        let pref = match cfg.window_corner {
+            crate::platform::WindowCorner::Round => DWMWCP_ROUND,
+            crate::platform::WindowCorner::Small => DWMWCP_ROUNDSMALL,
+            crate::platform::WindowCorner::Square => DWMWCP_DONOTROUND,
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -1627,6 +1656,22 @@ unsafe fn create_window(
             // 日后有人改 `pref` 的类型时不会留下静默失配的尺寸参数。
             size_of_val(&pref) as u32,
         );
+        // `WindowOutline::Off`：Win11 上 DWM 会在客户区之上画一道 1px 边框，自绘的外框关掉了
+        // 它还在——「不要这圈线」得连它一起去掉。DWMWA_COLOR_NONE 即不画边框。
+        //
+        // 只在 Off 时设，别的策略不碰：该属性只能 Set 不能 Get，读不回原值；虽有
+        // `DWMWA_COLOR_DEFAULT` 可恢复系统默认，没必要在用户没要求时改写它。外框策略建窗后
+        // 不再变，所以这里一次设定即可。Win10 不认这个属性，返回 E_INVALIDARG，照样丢弃——
+        // 那里的外框本来就是宿主自画、Off 已经关掉了。
+        if cfg.window_outline == crate::platform::WindowOutline::Off {
+            let none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR,
+                &none as *const _ as *const c_void,
+                size_of_val(&none) as u32,
+            );
+        }
         // 外框由谁画：问 DWM 认不认"可见边框厚度"这个属性。认（Win11，22000 起）就说明
         // 它会在客户区之上给所有窗口画 1px 边框；不认（Win10，含 Server 2022、LTSC）查询
         // 失败——那里没有任何边框：普通窗口那条边画在非客户区里，而我们把非客户区整个
@@ -1648,6 +1693,7 @@ unsafe fn create_window(
             s.self_outline = !dwm_border;
         }
         push_window_state(hwnd);
+        // 建窗中的外框重算也会激活窗口；必须留到 show_window 按配置决定是否激活。
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -1655,7 +1701,7 @@ unsafe fn create_window(
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
         );
     }
 
@@ -1664,7 +1710,8 @@ unsafe fn create_window(
 
 /// 显示窗口。与创建分开：主窗要照顾 `start_hidden`，子窗建好即显。
 unsafe fn show_window(hwnd: HWND) {
-    let _ = ShowWindow(hwnd, SW_SHOW);
+    let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
+    let _ = ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
     let _ = UpdateWindow(hwnd);
 }
 
@@ -2063,6 +2110,32 @@ unsafe extern "system" fn wnd_proc(
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
+        WM_SHOWWINDOW => {
+            // 显隐转换的真值推送，一条消息收口一切显隐来源（框架 op、hide_on_minimize 的
+            // SW_HIDE、用户经任务栏 / 快捷键的显隐）——它们最终都经过 ShowWindow。
+            //
+            // ⚠️ 这是**前置**消息（"about to be hidden or shown"）：WS_VISIBLE 位要等
+            // DefWindowProcW 处理完才翻转，臂内 IsWindowVisible 读到的还是旧值——
+            // 直接推 live 值等于没修（hide 方向推的还是 true，热键「露着就收起」依旧
+            // 无反应）。visible 从 wparam 合成：lparam==0 来自 ShowWindow；lparam 为
+            // SW_PARENTCLOSING/OPENING（1/3）时 owner 最小化/还原连带藏/显本窗（owned/
+            // modal 子窗会遇到），这两档 wparam 同样给出转换后的新可见性；唯独
+            // SW_OTHERZOOM/UNZOOM（2/4，MDI 被别窗盖住，窗口并未真藏）可见性不变，
+            // 保持 live 读。maximized/minimized/能力位不受显隐影响，此刻仍是真值
+            //（min/max 转换随后必有 WM_SIZE 推送收敛）。
+            //
+            // 缺口的由来：此前常规推送点只有建窗与 WM_SIZE（热键臂还有一处，等价于
+            // WM_SIZE 语义）。hide_on_minimize 在 WM_SIZE 里
+            // 推送完 minimized=true 之后立即 SW_HIDE，从此 visible 恒真——热键「露着就
+            // 收起、藏着就唤起」恒走隐藏分支毫无反应（设计调研发现，见
+            // docs/roadmap-three-designs.md §3）。
+            let mut st = read_window_state(hwnd);
+            if matches!(lparam.0, 0 | 1 | 3) {
+                st.visible = wparam.0 != 0;
+            }
+            push_window_state_with(hwnd, st);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_SIZE => {
             // 状态推送在最小化早退**之前**：最小化本身就是一次状态变化，跳过它，
             // 宿主眼里窗口就永远没最小化过。
@@ -2186,9 +2259,22 @@ unsafe extern "system" fn wnd_proc(
         // DefWindowProc 对 WM_NCRBUTTONUP 的默认处理就是弹系统的灰色原生菜单，与自绘
         // 标题栏视觉割裂。非 HTCAPTION 的部位（缩放边框）同样吞掉、不弹任何东西——
         // 无边框窗口没有系统外框，那里本就不该有系统菜单。
-        WM_NCRBUTTONDOWN if is_frameless(hwnd) => LRESULT(0),
+        WM_NCRBUTTONDOWN if is_frameless(hwnd) => {
+            // 策略是「按下即弹」时在这里就把 Down 交出去（菜单立刻出，且可按住滑选）；
+            // 否则等 `WM_NCRBUTTONUP` 一次补发完整的点击。
+            if wparam.0 as u32 == HTCAPTION && nc_menu_on_press(hwnd) {
+                nc_right_pointer(hwnd, lparam, PointerKind::Down);
+                if let Some(s) = state_from(hwnd) {
+                    s.nc_down_sent = true;
+                }
+            }
+            LRESULT(0)
+        }
         WM_NCRBUTTONUP if is_frameless(hwnd) => {
-            if wparam.0 as u32 == HTCAPTION {
+            let sent = state_from(hwnd).is_some_and(|s| std::mem::take(&mut s.nc_down_sent));
+            if sent {
+                nc_right_pointer(hwnd, lparam, PointerKind::Up);
+            } else if wparam.0 as u32 == HTCAPTION {
                 nc_right_click(hwnd, lparam);
             }
             LRESULT(0)
@@ -2332,6 +2418,8 @@ unsafe extern "system" fn wnd_proc(
                 if !window_presents(hwnd) {
                     apply_hidden_frame_effects(hwnd);
                 }
+                // 定时器里改了光标形状，指针不动就不会有 WM_SETCURSOR（见 `sync_cursor`）。
+                sync_cursor(hwnd);
             }
             LRESULT(0)
         }
@@ -2440,6 +2528,13 @@ unsafe extern "system" fn wnd_proc(
             // 兜底：不经 `destroy_window` 的销毁（owner 关闭时系统级联销毁归属窗口）
             // 也要把 owner 的输入还回去；正常关窗路径这里已是空操作。
             release_modal_owner(hwnd);
+            // 关的是主窗本体：清 MAIN_HWND。AppHost::main 的悬空句柄清不了（它是启动时
+            // 的 Option<HWND>，只写一次），MAIN_HWND 清掉后热键路径随之对已关窗口
+            // no-op，查询返回 None——与 macOS windowWillClose 清 MAIN_WINDOW 同口径：
+            // 主窗没了 = 无主窗，不报全 false 的假状态。
+            if MAIN_HWND.with(|c| c.get()) == hwnd.0 as isize {
+                MAIN_HWND.with(|c| c.set(0));
+            }
             // 最后一个窗口关闭才结束消息循环：多窗口下关掉设置子窗不该把整个应用带走。
             //
             // 常驻模式下连"最后一个"也不退出：零窗口正是那个模式的常态，退出只能由
@@ -2528,9 +2623,41 @@ unsafe fn apply_window_icon(hwnd: HWND, src: &crate::icon::IconSource) {
     }
 }
 
+/// 让光标形状跟上应用刚改的状态，不等下一次 `WM_SETCURSOR`。
+///
+/// 系统只在指针**移动或点击**时发 `WM_SETCURSOR`；定时器、按键触发的形状变化（全屏播放器
+/// 「静止几秒后隐藏指针」、按键进入某种模式）在指针不动时看不到任何效果，等用户一动才
+/// 生效——对 `CursorShape::Hidden` 而言还会把时序弄反（动一下才藏起来，紧接着的移动又被
+/// 换回箭头）。做法是指针恰好在本窗口客户区内时，自己补发一条等价的 `WM_SETCURSOR`。
+///
+/// 调用方须已释放对 `state` 的借用：`SendMessageW` 同步重入 `wnd_proc`（铁律 6）。
+unsafe fn sync_cursor(hwnd: HWND) {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() || WindowFromPoint(pt) != hwnd {
+        return;
+    }
+    let pos = LPARAM(((pt.y as u16 as isize) << 16) | (pt.x as u16 as isize));
+    let hit = SendMessageW(hwnd, WM_NCHITTEST, None, Some(pos));
+    if hit.0 as u32 == HTCLIENT {
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETCURSOR,
+            Some(WPARAM(hwnd.0 as usize)),
+            Some(LPARAM(
+                (HTCLIENT as isize) | ((WM_MOUSEMOVE as isize) << 16),
+            )),
+        );
+    }
+}
+
 /// 按形状加载并设置系统光标（应答 WM_SETCURSOR）。加载失败时静默退回类光标。
 unsafe fn apply_cursor(shape: CursorShape) {
     let id = match shape {
+        // `SetCursor(None)` 即不画光标；WM_SETCURSOR 已应答，系统不会再覆盖回类光标。
+        CursorShape::Hidden => {
+            let _ = SetCursor(None);
+            return;
+        }
         CursorShape::Hand => IDC_HAND,
         CursorShape::Text => IDC_IBEAM,
         CursorShape::SizeWE => IDC_SIZEWE,
@@ -2603,24 +2730,34 @@ unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
 }
 
-/// 无边框窗口标题栏（HTCAPTION）上的右键：转成客户区右键**按下**交给控件树。
+/// 无边框窗口标题栏（HTCAPTION）上的右键：合成一次完整的客户区右键点击（`Down` + `Up`）。
 ///
-/// **在抬起时才弹、合成的却是 `Down`**——这处不对称是刻意的，别顺手改齐：
-/// - 抬起时弹是 Windows 惯例（原生标题栏系统菜单就是 `WM_NCRBUTTONUP` 才出），而且
-///   "右键按住在标题栏上移动"没有任何别的语义，按下即弹只会让菜单跟着乱跑；
-/// - 合成 `Down` 是因为框架的上下文菜单统一在 `Down` 上开（`Tree::dispatch_pointer`
-///   只在「非左键 + Down」时才建 `MenuRequest`）。合成 `Up` 什么也不会发生。
+/// `WM_NCRBUTTONDOWN` 被吞掉了（见 `wnd_proc`），到 `WM_NCRBUTTONUP` 才一次性补发两下：
+/// - `Down` 给 `on_context_menu`（框架的上下文菜单统一在 `Down` 上开）；
+/// - `Up` 让宿主放行暂存的菜单（`defer_right_click_menu`），与 Windows 原生标题栏
+///   "抬起才出菜单"一致。
 ///
 /// 坐标：NC 消息的 lParam 是**屏幕**坐标，客户区消息的是客户区坐标，两者不能混用。
 /// 转换后仍是物理像素，÷scale 由宿主 `on_pointer` 统一做——漏掉任一步的症状都是
 /// "高 DPI 下菜单弹在离光标几十像素的地方"。
 unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
+    nc_right_pointer(hwnd, lparam, PointerKind::Down);
+    nc_right_pointer(hwnd, lparam, PointerKind::Up);
+}
+
+/// 把一条 NC 右键消息（lParam 为屏幕坐标）转成客户区的一次右键指针事件。
+unsafe fn nc_right_pointer(hwnd: HWND, lparam: LPARAM, kind: PointerKind) {
     let mut pt = POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
         y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
     };
     let _ = ScreenToClient(hwnd, &mut pt);
-    handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
+    handle_pointer_at(hwnd, kind, MouseButton::Right, pt.x, pt.y);
+}
+
+/// 右键菜单策略是否为「按下即弹」。读完即放开 state 借用（调用方随后才会进 `handle_pointer_at`）。
+unsafe fn nc_menu_on_press(hwnd: HWND) -> bool {
+    state_from(hwnd).is_some_and(|s| s.handler.context_menu_on_press())
 }
 
 /// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。
@@ -2655,21 +2792,52 @@ pub(crate) fn system_prefers_dark() -> bool {
 /// 能力位从**样式位**读而不是缓存 `cfg.resizable`：两者建窗时一致，但样式位是运行期的
 /// 真值。将来若加运行期改可缩放的能力，缓存那份会悄悄过期，而这里不会。
 ///
-/// 两段式（铁律 6）：四个 OS 查询先做完，再借 `state_from` 写入。查询本身不重入，
-/// 但"OS 调用不留在借用里"是这一层的统一纪律——留一个例外，下一个人就得重新判断一遍。
+/// 两段式（铁律 6）：OS 查询先做完，再借 `state_from` 写入。
 unsafe fn push_window_state(hwnd: HWND) {
+    let st = read_window_state(hwnd);
+    push_window_state_with(hwnd, st);
+}
+
+/// 推送一份**现成的**状态（`WM_SHOWWINDOW` 臂用：它要在读到的真值上替换单个字段）。
+unsafe fn push_window_state_with(hwnd: HWND, st: crate::event::WindowState) {
+    if let Some(state) = state_from(hwnd) {
+        state.handler.on_window_state(st);
+    }
+    sync_outline(hwnd);
+}
+
+/// 读一组窗口状态的 OS 真值（推送与同步查询共用同一集合，保证两个读法口径一致）。
+///
+/// 四个 OS 查询（IsZoomed/IsIconic/IsWindowVisible/GetWindowLongPtrW）不派发消息、
+/// 不重入 wnd_proc——与 `single_window_open` 读登记表同一性质，任何时机成立。
+unsafe fn read_window_state(hwnd: HWND) -> crate::event::WindowState {
     let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-    let st = crate::event::WindowState {
+    crate::event::WindowState {
         maximized: IsZoomed(hwnd).as_bool(),
         minimized: IsIconic(hwnd).as_bool(),
         visible: IsWindowVisible(hwnd).as_bool(),
         maximizable: style & WS_MAXIMIZEBOX.0 != 0,
         minimizable: style & WS_MINIMIZEBOX.0 != 0,
-    };
-    if let Some(state) = state_from(hwnd) {
-        state.handler.on_window_state(st);
     }
-    sync_outline(hwnd);
+}
+
+/// [`crate::event::main_window_state`] 的 win32 落地：对主窗做一组不派发消息的同步查询，
+/// 任何时机成立——热键 / interval / 托盘回调里读到的都是此刻真值，不依赖快照纪律。
+///
+/// 无主窗（常驻模式）返回 `None`——「无窗可谈状态」是事实陈述，不是失败。
+pub(crate) fn query_main_window_state() -> Option<crate::event::WindowState> {
+    // 不走 `app_host()`（MAIN_HWND 文档说明的借用问题），主窗句柄从独立登记读；
+    // 跨线程每线程独立 → 0 → None，与文档口径一致。
+    let hwnd = MAIN_HWND.with(|c| c.get());
+    if hwnd == 0 {
+        return None;
+    }
+    // 主窗已销毁：句柄悬空。IsWindow 对失效句柄返回 false——主窗没了 = 无主窗
+    //（None），不报全 false 的假状态（与 macOS 同口径）。
+    if !unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool() {
+        return None;
+    }
+    Some(unsafe { read_window_state(HWND(hwnd as *mut _)) })
 }
 
 /// Win10 无边框窗口的外框色，仿 Win11 DWM 给所有窗口画的那圈边：灰色；激活且开了
@@ -2893,6 +3061,11 @@ unsafe fn apply_window_op(hwnd: HWND) {
     apply_hotkey_ops(hwnd);
     // 运行期托盘操作同点消费（TrayHandle 排队 → 此处落地）。
     apply_tray_ops();
+    // 应用通道也可能由可见窗口的一帧消费，指定键的关闭不能只在 AppHost 收尾时落地。
+    // 此处没有 WindowState 借用；先排关闭，再建新窗，与应用级回调的顺序一致。
+    for key in crate::event::take_callback_closes() {
+        close_single_window(&key);
+    }
     // 开窗请求同点消费（`ctx.open_window` 排队 → 此处落地）。
     open_pending_windows(hwnd);
     // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。
@@ -3307,6 +3480,15 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
 /// 托盘点击同理（用户交互授予）。
 pub(crate) fn show_and_activate(hwnd: HWND) {
     unsafe {
+        let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
+        if !activate {
+            let was_hidden = !IsWindowVisible(hwnd).as_bool();
+            show_window(hwnd);
+            if was_hidden {
+                notify_shown(hwnd);
+            }
+            return;
+        }
         // 先问再显示：`ShowWindow` 之后 `IsWindowVisible` 恒为真，跃迁就无从判断了。
         let was_hidden = !IsWindowVisible(hwnd).as_bool();
         // 隐藏与最小化是**两个独立的位**，可以同时为真——`hide_on_minimize` 就是这么
@@ -3624,6 +3806,8 @@ unsafe fn dispatch_pointer_event(hwnd: HWND, ev: PointerEvent) {
     }
     // 点击可能换了焦点：输入法开关当场跟上，不等下一帧（见 `sync_ime`）。
     sync_ime(hwnd, false);
+    // 点击可能改了光标形状；Down / Up 之后系统不会补发 WM_SETCURSOR。
+    sync_cursor(hwnd);
     // 自定义标题栏按钮请求的窗口操作（最小化/最大化）；在可能的关窗之前执行。
     apply_window_op(hwnd);
     // 原生文件对话框请求：此时 OS 捕获已在上面同步完毕，才轮到这个阻塞调用。

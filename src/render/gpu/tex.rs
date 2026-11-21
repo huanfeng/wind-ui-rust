@@ -95,7 +95,7 @@ pub(super) struct ImageItem {
     bound: Arc<Bound>,
 }
 
-/// 图片四边形的实例数据（64 B）。坐标是**物理**像素（同文字管线，理由见 `image.wgsl`）。
+/// 图片四边形的实例数据（96 B）。坐标是**物理**像素（同文字管线，理由见 `image.wgsl`）。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ImageInstance {
@@ -107,12 +107,16 @@ struct ImageInstance {
     clip: [f32; 4],
     /// `[0]`=圆角半径（物理），`[1]`=opacity，`[2]`=1 走 nearest / 0 走 linear，`[3]` 保留。
     params: [f32; 4],
+    /// 圆角裁剪外框（物理 x0,y0,x1,y1）与四角半径，见 `prim::GpuClip`。
+    clip_rr: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
 impl ImageInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+            4 => Float32x4, 5 => Float32x4,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ImageInstance>() as u64,
@@ -159,6 +163,8 @@ pub(super) fn place_image(
         }
         // 1 图片像素 = 1 逻辑 dp → 物理为 ×scale。
         Fit::None => (scale, scale),
+        // 1 图片像素 = 1 物理 px：恒等缩放，落点取整后走 nearest 纯 blit。
+        Fit::Physical => (1.0, 1.0),
     };
     let (mut dw, mut dh) = (iw * sx, ih * sy);
     // 物理尺寸与源图相差不足 1 像素时吸附为 1:1：DPI 感知的矢量图标经此走上纯 blit
@@ -184,7 +190,7 @@ pub(super) fn image_item(
     bound: Arc<Bound>,
     quad: [f32; 4],
     mask: [f32; 4],
-    clip: [f32; 4],
+    clip: super::prim::GpuClip,
     radius: f32,
     opacity: f32,
     nearest: bool,
@@ -193,8 +199,10 @@ pub(super) fn image_item(
         inst: ImageInstance {
             quad,
             mask,
-            clip,
+            clip: clip.rect,
             params: [radius, opacity, if nearest { 1.0 } else { 0.0 }, 0.0],
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
         },
         bound,
     }
@@ -626,6 +634,26 @@ mod tests {
         assert_eq!([q[2], q[3]], [8.0, 4.0]);
     }
 
+    /// Physical：恒等缩放（quad = 图片像素数，与 scale 无关），恒走 nearest；dst 比图小
+    /// 时与 None/Cover 同语义——居中裁剪（溢出由圆角遮罩收口），不缩图。
+    #[test]
+    fn physical_mode_is_dpi_independent_nearest() {
+        let dst = [0.0, 0.0, 40.0, 40.0];
+        // scale=2.0：quad 尺寸 = 图片像素数，与 scale 无关；框大留白居中并取整。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, dst, 2.0);
+        assert_eq!(q, [16.0, 16.0, 8.0, 8.0], "scale=2 下仍应为图片像素数");
+        assert!(near, "Physical 恒 1:1，应走 nearest");
+        // scale=1.5 同样恒等：不吸附逻辑参与、尺寸即像素数。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, dst, 1.5);
+        assert_eq!(q, [16.0, 16.0, 8.0, 8.0]);
+        assert!(near);
+        // dst 物理框小于图片：居中裁剪。tx = f32::round(-2.5) = -3（半数远离零，
+        // 与软后端 `round_half_up` 的向 +∞ 方向不同，均为既有行为）。
+        let (q, near) = place_image(Fit::Physical, 8.0, 8.0, [0.0, 0.0, 3.0, 3.0], 1.5);
+        assert_eq!(q, [-3.0, -3.0, 8.0, 8.0]);
+        assert!(near);
+    }
+
     /// 近 1:1 吸附：物理尺寸与源图差**不足 1 物理像素**时按 1:1 画，并走 nearest。
     ///
     /// 典型落点是非整数 DPI 下的图标：`Fit::None` 要把 8px 的图画成 8.4px，不吸附就是
@@ -667,8 +695,8 @@ mod tests {
 
     /// 实例布局的字节数必须与 shader 的属性偏移对得上（同 `prim.rs`/`text.rs` 的同款判据）。
     #[test]
-    fn image_instance_is_64_bytes() {
-        assert_eq!(std::mem::size_of::<ImageInstance>(), 64);
+    fn image_instance_is_96_bytes() {
+        assert_eq!(std::mem::size_of::<ImageInstance>(), 96);
         assert_eq!(std::mem::align_of::<ImageInstance>(), 4);
     }
 
@@ -681,6 +709,8 @@ mod tests {
             mask: [0.0; 4],
             clip: [0.0; 4],
             params: [4.0, 0.5, 1.0, 0.0],
+            clip_rr: [0.0; 4],
+            clip_radii: [0.0; 4],
         };
         assert_eq!(inst.params[2], 1.0);
         let src = include_str!("image.wgsl");

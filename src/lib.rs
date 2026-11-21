@@ -43,16 +43,17 @@ pub mod prelude {
     pub use crate::app::{App, HotkeyHandle, ThemeHandle, Window};
     pub use crate::core::ScrollEdge;
     pub use crate::event::{
-        pointer_mods, window_open, window_state, CursorShape, Hotkey, HotkeyCtx, HotkeyOp,
-        ImeField, ImeHints, Key, MenuBarLink, MenuItem, MenuRequest, Mods, Preedit, PreeditSpan,
-        ToastKind, UnderlineStyle, WindowRequest, WindowState,
+        main_window_state, pointer_mods, window_open, window_state, ContextMenuTrigger,
+        CursorShape, Hotkey, HotkeyCtx, HotkeyOp, ImeField, ImeHints, Key, MenuBarLink, MenuItem,
+        MenuRequest, Mods, Preedit, PreeditSpan, ToastKind, UnderlineStyle, WindowRequest,
+        WindowState,
     };
     pub use crate::geometry::{Color, Corners, Insets, Point, Rect, Size};
     pub use crate::i18n::{Initial, LocaleHandle, LocaleInfo, Locales};
     pub use crate::icon::{brand_icon, brand_icon_at, IconSource, WindowIcon};
     pub use crate::platform::{
         ActiveRenderer, ImeInterrupt, PickDialog, Renderer, Tray, TrayCtx, TrayHandle,
-        TrayMenuItem, TrayOp, WindowOutline,
+        TrayMenuItem, TrayOp, WindowCorner, WindowOutline,
     };
     pub use crate::render::image::{Fit, Image, ImageError, VisualState};
     pub use crate::render::{Gradient, PixelSnap, PixmapTarget, RenderTarget};
@@ -69,6 +70,7 @@ pub mod prelude {
     // `Element::color_picker_opts` 的：构造器在 prelude 里，参数类型却要写一行深路径
     // import，那条路就没人走。`Hsva` 则是取色器对外的颜色模型，业务侧做色相运算时用得上。
     pub use crate::ui::containers::{TabItem, TabStyle};
+    pub use crate::ui::slide_highlight::HighlightSpec;
     pub use crate::ui::split::SplitOpts;
     pub use crate::ui::{
         default_presets, CaretStyle, CheckMenuItem, ColorPickerOpts, CommitMode, DropdownItem,

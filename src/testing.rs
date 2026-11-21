@@ -29,6 +29,20 @@ use crate::event::{HotkeyCtx, WindowOp};
 use crate::platform::{TrayAction, TrayCtx, TrayMenuItem};
 use crate::ui::Element;
 
+/// 设置帧时钟（毫秒）——宿主每帧 render 前做的那件事。
+///
+/// 下游直接驱动裸 [`Tree`]（`layout_root` + `paint`）的测试没有宿主替它推进时钟：
+/// 时钟冻结时，进出场过渡（`Element::transition`、`switcher` 默认的淡出）的进度永远
+/// 停在原地，残影**永不回收**。于是「淡出播完、旧内容连同它的信号作用域被回收」那
+/// 一帧根本不会出现——而跨作用域引用（挂在别处的节点读到已回收的信号）正是在那一帧
+/// 炸的。要测真机时序，就每帧先调它把时钟往前推，再 layout + paint。
+///
+/// 与宿主一样受 [`MotionLevel`](crate::anim::MotionLevel) 约束：`Off` 档下过渡本就
+/// 瞬时收敛，推不推时钟都一样。
+pub fn set_frame_clock_ms(ms: u64) {
+    crate::anim::set_clock_ms(ms);
+}
+
 /// 借一个 `EventCtx` 跑 `f`，返回它请求的副作用。
 ///
 /// ctx 挂在一棵**只有一个空叶子**的临时树的根上：够用于绝大多数回调（toast、对话框、

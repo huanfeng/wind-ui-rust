@@ -42,8 +42,8 @@
 
 | 依赖 | 用途 | 为什么是它 |
 |------|------|-----------|
-| `x11rb` 0.13 | X11 协议 | 纯 Rust 实现协议，不链接 libX11/libxcb，编译期不要任何 `-dev` 包。钉 0.13 是为了与 `xim` 共用连接类型 |
-| `xim` 0.5 | XIM 输入法协议 | fcitx5 / ibus 都提供 XIM 前端；比 D-Bus 路线（要拉进 zbus 整套异步栈）轻得多 |
+| `x11rb` 0.14 | X11 协议 | 纯 Rust 实现协议，不链接 libX11/libxcb，编译期不要任何 `-dev` 包。大版本须与 `xim` 同步，两者共用连接类型 |
+| `xim` 0.6 | XIM 输入法协议 | fcitx5 / ibus 都提供 XIM 前端；比 D-Bus 路线（要拉进 zbus 整套异步栈）轻得多 |
 | `ttf-parser` | 字体解析 | 零依赖；读 cmap / hmtx / kern / 轮廓 |
 | `ab_glyph_rasterizer` | 轮廓 → 覆盖度 | 零依赖、单文件，精确面积覆盖 |
 | `rfd`（`xdg-portal` 特性） | 文件对话框 | 走 D-Bus 门户、无门户时回退 zenity，都弹不出时 windui 再试 kdialog（`PickDialog::last_pick_failed` 报失败）；不用 `gtk3` 特性——那会把整套 GTK 拉进进程 |

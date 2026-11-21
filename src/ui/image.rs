@@ -256,6 +256,10 @@ impl ImageContent {
             Fit::Cover => iw * (dw / iw).max(dh / ih),
             // 1 图片像素 = 1 逻辑 dp。
             Fit::None => iw,
+            // 1 图片像素 = 1 物理 px：元素逻辑宽 = 像素宽 ÷ DPI（向上取整防少一行像素），
+            // ×scale 后的光栅物理宽 ≥ 像素宽——矢量内容光栅化不丢边；绘制时 1 图片像素
+            // = 1 物理像素直出（见三后端 draw_image 的 Physical 分支）。
+            Fit::Physical => (iw / scale).ceil(),
         };
         // 上限保护：异常布局下不至于光栅出巨图拖垮 paint。
         Some((draw_w * scale).round().clamp(1.0, 8192.0) as u32)
@@ -455,6 +459,21 @@ mod tests {
         assert!(ImageContent::from_svg_bytes(BAR_SVG, Some(40))
             .svg
             .is_none());
+    }
+
+    /// Physical：元素逻辑宽 = 像素宽 ÷ DPI（ceil），×scale 后的光栅物理宽 ≥ 固有像素宽
+    /// （矢量内容光栅化不丢边）；两档非整数 DPI 下都如此。dst 框大小不影响结果。
+    #[cfg(feature = "svg")]
+    #[test]
+    fn svg_target_width_physical_never_loses_rows() {
+        let c = ImageContent::from_svg_bytes(BAR_SVG, None).fit(Fit::Physical);
+        // 固有 20px，scale=1.5：draw_w = ceil(20/1.5)=14 逻辑 dp，物理 = 14×1.5 = 21 ≥ 20。
+        assert_eq!(c.svg_target_width(Rect::new(0, 0, 20, 20), 1.5), Some(21));
+        // scale=1.25：ceil(16)=16 → 16×1.25 = 20 = 固有（整除时不放大）。
+        assert_eq!(c.svg_target_width(Rect::new(0, 0, 20, 20), 1.25), Some(20));
+        // scale=2.0：ceil(10)=10 → 20。dst 框大于或小于固有尺寸都不影响。
+        assert_eq!(c.svg_target_width(Rect::new(0, 0, 40, 40), 2.0), Some(20));
+        assert_eq!(c.svg_target_width(Rect::new(0, 0, 8, 8), 2.0), Some(20));
     }
 
     /// 各 DPI 下描边都应落满整像素（出现纯色像素）。写死 2× 光栅的老做法在

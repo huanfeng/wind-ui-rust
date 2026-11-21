@@ -62,6 +62,8 @@
 - **DPI / Retina 感知** — 控件树用逻辑坐标、绘制层统一缩放到物理像素，文字按物理字号渲染（测量与绘制同源），高 DPI（1.5x/2x/Retina）下依然锐利、不偏小。
 - **纯净焦点环** — 焦点环仅在键盘 Tab 导航时显示，纯鼠标操作不显示外框。
 - **完整控件集** — 布局、文本、按钮、表单输入、容器导航、列表、图片、托盘一应俱全。
+- **跟随平台的菜单手感** — 右键菜单弹出时机默认随平台（Windows 松开时弹，macOS / Linux 按下时弹，`App::context_menu_trigger` 可改）；菜单项松开才执行、移开可反悔；下拉框与菜单栏支持按住滑到某项上松开直接选中。
+- **多语言** — `Locales` 运行期切换语言，框架自带文案（右键菜单、窗口系统菜单）内置中英两份，应用可同名覆盖。
 - **触摸/触控板** — 平移滚动 + 惯性滑动 + 撞界回弹。
 - **可选 GPU 加速（双平台）** — 大窗口可 opt-in 硬件加速（`App::renderer(Renderer::Auto)`）：Windows 走 Direct2D，macOS 走 wgpu/Metal（默认编入，无需 feature 开关）。几何/渐变/阴影走 GPU，文字仍由系统排版栈光栅（DirectWrite / Core Text），字体与度量不变。默认软渲染；无 GPU / RDP / 离屏截图自动回退，运行期设备丢失会重建、重建不成则切回软渲染继续出帧，绝不 panic。
 - **自动截屏** — `--screenshot` 离屏渲染存 PNG（`--scale 1.5` 验证高 DPI），适合自动化回归。
@@ -130,14 +132,14 @@ fn main() {
 | 布局 | `col` / `row`（LinearLayout，支持 weight）、`stack`（FrameLayout）、`grid`（等宽网格）、`split`（可拖动分栏）、`flex_spacer` |
 | 文本 | `label`（自动换行）、`label_signal`（绑信号）、`link`（可点击链接）、`rich`（富文本：多样式 span / 折叠段） |
 | 按钮 | `button`（hover/press/focus 三态 + 点击/回车/空格激活）、`icon_button`（纯图标） |
-| 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行+区间底色）/ `dropdown` / `combo_box`（可输入下拉）/ `check_menu` / `stepper` / `chip` / `tag_field` / `color_picker`（取色面板） |
+| 表单 | `checkbox` / `switch` / `radio`（互斥组）/ `slider`（拖动+键盘）/ `text_input`（CJK 编辑+密码+多行+区间底色）/ `dropdown` / `combo_box`（可输入下拉）/ `check_menu` / `stepper`（± 步进）/ `number_input`（纯数值框，范围钳制 + 单位后缀）/ `chip` / `tag_field` / `color_picker`（取色面板） |
 | 反馈 | `progress`（确定/不确定）/ `tooltip`（悬停提示）/ `toast`（居中轻提示）/ `badge`（胶囊徽章） |
 | 容器 | `scroll`（竖向 / 横向 / 双向；滚轮/触摸+裁剪+滚动条）/ `tabs` / `tabs_pill` / `divider` / `dialog`（模态）/ `dialog_panel`（带标题栏）/ `visible_when`（条件可见） |
-| 导航 | `menu_bar`（原生手感菜单栏：滑动切换、←→ 跨菜单、F10 / Alt 激活、助记键）/ `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴） |
+| 导航 | `menu_bar`（原生手感菜单栏：滑动切换、←→ 跨菜单、F10 / Alt 激活、助记键）/ `segmented`（连体多段单选）/ `nav_row`（钻入行）/ `collapsible` / `accordion`·`accordion_multi`（手风琴）；选中高亮在行间滑动（`slide_highlight`，`list_pill` 已接入） |
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
-| 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选） |
+| 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选）；表头拖动调列宽（权重可持久化） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG，状态调制/着色/圆角） |
-| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单）、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
+| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单；Linux 经 StatusNotifierItem）与桌面通知、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
 | 无障碍 | Windows UI Automation：窗口、文本、按钮可被讲述人等屏幕阅读器读出，支持经屏幕阅读器聚焦与点击；自定义控件实现 `Widget::accessibility_role` 等方法即可加入 |
 
 控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
@@ -159,8 +161,8 @@ cargo clippy --all-targets                                  # 静态检查
 | 类别 | 示例 |
 |------|------|
 | **完整应用** | `settings`（设置窗：标题栏 + 图标侧栏 + 内容 + 底部操作栏 + 两个对话框）、`about`（关于页）、`ime_settings`（输入法设置场景）、`light_titlebar`（安装器风格的浅色标题栏） |
-| **控件与能力** | `fullshowcase`（控件总览，七个分页）、`theming`（TOML 主题 + 运行期换肤）、`font_switch`（运行期换界面字体 + 字体查询）、`image`（图片/SVG）、`animation`、`emoji`（彩色 emoji）、`caret`（文本光标四风格） |
-| **数据展示** | `virtual_list`（虚拟滚动列表 + 表格）、`virtual_table_server`（服务端分页）、`table_pager`（分页操作栏）、`dyn_list`（数据驱动动态列表）、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline` |
+| **控件与能力** | `fullshowcase`（控件总览，七个分页）、`theming`（TOML 主题 + 运行期换肤）、`font_switch`（运行期换界面字体 + 字体查询）、`image`（图片/SVG）、`animation`、`emoji`（彩色 emoji）、`caret`（文本光标四风格）、`menubar`（菜单栏）、`i18n`（多语言）、`color_picker`（取色面板）、`palette`（纯键盘命令面板） |
+| **数据展示** | `virtual_list`（虚拟滚动列表 + 表格）、`virtual_table_server`（服务端分页）、`table_pager`（分页操作栏）、`dyn_list`（数据驱动动态列表）、`chat_scroll`（聊天式滚动：跟随底部 / 头部插入锚定）、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline` |
 | **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`resident`（零窗口常驻托盘服务）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`window_attrs`（指定位置 / 不进任务栏 / 不可缩放的无边框窗）、`ime` |
 
 另有 `phase0`–`phase5` 分阶段演示与 `perfprobe` 性能探针，供开发与回归比对使用。
@@ -182,7 +184,7 @@ cargo clippy --all-targets                                  # 静态检查
 
 ## 状态
 
-Windows 与 macOS 均已支持；Linux 基本可用：X11 后端为默认，原生 Wayland 后端（输入法 text-input-v3、客户端标题栏、xdg-activation）已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏，暂需 `WINDUI_BACKEND=wayland` 启用。托盘、文件拖出、零窗口常驻与窗口模式 GPU 尚未实现，原生 Wayland 下全局热键不可用，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
+Windows 与 macOS 均已支持；Linux 基本可用：X11 后端为默认，原生 Wayland 后端（输入法 text-input-v3、客户端标题栏、xdg-activation）已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏，暂需 `WINDUI_BACKEND=wayland` 启用。系统托盘与桌面通知（经 D-Bus，X11 路径）、零窗口常驻已实现；文件拖出与窗口模式 GPU 尚未实现，原生 Wayland 下托盘、常驻与全局热键不可用，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
 
 ## 文档
 

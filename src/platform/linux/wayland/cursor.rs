@@ -35,6 +35,8 @@ fn theme_names(l: Look) -> &'static [&'static str] {
         Look::Shape(CursorShape::SizeWE) => &["ew-resize", "sb_h_double_arrow", "h_double_arrow"],
         Look::Shape(CursorShape::SizeNS) => &["ns-resize", "sb_v_double_arrow", "v_double_arrow"],
         Look::Shape(CursorShape::SizeAll) => &["move", "fleur", "size_all"],
+        // `apply` 在查主题之前就把 Hidden 截走了，走不到这里；留空表而非 panic。
+        Look::Shape(CursorShape::Hidden) => &[],
         Look::Resize(0) => &["nw-resize", "top_left_corner"],
         Look::Resize(1) => &["n-resize", "top_side"],
         Look::Resize(2) => &["ne-resize", "top_right_corner"],
@@ -55,6 +57,8 @@ fn protocol_shape(l: Look) -> wp_cursor_shape_device_v1::Shape {
         Look::Shape(CursorShape::SizeWE) => Shape::EwResize,
         Look::Shape(CursorShape::SizeNS) => Shape::NsResize,
         Look::Shape(CursorShape::SizeAll) => Shape::Move,
+        // 协议里没有「隐藏」这个形状，`apply` 另走 `set_cursor(None)`；此处只为穷尽匹配。
+        Look::Shape(CursorShape::Hidden) => Shape::Default,
         Look::Resize(0) => Shape::NwResize,
         Look::Resize(1) => Shape::NResize,
         Look::Resize(2) => Shape::NeResize,
@@ -119,6 +123,12 @@ impl Cursor {
             return;
         }
         self.applied = Some((serial, shape, int_scale));
+        // 隐藏：协议规定 `set_cursor` 的 surface 为 null 即不显示光标。cursor-shape 协议没有
+        // 对应形状，所以不论合成器支不支持它都得走这条老路。
+        if shape == Look::Shape(CursorShape::Hidden) {
+            pointer.set_cursor(serial, None, 0, 0);
+            return;
+        }
         if let Some(dev) = &self.shape_device {
             dev.set_shape(serial, protocol_shape(shape));
             return;

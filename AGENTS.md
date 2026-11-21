@@ -48,6 +48,7 @@ cargo clippy --all-targets --features gpu
 cargo test --features gpu --lib
 
 cargo run --release --example fullshowcase           # 运行综合示例窗口
+# Windows 上要示例 exe 带图标：加 `--features example-icon`（默认关，它需要 MSVC C++ 工具链）
 cargo run --example <name> -- --screenshot out.png   # 离屏渲染存 PNG
 powershell scripts/screenshots.ps1                   # 一键生成所有示例截屏
 ```

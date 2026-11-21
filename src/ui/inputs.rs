@@ -441,6 +441,8 @@ pub struct Switch {
     size: SwitchSize,
     /// 见 [`SwitchChangeFn`]。`RefCell` 只为在 `&self` 的 `toggle` 里取用，不改内容。
     on_change: RefCell<Option<SwitchChangeFn>>,
+    /// `Element::on_click` 的旁路通知：翻转并跑完 `on_change` 之后触发。取用方式同上。
+    on_click: RefCell<Option<ClickFn>>,
 }
 
 impl Switch {
@@ -452,6 +454,7 @@ impl Switch {
             primed: Cell::new(false),
             size: SwitchSize::Normal,
             on_change: RefCell::new(None),
+            on_click: RefCell::new(None),
         }
     }
     /// 设置翻转后的副作用钩子（供 Builder 的 `.on_switch_change()` 调用）。
@@ -474,6 +477,11 @@ impl Switch {
         if let Some(f) = cb {
             f(ctx, now);
             *self.on_change.borrow_mut() = Some(f);
+        }
+        let click = self.on_click.borrow_mut().take();
+        if let Some(mut f) = click {
+            f(ctx);
+            *self.on_click.borrow_mut() = Some(f);
         }
         ctx.mark_dirty();
     }
@@ -555,6 +563,9 @@ impl Widget for Switch {
             _ => false,
         }
     }
+    fn take_click(&mut self, f: ClickFn) {
+        *self.on_click.borrow_mut() = Some(f);
+    }
     fn reset_interaction(&mut self) {
         self.primed.set(false); // 下次显示瞬时落定位置，不回放旧的开关滑动动画
     }
@@ -578,6 +589,8 @@ pub struct RadioButton {
     primed: Cell<bool>,
     /// 标签折行溢出 bounds 时的裁剪判定（自带排版缓存）。
     overflow: super::text_fit::WrapClip,
+    /// `Element::on_click` 的旁路通知：选中**之后**触发（见 `take_click`）。
+    on_click: Option<ClickFn>,
 }
 
 impl RadioButton {
@@ -590,15 +603,21 @@ impl RadioButton {
             sel: Cell::new(Transition::new(init)),
             primed: Cell::new(false),
             overflow: Default::default(),
+            on_click: None,
         }
     }
     fn selected(&self) -> bool {
         self.group.get() == self.index
     }
-    fn select(&self, ctx: &mut EventCtx) {
+    fn select(&mut self, ctx: &mut EventCtx) {
         self.group.set(self.index);
         // 共享 group 被同组其他单选按钮读取：选中变化会改其同伴视觉，属非局部 → 整窗失效。
         ctx.mark_dirty_all();
+        // 通知在 `set` 之后：回调里读 group 拿到的已是新值。已选中的再点一下也通知
+        // （与按钮一致，「被点了」不等于「值变了」）。
+        if let Some(f) = self.on_click.as_mut() {
+            f(ctx);
+        }
     }
 }
 
@@ -699,6 +718,9 @@ impl Widget for RadioButton {
             _ => false,
         }
     }
+    fn take_click(&mut self, f: ClickFn) {
+        self.on_click = Some(f);
+    }
     fn reset_interaction(&mut self) {
         self.primed.set(false); // 下次显示瞬时落定选中态，不回放旧的单选动画
     }
@@ -728,6 +750,9 @@ pub(crate) fn value_label_w(text_w: i32) -> i32 {
 pub struct Slider {
     value: Signal<f32>, // 0.0..=1.0
     dragging: bool,
+    /// 「正在被鼠标拖动」的对外镜像（`Element::dragging_signal`）：按下置 true，抬起 / 被复位
+    /// 置 false。只反映指针拖动——键盘调值是瞬发动作，没有「正在」可言。
+    drag_signal: Option<Signal<bool>>,
     /// 是否在旋钮右侧显示当前值百分比（如 "65%"）。
     pub show_value: bool,
     /// 值标签宽度：`measure` 按当前字号实测 "100%" 后写入，`paint` 与指针换算读它——
@@ -743,6 +768,7 @@ impl Slider {
         Self {
             value,
             dragging: false,
+            drag_signal: None,
             show_value: false,
             label_w: Cell::new(VALUE_LABEL_W),
             value_fit: Default::default(),
@@ -751,6 +777,24 @@ impl Slider {
 
     pub fn set_show_value(&mut self, on: bool) {
         self.show_value = on;
+    }
+
+    /// 接上拖动态镜像信号（见 `drag_signal`）。**不在这里写信号**：构造期写会冲掉别处已置的
+    /// 值（几个滑块共用一个「任一在拖」信号时，拖动途中重建一个滑块就把 true 冲成 false）；
+    /// 信号的初值由调用方负责，通常就是 `signal(false)`。
+    pub fn set_drag_signal(&mut self, s: Signal<bool>) {
+        self.drag_signal = Some(s);
+    }
+
+    /// 改拖动态并同步镜像。值没变不写信号——写信号会触发依赖它的界面重绘；信号已失效
+    /// （所属作用域先于控件被回收）也不写，写失效句柄在 debug 下会断言。
+    fn set_dragging(&mut self, on: bool) {
+        self.dragging = on;
+        if let Some(s) = self.drag_signal {
+            if s.is_alive() && s.get() != on {
+                s.set(on);
+            }
+        }
     }
 
     /// 轨道占用的宽度：`show_value` 时右侧让给值标签。绘制与指针换算共用这一处，
@@ -764,13 +808,43 @@ impl Slider {
         }
     }
 
+    /// 写值 + 按读者位置选择失效强度。
+    ///
+    /// 值的读者有两类：本节点内的（旋钮、`show_value` 的内部值标签）——局部脏区覆盖；
+    /// 节点外的（`dragging_signal` 用法里兄弟标签读同一信号显示百分比）——`mark_dirty`
+    /// 只重画滑块自己，标签停在旧值。真机（verify_batch §5）暴露的症状是「拖动时右侧
+    /// 百分比不更新，松手或晃一下鼠标才跳变」：Down/Up 走整窗掩盖了 Move 路径的缺口，
+    /// 拖动中每帧 Move 都只局部失效滑块自身。按共享状态有非局部读者的惯例升整窗（同
+    /// [`EventCtx::mark_dirty_all`] 文档、`RadioButton::select`）。
+    ///
+    /// 失效强度拿 `show_value` 当「读者是否全在节点内」的**代理**：`show_value=true`
+    /// 视为读者全在节点内（保留局部，拖动高频，能局部则局部）。已知限制——若
+    /// `show_value=true` 同时又把同一信号接给节点外的控件（罕见组合：show_value 自带
+    /// 百分比显示，再挂外部标签是冗余），外部读者不在局部脏区里，拖动中不实时刷新，
+    /// 要等下一次整窗重绘。治本等信号读者追踪（Signal Phase 2）。
+    ///
+    /// 值没变就不写信号也不失效：指针在已饱和区域里继续移动时不空转（写信号会连带
+    /// 跨窗口脏广播，高频拖动下是纯浪费）。
     fn set_from_pos(&self, ctx: &mut EventCtx, x: i32) {
         let b = ctx.bounds();
         let r = KNOB_R;
         let usable = (self.track_w(b.w) - 2 * r).max(1);
         let v = ((x - b.x - r) as f32 / usable as f32).clamp(0.0, 1.0);
-        self.value.set(v);
-        ctx.mark_dirty();
+        self.apply_value(ctx, v);
+    }
+
+    /// 拖动与键盘步进共用的写值落点：写信号 + 按读者位置选失效强度（理由与不变式见
+    /// `set_from_pos` 文档；键盘步进的外部标签读者与拖动完全同款，verify_batch §5
+    /// 同样中招）。
+    fn apply_value(&self, ctx: &mut EventCtx, v: f32) {
+        if (v - self.value.get()).abs() > f32::EPSILON {
+            self.value.set(v);
+            if self.show_value {
+                ctx.mark_dirty();
+            } else {
+                ctx.mark_dirty_all();
+            }
+        }
     }
 }
 
@@ -861,7 +935,7 @@ impl Widget for Slider {
                 PointerKind::Down => {
                     ctx.request_focus();
                     ctx.capture();
-                    self.dragging = true;
+                    self.set_dragging(true);
                     self.set_from_pos(ctx, p.pos.x);
                     true
                 }
@@ -871,24 +945,30 @@ impl Widget for Slider {
                     true
                 }
                 PointerKind::Up => {
-                    self.dragging = false;
+                    // 只有自己在拖时才收尾：在别处按下、拖进来松开的 Up 不归本滑块管，
+                    // 否则会清掉共用信号里别的滑块置的 true。
+                    if self.dragging {
+                        self.set_dragging(false);
+                    }
                     ctx.release_capture();
                     true
                 }
                 _ => false,
             },
+            // 带修饰键的方向键（Shift+←、Ctrl+→…）是应用快捷键，不是调值：放行给
+            // `on_shortcut`。裸方向键才归滑块，否则「上一集 / 下一集」之类的组合键
+            // 一旦焦点落在滑条上就被它吞掉。
+            Event::Key(k) if k.pressed && (k.shift || k.ctrl || k.alt || k.meta) => false,
             Event::Key(k) if k.pressed => {
                 let step = 0.05;
                 let v = self.value.get();
                 match k.key {
                     Key::Left => {
-                        self.value.set((v - step).max(0.0));
-                        ctx.mark_dirty();
+                        self.apply_value(ctx, (v - step).max(0.0));
                         true
                     }
                     Key::Right => {
-                        self.value.set((v + step).min(1.0));
-                        ctx.mark_dirty();
+                        self.apply_value(ctx, (v + step).min(1.0));
                         true
                     }
                     _ => false,
@@ -896,6 +976,14 @@ impl Widget for Slider {
             }
             _ => false,
         }
+    }
+    fn reset_interaction(&mut self) {
+        // 被隐藏 / 禁用时拖动随之作废：没有 Up 会再来，不复位就一直卡在「拖动中」。
+        self.set_dragging(false);
+    }
+    fn on_removed(&mut self) {
+        // 拖动中节点被回收（整页切走、所在行被删）：同理没有 Up 会再来。
+        self.set_dragging(false);
     }
     fn focusable(&self) -> bool {
         true
@@ -910,6 +998,15 @@ impl Widget for Slider {
 
 /// 输入框内边距。与下拉框的 `PAD_X` 同为 12，同一列里文字左缘对齐。
 pub(crate) const TEXT_PAD: i32 = 12;
+
+/// 宿主控件在右侧让出的额外宽度（`trail_extra`，如单位后缀）是否放得进这个框。
+///
+/// 超过框宽的一半就**整个放弃**：框很窄而单位很长时，硬让会把文字区压成 0 宽、数字完全
+/// 看不见，比没有单位糟得多。让位方（`TextInput::paint`）与绘制方（数值框画单位）必须
+/// 用同一个判据——一边让了位、另一边没画，或反过来，都会留下一块空白或叠在一起的字。
+pub(crate) fn extra_fits(extra: i32, box_w: i32) -> bool {
+    extra * 2 <= box_w
+}
 /// 单行文本绘制用的"足够宽"矩形宽度，依赖 clip_rect 裁剪保证不溢出。
 const NO_WRAP_W: i32 = 100_000;
 /// 选区跨行时行尾延伸宽度（标示换行/折行被选中）。
@@ -993,6 +1090,13 @@ pub struct TextConfig {
     /// 多行框 Enter 提交（见 [`crate::ui::Element::submit_on_enter`]）：Enter 触发
     /// `on_submit`、Shift+Enter 换行。只对多行有意义。
     pub submit_on_enter: bool,
+    /// 文字区左右内距（逻辑 px，负值按 0）。默认 12。
+    ///
+    /// 有 `leading` 图标时图标也从这条内距起算；`trail` 在其之外另加。
+    pub pad_x: i32,
+    /// 多行框上下内距（逻辑 px，负值按 0）。默认 12。**单行忽略**：单行文字在框内垂直居中，
+    /// 没有「内距」可言。
+    pub pad_y: i32,
 }
 
 impl Default for TextConfig {
@@ -1008,6 +1112,8 @@ impl Default for TextConfig {
             align: Align::Start,
             read_only: false,
             submit_on_enter: false,
+            pad_x: TEXT_PAD,
+            pad_y: TEXT_PAD,
         }
     }
 }
@@ -1061,6 +1167,10 @@ pub struct TextInput {
     /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
     /// 滚轮滚动不设置，避免 paint 每帧重置 scroll_y。
     follow_cursor: Cell<bool>,
+    /// 宿主控件在文字区**右侧**额外占用的宽度（逻辑 px），在 `config.trail` 之外另加。
+    /// 与 `trail` 的区别是它由 `measure` 实测得出（如数值框的单位后缀，宽度取决于字体），
+    /// 而 `measure` 只有 `&self`，所以用 `Cell`；`trail` 是配置期写死的整数。
+    trail_extra: Cell<i32>,
     /// 鼠标当前悬停在滚动条命中区内（影响光标形状）。
     hover_in_scrollbar: Cell<bool>,
     /// 最近一帧 paint 用的字号快照：供无 style 的命中路径换算前置图标左偏移。
@@ -1157,6 +1267,15 @@ type NavKeyFn = Box<dyn FnMut(&mut EventCtx, KeyEvent) -> bool>;
 type FilterFn = Box<dyn Fn(&str) -> bool>;
 
 impl TextInput {
+    /// 生效的左右内距：`pad_x` 是公开字段（`config_mut` 可直接写），负值在此统一按 0，
+    /// 不依赖调用方先钳过。
+    fn pad_x(&self) -> i32 {
+        self.config.pad_x.max(0)
+    }
+    /// 生效的多行上下内距，同 [`pad_x`](Self::pad_x)。
+    fn pad_y(&self) -> i32 {
+        self.config.pad_y.max(0)
+    }
     pub fn new(text: Signal<String>, placeholder: impl Into<crate::ui::TextContent>) -> Self {
         let placeholder = placeholder.into();
         let cursor = text.with(|t| t.chars().count());
@@ -1177,6 +1296,7 @@ impl TextInput {
             triple: crate::event::TripleClick::default(),
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
+            trail_extra: Cell::new(0),
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
             align_off: Cell::new(0),
@@ -1279,6 +1399,22 @@ impl TextInput {
     /// 设置导航键回调（供 Builder；下游用 [`crate::ui::Element::on_nav_key`]）。
     pub fn set_on_nav_key(&mut self, f: impl FnMut(&mut EventCtx, KeyEvent) -> bool + 'static) {
         self.on_nav_key = Some(Box::new(f));
+    }
+
+    /// 只读访问配置（`config_mut` 的只读对应，给持有 `&self` 的宿主控件用）。
+    pub(crate) fn config_ref(&self) -> &TextConfig {
+        &self.config
+    }
+
+    /// 当前的额外右侧占用宽度（见 `trail_extra`）。
+    #[cfg(test)]
+    pub(crate) fn trail_extra_px(&self) -> i32 {
+        self.trail_extra.get()
+    }
+
+    /// 设置文字区右侧的额外占用宽度（见 `trail_extra`）。
+    pub(crate) fn set_trail_extra(&self, px: i32) {
+        self.trail_extra.set(px.max(0));
     }
 
     /// 设置输入准入过滤（见 [`Self::filter`]）。入参是改动后的完整正文。
@@ -1758,11 +1894,11 @@ impl TextInput {
         // 减掉 paint 那一帧实际用的对齐偏移：不减的话居中/右对齐时点击落点整体偏移，
         // 点第一个字符会选到中间去。
         let local_x =
-            screen_x - (b.x + TEXT_PAD + lead) + self.scroll_x.get() - self.align_off.get();
+            screen_x - (b.x + self.pad_x() + lead) + self.scroll_x.get() - self.align_off.get();
         // 垂直按多行内边距换算行号。单行只有一行、下方 clamp 恒为 0，故单行垂直
         // 居中（vpad=0）与此处用 TEXT_PAD 的不一致不影响命中；若将来单行支持多视觉
         // 行，需与 paint 的 first_line_y 同步。
-        let local_y = screen_y - (b.y + TEXT_PAD) + self.scroll_y.get();
+        let local_y = screen_y - (b.y + self.pad_y()) + self.scroll_y.get();
         let li = if lay.line_h > 0 {
             (local_y / lay.line_h).clamp(0, lay.lines.len() as i32 - 1) as usize
         } else {
@@ -2120,7 +2256,7 @@ impl Widget for TextInput {
             .max(style.font_size() as i32);
         // 多行默认约 5 行高（用户可 .height() 覆盖）；单行沿用紧凑高度。
         let h = if self.is_multiline() {
-            lh * 5 + 2 * TEXT_PAD
+            lh * 5 + 2 * self.pad_y()
         } else {
             crate::theme::current()
                 .metrics
@@ -2188,12 +2324,21 @@ impl Widget for TextInput {
         let multiline = self.is_multiline();
         // 单行：仅水平内边距，垂直占满并居中（避免矮控件被垂直裁掉文字）；
         // 多行：四周都留内边距，使多行文本不贴边。
-        let vpad = if multiline { TEXT_PAD } else { 0 };
+        let vpad = if multiline { self.pad_y() } else { 0 };
         let lead = self.lead_inset(style.font_size());
         let inner = Rect::new(
-            bounds.x + TEXT_PAD + lead,
+            bounds.x + self.pad_x() + lead,
             bounds.y + vpad,
-            bounds.w - 2 * TEXT_PAD - lead - self.config.trail.max(0),
+            (bounds.w
+                - 2 * self.pad_x()
+                - lead
+                - self.config.trail.max(0)
+                - if extra_fits(self.trail_extra.get(), bounds.w) {
+                    self.trail_extra.get()
+                } else {
+                    0
+                })
+            .max(0),
             bounds.h - 2 * vpad,
         );
         // 文字属性打包传递：字重与行高随 `Style` 自动带上，不必在每个调用点重列。
@@ -2203,7 +2348,7 @@ impl Widget for TextInput {
         // 前置图标（搜索框等）：绘于左侧留白区，垂直居中，弱化色。
         if let Some(g) = self.config.leading {
             let mut buf = [0u8; 4];
-            let icon_rect = Rect::new(bounds.x + TEXT_PAD, bounds.y, lead, bounds.h);
+            let icon_rect = Rect::new(bounds.x + self.pad_x(), bounds.y, lead, bounds.h);
             canvas.draw_text(
                 g.encode_utf8(&mut buf),
                 icon_rect,
@@ -2636,7 +2781,7 @@ impl Widget for TextInput {
                     // 多行：滚动条命中优先于文字交互。右键跳过（不拖滚动条）。
                     if self.is_multiline() && p.button != MouseButton::Right {
                         let b = ctx.bounds();
-                        let view_h = b.h - 2 * TEXT_PAD;
+                        let view_h = b.h - 2 * self.pad_y();
                         let (content_h, _) = {
                             let lay = self.layout.borrow();
                             let lh = lay.line_h.max(1);
@@ -2724,7 +2869,7 @@ impl Widget for TextInput {
                     if self.dragging {
                         if self.is_multiline() {
                             let b = ctx.bounds();
-                            let inner_h = b.h - 2 * TEXT_PAD;
+                            let inner_h = b.h - 2 * self.pad_y();
                             let (content_h, line_h) = {
                                 let lay = self.layout.borrow();
                                 let lh = lay.line_h.max(1);
@@ -2733,8 +2878,8 @@ impl Widget for TextInput {
                             let max_scroll = (content_h - inner_h).max(0);
                             if max_scroll > 0 {
                                 let sy = self.scroll_y.get();
-                                let top_edge = b.y + TEXT_PAD;
-                                let bot_edge = b.y + b.h - TEXT_PAD;
+                                let top_edge = b.y + self.pad_y();
+                                let bot_edge = b.y + b.h - self.pad_y();
                                 if p.pos.y < top_edge && sy > 0 {
                                     // 鼠标在上边界外：按超出距离比例向上滚（最少 1px，最多一行）。
                                     let step = ((top_edge - p.pos.y) / 5).clamp(1, line_h);
@@ -2787,7 +2932,7 @@ impl Widget for TextInput {
                 PointerKind::Wheel(delta) if self.is_multiline() => {
                     // 不设 follow_cursor，避免 paint 把视口重置到光标。
                     let b = ctx.bounds();
-                    let inner_h = b.h - 2 * TEXT_PAD;
+                    let inner_h = b.h - 2 * self.pad_y();
                     let (content_h, line_h) = {
                         let lay = self.layout.borrow();
                         let lh = lay.line_h.max(1);
@@ -4897,5 +5042,380 @@ mod slider_value_overflow_tests {
             let (pm, b) = paint_first_child(el, win_w, 150);
             assert_no_ink_outside(&pm, b, &format!("Slider 值标签 {what}"));
         }
+    }
+}
+
+/// Slider 对修饰键的让路，以及 Radio / Switch 的 `on_click` 旁路通知。
+///
+/// 两件事共同的毛病是「静默」：Shift+← 被滑块吞了 `on_shortcut` 永远收不到，
+/// `radio(..).on_click(..)` 链上去不报错也不生效。经真实的 `dispatch_key` /
+/// `dispatch_pointer` 验证，不 mock。
+#[cfg(test)]
+mod modifier_and_click_tests {
+    use crate::core::Tree;
+    use crate::event::{Key, KeyEvent, MouseButton, PointerEvent, PointerKind};
+    use crate::geometry::{Point, Size};
+    use crate::signal::signal;
+    use crate::ui::Element;
+
+    /// 把 `el` 建成根节点（不设宽：Wrap 宽），返回树与根 id。
+    fn build(el: Element) -> (Tree, crate::core::NodeId) {
+        let mut tree = Tree::new();
+        let root = el.build(&mut tree);
+        tree.root = Some(root);
+        tree.layout_root(Size::new(300, 80), &mut crate::text::NullTextEngine);
+        (tree, root)
+    }
+
+    fn click_center(tree: &mut Tree, root: crate::core::NodeId) {
+        let b = tree.abs_bounds(root);
+        let pos = Point::new(b.x + 5, b.y + b.h / 2);
+        for kind in [PointerKind::Down, PointerKind::Up] {
+            tree.dispatch_pointer(
+                PointerEvent::single(kind, pos, MouseButton::Left),
+                &mut None,
+                &mut None,
+            );
+        }
+    }
+
+    fn key(k: Key) -> KeyEvent {
+        KeyEvent::pressed(k)
+    }
+
+    #[test]
+    fn slider_bare_arrow_still_adjusts() {
+        let v = signal(0.5f32);
+        let (mut tree, root) = build(Element::slider(v));
+        let r = tree.dispatch_key(key(Key::Right), Some(root));
+        assert!(r.consumed, "裸方向键归滑块");
+        assert!(
+            (v.get() - 0.55).abs() < 1e-4,
+            "值应 +0.05，实际 {}",
+            v.get()
+        );
+    }
+
+    #[test]
+    fn slider_lets_modified_arrows_through() {
+        type Mod = fn(&mut KeyEvent);
+        let mods: [(&str, Mod); 4] = [
+            ("shift", |k| k.shift = true),
+            ("ctrl", |k| k.ctrl = true),
+            ("alt", |k| k.alt = true),
+            ("meta", |k| k.meta = true),
+        ];
+        for (name, set) in mods {
+            for arrow in [Key::Left, Key::Right] {
+                let v = signal(0.5f32);
+                let (mut tree, root) = build(Element::slider(v));
+                let mut ev = key(arrow);
+                set(&mut ev);
+                let r = tree.dispatch_key(ev, Some(root));
+                assert!(
+                    !r.consumed,
+                    "{name}+{arrow:?} 不该被滑块消费，否则到不了 on_shortcut"
+                );
+                assert_eq!(v.get(), 0.5, "{name}+{arrow:?} 不该改值");
+            }
+        }
+    }
+
+    /// 在滑块上依次派发指针事件（x 是相对滑块左缘的偏移）。
+    fn slider_ptr(
+        tree: &mut Tree,
+        root: crate::core::NodeId,
+        cap: &mut Option<crate::core::NodeId>,
+        kind: PointerKind,
+        dx: i32,
+    ) {
+        let b = tree.abs_bounds(root);
+        tree.dispatch_pointer(
+            PointerEvent::single(kind, Point::new(b.x + dx, b.y + b.h / 2), MouseButton::Left),
+            &mut None,
+            cap,
+        );
+    }
+
+    #[test]
+    fn slider_dragging_signal_follows_the_pointer() {
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        assert!(!grabbed.get(), "没按下时是 false");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "按下即拖动中");
+        let at_down = v.get();
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Move, 100);
+        assert!(grabbed.get(), "移动中保持");
+        assert!(v.get() > at_down, "前提：拖动确实改了值");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, 100);
+        assert!(!grabbed.get(), "抬起即结束");
+    }
+
+    #[test]
+    fn slider_dragging_signal_ignores_keyboard_adjustment() {
+        let (v, grabbed) = (signal(0.5f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        tree.dispatch_key(key(Key::Right), Some(root));
+        assert!(v.get() > 0.5, "前提：键盘调值生效");
+        assert!(!grabbed.get(), "键盘调值是瞬发动作，不算拖动");
+    }
+
+    #[test]
+    fn slider_dragging_signal_resets_when_the_slider_is_reset() {
+        // 被隐藏 / 禁用时没有 Up 会再来；不复位就一直卡在「拖动中」。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "前提：拖动中");
+        tree.get_mut(root).unwrap().widget.reset_interaction();
+        assert!(!grabbed.get());
+    }
+
+    #[test]
+    fn slider_dragging_signal_resets_when_the_node_is_removed() {
+        // 拖动中整页切走 / 所在行被删：配对的 Up 再也派发不到它，信号不能一直停在 true。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get(), "前提：拖动中");
+        tree.remove(root);
+        assert!(!grabbed.get(), "节点被回收时拖动随之作废");
+    }
+
+    /// 拖动 / 键盘写值必须覆盖**节点外**的读者：非 show_value 滑块写值升整窗失效。
+    ///
+    /// 突变目标：`apply_value` 的非 show_value 分支改回 `ctx.mark_dirty()`（局部）→
+    /// 本测试红（damage 从 Full 降级为滑块自身的局部 Rect，兄弟标签读者漏刷）。
+    /// 对照组：show_value 的读者全在节点内，保留局部——同一操作断言**不**升整窗，
+    /// 钉住「能局部则局部」不被顺手回退。
+    #[test]
+    fn slider_value_writes_cover_external_readers() {
+        // 兄弟标签读同一信号：verify_batch §5「拖动时才显示百分比」的最小复现树。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let b = tree.abs_bounds(root);
+        let mut cap = None;
+        let at = |x| Point::new(b.x + x, b.y + b.h / 2);
+        let dptr = |tree: &mut Tree, cap: &mut Option<_>, pos| {
+            tree.dispatch_pointer(
+                PointerEvent::single(PointerKind::Move, pos, MouseButton::Left),
+                &mut None,
+                cap,
+            )
+        };
+        // Down 走 Layout（非 Move 事件）→ 本就是整窗；缺口在 Move：此前只局部失效滑块。
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Down, at(60), MouseButton::Left),
+            &mut None,
+            &mut cap,
+        );
+        let v0 = v.get();
+        let r = dptr(&mut tree, &mut cap, at(120));
+        assert!(v.get() > v0, "前提：拖动确实改了值");
+        assert_eq!(
+            r.damage,
+            crate::core::DamageReq::Full,
+            "拖动写值升整窗，节点外的标签读者才能跟着刷"
+        );
+        // 对照：show_value 的读者全在节点内——保留局部，不升整窗。
+        let v2 = signal(0.0f32);
+        let (mut tree, root) = build(Element::slider(v2).show_value(true));
+        let b = tree.abs_bounds(root);
+        let mut cap = None;
+        tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Down,
+                Point::new(b.x + 60, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        let r = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(b.x + 120, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        assert!(v2.get() > 0.0, "前提：show_value 拖动同样改值");
+        assert_ne!(
+            r.damage,
+            crate::core::DamageReq::Full,
+            "show_value 读者在节点内，应保持局部失效"
+        );
+        // 值没变不失效：同一位置重复 Move，画面没变就不该产生任何脏区。
+        let r = tree.dispatch_pointer(
+            PointerEvent::single(
+                PointerKind::Move,
+                Point::new(b.x + 120, b.y + b.h / 2),
+                MouseButton::Left,
+            ),
+            &mut None,
+            &mut cap,
+        );
+        assert_eq!(
+            r.damage,
+            crate::core::DamageReq::None,
+            "值不变时不写信号不失效：同位置 Move 不空转"
+        );
+        // 键盘步进同口径：外部标签读者同样要跟上。
+        let vk = v2.get();
+        let rk = tree.dispatch_key(key(Key::Left), Some(root));
+        assert!(v2.get() < vk, "前提：键盘步进生效");
+        assert_ne!(
+            rk.damage,
+            crate::core::DamageReq::Full,
+            "show_value 的键盘步进同样保持局部"
+        );
+    }
+
+    #[test]
+    fn slider_capture_lost_synthetic_up_ends_the_drag() {
+        // 失焦 / Alt-Tab 中松手：宿主给捕获节点派一个远处坐标的合成 Up 收尾。
+        let (v, grabbed) = (signal(0.0f32), signal(false));
+        let (mut tree, root) = build(Element::slider(v).dragging_signal(grabbed));
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Down, 60);
+        assert!(grabbed.get() && cap.is_some(), "前提：拖动中且持有捕获");
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, -1_000_000);
+        assert!(!grabbed.get(), "合成 Up 应结束拖动");
+    }
+
+    #[test]
+    fn slider_up_without_its_own_press_does_not_clear_a_shared_flag() {
+        // 几个滑块共用一个「任一在拖」信号：别处按下、拖进来松开的 Up 不归这个滑块管。
+        let shared = signal(true); // 别的滑块正在拖
+        let (mut tree, root) = build(Element::slider(signal(0.0f32)).dragging_signal(shared));
+        assert!(shared.get(), "构造时不该去冲掉别处置的 true");
+        let mut cap = None;
+        slider_ptr(&mut tree, root, &mut cap, PointerKind::Up, 60);
+        assert!(shared.get(), "没按下过的滑块收到 Up 不该清信号");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "dragging_signal")]
+    fn dragging_signal_on_a_non_slider_is_rejected_in_debug() {
+        let _ = Element::button("x").dragging_signal(signal(false));
+    }
+
+    #[test]
+    fn radio_on_click_fires_after_select() {
+        let group = signal(0usize);
+        let seen = signal(usize::MAX);
+        let (mut tree, root) =
+            build(Element::radio("r", group, 1).on_click(move |_| seen.set(group.get())));
+        click_center(&mut tree, root);
+        assert_eq!(group.get(), 1, "前提：照常选中");
+        assert_eq!(seen.get(), 1, "回调触发，且读到的是已选中的新值");
+    }
+
+    #[test]
+    fn switch_on_click_fires_after_toggle() {
+        let on = signal(false);
+        let seen = signal(None::<bool>);
+        let (mut tree, root) =
+            build(Element::switch(on).on_click(move |_| seen.set(Some(on.get()))));
+        click_center(&mut tree, root);
+        assert!(on.get(), "前提：照常翻转");
+        assert_eq!(seen.get(), Some(true), "回调触发，且读到的是翻转后的值");
+        // 键盘激活同一条路径。
+        tree.dispatch_key(key(Key::Space), Some(root));
+        assert_eq!(seen.get(), Some(false));
+    }
+
+    /// 不支持点击回调的控件：debug 下喊出来，而不是静默丢弃。
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "on_click")]
+    fn on_click_on_unsupported_widget_panics_in_debug() {
+        let mut tree = Tree::new();
+        let _ = Element::slider(signal(0.0f32))
+            .on_click(|_| {})
+            .build(&mut tree);
+    }
+}
+
+/// `pad_x` / `pad_y`：文字区离框边的距离可配，且绘制真的跟着动。
+///
+/// 量的是墨的位置而非配置值本身——配置读了没人用（改了字段、绘制仍写死 12）是这类特性最
+/// 典型的假绿。用拉丁字母，免得 CI 没有 CJK 字体时空跑；框设显式宽（文字在框内起笔位置
+/// 与 Wrap 宽无关，只依赖内距）。
+#[cfg(test)]
+mod text_pad_tests {
+    use crate::geometry::Rect;
+    use crate::signal::signal;
+    use crate::ui::text_fit::ink::*;
+    use crate::ui::Element;
+
+    fn input(pad: impl FnOnce(Element) -> Element, multiline: bool) -> Element {
+        let mut el = Element::text_input(signal(String::from("WWWW")), "")
+            .frameless()
+            .width(200)
+            .height(60);
+        if multiline {
+            el = el.multiline();
+        }
+        Element::col().children([pad(el), Element::col().height(20).width_match()])
+    }
+
+    /// 最左一列有墨的 x、最上一行有墨的 y。
+    fn ink_origin(pm: &tiny_skia::Pixmap, area: Rect) -> (i32, i32) {
+        let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                if ink_in(pm, Rect::new(x, y, 1, 1)) > 0 {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                }
+            }
+        }
+        (min_x, min_y)
+    }
+
+    #[test]
+    fn pad_x_moves_the_text_horizontally() {
+        let at = |px| {
+            let (pm, b) = paint_first_child(input(|e| e.pad_x(px), false), 240, 100);
+            ink_origin(&pm, b).0
+        };
+        let (wide, narrow) = (at(12), at(2));
+        assert!(wide < i32::MAX && narrow < i32::MAX, "前提：确实画出了字");
+        assert_eq!(wide - narrow, 10, "内距少 10，字应左移 10");
+    }
+
+    #[test]
+    fn pad_y_moves_multiline_text_vertically() {
+        let at = |py| {
+            let (pm, b) = paint_first_child(input(|e| e.pad_y(py), true), 240, 100);
+            ink_origin(&pm, b).1
+        };
+        assert_eq!(at(12) - at(2), 10, "多行：上内距少 10，字应上移 10");
+    }
+
+    /// 单行垂直居中，`pad_y` 不起作用（文档承诺的「单行忽略」）。
+    #[test]
+    fn pad_y_is_ignored_by_single_line() {
+        let at = |py| {
+            let (pm, b) = paint_first_child(input(|e| e.pad_y(py), false), 240, 100);
+            ink_origin(&pm, b)
+        };
+        assert_eq!(at(0), at(30));
+    }
+
+    #[test]
+    fn negative_pad_is_treated_as_zero() {
+        let at = |px| {
+            let (pm, b) = paint_first_child(input(|e| e.pad_x(px), false), 240, 100);
+            ink_origin(&pm, b)
+        };
+        assert_eq!(at(-8), at(0));
     }
 }

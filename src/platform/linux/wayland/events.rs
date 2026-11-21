@@ -597,6 +597,11 @@ impl Wl {
                     .deco
                     .as_mut()
                     .is_some_and(|d| std::mem::take(&mut d.swallow_right_up));
+                let on_bar = match self.frame(i).locate(pos) {
+                    Region::Bar(p) => Some(p),
+                    Region::Content(_) => None,
+                };
+                self.deco_release_menu(i, on_bar);
                 if swallow {
                     return;
                 }

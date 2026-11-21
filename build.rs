@@ -3,7 +3,8 @@
 //! 嵌进去之后，窗口类的 `LoadIconW`（见 `platform/win32` 的 `register_window_class`）
 //! 就能取到多尺寸 `.ico`：标题栏 16px、任务栏 32px、Alt-Tab 48px 各取所需一档，
 //! 比运行时 `App::icon` 交给系统缩放的单尺寸位图锐利，exe 文件在资源管理器里也带图标。
-//! 两条路互补，示例两条都走。
+//! 两条路互补，示例两条都走。嵌入这一条要开 `--features example-icon`（默认关，需要 MSVC 的
+//! C++ 工具链，见 Cargo.toml）。
 //!
 //! ## ⚠️ 必须用 `compile_for_examples`，不能用 `compile`
 //!
@@ -30,13 +31,13 @@ fn main() {
 
     emit_gpu_cfg();
 
-    // host 非 Windows 时 embed-resource 根本没被拉进来（见 Cargo.toml 的
-    // `target.'cfg(windows)'.build-dependencies`），故用 host cfg 门控整段。
-    #[cfg(windows)]
+    // embed-resource 只在「host 是 Windows 且开了 `example-icon`」时才被拉进来（见
+    // Cargo.toml），故两个条件都要门控整段；默认不开，下游与本库的构建都不碰它。
+    #[cfg(all(windows, feature = "example-icon"))]
     embed_icon();
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "example-icon"))]
 fn embed_icon() {
     use std::path::Path;
 

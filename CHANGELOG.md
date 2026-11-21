@@ -15,15 +15,179 @@
   前五个进 prelude）、`Tree::accessibility_snapshot()`，以及 `Widget` 的三个可选方法
   `accessibility_role` / `accessibility_name` / `accessibility_description`（有默认实现，既有控件
   源码兼容）。手动冒烟见 `examples/uia_smoke.rs`。
+- **表格列宽拖动 + 持久化**：八种表格的表头相邻两列分界均可拖动调列宽（默认开启）。
+  列宽仍是权重，拖动只在相邻两列间转移、总和不变（表格始终撑满、不出横向滚动），每列
+  至少 48px；表头与正文（含排序 / 虚拟表重建出的行）读同一个权重信号，拖动不重建任何行。
+  新修饰符 `.column_weights(Signal<Vec<f32>>)`（绑定应用持有的信号，存权重即可持久化；
+  信号已有值优先，长度不符时写回默认权重）、`.on_columns_resized(|ctx, &[f32]|)`（松手
+  回调，落盘时机）、`.resizable_columns(bool)`。手柄是插在两列之间的零宽节点、不占
+  布局，平时不画、悬停 / 拖动时在分界上画 2px 线（`TableTheme::resize_line`），抓取带
+  跨分界两侧各 4px。复选框列与 `actions` 操作列宽度固定。
+- **`Widget::hit_slop() -> Insets`**：命中区在节点矩形外额外外扩（不影响布局），声明了
+  外扩的空矩形节点照常绘制。
+- **`Element::clip()` 圆角裁剪**：把子树裁到节点外形（描边内侧的圆角矩形，CSS
+  `overflow: hidden`），与内部滚动容器的矩形裁剪可嵌套。修复贴边表格放进无内边距圆角
+  卡片时表头底色 / 斑马纹盖出圆角与描边。底层新增 `Canvas::clip_round_rect(rect, Corners)`，
+  软件 / wgpu / D2D 三后端均为抗锯齿真圆角裁剪；D2D 以 `INITIALIZE_FROM_BACKGROUND` 层实现，
+  裁剪内 ClearType 文字照常绘制。
+
+- **`Element::scroll_position(Signal<i32>)`**：滚动位置双向绑定。容器侧滚动（滚轮 /
+  触摸平移 / 惯性 / 钳制 / `stick_to_bottom` 改写）下一帧写回信号；外部写信号由下一次
+  布局的同步相位消费。多容器绑同一信号 = 等偏移联动（同帧收敛）；初始位置先 `set`
+  再 build 即生效。一期仅纵向滚动容器。
+- **`event::main_window_state()`**：查询**主窗**此刻的真实窗口状态。平台层同步查询，不走
+  线程局部快照，任何时机成立（`on_interval`、托盘 / 热键回调、显隐转换瞬间）；无主窗
+  （常驻模式）返回 `None`。与 `window_state()` 快照的分工：快照快、事件期内为真值，是
+  首选；本函数是任何时机的仲裁读法。Windows / macOS 实现同步读真值，Linux 暂未实现
+  （恒 `None`，平台表见 API_GUIDE §11）。
+- **`WindowState` 字段文档补快照纪律**：`minimized` / `visible` 标明仅事件回调 /
+  菜单构建 / `paint` 期间有效，指路 `main_window_state()`。
+
+### 变更
+
+- 表头标题在列宽不足时单行末尾省略（此前静态表头会溢出）。wgpu 后端三条管线的实例
+  各增两个 `vec4`（圆角裁剪外框与四角半径）。
 
 ### 修复
 
+- **Windows 上 `WindowState::visible` 在显隐转换后不再陈旧**：wnd_proc 此前只在建窗与
+  `WM_SIZE` 推送状态，`run_window_op` 的 Show/Hide（及任务栏等一切 `ShowWindow` 来源）
+  之后快照停在旧值——hide_on_minimize 的窗口推送完 minimized 后立即被藏，`visible` 恒
+  `true`，热键「露着就收起、藏着就唤起」恒走隐藏分支毫无反应。新增 `WM_SHOWWINDOW`
+  推送臂，一条消息收口一切显隐转换；前置消息语义下用 `wparam` 合成新值（`lparam` 0/1/3
+  档给出转换后的新可见性，2/4 档可见性不变保持 live 读），不必等下一次 `WM_SIZE` 或重排
+  顺手修正。示例 `verify_batch` 第 ⑦ 节提供真机核对卡片（各转换后「快照 == 查询」一致性
+  与 F9 热键显隐切换）。
+- **Linux X11：输入法 XIM 前端失效时不再无声挂起**：输入法（如 fcitx5）的 XIM 服务掉线
+  后，根窗口 `XIM_SERVERS` 里的登记可能还在、选区却已无人持有，xim crate 的握手被拒后
+  既不报错也不重试，应用干等、打不了中文也没有任何提示。现在启动时先查选区持有者，
+  没人持有就记一条 `warn` 日志并跳过 XIM，按键走本地处理。输入法重启后仍需重开应用
+  （自动重连已记入 ROADMAP）。
+
+### 构建
+
+- **依赖升级 x11rb 0.13 → 0.14、xim 0.5 → 0.6**（两者共用连接类型，须同步升级）。源码
+  无需适配；x11rb 0.14 去掉了抽象 unix socket，只走 `/tmp/.X11-unix/X<n>` 文件 socket，
+  `/tmp` 与宿主不共享的沙箱 / 容器里可能连不上 X。xim 0.6 的 MSRV 为 1.88。
+- **依赖升级 resvg 0.48 → 0.50**：源码无需适配（0.50 的破坏性变更是包围盒接口改返回
+  `Option`，本项目未使用）。顺带获得 `currentColor` 继承、滤镜子区域、循环引用检测等
+  修复与更低的解析内存；tiny-skia 仍与本项目共用 0.12 一份。
+
+## [0.34.0] - 2026-11-17
+
+### 构建
+
+- **示例图标嵌入改为可选 feature `example-icon`，默认关**：`embed-resource` 会拉
+  `vswhom-sys`，其 build.rs 需要 MSVC 的 C++ 编译器（`cl.exe`），导致只有 Rust + Windows SDK
+  的环境连 windui 本身都编不过。图标只服务本仓库示例，库与下游不再依赖它。要示例带图标：
+  `cargo run --example fullshowcase --features example-icon`。
+
+### 新增
+
+- **`App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`**：ESC 在没有浮层 /
+  对话框可收时是否关窗，默认 `true`（与此前一致）。单主窗应用默认「按一下 ESC 就退出」，设为
+  `false` 后 ESC 仍逐层收浮层、关对话框，但不再触碰窗口，也不询问 `on_close_request`；点 × 与
+  `ctx.request_close()` 不受影响。此前下游只能在 `on_shortcut` 里恒消费 ESC 再自己收浮层。
+- **`Element::dragging_signal(Signal<bool>)`**（仅 `slider`）：把「正在被鼠标拖动」镜像到信号，
+  做「抓住才显示百分比」之类的交互；键盘调值不算拖动，滑块被隐藏 / 禁用时自动回到 `false`。
+- **`Element::number_input(value, min, max, step)`**：不带 ± 按钮的数值输入框，绑定 `Signal<f64>`。
+  数值语义与 `stepper` 的中部输入框是同一份实现（键入准入、钳制、↑↓ 步进、Enter / 失焦规整、
+  Esc 回退）；外观同 `text_input`、文字左对齐，`text_align` / `pad_x` / `pad_y` / `read_only`
+  （只读时 ↑↓ / 键入 / Esc 都不改值）/ `on_click` 可用。配套 `.decimals(n)`（显式小数位；
+  不能少于步长推断的位数，少了按推断值处理）与 `.unit("px")`（框内右侧的弱化单位后缀，不参与
+  编辑与取值；框窄到放不下就整个不显示）。与 `text_input(..).numeric()` 的分工：后者只管
+  「能打进去什么」、绑 `Signal<String>`；这里直接给出已钳制的 `f64`。
+  数值框自带 Enter / 失焦规整与准入过滤，`on_submit` / `on_commit` / `numeric` / `password` /
+  `multiline` / `wrap` / `submit_on_enter` / `on_nav_key` / `on_paste_image` 挂上去在 debug 下
+  断言失败，而不是静默装上又从不生效。
+- **`App::window_corner` / `Window::window_corner`（`WindowCorner`：`Round` / `Small` / `Square`）**：
+  Windows 11 上无边框窗口的圆角可选，默认 `Round` 与此前一致。窗口要贴着工作区边缘时选
+  `Square`，不再被切掉四角。
+- **无边框窗口的 `WindowOutline::Off` 在 Windows 11 上连 DWM 的 1px 边框一并去掉**：此前 `Off` 只关自绘线，
+  系统画的那道亮边仍在，等于没有「不要外框」的开关。别的取色策略不碰 DWM 边框。
+- **`Element::dismiss_swallows_click(bool)`**：浮层被「点外面」收起时，这一击是否到此为止。
+  默认 `false`，与此前一致（同一击里既关面板、又按到底下的控件）；设 `true` 则只收起、不穿透，
+  配对的抬起同样被吃掉。写在传给 `popup` 的面板上。
+- **`Element::pad_x` / `pad_y`（`TextConfig::pad_x` / `pad_y`）**：输入框文字区的左右 / 多行上下
+  内距可配，默认仍为 12。命中、光标、选区与水平滚动跟随同一个值，不必再用负外边距去顶
+  （那会连命中区域一起改）。单行忽略 `pad_y`（垂直居中）。
+- **`CursorShape::Hidden`**：隐藏指针（全屏播放器等「指针静止后藏起来」的场景）。Windows 用
+  `SetCursor(None)`，macOS 用全透明光标（不用 `NSCursor::hide`，那个按次数计数、漏配对会让
+  指针在整个系统里消失），X11 用空位图光标，Wayland 用 `set_cursor(None)`。
+
+### 修复
+
+- **ESC 收起浮层 / 对话框后界面立即刷新**：键盘路径此前只在「放行关窗」时才让平台层重绘，
+  收层被当成「没动界面」跳过——浮层信号已翻、整窗失效已置，屏幕上却赖着不走，要晃一下
+  鼠标才消失。快捷键 `sc.close` 路径同款缺口一并修复；点 ×（`WM_CLOSE`）不受影响。
+- **`Slider` 拖动 / 键盘调值时节点外的读者跟着刷新**：`dragging_signal` 用法里兄弟标签读
+  同一信号显示百分比，此前 Move 路径只局部失效滑块自身，标签停在旧值、松手才跳变。
+  非 `show_value` 的滑块写值升整窗（同 `RadioButton` 的共享组先例）；`show_value` 按
+  「读者全在节点内」处理保留局部——若 `show_value` 之外又把同一信号接给节点外控件
+  （罕见：自带百分比时外部标签是冗余），外部读者拖动中不实时刷新，治本等信号读者追踪。
+  值不变时不再写信号、不产生任何脏区（拖动经过饱和区不空转）。
+- **`Slider` 不再吞带修饰键的方向键**：Shift/Ctrl/Alt/Meta + ←/→ 放行给 `App::on_shortcut`，
+  只有裸方向键调值。此前焦点落在滑条上时「上一集 / 下一集」这类快捷键永远收不到。
+- **`Element::radio(..).on_click(..)` 与 `Element::switch(..).on_click(..)` 不再静默失效**：
+  选中 / 翻转之后作为旁路通知触发（回调里读信号拿到的是新值）。
+
+### 变更
+
+- 把 `on_click` / `on_toggle` 挂到不支持点击回调的节点上，debug 构建下改为 `debug_assert`
+  失败，不再静默丢弃回调；release 行为不变。**影响面**：除 `slider` 外，还包括没加
+  `.clickable()` 的 `col` / `row` / `stack`、`label`、`dropdown`、`stepper` 等——此前它们
+  同样静默无效。容器想可点请写 `.clickable().on_click(..)`。
+
+## [0.33.0] - 2026-11-14
+
+### 变更
+
+- **菜单交互对齐桌面惯例（按下 / 松开）**：菜单里的项改为**松开**时才执行，且须与按下是同一项；
+  移开再松可反悔。`Dropdown` / `CheckMenu` 改为**按下即展开**，菜单栏、下拉框、按下即弹的右键菜单
+  支持「按住滑到某项上松开」直接选中。
+- **`ContextMenuTrigger` 与 `App::context_menu_trigger` / `Window::context_menu_trigger`**：
+  右键菜单（输入框编辑菜单、`on_context_menu`、标题栏系统菜单，含 Wayland 客户端标题栏）
+  何时弹出的策略。默认 `Auto` 随平台——Windows 松开时弹（松开处离按下处超过 8 逻辑像素则作罢），
+  macOS / Linux 按下时弹；也可固定为 `Press` / `Release`。`AppHandler::context_menu_on_press`
+  供平台层自弹窗口菜单时对齐。
+
+### 新增
+
+- **`Fit::Physical`**：新的图片适配模式，1 图片像素 = 1 屏幕物理像素——不随 DPI 缩放、
+  绘制恒走无插值直出。给「图片按目标 DPI 预先光栅好」的调用方用（如按窗口 DPI 出图的
+  设置端工具栏预览：任何缩放倍率下都不经历重采样，HiDPI 屏不再模糊）。与其它 fit 一样
+  在 dst 框内居中，dst 比图小时同样居中裁剪。
+- **滑动选中高亮**：`Element::slide_highlight()` 声明容器，选中行换了时底块从旧行滑到新行，
+  而不是旧行淡出、新行淡入（`list_pill` 已接入）。自拼的导航行用 `Element::slide_target(闭包)`
+  自报选中状态与样式；`HighlightSpec` 进了 prelude。减弱动效档位瞬时到位。
+- **tooltip 弹出**：入场在淡入的同时从 0.9 倍放大到原大，支点为离指针最近的角；减弱动效档只淡入。
+  D2D 后端不实现层缩放，只有淡入。
+- **`Signal::try_set` / `try_update`**：句柄已失效时为空操作并返回 `false`，给可能晚于所属
+  作用域回收才执行的回调（网络请求完成、定时器）当门禁；只在真的写入时才通知重绘。
+- **死句柄断言更好定位**：读写已失效的信号时，panic 消息带上值类型名；`set` / `update` 还带
+  调用方的写出点。
+- **`testing::set_frame_clock_ms`**：裸 `Tree` 测试里推进动画时钟，让淡出等过渡能播完，测得到
+  残影回收时序。
+
+- **`Window::activate_on_show(false)`**：显示或同键单例重新唤起时不激活窗口，悬停浮窗不会抢走前台应用的
+  键盘焦点，点击窗口仍可激活。仅 Windows 生效，其它平台忽略；默认 `true`，行为不变。
+- **`ctx.close_window(key)`**：在通道回调等处收起指定的单例窗口，遵循关闭决策链，窗口不存在时无操作。
+- **常驻应用可用存活的通道发送端作入口**：托盘由别的 GUI 框架持有时，`App::channel` 的发送端也算
+  常驻入口，无需另建托盘；全部提前丢弃时启动检查仍拒绝无入口的常驻应用。
+
+### 修复
+
+- **无边框窗口初始化居中时不再抢占焦点**（Windows）：定位窗口时加上不激活标志，悬停浮窗显示不再
+  被激活。
+- **toast 悬停时透明度不再冻结**：悬停只暂停消失倒计时并补全淡入，不会让提示停在半透明状态。
 - **Windows：窗口隐藏或最小化时，`App::on_interval` 回调里的意图不再搁置**。此前这些意图只在
   `WM_PAINT` 后落地，而隐藏（`hide_on_close` / `hide_on_minimize` 收进托盘）或最小化的窗口收不到
   `WM_PAINT`——回调里 `TrayHandle::set_tooltip` / `set_icon_rgba`、`ctx.show_window()`、关窗等要等到
   窗口再次露面才生效，托盘常驻应用的状态图标因此在收起期间停在旧值。现在窗口出不了帧时由定时器
   直接执行同一套收尾；对话框例外，仍等窗口露面才弹（隐藏窗口名下的模态框可能被压在后面，并把
   唤出的窗口锁住），但同一批意图要关窗时先执行它们再关窗，`defer_blocking` 排的闭包不会丢。
+- **对话框登记不再随子树重建无界增长**：登记改为跟着遮罩节点走，节点删掉即出表；重建过的对话框
+  保持原来的 ESC 关闭顺序，不会跳到并列对话框之上。
 
 ## [0.32.0] - 2026-11-08
 
@@ -3195,7 +3359,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.33.0...HEAD
+[0.33.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.32.0...v0.33.0
 [0.32.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.29.0...v0.30.0

@@ -24,6 +24,7 @@ use crate::style::{Role, Style};
 use crate::text::TextEngine;
 
 use super::row_source::{RowRequest, RowSource};
+use super::table_cols::TableCols;
 use super::virtual_list::{clear_children, VirtualWindow};
 use super::{Element, SortOrder, Truncate, TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y, TABLE_HEADER_PAD_Y};
 
@@ -207,7 +208,6 @@ pub(super) fn next_sort(current: Option<SortKey>, ci: usize) -> Option<SortKey> 
 fn header_cell(
     ci: usize,
     title: &str,
-    weight: f32,
     sort: SortState,
     on_sort: Option<OnSort>,
     rs: &ResolvedSort,
@@ -246,8 +246,8 @@ fn header_cell(
     } else {
         inner.child(title_el).child(arrow)
     };
+    // 列宽不在这里设：由调用方经 `TableCols::header_cell` 包一层按列权重占宽（并叠拖动手柄）。
     Element::stack()
-        .weight(weight)
         .clickable()
         .on_click(move |ctx| {
             let next = next_sort(sort.get(), ci);
@@ -394,8 +394,12 @@ impl Widget for HoverRow {
 /// 操作列单元格：水平内边距 + 内容垂直居中，宽度按权重（内容自身决定高度，行随之等高）。
 /// 与文本列的 `table_cell_pad` 不同——不强制 20px 高，故按钮等较高控件不被压扁。
 fn action_cell(content: Element, weight: f32) -> Element {
+    cell_box(content).weight(weight)
+}
+
+/// 操作格 / 自定义格的盒子（未定列宽）：水平内边距 + 内容垂直居中。
+fn cell_box(content: Element) -> Element {
     Element::row()
-        .weight(weight)
         .cross(Align::Center)
         .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
         .child(content)
@@ -425,21 +429,21 @@ fn data_cell(
     orig: usize,
     ci: usize,
     cell: &str,
-    w: f32,
+    cols: &TableCols,
     render: Option<&CellRender>,
     lines: usize,
 ) -> Element {
-    match render.and_then(|r| r(orig, ci, cell)) {
-        Some(custom) => action_cell(custom, w),
+    let el = match render.and_then(|r| r(orig, ci, cell)) {
+        Some(custom) => cell_box(custom),
         None => Element::table_cell_pad_lines(
             Element::label(cell.to_string())
                 .font_size(crate::theme::current().metrics.font_sm)
                 .max_lines(lines.max(1))
                 .truncate(Truncate::End),
             lines.max(1),
-        )
-        .weight(w),
-    }
+        ),
+    };
+    cols.weigh(el, ci)
 }
 
 /// 构建一行正文：`disp` 为显示位置（决定斑马纹），`orig` 为该行下标（传给操作列/单元格生成器），
@@ -451,7 +455,7 @@ pub(super) fn body_row(
     disp: usize,
     orig: usize,
     cells: &[String],
-    weights: &[f32],
+    cols: &TableCols,
     actions: Option<&ActionCol>,
     render: Option<&CellRender>,
     lines: usize,
@@ -464,8 +468,7 @@ pub(super) fn body_row(
         tr = tr.bg_role(Role::SurfaceAlt);
     }
     for (ci, cell) in cells.iter().enumerate() {
-        let w = weights.get(ci).copied().unwrap_or(1.0);
-        tr = tr.child(data_cell(orig, ci, cell, w, render, lines));
+        tr = tr.child(data_cell(orig, ci, cell, cols, render, lines));
     }
     if let Some(a) = actions {
         tr = tr.child(action_cell((a.build)(orig), a.weight));
@@ -497,7 +500,8 @@ fn with_row_menu(row: Element, idx: usize, menu: Option<&OnRowMenu>) -> Element 
 /// 单元格统一由本 widget 构建（不在构造期预建），故 `.sort_indicator(..)` 在 build 前设置的
 /// 样式覆盖能被首次构建采纳。`on_sort` 在服务端模式下透传给单元格（点击时触发应用重新拉取）。
 pub(super) struct SortableHeader {
-    columns: Vec<(String, f32)>,
+    titles: Vec<String>,
+    cols: TableCols,
     sort: SortState,
     on_sort: Option<OnSort>,
     /// 每实例样式覆盖（由 `Element::sort_indicator` 设置）；未设字段回退主题。
@@ -513,13 +517,15 @@ pub(super) struct SortableHeader {
 
 impl SortableHeader {
     pub(super) fn new(
-        columns: Vec<(String, f32)>,
+        titles: Vec<String>,
+        cols: TableCols,
         sort: SortState,
         on_sort: Option<OnSort>,
     ) -> Self {
         Self {
             last_version: sort.version(),
-            columns,
+            titles,
+            cols,
             sort,
             on_sort,
             style: SortStyle::default(),
@@ -556,13 +562,19 @@ impl Widget for SortableHeader {
         let tree = ctx.tree_mut();
         clear_children(tree, self_id, &mut signals);
         signals.collect(|| {
-            for (ci, (title, w)) in self.columns.iter().enumerate() {
-                let mut el = header_cell(ci, title, *w, self.sort, self.on_sort.clone(), &rs);
-                // 直接 build+add_child 绕过了父级线性容器 build 循环的 weight→主轴维度转换
-                // （见 Element::build），此处手工复现：表头行恒为水平轴，故落到宽度。
-                el.width = Dimension::Weight(*w);
+            let n = self.titles.len();
+            for (ci, title) in self.titles.iter().enumerate() {
+                let cell = header_cell(ci, title, self.sort, self.on_sort.clone(), &rs);
+                // 列宽走运行期权重（`weight_fn` 随节点建出，直接 add_child 也照样生效），
+                // 不必像静态权重那样手工落到 `Dimension::Weight`。
+                let el = self.cols.header_cell(cell, ci);
                 let id = el.build(tree);
                 tree.add_child(self_id, id);
+                // 两列之间插零宽拖动手柄（最右列之后没有：再往右是操作列或表格边缘）。
+                if ci + 1 < n {
+                    let id = self.cols.handle(ci).build(tree);
+                    tree.add_child(self_id, id);
+                }
             }
             // 尾部操作列表头（不可排序），与正文操作单元格同权重对齐。
             if let Some(a) = &self.actions {
@@ -600,7 +612,7 @@ impl Widget for SortableHeader {
 /// 响应式正文：排序状态变化时按列重排并重建数据行（详见模块级说明）。
 pub(super) struct SortableBody {
     rows: Vec<Vec<String>>,
-    weights: Vec<f32>,
+    cols: TableCols,
     sort: SortState,
     /// 尾部操作列（由 `Element::actions` 设置）。
     actions: Option<ActionCol>,
@@ -620,11 +632,11 @@ pub(super) struct SortableBody {
 }
 
 impl SortableBody {
-    pub(super) fn new(rows: Vec<Vec<String>>, weights: Vec<f32>, sort: SortState) -> Self {
+    pub(super) fn new(rows: Vec<Vec<String>>, cols: TableCols, sort: SortState) -> Self {
         Self {
             last_version: sort.version(),
             rows,
-            weights,
+            cols,
             sort,
             actions: None,
             render: None,
@@ -686,7 +698,7 @@ impl Widget for SortableBody {
                     disp,
                     ri,
                     &self.rows[ri],
-                    &self.weights,
+                    &self.cols,
                     self.actions.as_ref(),
                     self.render.as_ref(),
                     self.cell_lines,
@@ -725,7 +737,7 @@ impl Widget for SortableBody {
 /// 前端只按应用给定的顺序渲染。数据信号版本变化（应用换页/换排序后写回）时重建行。
 pub(super) struct PagedBody {
     rows: Signal<Vec<Vec<String>>>,
-    weights: Vec<f32>,
+    cols: TableCols,
     /// 尾部操作列（由 `Element::actions` 设置）。生成器收到当前页内显示下标。
     actions: Option<ActionCol>,
     /// 自定义单元格渲染（由 `Element::cell_render` 设置）。生成器收到当前页内显示下标。
@@ -744,11 +756,11 @@ pub(super) struct PagedBody {
 }
 
 impl PagedBody {
-    pub(super) fn new(rows: Signal<Vec<Vec<String>>>, weights: Vec<f32>) -> Self {
+    pub(super) fn new(rows: Signal<Vec<Vec<String>>>, cols: TableCols) -> Self {
         Self {
             last_version: rows.version(),
             rows,
-            weights,
+            cols,
             actions: None,
             render: None,
             cell_lines: 1,
@@ -809,7 +821,7 @@ impl Widget for PagedBody {
                     disp,
                     disp,
                     row,
-                    &self.weights,
+                    &self.cols,
                     self.actions.as_ref(),
                     self.render.as_ref(),
                     self.cell_lines,
@@ -869,7 +881,7 @@ pub(super) fn select_body_row(
     disp: usize,
     orig: usize,
     cells: &[String],
-    weights: &[f32],
+    cols: &TableCols,
     row_sel: Signal<bool>,
     actions: Option<&ActionCol>,
     render: Option<&CellRender>,
@@ -882,8 +894,7 @@ pub(super) fn select_body_row(
     }
     tr = tr.child(select_cell(row_sel));
     for (ci, cell) in cells.iter().enumerate() {
-        let w = weights.get(ci).copied().unwrap_or(1.0);
-        tr = tr.child(data_cell(orig, ci, cell, w, render, lines));
+        tr = tr.child(data_cell(orig, ci, cell, cols, render, lines));
     }
     if let Some(a) = actions {
         tr = tr.child(action_cell((a.build)(orig), a.weight));
@@ -1103,7 +1114,7 @@ impl Widget for SelectAllCheck {
 /// 选择变化不触发本重建（复选框自更新、行高亮经信号重绘），仅排序变化重排。
 pub(super) struct SelectableBody {
     rows: Vec<Vec<String>>,
-    weights: Vec<f32>,
+    cols: TableCols,
     sel: Vec<Signal<bool>>,
     sort: SortState,
     /// 尾部操作列（由 `Element::actions` 设置）。生成器收到原始行下标（与选择同身份）。
@@ -1124,14 +1135,14 @@ pub(super) struct SelectableBody {
 impl SelectableBody {
     pub(super) fn new(
         rows: Vec<Vec<String>>,
-        weights: Vec<f32>,
+        cols: TableCols,
         sel: Vec<Signal<bool>>,
         sort: SortState,
     ) -> Self {
         Self {
             last_version: sort.version(),
             rows,
-            weights,
+            cols,
             sel,
             sort,
             actions: None,
@@ -1191,7 +1202,7 @@ impl Widget for SelectableBody {
                     disp,
                     ri,
                     &self.rows[ri],
-                    &self.weights,
+                    &self.cols,
                     row_sel,
                     self.actions.as_ref(),
                     self.render.as_ref(),
@@ -1246,12 +1257,12 @@ pub(super) struct RowCfg {
 }
 
 impl RowCfg {
-    fn row(&self, disp: usize, orig: usize, cells: &[String], weights: &[f32]) -> Element {
+    fn row(&self, disp: usize, orig: usize, cells: &[String], cols: &TableCols) -> Element {
         body_row(
             disp,
             orig,
             cells,
-            weights,
+            cols,
             self.actions.as_ref(),
             self.render.as_ref(),
             self.lines.max(1),
@@ -1275,7 +1286,7 @@ impl RowCfg {
 /// 分支的事；通用的窗口逻辑留在 `virtual_list`，与表格无关。
 pub(super) struct VirtualTableBody {
     rows: Signal<Vec<Vec<String>>>,
-    weights: Vec<f32>,
+    cols: TableCols,
     cfg: RowCfg,
     win: VirtualWindow,
     /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
@@ -1283,10 +1294,10 @@ pub(super) struct VirtualTableBody {
 }
 
 impl VirtualTableBody {
-    pub(super) fn new(rows: Signal<Vec<Vec<String>>>, weights: Vec<f32>, row_h: i32) -> Self {
+    pub(super) fn new(rows: Signal<Vec<Vec<String>>>, cols: TableCols, row_h: i32) -> Self {
         Self {
             rows,
-            weights,
+            cols,
             cfg: RowCfg::default(),
             win: VirtualWindow::new(row_h),
             signals: crate::signal::SignalScope::new(),
@@ -1334,13 +1345,13 @@ impl Widget for VirtualTableBody {
         last = first + visible.len();
 
         let self_id = ctx.id();
-        let (weights, cfg) = (&self.weights, &self.cfg);
+        let (cols, cfg) = (&self.cols, &self.cfg);
         let mut signals = std::mem::take(&mut self.signals);
         self.win
             .rebuild(ctx.tree_mut(), self_id, first, last, n, &mut signals, |i| {
                 // 两个下标都传真实行号：斑马纹因此跟着**数据行**走，而不是跟着它在渲染
                 // 窗口里的位置——否则滚动时深浅条纹会随窗口起点整体跳一格。
-                cfg.row(i, i, &visible[i - first], weights)
+                cfg.row(i, i, &visible[i - first], cols)
             });
         self.signals = signals;
     }
@@ -1361,7 +1372,7 @@ pub(super) type OnNeedRows = Box<dyn FnMut(&mut EventCtx, RowRequest)>;
 /// 张冠李戴，而且看着一切正常。
 pub(super) struct VirtualServerBody {
     src: RowSource,
-    weights: Vec<f32>,
+    cols: TableCols,
     cfg: RowCfg,
     win: VirtualWindow,
     signals: crate::signal::SignalScope,
@@ -1373,7 +1384,7 @@ pub(super) struct VirtualServerBody {
 impl VirtualServerBody {
     pub(super) fn new(
         src: RowSource,
-        weights: Vec<f32>,
+        cols: TableCols,
         row_h: i32,
         on_need: impl FnMut(&mut EventCtx, RowRequest) + 'static,
     ) -> Self {
@@ -1382,7 +1393,7 @@ impl VirtualServerBody {
             // 一次信号（信号一写就请求重绘）。
             last_sort: src.sort_version(),
             src,
-            weights,
+            cols,
             cfg: RowCfg::default(),
             win: VirtualWindow::new(row_h),
             signals: crate::signal::SignalScope::new(),
@@ -1441,7 +1452,7 @@ impl Widget for VirtualServerBody {
         // 数据当帧就能画出来，不必先闪一帧骨架。
         let visible = self.src.visible(first..last);
         let self_id = ctx.id();
-        let (weights, cfg) = (&self.weights, &self.cfg);
+        let (cols, cfg) = (&self.cols, &self.cfg);
         let mut signals = std::mem::take(&mut self.signals);
         self.win.rebuild(
             ctx.tree_mut(),
@@ -1451,8 +1462,8 @@ impl Widget for VirtualServerBody {
             total,
             &mut signals,
             |i| match &visible[i - first] {
-                Some(cells) => cfg.row(i, i, cells, weights),
-                None => skeleton_row(i, weights, cfg.actions_weight()),
+                Some(cells) => cfg.row(i, i, cells, cols),
+                None => skeleton_row(i, cols, cfg.actions_weight()),
             },
         );
         self.signals = signals;
@@ -1466,14 +1477,14 @@ impl Widget for VirtualServerBody {
 ///
 /// **刻意不做流光动画**：那要每帧重绘，而「空闲零 CPU」是本库的立身指标之一——为了一个
 /// 加载态把整个窗口钉在满转，不划算。参差不齐的条宽已经足够说明"这不是数据"。
-fn skeleton_row(row: usize, weights: &[f32], actions_col: Option<f32>) -> Element {
+fn skeleton_row(row: usize, cols: &TableCols, actions_col: Option<f32>) -> Element {
     let mut tr = Element::row().width_match().cross(Align::Stretch);
     // 斑马纹照常按真实行下标交替：骨架与到货的行混在一起时条纹才不会断。
     if row % 2 == 1 {
         tr = tr.bg_role(Role::SurfaceAlt);
     }
-    for (ci, &w) in weights.iter().enumerate() {
-        tr = tr.child(skeleton_cell(row, ci, w));
+    for ci in 0..cols.len() {
+        tr = tr.child(cols.weigh(skeleton_cell(row, ci), ci));
     }
     if let Some(aw) = actions_col {
         // 空的操作格：不画东西，只占住那一列，否则骨架行与数据行的列边界对不齐。
@@ -1485,12 +1496,11 @@ fn skeleton_row(row: usize, weights: &[f32], actions_col: Option<f32>) -> Elemen
         .child(Element::divider())
 }
 
-fn skeleton_cell(row: usize, col: usize, w: f32) -> Element {
+fn skeleton_cell(row: usize, col: usize) -> Element {
     // 条宽在 45%~85% 之间按下标确定性地变化：整齐划一的等宽灰条看着像"数据"，参差不齐
     // 才像"还没来"。用下标而不是随机数，是为了同一行滚出去再滚回来长得一样。
     let frac = 0.45 + ((row * 7 + col * 13) % 41) as f32 / 100.0;
     Element::row()
-        .weight(w)
         .cross(Align::Center)
         .padding_xy(TABLE_CELL_PAD_X, TABLE_CELL_PAD_Y)
         .child(
@@ -2258,18 +2268,17 @@ mod tests {
         tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
         let root = tree.root.unwrap();
         let header_id = tree.get(root).unwrap().children[0];
-        let cells = tree.get(header_id).unwrap().children.clone();
+        let cells = crate::ui::table_cols::header_cells(&tree, header_id);
         assert_eq!(cells.len(), 3, "重建后表头应仍有 3 个单元格");
-        let widths: Vec<Dimension> = cells.iter().map(|&c| tree.get(c).unwrap().width).collect();
-        assert_eq!(
-            widths,
-            vec![
-                Dimension::Weight(2.0),
-                Dimension::Weight(1.0),
-                Dimension::Weight(1.5)
-            ],
-            "重建后各表头单元格应保持比例宽度"
-        );
+        // 量排布后的实际宽度而不是节点上的 `Dimension`：列宽走运行期权重（`weight_fn`），
+        // 节点维度本身不再携带比例。400 按 2 : 1 : 1.5 分 ≈ 178 / 89 / 133（取整余数落末列）。
+        let widths: Vec<i32> = cells.iter().map(|&c| tree.abs_bounds(c).w).collect();
+        for (w, want) in widths.iter().zip([177.8f32, 88.9, 133.3]) {
+            assert!(
+                (*w as f32 - want).abs() <= 2.0,
+                "重建后各表头单元格应保持比例宽度，实得 {widths:?}"
+            );
+        }
     }
 
     /// 目标节点的**绝对**中心点（bounds 是局部坐标，需累加祖先 origin 才对得上
@@ -2301,7 +2310,7 @@ mod tests {
         let root = tree.root.unwrap();
         let header = tree.get(root).unwrap().children[0];
         assert_eq!(
-            tree.get(header).unwrap().children.len(),
+            crate::ui::table_cols::header_cells(&tree, header).len(),
             3,
             "表头应为 2 数据列 + 1 操作列"
         );

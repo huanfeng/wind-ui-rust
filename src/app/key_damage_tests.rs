@@ -57,7 +57,9 @@ fn assert_reader_repaints(
         h.on_key(k);
         render(&mut h);
     }
-    drop(render);
+    // 释放闭包对 pm 的借用（后续直接用 pm 比对）。闭包不实现 Drop，clippy 新版
+    // 的 drop_non_drop 对 drop(closure) 报警；`let _ =` 同样立即结束借用。
+    let _ = render;
     assert_eq!(msg.get(), "WWWWWWWW", "{what}：前提：回调写了信号");
     let got = ink(&pm, label);
     h.damage.needs_full = true;

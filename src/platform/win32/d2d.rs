@@ -21,12 +21,13 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1Shadow, D2D1CreateFactory, ID2D1Bitmap1, ID2D1Brush, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Effect, ID2D1Factory1, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
+    ID2D1Effect, ID2D1Factory1, ID2D1Geometry, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED,
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_NONE,
     D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
     D2D1_COLOR_INTERPOLATION_MODE_STRAIGHT, D2D1_COLOR_SPACE_SRGB,
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_OPTIONS1_NONE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_LAYER_OPTIONS1_INITIALIZE_FROM_BACKGROUND, D2D1_LAYER_OPTIONS1_NONE,
     D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_FLOAT,
     D2D1_PROPERTY_TYPE_VECTOR4, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
     D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR,
@@ -632,7 +633,7 @@ impl RenderTarget for D2DTarget<'_> {
             shadow_cache: self.shadow_cache,
             shadow_bytes: self.shadow_bytes,
             saves: Vec::new(),
-            pushed_clips: 0,
+            clip_stack: Vec::new(),
             pushed_layers: 0,
             scale,
             size: self.size,
@@ -669,10 +670,12 @@ struct D2DCanvas<'a> {
     /// 阴影缓存已占字节（借入，可变）：见 `D2DBackend::shadow_bytes`。
     shadow_bytes: &'a mut u64,
     /// save() 时记录的裁剪栈深度快照；restore() pop 到该深度。每帧空起。
-    saves: Vec<u32>,
-    /// 当前已 PushAxisAlignedClip 未配对 Pop 的层数（裁剪栈深度）。
-    /// EndDraw 前必须归零（LIFO 平衡），否则 EndDraw 失败。
-    pushed_clips: u32,
+    saves: Vec<usize>,
+    /// 已压入、未配对弹出的裁剪（裁剪栈）。`None` = `PushAxisAlignedClip`；`Some(几何)` =
+    /// 圆角裁剪，以 `PushLayer` + 几何遮罩实现，几何体的 COM 引用在 `PopLayer` 之后才还
+    /// （`geometricMask` 是 `ManuallyDrop`，见 `draw_image` 的同款说明）。两种必须按 LIFO
+    /// 对应弹出，且与合成层交错时也是 LIFO。EndDraw 前必须清空，否则 EndDraw 失败。
+    clip_stack: Vec<Option<ID2D1Geometry>>,
     /// 当前已 PushLayer 未配对 PopLayer 的合成层数。
     /// 同裁剪：EndDraw 前必须归零，否则层不平衡使 EndDraw 静默返回 Err、整帧丢失。
     pushed_layers: u32,
@@ -1211,18 +1214,15 @@ impl D2DCanvas<'_> {
 
 impl Drop for D2DCanvas<'_> {
     /// 兜底平衡：正常控件树的 save/clip/restore 与 push/pop_layer 本就 LIFO 平衡
-    /// （pushed_clips / pushed_layers 归零）。此处防御性清空残留裁剪与层，避免 EndDraw
+    /// （clip_stack 清空 / pushed_layers 归零）。此处防御性清空残留裁剪与层，避免 EndDraw
     /// 因 Push/PopAxisAlignedClip 或 Push/PopLayer 不平衡而（静默）失败、整帧丢失。
     /// 理论上不应触发，触发即上层逻辑漏 restore / pop_layer。
     fn drop(&mut self) {
-        debug_assert_eq!(
-            self.pushed_clips, 0,
-            "EndDraw 前裁剪栈应已平衡（pushed_clips==0），残留说明上层漏 restore"
+        debug_assert!(
+            self.clip_stack.is_empty(),
+            "EndDraw 前裁剪栈应已平衡（clip_stack 为空），残留说明上层漏 restore"
         );
-        while self.pushed_clips > 0 {
-            unsafe { self.ctx.PopAxisAlignedClip() };
-            self.pushed_clips -= 1;
-        }
+        self.pop_clips_to(0);
         debug_assert_eq!(
             self.pushed_layers, 0,
             "EndDraw 前合成层应已平衡（pushed_layers==0），残留说明上层 push_layer/pop_layer 不平衡"
@@ -1520,6 +1520,7 @@ impl Canvas for D2DCanvas<'_> {
         let (dw0, dh0) = (dst.w as f32, dst.h as f32);
         // 按 fit 求缩放因子（镜像 SkiaCanvas::draw_image 语义）。None 用 1.0：1 图片像素 = 1 逻辑 dp，
         // DPI 物理化交给 context 的 SetTransform（不像软路径 ×scale，那是因软路径直画物理 pixmap）。
+        let scale = self.scale;
         let (sx, sy) = match fit {
             Fit::Fill => (dw0 / iw, dh0 / ih),
             Fit::Contain => {
@@ -1531,12 +1532,14 @@ impl Canvas for D2DCanvas<'_> {
                 (s, s)
             }
             Fit::None => (1.0, 1.0),
+            // 1 图片像素 = 1 物理 px：逻辑缩放取 1/scale，经 ctx 的 SetTransform 物理化后
+            // 恰为 1:1（吸附分支 dw×scale == iw 精确命中），不随 DPI 缩放、无插值。
+            Fit::Physical => (1.0 / scale, 1.0 / scale),
         };
         let (mut dw, mut dh) = (iw * sx, ih * sy);
         // 物理尺寸与源图相差不足 1 像素时吸附为 1:1（镜像 SkiaCanvas::draw_image）：
         // DPI 感知的矢量图标经此免去一次双线性重采样。此处 dw/dh 是逻辑值，
-        // 故与源像素比较前要 ×scale。
-        let scale = self.scale;
+        // 故与源像素比较前要 ×scale。Physical 恰好精确命中（dw×scale == iw），动作无变化。
         if scale > 0.0 && (dw * scale - iw).abs() < 1.0 && (dh * scale - ih).abs() < 1.0 {
             dw = iw / scale;
             dh = ih / scale;
@@ -1835,15 +1838,12 @@ impl Canvas for D2DCanvas<'_> {
 
     fn save(&mut self) {
         // 记录当前裁剪栈深度，restore() 据此 pop 回此快照。
-        self.saves.push(self.pushed_clips);
+        self.saves.push(self.clip_stack.len());
     }
 
     fn restore(&mut self) {
         if let Some(target) = self.saves.pop() {
-            while self.pushed_clips > target {
-                unsafe { self.ctx.PopAxisAlignedClip() };
-                self.pushed_clips -= 1;
-            }
+            self.pop_clips_to(target);
         }
     }
 
@@ -1873,7 +1873,111 @@ impl Canvas for D2DCanvas<'_> {
             self.ctx
                 .PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED)
         };
-        self.pushed_clips += 1;
+        self.clip_stack.push(None);
+    }
+
+    fn clip_round_rect(&mut self, r: crate::geometry::Rect, radii: crate::geometry::Corners) {
+        debug_assert!(
+            !self.saves.is_empty(),
+            "clip_round_rect 必须在 save() 之后调用，以与 restore() 配对"
+        );
+        // 四角全 0 即矩形裁剪，走便宜的轴对齐裁剪。
+        if radii.max() <= 0.0 {
+            return self.clip_rect(r);
+        }
+        // 外框与矩形裁剪同一套物理取整（`Rect::scaled` 再还原逻辑值）。
+        let s = self.scale;
+        let p = r.scaled(s);
+        let (x, y, w, h) = (
+            p.x as f32 / s,
+            p.y as f32 / s,
+            p.w as f32 / s,
+            p.h as f32 / s,
+        );
+        let Some(geom) = round_clip_geometry(self.ctx, x, y, w, h, radii, s) else {
+            // 建不出几何体（极少见的设备状态）：退化为外框矩形裁剪，至少不越出外框。
+            return self.clip_rect(r);
+        };
+        // 层用 INITIALIZE_FROM_BACKGROUND：层内先拷入底图，ClearType 文字才有底色可依。
+        // 不加的话 D2D 对层内 ClearType 文字是**整段不画**（见 `sync_text_aa`），而圆角
+        // 卡片里恰恰全是文字。拷贝范围由 contentBounds 限在外框内，不是整窗。
+        // 不计入 `pushed_layers`：那个计数决定文字降为灰度，这里底色是真实的，不必降。
+        let mut params = D2D1_LAYER_PARAMETERS1 {
+            contentBounds: rect_f(x, y, w, h),
+            geometricMask: std::mem::ManuallyDrop::new(Some(geom.clone())),
+            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            maskTransform: Matrix3x2::identity(),
+            opacity: 1.0,
+            opacityBrush: std::mem::ManuallyDrop::new(None),
+            layerOptions: D2D1_LAYER_OPTIONS1_INITIALIZE_FROM_BACKGROUND,
+        };
+        unsafe {
+            self.ctx.PushLayer(&params, None);
+            // 结构体里那份克隆的引用立即还掉；栈里留的 `geom` 保活到 PopLayer 之后。
+            std::mem::ManuallyDrop::drop(&mut params.geometricMask);
+        }
+        self.clip_stack.push(Some(geom));
+    }
+}
+
+impl D2DCanvas<'_> {
+    /// 按 LIFO 弹出裁剪直到栈深为 `depth`：轴对齐裁剪 `PopAxisAlignedClip`，圆角裁剪
+    /// `PopLayer` 后再还几何体引用。
+    fn pop_clips_to(&mut self, depth: usize) {
+        while self.clip_stack.len() > depth {
+            match self.clip_stack.pop().flatten() {
+                None => unsafe { self.ctx.PopAxisAlignedClip() },
+                Some(geom) => {
+                    unsafe { self.ctx.PopLayer() };
+                    drop(geom);
+                }
+            }
+        }
+    }
+}
+
+/// 圆角裁剪的几何体（逻辑坐标，D2D 的世界变换负责物理化）。四角相同走原生圆角矩形
+/// （真圆弧），四角各异用折线轮廓（`corners_contour` 的弦高 < 0.1 物理像素）。
+fn round_clip_geometry(
+    ctx: &ID2D1DeviceContext,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii: crate::geometry::Corners,
+    scale: f32,
+) -> Option<ID2D1Geometry> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let k = radii.fit(w, h);
+    unsafe {
+        let factory = ctx.GetFactory().ok()?;
+        if k.is_uniform() {
+            let rr = D2D1_ROUNDED_RECT {
+                rect: rect_f(x, y, w, h),
+                radiusX: k.top_left,
+                radiusY: k.top_left,
+            };
+            return factory
+                .CreateRoundedRectangleGeometry(&rr)
+                .ok()?
+                .cast()
+                .ok();
+        }
+        let pts = crate::render::corners_contour(x, y, w, h, k, scale);
+        if pts.len() < 3 {
+            return None;
+        }
+        let geometry = factory.CreatePathGeometry().ok()?;
+        let sink = geometry.Open().ok()?;
+        sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+        sink.BeginFigure(vec2(pts[0].0, pts[0].1), D2D1_FIGURE_BEGIN_FILLED);
+        let rest: Vec<Vector2> = pts[1..].iter().map(|&(x, y)| vec2(x, y)).collect();
+        sink.AddLines(&rest);
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink.Close().ok()?;
+        geometry.cast().ok()
     }
 }
 
@@ -2246,6 +2350,53 @@ mod tests {
         });
         assert_eq!(px(&pm, 20, 20), [255, 0, 0, 255], "矩形内应是红，不是蓝");
         assert_eq!(px(&pm, 2, 2), [255, 255, 255, 255], "矩形外应保持背景白");
+    }
+
+    /// Physical：1 图片像素 = 1 物理 px——不随 DPI 缩放（scale=1.5 下源 6×6 画 6×6
+    /// 物理，而非 ×1.5），无插值，dst 比图大时留白居中；dst 比图小时与 None/Cover
+    /// 同语义居中裁剪。
+    #[test]
+    fn draw_image_physical_is_dpi_independent_blit() {
+        // 用例 1：scale=1.5，源 6×6 纯红。dst 逻辑 30×30 于 (5,5)，图 6 物理 px
+        // 居中 → 逻辑宽 4、tx=5+(30-4)/2=18 逻辑 → 物理 [27,33)，内部全红、图外白。
+        let img = || {
+            crate::render::image::Image::from_rgba(6, 6, &[255u8, 0, 0, 255].repeat(6 * 6)).unwrap()
+        };
+        let pm = render(60, 60, 1.5, |c| {
+            c.draw_image(
+                &img(),
+                Rect::new(5, 5, 30, 30),
+                crate::render::image::Fit::Physical,
+                0.0,
+                1.0,
+            );
+        });
+        for y in 27..33 {
+            for x in 27..33 {
+                assert_eq!(px(&pm, x, y), [255, 0, 0, 255], "({x},{y}) 应为纯红");
+            }
+        }
+        assert_eq!(px(&pm, 26, 29), [255, 255, 255, 255], "图左应留白");
+        assert_eq!(px(&pm, 33, 29), [255, 255, 255, 255], "图右应留白");
+        // 用例 2：dst 物理 3×3（逻辑 2×2）小于源 8×8 → 居中裁剪，框内全红、框外全白。
+        let img2 = || {
+            crate::render::image::Image::from_rgba(8, 8, &[255u8, 0, 0, 255].repeat(8 * 8)).unwrap()
+        };
+        let pm2 = render(20, 20, 1.5, |c| {
+            c.draw_image(
+                &img2(),
+                Rect::new(0, 0, 2, 2),
+                crate::render::image::Fit::Physical,
+                0.0,
+                1.0,
+            );
+        });
+        for y in 0..3 {
+            for x in 0..3 {
+                assert_eq!(px(&pm2, x, y), [255, 0, 0, 255], "({x},{y}) 应为图片色");
+            }
+        }
+        assert_eq!(px(&pm2, 3, 3), [255, 255, 255, 255], "框外应保持白");
     }
 
     /// 图片缓存按**字节**封顶，而不只是条数。
@@ -2977,6 +3128,100 @@ mod tests {
         assert!(
             (after - soft_w).abs() <= 1,
             "D2D 应与软引擎同样切到图标字体：D2D {after}，软引擎 {soft_w}"
+        );
+    }
+
+    // ---- 圆角裁剪（clip_round_rect）：与软 / wgpu 后端同一组判据 ----
+
+    fn white(p: [u8; 4]) -> bool {
+        p[0] > 240 && p[1] > 240 && p[2] > 240
+    }
+    fn red(p: [u8; 4]) -> bool {
+        p[0] > 200 && p[1] < 60 && p[2] < 60
+    }
+
+    #[test]
+    fn round_clip_cuts_corners_and_keeps_edges() {
+        let pm = render(60, 60, 1.0, |c| {
+            c.save();
+            c.clip_round_rect(
+                Rect::new(10, 10, 40, 40),
+                crate::geometry::Corners::all(12.0),
+            );
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(Color::rgb(255, 0, 0)));
+            c.restore();
+        });
+        for (x, y) in [(11, 11), (48, 11), (48, 48), (11, 48)] {
+            assert!(
+                white(px(&pm, x, y)),
+                "({x},{y}) 在圆角外应留白，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        for (x, y) in [(10, 30), (30, 10), (49, 30), (30, 30)] {
+            assert!(
+                red(px(&pm, x, y)),
+                "({x},{y}) 应为红，实得 {:?}",
+                px(&pm, x, y)
+            );
+        }
+        assert!(white(px(&pm, 5, 30)), "外框外应裁掉");
+    }
+
+    /// 嵌套轴对齐裁剪（滚动视口）保住外层圆角；两种裁剪交错弹出不乱栈。
+    #[test]
+    fn nested_clip_rect_keeps_outer_round_corners() {
+        let pm = render(60, 60, 1.0, |c| {
+            c.save();
+            c.clip_round_rect(
+                Rect::new(10, 10, 40, 40),
+                crate::geometry::Corners::all(12.0),
+            );
+            c.save();
+            c.clip_rect(Rect::new(0, 30, 60, 30));
+            c.fill_rect(0.0, 0.0, 60.0, 60.0, &Paint::fill(Color::rgb(255, 0, 0)));
+            c.restore();
+            c.restore();
+            // 栈已回空：这一笔不受任何裁剪。
+            c.fill_rect(0.0, 0.0, 4.0, 4.0, &Paint::fill(Color::rgb(255, 0, 0)));
+        });
+        assert!(
+            white(px(&pm, 11, 48)) && white(px(&pm, 48, 48)),
+            "嵌套矩形裁剪丢了外层圆角"
+        );
+        assert!(white(px(&pm, 30, 20)), "嵌套矩形裁剪之外应留白");
+        assert!(red(px(&pm, 30, 45)), "交集内应落笔");
+        assert!(red(px(&pm, 1, 1)), "restore 后应回到无裁剪");
+    }
+
+    /// 圆角裁剪是一个 PushLayer：层内 ClearType 文字若无底色可依，D2D 会整段不画
+    /// （见 `sync_text_aa`）。INITIALIZE_FROM_BACKGROUND 保证圆角卡片里的字照常出现。
+    #[test]
+    fn text_inside_round_clip_still_draws() {
+        let draw_text = |c: &mut dyn Canvas| {
+            c.draw_text(
+                "Hello 圆角",
+                Rect::new(14, 20, 100, 24),
+                Color::rgb(0, 0, 0),
+                Align::Start,
+                &TextStyle::new(14.0),
+            );
+        };
+        let plain = render(140, 60, 1.0, draw_text);
+        let clipped = render(140, 60, 1.0, |c| {
+            c.save();
+            c.clip_round_rect(
+                Rect::new(4, 4, 132, 52),
+                crate::geometry::Corners::all(10.0),
+            );
+            draw_text(c);
+            c.restore();
+        });
+        let (a, b) = (ink(&plain, 0, 60), ink(&clipped, 0, 60));
+        assert!(a > 50, "前提：无裁剪时应画出文字，墨量 {a}");
+        assert!(
+            b * 10 >= a * 9,
+            "圆角裁剪内文字墨量骤降：无裁剪 {a}、裁剪内 {b}"
         );
     }
 }

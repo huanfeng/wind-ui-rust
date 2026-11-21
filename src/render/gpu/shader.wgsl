@@ -74,6 +74,10 @@ struct Inst {
     @location(6) params: vec4<f32>,
     /// x=kind，y=flags，z=渐变基址（GRAD_NONE 表示无），w=色标数。
     @location(7) info: vec4<u32>,
+    /// 圆角裁剪外框（**物理**浮点 x0,y0,x1,y1）。无圆角裁剪时是一个极大的框。
+    @location(8) clip_rr: vec4<f32>,
+    /// 圆角裁剪四角半径（物理）：左上、右上、右下、左下。
+    @location(9) clip_radii: vec4<f32>,
 };
 
 struct VsOut {
@@ -86,6 +90,8 @@ struct VsOut {
     @location(4) @interpolate(flat) grad: vec4<f32>,
     @location(5) @interpolate(flat) params: vec4<f32>,
     @location(6) @interpolate(flat) info: vec4<u32>,
+    @location(7) @interpolate(flat) clip_rr: vec4<f32>,
+    @location(8) @interpolate(flat) clip_radii: vec4<f32>,
 };
 
 @vertex
@@ -116,6 +122,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.grad = inst.grad * s;
     out.params = inst.params * s;
     out.info = inst.info;
+    // 圆角裁剪与 clip 一样已是物理量，不再乘。
+    out.clip_rr = inst.clip_rr;
+    out.clip_radii = inst.clip_radii;
     return out;
 }
 
@@ -123,6 +132,23 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
 fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - b + vec2<f32>(r);
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+/// 四角各异的圆角矩形 SDF（`r` = 左上、右上、右下、左下；y 向下）。
+fn sd_round_box4(p: vec2<f32>, b: vec2<f32>, r: vec4<f32>) -> f32 {
+    // 先按左右半边取 (上角, 下角)，再按上下半边取其一。
+    let side = select(r.xw, r.yz, p.x > 0.0);
+    let k = select(side.x, side.y, p.y > 0.0);
+    let q = abs(p) - b + vec2<f32>(k);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - k;
+}
+
+/// 圆角裁剪的覆盖率（0..1，1 物理像素的抗锯齿斜坡）。`rr` 为 x0,y0,x1,y1。
+/// 三条管线逐字相同（WGSL 没有 include），改一处要三处一起改。
+fn round_clip_cov(p: vec2<f32>, rr: vec4<f32>, radii: vec4<f32>) -> f32 {
+    let half_size = (rr.zw - rr.xy) * 0.5;
+    let d = sd_round_box4(p - (rr.xy + half_size), half_size, radii);
+    return clamp(0.5 - d, 0.0, 1.0);
 }
 
 /// 线段（Butt 端帽）有向距离场：等价于以线段为中轴、宽 `2*half_w`、长 `|b-a|` 的
@@ -243,7 +269,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 「中心落在 [x0,x1] 内」恰好选中 [x0, x1) 这些列——与软后端非抗锯齿的
     // 矩形 mask 逐像素同集。用系数而不是 discard：分支在这里没有性能意义，
     // 而 discard 会让后续代码路径多一种要考虑的终止方式。
-    let inside = f32(p.x >= in.clip.x && p.x <= in.clip.z && p.y >= in.clip.y && p.y <= in.clip.w);
+    let inside = f32(p.x >= in.clip.x && p.x <= in.clip.z && p.y >= in.clip.y && p.y <= in.clip.w)
+        * round_clip_cov(p, in.clip_rr, in.clip_radii);
 
     let kind = in.info.x;
     var cov = 0.0;
