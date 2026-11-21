@@ -926,6 +926,16 @@ pub trait Canvas {
     fn restore(&mut self);
     /// 将裁剪区与矩形 `r` 求交（后续绘制仅作用于交集内）。
     fn clip_rect(&mut self, r: Rect);
+    /// 将裁剪区与圆角矩形求交：`r` 为外框（逻辑坐标），`radii` 为四角半径（逻辑长度，
+    /// 放不下时按 [`Corners::fit`] 等比收缩）。边缘抗锯齿。契约同 [`clip_rect`](Self::clip_rect)：
+    /// 须先 `save()`，由配对的 `restore()` 撤销。
+    ///
+    /// 与其后嵌套的 `clip_rect` 取交集——圆角卡片里的滚动视口仍保住卡片的四角。
+    /// 默认退化为外框矩形裁剪，只给测试画布兜底；三个真实后端都已覆盖。
+    fn clip_round_rect(&mut self, r: Rect, radii: Corners) {
+        let _ = radii;
+        self.clip_rect(r);
+    }
 }
 
 /// 后端无关的一帧渲染目标。平台层每帧提供，宿主结合自身文字引擎得到 `Canvas`。
@@ -1182,6 +1192,72 @@ pub(crate) fn rounded_rect_path(
     pb.cubic_to(l, t + r - k, l + r - k, t, l + r, t);
     pb.close();
     pb.finish()
+}
+
+/// 四角各自半径的圆角矩形路径（坐标与半径同一空间，调用方负责缩放）。半径先经
+/// [`Corners::fit`] 收进 `w × h`；四角全 0 即直角矩形。供软后端圆角裁剪建 mask。
+pub(crate) fn corners_rect_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    corners: Corners,
+) -> Option<tiny_skia::Path> {
+    use tiny_skia::PathBuilder;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let c = corners.fit(w, h);
+    let mut pb = PathBuilder::new();
+    if c.max() <= 0.0 {
+        pb.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h)?);
+        return pb.finish();
+    }
+    const K: f32 = 0.552_284_8; // 贝塞尔逼近圆弧的控制点系数
+    let (l, t, rt, b) = (x, y, x + w, y + h);
+    let (tl, tr, br, bl) = (c.top_left, c.top_right, c.bottom_right, c.bottom_left);
+    pb.move_to(l + tl, t);
+    pb.line_to(rt - tr, t);
+    pb.cubic_to(rt - tr + K * tr, t, rt, t + tr - K * tr, rt, t + tr);
+    pb.line_to(rt, b - br);
+    pb.cubic_to(rt, b - br + K * br, rt - br + K * br, b, rt - br, b);
+    pb.line_to(l + bl, b);
+    pb.cubic_to(l + bl - K * bl, b, l, b - bl + K * bl, l, b - bl);
+    pb.line_to(l, t + tl);
+    pb.cubic_to(l, t + tl - K * tl, l + tl - K * tl, t, l + tl, t);
+    pb.close();
+    pb.finish()
+}
+
+/// 圆角裁剪的「四角区」：外框四角各一块边长 = 该角半径（向上取整再 +1 兜住抗锯齿）的
+/// 正方形，半径为 0 的角不产生。区外的像素与外框矩形裁剪完全同集——各后端的矩形快路
+/// 据此判断能否绕开圆角 mask：落笔范围不碰任何四角区，就照旧走快路。
+pub(crate) fn corner_zones(r: Rect, radii: Corners) -> Vec<Rect> {
+    if r.is_empty() {
+        return Vec::new();
+    }
+    let c = radii.fit(r.w as f32, r.h as f32);
+    let side = |k: f32| if k > 0.0 { k.ceil() as i32 + 1 } else { 0 };
+    let (tl, tr, br, bl) = (
+        side(c.top_left),
+        side(c.top_right),
+        side(c.bottom_right),
+        side(c.bottom_left),
+    );
+    let mut z = Vec::with_capacity(4);
+    if tl > 0 {
+        z.push(Rect::new(r.x, r.y, tl, tl));
+    }
+    if tr > 0 {
+        z.push(Rect::new(r.right() - tr, r.y, tr, tr));
+    }
+    if br > 0 {
+        z.push(Rect::new(r.right() - br, r.bottom() - br, br, br));
+    }
+    if bl > 0 {
+        z.push(Rect::new(r.x, r.bottom() - bl, bl, bl));
+    }
+    z
 }
 
 #[cfg(test)]

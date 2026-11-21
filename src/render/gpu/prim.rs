@@ -48,7 +48,7 @@ const INIT_CAPACITY: usize = 512;
 /// 中途 flush 不改变叠放次序，只是多一次 draw call。
 pub(super) const MAX_BATCH: usize = 16384;
 
-/// 一个图元 = 一个实例（128 B）。字段语义随 `meta[0]`（kind）而变。
+/// 一个图元 = 一个实例（160 B）。字段语义随 `meta[0]`（kind）而变。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(super) struct Instance {
@@ -72,19 +72,55 @@ pub(super) struct Instance {
     params: [f32; 4],
     /// `[0]`=kind，`[1]`=flags，`[2]`=渐变基址（`GRAD_NONE` 为无），`[3]`=色标数。
     meta: [u32; 4],
+    /// 圆角裁剪外框（**物理**浮点 x0,y0,x1,y1），见 [`GpuClip`]。追加在末尾，前面字段的
+    /// shader location 不动。
+    clip_rr: [f32; 4],
+    /// 圆角裁剪四角半径（物理，左上/右上/右下/左下）。全 0 且外框极大即「无圆角裁剪」。
+    clip_radii: [f32; 4],
 }
 
 impl Instance {
-    /// 顶点缓冲布局：8 个 `vec4` 属性，逐实例步进。
+    /// 顶点缓冲布局：10 个 `vec4` 属性，逐实例步进。
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 10] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
             4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Uint32x4,
+            8 => Float32x4, 9 => Float32x4,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Instance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRS,
+        }
+    }
+}
+
+/// 一个图元的裁剪：物理整数矩形（非抗锯齿，与软后端矩形 mask 逐像素同集）+ 可选的
+/// 圆角裁剪（抗锯齿 SDF）。三条管线（几何 / 文字 / 图片）共用。
+///
+/// 圆角只记**最内层**一个：两个圆角矩形的交集无法用一个圆角矩形表达。外层圆角的
+/// 外框仍并入 `rect`，只在内层圆角框伸进外层四角时才丢外层那段弧——嵌套圆角容器
+/// 本就该内缩，实际界面里碰不到。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GpuClip {
+    /// 物理整数 x0,y0,x1,y1。
+    pub rect: [f32; 4],
+    /// 圆角外框，物理浮点 x0,y0,x1,y1。
+    pub rr: [f32; 4],
+    /// 四角半径（物理），左上/右上/右下/左下。
+    pub radii: [f32; 4],
+}
+
+impl GpuClip {
+    /// 「无圆角」的外框：远大于任何目标，SDF 处处为负、覆盖率恒为 1。
+    const NO_RR: [f32; 4] = [-1.0e6, -1.0e6, 1.0e6, 1.0e6];
+
+    /// 只有矩形裁剪。
+    pub fn rect(rect: [f32; 4]) -> Self {
+        Self {
+            rect,
+            rr: Self::NO_RR,
+            radii: [0.0; 4],
         }
     }
 }
@@ -250,7 +286,7 @@ impl PrimBatch {
         h: f32,
         radius: f32,
         paint: &Paint,
-        clip: [f32; 4],
+        clip: GpuClip,
         aa_margin: f32,
     ) {
         if w <= 0.0 || h <= 0.0 {
@@ -262,7 +298,9 @@ impl PrimBatch {
             bbox: inflate(x, y, w, h, aa_margin),
             rect: [x, y, w, h],
             line: [0.0; 4],
-            clip,
+            clip: clip.rect,
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
             color,
             grad,
             params: [r, 0.0, 0.0, 0.0],
@@ -277,7 +315,7 @@ impl PrimBatch {
         cy: f32,
         r: f32,
         paint: &Paint,
-        clip: [f32; 4],
+        clip: GpuClip,
         aa_margin: f32,
     ) {
         if r <= 0.0 {
@@ -289,7 +327,9 @@ impl PrimBatch {
             bbox: inflate(x, y, w, h, aa_margin),
             rect: [x, y, w, h],
             line: [0.0; 4],
-            clip,
+            clip: clip.rect,
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
             color,
             grad,
             params: [r, 0.0, 0.0, 0.0],
@@ -308,7 +348,7 @@ impl PrimBatch {
         radius: f32,
         half: f32,
         paint: &Paint,
-        clip: [f32; 4],
+        clip: GpuClip,
         aa_margin: f32,
     ) {
         if w < 0.0 || h < 0.0 || half <= 0.0 {
@@ -319,7 +359,9 @@ impl PrimBatch {
             bbox: inflate(x, y, w, h, half + aa_margin),
             rect: [x, y, w, h],
             line: [0.0; 4],
-            clip,
+            clip: clip.rect,
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
             color: color_f32(paint.color),
             grad: [0.0; 4],
             params: [radius, half, 0.0, 0.0],
@@ -336,7 +378,7 @@ impl PrimBatch {
         y1: f32,
         half: f32,
         paint: &Paint,
-        clip: [f32; 4],
+        clip: GpuClip,
         aa_margin: f32,
     ) {
         if half <= 0.0 {
@@ -350,7 +392,9 @@ impl PrimBatch {
             bbox: [lx - m, ty - m, rx - lx + 2.0 * m, by - ty + 2.0 * m],
             rect: [0.0; 4],
             line: [x0, y0, x1, y1],
-            clip,
+            clip: clip.rect,
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
             color: color_f32(paint.color),
             grad: [0.0; 4],
             params: [0.0, half, 0.0, 0.0],
@@ -371,13 +415,15 @@ impl PrimBatch {
         sigma: f32,
         margin: f32,
         color: Color,
-        clip: [f32; 4],
+        clip: GpuClip,
     ) {
         self.instances.push(Instance {
             bbox: inflate(x, y, w, h, margin),
             rect: [x, y, w, h],
             line: [0.0; 4],
-            clip,
+            clip: clip.rect,
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
             color: color_f32(color),
             grad: [0.0; 4],
             params: [radius, sigma, 0.0, 0.0],
@@ -708,15 +754,15 @@ mod tests {
     use super::*;
     use crate::render::Gradient;
 
-    fn clip() -> [f32; 4] {
-        [0.0, 0.0, 100.0, 100.0]
+    fn clip() -> GpuClip {
+        GpuClip::rect([0.0, 0.0, 100.0, 100.0])
     }
 
     /// 实例布局的字节数必须与 shader 的属性偏移对得上：改了字段忘了改 shader 的话，
     /// 顶点属性会整体错位，症状是「图元位置全乱」而不是编译错误。
     #[test]
-    fn instance_is_128_bytes() {
-        assert_eq!(std::mem::size_of::<Instance>(), 128);
+    fn instance_is_160_bytes() {
+        assert_eq!(std::mem::size_of::<Instance>(), 160);
         assert_eq!(std::mem::align_of::<Instance>(), 4);
     }
 

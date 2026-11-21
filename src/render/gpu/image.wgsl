@@ -38,6 +38,9 @@ struct Inst {
     @location(2) clip: vec4<f32>,
     /// x=圆角半径（物理），y=opacity，z=1 走 nearest / 0 走 linear，w 保留。
     @location(3) params: vec4<f32>,
+    /// 圆角裁剪外框与四角半径（物理），与几何管线同一份语义。
+    @location(4) clip_rr: vec4<f32>,
+    @location(5) clip_radii: vec4<f32>,
 };
 
 struct VsOut {
@@ -46,6 +49,8 @@ struct VsOut {
     @location(1) @interpolate(flat) mask: vec4<f32>,
     @location(2) @interpolate(flat) clip: vec4<f32>,
     @location(3) @interpolate(flat) params: vec4<f32>,
+    @location(4) @interpolate(flat) clip_rr: vec4<f32>,
+    @location(5) @interpolate(flat) clip_radii: vec4<f32>,
 };
 
 @vertex
@@ -69,8 +74,26 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.mask = inst.mask;
     out.clip = inst.clip;
     out.params = inst.params;
+    out.clip_rr = inst.clip_rr;
+    out.clip_radii = inst.clip_radii;
     return out;
 }
+
+/// 四角各异的圆角矩形 SDF。与 `shader.wgsl` 的同名函数逐字相同。
+fn sd_round_box4(p: vec2<f32>, b: vec2<f32>, r: vec4<f32>) -> f32 {
+    let side = select(r.xw, r.yz, p.x > 0.0);
+    let k = select(side.x, side.y, p.y > 0.0);
+    let q = abs(p) - b + vec2<f32>(k);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - k;
+}
+
+/// 圆角裁剪覆盖率。与 `shader.wgsl` 的同名函数逐字相同。
+fn round_clip_cov(p: vec2<f32>, rr: vec4<f32>, radii: vec4<f32>) -> f32 {
+    let half_size = (rr.zw - rr.xy) * 0.5;
+    let d = sd_round_box4(p - (rr.xy + half_size), half_size, radii);
+    return clamp(0.5 - d, 0.0, 1.0);
+}
+
 
 /// 圆角矩形有向距离场。与 `shader.wgsl` 的同名函数逐字相同（WGSL 没有 include；
 /// 两处都改才对得上，这也是「圆角裁角」判据在两条管线上都要跑一遍的原因）。
@@ -83,7 +106,8 @@ fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = in.pos.xy;
     // 裁剪判据与另两条管线逐字一致（含闭区间的取法）。
-    let inside = f32(p.x >= in.clip.x && p.x <= in.clip.z && p.y >= in.clip.y && p.y <= in.clip.w);
+    let inside = f32(p.x >= in.clip.x && p.x <= in.clip.z && p.y >= in.clip.y && p.y <= in.clip.w)
+        * round_clip_cov(p, in.clip_rr, in.clip_radii);
     // 圆角遮罩：软后端是 `mask.fill_path(圆角路径, 抗锯齿=true)` 再 blit，这里是同一个
     // 形状的 SDF + 1 物理像素的线性斜坡（与 `shader.wgsl` 的 AA 取法同源）。
     let half_size = in.mask.zw * 0.5;

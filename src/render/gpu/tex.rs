@@ -95,7 +95,7 @@ pub(super) struct ImageItem {
     bound: Arc<Bound>,
 }
 
-/// 图片四边形的实例数据（64 B）。坐标是**物理**像素（同文字管线，理由见 `image.wgsl`）。
+/// 图片四边形的实例数据（96 B）。坐标是**物理**像素（同文字管线，理由见 `image.wgsl`）。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ImageInstance {
@@ -107,12 +107,16 @@ struct ImageInstance {
     clip: [f32; 4],
     /// `[0]`=圆角半径（物理），`[1]`=opacity，`[2]`=1 走 nearest / 0 走 linear，`[3]` 保留。
     params: [f32; 4],
+    /// 圆角裁剪外框（物理 x0,y0,x1,y1）与四角半径，见 `prim::GpuClip`。
+    clip_rr: [f32; 4],
+    clip_radii: [f32; 4],
 }
 
 impl ImageInstance {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
             0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+            4 => Float32x4, 5 => Float32x4,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ImageInstance>() as u64,
@@ -186,7 +190,7 @@ pub(super) fn image_item(
     bound: Arc<Bound>,
     quad: [f32; 4],
     mask: [f32; 4],
-    clip: [f32; 4],
+    clip: super::prim::GpuClip,
     radius: f32,
     opacity: f32,
     nearest: bool,
@@ -195,8 +199,10 @@ pub(super) fn image_item(
         inst: ImageInstance {
             quad,
             mask,
-            clip,
+            clip: clip.rect,
             params: [radius, opacity, if nearest { 1.0 } else { 0.0 }, 0.0],
+            clip_rr: clip.rr,
+            clip_radii: clip.radii,
         },
         bound,
     }
@@ -689,8 +695,8 @@ mod tests {
 
     /// 实例布局的字节数必须与 shader 的属性偏移对得上（同 `prim.rs`/`text.rs` 的同款判据）。
     #[test]
-    fn image_instance_is_64_bytes() {
-        assert_eq!(std::mem::size_of::<ImageInstance>(), 64);
+    fn image_instance_is_96_bytes() {
+        assert_eq!(std::mem::size_of::<ImageInstance>(), 96);
         assert_eq!(std::mem::align_of::<ImageInstance>(), 4);
     }
 
@@ -703,6 +709,8 @@ mod tests {
             mask: [0.0; 4],
             clip: [0.0; 4],
             params: [4.0, 0.5, 1.0, 0.0],
+            clip_rr: [0.0; 4],
+            clip_radii: [0.0; 4],
         };
         assert_eq!(inst.params[2], 1.0);
         let src = include_str!("image.wgsl");

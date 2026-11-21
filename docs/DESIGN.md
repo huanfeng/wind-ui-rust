@@ -243,6 +243,7 @@ pub trait Canvas {
     fn save(&mut self); fn restore(&mut self);
     fn translate(&mut self, dx: f32, dy: f32);
     fn clip_rect(&mut self, r: Rect);
+    fn clip_round_rect(&mut self, r: Rect, radii: Corners); // 抗锯齿圆角裁剪，与嵌套 clip_rect 取交集
 }
 ```
 
@@ -251,7 +252,12 @@ pub trait Canvas {
   局部重绘时脏区之外直接沿用里面已有的像素（故 win32 的 R/B 交换改成拷进独立上传缓冲，
   不再原地毁掉它）。重分配的那一帧内容不完整，平台须先 `request_full_frame`。
 - 图形原语直接映射到 tiny-skia 的 `PathBuilder` + `Paint` + `fill_path/stroke_path`。
-- 变换/裁剪用 `Transform` + 手动裁剪矩形栈（裁剪外的绘制早退，省光栅）。
+- 变换/裁剪用 `Transform` + 手动裁剪矩形栈（裁剪外的绘制早退，省光栅）。栈的每层记着生效的
+  圆角裁剪；无圆角时 mask 恒等于矩形，纯色快填 / 投影 / 图片 / 文字的快路直接对矩形求交而不读
+  mask。有圆角时只有**四角区**（每角半径见方）与矩形不同，快路落笔碰到四角区就退回读 mask 的
+  通用路径——这条不变量破了不会报错，只会让圆角失效、四角照画。
+- 圆角裁剪在 wgpu 后端是逐实例的「外框 + 四角半径」SDF 覆盖率（只记最内层一个圆角），在 D2D
+  后端是带几何遮罩的 `PushLayer`（`INITIALIZE_FROM_BACKGROUND`，否则层内 ClearType 文字被整段丢弃）。
 - 文字由 `draw_text` 委托给 **Text 层**，把字形位图 alpha-over 合成进 pixmap。
 
 ### 像素格式与呈现（关键细节）
