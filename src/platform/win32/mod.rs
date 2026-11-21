@@ -70,26 +70,27 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetCaretBlinkTime, GetClientRect, GetCursorPos, GetMessageExtraInfo, GetMessageTime,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
-    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT,
-    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO,
-    MSG, MSGFLT_ALLOW, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-    SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
-    SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN,
-    WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, ReplyMessage, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA,
+    GWL_EXSTYLE, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM,
+    IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO, MSG, MSGFLT_ALLOW, MWMO_INPUTAVAILABLE,
+    NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME,
+    SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK, SM_CYFRAME, SM_CYSCREEN,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
+    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+    WS_POPUP, WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -2030,13 +2031,13 @@ unsafe fn window_frame_interval_ms(hwnd: HWND) -> u128 {
     (1000 / fps.max(1)) as u128
 }
 
-/// True only for the OS UIA root-object request (`UiaRootObjectId`).
+/// 只有系统的 UIA 根对象请求（`UiaRootObjectId`）才返回 `true`。
 ///
-/// Every other `WM_GETOBJECT` object id — notably the MSAA `OBJID_CLIENT` value — must continue
-/// to fall through to `DefWindowProcW` untouched, so this gate is deliberately exact rather than
-/// a range check.
+/// 其余 `WM_GETOBJECT` 对象 id（尤其是 MSAA 的 `OBJID_CLIENT`）必须原样落到 `DefWindowProcW`，
+/// 所以这里刻意做精确比较而不是区间判断。按文档 lParam 是 32 位对象 id，先截成 `i32` 再比，
+/// 64 位下高位不干净时也不会误判。
 fn is_uia_root_object(lparam: LPARAM) -> bool {
-    lparam.0 == windows::Win32::UI::Accessibility::UiaRootObjectId as isize
+    lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -2057,40 +2058,16 @@ unsafe extern "system" fn wnd_proc(
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        accessibility::WM_APP_ACCESSIBILITY => {
-            let request = lparam.0 as *mut accessibility::BridgeRequest;
-            if request.is_null() {
-                return LRESULT(0);
-            }
-            let Some(state) = state_from(hwnd) else {
-                return LRESULT(0);
-            };
-            // SAFETY: the provider allocates this request on its stack and SendMessageW keeps
-            // it alive until this synchronous arm returns. The request never escapes here.
-            unsafe {
-                match (*request).operation {
-                    accessibility::BridgeOperation::Snapshot => {
-                        (*request).snapshot = state.handler.accessibility_snapshot();
-                    }
-                    accessibility::BridgeOperation::Action { id, action } => {
-                        (*request).action_result =
-                            Some(state.handler.accessibility_action(id, action));
-                    }
-                }
-                (*request).delivered = true;
-            }
-            LRESULT(1)
-        }
+        accessibility::WM_APP_ACCESSIBILITY => handle_accessibility_request(hwnd, lparam),
         windows::Win32::UI::WindowsAndMessaging::WM_GETOBJECT if is_uia_root_object(lparam) => {
-            // Check liveness before constructing the root provider, then end the WindowState
-            // borrow before calling the OS UIA hand-off routine.
+            // 构造根 provider 之前先确认窗口状态还在；随后释放 WindowState 借用，
+            // 再调用系统的 UIA 交接函数。
             if state_from(hwnd).is_none() {
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             }
             let provider = accessibility::root_provider(hwnd);
-            // SAFETY: `hwnd` is alive and owned by this thread, `wparam`/`lparam` are the
-            // unmodified WM_GETOBJECT parameters, and `provider` outlives the call. The
-            // borrow keeps the COM reference alive across the OS UIA hand-off.
+            // SAFETY: `hwnd` 存活且归本线程所有，`wparam`/`lparam` 是原样的 WM_GETOBJECT
+            // 参数，`provider` 活过这次调用；借用让 COM 引用撑过整个交接。
             UiaReturnRawElementProvider(hwnd, wparam, lparam, &provider)
         }
         WM_PAINT => {
@@ -2546,6 +2523,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 通知 UIA 本窗口的 provider 全部作废，客户端不再拿旧对象回调过来。
+            // 参数固定为 (hwnd, 0, 0, None)，见 `UiaReturnRawElementProvider` 文档。
+            let _ = UiaReturnRawElementProvider(hwnd, WPARAM(0), LPARAM(0), None);
             // 兜底：不经 `destroy_window` 的销毁（owner 关闭时系统级联销毁归属窗口）
             // 也要把 owner 的输入还回去；正常关窗路径这里已是空操作。
             release_modal_owner(hwnd);
@@ -4663,6 +4643,67 @@ unsafe fn handle_char(hwnd: HWND, wparam: WPARAM) {
     dispatch_key_event(hwnd, ev);
 }
 
+/// UIA 桥接请求（`WM_APP_ACCESSIBILITY`）。provider 在 UIA 线程上 `SendMessageW` 过来，
+/// 请求结构体在发送方的栈上，本函数同步填好结果。
+///
+/// 操作类请求与 `dispatch_key_event` 同为两段式：先借 state 执行并取出意图，填好结果后
+/// `ReplyMessage` 先放发送方走，再在无借用的状态下补上同一套收尾（重绘、输入法同步、
+/// 窗口操作、对话框、关窗）。先回复是因为对话框是阻塞的模态循环，不能让屏幕阅读器的
+/// 线程一直卡在 `SendMessageW` 里。
+unsafe fn handle_accessibility_request(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let request = lparam.0 as *mut accessibility::BridgeRequest;
+    if request.is_null() {
+        return LRESULT(0);
+    }
+    // 重入：事件回调正在运行（state 已被借出）时又泵到了这条消息。不能再借第二个
+    // `&mut WindowState`，按「元素暂不可用」回绝，provider 会把它报成 UIA_E_ELEMENTNOTAVAILABLE。
+    if super::in_event_dispatch() {
+        return LRESULT(0);
+    }
+    // SAFETY: 请求由 provider 在自己的栈上分配，`SendMessageW` 同步等待，在本函数回复之前
+    // 它一直有效；指针不会被保存到别处。
+    let operation = unsafe { (*request).operation };
+    let (repaint, close) = {
+        let Some(state) = state_from(hwnd) else {
+            return LRESULT(0);
+        };
+        match operation {
+            accessibility::BridgeOperation::Snapshot => {
+                // SAFETY: 同上。
+                unsafe {
+                    (*request).snapshot = state.handler.accessibility_snapshot();
+                    (*request).delivered = true;
+                }
+                return LRESULT(1);
+            }
+            accessibility::BridgeOperation::Action { id, action } => {
+                let _guard = super::EventDispatchGuard::enter();
+                let (result, repaint) = state.handler.accessibility_action(id, action);
+                // SAFETY: 同上。
+                unsafe {
+                    (*request).action_result = Some(result);
+                    (*request).delivered = true;
+                }
+                (repaint, state.handler.wants_close())
+            }
+        }
+    };
+    // 之后不再碰 `request`：回复后发送方的栈帧随时可能消失。同线程发来的消息（没有
+    // 跨线程等待方）`ReplyMessage` 什么也不做，返回值照常由下面的 LRESULT 送回。
+    let _ = ReplyMessage(LRESULT(1));
+    if repaint {
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    // 聚焦或点击可能换了焦点：输入法开关当场跟上（见 `sync_ime`）。
+    sync_ime(hwnd, false);
+    apply_window_op(hwnd);
+    apply_dialog_request(hwnd);
+    if close {
+        destroy_window(hwnd);
+    }
+    LRESULT(1)
+}
+
 /// 分发键盘事件（两段式：先借 state 取意图，释放后再调可能重入的 DestroyWindow）。
 unsafe fn dispatch_key_event(hwnd: HWND, ev: KeyEvent) {
     let (repaint, close) = {
@@ -5040,11 +5081,19 @@ mod tests {
     #[test]
     fn only_the_uia_root_object_id_takes_the_accessibility_path() {
         use super::{is_uia_root_object, LPARAM};
-        // The UIA root request is the single object id that may create a raw provider.
+        // 只有 UIA 根请求能创建 raw provider。
         let root = LPARAM(windows::Win32::UI::Accessibility::UiaRootObjectId as isize);
         assert!(is_uia_root_object(root));
-        // MSAA client (`OBJID_CLIENT` = -4) and the window object (`OBJID_WINDOW` = 0) are not
-        // UIA roots and must keep the legacy `DefWindowProcW` path.
+        // 64 位下 lParam 高 32 位不干净时，按 32 位对象 id 比较仍应命中。
+        let dirty = LPARAM(
+            ((windows::Win32::UI::Accessibility::UiaRootObjectId as u32 as u64) | (1u64 << 40))
+                as isize,
+        );
+        if std::mem::size_of::<isize>() == 8 {
+            assert!(is_uia_root_object(dirty));
+        }
+        // MSAA 客户区（`OBJID_CLIENT` = -4）与窗口对象（`OBJID_WINDOW` = 0）不是 UIA 根，
+        // 必须继续走 `DefWindowProcW`。
         assert!(!is_uia_root_object(LPARAM(-4)));
         assert!(!is_uia_root_object(LPARAM(0)));
     }

@@ -140,6 +140,7 @@ fn main() {
 | 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选）；表头拖动调列宽（权重可持久化） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG 内置；JPEG/GIF/WebP/BMP/ICO 为可选 feature；状态调制/着色/圆角） |
 | 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单；Linux 经 StatusNotifierItem）与桌面通知、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板、文件图标（`platform::file_icon`，Windows / macOS） |
+| 无障碍 | Windows UI Automation：窗口、文本、按钮可被讲述人等屏幕阅读器读出，支持经屏幕阅读器聚焦与点击；自定义控件实现 `Widget::accessibility_role` 等方法即可加入 |
 
 控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
 `Signal<bool>`、`dropdown`/`list`/`tabs` 绑 `Signal<usize>`、`text_input` 绑 `Signal<String>`。

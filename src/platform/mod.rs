@@ -1007,18 +1007,24 @@ pub trait AppHandler {
     fn on_key(&mut self, _ev: KeyEvent) -> bool {
         false
     }
-    /// Current owned semantic projection of the real WindUI tree, for platform accessibility
-    /// adapters. The default keeps existing non-UiHost handlers source-compatible.
+    /// 真实控件树当前的语义投影，供平台无障碍适配层读取。默认返回 `None`，
+    /// 不是 `UiHost` 的既有 handler 因此源码兼容。
     fn accessibility_snapshot(&self) -> Option<crate::accessibility::AccessibilitySnapshot> {
         None
     }
-    /// Route a platform accessibility request back to the real WindUI event/focus path.
+    /// 把平台无障碍请求送回真实的事件 / 焦点路径。返回 `(结果, 是否需要重绘)`。
+    ///
+    /// 与 `on_key` 一样是一次事件分发：平台层要在释放 state 借用之后补上同一套收尾
+    /// （重绘、输入法同步、窗口操作、对话框、关窗检查）。
     fn accessibility_action(
         &mut self,
         _id: crate::accessibility::AccessibilityNodeId,
         _action: crate::accessibility::AccessibilityAction,
-    ) -> crate::accessibility::AccessibilityActionResult {
-        crate::accessibility::AccessibilityActionResult::UnsupportedAction
+    ) -> (crate::accessibility::AccessibilityActionResult, bool) {
+        (
+            crate::accessibility::AccessibilityActionResult::UnsupportedAction,
+            false,
+        )
     }
     /// 是否请求关闭窗口（事件处理后由平台查询）。
     fn wants_close(&self) -> bool {

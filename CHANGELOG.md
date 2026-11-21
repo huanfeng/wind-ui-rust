@@ -63,6 +63,17 @@
 - 表头标题在列宽不足时单行末尾省略（此前静态表头会溢出）。wgpu 后端三条管线的实例
   各增两个 `vec4`（圆角裁剪外框与四角半径）。
 
+### 新增
+
+- **Windows：UI Automation 无障碍支持**。窗口向讲述人、NVDA 等屏幕阅读器暴露语义树（`Window` /
+  `Text` / `Button`），提供名称、角色、包围盒、焦点与 Invoke 模式；聚焦与点击经正常事件路径执行，
+  之后照常重绘、同步输入法、执行窗口操作与关窗检查。语义树每次查询现取真实控件树，隐藏子树不出现，
+  无角色的容器被拍平。新增 `windui::accessibility` 模块（`AccessibilitySnapshot`、`AccessibilityNode`、
+  `AccessibilityNodeId`、`AccessibilityRole`、`AccessibilityAction`、`AccessibilityActionResult`，
+  前五个进 prelude）、`Tree::accessibility_snapshot()`，以及 `Widget` 的三个可选方法
+  `accessibility_role` / `accessibility_name` / `accessibility_description`（有默认实现，既有控件
+  源码兼容）。手动冒烟见 `examples/uia_smoke.rs`。
+
 ### 修复
 
 - **Windows 上 `WindowState::visible` 在显隐转换后不再陈旧**：wnd_proc 此前只在建窗与
