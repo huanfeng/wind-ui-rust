@@ -117,6 +117,7 @@
 | **查询主窗真实窗口状态** | 🟡 记账（P0 已交付（Win11 真机核对通过，2026-11-17）：`main_window_state()` 同步查询 Win/macOS、`WM_SHOWWINDOW` 推送臂修 `visible` 陈旧、字段文档补快照纪律；Linux 同步查询与 macOS 推送待做，设计见 docs/roadmap-three-designs.md §3） | P3 | 同上反馈：`App::on_interval` 里 `window_state()` 恒为 `UNKNOWN`（注入本身有理由：不让已销毁窗口的旧快照残留），下游判最小化只能自己 `FindWindowW` + `IsIconic`。方向：给「查询主窗当前状态」的 API，或在 `WindowState::minimized` 文档里醒目标注 |
 | **Slider 暴露「拖动中」状态** | ✅ 已交付 | — | `Element::slider(..).dragging_signal(Signal<bool>)`：按下置 true、抬起或被复位置 false，键盘调值不算 |
 | **ESC 兜底关窗的开关** | ✅ 已交付 | — | `App::escape_closes_window(bool)` / `Window::escape_closes_window(bool)`，默认 true；false 时 ESC 仍逐层收浮层与对话框，不关窗也不问 `on_close_request` |
+| **X11 输入法重启后 XIM 自动重连** | 🟡 记账 | P3 | 现状：只在启动时连一次 XIM，输入法（fcitx5 / ibus）重启后须重开应用才能重新输入中文。XIM 前端已失效、只剩过期登记时，启动预检会记一条日志并跳过 XIM，不再无声挂起（2026-11-21 在 Deepin 25 真机上实际碰到）。方向：仿 Xlib `XRegisterIMInstantiateCallback`，监听根窗口 `XIM_SERVERS` 属性变化与 `@server=<名>` 选区易主，丢弃旧 IC、重新握手并为已有窗口补建 IC。现在 Linux 桌面上 XIM 用得少（Qt/GTK 程序多走 D-Bus 前端），等有用户反馈再做 |
 
 ### 架构演进
 | 项 | 评级 | 优先级 | 说明 |

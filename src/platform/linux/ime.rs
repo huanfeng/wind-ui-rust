@@ -18,7 +18,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use x11rb::protocol::xproto::{KeyPressEvent, Window};
+use x11rb::protocol::xproto::{ConnectionExt as _, KeyPressEvent, Window};
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use xim::x11rb::X11rbClient;
@@ -224,6 +224,12 @@ const DEAD: Window = 0;
 impl Ime {
     /// 连接 `XMODIFIERS` 指定的输入法。没配置或连不上返回 `None`（按键走本地）。
     pub fn connect(conn: Rc<RustConnection>, screen: usize) -> Option<Self> {
+        let name = std::env::var("XMODIFIERS").ok();
+        if let Some(name) = name.as_deref().and_then(xim_server_name) {
+            if !xim_server_owned(&conn, name) {
+                return None;
+            }
+        }
         let client = match X11rbClient::init(conn, screen, None) {
             Ok(c) => c,
             Err(e) => {
@@ -397,6 +403,46 @@ impl Ime {
     }
 }
 
+/// `XMODIFIERS=@im=<名>` 里的服务器名（与 xim crate 的取法一致）。
+fn xim_server_name(xmodifiers: &str) -> Option<&str> {
+    xmodifiers.strip_prefix("@im=").filter(|n| !n.is_empty())
+}
+
+/// 预检 `@server=<名>` 选区是否真有窗口持有。
+///
+/// 输入法的 XIM 前端失效后，根窗口 `XIM_SERVERS` 里的登记可能还在，选区却已无人持有。
+/// xim crate 照样发 `ConvertSelection`，被拒（property=NONE）后既不报错也不重试，握手
+/// 就此无声挂起。这里先查持有者：没人持有就记一条日志并放弃 XIM，按键直接本地处理。
+/// 查询本身出错时不拦，交给 `init` 自己报。
+fn xim_server_owned(conn: &RustConnection, name: &str) -> bool {
+    let atom = format!("@server={name}");
+    let Some(atom) = conn
+        .intern_atom(true, atom.as_bytes())
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.atom)
+    else {
+        return true;
+    };
+    // 从未登记过：`init` 会报 NoXimServer，日志由那边打。
+    if atom == x11rb::NONE {
+        return true;
+    }
+    let owner = conn
+        .get_selection_owner(atom)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|r| r.owner);
+    if owner == Some(x11rb::NONE) {
+        log::warn!(
+            "XIM 服务器 @server={name} 的选区无人持有：输入法的 XIM 前端可能已失效，\
+             本次不启用 XIM（重启输入法后需重开应用）"
+        );
+        return false;
+    }
+    true
+}
+
 /// 交给 `XIM_OPEN` 的 locale：取 `LC_ALL`/`LC_CTYPE`/`LANG` 去掉编码后缀，缺省 `C`。
 fn xim_locale() -> String {
     ["LC_ALL", "LC_CTYPE", "LANG"]
@@ -411,6 +457,13 @@ fn xim_locale() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xim_server_name_parses_im_modifier_only() {
+        assert_eq!(xim_server_name("@im=fcitx"), Some("fcitx"));
+        assert_eq!(xim_server_name("@im="), None);
+        assert_eq!(xim_server_name("fcitx"), None);
+    }
 
     fn s(v: &str) -> Vec<char> {
         v.chars().collect()
