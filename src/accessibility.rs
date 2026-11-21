@@ -1,40 +1,50 @@
-//! Platform-neutral accessibility projection for the real WindUI tree.
+//! 真实控件树的平台无关无障碍投影。
 //!
-//! This is deliberately a projection, not a second UI state tree: every node and every value
-//! comes from the current [`Tree`]. Platform adapters can query the snapshot and route actions
-//! back through the normal event path.
+//! 这里刻意只做投影，不是第二套 UI 状态树：每个节点、每个值都现取自当前的 [`Tree`]。
+//! 平台适配层查询快照，并把操作经正常事件路径送回树上执行。
 
 use crate::core::{DispatchResult, NodeId, Tree};
 use crate::event::{Key, KeyEvent};
 use crate::geometry::Rect;
 
-/// The first supported semantic slice. Containers without a role are flattened.
+/// 首批支持的语义角色。没有角色的容器会被拍平。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessibilityRole {
+    /// 窗口根节点。
     Window,
+    /// 静态文本（`label` 等）。
     Text,
+    /// 可点击的按钮。
     Button,
 }
 
-/// Actions that a platform adapter may route to the real tree.
+/// 平台适配层可以送回真实控件树执行的操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessibilityAction {
+    /// 把键盘焦点移到该节点。
     SetFocus,
+    /// 激活该节点（按钮即点击），走与回车键相同的事件路径。
     Invoke,
 }
 
-/// Platform-neutral result for an accessibility request.
+/// 无障碍请求的平台无关结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessibilityActionResult {
+    /// 已执行。
     Performed,
+    /// 节点已不存在（被删除，或槽位已换代）。
     NodeUnavailable,
+    /// 节点或其祖先当前不可见。
     NotVisible,
+    /// 节点或其祖先已禁用。
     Disabled,
+    /// 节点不能获得焦点。
     NotFocusable,
+    /// 节点不支持这个操作。
     UnsupportedAction,
 }
 
-/// Direct wrapper around WindUI's generation-checked arena identity.
+/// 直接包着 WindUI 带代际校验的 arena 标识。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AccessibilityNodeId(NodeId);
 
@@ -47,53 +57,70 @@ impl AccessibilityNodeId {
         self.0
     }
 
+    /// arena 槽位下标。身份由它与 [`generation`](Self::generation) 共同确定。
     pub fn index(self) -> u32 {
         self.0.index()
     }
 
+    /// arena 代际。槽位复用后代际变化，旧节点的标识随之失效。
     pub fn generation(self) -> u32 {
         self.0.generation()
     }
 }
 
-/// One visible semantic node in the current WindUI tree.
+/// 当前控件树中一个可见的语义节点。
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccessibilityNode {
+    /// 节点标识。
     pub id: AccessibilityNodeId,
+    /// 语义父节点（拍平后的，不是布局父节点）。根节点为 `None`。
     pub parent: Option<AccessibilityNodeId>,
+    /// 语义子节点，按树序排列。
     pub children: Vec<AccessibilityNodeId>,
+    /// 语义角色。
     pub role: AccessibilityRole,
+    /// 当前文案（随信号变化）。没有文案时为空串。
     pub name: String,
+    /// 补充说明：优先取悬停提示，其次取控件自己的说明。
     pub description: Option<String>,
+    /// 窗口客户区内的逻辑坐标（DIP）。
     pub bounds: Rect,
+    /// 自身及所有祖先都启用时为 `true`。
     pub enabled: bool,
+    /// 能否获得键盘焦点。
     pub focusable: bool,
+    /// 当前是否持有焦点。
     pub focused: bool,
+    /// 文本是否被截断；不适用时为 `None`。
     pub truncated: Option<bool>,
+    /// 该节点支持的操作。
     pub supported_actions: Vec<AccessibilityAction>,
 }
 
-/// Immutable, ordered snapshot of the current semantic projection.
+/// 当前语义投影的只读有序快照。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccessibilitySnapshot {
+    /// 根节点（窗口）。树为空或根不可见时为 `None`。
     pub root: Option<AccessibilityNodeId>,
+    /// 全部节点，按先序遍历排列，根在第一个。
     pub nodes: Vec<AccessibilityNode>,
 }
 
 impl AccessibilitySnapshot {
+    /// 按标识查节点。
     pub fn node(&self, id: AccessibilityNodeId) -> Option<&AccessibilityNode> {
         self.nodes.iter().find(|node| node.id == id)
     }
 
+    /// 快照里是否有这个节点。
     pub fn contains(&self, id: AccessibilityNodeId) -> bool {
         self.node(id).is_some()
     }
 }
 
 impl Tree {
-    /// Validate an action against the current real tree, including ancestor visibility and
-    /// enabled state. This is intentionally kept in the tree so platform adapters cannot
-    /// accidentally create a second validity or action policy.
+    /// 在当前真实控件树上校验一个操作，包括祖先的可见与启用状态。校验刻意放在树里，
+    /// 平台适配层就不会不小心长出第二套有效性或操作规则。
     pub(crate) fn validate_accessibility_action(
         &self,
         id: AccessibilityNodeId,
@@ -127,9 +154,8 @@ impl Tree {
         }
     }
 
-    /// Execute an already validated action through the existing keyboard event path.
-    /// `UiHost` owns focus, scrolling and dispatch-effect consumption; `Tree` only owns the
-    /// generation-checked target and the normal widget event route.
+    /// 经现有的键盘事件路径执行一个已校验的操作。焦点、滚动与分发副作用的消费归
+    /// `UiHost`；`Tree` 只负责带代际校验的目标和控件的正常事件路由。
     pub(crate) fn dispatch_accessibility_action(
         &mut self,
         id: AccessibilityNodeId,
@@ -172,10 +198,10 @@ impl Tree {
         true
     }
 
-    /// Projects the real visible tree into a stable semantic snapshot.
+    /// 把真实的可见控件树投影成一份稳定的语义快照。
     ///
-    /// Hidden subtrees are excluded. Pure layout nodes are flattened so changes in internal
-    /// `Row`/`Col`/`Stack` structure do not become user-visible accessibility churn.
+    /// 隐藏的子树不进快照。纯布局节点被拍平，`Row`/`Col`/`Stack` 的内部结构调整就不会
+    /// 变成用户能感知的无障碍树抖动。
     pub fn accessibility_snapshot(&self) -> AccessibilitySnapshot {
         let mut snapshot = AccessibilitySnapshot::default();
         let Some(root) = self.root else {
@@ -210,21 +236,17 @@ impl Tree {
         });
 
         for &child in &root_node.children {
-            self.collect_accessibility(
-                child,
-                root_id,
-                true,
-                root_node.own_enabled(),
-                &mut snapshot,
-            );
+            self.collect_accessibility(child, 0, true, root_node.own_enabled(), &mut snapshot);
         }
         snapshot
     }
 
+    /// `parent_slot` 是语义父节点在 `snapshot.nodes` 里的下标：直接按下标挂子节点，
+    /// 不再逐个线性查找父节点（那样整棵树是 O(n²)）。
     fn collect_accessibility(
         &self,
         id: NodeId,
-        semantic_parent: AccessibilityNodeId,
+        parent_slot: usize,
         parent_visible: bool,
         parent_enabled: bool,
         snapshot: &mut AccessibilitySnapshot,
@@ -238,7 +260,7 @@ impl Tree {
         }
         let enabled = parent_enabled && node.own_enabled();
         let semantic_role = node.widget.accessibility_role();
-        let next_parent = if let Some(role) = semantic_role {
+        let next_slot = if let Some(role) = semantic_role {
             let focusable = node.focusable.unwrap_or_else(|| node.widget.focusable());
             let mut actions = Vec::with_capacity(2);
             if focusable {
@@ -248,9 +270,11 @@ impl Tree {
                 actions.push(AccessibilityAction::Invoke);
             }
             let id = AccessibilityNodeId::from_node_id(id);
+            let parent_id = snapshot.nodes[parent_slot].id;
+            let slot = snapshot.nodes.len();
             snapshot.nodes.push(AccessibilityNode {
                 id,
-                parent: Some(semantic_parent),
+                parent: Some(parent_id),
                 children: Vec::new(),
                 role,
                 name: node.widget.accessibility_name().unwrap_or_default(),
@@ -266,23 +290,15 @@ impl Tree {
                 truncated: node.widget.text_truncated(),
                 supported_actions: actions,
             });
-            if let Some(parent) = snapshot.node_mut(semantic_parent) {
-                parent.children.push(id);
-            }
-            id
+            snapshot.nodes[parent_slot].children.push(id);
+            slot
         } else {
-            semantic_parent
+            parent_slot
         };
 
         for &child in &node.children {
-            self.collect_accessibility(child, next_parent, visible, enabled, snapshot);
+            self.collect_accessibility(child, next_slot, visible, enabled, snapshot);
         }
-    }
-}
-
-impl AccessibilitySnapshot {
-    fn node_mut(&mut self, id: AccessibilityNodeId) -> Option<&mut AccessibilityNode> {
-        self.nodes.iter_mut().find(|node| node.id == id)
     }
 }
 

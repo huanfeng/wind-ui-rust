@@ -3907,12 +3907,12 @@ impl AppHandler for UiHost {
         &mut self,
         id: AccessibilityNodeId,
         action: AccessibilityAction,
-    ) -> AccessibilityActionResult {
+    ) -> (AccessibilityActionResult, bool) {
         self.enter();
         let node_id = id.node_id();
         let (result, dispatch) = self.tree.dispatch_accessibility_action(id, action);
         if result != AccessibilityActionResult::Performed {
-            return result;
+            return (result, false);
         }
         match action {
             AccessibilityAction::SetFocus => {
@@ -3925,16 +3925,16 @@ impl AppHandler for UiHost {
                 self.damage.needs_full = true;
             }
             AccessibilityAction::Invoke => {
-                let (repaint, damage, _) =
+                let (_, damage, _) =
                     self.apply_dispatch_effects(dispatch, FocusSource::Pointer, None);
                 self.apply_damage(damage);
+                // 宿主不知道回调改了什么（切页、改信号、翻状态），按快捷键同理走整窗。
                 self.damage.needs_relayout = true;
-                if repaint {
-                    self.damage.needs_full = true;
-                }
+                self.damage.needs_full = true;
             }
         }
-        result
+        // 执行成功必然改了界面（焦点环或回调效果），一律请求重绘。
+        (result, true)
     }
 
     fn wants_close(&self) -> bool {
@@ -4401,26 +4401,23 @@ mod tests {
 
         let snapshot = handler
             .accessibility_snapshot()
-            .expect("UiHost must expose its owned semantic snapshot");
+            .expect("UiHost 必须提供语义快照");
         let button = snapshot
             .nodes
             .iter()
             .find(|node| node.role == crate::accessibility::AccessibilityRole::Button)
             .cloned()
-            .expect("button must be projected");
+            .expect("按钮必须出现在快照里");
         assert_eq!(
             handler.accessibility_action(button.id, AccessibilityAction::Invoke),
-            AccessibilityActionResult::Performed
+            (AccessibilityActionResult::Performed, true),
+            "执行成功必须请求重绘，否则界面要等下一条消息才刷新"
         );
-        assert_eq!(
-            invoked.get(),
-            1,
-            "Invoke must use the normal callback exactly once"
-        );
+        assert_eq!(invoked.get(), 1, "Invoke 必须经正常回调恰好执行一次");
 
         assert_eq!(
             handler.accessibility_action(button.id, AccessibilityAction::SetFocus),
-            AccessibilityActionResult::Performed
+            (AccessibilityActionResult::Performed, true)
         );
         assert!(
             handler
@@ -4429,7 +4426,7 @@ mod tests {
                 .node(button.id)
                 .unwrap()
                 .focused,
-            "SetFocus must update the real tree snapshot"
+            "SetFocus 必须更新真实控件树的快照"
         );
     }
 

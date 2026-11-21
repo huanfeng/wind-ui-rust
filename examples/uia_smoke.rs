@@ -94,8 +94,8 @@ fn run_client() -> Result<(), String> {
         UIA_WindowControlTypeId,
     };
 
-    // SAFETY: the COM apartment is initialized for this thread before any UIA object is created;
-    // RPC_E_CHANGED_MODE only means another apartment mode is already active, which is harmless.
+    // SAFETY: 创建任何 UIA 对象之前先为本线程初始化 COM 套间；RPC_E_CHANGED_MODE 只表示
+    // 已有别的套间模式在用，无害。
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
 
     let exe = std::env::current_exe().map_err(|error| format!("current_exe failed: {error}"))?;
@@ -106,15 +106,15 @@ fn run_client() -> Result<(), String> {
 
     let outcome = (|| -> Result<(), String> {
         let hwnd = wait_for_host_window(&mut host)?;
-        // SAFETY: CUIAutomation is a documented in-proc coclass and the apartment is initialized.
+        // SAFETY: CUIAutomation 是文档化的进程内 coclass，套间已初始化。
         let automation: IUIAutomation =
             unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
                 .map_err(|error| format!("CoCreateInstance(CUIAutomation) failed: {error}"))?;
-        // SAFETY: `hwnd` is a live window owned by the host process.
+        // SAFETY: `hwnd` 是宿主进程的存活窗口。
         let root = unsafe { automation.ElementFromHandle(hwnd) }
             .map_err(|error| format!("ElementFromHandle failed: {error}"))?;
 
-        // (1) root is the Window element.
+        // (1) 根是 Window 元素。
         let root_type = current_control_type(&root)?;
         if root_type != UIA_WindowControlTypeId.0 {
             return Err(format!(
@@ -122,7 +122,7 @@ fn run_client() -> Result<(), String> {
             ));
         }
 
-        // (2) the flattened semantic tree exposes Text and Button, and never the hidden button.
+        // (2) 拍平后的语义树露出 Text 与 Button，隐藏按钮绝不出现。
         let elements = descendants(&automation, &root)?;
         let mut names = Vec::new();
         let mut button: Option<IUIAutomationElement> = None;
@@ -153,8 +153,8 @@ fn run_client() -> Result<(), String> {
         }
         let button = button.ok_or_else(|| format!("invoke button missing; saw {names:?}"))?;
 
-        // (3) Button properties.
-        // SAFETY: provider elements are only queried while the host window is alive.
+        // (3) 按钮属性。
+        // SAFETY: 只在宿主窗口存活期间查询 provider 元素。
         let enabled = unsafe { button.CurrentIsEnabled() }
             .map_err(|error| format!("CurrentIsEnabled failed: {error}"))?
             .as_bool();
@@ -168,9 +168,9 @@ fn run_client() -> Result<(), String> {
             return Err("invoke button reported not keyboard focusable".to_owned());
         }
 
-        // (4) BoundingRectangle is inside the real window rectangle (physical screen pixels).
+        // (4) BoundingRectangle 落在真实窗口矩形内（屏幕物理像素）。
         let window_rect = window_rect(hwnd)?;
-        // SAFETY: same as above.
+        // SAFETY: 同上。
         let bounds = unsafe { button.CurrentBoundingRectangle() }
             .map_err(|error| format!("CurrentBoundingRectangle failed: {error}"))?;
         if bounds.left < window_rect.left
@@ -183,24 +183,24 @@ fn run_client() -> Result<(), String> {
             ));
         }
 
-        // (5) SetFocus is visible through the OS UIA client.
-        // SAFETY: same as above.
+        // (5) SetFocus 的效果能经系统 UIA 客户端看到。
+        // SAFETY: 同上。
         unsafe { button.SetFocus() }.map_err(|error| format!("SetFocus failed: {error}"))?;
         poll_until(Duration::from_secs(3), || {
-            // SAFETY: same as above.
+            // SAFETY: 同上。
             unsafe { button.CurrentHasKeyboardFocus() }
                 .map(|value| value.as_bool())
                 .unwrap_or(false)
         })
         .map_err(|_| "HasKeyboardFocus stayed false after SetFocus".to_owned())?;
 
-        // (6) Invoke through the real UIA pattern, then observe the dynamic label change.
-        // SAFETY: the pattern id is the documented Invoke pattern.
+        // (6) 经真实的 UIA 模式调用 Invoke，再观察动态标签变化。
+        // SAFETY: 模式 id 是文档化的 Invoke 模式。
         let pattern: IUIAutomationInvokePattern = unsafe {
             button.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         }
         .map_err(|error| format!("InvokePattern unavailable: {error}"))?;
-        // SAFETY: the pattern was obtained from a live provider element.
+        // SAFETY: 模式取自存活的 provider 元素。
         unsafe { pattern.Invoke() }.map_err(|error| format!("Invoke failed: {error}"))?;
         poll_until(Duration::from_secs(5), || {
             let Ok(elements) = descendants(&automation, &root) else {
@@ -218,11 +218,11 @@ fn run_client() -> Result<(), String> {
             names.join(" | ")
         );
 
-        // (7) After the host dies, held elements must fail as unavailable, not hang or crash.
+        // (7) 宿主退出后，手里的旧元素必须报不可用，不能卡住或崩溃。
         let _ = host.kill();
         let _ = host.wait();
         std::thread::sleep(Duration::from_millis(500));
-        // SAFETY: intentionally querying a stale element; a failure here is the expected outcome.
+        // SAFETY: 故意查询已失效的元素，这里失败才是预期结果。
         let stale = unsafe { button.CurrentName() };
         match stale {
             Err(error) => println!("stale element reported: {error}"),
@@ -260,13 +260,12 @@ fn wait_for_host_window(
         {
             return Err(format!("host exited before showing a window: {status}"));
         }
-        // SAFETY: a null class name matches any class; the title is a static wide literal.
-        // `FindWindowW` reports "no such window" as `Err(HRESULT(0))`, which is a normal
-        // not-found result here rather than a failure.
+        // SAFETY: 类名传空匹配任意类，标题是静态宽字符串字面量。
+        // `FindWindowW` 把「没有这个窗口」报成 `Err(HRESULT(0))`，这里是正常的未找到，不是失败。
         if let Ok(hwnd) = unsafe { FindWindowW(None, w!("WindUI UIA smoke host")) } {
             if !hwnd.is_invalid() {
                 let mut pid = 0_u32;
-                // SAFETY: `hwnd` came from FindWindowW and `pid` is a valid out pointer.
+                // SAFETY: `hwnd` 来自 FindWindowW，`pid` 是有效的输出指针。
                 unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
                 if pid == host_pid {
                     return Ok(hwnd);
@@ -285,17 +284,17 @@ fn descendants(
 ) -> Result<Vec<windows::Win32::UI::Accessibility::IUIAutomationElement>, String> {
     use windows::Win32::UI::Accessibility::TreeScope_Descendants;
 
-    // SAFETY: `automation` is a live IUIAutomation and the condition is created per call.
+    // SAFETY: `automation` 是存活的 IUIAutomation，条件每次调用现建。
     let condition = unsafe { automation.CreateTrueCondition() }
         .map_err(|error| format!("CreateTrueCondition failed: {error}"))?;
-    // SAFETY: `root` is a live element and the condition outlives the call.
+    // SAFETY: `root` 是存活元素，条件活过这次调用。
     let found = unsafe { root.FindAll(TreeScope_Descendants, &condition) }
         .map_err(|error| format!("FindAll failed: {error}"))?;
-    // SAFETY: `found` is a live element array.
+    // SAFETY: `found` 是存活的元素数组。
     let count = unsafe { found.Length() }.map_err(|error| format!("Length failed: {error}"))?;
     let mut elements = Vec::new();
     for index in 0..count {
-        // SAFETY: index is within the array length reported above.
+        // SAFETY: 下标在上面报告的数组长度之内。
         if let Ok(element) = unsafe { found.GetElement(index) } {
             elements.push(element);
         }
@@ -307,7 +306,7 @@ fn descendants(
 fn current_name(
     element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
 ) -> Result<String, String> {
-    // SAFETY: element is a live provider element.
+    // SAFETY: element 是存活的 provider 元素。
     unsafe { element.CurrentName() }
         .map(|value| value.to_string())
         .map_err(|error| format!("CurrentName failed: {error}"))
@@ -317,7 +316,7 @@ fn current_name(
 fn current_control_type(
     element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
 ) -> Result<i32, String> {
-    // SAFETY: element is a live provider element.
+    // SAFETY: element 是存活的 provider 元素。
     unsafe { element.CurrentControlType() }
         .map(|value| value.0)
         .map_err(|error| format!("CurrentControlType failed: {error}"))
@@ -331,7 +330,7 @@ fn window_rect(
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
     let mut rect = RECT::default();
-    // SAFETY: `hwnd` is the live host window and `rect` is a valid out pointer.
+    // SAFETY: `hwnd` 是存活的宿主窗口，`rect` 是有效的输出指针。
     unsafe { GetWindowRect(hwnd, &mut rect) }
         .map_err(|error| format!("GetWindowRect failed: {error}"))?;
     Ok(rect)

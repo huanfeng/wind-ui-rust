@@ -1,9 +1,8 @@
-//! Native UI Automation provider for a WindUI HWND.
+//! WindUI 窗口的原生 UI Automation provider。
 //!
-//! The provider is intentionally a stateless COM façade.  It stores only the HWND and the
-//! generation-checked semantic target; every property, navigation, focus, and invoke request
-//! is synchronously evaluated by the owning UI thread through the private window message below.
-//! This keeps UIA from becoming a second tree, cache, or cross-thread `Tree` owner.
+//! provider 刻意做成无状态的 COM 外壳：只存 HWND 和带代际校验的语义目标。每次属性、导航、
+//! 聚焦、点击请求都经下面的私有窗口消息，同步交给窗口所属的 UI 线程求值。这样 UIA 就不会
+//! 变成第二棵树、一层缓存，或者跨线程持有 `Tree` 的一方。
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -38,8 +37,7 @@ use crate::accessibility::{
     AccessibilityRole, AccessibilitySnapshot,
 };
 
-/// WM_APP+3 is reserved for synchronous UIA bridge calls.  WM_APP+1 is the tray message and
-/// WM_APP+2 is the cross-thread wake message.
+/// WM_APP+3 留给同步的 UIA 桥接调用。WM_APP+1 是托盘消息，WM_APP+2 是跨线程唤醒消息。
 pub(crate) const WM_APP_ACCESSIBILITY: u32 = WM_APP + 3;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,8 +49,8 @@ pub(crate) enum BridgeOperation {
     },
 }
 
-/// Stack-owned request.  The pointer is used only for the duration of synchronous SendMessageW;
-/// no pointer or WindUI state escapes the UI-thread message handler.
+/// 栈上的请求。指针只在同步的 `SendMessageW` 期间使用，指针和 WindUI 状态都不会逃出
+/// UI 线程的消息处理函数。
 pub(crate) struct BridgeRequest {
     pub(crate) operation: BridgeOperation,
     pub(crate) delivered: bool,
@@ -103,9 +101,8 @@ pub(crate) fn bridge_action(
 }
 
 fn send_request(hwnd: HWND, request: &mut BridgeRequest) -> bool {
-    // SAFETY: request is stack-owned and SendMessageW is synchronous; the window procedure does
-    // not retain the pointer. The HWND is supplied by UIA for a live provider and a failed send
-    // is treated as an unavailable element.
+    // SAFETY: 请求在本栈帧上，`SendMessageW` 同步返回，窗口过程不保存这个指针。HWND 来自
+    // 存活的 provider；发送失败按元素不可用处理。
     let result = unsafe {
         SendMessageW(
             hwnd,
@@ -178,12 +175,14 @@ fn provider_for(
     }
 }
 
-/// The raw-provider ABI cannot express a null COM interface: the windows-rs interface types are
-/// `NonNull`-backed, so `zeroed()` is invalid and aborts the process. UIA expects a fragment to
-/// report "no such element" / "no such pattern" as a failed HRESULT, which its client side
-/// treats as "nothing there".
-fn no_element_error() -> Error {
-    Error::from_hresult(HRESULT(0x8000_4005_u32 as i32))
+/// 「这里没有元素 / 不支持这个模式」：UIA 约定返回 `S_OK` 加空输出指针，而不是失败码。
+///
+/// windows-rs 的接口类型背后是 `NonNull`，`Ok` 里放不进空接口。`Error::empty()` 的错误码是
+/// `S_OK`（windows-result 0.4），生成的 vtable 胶水走 `Err` 分支时不写输出指针，直接返回
+/// 这个 `S_OK`，输出保持调用方预置的 NULL。返回 E_FAIL 的话，Navigate 走到末尾的兄弟、
+/// 查询不支持的模式都会被客户端当成真正的错误。
+fn not_present<T>() -> Result<T> {
+    Err(Error::empty())
 }
 
 fn uia_error(code: u32) -> Error {
@@ -292,6 +291,9 @@ fn i32_variant(value: i32) -> VARIANT {
 fn property_value(state: ProviderState, property_id: i32) -> Result<VARIANT> {
     let (_, node) = node_for(state)?;
     let value = match property_id {
+        // 名称为空时返回 VT_EMPTY，UIA 会退回宿主 provider（`UiaHostProviderFromHwnd`）给的
+        // 值，根节点因此仍能读到窗口标题，而不是被空串盖掉。
+        id if id == UIA_NamePropertyId.0 && node.name.is_empty() => VARIANT::default(),
         id if id == UIA_NamePropertyId.0 => bstr_variant(&node.name),
         id if id == UIA_ControlTypePropertyId.0 => i32_variant(control_type(node.role)),
         id if id == UIA_IsEnabledPropertyId.0 => bool_variant(node.enabled),
@@ -304,7 +306,7 @@ fn property_value(state: ProviderState, property_id: i32) -> Result<VARIANT> {
 
 fn pattern_provider(state: ProviderState, pattern_id: i32) -> Result<IUnknown> {
     if pattern_id != UIA_InvokePatternId.0 {
-        return Err(no_element_error());
+        return not_present();
     }
     let (_, node) = node_for(state)?;
     if node.role != AccessibilityRole::Button
@@ -312,7 +314,7 @@ fn pattern_provider(state: ProviderState, pattern_id: i32) -> Result<IUnknown> {
             .supported_actions
             .contains(&AccessibilityAction::Invoke)
     {
-        return Err(no_element_error());
+        return not_present();
     }
     Ok(InvokeProvider(state).into())
 }
@@ -322,8 +324,10 @@ fn fragment_for_neighbor(
     snapshot: &AccessibilitySnapshot,
     id: Option<AccessibilityNodeId>,
 ) -> Result<IRawElementProviderFragment> {
-    id.map(|id| provider_for(state.hwnd, snapshot, id))
-        .ok_or_else(no_element_error)
+    match id {
+        Some(id) => Ok(provider_for(state.hwnd, snapshot, id)),
+        None => not_present(),
+    }
 }
 
 #[allow(non_upper_case_globals)]
@@ -338,7 +342,7 @@ fn neighbor(
         NavigateDirection_LastChild => node.children.last().copied(),
         NavigateDirection_NextSibling | NavigateDirection_PreviousSibling => {
             let Some(parent_id) = node.parent else {
-                return Err(no_element_error());
+                return not_present();
             };
             let Some(parent) = snapshot.node(parent_id) else {
                 return unavailable();
@@ -363,11 +367,10 @@ fn neighbor(
     fragment_for_neighbor(state, &snapshot, id)
 }
 
-/// Scales a semantic (logical DIP) rectangle into physical client pixels.
+/// 把语义矩形（逻辑 DIP）换算成客户区物理像素。
 ///
-/// Kept separate from the OS calls in [`scaled_screen_rect`] so the 100%/150% conversions are
-/// unit-testable without an HWND. The snapshot itself is never rewritten: it stays in logical
-/// coordinates and only this projection is physical.
+/// 与 [`scaled_screen_rect`] 里的系统调用分开，100% / 150% 的换算就能脱离 HWND 单测。
+/// 快照本身从不改写，始终是逻辑坐标，只有这一步投影是物理的。
 fn scale_logical_rect(bounds: crate::geometry::Rect, scale: f64) -> (i32, i32, i32, i32) {
     (
         (f64::from(bounds.x) * scale).round() as i32,
@@ -378,14 +381,13 @@ fn scale_logical_rect(bounds: crate::geometry::Rect, scale: f64) -> (i32, i32, i
 }
 
 fn scaled_screen_rect(state: ProviderState, node: &AccessibilityNode) -> Result<UiaRect> {
-    // SAFETY: `state.hwnd` is the live window handle of the provider that created this element;
-    // the call only reads the window's DPI and a failure returns 0, which the following
-    // `.max(96)` clamps to the documented 96-DPI baseline.
+    // SAFETY: `state.hwnd` 是创建本元素的 provider 的存活窗口句柄；调用只读窗口 DPI，
+    // 失败返回 0，由后面的 `.max(96)` 夹到文档规定的 96 DPI 基线。
     let dpi = unsafe { GetDpiForWindow(state.hwnd) }.max(96);
     let scale = f64::from(dpi) / 96.0;
     let (x, y, right, bottom) = scale_logical_rect(node.bounds, scale);
     let mut origin = POINT { x, y };
-    // SAFETY: origin is a valid stack POINT and hwnd is the provider's live window handle.
+    // SAFETY: origin 是栈上有效的 POINT，hwnd 是 provider 的存活窗口句柄。
     if !unsafe { ClientToScreen(state.hwnd, &mut origin) }.as_bool() {
         return unavailable();
     }
@@ -403,19 +405,18 @@ fn runtime_id(id: AccessibilityNodeId) -> Result<*mut SAFEARRAY> {
         id.index() as i32,
         id.generation() as i32,
     ];
-    // SAFETY: SafeArrayCreateVector allocates a COM-owned VT_I4 array; ownership is transferred to
-    // UIA on success. Every put uses a valid element index and pointer to a live i32.
+    // SAFETY: SafeArrayCreateVector 分配一个 COM 持有的 VT_I4 数组，成功后所有权交给 UIA。
+    // 每次写入都用有效下标和指向存活 i32 的指针。
     let array = unsafe { SafeArrayCreateVector(VT_I4, 0, values.len() as u32) };
     if array.is_null() {
         return Err(Error::from_thread());
     }
     for (index, value) in values.iter().enumerate() {
         let index = index as i32;
-        // SAFETY: `array` was allocated immediately above and has not been transferred to UIA
-        // yet, and `index` is bounded by `values.len()`, so both arguments refer to live storage
-        // owned by this stack frame for the duration of the call.
+        // SAFETY: `array` 刚在上面分配、尚未交给 UIA，`index` 不超过 `values.len()`，
+        // 两个参数在调用期间都指向本栈帧持有的存活存储。
         if unsafe { SafeArrayPutElement(array, &index, value as *const i32 as *const _) }.is_err() {
-            // SAFETY: array was allocated above and has not been transferred to UIA.
+            // SAFETY: array 在上面分配，尚未交给 UIA。
             let _ = unsafe { SafeArrayDestroy(array) };
             return Err(Error::from_thread());
         }
@@ -432,8 +433,10 @@ fn focused_fragment(
         .iter()
         .find(|node| node.focused)
         .map(|node| node.id);
-    id.map(|id| provider_for(state.hwnd, snapshot, id))
-        .ok_or_else(no_element_error)
+    match id {
+        Some(id) => Ok(provider_for(state.hwnd, snapshot, id)),
+        None => not_present(),
+    }
 }
 
 fn deepest_at_point(
@@ -457,8 +460,10 @@ fn deepest_at_point(
             best = Some((depth, node.id));
         }
     }
-    best.map(|(_, id)| provider_for(state.hwnd, snapshot, id))
-        .ok_or_else(no_element_error)
+    match best {
+        Some((_, id)) => Ok(provider_for(state.hwnd, snapshot, id)),
+        None => not_present(),
+    }
 }
 
 fn depth(snapshot: &AccessibilitySnapshot, mut id: AccessibilityNodeId) -> usize {
@@ -494,9 +499,8 @@ impl IRawElementProviderSimple_Impl for ElementProvider_Impl {
     }
 
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
-        // A fragment (non-root) reports "no host provider" as a failure; the ABI cannot express
-        // a null interface.
-        Err(no_element_error())
+        // 非根 fragment 没有宿主 provider：S_OK + NULL。
+        not_present()
     }
 }
 
@@ -509,7 +513,8 @@ impl IRawElementProviderFragment_Impl for ElementProvider_Impl {
     fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
         match self.0.target {
             ProviderTarget::Node(id) => runtime_id(id),
-            ProviderTarget::Root => Err(Error::from_hresult(HRESULT(0x80004001u32 as i32))),
+            // 根节点返回 NULL，由 UIA 按宿主 HWND 生成运行时 id。
+            ProviderTarget::Root => Ok(null_mut()),
         }
     }
 
@@ -565,13 +570,12 @@ impl IRawElementProviderSimple_Impl for RootProvider_Impl {
 
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
         match self.0.target {
-            // SAFETY: this arm runs only for the Root provider, and the HWND was validated as a
-            // live window before the provider was constructed. The call merely wraps that HWND in
-            // a COM provider; no ownership is transferred away from `self`.
+            // SAFETY: 只有根 provider 走这个分支，构造 provider 前已确认 HWND 存活。调用只是
+            // 把这个 HWND 包成 COM provider，不从 `self` 转移任何所有权。
             ProviderTarget::Root => unsafe {
                 windows::Win32::UI::Accessibility::UiaHostProviderFromHwnd(self.0.hwnd)
             },
-            ProviderTarget::Node(_) => Err(no_element_error()),
+            ProviderTarget::Node(_) => not_present(),
         }
     }
 }
@@ -583,7 +587,8 @@ impl IRawElementProviderFragment_Impl for RootProvider_Impl {
     }
 
     fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
-        Err(Error::from_hresult(HRESULT(0x80004001u32 as i32)))
+        // 根节点返回 NULL，由 UIA 按宿主 HWND 生成运行时 id。
+        Ok(null_mut())
     }
 
     fn BoundingRectangle(&self) -> Result<UiaRect> {
@@ -631,53 +636,56 @@ impl IInvokeProvider_Impl for InvokeProvider_Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the runtime-id test reads a COM array back, so this import stays out of the library
-    // build (where it would be unused).
+    // 只有运行时 id 的测试要读回 COM 数组，这个导入放在测试里，库构建中不会变成未使用。
     use windows::Win32::System::Ole::SafeArrayGetElement;
 
     #[test]
     fn runtime_id_contains_uia_marker_index_and_generation() {
-        // `NodeId` keeps its fields private to the arena, so obtain a real id
-        // from a tree insert and assert the accessibility id preserves both
-        // index and generation (no test-only `NodeId` constructor is added).
+        // `NodeId` 的字段对 arena 私有，所以从一次真实插入拿 id，断言无障碍 id 保留了
+        // 下标与代际（不为测试单独加 `NodeId` 构造函数）。
         let mut tree = crate::core::Tree::new();
         let node_id = crate::ui::Element::button("probe").build(&mut tree);
         let id = AccessibilityNodeId::from_node_id(node_id);
         assert_eq!(id.index(), node_id.index());
         assert_eq!(id.generation(), node_id.generation());
 
-        // The child runtime id must carry the UIA marker followed by the arena index and the
-        // generation, in that order. Root never reaches here (it uses the UIA host rules).
-        let array = runtime_id(id).expect("runtime id array");
+        // 子元素的运行时 id 依次是 UIA 标记、arena 下标、代际。根节点不走这里（按宿主规则）。
+        let array = runtime_id(id).expect("运行时 id 数组");
         assert!(!array.is_null());
         let read = |index: i32| -> i32 {
             let mut value = 0_i32;
-            // SAFETY: `array` was allocated by `runtime_id` immediately above and owns exactly
-            // three VT_I4 elements, so every index passed here is in range and the destination is
-            // a live i32 owned by this stack frame.
+            // SAFETY: `array` 刚由 `runtime_id` 分配，恰好三个 VT_I4 元素，这里传入的下标都在
+            // 范围内，目标是本栈帧上存活的 i32。
             unsafe { SafeArrayGetElement(array, &index, &mut value as *mut i32 as *mut _) }
-                .expect("runtime id element in range");
+                .expect("运行时 id 下标在范围内");
             value
         };
         assert_eq!(read(0), UiaAppendRuntimeId as i32);
         assert_eq!(read(1), id.index() as i32);
         assert_eq!(read(2), id.generation() as i32);
-        // SAFETY: UIA never received this array, so ownership is still ours to release.
+        // SAFETY: 这个数组没交给过 UIA，所有权仍在这里，由这里释放。
         let _ = unsafe { SafeArrayDestroy(array) };
     }
 
     #[test]
+    fn not_present_reports_s_ok_with_null_output() {
+        // 「没有这个元素」必须是 S_OK：E_FAIL 会被客户端当成真正的错误。
+        let error = not_present::<IRawElementProviderFragment>().unwrap_err();
+        assert_eq!(HRESULT::from(error), HRESULT(0));
+    }
+
+    #[test]
     fn bounds_scale_is_dpi_correct_at_100_and_150_percent() {
-        // `Rect::new(x, y, w, h)` -> right = 40, bottom = 60.
+        // `Rect::new(x, y, w, h)`：right = 40，bottom = 60。
         let logical = crate::geometry::Rect::new(10, 20, 30, 40);
-        // 100%: the projection is the identity.
+        // 100%：投影是恒等变换。
         assert_eq!(scale_logical_rect(logical, 1.0), (10, 20, 40, 60));
-        // 150%: every edge scales and rounds, and width/height stay consistent.
+        // 150%：每条边缩放后取整，宽高保持一致。
         let (x, y, right, bottom) = scale_logical_rect(logical, 1.5);
         assert_eq!((x, y, right, bottom), (15, 30, 60, 90));
-        assert_eq!(right - x, 45, "150% width must be 1.5x the 30 DIP width");
-        assert_eq!(bottom - y, 60, "150% height must be 1.5x the 40 DIP height");
-        // A fractional edge must round rather than truncate.
+        assert_eq!(right - x, 45, "150% 下宽度必须是 30 DIP 的 1.5 倍");
+        assert_eq!(bottom - y, 60, "150% 下高度必须是 40 DIP 的 1.5 倍");
+        // 小数边必须四舍五入而不是截断。
         let odd = crate::geometry::Rect::new(0, 0, 10, 0);
         assert_eq!(scale_logical_rect(odd, 1.5).2, 15);
     }
@@ -698,7 +706,7 @@ mod tests {
         let request = BridgeRequest::action(id, AccessibilityAction::Invoke);
         assert!(!request.delivered);
         assert!(request.action_result.is_none());
-        // Mirrors the fallback in `bridge_action`.
+        // 与 `bridge_action` 里的兜底一致。
         let mapped = request
             .action_result
             .unwrap_or(AccessibilityActionResult::NodeUnavailable);
@@ -707,7 +715,7 @@ mod tests {
 
     #[test]
     fn null_hwnd_query_reports_unavailable() {
-        // A provider whose window is gone must fail closed as element-unavailable, never panic.
+        // 窗口已销毁的 provider 必须报元素不可用，绝不能 panic。
         let hwnd = HWND(std::ptr::null_mut());
         assert!(bridge_snapshot(hwnd).is_none());
         let mut tree = crate::core::Tree::new();
@@ -721,8 +729,7 @@ mod tests {
 
     #[test]
     fn stale_generation_action_reports_unavailable() {
-        // An id obtained from a different arena must not resolve: the validation is generation
-        // checked, so the other tree reports it as unavailable rather than invoking a stranger.
+        // 来自另一个 arena 的 id 不能解析成功：校验带代际，另一棵树报不可用，而不是点到别的节点。
         let mut source = crate::core::Tree::new();
         let node_id = crate::ui::Element::button("probe").build(&mut source);
         let stale = AccessibilityNodeId::from_node_id(node_id);
@@ -733,9 +740,8 @@ mod tests {
         ));
     }
 
-    /// The semantic snapshot is flattened by `app::UiHost`; these two helpers drive navigation
-    /// and hit-testing and are pure functions of that snapshot, so they are testable without an
-    /// HWND (the provider methods that wrap them do need a live window).
+    /// 语义快照是拍平过的；下面两个辅助函数负责导航与命中测试，是快照的纯函数，所以不需要
+    /// HWND 就能测（包着它们的 provider 方法才需要真实窗口）。
     fn probe_snapshot() -> crate::accessibility::AccessibilitySnapshot {
         use crate::geometry::Size;
         use crate::text::NullTextEngine;
@@ -776,17 +782,14 @@ mod tests {
             .iter()
             .map(|node| depth(&snapshot, node.id))
             .min()
-            .expect("snapshot has a root");
+            .expect("快照必须有根");
         let deepest = snapshot
             .nodes
             .iter()
             .map(|node| depth(&snapshot, node.id))
             .max()
-            .expect("snapshot has a root");
-        assert_eq!(root_depth, 0, "the semantic root has no ancestors");
-        assert!(
-            deepest > root_depth,
-            "a nested Button must be deeper than the root"
-        );
+            .expect("快照必须有根");
+        assert_eq!(root_depth, 0, "语义根没有祖先");
+        assert!(deepest > root_depth, "嵌套的按钮必须比根更深");
     }
 }

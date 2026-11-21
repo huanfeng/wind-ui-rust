@@ -1179,6 +1179,45 @@ Element::button("展开")
 与 `Element::dialog` 的分工：对话框是**模态**的（铺满全窗、压暗背景、要求先处理完）；
 浮层是**非模态**的，只借一小块地方，不拦其余交互。
 
+### 无障碍（屏幕阅读器）
+
+Windows 上的窗口默认就向 UI Automation 暴露一棵语义树，讲述人（Narrator）、NVDA 等屏幕阅读器
+和 Inspect.exe 不需要应用做任何事就能读到。目前覆盖三种角色：
+
+| 角色 | 来源 | 名称取自 |
+|------|------|----------|
+| `Window` | 窗口根节点 | 窗口标题 |
+| `Text` | `label` 等文本控件 | 当前文案（绑信号的跟着变） |
+| `Button` | `button` | 按钮文案 |
+
+- **只投影、不另存**：每次查询都现取当前控件树，没有第二份状态要同步。隐藏子树不出现；
+  `col` / `row` / `stack` 这类没有角色的容器被拍平，调整布局结构不会改变屏幕阅读器看到的树。
+- **说明文字**：节点挂了 `.tooltip(..)` 时，它就是该节点的无障碍说明。
+- **操作走正常事件路径**：屏幕阅读器的「聚焦」等同于用户把焦点移过去；「点击」（Invoke 模式）
+  与在按钮上按回车走同一条路，`on_click` 恰好执行一次，禁用或隐藏的按钮会被拒绝。
+- **跨平台查询**：`Tree::accessibility_snapshot()` 返回平台无关的 `AccessibilitySnapshot`，
+  可用于测试断言界面语义。
+
+自定义控件想进无障碍树，实现 `Widget` 的三个可选方法即可（都有默认实现，不实现就被拍平）：
+
+```rust
+impl Widget for MyToggle {
+    fn accessibility_role(&self) -> Option<AccessibilityRole> {
+        Some(AccessibilityRole::Button)
+    }
+    fn accessibility_name(&self) -> Option<String> {
+        Some(self.label.clone())
+    }
+    fn accessibility_description(&self) -> Option<String> {
+        None // 节点挂了 tooltip 时以 tooltip 为准
+    }
+    // ……其余方法照常
+}
+```
+
+开着讲述人或 Inspect.exe 运行 `cargo run --example uia_smoke` 可以手动检查；这个示例本身
+也会起一个子进程，用系统的 UIA 客户端把上面几条逐项验一遍。
+
 ## 6. 布局系统
 
 ### 6.1 容器与主轴

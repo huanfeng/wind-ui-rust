@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Windows：UI Automation 无障碍支持**。窗口向讲述人、NVDA 等屏幕阅读器暴露语义树（`Window` /
+  `Text` / `Button`），提供名称、角色、包围盒、焦点与 Invoke 模式；聚焦与点击经正常事件路径执行，
+  之后照常重绘、同步输入法、执行窗口操作与关窗检查。语义树每次查询现取真实控件树，隐藏子树不出现，
+  无角色的容器被拍平。新增 `windui::accessibility` 模块（`AccessibilitySnapshot`、`AccessibilityNode`、
+  `AccessibilityNodeId`、`AccessibilityRole`、`AccessibilityAction`、`AccessibilityActionResult`，
+  前五个进 prelude）、`Tree::accessibility_snapshot()`，以及 `Widget` 的三个可选方法
+  `accessibility_role` / `accessibility_name` / `accessibility_description`（有默认实现，既有控件
+  源码兼容）。手动冒烟见 `examples/uia_smoke.rs`。
+
 ### 修复
 
 - **Windows：窗口隐藏或最小化时，`App::on_interval` 回调里的意图不再搁置**。此前这些意图只在
