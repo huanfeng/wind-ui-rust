@@ -12,6 +12,10 @@
   `image-formats`，默认全关。开启后挂进现有解码器注册表，`Image::from_bytes` / `from_file` /
   `Element::image*` 按文件头自动识别，公共 API 不变；另新增 `Image::from_ico_bytes(bytes, target)`
   按显示尺寸挑 ICO 条目。单张图片上限 4000 万像素。体积增量见 API_GUIDE 图片一节（全开约 +319KB）。
+- **`platform::file_icon(path, size)`**（issue #26）：取文件 / 文件夹在系统文件管理器里显示的
+  图标（exe 内嵌图标、按扩展名关联的类型图标、文件夹图标），`size` 为物理像素边长。Windows 走
+  `IShellItemImageFactory`、macOS 走 `NSWorkspace::iconForFile`；Linux 暂恒返回 `None`。路径不存在
+  时三个平台统一返回 `None`。新示例 `examples/file_icons.rs`。
 - **表格列宽拖动 + 持久化**：八种表格的表头相邻两列分界均可拖动调列宽（默认开启）。
   列宽仍是权重，拖动只在相邻两列间转移、总和不变（表格始终撑满、不出横向滚动），每列
   至少 48px；表头与正文（含排序 / 虚拟表重建出的行）读同一个权重信号，拖动不重建任何行。

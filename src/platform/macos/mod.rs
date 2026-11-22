@@ -16,6 +16,7 @@
 //! 逐项对照实现见 `docs/MACOS_PORTING.md` 与 `platform/win32/mod.rs`。
 
 pub mod clipboard;
+pub(crate) mod file_icon;
 pub mod hotkey;
 pub mod open_files;
 pub mod tray;

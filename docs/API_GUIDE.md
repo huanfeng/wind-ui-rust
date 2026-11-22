@@ -812,6 +812,13 @@ Element::image_content(pic);
 >
 > 以上之外的格式（AVIF、HEIC、TIFF 等）仍可实现 `ImageDecoder` trait，再用 `windui::render::image::register_decoder(...)` 注册；后注册者优先，也可以覆盖内置实现。
 
+> **文件图标**：`windui::platform::file_icon(path, size) -> Option<Image>` 取文件 / 文件夹在系统文件管理器里显示的图标（exe 取内嵌图标，普通文件取按扩展名关联的类型图标），`size` 为**物理像素**边长（32 逻辑像素在 200% 下传 64），上限 `MAX_FILE_ICON_SIZE`（1024）。只取图标不取缩略图；路径不存在返回 `None`；同步调用，列表里大量显示时请按扩展名缓存。返回尺寸偶尔与请求不同（关联程序没提供大图标时 Windows 会给小图），按实际宽高布局。Windows、macOS 支持，Linux 暂恒返回 `None`。示例：`examples/file_icons.rs`。
+>
+> ```rust
+> let icon = windui::platform::file_icon("C:/Windows/notepad.exe", 64);
+> Element::image_content(ImageContent::new(icon).fit(Fit::Contain)).width(32).height(32)
+> ```
+
 ### 链接
 ```rust
 Element::link("打开官网").url("https://example.com")  // 点击用系统默认程序打开
@@ -3172,6 +3179,7 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） | ✓ 根窗口 `GrabKey`（Wayland 下受限，见「全局热键与启动即隐藏」） |
 | 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 | ✓ 同语义 |
 | 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
+| 文件图标（`platform::file_icon`） | ✓ `IShellItemImageFactory` | ✓ `NSWorkspace::iconForFile` | ✗ 恒返回 `None`（XDG 图标主题查找未实现） |
 | 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误，返回 `false` | ✓ 固定走 X11（经 XWayland），无 X 显示时返回 `false` |
 | 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |
 | 窗口状态推送（`EventCtx::window_state()` 的数据来源） | ✓ 建窗 + `WM_SIZE` + `WM_SHOWWINDOW`（显隐收口）各推一次，读样式位；另有 `main_window_state()` 同步查询 | ✗ 未实现推送。`window_state()` 恒返回**建窗配置推导的初始值**：能力位（`maximizable`/`minimizable`）正确，但 `maximized`/`minimized` 永远是 `false`；`main_window_state()` 可用（同步读 NSWindow 属性，非主线程 `None`） | ✓ 映射 / 隐藏 + `_NET_WM_STATE` 变化时推送；`main_window_state()` 恒 `None`（同步查询暂未实现） |

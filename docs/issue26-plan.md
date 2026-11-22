@@ -33,6 +33,8 @@
 
 ### 顺带：文件图标
 
+> **已交付**（Windows + macOS，随 Unreleased）：`platform::file_icon`，示例 `examples/file_icons.rs`。Linux 仍返回 `None`。
+
 issue 里要的「取 exe 图标」其实是**取文件图标**，这对文件管理类应用是刚需（按扩展名显示类型图标）。
 建议加平台函数 `platform::file_icon(path, size) -> Option<Image>`：
 

@@ -8,6 +8,7 @@ pub mod clipboard;
 #[cfg(feature = "d2d")]
 pub(super) mod d2d;
 pub mod dragdrop;
+pub(crate) mod file_icon;
 pub mod hotkey;
 pub mod tray;
 mod tsf;

@@ -139,7 +139,7 @@ fn main() {
 | 列表 | `list` / `list_pill`（侧栏样式）/ `list_icons`（单选/滚动/高亮/图标/禁用态）/ `list_signal`（数据驱动动态列表）/ `reorder_list`（拖拽排序） |
 | 表格 | `table`（只读）/ `table_custom` / `table_editable` / `table_sortable` / `table_sortable_server`（服务端排序分页）/ `table_selectable`（多选）；表头拖动调列宽（权重可持久化） |
 | 图片 | `image` / `image_svg` / `image_view`（PNG/SVG 内置；JPEG/GIF/WebP/BMP/ICO 为可选 feature；状态调制/着色/圆角） |
-| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单；Linux 经 StatusNotifierItem）与桌面通知、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板 |
+| 系统 | 系统托盘（图标 + 左键/双击 + 原生右键菜单；Linux 经 StatusNotifierItem）与桌面通知、全局热键、多窗口（`ctx.open_window`，含单例窗口）、启动即隐藏、关闭转隐藏、零窗口常驻（`App::run_resident`，Windows / Linux）、无边框窗口（自定义标题栏）、文件拖放、剪贴板、文件图标（`platform::file_icon`，Windows / macOS） |
 
 控件状态统一绑定 `Signal<T>`（`signal(初值)` 创建的 `Copy` 句柄）：`checkbox`/`switch` 绑
 `Signal<bool>`、`dropdown`/`list`/`tabs` 绑 `Signal<usize>`、`text_input` 绑 `Signal<String>`。
@@ -162,7 +162,7 @@ cargo clippy --all-targets                                  # 静态检查
 | **完整应用** | `settings`（设置窗：标题栏 + 图标侧栏 + 内容 + 底部操作栏 + 两个对话框）、`about`（关于页）、`ime_settings`（输入法设置场景）、`light_titlebar`（安装器风格的浅色标题栏） |
 | **控件与能力** | `fullshowcase`（控件总览，七个分页）、`theming`（TOML 主题 + 运行期换肤）、`font_switch`（运行期换界面字体 + 字体查询）、`image`（图片/SVG）、`animation`、`emoji`（彩色 emoji）、`caret`（文本光标四风格）、`menubar`（菜单栏）、`i18n`（多语言）、`color_picker`（取色面板）、`palette`（纯键盘命令面板） |
 | **数据展示** | `virtual_list`（虚拟滚动列表 + 表格）、`virtual_table_server`（服务端分页）、`table_pager`（分页操作栏）、`dyn_list`（数据驱动动态列表）、`chat_scroll`（聊天式滚动：跟随底部 / 头部插入锚定）、`list`、`dropdown`、`tabs_pill`、`toast`、`progress`、`multiline` |
-| **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`resident`（零窗口常驻托盘服务）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`window_attrs`（指定位置 / 不进任务栏 / 不可缩放的无边框窗）、`ime` |
+| **系统集成** | `tray`（系统托盘）、`hotkey`（全局热键 + 启动即隐藏）、`resident`（零窗口常驻托盘服务）、`multi_window`（子窗 + 跨窗共享状态）、`file_drop`、`frameless`（自定义标题栏 + 系统菜单）、`background_task`（跨线程更新）、`window_attrs`（指定位置 / 不进任务栏 / 不可缩放的无边框窗）、`ime`、`file_icons`（系统文件图标） |
 
 另有 `phase0`–`phase5` 分阶段演示与 `perfprobe` 性能探针，供开发与回归比对使用。
 

@@ -15,6 +15,10 @@
 #[cfg(any(windows, target_os = "linux", test))]
 pub(crate) mod clip_image;
 
+// 系统图标位图 → 非预乘 RGBA（纯函数，`file_icon` 的 Windows 与 macOS 实现共用）。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) mod icon_pixels;
+
 // 模块名用 `win32` 而非 `windows`，以免与外部 `windows` crate 冲突。
 #[cfg(windows)]
 pub mod win32;
@@ -145,6 +149,39 @@ pub use linux::{drag_files, drag_files_with};
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 compile_error!("windui 目前仅支持 Windows、macOS 与 Linux（X11）平台");
+
+/// [`file_icon`] 接受的最大边长（物理像素）。系统图标最大的表示是 macOS 的 1024×1024。
+pub const MAX_FILE_ICON_SIZE: u32 = 1024;
+
+/// 取文件（或文件夹）在系统文件管理器里显示的图标，边长 `size` 为**物理像素**。
+///
+/// 与资源管理器 / Finder 同源：exe 等程序取其内嵌图标，普通文件取按扩展名关联的类型图标，
+/// 文件夹取文件夹图标。只取图标、不取缩略图（图片文件得到的是图片类型图标，不是图片内容）。
+///
+/// - 返回的图片尺寸通常等于 `size`，但 Windows 上偶尔会是系统挑出的相近尺寸，按实际
+///   [`Image::width`](crate::render::image::Image::width) 布局即可。HiDPI 下按物理像素传，
+///   例如 32 逻辑像素在 200% 缩放下传 64。
+/// - 路径不存在、`size` 为 0 或超过 [`MAX_FILE_ICON_SIZE`] 时返回 `None`；macOS 上路径不是
+///   合法 UTF-8 时也返回 `None`。
+/// - **同步调用**，在 UI 线程直接用即可；但网络路径等可能较慢，列表里大量显示时请按扩展名
+///   缓存，不要每帧重新取。
+///
+/// 平台：Windows（`IShellItemImageFactory`）、macOS（`NSWorkspace::iconForFile`）。
+/// **Linux 暂不支持，恒返回 `None`**（需要按 MIME 类型查 XDG 图标主题，尚未实现）。
+pub fn file_icon(
+    path: impl AsRef<std::path::Path>,
+    size: u32,
+) -> Option<crate::render::image::Image> {
+    #[cfg(windows)]
+    return win32::file_icon::file_icon(path, size);
+    #[cfg(target_os = "macos")]
+    return macos::file_icon::file_icon(path, size);
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (path, size);
+        None
+    }
+}
 
 /// 托盘的平台无关声明层（`Tray` / `TrayMenuItem` / `TrayCtx` / `TrayAction`）。
 pub mod tray;
