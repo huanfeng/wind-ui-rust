@@ -164,6 +164,33 @@ pub(super) type OnRowActivate = Rc<RefCell<dyn FnMut(&mut EventCtx, usize)>>;
 /// 与双击激活"按钮先吃掉 Down"的行为不同，右键在分发层就只发给接右键的节点。
 pub(super) type OnRowMenu = Rc<dyn Fn(usize) -> Vec<crate::event::MenuItem>>;
 
+/// 服务端多选表的勾选回调：用户点了行复选框或表头全选后触发，参数为**当前页**的整组勾选态
+/// （按显示下标）。应用自己写回 `selected` 信号以外的状态（如跨页的选中集）时用它。
+pub(super) type OnSelect = Rc<RefCell<dyn FnMut(&mut EventCtx, &[bool])>>;
+
+/// 服务端多选表的选择状态：当前页每行一个勾选位（按显示下标），外加用户改动时的回调。
+///
+/// 与客户端多选表（每行一个 `Signal<bool>`）不同：服务端表每次换页整批换行，行信号没有
+/// 稳定身份可言，故以「当前页一个向量」为唯一真值，行复选框是它的投影。
+#[derive(Clone)]
+pub(super) struct PageSel {
+    pub(super) sel: Signal<Vec<bool>>,
+    pub(super) on_select: OnSelect,
+}
+
+impl PageSel {
+    /// 把第 `i` 行设为 `on`（越界时按当前页行数补齐），写回信号并通知应用。
+    fn set_row(&self, ctx: &mut EventCtx, i: usize, on: bool, rows: usize) {
+        let mut v = self.sel.get();
+        v.resize(rows.max(v.len()), false);
+        if let Some(slot) = v.get_mut(i) {
+            *slot = on;
+        }
+        self.sel.set(v.clone());
+        (self.on_select.borrow_mut())(ctx, &v);
+    }
+}
+
 /// 单元格值比较：两侧都能解析为数值时按数值比，否则按字符串（区分大小写）。
 fn cmp_cells(a: &str, b: &str) -> Ordering {
     match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
@@ -353,32 +380,7 @@ impl Widget for HoverRow {
                     self.armed = false;
                     true
                 }
-                // 双击的第二次 Down 只"预备"，不立即动作；单击 Down 顺带清预备位（避免陈旧误触）。
-                // 命中的子单元格标签不吃 Down，事件沿祖先链冒泡到本行；落在操作列按钮上时
-                // 按钮已先消费 Down，故整行不会被预备。
-                PointerKind::Down => {
-                    // 平台层的 click_count 到 2 就重新起算（1,2,1,2,…），故 `>= 2`
-                    // 已等价于"恰好一对"——同一轮的第三下报的是 1，不会重复激活。
-                    // 不写成 `== 2` 是要给合成事件留路：`TripleClick` 明文承诺 >= 3
-                    // 原样放行，库内两处契约得一致。
-                    let dbl = p.button == MouseButton::Left
-                        && p.click_count >= 2
-                        && self.activate.is_some()
-                        && ctx.bounds().contains(p.pos);
-                    self.armed = dbl;
-                    dbl // 仅在预备成功时消费该 Down
-                }
-                // 已预备且在本行内释放：此刻才真正激活（进入编辑）。
-                PointerKind::Up if self.armed => {
-                    self.armed = false;
-                    if p.button == MouseButton::Left && ctx.bounds().contains(p.pos) {
-                        if let Some(cb) = self.activate.clone() {
-                            (cb.borrow_mut())(ctx, self.idx);
-                        }
-                    }
-                    true
-                }
-                _ => false,
+                _ => row_activate_event(ctx, p, &mut self.armed, self.activate.as_ref(), self.idx),
             }
         } else {
             false
@@ -388,6 +390,45 @@ impl Widget for HoverRow {
         self.hover = false;
         self.armed = false;
         self.primed.set(false); // 隐藏期不回放 hover 淡出，下次显示瞬时落定
+    }
+}
+
+/// 整行双击激活的按下 / 释放处理（[`HoverRow`] 与 [`SelectableRow`] 共用）；返回是否消费。
+///
+/// 双击的第二次 Down 只"预备"，不立即动作；单击 Down 顺带清预备位（避免陈旧误触）。
+/// 命中的子单元格标签不吃 Down，事件沿祖先链冒泡到本行；落在操作列按钮或首列复选框上时
+/// 控件已先消费 Down，故整行不会被预备。
+fn row_activate_event(
+    ctx: &mut EventCtx,
+    p: &crate::event::PointerEvent,
+    armed: &mut bool,
+    activate: Option<&OnRowActivate>,
+    idx: usize,
+) -> bool {
+    match p.kind {
+        PointerKind::Down => {
+            // 平台层的 click_count 到 2 就重新起算（1,2,1,2,…），故 `>= 2`
+            // 已等价于"恰好一对"——同一轮的第三下报的是 1，不会重复激活。
+            // 不写成 `== 2` 是要给合成事件留路：`TripleClick` 明文承诺 >= 3
+            // 原样放行，库内两处契约得一致。
+            let dbl = p.button == MouseButton::Left
+                && p.click_count >= 2
+                && activate.is_some()
+                && ctx.bounds().contains(p.pos);
+            *armed = dbl;
+            dbl // 仅在预备成功时消费该 Down
+        }
+        // 已预备且在本行内释放：此刻才真正激活（进入编辑）。
+        PointerKind::Up if *armed => {
+            *armed = false;
+            if p.button == MouseButton::Left && ctx.bounds().contains(p.pos) {
+                if let Some(cb) = activate.cloned() {
+                    (cb.borrow_mut())(ctx, idx);
+                }
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -753,6 +794,12 @@ pub(super) struct PagedBody {
     last_version: u64,
     /// 当前这批行在构建期创建的信号，重建时整批回收（见 `clear_children`）。
     cell_signals: crate::signal::SignalScope,
+    /// 多选（`table_selectable_server`）：当前页勾选向量 + 回调；`None` 为普通服务端表。
+    select: Option<PageSel>,
+    /// 当前这批行的复选框信号（按显示下标），是 `select.sel` 的投影。
+    row_sel: Vec<Signal<bool>>,
+    /// 上次同步行复选框时 `select.sel` 的版本。
+    last_sel_version: u64,
 }
 
 impl PagedBody {
@@ -768,6 +815,41 @@ impl PagedBody {
             menu: None,
             force: false,
             cell_signals: crate::signal::SignalScope::new(),
+            select: None,
+            row_sel: Vec::new(),
+            last_sel_version: 0,
+        }
+    }
+
+    /// 带首列多选的服务端正文（首次 on_update 构建，不预建行）。
+    pub(super) fn selectable(
+        rows: Signal<Vec<Vec<String>>>,
+        cols: TableCols,
+        select: PageSel,
+    ) -> Self {
+        Self {
+            force: true,
+            select: Some(select),
+            ..Self::new(rows, cols)
+        }
+    }
+
+    /// 应用改了勾选向量（换页后按跨页选中集重填、或清空）而行没变：只同步行复选框，不重建。
+    fn sync_row_sel(&mut self) {
+        let Some(s) = &self.select else {
+            return;
+        };
+        let ver = s.sel.version();
+        if ver == self.last_sel_version {
+            return;
+        }
+        self.last_sel_version = ver;
+        let v = s.sel.get();
+        for (i, rs) in self.row_sel.iter().enumerate() {
+            let want = v.get(i).copied().unwrap_or(false);
+            if rs.get() != want {
+                rs.set(want);
+            }
         }
     }
 
@@ -806,6 +888,7 @@ impl Widget for PagedBody {
     fn on_update(&mut self, ctx: &mut EventCtx) {
         let ver = self.rows.version();
         if !self.force && ver == self.last_version {
+            self.sync_row_sel();
             return;
         }
         self.force = false;
@@ -815,6 +898,42 @@ impl Widget for PagedBody {
         let tree = ctx.tree_mut();
         clear_children(tree, self_id, &mut signals);
         let data = self.rows.get();
+        if let Some(sel) = self.select.clone() {
+            self.last_sel_version = sel.sel.version();
+            let v = sel.sel.get();
+            let n = data.len();
+            let mut row_sel = Vec::with_capacity(n);
+            signals.collect(|| {
+                for (disp, row) in data.iter().enumerate() {
+                    let rs = crate::signal::signal(v.get(disp).copied().unwrap_or(false));
+                    row_sel.push(rs);
+                    let s2 = sel.clone();
+                    let toggle: OnRowToggle = Box::new(move |ctx| {
+                        let on = !rs.get();
+                        rs.set(on);
+                        s2.set_row(ctx, disp, on, n);
+                    });
+                    let el = select_body_row(
+                        disp,
+                        disp,
+                        row,
+                        &self.cols,
+                        rs,
+                        Some(toggle),
+                        self.actions.as_ref(),
+                        self.render.as_ref(),
+                        self.cell_lines,
+                        self.activate.as_ref(),
+                        self.menu.as_ref(),
+                    );
+                    let id = el.build(tree);
+                    tree.add_child(self_id, id);
+                }
+            });
+            self.row_sel = row_sel;
+            self.cell_signals = signals;
+            return;
+        }
         signals.collect(|| {
             for (disp, row) in data.iter().enumerate() {
                 let el = body_row(
@@ -865,41 +984,56 @@ const SEL_BOX: i32 = 18;
 /// 选中行高亮叠层不透明度（accent 低 alpha；叠在斑马纹之上、悬停层之下）。
 const ROW_SELECTED_A: f32 = crate::theme::SELECTED_ALPHA;
 
+/// 行复选框被点时的接管回调（服务端多选表用：翻转之外还要写回整页向量、通知应用）。
+pub(super) type OnRowToggle = Box<dyn FnMut(&mut EventCtx)>;
+
 /// 首列复选框单元格：固定宽，内含绑定该行选择信号的复选框（水平居中 + 垂直居中）。
-fn select_cell(row_sel: Signal<bool>) -> Element {
+/// `on_toggle` 为 `Some` 时接管点击（翻转由回调负责，见 [`Element::on_toggle`]）。
+fn select_cell(row_sel: Signal<bool>, on_toggle: Option<OnRowToggle>) -> Element {
     let pad = (SELECT_COL_W - SEL_BOX) / 2;
+    let mut cb = Element::checkbox("", row_sel).width(SEL_BOX);
+    if let Some(f) = on_toggle {
+        cb = cb.on_toggle(f);
+    }
     Element::row()
         .width(SELECT_COL_W)
         .cross(Align::Center)
         .padding_xy(pad, 0)
-        .child(Element::checkbox("", row_sel).width(SEL_BOX))
+        .child(cb)
 }
 
 /// 构建一行可选正文：[复选框列] + 数据列；行挂 [`SelectableRow`]（悬停 + 选中高亮）。
 /// `row_sel` 为该行（原始行身份）的选择信号：复选框直接绑定，行高亮读取它。
+/// `on_toggle` 见 [`select_cell`]；`activate` 为整行双击激活（服务端多选表支持）。
 pub(super) fn select_body_row(
     disp: usize,
     orig: usize,
     cells: &[String],
     cols: &TableCols,
     row_sel: Signal<bool>,
+    on_toggle: Option<OnRowToggle>,
     actions: Option<&ActionCol>,
     render: Option<&CellRender>,
     lines: usize,
+    activate: Option<&OnRowActivate>,
     menu: Option<&OnRowMenu>,
 ) -> Element {
     let mut tr = Element::row().width_match().cross(Align::Stretch);
     if disp % 2 == 1 {
         tr = tr.bg_role(Role::SurfaceAlt);
     }
-    tr = tr.child(select_cell(row_sel));
+    tr = tr.child(select_cell(row_sel, on_toggle));
     for (ci, cell) in cells.iter().enumerate() {
         tr = tr.child(data_cell(orig, ci, cell, cols, render, lines));
     }
     if let Some(a) = actions {
         tr = tr.child(action_cell((a.build)(orig), a.weight));
     }
-    tr.set_widget(Box::new(SelectableRow::new(row_sel)));
+    tr.set_widget(Box::new(SelectableRow::new(
+        row_sel,
+        orig,
+        activate.cloned(),
+    )));
     tr = with_row_menu(tr, orig, menu);
     Element::col()
         .width_match()
@@ -914,15 +1048,22 @@ pub(super) struct SelectableRow {
     hover: bool,
     overlay: Cell<Transition<f32>>,
     primed: Cell<bool>,
+    /// 行下标与双击激活回调（语义同 [`HoverRow`]）；客户端多选表不设。
+    idx: usize,
+    activate: Option<OnRowActivate>,
+    armed: bool,
 }
 
 impl SelectableRow {
-    pub(super) fn new(sel: Signal<bool>) -> Self {
+    pub(super) fn new(sel: Signal<bool>, idx: usize, activate: Option<OnRowActivate>) -> Self {
         Self {
             sel,
             hover: false,
             overlay: Cell::new(Transition::new(0.0)),
             primed: Cell::new(false),
+            idx,
+            activate,
+            armed: false,
         }
     }
 }
@@ -990,9 +1131,10 @@ impl Widget for SelectableRow {
                         self.hover = false;
                         ctx.mark_dirty();
                     }
+                    self.armed = false;
                     true
                 }
-                _ => false,
+                _ => row_activate_event(ctx, p, &mut self.armed, self.activate.as_ref(), self.idx),
             }
         } else {
             false
@@ -1000,6 +1142,7 @@ impl Widget for SelectableRow {
     }
     fn reset_interaction(&mut self) {
         self.hover = false;
+        self.armed = false;
         self.primed.set(false);
     }
 }
@@ -1007,22 +1150,56 @@ impl Widget for SelectableRow {
 /// 全选表头单元格 widget：自绘三态复选框（全选 ✓ / 部分选 − / 未选 空），点击切换全选/清空。
 /// 直接读写各行选择信号（单一数据源），故手动勾选行时表头聚合态实时刷新。
 pub(super) struct SelectAllCheck {
-    sel: Vec<Signal<bool>>,
+    src: SelSrc,
+}
+
+/// 全选框聚合的对象：客户端多选表的每行信号，或服务端多选表的当前页向量。
+enum SelSrc {
+    Rows(Vec<Signal<bool>>),
+    Page(PageSel),
 }
 
 impl SelectAllCheck {
     pub(super) fn new(sel: Vec<Signal<bool>>) -> Self {
-        Self { sel }
+        Self {
+            src: SelSrc::Rows(sel),
+        }
     }
-    /// 是否全选（非空且每行皆选）。
-    fn all(&self) -> bool {
-        !self.sel.is_empty() && self.sel.iter().all(|s| s.get())
+    /// 服务端多选表：聚合当前页向量，点击整页全选 / 清空并通知应用。
+    pub(super) fn page(sel: PageSel) -> Self {
+        Self {
+            src: SelSrc::Page(sel),
+        }
+    }
+    /// (已选行数, 总行数)。
+    fn counts(&self) -> (usize, usize) {
+        match &self.src {
+            SelSrc::Rows(v) => (v.iter().filter(|s| s.get()).count(), v.len()),
+            SelSrc::Page(p) => {
+                let v = p.sel.get();
+                (v.iter().filter(|&&b| b).count(), v.len())
+            }
+        }
     }
     /// 切换：全选→清空；否则→全选。
     fn toggle_all(&self, ctx: &mut EventCtx) {
-        let target = !self.all();
-        for s in &self.sel {
-            s.set(target);
+        let (n, total) = self.counts();
+        let target = !(total > 0 && n == total);
+        match &self.src {
+            SelSrc::Rows(v) => {
+                for s in v {
+                    s.set(target);
+                }
+            }
+            SelSrc::Page(p) => {
+                // 空页不动：没有行可选，也就没有什么要通知的。
+                if total == 0 {
+                    return;
+                }
+                let v = vec![target; total];
+                p.sel.set(v.clone());
+                (p.on_select.borrow_mut())(ctx, &v);
+            }
         }
         ctx.mark_dirty_all(); // 影响所有行，升整窗
     }
@@ -1040,8 +1217,8 @@ impl Widget for SelectAllCheck {
     ) {
         let th = crate::theme::current();
         let (p, tg) = (&th.palette, &th.toggle);
-        let n = self.sel.iter().filter(|s| s.get()).count();
-        let all = n > 0 && n == self.sel.len();
+        let (n, total) = self.counts();
+        let all = n > 0 && n == total;
         let some = n > 0 && !all;
         let box_x = bounds.x as f32 + ((SELECT_COL_W - SEL_BOX) / 2) as f32;
         let box_y = bounds.y as f32 + ((bounds.h - SEL_BOX) / 2) as f32;
@@ -1204,9 +1381,11 @@ impl Widget for SelectableBody {
                     &self.rows[ri],
                     &self.cols,
                     row_sel,
+                    None,
                     self.actions.as_ref(),
                     self.render.as_ref(),
                     self.cell_lines,
+                    None,
                     self.menu.as_ref(),
                 );
                 let id = el.build(tree);
@@ -1624,7 +1803,8 @@ pub(super) fn set_body_cell_render(el: &mut Element, render: &CellRender) -> boo
 }
 
 /// 若 `el` 挂的是 HoverRow 型响应式正文（Sortable/Paged/Virtual）则设入整行双击激活回调并返回 true。
-/// 可选表格（SelectableBody/SelectableRow）不支持整行激活（首列复选框语义冲突），返回 false。
+/// 服务端多选表（`table_selectable_server`）的正文也是 `PagedBody`，同样支持：首列复选框会先
+/// 消费落在它身上的 Down，双击别处才激活整行。客户端多选表（SelectableBody）不支持，返回 false。
 #[must_use]
 pub(super) fn set_body_activate(el: &mut Element, activate: &OnRowActivate) -> bool {
     let Some(a) = el.widget.as_any_mut() else {
@@ -2016,6 +2196,122 @@ mod tests {
         assert!(sel.iter().all(|s| s.get()), "点全选应选中所有行");
         click(&mut tree, Point::new(20, 19));
         assert!(sel.iter().all(|s| !s.get()), "再点全选应清空");
+    }
+
+    /// 服务端多选表：两行、记录每次 `on_select` 收到的整页向量。
+    #[allow(clippy::type_complexity)]
+    fn server_selectable() -> (
+        Tree,
+        Signal<Vec<Vec<String>>>,
+        Signal<Vec<bool>>,
+        Rc<RefCell<Vec<Vec<bool>>>>,
+    ) {
+        let rows = signal(vec![vec!["a".to_string()], vec!["b".to_string()]]);
+        let sel = signal(vec![false, false]);
+        let seen: Rc<RefCell<Vec<Vec<bool>>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_c = seen.clone();
+        let tree = layout(
+            Element::table_selectable_server(
+                vec![("名称", 1.0)],
+                rows,
+                sel,
+                signal(None),
+                |_ctx, _sort| {},
+                move |_ctx, page| seen_c.borrow_mut().push(page.to_vec()),
+            )
+            .actions("操作", 1.0, |_| Element::label("x"))
+            .width(400)
+            .height(300),
+        );
+        (tree, rows, sel, seen)
+    }
+
+    #[test]
+    fn server_selectable_row_checkbox_writes_page_vector_and_notifies() {
+        let (mut tree, _rows, sel, seen) = server_selectable();
+        click(&mut tree, Point::new(20, 58));
+        assert_eq!(sel.get(), vec![true, false]);
+        assert_eq!(seen.borrow().as_slice(), &[vec![true, false]]);
+    }
+
+    #[test]
+    fn server_selectable_header_selects_page_then_clears() {
+        let (mut tree, _rows, sel, seen) = server_selectable();
+        click(&mut tree, Point::new(20, 19));
+        assert_eq!(sel.get(), vec![true, true], "点全选选中本页");
+        click(&mut tree, Point::new(20, 19));
+        assert_eq!(sel.get(), vec![false, false], "再点清空本页");
+        assert_eq!(seen.borrow().len(), 2);
+    }
+
+    /// 应用自己改勾选向量（如换页后按跨页选中集重填）：行复选框跟上，且不回调应用。
+    #[test]
+    fn server_selectable_app_set_syncs_rows_without_notifying() {
+        let (mut tree, _rows, sel, seen) = server_selectable();
+        sel.set(vec![true, false]);
+        tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
+        assert!(seen.borrow().is_empty(), "应用写入不回调");
+        // 行 0 的复选框已同步成勾上：再点一次是取消。
+        click(&mut tree, Point::new(20, 58));
+        assert_eq!(sel.get(), vec![false, false]);
+    }
+
+    /// 换页（rows 重写）时按新的勾选向量重建行。
+    #[test]
+    fn server_selectable_rebuild_uses_new_page_vector() {
+        let (mut tree, rows, sel, _seen) = server_selectable();
+        rows.set(vec![vec!["c".to_string()], vec!["d".to_string()]]);
+        sel.set(vec![false, true]);
+        tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
+        // 半选态下点全选 → 全选。
+        click(&mut tree, Point::new(20, 19));
+        assert_eq!(sel.get(), vec![true, true]);
+    }
+
+    #[test]
+    fn server_selectable_rows_support_double_click_activate() {
+        use std::cell::Cell as StdCell;
+        let seen: Rc<StdCell<Option<usize>>> = Rc::new(StdCell::new(None));
+        let seen_c = seen.clone();
+        let mut tree = layout(
+            Element::table_selectable_server(
+                vec![("名称", 1.0)],
+                signal(vec![vec!["a".to_string()], vec!["b".to_string()]]),
+                signal(vec![false, false]),
+                signal(None),
+                |_ctx, _sort| {},
+                |_ctx, _page| {},
+            )
+            .on_row_activate(move |_ctx, idx| seen_c.set(Some(idx)))
+            .width(400)
+            .height(300),
+        );
+        let root = tree.root.unwrap();
+        let scroll = *tree.get(root).unwrap().children.last().unwrap();
+        let body = tree.get(scroll).unwrap().children[0];
+        let second = tree.get(body).unwrap().children[1];
+        let tr = tree.get(second).unwrap().children[0];
+        // 首格是复选框列，数据格是第二个。
+        let cell = tree.get(tr).unwrap().children[1];
+        let at = abs_center(&tree, cell).unwrap();
+        let (mut hover, mut capture) = (None, None);
+        tree.dispatch_pointer(
+            PointerEvent {
+                kind: PointerKind::Down,
+                pos: at,
+                button: MouseButton::Left,
+                click_count: 2,
+                mods: crate::event::Mods::default(),
+            },
+            &mut hover,
+            &mut capture,
+        );
+        tree.dispatch_pointer(
+            PointerEvent::single(PointerKind::Up, at, MouseButton::Left),
+            &mut hover,
+            &mut capture,
+        );
+        assert_eq!(seen.get(), Some(1));
     }
 
     #[test]

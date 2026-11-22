@@ -4840,6 +4840,76 @@ impl Element {
         Self::table_frame(header, scroll, cols)
     }
 
+    /// 服务端分页 + 可多选表格：[`table_sortable_server`](Self::table_sortable_server) 加上
+    /// [`table_selectable`](Self::table_selectable) 的首列复选框与表头三态全选。
+    ///
+    /// - `selected`：**当前页**每行一个勾选位（按页内显示下标），行复选框与表头全选都读写它。
+    ///   应用换页 / 重载写回 `rows` 时，也应按自己的跨页选中集把它重填成新页的勾选态
+    ///   （长度不足的按未选处理）；只改它不改 `rows` 时只同步复选框，不重建行。
+    /// - `on_select(ctx, 当前页勾选向量)`：**用户**点了行复选框或表头全选后触发（应用自己
+    ///   `set` 不触发），应用据此维护跨页选中集。
+    /// - 表头全选只管当前页：全选 / 半选 / 未选三态按当前页算。
+    ///
+    /// 其余同 `table_sortable_server`：`.actions` / `.cell_render` / `.cell_lines` /
+    /// `.on_row_activate` / `.on_row_context_menu` 照常可用，回调收到的是页内显示下标。
+    ///
+    /// # 示例
+    /// ```ignore
+    /// let rows = signal(vec![vec!["a".to_string()], vec!["b".to_string()]]);
+    /// let selected = signal(vec![false; 2]);
+    /// let sort = signal(None);
+    /// Element::table_selectable_server(vec![("名称", 1.0)], rows, selected, sort,
+    ///     |_ctx, _sort| { /* 重新拉取 */ },
+    ///     |_ctx, page| println!("本页勾选 {page:?}"))
+    /// ```
+    pub fn table_selectable_server(
+        columns: Vec<(impl Into<String>, f32)>,
+        rows: Signal<Vec<Vec<String>>>,
+        selected: Signal<Vec<bool>>,
+        sort: Signal<Option<SortKey>>,
+        on_sort: impl FnMut(&mut EventCtx, Option<SortKey>) + 'static,
+        on_select: impl FnMut(&mut EventCtx, &[bool]) + 'static,
+    ) -> Self {
+        let (titles, cols) =
+            Self::table_cols(columns.into_iter().map(|(t, w)| (t.into(), w)).collect());
+        let on_sort: sortable_table::OnSort = Rc::new(RefCell::new(on_sort));
+        let on_select: sortable_table::OnSelect = Rc::new(RefCell::new(on_select));
+        let page_sel = sortable_table::PageSel {
+            sel: selected,
+            on_select,
+        };
+        let scw = sortable_table::select_col_w();
+
+        // 表头：[全选列] + [可排序数据列子行]，结构同 table_selectable（`.actions` 据此找子行）。
+        let selectall = Element::leaf()
+            .width(scw)
+            .widget(sortable_table::SelectAllCheck::page(page_sel.clone()));
+        let mut subrow = Element::row().weight(1.0).cross(Align::Stretch);
+        subrow.set_widget(Box::new(sortable_table::SortableHeader::new(
+            titles,
+            cols.clone(),
+            sort,
+            Some(on_sort),
+        )));
+        subrow.reactive = true;
+        let header = Element::row()
+            .width_match()
+            .cross(Align::Stretch)
+            .bg_role(Role::SurfaceAlt)
+            .child(selectall)
+            .child(subrow);
+
+        let mut body = Element::col().width_match();
+        body.set_widget(Box::new(sortable_table::PagedBody::selectable(
+            rows,
+            cols.clone(),
+            page_sel,
+        )));
+        body.reactive = true;
+        let scroll = Element::scroll().fill().child(body);
+        Self::table_frame(header, scroll, cols)
+    }
+
     /// 取表格的列宽句柄；不是表格元素时 debug 期 panic（链错了元素）。
     #[track_caller]
     fn table_cols_or_panic(&mut self, who: &str) -> Option<table_cols::TableCols> {
