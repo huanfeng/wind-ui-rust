@@ -156,6 +156,7 @@ let ver: u64 = n.version();   // 写入版本号，每次 set/update 自增（�
 | `dropdown_signal` / `combo_box(..).options_signal` | `Signal<Vec<String>>` | 动态选项 |
 | `table_editable` | `Vec<Vec<Signal<String>>>` | 每格一个信号 |
 | `table_selectable` | `Vec<Signal<bool>>` | 每行一个选中信号 |
+| `table_selectable_server` | `Signal<Vec<bool>>` | 当前页每行一个勾选位（按页内显示下标） |
 | `table_sortable` / `_server` | `Signal<Option<SortKey>>` | 排序列 + 方向（`SortKey { column, order }`） |
 | `visible_signal` / `enabled_signal` | `Signal<bool>` | 显隐 / 启用态（启用沿父链继承） |
 | `visible_when` / `enabled_when` | 闭包 `Fn() -> bool` | 派生显隐 / 启用 |
@@ -369,6 +370,9 @@ Element::table_sortable(columns, rows, sort)
 Element::table_sortable_server(columns, rows, sort, |ctx, new_sort| { /* 拉数据后 rows.set(..) */ })
 // 可多选：首列复选框 + 表头三态全选；selected: Vec<Signal<bool>>（长度 == rows，按原始行下标索引）
 Element::table_selectable(columns, rows, selected, sort)
+// 服务端分页 + 可多选：selected: Signal<Vec<bool>> 为当前页勾选（换页时由应用按跨页选中集重填），
+//   on_select 在用户点勾选 / 全选后回调整页向量；表头全选只管当前页
+Element::table_selectable_server(columns, rows, selected, sort, |ctx, s| { /* 重取 */ }, |ctx, page| { /* 记选中 */ })
 // 虚拟滚动：只构建视口内的行，行数再多每帧成本不变；要求行高固定（详见 §6.6）
 //   行内修饰符（actions / cell_render / on_row_activate / on_row_context_menu）照常可用
 Element::table_virtual(columns, rows /* Signal<Vec<Vec<String>>> */, TABLE_ROW_H)
@@ -393,14 +397,14 @@ Element::pager(page /* Signal<usize>, 0 基 */, total_items, PAGE_SIZE, |ctx, p|
 > release 下静默忽略**（口径同 §5 的 text_input 专属修饰符），panic 位置指向你的调用行。
 > 照下表核对：
 >
-> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_virtual` | `table_virtual_server` |
-> |---|---|---|---|---|---|---|---|---|
-> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✓ |
-> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
-> | `cell_render` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
-> | `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓（须自行调大 `row_height`） | ✓（同左） |
-> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✓ | ✓ |
-> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | 修饰符 | `table` | `table_custom` | `table_editable` | `table_sortable` | `table_sortable_server` | `table_selectable` | `table_selectable_server` | `table_virtual` | `table_virtual_server` |
+> |---|---|---|---|---|---|---|---|---|---|
+> | `sort_indicator` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ |
+> | `actions` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_render` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | `cell_lines` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓（须自行调大 `row_height`） | ✓（同左） |
+> | `on_row_activate` | ✗ | ✗ | ✗ | ✓ | ✓ | ✗（与首列复选框语义冲突） | ✓（双击复选框以外处） | ✓ | ✓ |
+> | `on_row_context_menu` | ✗ | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 >
 > `table` / `table_editable` 内部会转成 `table_custom` 的结构，三者都不带响应式表头/正文
 > widget，因此整列扩展点都不适用——需要排序或行级交互，请直接从 `table_sortable` 起步。
@@ -417,7 +421,7 @@ Element::pager(page /* Signal<usize>, 0 基 */, total_items, PAGE_SIZE, |ctx, p|
 >
 > **行下标语义**：`actions` / `cell_render` / `on_row_activate` / `on_row_context_menu`
 > 拿到的下标，客户端表格（`table_sortable` / `table_selectable`）是**原始行下标**（排序重排
-> 后仍锁定同一数据行，可直接索引 `selected[row]`），服务端表格（`table_sortable_server`）
+> 后仍锁定同一数据行，可直接索引 `selected[row]`），服务端表格（`table_sortable_server` / `table_selectable_server`）
 > 是当前页内的**显示下标**，两种虚拟表格（`table_virtual` / `table_virtual_server`）是数据里的
 > **真实行下标**——不是它在渲染窗口里的位置、也不是段内位置，滚到哪一行，闭包拿到的就是哪一行。
 
@@ -438,7 +442,7 @@ Element::table_sortable(columns, rows, sort)
   构造器给的默认权重，免得列宽错位到别的列。
 - 应用在事件回调里 `widths.set(..)` 即生效（如「恢复默认列宽」按钮），不必重建表格；拖动不重建任何行。
   在其它线程 / 事件之外写只触发重绘、不重排，要到下一次重排才生效（契约同 `weight_when`）。
-- 只有数据列之间可拖：`table_selectable` 的复选框列、`actions` 操作列宽度固定。
+- 只有数据列之间可拖：`table_selectable` / `table_selectable_server` 的复选框列、`actions` 操作列宽度固定。
 - 分界上的手柄是**零宽**的、不占任何布局空间：平时不画，悬停 / 拖动时在列边界上画一条 2px 线（颜色走主题
   `TableTheme::resize_line`，默认 `accent`），抓取带跨分界两侧各 4px。
 

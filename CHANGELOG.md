@@ -48,6 +48,11 @@
 - **`WindowState` 字段文档补快照纪律**：`minimized` / `visible` 标明仅事件回调 /
   菜单构建 / `paint` 期间有效，指路 `main_window_state()`。
 
+- **`Element::table_selectable_server`**：服务端分页表格加首列复选框与表头三态全选（全选 / 半选 /
+  未选，按当前页算）。勾选态是当前页的 `Signal<Vec<bool>>`，应用换页时按自己的跨页选中集重填；
+  用户点勾选时回调 `on_select(ctx, &[bool])`。`actions` / `cell_render` / `cell_lines` /
+  `on_row_activate` / `on_row_context_menu` 照常可用，选中行高亮同 `table_selectable`。
+
 ### 变更
 
 - 表头标题在列宽不足时单行末尾省略（此前静态表头会溢出）。wgpu 后端三条管线的实例
