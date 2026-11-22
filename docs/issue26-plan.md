@@ -60,6 +60,8 @@ macOS / Linux 是返回 `DragEffect::None` 的桩。契约要点（三个平台�
 
 ### macOS
 
+> **已交付**（随 Unreleased）：`src/platform/macos/dragdrop.rs`，示例 `examples/drag_out.rs`。`before_drop` 用延迟数据提供者实现，接收方首次读取路径时调用。
+
 - `NSView::beginDraggingSessionWithItems:event:source:`。拖动条目用 `NSPasteboardItem`，类型为
   `public.file-url`；`before_drop` 对应 `NSPasteboardItemDataProvider` 的延迟提供回调，
   接收方真正读取数据时才触发。

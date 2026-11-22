@@ -223,6 +223,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSTimer",
     "NSDate",
     "NSUserNotification",
+    "NSRunLoop",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
@@ -253,6 +254,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSTextInputClient",
     "NSTextInputContext",
     "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
     "NSPasteboardItem",
     "NSRunningApplication",
     "NSWindowScripting",

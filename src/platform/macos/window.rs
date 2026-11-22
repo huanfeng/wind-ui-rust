@@ -1925,6 +1925,12 @@ impl ContentView {
         }
     }
 
+    /// 文件拖出会话结束：会话吞掉了那次 `mouseUp:`，按捕获丢失收尾，见
+    /// [`notify_drag_out_ended`]。
+    fn drag_out_ended(&self) {
+        self.notify_capture_lost();
+    }
+
     /// 窗口失去 key 状态时通知上层的逻辑捕获方收尾（复位拖动态）。对照 win32 的
     /// `WM_CAPTURECHANGED`：那边是 OS 真把 `SetCapture` 抢走了，macOS 没有显式捕获可抢
     /// （见 `ViewState::capturing`），但"手还按着、抬起事件却永远不会来"这件事一样会发生
@@ -2230,6 +2236,16 @@ extern "C" {
         context: *mut c_void,
         work: extern "C" fn(*mut c_void),
     );
+}
+
+/// 文件拖出（`dragdrop`）结束后调用：AppKit 的拖动会话吞掉了那次 `mouseUp:`，上层的
+/// 按下态永远等不到抬起，下一次移动又会被当成拖动、再起一次拖出。按捕获丢失收尾，
+/// 对照 win32 上 `DoDragDrop` 抢走捕获时的 `WM_CAPTURECHANGED`。`view` 不是本库的
+/// 内容视图时什么都不做。
+pub(super) fn notify_drag_out_ended(view: &NSView) {
+    if let Some(v) = view.downcast_ref::<ContentView>() {
+        v.drag_out_ended();
+    }
 }
 
 /// 主线程蹦床：dispatch 回主线程后标脏所有窗口。此刻必在主线程，thread_local 的登记表

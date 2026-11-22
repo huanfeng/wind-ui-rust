@@ -3178,7 +3178,7 @@ Linux 的原生 Wayland 后端在 `wayland` feature 下（默认开），有窗�
 | 系统托盘 | ✓ | ✓ | ✓ StatusNotifierItem（X11 后端；无托盘宿主时降级为无图标，通知照常） |
 | 全局热键（`App::hotkey` / `App::hotkey_handle`） | ✓ `RegisterHotKey` | ✓ Carbon `RegisterEventHotKey`（唯一免授权途径） | ✓ 根窗口 `GrabKey`（Wayland 下受限，见「全局热键与启动即隐藏」） |
 | 多窗口（`EventCtx::open_window`，见 §8.8） | ✓ | ✓ 同语义 | ✓ 同语义 |
-| 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件） | ✓ | ✗ 返回 `DragEffect::None` | ✗ 同 macOS |
+| 文件拖出（`platform::drag_files` / `drag_files_with`，后者可到放下时才生成文件；示例 `examples/drag_out.rs`） | ✓ | ✓ `NSDraggingSession` + 嵌套事件循环。`before_drop` 在接收方首次读取路径时调用：Finder 在松手时读，个别程序悬停时就读，此时回调会提前 | ✗ 返回 `DragEffect::None` |
 | 文件图标（`platform::file_icon`） | ✓ `IShellItemImageFactory` | ✓ `NSWorkspace::iconForFile` | ✗ 恒返回 `None`（XDG 图标主题查找未实现） |
 | 零窗口常驻（`App::run_resident`） | ✓ | ✗ 打印错误，返回 `false` | ✓ 固定走 X11（经 XWayland），无 X 显示时返回 `false` |
 | 自绘标题栏右键系统菜单（`App::system_menu`，见 §5） | ✓ 默认开 | ✗ 不弹，`system_menu(true)` 也不弹。除 macOS 无此惯例外，更要紧的是它的平台层还不推送窗口状态（下一行），弹出来的菜单禁用态会说谎 | ✓ 默认开 |

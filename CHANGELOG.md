@@ -12,6 +12,10 @@
   `image-formats`，默认全关。开启后挂进现有解码器注册表，`Image::from_bytes` / `from_file` /
   `Element::image*` 按文件头自动识别，公共 API 不变；另新增 `Image::from_ico_bytes(bytes, target)`
   按显示尺寸挑 ICO 条目。单张图片上限 4000 万像素。体积增量见 API_GUIDE 图片一节（全开约 +319KB）。
+- **macOS 文件拖出**（issue #26）：`platform::drag_files` / `drag_files_with` 在 macOS 上接通
+  （此前是返回 `DragEffect::None` 的桩），走 `NSDraggingSession`，拖动预览图用系统文件图标。
+  与 Windows 契约一致，调用阻塞到拖放结束。`before_drop` 挂在延迟数据上：接收方首次读取路径时才调用，
+  Finder 在松手时读取，个别程序悬停时就读。新示例 `examples/drag_out.rs`。
 - **`platform::file_icon(path, size)`**（issue #26）：取文件 / 文件夹在系统文件管理器里显示的
   图标（exe 内嵌图标、按扩展名关联的类型图标、文件夹图标），`size` 为物理像素边长。Windows 走
   `IShellItemImageFactory`、macOS 走 `NSWorkspace::iconForFile`；Linux 暂恒返回 `None`。路径不存在

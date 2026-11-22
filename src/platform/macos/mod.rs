@@ -10,12 +10,14 @@
 //!   多窗口也在此：登记表 `WINDOWS` 兼任子窗 `NSWindow` 的所有者（对照 win32 那张只存
 //!   `HWND` 的名册——差别的来由见该常量的说明）。
 //! - `clipboard`：`NSPasteboard`。
+//! - `dragdrop`：拖出文件到外部程序（`NSDraggingSession`）。
 //! - `tray`：`NSStatusItem` 托盘（图标 + 左键/双击 + 原生右键菜单）。
 //! - 文字渲染见 `crate::text::coretext`（Core Text）。
 //!
 //! 逐项对照实现见 `docs/MACOS_PORTING.md` 与 `platform/win32/mod.rs`。
 
 pub mod clipboard;
+mod dragdrop;
 pub(crate) mod file_icon;
 pub mod hotkey;
 pub mod open_files;
@@ -156,24 +158,7 @@ pub(crate) fn system_prefers_dark() -> bool {
         .is_some_and(|s| s.to_string().eq_ignore_ascii_case("dark"))
 }
 
-/// 拖出到外部程序。macOS 侧（`NSDraggingSession`）尚未接入：暂时什么都不做、
-/// 返回 [`DragEffect::None`](crate::platform::DragEffect::None)，让调用方按"没落到任何
-/// 地方"处理，API 形状与 win32 一致，下游不必按平台分支。
-pub fn drag_files(
-    _paths: &[impl AsRef<std::path::Path>],
-    _allow_move: bool,
-) -> crate::platform::DragEffect {
-    crate::platform::DragEffect::None
-}
-
-/// 见 win32 `drag_files_with`。拖出未接入，`before_drop` 不会被调。
-pub fn drag_files_with(
-    _paths: &[impl AsRef<std::path::Path>],
-    _allow_move: bool,
-    _before_drop: Option<Box<dyn FnOnce() -> bool>>,
-) -> crate::platform::DragEffect {
-    crate::platform::DragEffect::None
-}
+pub use dragdrop::{drag_files, drag_files_with};
 
 /// 用户偏好的界面语言（BCP-47，按优先级排序）。对照 win32 `GetUserPreferredUILanguages`。
 ///

@@ -101,6 +101,7 @@ Win32 实现与应使用的 Cocoa/Core 框架 API，以及推荐的分阶段落�
 | 输入法 | `WM_IME_*` + `ImmSetCompositionWindow`（用 `ime_caret()`） | ✅ 已接：`NSTextInputClient`；合成串经 `setMarkedText:` 整串上报 `set_ime_preedit`，由 `TextInput` **内联绘制**（win32 那边是系统 IME 自己画，故那条路仍走 `set_ime_composing`）；`firstRectForCharacterRange:` 用 `ime_caret()` 定位候选窗，合成期间该位置自动落在合成串内；收尾三处：`unmarkText`/`insertText:` + 窗口失活与 `mouseDown` 兜底 |
 | 光标形状 | `WM_SETCURSOR`（用 `cursor()`） | `NSView::resetCursorRects` 或 `NSCursor::set`，按 `cursor()` 选 arrow/pointingHand/iBeam |
 | 文件拖放 | `WM_DROPFILES`（用 `on_drop_files()`） | `NSDraggingDestination`：`draggingEntered:`/`performDragOperation:` |
+| 文件拖出 | OLE `DoDragDrop`（自带消息泵，阻塞） | `beginDraggingSessionWithItems:` 是异步的，`dragdrop.rs` 自跑嵌套事件循环到 `draggingSession:endedAtPoint:operation:`；会话吞掉的 `mouseUp:` 按捕获丢失补（对照 `WM_CAPTURECHANGED`） |
 | 无边框窗口 | `WM_NCCALCSIZE` + `WM_NCHITTEST`（用 `window_drag_at`/`interactive_at`） | styleMask 去 `titled` + 加 `fullSizeContentView`；自管拖动可重写 `mouseDown` 调 `performWindowDragWithEvent:` |
 | 窗口操作 | `take_window_op()` → `ShowWindow(SW_MINIMIZE/MAXIMIZE...)` | `NSWindow::miniaturize`/`zoom`/`close` |
 
