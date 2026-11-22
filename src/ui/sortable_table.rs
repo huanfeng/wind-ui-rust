@@ -176,6 +176,9 @@ pub(super) type OnSelect = Rc<RefCell<dyn FnMut(&mut EventCtx, &[bool])>>;
 pub(super) struct PageSel {
     pub(super) sel: Signal<Vec<bool>>,
     pub(super) on_select: OnSelect,
+    /// 当前页数据：表头全选按它的行数算，不信勾选向量的长度（应用换页后没及时重填时，
+    /// 向量可能比行多或少）。
+    pub(super) rows: Signal<Vec<Vec<String>>>,
 }
 
 impl PageSel {
@@ -1171,13 +1174,14 @@ impl SelectAllCheck {
             src: SelSrc::Page(sel),
         }
     }
-    /// (已选行数, 总行数)。
+    /// (已选行数, 总行数)。服务端表按当前页行数算，勾选向量多出的不计、缺的算未选。
     fn counts(&self) -> (usize, usize) {
         match &self.src {
             SelSrc::Rows(v) => (v.iter().filter(|s| s.get()).count(), v.len()),
             SelSrc::Page(p) => {
-                let v = p.sel.get();
-                (v.iter().filter(|&&b| b).count(), v.len())
+                let total = p.rows.with(Vec::len);
+                let n = p.sel.with(|v| v.iter().take(total).filter(|&&b| b).count());
+                (n, total)
             }
         }
     }
@@ -2266,6 +2270,21 @@ mod tests {
         // 半选态下点全选 → 全选。
         click(&mut tree, Point::new(20, 19));
         assert_eq!(sel.get(), vec![true, true]);
+    }
+
+    /// 勾选向量比当前页行多（应用换页后没重填）：表头按行数算，点全选写出与行数等长的向量。
+    #[test]
+    fn server_selectable_header_counts_by_page_rows() {
+        let (mut tree, _rows, sel, seen) = server_selectable();
+        sel.set(vec![true, true, true]); // 两行的页，向量却有三位
+        tree.layout_root(Size::new(400, 300), &mut crate::text::NullTextEngine);
+        click(&mut tree, Point::new(20, 19));
+        assert_eq!(
+            sel.get(),
+            vec![false, false],
+            "前两位已全选 → 清空，长度按行数"
+        );
+        assert_eq!(seen.borrow().last().unwrap(), &vec![false, false]);
     }
 
     #[test]

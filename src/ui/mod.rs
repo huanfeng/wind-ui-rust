@@ -4877,6 +4877,7 @@ impl Element {
         let page_sel = sortable_table::PageSel {
             sel: selected,
             on_select,
+            rows,
         };
         let scw = sortable_table::select_col_w();
 
