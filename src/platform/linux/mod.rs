@@ -32,6 +32,8 @@
 
 pub mod clipboard;
 mod dnd;
+mod dnd_source;
+mod drag_image;
 pub(crate) mod file_dialog;
 mod host;
 mod hotkey;
@@ -249,21 +251,22 @@ pub fn open_url(url: &str) {
     }
 }
 
-/// 拖出到外部程序。Linux 侧（XDND 源端）尚未接入：返回 `None`，语义同 macOS 侧。
+/// 拖出到外部程序。X11 后端走 XDND 源端（见 `dnd_source`）；原生 Wayland 后端尚未接入，
+/// 返回 `None`。
 pub fn drag_files(
-    _paths: &[impl AsRef<std::path::Path>],
-    _allow_move: bool,
+    paths: &[impl AsRef<std::path::Path>],
+    allow_move: bool,
 ) -> crate::platform::DragEffect {
-    crate::platform::DragEffect::None
+    drag_files_with(paths, allow_move, None)
 }
 
-/// 见 win32 `drag_files_with`。拖出未接入，`before_drop` 不会被调。
+/// 见 win32 `drag_files_with`。`before_drop` 的调用时机见 `dnd_source` 模块文档。
 pub fn drag_files_with(
-    _paths: &[impl AsRef<std::path::Path>],
-    _allow_move: bool,
-    _before_drop: Option<Box<dyn FnOnce() -> bool>>,
+    paths: &[impl AsRef<std::path::Path>],
+    allow_move: bool,
+    before_drop: Option<Box<dyn FnOnce() -> bool>>,
 ) -> crate::platform::DragEffect {
-    crate::platform::DragEffect::None
+    dnd_source::drag_files_with(paths, allow_move, before_drop)
 }
 
 /// 见 `win32::single_window_open`。Linux 的窗口登记表还没接常驻模式，恒为 `false`

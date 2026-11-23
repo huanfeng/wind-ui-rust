@@ -77,6 +77,8 @@ macOS / Linux 是返回 `DragEffect::None` 的桩。契约要点（三个平台�
 
 ### Linux X11（XDND 源端）
 
+> **已交付**（随 Unreleased）：`src/platform/linux/dnd_source.rs`。按下述方案实现，拖到本程序窗口时排一个本地放下给主循环；`before_drop` 同 macOS，在接收方首次要数据时调用。
+
 目标端已有（`src/platform/linux/dnd.rs`，XDND v5）。源端要补：
 
 1. 拥有 `XdndSelection`，抓住指针与键盘（Esc 取消）。

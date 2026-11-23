@@ -12,6 +12,11 @@
   `image-formats`，默认全关。开启后挂进现有解码器注册表，`Image::from_bytes` / `from_file` /
   `Element::image*` 按文件头自动识别，公共 API 不变；另新增 `Image::from_ico_bytes(bytes, target)`
   按显示尺寸挑 ICO 条目。单张图片上限 4000 万像素。体积增量见 API_GUIDE 图片一节（全开约 +319KB）。
+- **Linux（X11）文件拖出**（issue #26）：`platform::drag_files` / `drag_files_with` 在 X11 后端接通，
+  实现 XDND 源端（v5，兼容 v3、v4，支持 `XdndProxy`），Esc 取消，拖到本程序自己的窗口上照常算放下。
+  默认提议复制，`allow_move` 时按住 Shift 提议移动。`before_drop` 在接收方首次要数据时调用（同 macOS）。
+  拖动时指针旁跟一张拖动图像（文档图标 + 首个文件名，多个文件带个数角标，有合成器时圆角半透明），
+  光标按系统光标主题换成 `dnd-copy` / `dnd-move` / `dnd-no-drop`。拖动期间本程序的窗口不重绘。原生 Wayland 后端仍返回 `DragEffect::None`。
 - **macOS 文件拖出**（issue #26）：`platform::drag_files` / `drag_files_with` 在 macOS 上接通
   （此前是返回 `DragEffect::None` 的桩），走 `NSDraggingSession`，拖动预览图用系统文件图标。
   与 Windows 契约一致，调用阻塞到拖放结束。`before_drop` 挂在延迟数据上：接收方首次读取路径时才调用，

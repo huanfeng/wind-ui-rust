@@ -10,7 +10,7 @@
 > 仅 X11 后端）都已落地。`cargo build` / `cargo test`（默认与
 > `--features gpu` 两档）/ `cargo clippy` 在 Linux 上通过。
 >
-> 尚未实现：文件拖出、窗口模式下的 GPU 后端、原生 Wayland 后端下的托盘与常驻（见 §7.1）。
+> 尚未实现：原生 Wayland 后端下的文件拖出、窗口模式下的 GPU 后端、原生 Wayland 后端下的托盘与常驻（见 §7.1）。
 > 这些入口都存在且不 panic——空操作并记日志，API 形状与另两个平台一致，
 > 下游不必按平台分支。
 >
@@ -34,6 +34,7 @@
 | 输入法 | XIM 客户端（合成串回调风格） | `src/platform/linux/ime.rs` |
 | `Clipboard` | 独立线程拥有 `CLIPBOARD` 选区；X11 下另支持 `image/png` 图片读写（读支持 INCR；PNG 编解码在 `src/platform/clip_image.rs`），原生 Wayland 暂不支持图片 | `src/platform/linux/clipboard.rs` |
 | 文件拖入 | XDND v5 目标端 | `src/platform/linux/dnd.rs` |
+| 文件拖出 | XDND v5 源端（兼容 v3、v4）；后端被借用时自跑嵌套循环，无关事件留给主循环，拖动期间本程序窗口不重绘。拖动图像是 override-redirect 窗口（`drag_image.rs` 出图，做成背景 pixmap 免处理 Expose），偏在指针右下方以免挡住找接收方；光标经 x11rb `cursor` 特性按主题加载。GNOME Wayland 会话下经 XWayland 拖给原生 Wayland 窗口时，Mutter（`meta-xwayland-dnd.c`）把可选动作写死为复制 / 移动 / 询问，不看源端提议，文件管理器同盘默认移动、源文件会被移走，回报给源端的仍是复制——X11 源端无从约束，要靠原生 Wayland 拖出（`wl_data_source.set_actions`） | `src/platform/linux/dnd_source.rs` |
 | 全局热键 | 根窗口 `GrabKey` | `src/platform/linux/hotkey.rs` |
 | 事件循环原语 | `poll(2)` + 唤醒 socketpair | `src/platform/linux/sys.rs` |
 | `PlatformTextEngine` | fontconfig + ttf-parser + ab_glyph_rasterizer | `src/text/linux/` |
@@ -175,7 +176,9 @@ export XDG_DATA_DIRS=$PWD/root/usr/share:/usr/share
 输入法与文件拖入没有现成的无头工具可用：`xim` crate 带服务端特性，写一个几十行的
 测试 XIM 服务端（字母进合成串、空格提交）即可在 `XMODIFIERS=@im=<名字>` 下走完整协议；
 XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSelection`）。两者都是
-真协议往返，不是 mock。
+真协议往返，不是 mock。文件拖出不用另写替身：`drag_out` 与 `file_drop` 两个示例分属两个进程，
+同时开着，用 `xdotool mousedown` / `mousemove` / `mouseup` 从前者拖到后者，就是一次完整的跨进程
+XDND 往返（拖到 `drag_out` 自己的窗口上则走本地放下路径）。
 
 ## 7. 后续
 
@@ -185,7 +188,7 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
 2. **MIT-SHM 呈现**：大窗口整窗帧下 `PutImage` 要把整帧过一遍 socket，SHM 可省掉这次拷贝。
 3. **窗口模式 GPU**：`src/render/gpu/` 已在 Linux 编译通过，差的是从 X 窗口建 wgpu surface。
 4. **Wayland 原生**：已完成（默认仍走 X11），见 §8；默认后端是否改为 Wayland 见 §8.1。
-5. **文件拖出**（XDND 源端）、运行期 DPI / 主题跟随。
+5. ~~文件拖出（XDND 源端）~~：已落地（原生 Wayland 后端仍未接）；运行期 DPI / 主题跟随。
 
 ### 7.1 系统托盘、桌面通知与零窗口常驻
 
@@ -266,7 +269,7 @@ XDND 同理写一个最小拖放源（发 Enter/Position/Drop、应答 `XdndSele
   拿令牌换焦点（§8.3）。合成器的防抢焦点策略决定成不成：令牌来自桌面启动器或本应用近期输入时
   一般会给焦点；两者都没有时合成器多半只把窗口标成「需要注意」（GNOME 弹「已就绪」通知），
   不像 XWayland 下那样直接到前台。
-- **文件拖出、primary selection（中键粘贴）、系统托盘** 在两条路上都没有，不算回退。
+- **文件拖出**：X11 后端已有、原生 Wayland 后端还没有，切换默认后端前要补上。**primary selection（中键粘贴）、系统托盘** 在两条路上都没有，不算回退。
 - 默认后端一变，所有下游应用同时换路径：建议先在 CHANGELOG 里公告一个版本，留出
   `WINDUI_BACKEND=x11` 作为逃生口。
 

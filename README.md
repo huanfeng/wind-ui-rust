@@ -183,7 +183,7 @@ cargo clippy --all-targets                                  # 静态检查
 
 ## 状态
 
-Windows 与 macOS 均已支持；Linux 基本可用：X11 后端为默认，原生 Wayland 后端（输入法 text-input-v3、客户端标题栏、xdg-activation）已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏，暂需 `WINDUI_BACKEND=wayland` 启用。系统托盘与桌面通知（经 D-Bus，X11 路径）、零窗口常驻已实现；文件拖出与窗口模式 GPU 尚未实现，原生 Wayland 下托盘、常驻与全局热键不可用，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
+Windows 与 macOS 均已支持；Linux 基本可用：X11 后端为默认，原生 Wayland 后端（输入法 text-input-v3、客户端标题栏、xdg-activation）已在 GNOME 42 上过真桌面回归清单，并在 Deepin 25 Treeland 上确认服务端装饰时不重复画标题栏，暂需 `WINDUI_BACKEND=wayland` 启用。系统托盘与桌面通知（经 D-Bus，X11 路径）、零窗口常驻已实现；文件拖出已在 X11 后端实现；窗口模式 GPU 尚未实现，原生 Wayland 下托盘、常驻、全局热键与文件拖出不可用，见 [`docs/LINUX_PORTING.md`](docs/LINUX_PORTING.md)。MVP 控件集完成，持续完善中。
 
 ## 文档
 

@@ -28,7 +28,7 @@ pub mod split;
 pub mod stepper;
 mod table_cols;
 pub mod text_content;
-mod text_fit;
+pub(crate) mod text_fit;
 pub mod virtual_list;
 pub mod window_buttons;
 

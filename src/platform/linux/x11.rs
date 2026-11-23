@@ -297,6 +297,7 @@ impl X11 {
         let screen = &setup.roots[screen_num];
         let root = screen.root;
         let depth = screen.root_depth;
+        let root_visual = screen.root_visual;
         let bpp = setup
             .pixmap_formats
             .iter()
@@ -325,6 +326,34 @@ impl X11 {
         let argb = argb_visual(&conn, screen_num);
         let conn = Rc::new(conn);
         let ime = Ime::connect(conn.clone(), screen_num);
+        // 文件拖出在后端被借用时运行，自带一份连接（见 `dnd_source` 模块文档）。
+        let icon = match &argb {
+            Some(v) => super::dnd_source::IconVisual {
+                depth: 32,
+                visual: v.visual,
+                colormap: v.colormap,
+                gc: v.gc,
+                argb: true,
+                lsb: fmt.lsb,
+            },
+            None => super::dnd_source::IconVisual {
+                depth: fmt.depth,
+                visual: root_visual,
+                colormap: x11rb::NONE,
+                gc,
+                argb: false,
+                lsb: fmt.lsb,
+            },
+        };
+        super::dnd_source::install(super::dnd_source::SourceCtx {
+            conn: conn.clone(),
+            screen: screen_num,
+            root,
+            atoms: dnd_atoms,
+            scale,
+            icon,
+        });
+        super::dnd_source::set_composited(argb.is_some());
         let mut x = X11 {
             conn,
             ime,
@@ -829,8 +858,13 @@ impl X11 {
             fds.push(p.read.as_raw_fd());
         }
         loop {
-            // 1. 排空 X 事件（含等回复期间被读进内部队列的那些）。
+            // 1. 排空 X 事件（含等回复期间被读进内部队列的那些）。文件拖出的嵌套循环
+            //    留下的事件先处理，它们比连接里的新事件早。
             loop {
+                if let Some(p) = super::dnd_source::take_pending() {
+                    self.handle_pending(p);
+                    continue;
+                }
                 match self.conn.poll_for_event() {
                     Ok(Some(ev)) => self.handle_event(ev),
                     Ok(None) => break,
@@ -898,7 +932,8 @@ impl X11 {
                 continue;
             }
             let any_dirty = self.windows.iter().any(|w| w.needs_paint && w.mapped);
-            let timeout = if any_dirty {
+            // 文件拖出若在出帧 / 定时器回调里发起，它留下的事件此刻还在队列里，不能去睡。
+            let timeout = if any_dirty || super::dnd_source::has_pending() {
                 Some(Duration::ZERO)
             } else {
                 timeout
@@ -1098,6 +1133,7 @@ impl X11 {
                 if self.argb.as_ref().is_some_and(|v| v.cm == e.selection) =>
             {
                 let on = e.owner != x11rb::NONE;
+                super::dnd_source::set_composited(on);
                 if std::mem::replace(&mut self.composited, on) != on {
                     log::debug!(
                         "合成器{}：无边框窗口圆角随之开关",
@@ -1160,9 +1196,18 @@ impl X11 {
                     self.request_close(e.window);
                 }
             }
-            Event::ButtonPress(e) => self.on_button(e, true),
+            Event::ButtonPress(e) => {
+                if e.detail == 1 {
+                    super::dnd_source::note_pointer(e.event, e.time);
+                }
+                self.on_button(e, true)
+            }
             Event::ButtonRelease(e) => self.on_button(e, false),
             Event::MotionNotify(e) => {
+                // 左键按着：文件拖出若在这次移动里发起，要用它的时间戳。
+                if u16::from(e.state) & u16::from(xproto::KeyButMask::BUTTON1) != 0 {
+                    super::dnd_source::note_pointer(e.event, e.time);
+                }
                 if self.pending_drag_motion(e.event, (e.root_x, e.root_y)) {
                     return;
                 }
@@ -1321,6 +1366,37 @@ impl X11 {
             );
         } else if e.type_ == a.XdndLeave {
             self.drag = None;
+        }
+    }
+
+    /// 文件拖出的嵌套循环留给主循环的事，见 `dnd_source::Pending`。
+    fn handle_pending(&mut self, p: super::dnd_source::Pending) {
+        use super::dnd_source::Pending;
+        match p {
+            Pending::Event(ev) => self.handle_event(ev),
+            Pending::CaptureLost(id) => {
+                let Some(i) = self.idx(id) else { return };
+                let w = &mut self.windows[i];
+                if w.capturing {
+                    w.capturing = false;
+                    if w.handler.on_capture_lost() {
+                        w.needs_paint = true;
+                    }
+                }
+                self.after_event(id);
+            }
+            Pending::LocalDrop { window, pos, paths } => {
+                let Some(i) = self.idx(window) else { return };
+                let w = &mut self.windows[i];
+                let r = {
+                    let _g = crate::platform::EventDispatchGuard::enter();
+                    w.handler.on_drop_files(Point::new(pos.0, pos.1), paths)
+                };
+                if r {
+                    w.needs_paint = true;
+                }
+                self.after_event(window);
+            }
         }
     }
 

@@ -154,7 +154,8 @@ windows = { version = "0.62", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 # x11rb 与 xim（XIM 输入法协议）的大版本必须同步升级：两者共用同一个连接类型。
 # xfixes：监听合成器选区（`_NET_WM_CM_S<屏>`）的出现 / 消失，无边框窗口的圆角随之开关。
-x11rb = { version = "0.14", features = ["xfixes"] }
+# cursor：按系统光标主题加载拖出时的 dnd-copy / dnd-no-drop 等光标（纯 Rust 读 Xcursor 文件）。
+x11rb = { version = "0.14", features = ["xfixes", "cursor"] }
 # XIM 客户端：与 fcitx5 / ibus 的 XIM 前端通话（合成串回调 + 提交）。
 xim = { version = "0.6", default-features = false, features = ["x11rb-client"] }
 ttf-parser = "0.25"

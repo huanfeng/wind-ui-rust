@@ -5,8 +5,10 @@
 //! - 「现成的文件」：直接用 `platform::drag_files` 拖出，允许移动（同一卷上拖进 Finder 会移走）。
 //! - 「放下时才生成」：`platform::drag_files_with`，路径先报给接收方，接收方要读取时才写出文件。
 //!
-//! 页面底部显示上一次拖动的结果与 `before_drop` 是否被调用。文件都建在临时目录的
-//! `windui-drag-out` 下。Linux 暂未实现拖出，拖动后结果恒为 `None`。
+//! 页面底部显示上一次拖动的结果与 `before_drop` 是否被调用。拖回本窗口松手也算放下，
+//! 本窗口收到的路径同样显示在底部。文件都建在临时目录的
+//! `windui-drag-out` 下；「现成的文件」被接收方移走后，下次拖动前自动补回。
+//! Linux 目前只有 X11 后端支持拖出，原生 Wayland 后端拖动后结果恒为 `None`。
 
 use std::path::PathBuf;
 
@@ -72,6 +74,8 @@ impl Widget for DragOut {
                         );
                         format!("{effect:?}，before_drop 调用：{}", called.get())
                     } else {
+                        // 上次可能被接收方移走了，补回来再拖。
+                        ensure_files(&paths);
                         format!("{:?}", drag_files(&paths, true))
                     };
                     status.set(format!("上次拖出结果：{effect}"));
@@ -111,25 +115,35 @@ fn draggable(
         })
 }
 
+/// 缺哪个补哪个（目录也可能被整个清掉）。
+fn ensure_files(paths: &[PathBuf]) {
+    for p in paths {
+        if !p.exists() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(p, "windui 拖出示例\n");
+        }
+    }
+}
+
 fn main() {
     let dir = std::env::temp_dir().join("windui-drag-out");
-    let _ = std::fs::create_dir_all(&dir);
     let ready: Vec<PathBuf> = ["拖出示例.txt", "拖出示例-2.txt"]
         .iter()
-        .map(|n| {
-            let p = dir.join(n);
-            if !p.exists() {
-                let _ = std::fs::write(&p, "windui 拖出示例\n");
-            }
-            p
-        })
+        .map(|n| dir.join(n))
         .collect();
+    ensure_files(&ready);
     let lazy = vec![dir.join("放下时生成.txt")];
     // 每次启动都删掉，好确认它确实是放下时才写出来的。
     let _ = std::fs::remove_file(&lazy[0]);
 
     let status = signal("还没有拖动过".to_string());
+    let received = signal(String::new());
     let page = Element::col()
+        .on_drop_files(move |_, paths| {
+            received.set(format!("本窗口收到 {} 个文件", paths.len()));
+        })
         .fill()
         .bg_role(Role::Bg)
         .padding(18)
@@ -150,6 +164,7 @@ fn main() {
             status,
         ))
         .child(Element::label(status).fg_role(Role::TextMuted))
+        .child(Element::label(received).fg_role(Role::TextMuted))
         .child(
             Element::label(format!("文件位置：{}", dir.display()))
                 .font_size(12.0)
