@@ -169,6 +169,41 @@ Linux 上上述命令同样可跑（单测、截图回归都不需要 X 服务�
 
 ---
 
+## 6.1 发版与下游依赖
+
+下游仓库（`wind-setting`、`wind-installer`、`wind-portable`、`wind-dict`）一律按 **crates.io 版本号**
+依赖 windui（如 `windui = "0.35"`），**不再用 path / git 指向本仓库的最新代码**。
+
+**windui 有改动要让下游用上时，顺序固定：先发版，再改下游。**
+
+1. 本仓库发版：`CHANGELOG.md` 的 `[Unreleased]` 改成版本号与日期、`Cargo.toml` 升版本、补底部对比链接，
+   提交 `chore(release): vX.Y.Z`，打标签 `vX.Y.Z`，推送 main 与标签；CI（`release.yml`）发布到 crates.io。
+2. 等 crates.io 上能取到新版本（CI 在 macOS 机器上跑，机器紧张时会排队，必要时重新触发）。
+3. 逐个下游仓库：`Cargo.toml` 里把版本号改成新的，`cargo update -p windui` 刷新 `Cargo.lock`
+   （若 lock 里还是旧的路径条目导致 `-p` 匹配不上，用 `cargo fetch`），编译与测试通过后提交。
+
+不要先改下游再补发版：下游在新版本发布前编不过，提交里的 lock 也会指向不存在的版本。
+
+### 联调本地 windui（临时，不提交）
+
+开发 windui 的同时要在下游仓库里验证，不必发版，在下游仓库目录里用 `--config` 临时把依赖改指向本地：
+
+```sh
+# 下游仓库目录下；wind-ui-rust 与下游仓库平级
+cargo check --config 'patch.crates-io.windui.path="../wind-ui-rust"'
+cargo test  --config 'patch.crates-io.windui.path="../wind-ui-rust"'
+```
+
+- 这条覆盖**只对本次命令生效**，不改 `Cargo.toml`。每条 cargo 命令都要带；不带就回到 crates.io 版本。
+- **不能加 `--locked`**：覆盖会让 `Cargo.lock` 里 windui 条目少掉 `source` 与 `checksum` 两行，加了会直接报错。
+- 联调完 **必须还原 `Cargo.lock`**：`git checkout -- Cargo.lock`（先确认 lock 里没有你自己要保留的别的改动）。
+- 下游的 `pre-commit` 钩子会拦两种误提交：`Cargo.toml` 里 windui 写成 path/git、`Cargo.lock` 里 windui 没有
+  `source`。钩子拦下时按提示还原，**不要用 `--no-verify` 绕过**。
+- 不要把 `path = "../wind-ui-rust"` 直接写进 `Cargo.toml` 来联调：那样既容易误提交，也会让其他人的构建找不到目录。
+  `wind-dict` 没有提交钩子，更要自己留意。
+
+---
+
 ## 7. 提交规范
 
 - **Conventional commit**：`feat(scope): …` / `fix` / `refactor` / `docs` / `test` / `chore`。
