@@ -1848,6 +1848,25 @@ impl Element {
             c.multiline = false;
         })
     }
+    /// 密码框尾部加一个眼睛按钮：点击在掩码与明文显示间切换，只改显示——正文、光标、
+    /// 选区与焦点都不动，复制 / 剪切照旧被禁止。隐藏或复用该输入框时自动遮回。
+    /// 必须先 `.password()`（否则 debug 下 panic、release 忽略）。
+    ///
+    /// 眼睛按钮只响应鼠标 / 触摸；键盘上没有对应的按键焦点（输入框内部无独立焦点位）。
+    #[track_caller]
+    pub fn reveal_toggle(mut self) -> Self {
+        self.reject_on_number_field("reveal_toggle()");
+        let has_password = self
+            .widget
+            .as_any_mut()
+            .and_then(text_input_of)
+            .is_some_and(|ti| ti.config_mut().password);
+        debug_assert!(
+            has_password || self.widget.as_any_mut().and_then(text_input_of).is_none(),
+            "reveal_toggle() 必须先 .password()"
+        );
+        self.config_text_input(|c| c.reveal_toggle = c.password)
+    }
     /// 多行输入（编辑/换行行为见 P4）。
     #[track_caller]
     pub fn multiline(mut self) -> Self {

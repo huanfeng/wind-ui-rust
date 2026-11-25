@@ -3,6 +3,15 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **密码框眼睛按钮 `.reveal_toggle()`**：`Element::text_input(..).password().reveal_toggle()` 在框内
+  右端加一个眼睛图标，点击在掩码与明文显示间切换（明文时图标带斜线）。只改显示：正文、光标、选区
+  与焦点都不动，复制 / 剪切仍被禁止；输入框被隐藏或复用时自动遮回。必须先 `.password()`
+  （否则 debug 下 panic）。目前只响应鼠标 / 触摸，无键盘入口。
+
 ## [0.36.0] - 2026-11-26
 
 ### 新增

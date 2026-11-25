@@ -639,6 +639,7 @@ let page = Element::col()
 Element::text_input(text, "占位符")               // text: Signal<String>；占位符收 TextContent：
                                                   // &str/String 固定、Signal<String> 随状态变、t!(..) 随语言
     .password()        // 密码遮蔽（仅对 text_input 有效）
+    .reveal_toggle()   // 密码框尾部眼睛按钮：点击切换明文显示（须先 .password()；只改显示，仍禁复制）
     .multiline()       // 多行
     .wrap(true)        // 多行时是否自动折行（默认 true）
     .read_only()       // 只读：可聚焦 / 选择 / 复制，拒绝一切编辑（与 disabled 不同：disabled 不可聚焦不可选）

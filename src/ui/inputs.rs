@@ -1013,6 +1013,8 @@ const NO_WRAP_W: i32 = 100_000;
 const SEL_EOL_EXTRA: i32 = 6;
 /// 密码掩码字符（U+2022 BULLET）。
 const PASSWORD_MASK: char = '\u{2022}';
+/// 眼睛按钮命中区宽度（逻辑 px，自框右沿起算）。
+const EYE_ZONE: i32 = 28;
 
 /// 插入符的竖直范围 `(y, h)`（逻辑坐标），`ly`/`line_h` 为所在视觉行的行盒，`text` 为该行文本。
 ///
@@ -1064,6 +1066,9 @@ pub struct TextConfig {
     pub multiline: bool,
     /// 密码模式：显示为掩码圆点、禁止复制/剪切、强制单行。
     pub password: bool,
+    /// 密码框尾部的眼睛按钮：点击在掩码与明文显示间切换（仅 `password` 时生效，
+    /// 见 `Element::reveal_toggle`）。只改显示，复制 / 剪切仍被禁止。
+    pub reveal_toggle: bool,
     /// 多行软换行（仅 multiline 生效）；false 时仅显式 \n 换行。
     pub wrap: bool,
     /// 前置图标字形（如放大镜 🔍）：在左侧留出图标区并绘制，文字/光标/命中相应右移。
@@ -1105,6 +1110,7 @@ impl Default for TextConfig {
         Self {
             multiline: false,
             password: false,
+            reveal_toggle: false,
             wrap: true,
             leading: None,
             trail: 0,
@@ -1167,6 +1173,12 @@ pub struct TextInput {
     /// true 时 paint 将视口滚到光标位置（键盘移动/鼠标点击后设置）；
     /// 滚轮滚动不设置，避免 paint 每帧重置 scroll_y。
     follow_cursor: Cell<bool>,
+    /// 眼睛按钮当前为明文显示。隐藏 / 复用（`reset_interaction`）时复位为掩码。
+    revealed: bool,
+    /// 指针停在眼睛区（光标换成箭头）。
+    over_eye: Cell<bool>,
+    /// 本次按下落在眼睛区；松手时只认它，免得在文字区按下的拖选被误当成点按钮。
+    eye_down: bool,
     /// 宿主控件在文字区**右侧**额外占用的宽度（逻辑 px），在 `config.trail` 之外另加。
     /// 与 `trail` 的区别是它由 `measure` 实测得出（如数值框的单位后缀，宽度取决于字体），
     /// 而 `measure` 只有 `&self`，所以用 `Cell`；`trail` 是配置期写死的整数。
@@ -1297,6 +1309,9 @@ impl TextInput {
             scrollbar: VScrollbar::new(),
             follow_cursor: Cell::new(true),
             trail_extra: Cell::new(0),
+            revealed: false,
+            over_eye: Cell::new(false),
+            eye_down: false,
             hover_in_scrollbar: Cell::new(false),
             font_size_hint: Cell::new(14.0),
             align_off: Cell::new(0),
@@ -1521,6 +1536,74 @@ impl TextInput {
         self.config.multiline && !self.config.password
     }
 
+    /// 眼睛按钮是否生效：只在密码框上。
+    fn eye_enabled(&self) -> bool {
+        self.config.password && self.config.reveal_toggle
+    }
+
+    /// 眼睛按钮让出的右侧留白：文字右沿停在按钮左侧 4px，随 `pad_x` 反向取值。
+    fn eye_reserve(&self) -> i32 {
+        if self.eye_enabled() {
+            (EYE_ZONE + 4 - self.pad_x()).max(0)
+        } else {
+            0
+        }
+    }
+
+    fn in_eye(&self, bounds: Rect, p: crate::geometry::Point) -> bool {
+        self.eye_enabled()
+            && bounds.w >= EYE_ZONE * 2
+            && bounds.contains(p)
+            && p.x >= bounds.right() - EYE_ZONE
+    }
+
+    /// 当前是否明文显示（眼睛按钮状态）。
+    #[cfg(test)]
+    pub(crate) fn is_revealed(&self) -> bool {
+        self.revealed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_revealed(&mut self, on: bool) {
+        self.revealed = on;
+    }
+
+    /// 画眼睛：杏仁形轮廓 + 瞳孔；明文显示时加一道斜线（再点即遮住）。
+    fn paint_eye(&self, bounds: Rect, enabled: bool, canvas: &mut dyn Canvas) {
+        let th = crate::theme::current();
+        let color = if !enabled {
+            th.palette.text_disabled
+        } else if self.over_eye.get() {
+            th.palette.text
+        } else {
+            th.palette.placeholder
+        };
+        let paint = Paint::fill(color);
+        let cx = bounds.right() as f32 - EYE_ZONE as f32 / 2.0;
+        let cy = bounds.y as f32 + bounds.h as f32 / 2.0;
+        let (hw, hh) = (8.0f32, 4.5f32);
+        // 上下各一条二次曲线，端点在眼角；采样成折线闭合。
+        let n = 10;
+        let mut pts = Vec::with_capacity(2 * n + 1);
+        for side in [-1.0f32, 1.0] {
+            for i in 0..=n {
+                let t = i as f32 / n as f32;
+                let (t, sx) = if side < 0.0 { (t, -hw) } else { (1.0 - t, -hw) };
+                // 二次贝塞尔：P0=(-hw,0) P1=(0,±2*hh) P2=(hw,0)
+                let u = 1.0 - t;
+                let x = u * u * sx + t * t * hw;
+                let y = 2.0 * u * t * (side * 2.0 * hh);
+                pts.push((cx + x, cy + y));
+            }
+        }
+        pts.push(pts[0]);
+        canvas.draw_polyline(&pts, 1.4, &paint);
+        canvas.fill_circle(cx, cy, 2.3, &paint);
+        if self.revealed {
+            canvas.draw_line(cx - 7.0, cy + 7.0, cx + 7.0, cy - 7.0, 1.4, &paint);
+        }
+    }
+
     /// 前置图标占用的左侧内宽（图标区 ≈ 字号 + 间距）；无图标为 0。
     /// paint 的 `inner` 与命中的 `local_x` 都按此右移，保证文字/光标/点击一致。
     fn lead_inset(&self, fsize: f32) -> i32 {
@@ -1544,7 +1627,7 @@ impl TextInput {
     /// 那 5 处换算点都在 paint 里。
     fn display_string(&self) -> String {
         let base = self.text.with(|t| {
-            if self.config.password {
+            if self.config.password && !self.revealed {
                 t.chars().map(|_| PASSWORD_MASK).collect()
             } else {
                 t.clone()
@@ -2333,6 +2416,7 @@ impl Widget for TextInput {
                 - 2 * self.pad_x()
                 - lead
                 - self.config.trail.max(0)
+                - self.eye_reserve()
                 - if extra_fits(self.trail_extra.get(), bounds.w) {
                     self.trail_extra.get()
                 } else {
@@ -2356,6 +2440,9 @@ impl Widget for TextInput {
                 Align::Center,
                 ts,
             );
+        }
+        if self.eye_enabled() && bounds.w >= EYE_ZONE * 2 {
+            self.paint_eye(bounds, enabled, canvas);
         }
         let wrap = self.config.wrap && multiline;
         // 光标在**显示串**中的位置。合成期间它落在合成串内部——IME 边打边移动
@@ -2775,6 +2862,11 @@ impl Widget for TextInput {
         match ev {
             Event::Pointer(p) => match p.kind {
                 PointerKind::Down => {
+                    // 眼睛按钮：只记按下，不取焦点、不动光标与选区；松手才切换。
+                    if p.button == MouseButton::Left && self.in_eye(ctx.bounds(), p.pos) {
+                        self.eye_down = true;
+                        return true;
+                    }
                     ctx.request_focus();
                     // 同按键入口：右键落在选区内与否要按钳过的选区判。
                     self.clamp_selection();
@@ -2857,6 +2949,9 @@ impl Widget for TextInput {
                     true
                 }
                 PointerKind::Move => {
+                    if self.eye_enabled() {
+                        self.over_eye.set(self.in_eye(ctx.bounds(), p.pos));
+                    }
                     // 滚动条拖动优先。
                     if self.scrollbar.dragging {
                         if let Some(new_sy) = self.scrollbar.on_move(p.pos) {
@@ -2909,12 +3004,20 @@ impl Widget for TextInput {
                     false
                 }
                 PointerKind::Leave => {
+                    self.over_eye.set(false);
                     if self.hover_in_scrollbar.get() {
                         self.hover_in_scrollbar.set(false);
                     }
                     false
                 }
                 PointerKind::Up => {
+                    if std::mem::take(&mut self.eye_down) {
+                        if self.in_eye(ctx.bounds(), p.pos) {
+                            self.revealed = !self.revealed;
+                        }
+                        ctx.mark_dirty();
+                        return true;
+                    }
                     // 释放滚动条拖动。
                     if self.scrollbar.on_up(ctx) {
                         ctx.mark_dirty();
@@ -3268,6 +3371,9 @@ impl Widget for TextInput {
         self.dragging = false;
         self.goal_x.set(None);
         self.follow_cursor.set(true);
+        // 隐藏 / 复用即遮回：别让上一次露出的口令跟着对话框留下来。
+        self.revealed = false;
+        self.eye_down = false;
     }
     fn frame_shows_focus(&self) -> bool {
         // 无框时没有外框可变色，焦点只能靠焦点环。
@@ -3278,7 +3384,7 @@ impl Widget for TextInput {
     }
     fn cursor(&self) -> CursorShape {
         // 悬停在滚动条区域或正在拖动滚动条时，显示普通箭头。
-        if self.scrollbar.dragging || self.hover_in_scrollbar.get() {
+        if self.scrollbar.dragging || self.hover_in_scrollbar.get() || self.over_eye.get() {
             CursorShape::Arrow
         } else {
             CursorShape::Text
@@ -3785,6 +3891,20 @@ mod tests {
         ti.config.password = true;
         let disp = ti.display_string();
         assert_eq!(disp, "\u{2022}\u{2022}pin", "正文掩码、合成串明文");
+    }
+
+    /// 显示切换只改显示串：掩码 ↔ 明文，正文与光标不变。
+    #[test]
+    fn revealed_password_displays_plain_text() {
+        let mut ti = input_with("abc", 2, Preedit::default());
+        ti.config.password = true;
+        ti.config.reveal_toggle = true;
+        assert_eq!(ti.display_string(), "\u{2022}\u{2022}\u{2022}");
+        ti.set_revealed(true);
+        assert_eq!(ti.display_string(), "abc");
+        assert_eq!(ti.cursor, 2, "光标不动");
+        ti.set_revealed(false);
+        assert_eq!(ti.display_string(), "\u{2022}\u{2022}\u{2022}");
     }
 
     /// 逻辑索引 ↔ 显示索引的往返一致性。

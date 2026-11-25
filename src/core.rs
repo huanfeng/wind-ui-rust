@@ -9336,6 +9336,116 @@ mod tests {
         assert_eq!(txt.get(), "seed", "密码模式仍允许粘贴");
     }
 
+    /// 带眼睛按钮的密码框 + 一个同级输入框，宽 200（眼睛区在右端 28px 内）。
+    fn reveal_tree(initial: &str) -> (Tree, NodeId, Signal<String>) {
+        let txt = signal(String::from(initial));
+        let root = Element::col()
+            .width(200)
+            .height(80)
+            .child(
+                Element::text_input(txt, "ph")
+                    .password()
+                    .reveal_toggle()
+                    .width(200),
+            )
+            .child(Element::text_input(signal(String::new()), "other").width(200));
+        let mut tree = Tree::new();
+        let id = root.build(&mut tree);
+        tree.root = Some(id);
+        let mut te = crate::text::NullTextEngine;
+        tree.layout_root(Size::new(200, 80), &mut te);
+        let input = tree.get(id).unwrap().children[0];
+        (tree, input, txt)
+    }
+
+    fn press_at(tree: &mut Tree, pos: Point) -> DispatchResult {
+        let (mut h, mut cap) = (None, None);
+        let mut ev = PointerEvent {
+            kind: PointerKind::Down,
+            pos,
+            button: MouseButton::Left,
+            click_count: 1,
+            mods: crate::event::Mods::default(),
+        };
+        let r = tree.dispatch_pointer(ev, &mut h, &mut cap);
+        ev.kind = PointerKind::Up;
+        tree.dispatch_pointer(ev, &mut h, &mut cap);
+        r
+    }
+
+    fn revealed_of(tree: &mut Tree, id: NodeId) -> bool {
+        tree.get_mut(id)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<crate::ui::inputs::TextInput>())
+            .map(|ti| ti.is_revealed())
+            .unwrap()
+    }
+
+    #[test]
+    fn reveal_toggle_click_flips_display_keeps_text_selection_and_focus() {
+        let (mut tree, input, txt) = reveal_tree("secret");
+        let k = |key, ctrl| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl,
+            alt: false,
+            meta: false,
+        };
+        tree.dispatch_key(k(Key::Other(0x41), true), Some(input)); // Ctrl+A
+        let sel = |tree: &mut Tree| tree.selection_of(input);
+        let sel0 = sel(&mut tree);
+        assert_eq!(sel0, Some((0, 6)));
+        assert!(!revealed_of(&mut tree, input), "默认掩码");
+        let b = tree.abs_bounds(input);
+        let eye = Point::new(b.right() - 14, b.y + b.h / 2);
+        let r = press_at(&mut tree, eye);
+        assert!(revealed_of(&mut tree, input), "点眼睛后明文");
+        assert_eq!(r.focus, None, "点眼睛不抢焦点");
+        assert_eq!(txt.get(), "secret", "正文不变");
+        assert_eq!(sel(&mut tree), sel0, "选区/光标不变");
+        press_at(&mut tree, eye);
+        assert!(!revealed_of(&mut tree, input), "再点切回掩码");
+    }
+
+    #[test]
+    #[should_panic(expected = "必须先 .password()")]
+    fn reveal_toggle_without_password_panics_in_debug() {
+        let _ = Element::text_input(signal(String::new()), "").reveal_toggle();
+    }
+
+    #[test]
+    fn reveal_toggle_click_on_text_area_does_not_toggle() {
+        let (mut tree, input, _txt) = reveal_tree("secret");
+        let b = tree.abs_bounds(input);
+        press_at(&mut tree, Point::new(b.x + 20, b.y + b.h / 2));
+        assert!(!revealed_of(&mut tree, input));
+    }
+
+    #[test]
+    fn reveal_toggle_keeps_copy_blocked_when_revealed() {
+        let clip = Rc::new(RefCell::new(String::from("seed")));
+        let (mut tree, input, _txt) = reveal_tree("secret");
+        tree.clipboard = Some(Box::new(SharedClip(clip.clone())));
+        let k = |key| KeyEvent {
+            key,
+            pressed: true,
+            shift: false,
+            ctrl: true,
+            alt: false,
+            meta: false,
+        };
+        let b = tree.abs_bounds(input);
+        press_at(&mut tree, Point::new(b.right() - 14, b.y + b.h / 2));
+        assert!(revealed_of(&mut tree, input));
+        tree.dispatch_key(k(Key::Other(0x41)), Some(input));
+        tree.dispatch_key(k(Key::Other(0x43)), Some(input));
+        tree.dispatch_key(k(Key::Other(0x58)), Some(input)); // Ctrl+X
+        assert_eq!(&*clip.borrow(), "seed", "明文显示时仍不得复制/剪切");
+    }
+
     #[test]
     fn triple_click_selects_all() {
         let (mut tree, input, txt) = input_tree("hello world");

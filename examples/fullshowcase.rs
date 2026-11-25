@@ -360,6 +360,7 @@ fn main() {
                 "访问密码",
                 Element::text_input(pwd, "输入密码")
                     .password()
+                    .reveal_toggle()
                     .width_match(),
             ))
             .child(Element::field(
