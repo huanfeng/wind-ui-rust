@@ -1537,13 +1537,13 @@ impl TextInput {
     }
 
     /// 眼睛按钮是否生效：只在密码框上。
-    fn eye_enabled(&self) -> bool {
-        self.config.password && self.config.reveal_toggle
+    fn eye_enabled(&self, box_w: i32) -> bool {
+        self.config.password && self.config.reveal_toggle && box_w >= EYE_ZONE * 2
     }
 
     /// 眼睛按钮让出的右侧留白：文字右沿停在按钮左侧 4px，随 `pad_x` 反向取值。
-    fn eye_reserve(&self) -> i32 {
-        if self.eye_enabled() {
+    fn eye_reserve(&self, box_w: i32) -> i32 {
+        if self.eye_enabled(box_w) {
             (EYE_ZONE + 4 - self.pad_x()).max(0)
         } else {
             0
@@ -1551,16 +1551,18 @@ impl TextInput {
     }
 
     fn in_eye(&self, bounds: Rect, p: crate::geometry::Point) -> bool {
-        self.eye_enabled()
-            && bounds.w >= EYE_ZONE * 2
-            && bounds.contains(p)
-            && p.x >= bounds.right() - EYE_ZONE
+        self.eye_enabled(bounds.w) && bounds.contains(p) && p.x >= bounds.right() - EYE_ZONE
     }
 
     /// 当前是否明文显示（眼睛按钮状态）。
     #[cfg(test)]
     pub(crate) fn is_revealed(&self) -> bool {
         self.revealed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_dragging(&self) -> bool {
+        self.dragging
     }
 
     #[cfg(test)]
@@ -2416,7 +2418,7 @@ impl Widget for TextInput {
                 - 2 * self.pad_x()
                 - lead
                 - self.config.trail.max(0)
-                - self.eye_reserve()
+                - self.eye_reserve(bounds.w)
                 - if extra_fits(self.trail_extra.get(), bounds.w) {
                     self.trail_extra.get()
                 } else {
@@ -2441,7 +2443,7 @@ impl Widget for TextInput {
                 ts,
             );
         }
-        if self.eye_enabled() && bounds.w >= EYE_ZONE * 2 {
+        if self.eye_enabled(bounds.w) {
             self.paint_eye(bounds, enabled, canvas);
         }
         let wrap = self.config.wrap && multiline;
@@ -2865,8 +2867,12 @@ impl Widget for TextInput {
                     // 眼睛按钮：只记按下，不取焦点、不动光标与选区；松手才切换。
                     if p.button == MouseButton::Left && self.in_eye(ctx.bounds(), p.pos) {
                         self.eye_down = true;
+                        ctx.capture();
                         return true;
                     }
+                    // 非眼睛按下：清掉可能残留的眼睛状态与悬停高亮。
+                    self.eye_down = false;
+                    self.over_eye.set(false);
                     ctx.request_focus();
                     // 同按键入口：右键落在选区内与否要按钳过的选区判。
                     self.clamp_selection();
@@ -2949,7 +2955,7 @@ impl Widget for TextInput {
                     true
                 }
                 PointerKind::Move => {
-                    if self.eye_enabled() {
+                    if self.eye_enabled(ctx.bounds().w) {
                         self.over_eye.set(self.in_eye(ctx.bounds(), p.pos));
                     }
                     // 滚动条拖动优先。
@@ -3012,9 +3018,12 @@ impl Widget for TextInput {
                 }
                 PointerKind::Up => {
                     if std::mem::take(&mut self.eye_down) {
-                        if self.in_eye(ctx.bounds(), p.pos) {
+                        ctx.release_capture();
+                        let inside = self.in_eye(ctx.bounds(), p.pos);
+                        if inside {
                             self.revealed = !self.revealed;
                         }
+                        self.over_eye.set(inside);
                         ctx.mark_dirty();
                         return true;
                     }
@@ -3374,6 +3383,7 @@ impl Widget for TextInput {
         // 隐藏 / 复用即遮回：别让上一次露出的口令跟着对话框留下来。
         self.revealed = false;
         self.eye_down = false;
+        self.over_eye.set(false);
     }
     fn frame_shows_focus(&self) -> bool {
         // 无框时没有外框可变色，焦点只能靠焦点环。
@@ -3905,6 +3915,18 @@ mod tests {
         assert_eq!(ti.cursor, 2, "光标不动");
         ti.set_revealed(false);
         assert_eq!(ti.display_string(), "\u{2022}\u{2022}\u{2022}");
+    }
+
+    /// 隐藏 / 复用（reset_interaction）时遮回明文。
+    #[test]
+    fn reset_interaction_re_masks_revealed_password() {
+        use crate::core::Widget;
+        let mut ti = input_with("abc", 3, Preedit::default());
+        ti.config.password = true;
+        ti.config.reveal_toggle = true;
+        ti.set_revealed(true);
+        ti.reset_interaction();
+        assert!(!ti.is_revealed());
     }
 
     /// 逻辑索引 ↔ 显示索引的往返一致性。

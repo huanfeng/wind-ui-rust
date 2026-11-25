@@ -9416,6 +9416,41 @@ mod tests {
         let _ = Element::text_input(signal(String::new()), "").reveal_toggle();
     }
 
+    /// 在眼睛上按下、在别处松手后，随后的文字拖选必须能正常结束（不残留拖选 / 捕获）。
+    #[test]
+    fn eye_press_released_elsewhere_does_not_break_later_drag() {
+        let (mut tree, input, _txt) = reveal_tree("secret");
+        let b = tree.abs_bounds(input);
+        let y = b.y + b.h / 2;
+        let (mut h, mut cap) = (None, None);
+        let ev = |kind, x| PointerEvent {
+            kind,
+            pos: Point::new(x, y),
+            button: MouseButton::Left,
+            click_count: 1,
+            mods: crate::event::Mods::default(),
+        };
+        tree.dispatch_pointer(ev(PointerKind::Down, b.right() - 14), &mut h, &mut cap);
+        // 松手落在框外：捕获保证 Up 仍送达。
+        tree.dispatch_pointer(ev(PointerKind::Up, b.x - 30), &mut h, &mut cap);
+        assert!(cap.is_none(), "眼睛按下的捕获已释放");
+        assert!(!revealed_of(&mut tree, input), "在眼睛外松手不切换");
+        // 文字区拖选。
+        tree.dispatch_pointer(ev(PointerKind::Down, b.x + 20), &mut h, &mut cap);
+        tree.dispatch_pointer(ev(PointerKind::Move, b.x + 60), &mut h, &mut cap);
+        tree.dispatch_pointer(ev(PointerKind::Up, b.x + 60), &mut h, &mut cap);
+        assert!(cap.is_none(), "拖选正常结束并释放捕获");
+        let dragging = tree
+            .get_mut(input)
+            .unwrap()
+            .widget
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<crate::ui::inputs::TextInput>())
+            .map(|ti| ti.is_dragging())
+            .unwrap();
+        assert!(!dragging);
+    }
+
     #[test]
     fn reveal_toggle_click_on_text_area_does_not_toggle() {
         let (mut tree, input, _txt) = reveal_tree("secret");
