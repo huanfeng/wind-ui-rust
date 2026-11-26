@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-26
+
 ### 修复
 
 - **捕获的节点被移除后整窗输入失灵**：右键菜单的动作把被右键的行删掉后，指针捕获悬空，之后每个指针事件
@@ -3424,7 +3426,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.37.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.38.0...HEAD
+[0.38.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.34.0...v0.35.0
