@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.37.0] - 2026-11-26
 
 ### 新增
 
@@ -3399,7 +3399,8 @@
 - **windows-rs 0.58 → 0.62 迁移**：`implement` 宏改由 `windows-core` 提供；可空句柄参数
   语义化为 `Option<T>`；`BOOL` 迁至 `windows::core`；COM 实现入参 `Option<&T>` → `Ref<'_, T>`。
 
-[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.36.0...HEAD
+[Unreleased]: https://github.com/huanfeng/wind-ui-rust/compare/v0.37.0...HEAD
+[0.37.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.36.0...v0.37.0
 [0.36.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.35.0...v0.36.0
 [0.35.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/huanfeng/wind-ui-rust/compare/v0.33.0...v0.34.0
