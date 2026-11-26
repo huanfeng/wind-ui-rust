@@ -554,8 +554,12 @@ pub(crate) fn run_offscreen(cfg: &WindowConfig, handler: &mut Box<dyn AppHandler
             pos,
             MouseButton::Left,
         ));
+        // 先出一帧：悬停计时（hint 的「待开」态）要在帧里起算，直接睡过去就没有起点。
+        off.frame(handler, size, cfg.bg);
         // 等待跨过悬停延时（提示延时 500ms + 余量），再渲染让提示显现。
         std::thread::sleep(std::time::Duration::from_millis(650));
+        off.frame(handler, size, cfg.bg);
+        // hint 面板在到点那帧才打开，再出一帧让它排版落定。
         off.frame(handler, size, cfg.bg);
     }
     if let Some(ms) = cfg.screenshot_anim_at {

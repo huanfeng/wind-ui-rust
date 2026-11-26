@@ -971,6 +971,11 @@ pub struct Node {
     /// [`Element::dismiss_swallows_click`](crate::ui::Element::dismiss_swallows_click)）。
     /// 默认 false：同一击里既收起浮层、又照常按到底下的控件。只对 `overlay` 节点有意义。
     pub(crate) overlay_swallow: bool,
+    /// 本节点是交互式提示（[`Element::hint`](crate::ui::Element::hint)）的锚点：它的某个
+    /// `overlay` 子节点就是提示面板。宿主据此驱动开合，见 `app::hint`。
+    pub(crate) hint: bool,
+    /// 浮层摆在锚点右侧（放不下翻到左侧），而非默认的下方。`hint` 面板用。
+    pub(crate) overlay_right: bool,
     /// 进出场过渡状态（`Element::transition`）。只有声明了过渡的节点才分配。
     pub(crate) presence: Option<Box<crate::ui::presence::PresenceState>>,
     /// 高度过渡状态（`Element::animate_height`）。只有声明了的节点才分配。
@@ -1845,6 +1850,8 @@ impl Tree {
 
     /// 锚定浮层与其锚点之间的间隙（逻辑 px）。
     const OVERLAY_GAP: i32 = 4;
+    /// 右侧摆放时面板顶边高出锚点顶边的像素数。
+    const OVERLAY_RIGHT_LIFT: i32 = 4;
 
     /// 锚定浮层的根级排布（见 [`Node::overlay`]）。
     ///
@@ -1905,6 +1912,26 @@ impl Tree {
                 child_spec(h_dim, win.h, false),
                 text,
             );
+            if self.get(id).is_some_and(|n| n.overlay_right) {
+                // 右侧：顶边略高于锚点（视觉上与锚点居中偏上对齐），放不下翻到左侧，再不行贴边。
+                let right = anchor.right() + Self::OVERLAY_GAP;
+                let x = if right + size.w <= win.w {
+                    right
+                } else {
+                    let left = anchor.x - Self::OVERLAY_GAP - size.w;
+                    if left >= 0 {
+                        left
+                    } else {
+                        (win.w - size.w).max(0)
+                    }
+                };
+                let y = (anchor.y - Self::OVERLAY_RIGHT_LIFT).clamp(0, (win.h - size.h).max(0));
+                let saved = self.arrange_origin;
+                self.arrange_origin = Point::new(anchor.x, anchor.y);
+                self.arrange(id, Rect::new(x - anchor.x, y - anchor.y, size.w, size.h));
+                self.arrange_origin = saved;
+                continue;
+            }
             let below = anchor.bottom() + Self::OVERLAY_GAP;
             let y = if below + size.h <= win.h {
                 below
@@ -4160,6 +4187,11 @@ impl Tree {
     pub fn node_tooltip(&self, id: NodeId) -> Option<String> {
         for nid in self.ancestor_chain(id) {
             let Some(n) = self.get(nid) else { continue };
+            // 交互式提示优先：锚点（及其面板里的一切）不再弹指针锚定的 tooltip，
+            // 否则两层提示叠在一起。
+            if n.hint {
+                return None;
+            }
             // 控件动态提示优先：自绘图表按指针所在的数据点给文案，静态文本给不了
             // （见 [`Widget::tooltip`]）。返回 None 才回退到节点上设的静态文本。
             if let Some(dynamic) = n.widget.tooltip() {
@@ -4802,6 +4834,30 @@ impl Tree {
     }
 
     /// 祖先链：从节点自身到根。
+    /// 悬停节点所属的提示锚点：沿父链找最近的 `hint` 节点。第二个值为「是否经过了面板」
+    /// （链上先遇到 `overlay` 节点再遇到锚点＝指针在提示面板里，而不是在锚点自身上）。
+    pub(crate) fn hint_of(&self, hover: NodeId) -> Option<(NodeId, bool)> {
+        let mut in_panel = false;
+        for nid in self.ancestor_chain(hover) {
+            let n = self.get(nid)?;
+            if n.hint {
+                return Some((nid, in_panel));
+            }
+            if n.overlay.is_some() {
+                in_panel = true;
+            }
+        }
+        None
+    }
+
+    /// 提示锚点的面板：它的 `overlay` 子节点及其展开信号。
+    pub(crate) fn hint_panel(&self, anchor: NodeId) -> Option<(NodeId, Signal<bool>)> {
+        self.get(anchor)?.children.iter().find_map(|&c| {
+            let sig = self.get(c)?.overlay?;
+            Some((c, sig))
+        })
+    }
+
     fn ancestor_chain(&self, id: NodeId) -> Vec<NodeId> {
         let mut chain = vec![id];
         let mut cur = self.get(id).and_then(|n| n.parent);

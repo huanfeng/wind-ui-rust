@@ -11,10 +11,8 @@ use crate::render::{Canvas, Paint};
 use crate::text::TextStyle;
 use crate::theme::Theme;
 
-/// 悬停提示：内边距、相对指针的偏移（字号取 `metrics.font_sm`）。触发延时与换行宽度上限由宿主经
+/// 悬停提示：相对指针的偏移（内边距 / 字号取 `Theme.tooltip`，缺省 8×4 与 `metrics.font_sm`）。触发延时与换行宽度上限由宿主经
 /// `Theme.tooltip.delay_ms` / `max_width` 配置（见 [`crate::theme::TooltipTheme`]）。
-const TOOLTIP_PAD_X: i32 = 8;
-const TOOLTIP_PAD_Y: i32 = 4;
 const TOOLTIP_CURSOR_DX: i32 = 12;
 const TOOLTIP_CURSOR_DY: i32 = 20;
 /// 翻到指针上方时与指针的间隙。比 `TOOLTIP_CURSOR_DY` 小：上方翻转本就是空间
@@ -152,10 +150,10 @@ impl TooltipState {
         let tt = &theme.tooltip;
         let ts = canvas.measure_text_wrapped(
             &text,
-            &TextStyle::new(crate::theme::current().metrics.font_sm),
+            &TextStyle::new(tt.font_size(&crate::theme::current().metrics)),
             tt.max_width(),
         );
-        let size = Size::new(ts.w + 2 * TOOLTIP_PAD_X, ts.h + 2 * TOOLTIP_PAD_Y);
+        let size = Size::new(ts.w + 2 * tt.pad_x(), ts.h + 2 * tt.pad_y());
         let (w, h) = (size.w, size.h);
         let Point { x, y } = place(self.pos, size, ws);
         // 到点后弹出（只做入场、不做退场：指针移开即消失，残影会挡住用户正要看的东西）。按"距到点
@@ -200,13 +198,13 @@ impl TooltipState {
                 &Paint::fill(border),
             );
         }
-        let tr = Rect::new(x + TOOLTIP_PAD_X, y, w - 2 * TOOLTIP_PAD_X, h);
+        let tr = Rect::new(x + tt.pad_x(), y, w - 2 * tt.pad_x(), h);
         canvas.draw_text(
             text,
             tr,
             tt.text(pal),
             crate::spec::Align::Start,
-            &TextStyle::new(crate::theme::current().metrics.font_sm),
+            &TextStyle::new(tt.font_size(&crate::theme::current().metrics)),
         );
     }
 }

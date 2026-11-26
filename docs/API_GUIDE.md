@@ -475,6 +475,10 @@ Element::button("确定").on_click(|ctx| { /* ... */ })
 Element::icon_button("\u{25B2}").on_click(|ctx| ...)   // 纯图标按钮（字形）：▲▼ 调序 / ⓘ 信息 / × 关闭
 Element::icon_button_content(image_content)            // 纯图标按钮（图片/SVG）
 //  图标按钮：方形、hover/press 圆底 + 键盘激活 + 手型光标；.size(w,h) 调尺寸、.fg() 取色、.tooltip() 加说明
+//  说明提示两种：.tooltip("名称")  跟指针、不可交互，适合一句话名称；
+//               .hint("较长说明")  锚在元素右侧的卡片，可移入、可选中复制，点击固定（点外部/ESC 关）
+//    .hint_with(Hint::text("说明").title("标题").open_signal(open))  加粗体标题、绑定开合信号（锚点做状态视觉）
+//    同节点 hint 优先；外观见 TooltipTheme（pad_x/pad_y/font_size/line_height/shadow/open_delay_ms/close_delay_ms/hint_max_width）
 Element::badge("v0.0.0-alpha")                   // 胶囊徽章（不可删）：pill + 强调色淡底
 Element::badge_intent("废弃", Intent::Danger)    // 指定语义色的徽章
 Element::chip("分号(;)", |ctx| { /* 移除 */ })   // 可删标签：pill + × 删除按钮（点 × 触发回调）

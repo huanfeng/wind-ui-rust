@@ -1419,6 +1419,21 @@ pub struct TooltipTheme {
     pub border_width: Option<Len>,
     /// 指针静止多久（ms）后弹出，默认 500。
     pub delay_ms: Option<u64>,
+    /// 内边距（逻辑 px）。`tooltip` 默认 8 / 4；`hint` 默认 12 / 8。
+    pub pad_x: Option<i32>,
+    pub pad_y: Option<i32>,
+    /// 字号。默认 `metrics.font_sm`。
+    pub font_size: Option<f32>,
+    /// 行距倍数（相对字号的行高）。`tooltip` 默认 1.0；`hint` 默认 1.4。
+    pub line_height: Option<f32>,
+    /// 投影。`tooltip` 默认不画；`hint` 默认一层柔和的下投影。
+    pub shadow: Option<crate::style::Shadow>,
+    /// `hint` 悬停多久（ms）后弹出，默认 120。
+    pub open_delay_ms: Option<u64>,
+    /// `hint` 指针离开锚点与提示后多久（ms）收起，默认 180。
+    pub close_delay_ms: Option<u64>,
+    /// `hint` 的换行宽度上限（逻辑 px），默认 360。
+    pub hint_max_width: Option<f32>,
 }
 
 impl TooltipTheme {
@@ -1441,6 +1456,39 @@ impl TooltipTheme {
     }
     pub fn border_width(&self) -> Len {
         self.border_width.unwrap_or(Len::Physical { px: 1.0 })
+    }
+    /// `tooltip` 内边距（旧版写死的 8 / 4）。
+    pub fn pad_x(&self) -> i32 {
+        self.pad_x.unwrap_or(8)
+    }
+    pub fn pad_y(&self) -> i32 {
+        self.pad_y.unwrap_or(4)
+    }
+    pub fn font_size(&self, m: &Metrics) -> f32 {
+        self.font_size.unwrap_or(m.font_sm)
+    }
+    /// `hint` 内边距：未显式设置时比 `tooltip` 宽松。
+    pub fn hint_pad_x(&self) -> i32 {
+        self.pad_x.unwrap_or(12)
+    }
+    pub fn hint_pad_y(&self) -> i32 {
+        self.pad_y.unwrap_or(8)
+    }
+    pub fn hint_line_height(&self) -> f32 {
+        self.line_height.unwrap_or(1.4)
+    }
+    pub fn hint_shadow(&self) -> crate::style::Shadow {
+        self.shadow
+            .unwrap_or_else(|| crate::style::Shadow::new(0.0, 4.0, 16.0, Color::rgba(0, 0, 0, 40)))
+    }
+    pub fn open_delay_ms(&self) -> u64 {
+        self.open_delay_ms.unwrap_or(120)
+    }
+    pub fn close_delay_ms(&self) -> u64 {
+        self.close_delay_ms.unwrap_or(180)
+    }
+    pub fn hint_max_width(&self) -> f32 {
+        self.hint_max_width.unwrap_or(360.0)
     }
 }
 

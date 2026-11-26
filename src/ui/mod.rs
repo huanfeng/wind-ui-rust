@@ -785,6 +785,10 @@ pub struct Element {
     overlay: Option<Signal<bool>>,
     /// 见 [`Node::overlay_swallow`]。由 [`Element::dismiss_swallows_click`] 设置。
     dismiss_swallow: bool,
+    /// 交互式提示锚点标记（见 [`Element::hint`]）。
+    hint: bool,
+    /// 浮层摆在锚点右侧（见 [`Node::overlay_right`]），`hint` 面板用。
+    overlay_right: bool,
     presence: Option<presence::Presence>,
     /// 进出场滑动方向（标签页切换用）：显隐翻转时问一次，返回滑动量的符号。
     presence_dir: Option<Rc<dyn Fn(bool) -> i32>>,
@@ -842,6 +846,8 @@ impl Element {
             reactive: false,
             overlay: None,
             dismiss_swallow: false,
+            hint: false,
+            overlay_right: false,
             presence: None,
             presence_dir: None,
             animate_height: false,
@@ -3693,6 +3699,68 @@ impl Element {
         self.child(content)
     }
 
+    /// **交互式提示**：给本元素挂一个锚定在它**右侧**（放不下翻到左侧）的说明面板。
+    ///
+    /// 与 [`tooltip`](Self::tooltip) 的区别：tooltip 是跟着指针的纯绘制浮层，鼠标移不进去、
+    /// 文字也选不了；hint 锚定在节点上，指针可以移进面板，面板里的文字可选中、Ctrl+C 复制。
+    /// 悬停约 120ms 后弹出，离开后有 180ms 宽限；**点击锚点固定**，固定后移开不收，点别处、
+    /// 按 ESC 或再点锚点才关。面板是带边框与柔和阴影的卡片，外观见
+    /// [`TooltipTheme`](crate::theme::TooltipTheme)。要标题、或要拿到开合状态给锚点做
+    /// 视觉反馈，用 [`hint_with`](Self::hint_with)。
+    ///
+    /// 同一节点上 hint 优先，tooltip 不再弹。**说明性、可能较长、需要复制用 hint；
+    /// 控件名称一句话用 tooltip。** 面板里只有文本，要放控件请直接用 [`popup`](Self::popup)。
+    ///
+    /// 面板外观在**构建期**按当前主题定下；换主题后需重建树才会跟随。
+    ///
+    /// # 示例
+    /// ```
+    /// use windui::prelude::*;
+    /// let tip = Element::label("ⓘ").hint("较长的说明文字，可以选中复制。");
+    /// ```
+    pub fn hint(self, text: impl Into<TextContent>) -> Self {
+        self.hint_with(Hint::text(text))
+    }
+
+    /// 说明随信号变化的 [`hint`](Self::hint)：面板里始终显示信号的当前值。
+    pub fn hint_signal(self, text: Signal<String>) -> Self {
+        self.hint_with(Hint::signal(text))
+    }
+
+    /// 带选项的 [`hint`](Self::hint)：标题、绑定开合信号。
+    pub fn hint_with(self, hint: Hint) -> Self {
+        let th = crate::theme::current();
+        let (tt, pal, m) = (&th.tooltip, &th.palette, &th.metrics);
+        let open = hint.open.unwrap_or_else(|| crate::signal::signal(false));
+        let title = hint.title.map(|t| t.resolve().into_owned());
+        let doc = match hint.body {
+            HintBody::Text(t) => {
+                let t = t.resolve().into_owned();
+                Element::rich(hint_doc(title.as_deref(), &t))
+            }
+            HintBody::Signal(sig) => {
+                Element::rich_signal(sig.map(move |s| hint_doc(title.as_deref(), s)))
+            }
+        };
+        let body = doc.line_height(tt.hint_line_height()).copy_menu(true);
+        // 卡片式：默认走 surface / border / text（与应用其余浮层同调），而不是 tooltip 的反色；
+        // 主题显式设了 bg/text/border 则以主题为准。
+        let mut panel = Element::col()
+            .padding_xy(tt.hint_pad_x(), tt.hint_pad_y())
+            .max_width(tt.hint_max_width() as i32)
+            .bg(tt.bg.unwrap_or(pal.surface))
+            .corner(tt.corner.unwrap_or(m.corner_lg))
+            .border(tt.border.unwrap_or(pal.border), 1)
+            .shadow(tt.hint_shadow())
+            .child(body);
+        // 与锚点的间距是核心浮层摆放的固定 4px；指针跨过这道缝时悬停链会断，靠宿主的
+        // 离开宽限接住（见 `app::hint`）。
+        panel.overlay_right = true;
+        let mut me = self.popup(open, panel);
+        me.hint = true;
+        me
+    }
+
     /// 浮层的收起策略：在浮层与锚点之外按下而收起它时，这一击**到此为止**，不再命中底下的
     /// 控件（配对的抬起同样被吃掉）。默认 `false`——同一击里既关面板又按到下层控件。
     ///
@@ -5820,6 +5888,8 @@ impl Element {
             raised: self.raised,
             overlay: self.overlay,
             overlay_swallow: self.dismiss_swallow,
+            hint: self.hint,
+            overlay_right: self.overlay_right,
             presence: None,
             height_anim: self
                 .animate_height
@@ -5870,6 +5940,70 @@ impl Element {
             tree.add_child(id, cid);
         }
         id
+    }
+}
+
+/// hint 的文档：可选标题（粗体）+ 按换行分段的正文，字号取主题。
+fn hint_doc(title: Option<&str>, text: &str) -> rich::RichDoc {
+    let th = crate::theme::current();
+    let color = th.tooltip.text.unwrap_or(th.palette.text);
+    let size = th.tooltip.font_size(&th.metrics);
+    let body = rich::SpanStyle::new().size(size).fg(color);
+    let head = rich::SpanStyle::new().size(size).fg(color).bold();
+    let mut doc = rich::RichDoc::new()
+        .style("hint", body)
+        .style("hint_title", head);
+    if let Some(t) = title {
+        doc = doc.para(rich::Para::new().styled("hint_title", t));
+    }
+    for line in text.split('\n') {
+        doc = doc.para(rich::Para::new().styled("hint", line));
+    }
+    doc
+}
+
+/// [`Element::hint_with`] 的选项。
+pub struct Hint {
+    body: HintBody,
+    title: Option<TextContent>,
+    open: Option<Signal<bool>>,
+}
+
+enum HintBody {
+    Text(TextContent),
+    Signal(Signal<String>),
+}
+
+impl Hint {
+    /// 静态正文（按换行分段）。
+    pub fn text(text: impl Into<TextContent>) -> Self {
+        Self {
+            body: HintBody::Text(text.into()),
+            title: None,
+            open: None,
+        }
+    }
+
+    /// 随信号变化的正文。
+    pub fn signal(text: Signal<String>) -> Self {
+        Self {
+            body: HintBody::Signal(text),
+            title: None,
+            open: None,
+        }
+    }
+
+    /// 粗体标题，排在正文之前。
+    pub fn title(mut self, title: impl Into<TextContent>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// 绑定开合信号：面板打开（悬停弹出或点击固定）时为 `true`，收起为 `false`。
+    /// 锚点据此做状态视觉（如图标底色）；信号由框架写入，调用方只读。
+    pub fn open_signal(mut self, open: Signal<bool>) -> Self {
+        self.open = Some(open);
+        self
     }
 }
 

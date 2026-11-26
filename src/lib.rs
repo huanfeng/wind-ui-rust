@@ -74,9 +74,9 @@ pub mod prelude {
     pub use crate::ui::split::SplitOpts;
     pub use crate::ui::{
         default_presets, CaretStyle, CheckMenuItem, ColorPickerOpts, CommitMode, DropdownItem,
-        Element, Hsva, ImageContent, ImageView, Link, MenuBarEntry, Para, Presence, RichColor,
-        RichDoc, RowRequest, RowSource, SelectionScope, SortKey, SortOrder, SortStyle, SpanStyle,
-        TextContent, TextMark, Truncate, WindowButton, WindowButtonKind, ROW_CACHE_SEGMENTS,
-        ROW_CHUNK, TABLE_ROW_H,
+        Element, Hint, Hsva, ImageContent, ImageView, Link, MenuBarEntry, Para, Presence,
+        RichColor, RichDoc, RowRequest, RowSource, SelectionScope, SortKey, SortOrder, SortStyle,
+        SpanStyle, TextContent, TextMark, Truncate, WindowButton, WindowButtonKind,
+        ROW_CACHE_SEGMENTS, ROW_CHUNK, TABLE_ROW_H,
     };
 }

@@ -134,7 +134,7 @@ impl Brush {
 
 /// 浮层投影（drop shadow）。`blur` 为模糊半径（逻辑 px），`spread` 为正向外扩、
 /// 负向内收的外扩量；`color` 含 alpha。绘制在背景之前、节点矩形之下。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Shadow {
     pub dx: f32,
     pub dy: f32,

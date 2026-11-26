@@ -86,7 +86,8 @@ impl UiHost {
     ) -> (bool, Option<Rect>) {
         let overlay = self.menu.is_open()
             || self.toast.is_active()
-            || self.tooltip.is_overlay(&self.tree, self.hover);
+            || self.tooltip.is_overlay(&self.tree, self.hover)
+            || self.hint.active();
         // 下一帧脏区 = 动画脏区（上帧遗留）∪ 交互脏区（事件累积）。
         let damage = match (self.damage.pending.take(), self.damage.event.take()) {
             (Some(a), Some(b)) => Some(a.union(&b)),

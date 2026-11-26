@@ -1028,6 +1028,13 @@ fn main() {
                 Element::label("(?)")
                     .fg_role(Role::TextMuted)
                     .tooltip("把鼠标停在元素上片刻即可看到提示"),
+            ))
+            .child(Element::field(
+                "交互式提示 hint",
+                Element::button("悬停或点击我").hint_with(
+                    Hint::text("锚在元素右侧，可以移进来选中复制；\n点击按钮可固定。")
+                        .title("交互式提示"),
+                ),
             )),
     );
 

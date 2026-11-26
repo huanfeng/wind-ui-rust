@@ -3,6 +3,25 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **交互式提示 `Element::hint(..)` / `hint_signal(..)` / `hint_with(Hint)`**：给元素挂一个锚定在它**右侧**
+  （放不下翻到左侧）的说明面板。与跟着指针、不可交互的 `tooltip` 不同：指针可以移进面板，面板里的文字
+  可选中、Ctrl+C / 右键复制；悬停约 120ms 弹出，离开后 180ms 宽限收起；**点击锚点或面板固定**，固定后
+  移开不收，点外部、ESC 或再点锚点才关。面板是带边框与柔和阴影的卡片（缺省走 surface / border / text）。
+  `Hint::text(..)` / `Hint::signal(..)` 可加 `.title(..)`（粗体标题）与 `.open_signal(..)`（绑定开合信号，
+  供锚点做状态视觉）。同一节点上 hint 优先于 tooltip。面板外观在构建期按当前主题定下。`Hint` 进 prelude。
+- **`TooltipTheme` 新增字段**：`pad_x` / `pad_y`（内边距）、`font_size`、`line_height`、`shadow`、
+  `open_delay_ms` / `close_delay_ms`（hint 开合延时）、`hint_max_width`。均为 `Option`，缺省值保持原观感。
+
+### 变更
+
+- `tooltip` 的内边距与字号改读 `TooltipTheme.pad_x / pad_y / font_size`（缺省仍是 8×4 与 `font_sm`）。
+- `style::Shadow` 实现 `Serialize` / `Deserialize`（`TooltipTheme.shadow` 需要）。
+- 截图 `--hover X Y` 先出一帧起算悬停计时，再等待并多出一帧，使 hint 面板能入画。
+
 ## [0.37.0] - 2026-11-26
 
 ### 新增

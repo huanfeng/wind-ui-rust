@@ -45,6 +45,9 @@ mod fling;
 #[cfg(test)]
 mod fling_bind_tests;
 mod focus;
+mod hint;
+#[cfg(test)]
+mod hint_tests;
 #[cfg(test)]
 mod key_damage_tests;
 #[cfg(test)]
@@ -2730,6 +2733,8 @@ struct UiHost {
     toast: ToastHost,
     /// 悬停提示浮层，见 [`tooltip`]。
     tooltip: TooltipState,
+    /// 交互式提示（`Element::hint`）的开合状态，见 [`hint`]。
+    hint: hint::HintState,
     /// 触摸滚动手势（惯性 + 平移残差），见 [`fling`]。
     scroll: ScrollState,
     /// 最近一次指针事件的命中结果，供离屏截图路径诊断（见 `AppHandler::last_pointer_hit`）。
@@ -3076,6 +3081,7 @@ impl UiHost {
             menu: MenuHost::default(),
             toast: ToastHost::default(),
             tooltip: TooltipState::default(),
+            hint: hint::HintState::default(),
             scroll: ScrollState::default(),
             last_hit: None,
             damage: DamageState::default(),
@@ -3523,6 +3529,48 @@ impl UiHost {
     /// 签名不变（打字、按钮、勾选）→ 沿用控件上报的交互脏区走 1ms 局部重绘。
     ///
     /// 返回本帧是否已经布局过（全窗路径据此跳过重复的 `layout_root`）。
+    /// 推进交互式提示状态机并落实开合（见 [`hint`]）。
+    fn step_hint(&mut self, now_ms: u64) {
+        let anchor = self
+            .hover
+            .and_then(|h| self.tree.hint_of(h))
+            .map(|(a, _)| a);
+        let tree = &self.tree;
+        let tt = &self.theme.tooltip;
+        let step = self.hint.step(
+            anchor,
+            |a| tree.hint_panel(a).is_some_and(|(_, s)| s.get()),
+            now_ms,
+            tt.open_delay_ms(),
+            tt.close_delay_ms(),
+        );
+        if let Some(act) = step.act {
+            self.apply_hint_act(act);
+        }
+        if let Some(at) = step.wake_at {
+            crate::anim::request_repaint_after(at.saturating_sub(now_ms));
+        }
+    }
+
+    /// 开 / 关某锚点的面板。同一时刻只开一个：开新的先关掉其余。
+    fn apply_hint_act(&mut self, act: hint::Act) {
+        match act {
+            hint::Act::Open(a) => {
+                if let Some((_, sig)) = self.tree.hint_panel(a) {
+                    sig.set(true);
+                }
+            }
+            hint::Act::Close(a) => {
+                if let Some((_, sig)) = self.tree.hint_panel(a) {
+                    sig.set(false);
+                }
+            }
+        }
+        // 面板显隐会改布局与浮层，升整窗。
+        self.damage.needs_relayout = true;
+        self.damage.needs_full = true;
+    }
+
     fn relayout_if_needed(&mut self, logical: Size) -> bool {
         if !self.damage.needs_relayout {
             return false;
@@ -3720,6 +3768,8 @@ impl AppHandler for UiHost {
         // 动画：清上一帧请求/脏区并刷新帧时钟，绘制中控件可重新请求。
         crate::anim::reset_request();
         let now_ms = self.sync_clock();
+        // 交互式提示的开合在布局前决定：开关面板会改显隐，本帧 layout 就要反映。
+        self.step_hint(now_ms);
         // 惯性滑动：在布局前推进 scroll_y，本帧 arrange 据此钳制并重排。
         self.step_fling(now_ms);
         // pixmap 是物理像素；布局用逻辑坐标（物理 / scale），绘制时再 ×scale 放大。
@@ -3885,6 +3935,23 @@ impl AppHandler for UiHost {
         });
         self.hover = hover;
         self.capture = capture;
+        // 交互式提示：按下（点锚点固定 / 点面板固定）与悬停锚点变化都要出一帧。
+        if ev.kind == PointerKind::Down {
+            // 用命中测试而非 `hover`：`hover` 在 Down 上未必已指向被按的节点。
+            let on_hint = hit.and_then(|h| self.tree.hint_of(h));
+            if let Some(act) = self.hint.on_down(on_hint) {
+                self.apply_hint_act(act);
+            }
+            if on_hint.is_some() {
+                res.repaint = true;
+            }
+        }
+        if hover != old_hover {
+            let anchor = |id: Option<NodeId>| id.and_then(|h| self.tree.hint_of(h)).map(|x| x.0);
+            if anchor(hover) != anchor(old_hover) {
+                res.repaint = true;
+            }
+        }
         // 悬停提示：记录指针位置；悬停节点变化时重新计时（隐藏旧提示、对新节点计时）。
         // 按下抑制提示（点完控件不原地弹出盖住它），指针再次移动后解除抑制并重新计时。
         self.tooltip.pos = ev.pos;

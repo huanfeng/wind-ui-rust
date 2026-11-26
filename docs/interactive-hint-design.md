@@ -1,6 +1,6 @@
 # 交互式提示（hint）设计
 
-> 状态：已定方案，待实现。起因是清风设置端把选项说明收进标题后的 ⓘ 图标（悬停才显示），
+> 状态：已实现（windui 0.38 起）。与初稿的出入见各节「实现」注。起因是清风设置端把选项说明收进标题后的 ⓘ 图标（悬停才显示），
 > 暴露出现有 tooltip 的三处不足。
 
 ## 1. 要解决什么
@@ -20,7 +20,7 @@
 
 **目标**
 
-- 提示**锚定在节点上**：贴在锚点下方，放不下翻到上方，不跟指针。
+- 提示**锚定在节点上**：贴在锚点**右侧**（参照常见的帮助气泡），放不下翻到左侧，不跟指针。
 - 鼠标可以**移进提示**，提示保持显示；可**选中并复制**其中文本。
 - **点击锚点固定**提示：固定后移开也不收，点别处或 Esc 才关。
 - 外观由 `TooltipTheme` 提供足够多的定制项（§6）。
@@ -50,15 +50,17 @@
 ### 3.1 API
 
 ```rust
-// 新增，与 tooltip 并列；两者同时设置时 hint 优先（见 §5）。
-Element::icon(..).hint("较长的说明文本");                  // 默认选项
-Element::icon(..).hint_with("说明", HintOptions::default().pinnable(true));
+Element::icon(..).hint("较长的说明文本");                       // 右侧卡片，点击固定
+Element::icon(..).hint_signal(sig);                              // 正文随信号变
+Element::icon(..).hint_with(
+    Hint::text("说明").title("标题").open_signal(open),          // 粗体标题；open 绑到锚点做状态视觉
+);
 ```
 
-- `hint` 收 `impl Into<TextContent>`（沿用 i18n 的 `t!` 路径）。
-- `HintOptions`：`pinnable`（点击固定，默认 true）、`placement`（`Below` 默认 / `Above` /
-  `Auto`）、`max_width`（覆盖主题）。其余外观走主题，不进选项。
-- 构建期把 popup 子节点和 `open: Signal<bool>` 一并挂好，调用方不接触信号。
+- `hint` 收 `impl Into<TextContent>`（沿用 i18n 的 `t!` 路径）；`Hint` 进 prelude。
+- **实现注**：初稿的 `HintOptions { pinnable, placement }` 没做——点击固定恒开启，摆放恒为右侧
+  （核心浮层新增 `overlay_right`，放不下翻左，顶边高出锚点 4px）。外观全走主题，不进选项。
+- 构建期把 popup 子节点和 `open` 信号挂好；调用方要拿开合状态就传 `open_signal`。
 
 ## 4. 行为（宿主状态机）
 
@@ -94,32 +96,29 @@ Element::icon(..).hint_with("说明", HintOptions::default().pinnable(true));
 
 ## 6. 外观定制（`TooltipTheme` 扩展）
 
-hint 与 tooltip 共用 `TooltipTheme`，新增字段均 `Option`，缺省值保持现有观感，
-旧主题文件不受影响：
+hint 与 tooltip 共用 `TooltipTheme`，新增字段均 `Option`，缺省值保持现有观感，旧主题文件不受影响：
 
 | 字段 | 含义 | 缺省 |
 | --- | --- | --- |
-| `pad_x` / `pad_y` | 内边距（逻辑 px） | 8 / 4（现状）；hint 用 12 / 8 |
+| `pad_x` / `pad_y` | 内边距（逻辑 px） | tooltip 8 / 4；hint 12 / 8 |
 | `font_size` | 字号 | `metrics.font_sm` |
-| `line_height` | 行距倍数 | 1.0；hint 用 1.4（长文本更透气） |
-| `shadow` | 投影（偏移/模糊/色），`None` 不画 | tooltip 无；hint 有 |
-| `gap` | 与锚点间距 | 6 |
+| `line_height` | hint 行距倍数 | 1.4 |
+| `shadow` | hint 投影 | 偏移 (0,4)、模糊 16、黑 16% |
 | `open_delay_ms` | hint 弹出延时 | 120 |
 | `close_delay_ms` | hint 离开宽限 | 180 |
 | `hint_max_width` | hint 换行上限 | 360 |
-| `selection_bg` | 选区底色 | 沿用 `RichText` 的选区色 |
 
-`max_width` / `delay_ms` 仍管 tooltip，hint 用各自的 `hint_*` / `open_delay_ms`，
-避免一个字段在两种提示里含义漂移。tooltip 的内边距、字号、行距同样改读这几个字段
-（缺省即旧常量），一并解除「写死」。
+hint 的底 / 字 / 边 / 圆角缺省走 `palette.surface / text / border` 与 `metrics.corner_lg`（卡片式，
+不用 tooltip 的反色）；`TooltipTheme` 显式设了 `bg / text / border / corner` 则以主题为准。
+**实现注**：初稿的 `gap`（与锚点间距）没做——核心浮层摆放的间距固定 4px，改它要动 `popup`。
 
 ## 7. 清风设置端的接入
 
-- `widgets::desc_badge`（静态说明）改为在 ⓘ 图标上 `.hint(text)`；说明随状态变化的
-  信号型说明用 `hint_signal`（构建期给信号，打开时读当前值）。
+- `widgets::desc_badge` 在 ⓘ（现为 ?）图标上 `hint_with(Hint::text(说明).title(选项名).open_signal(open))`，
+  `open` 驱动图标的圆形底色；信号型说明用 `Hint::signal`。
 - 设置窗主题里调 `TooltipTheme`：pad / line_height / shadow 等，不再靠 `max_width` 一项硬撑。
 - 「选项说明」缺省值与「界面细节」窗口里的文案不变；只是图标模式下的浮层更好用。
-- 依赖：windui 当前 0.37.0 已发，本特性进下一个版本（暂定 0.38）。设置端先用
+- 依赖：windui 0.37.0 已发，本特性进 0.38.0。设置端先用
   `--config` 本地联调，**不提交路径依赖**；windui 发版由维护者执行，发版后设置端再升版本号。
 
 ## 8. 测试
@@ -138,4 +137,5 @@ hint 与 tooltip 共用 `TooltipTheme`，新增字段均 `Option`，缺省值保
   既当作「点外部」又当作「点锚点」处理；固定态的点击切换需单独写进 hint 的锚点回调。
 - 多行 `RichText` 的测量宽度走 `hint_max_width`；超长无空格串（路径）要允许任意位置断行。
 - 触屏/无悬停设备：只有点击固定一条路，行为已覆盖（点击即固定）。
-- 可访问性：hint 内容应并入锚点的无障碍描述（`accessibility.rs` 现有 tooltip 的做法同源）。
+- 可访问性：**未做**。`accessibility.rs` 直接读节点的静态 `tooltip` 字段作描述，hint 锚点没有它，
+  所以暂无描述；后续应把 hint 正文并进去。
