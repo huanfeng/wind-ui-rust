@@ -5136,6 +5136,15 @@ impl Tree {
             }
         }
 
+        // 捕获的节点可能已在重建中移除（右键菜单的动作删掉按下的行）：捕获悬空后
+        // 每个指针事件都路由进 `get(id)=None`，整窗输入失灵。
+        if let Some(id) = *capture {
+            if self.get(id).is_none() {
+                *capture = None;
+                *hover = None;
+            }
+        }
+
         // hover 进出（仅 Move 且无捕获时）：沿祖先链派发，使可点击容器也能收到 Enter/Leave。
         if matches!(ev.kind, PointerKind::Move) && capture.is_none() {
             let target = self.hit_test(ev.pos);

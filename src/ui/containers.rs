@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 
 use crate::anim::{Easing, Transition};
 use crate::core::{ClickFn, EventCtx, Widget};
-use crate::event::{CursorShape, Event, Key, PointerKind};
+use crate::event::{CursorShape, Event, Key, MouseButton, PointerKind};
 use crate::geometry::{Color, Point, Rect, Size};
 use crate::render::image::VisualState;
 use crate::render::{Canvas, Paint};
@@ -580,6 +580,10 @@ impl Widget for Clickable {
                     true
                 }
                 PointerKind::Down => {
+                    // 右键弹上下文菜单，浮层会吞掉配对的抬起。
+                    if p.button != MouseButton::Left {
+                        return false;
+                    }
                     self.state = ClickState::Press;
                     ctx.capture();
                     ctx.request_focus();
