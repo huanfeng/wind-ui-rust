@@ -162,6 +162,7 @@ impl LiveWindows {
         self.wins.iter().map(|w| w.id).collect()
     }
 
+    #[cfg(feature = "d2d")]
     fn is_empty(&self) -> bool {
         self.wins.is_empty()
     }
