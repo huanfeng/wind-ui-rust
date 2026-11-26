@@ -8667,6 +8667,108 @@ mod tests {
         assert!(!host.menu.is_open());
     }
 
+    /// 右键菜单动作删掉按下的行后，后续点击不能被失效捕获吞掉。
+    #[test]
+    fn context_menu_action_removing_the_row_keeps_input_alive() {
+        use crate::event::{MenuItem, MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let rows = crate::signal::signal(vec![1u32]);
+        let clicks = crate::signal::signal(0u32);
+        let rows_menu = rows;
+        let clicks_btn = clicks;
+        let ui = Element::col()
+            .fill()
+            .child(
+                Element::button("点")
+                    .height(32)
+                    .on_click(move |_| clicks_btn.set(clicks_btn.get() + 1)),
+            )
+            .child(Element::list_signal(
+                rows,
+                |id| *id,
+                move |_id| {
+                    Element::row()
+                        .width_match()
+                        .height(32)
+                        .clickable()
+                        .on_context_menu(move || {
+                            vec![MenuItem::run(
+                                "移除",
+                                move |_| rows_menu.set(Vec::new()),
+                                false,
+                            )]
+                        })
+                },
+            ));
+        let mut host = App::new("t", 200, 160)
+            .context_menu_trigger(crate::event::ContextMenuTrigger::Press)
+            .content(ui)
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 160);
+        let at = |kind, x, y, b| PointerEvent::single(kind, Point::new(x, y), b);
+        host.on_pointer(at(PointerKind::Down, 60, 56, MouseButton::Right));
+        assert!(host.menu.is_open(), "右键应弹出菜单");
+        let r = host.menu.active.as_ref().unwrap().levels[0].rect;
+        let item = Point::new(r.x + 20, r.y + 14);
+        host.on_pointer(at(PointerKind::Down, item.x, item.y, MouseButton::Left));
+        host.on_pointer(at(PointerKind::Up, item.x, item.y, MouseButton::Left));
+        assert!(!host.menu.is_open());
+        assert!(rows.get().is_empty(), "菜单动作应移除行");
+        layout_once(&mut host, 200, 160);
+        host.on_pointer(at(PointerKind::Down, 23, 16, MouseButton::Left));
+        host.on_pointer(at(PointerKind::Up, 23, 16, MouseButton::Left));
+        assert_eq!(
+            clicks.get(),
+            1,
+            "行移除后点击必须照常命中，不能被失效捕获吞掉"
+        );
+    }
+
+    /// 捕获的节点被移除后，后续点击不能被吞掉。
+    #[test]
+    fn capture_on_a_removed_node_does_not_swallow_later_input() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::platform::AppHandler;
+        let rows = crate::signal::signal(vec![1u32]);
+        let clicks = crate::signal::signal(0u32);
+        let clicks_btn = clicks;
+        let ui = Element::col()
+            .fill()
+            .child(
+                Element::list_signal(
+                    rows,
+                    |id| *id,
+                    |_id| Element::row().width_match().height(32).clickable(),
+                )
+                .fill(),
+            )
+            .child(
+                Element::button("点")
+                    .height(32)
+                    .on_click(move |_| clicks_btn.set(clicks_btn.get() + 1)),
+            );
+        let mut host = App::new("t", 200, 160).content(ui).into_handler_for_test();
+        layout_once(&mut host, 200, 160);
+        let at = |kind, x, y| PointerEvent::single(kind, Point::new(x, y), MouseButton::Left);
+        host.on_pointer(at(PointerKind::Down, 60, 16));
+        assert!(host.capture.is_some(), "左键按下应捕获指针（前置条件）");
+        rows.set(Vec::new());
+        layout_once(&mut host, 200, 160);
+        let btn = host
+            .tree
+            .hit_test(Point::new(60, 140))
+            .or_else(|| host.tree.hit_test(Point::new(60, 120)));
+        let p = btn.map(|id| host.tree.abs_bounds(id)).unwrap_or_default();
+        let c = Point::new(p.x + p.w / 2, p.y + p.h / 2);
+        host.on_pointer(at(PointerKind::Down, c.x, c.y));
+        host.on_pointer(at(PointerKind::Up, c.x, c.y));
+        assert_eq!(
+            clicks.get(),
+            1,
+            "捕获节点消失后必须自动失效，否则后续输入全部被吞"
+        );
+    }
+
     /// 右键菜单在松开时才弹：输入框与 `on_context_menu` 同理；按下后拖到别的节点再松则作罢。
     #[test]
     fn context_menu_opens_on_right_release_not_press() {
