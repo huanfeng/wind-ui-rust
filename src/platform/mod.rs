@@ -27,6 +27,12 @@ pub use win32::clipboard::WinClipboard as Clipboard;
 #[cfg(windows)]
 pub use win32::dragdrop::{drag_files, drag_files_with};
 
+/// 零窗口时释放本线程共享的 D2D / DWrite 设备链，返回是否真的释放了。
+///
+/// 托盘常驻应用关掉最后一个窗口后，这条设备链会一直留到进程退出。下游在窗口全部关闭后
+/// 调一次即可把它还给系统；下次开窗会惰性重建，已开窗口各自持有设备引用，不受影响。
+/// 仍有窗口、设备链尚未建立、重复调用，都返回 `false`。须在 UI 线程调用（设备链是线程局部的）；
+/// 非 Windows 或未启用 `d2d` 时恒返回 `false`。
 #[cfg(all(windows, feature = "d2d"))]
 pub fn release_shared_device_if_idle() -> bool {
     win32::release_shared_device_if_idle()

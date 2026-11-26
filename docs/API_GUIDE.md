@@ -1079,6 +1079,10 @@ app.run_resident();
 drop(sender); // 保持至少一个发送端存活到消息循环结束
 ```
 
+常驻应用关掉最后一个窗口后，Windows 的 D2D / DWrite 设备链仍会留着；在 UI 线程调用
+`platform::release_shared_device_if_idle()` 可在零窗口时释放它（返回是否真的释放，仍有窗口时为 `false`），
+下次开窗惰性重建。其它平台恒返回 `false`。
+
 发送端全部提前丢弃时，启动检查仍拒绝无入口的常驻应用。运行期间宿主应先发退出消息再丢弃发送端；
 通道断开不会自动结束其他窗口或应用服务。通道回调中 `ctx.close_window("usage")`
 可收起指定单例原生窗口，遵循关闭决策链，不存在时无操作（macOS 暂未实现按键关闭，此调用无效）。`activate_on_show(false)` 仅在 Windows 生效，

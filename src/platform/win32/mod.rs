@@ -199,8 +199,9 @@ pub(crate) fn single_window_open(key: &str) -> bool {
     LIVE_WINDOWS.with(|w| w.borrow().find_single(key).is_some())
 }
 
+/// 见 [`crate::platform::release_shared_device_if_idle`]。
 #[cfg(feature = "d2d")]
-pub fn release_shared_device_if_idle() -> bool {
+pub(crate) fn release_shared_device_if_idle() -> bool {
     if !LIVE_WINDOWS.with(|w| w.borrow().is_empty()) {
         return false;
     }

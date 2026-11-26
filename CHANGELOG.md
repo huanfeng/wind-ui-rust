@@ -3,6 +3,14 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **`platform::release_shared_device_if_idle()`**（Windows，`d2d`）：零窗口时释放共享的 D2D / DWrite
+  设备链，返回是否释放。托盘常驻应用关掉最后一个窗口后不必再背着设备链到进程退出；下次开窗惰性重建。
+  感谢 NLick47 的贡献。
+
 ## [0.35.0] - 2026-11-23
 
 ### 新增
