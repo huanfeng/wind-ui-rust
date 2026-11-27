@@ -4,7 +4,7 @@
 //! 截屏：cargo run --example fullscreen_demo -- --screenshot artifacts/fullscreen.png
 //!
 //! 功能：
-//! - 点击「切换全屏」按钮 / 按 F11：进入/退出全屏
+//! - 点击「切换全屏」按钮：进入/退出全屏
 //! - 按 Esc：退出全屏（仅在全屏时）
 //! - 显示当前窗口状态（全屏、最大化、普通）
 //!
@@ -45,7 +45,7 @@ fn main() {
                         .fg_role(Role::Accent),
                 )
                 .child(
-                    Element::label("• 点击「切换全屏」按钮或按 F11 进入/退出全屏")
+                    Element::label("• 点击「切换全屏」按钮进入/退出全屏")
                         .fg_role(Role::TextMuted)
                         .width_match(),
                 )
@@ -141,7 +141,7 @@ fn main() {
                 ),
         );
 
-    App::new("全屏测试 Demo", 560, 480)
+    let mut app = App::new("全屏测试 Demo", 560, 480)
         .icon(brand_icon())
         .bg(Color::hex(0x1E1E2E))
         .on_interval(Duration::from_millis(200), move |ctx| {
@@ -158,20 +158,13 @@ fn main() {
                 status, st.maximized, st.minimized, st.visible
             ));
         })
-        .on_key(move |ctx, key, _mods| {
-            match key {
-                Key::F11 => {
-                    ctx.toggle_fullscreen();
-                    hint_text.set("F11：已发送全屏切换请求".to_string());
-                }
-                Key::Escape => {
-                    ctx.restore();
-                    hint_text.set("Esc：已发送还原请求".to_string());
-                }
-                _ => {}
-            }
-        })
-        .screenshot_from_args()
-        .content(ui)
-        .run();
+        .content(ui);
+
+    // Esc 键退出全屏
+    app.hotkey(Hotkey::new(Key::Escape), move |ctx| {
+        ctx.restore();
+        hint_text.set("Esc：已发送还原请求".to_string());
+    });
+
+    app.run();
 }
