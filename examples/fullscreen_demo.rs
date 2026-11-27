@@ -162,7 +162,7 @@ fn main() {
 
     // Esc 键退出全屏
     app.hotkey(Hotkey::new(Key::Escape), move |ctx| {
-        ctx.restore();
+        ctx.restore_window();
         hint_text.set("Esc：已发送还原请求".to_string());
     });
 

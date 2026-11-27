@@ -499,6 +499,10 @@ impl HotkeyCtx {
     pub fn hide_window(&mut self) {
         self.op = Some(WindowOp::Hide);
     }
+    /// 请求从全屏 / 最大化 / 最小化还原。
+    pub fn restore_window(&mut self) {
+        self.op = Some(WindowOp::Restore);
+    }
     /// 请求**新建**一个窗口，语义同
     /// [`EventCtx::open_window`](crate::core::EventCtx::open_window)。
     ///
