@@ -141,7 +141,7 @@ fn main() {
                 ),
         );
 
-    let app = App::new("全屏测试 Demo", 560, 480)
+    App::new("全屏测试 Demo", 560, 480)
         .icon(brand_icon())
         .bg(Color::hex(0x1E1E2E))
         .on_interval(Duration::from_millis(200), move |ctx| {
@@ -158,13 +158,10 @@ fn main() {
                 status, st.maximized, st.minimized, st.visible
             ));
         })
-        .content(ui);
-
-    // Esc 键退出全屏
-    app.hotkey(Hotkey::new(Key::Escape), move |ctx| {
-        ctx.restore_window();
-        hint_text.set("Esc：已发送还原请求".to_string());
-    });
-
-    app.run();
+        .hotkey(Hotkey::new(Key::Escape), move |ctx| {
+            ctx.restore_window();
+            hint_text.set("Esc：已发送还原请求".to_string());
+        })
+        .content(ui)
+        .run();
 }
