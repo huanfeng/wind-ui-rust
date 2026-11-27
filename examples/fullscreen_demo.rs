@@ -141,7 +141,7 @@ fn main() {
                 ),
         );
 
-    let mut app = App::new("全屏测试 Demo", 560, 480)
+    let app = App::new("全屏测试 Demo", 560, 480)
         .icon(brand_icon())
         .bg(Color::hex(0x1E1E2E))
         .on_interval(Duration::from_millis(200), move |ctx| {
