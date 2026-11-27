@@ -1083,7 +1083,7 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
   })
   ```
   **Windows 与 Linux**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
-- 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
+- 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()` / `toggle_fullscreen()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **Win10 / Linux 的 1px 外框**：Win10 的无边框窗口没有 DWM 画的边，Linux 无边框窗口也没有，windui 在
   四边自画 1px 外框（最大化时不画）。取色由 `App::window_outline(WindowOutline::…)`（子窗

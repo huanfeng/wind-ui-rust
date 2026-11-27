@@ -65,6 +65,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_MODAL,
         _NET_WM_STATE_SKIP_TASKBAR,
@@ -120,6 +121,8 @@ struct Win {
     /// `on_window_shown`——契约是「隐藏→可见」的跃迁，不含首次显示与从最小化还原。
     hidden: bool,
     maximized: bool,
+    /// 是否已进入 EWMH 全屏（`_NET_WM_STATE_FULLSCREEN`）。全屏时不画外框与圆角。
+    fullscreen: bool,
     minimized: bool,
     intervals: Intervals,
     capturing: bool,
@@ -551,6 +554,7 @@ impl X11 {
             mapped: false,
             hidden: false,
             maximized: false,
+            fullscreen: false,
             minimized: false,
             intervals,
             capturing: false,
@@ -757,6 +761,16 @@ impl X11 {
         );
     }
 
+    /// EWMH `_NET_WM_STATE` 全屏消息：`action` 0=remove、1=add、2=toggle。
+    fn set_fullscreen(&self, id: Window, action: u32) {
+        let a = self.atoms;
+        self.client_message(
+            id,
+            a._NET_WM_STATE,
+            [action, a._NET_WM_STATE_FULLSCREEN, 0, 1, 0],
+        );
+    }
+
     fn set_maximized(&self, id: Window, action: u32) {
         let a = self.atoms;
         self.client_message(
@@ -781,11 +795,14 @@ impl X11 {
             }
             WindowOp::ToggleMaximize => self.set_maximized(id, 2),
             WindowOp::Maximize => self.set_maximized(id, 1),
+            WindowOp::ToggleFullscreen => self.set_fullscreen(id, 2),
             WindowOp::Restore => {
                 if self.windows[i].minimized || !self.windows[i].mapped {
                     self.show(id);
                 } else {
                     self.set_maximized(id, 0);
+                    // 还原同时覆盖“从全屏退出”：remove 对未全屏的窗口是无操作。
+                    self.set_fullscreen(id, 0);
                 }
             }
             WindowOp::Show => self.show(id),
@@ -998,8 +1015,8 @@ impl X11 {
             (w.w, w.h),
             w.bg,
             RimWant {
-                outline: w.frameless && !w.maximized,
-                radius: if w.argb && self.composited && !w.maximized {
+                outline: w.frameless && !w.maximized && !w.fullscreen,
+                radius: if w.argb && self.composited && !w.maximized && !w.fullscreen {
                     WINDOW_CORNER * self.scale
                 } else {
                     0.0
@@ -1902,13 +1919,15 @@ impl X11 {
         let atoms: Vec<u32> = r.value32().map(|v| v.collect()).unwrap_or_default();
         let maximized = atoms.contains(&a._NET_WM_STATE_MAXIMIZED_VERT)
             && atoms.contains(&a._NET_WM_STATE_MAXIMIZED_HORZ);
+        let fullscreen = atoms.contains(&a._NET_WM_STATE_FULLSCREEN);
         let minimized = atoms.contains(&a._NET_WM_STATE_HIDDEN);
         let w = &mut self.windows[i];
         let became_min = minimized && !w.minimized;
         w.maximized = maximized;
+        w.fullscreen = fullscreen;
         w.minimized = minimized;
-        // 最大化后没有缩放边：停在边上的缩放光标要当场收掉，不等指针再动。
-        let clear_edge = maximized && w.edge_hover.is_some();
+        // 最大化 / 全屏后没有缩放边：停在边上的缩放光标要当场收掉，不等指针再动。
+        let clear_edge = (maximized || fullscreen) && w.edge_hover.is_some();
         if became_min && w.handler.hide_on_minimize() {
             w.hidden = true;
             let _ = self.conn.unmap_window(id);
@@ -1927,9 +1946,8 @@ impl X11 {
             minimized: w.minimized,
             visible: w.mapped || w.minimized,
             maximizable: w.resizable,
-            // 不进任务栏的窗口最小化之后无处可还原（任务栏上没有它），除非应用接管成
-            // 最小化即隐藏（托盘唤起）。理由与 win32 去掉 `WS_MINIMIZEBOX` 相同。
             minimizable: !w.skip_taskbar || w.handler.hide_on_minimize(),
+            fullscreen: w.fullscreen,
         };
         w.handler.on_window_state(st);
         w.needs_paint = true;

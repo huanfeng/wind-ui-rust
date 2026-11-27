@@ -354,6 +354,8 @@ impl Role {
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct TopState {
     maximized: bool,
+    /// 合成器已把窗口置为全屏（没有外框、不画圆角）。
+    fullscreen: bool,
     activated: bool,
     /// 贴边平铺（任一边，xdg_wm_base v2 起）：同最大化，没有缩放边。
     tiled: bool,
@@ -485,11 +487,11 @@ impl Win {
     fn window_state(&self) -> crate::event::WindowState {
         crate::event::WindowState {
             maximized: self.state.maximized,
-            // Wayland 不告诉客户端自己是否被最小化。
             minimized: false,
             visible: !self.hidden,
             maximizable: self.resizable && self.caps.maximize,
             minimizable: self.caps.minimize,
+            fullscreen: self.state.fullscreen,
         }
     }
 }
@@ -913,7 +915,14 @@ impl Wl {
             WindowOp::Maximize => top.set_maximized(),
             WindowOp::ToggleMaximize if w.state.maximized => top.unset_maximized(),
             WindowOp::ToggleMaximize => top.set_maximized(),
-            WindowOp::Restore => top.unset_maximized(),
+            WindowOp::ToggleFullscreen if w.state.fullscreen => top.unset_fullscreen(),
+            WindowOp::ToggleFullscreen => top.set_fullscreen(None),
+            WindowOp::Restore => {
+                if w.state.fullscreen {
+                    top.unset_fullscreen();
+                }
+                top.unset_maximized();
+            }
             WindowOp::Show | WindowOp::Hide => {}
         }
     }
@@ -1233,10 +1242,14 @@ impl Wl {
                         (cw, ch),
                         w.bg,
                         host::RimWant {
-                            outline: w.frameless && !w.state.maximized,
+                            outline: w.frameless && !w.state.maximized && !w.state.fullscreen,
                             // Wayland 的表面总是被合成，ARGB 缓冲的透明角直接生效；平铺时
                             // 与最大化一样贴着屏幕边或别的窗口，圆角留缝难看。
-                            radius: if w.frameless && !w.state.maximized && !w.state.tiled {
+                            radius: if w.frameless
+                                && !w.state.maximized
+                                && !w.state.fullscreen
+                                && !w.state.tiled
+                            {
                                 host::WINDOW_CORNER * w.scale.factor as f32
                             } else {
                                 0.0
@@ -1553,6 +1566,7 @@ fn parse_states(raw: &[u8]) -> TopState {
     for v in u32_list(raw) {
         match xdg_toplevel::State::try_from(v) {
             Ok(xdg_toplevel::State::Maximized) => st.maximized = true,
+            Ok(xdg_toplevel::State::Fullscreen) => st.fullscreen = true,
             Ok(xdg_toplevel::State::Activated) => st.activated = true,
             Ok(
                 xdg_toplevel::State::TiledLeft

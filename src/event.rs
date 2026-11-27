@@ -25,6 +25,12 @@ pub enum WindowOp {
     Maximize,
     /// 从最大化 / 最小化还原（本就是常规态时无操作）。
     Restore,
+    /// 全屏 / 退出全屏切换：覆盖所在显示器，隐藏标题栏与任务栏。
+    ///
+    /// 平台实现：Windows 切换窗口样式并覆盖显示器；X11 发 `_NET_WM_STATE_FULLSCREEN`
+    /// 客户端消息；Wayland 用 `xdg_toplevel.set_fullscreen`；macOS 用
+    /// `NSWindow.toggleFullScreen:`。
+    ToggleFullscreen,
     /// 显示并前置窗口（从隐藏态唤起）。
     Show,
     /// 隐藏窗口（进程继续存活）。配合托盘或全局热键使用；
@@ -61,6 +67,8 @@ pub struct WindowState {
     pub maximizable: bool,
     /// 可最小化。win32 下等价于窗口带 `WS_MINIMIZEBOX`。
     pub minimizable: bool,
+    /// 当前已进入全屏。
+    pub fullscreen: bool,
 }
 
 impl WindowState {
@@ -73,14 +81,10 @@ impl WindowState {
     pub const UNKNOWN: Self = Self {
         maximized: false,
         minimized: false,
-        // 与其余字段的「错得显眼」原则不同，这一项取 true。
-        //
-        // 它不是能力位而是**当前事实**，没有对应的菜单项会因此变灰；而取 false 的
-        // 失败模式很具体：热键的切换逻辑会以为窗口藏着，于是去「显示」一个本就显示着
-        // 的窗口——按下去毫无反应。取 true 时最坏是多隐藏一次，用户再按一下就回来了。
         visible: true,
         maximizable: false,
         minimizable: false,
+        fullscreen: false,
     };
 
     /// 建窗配置推导出的初始快照——平台推来真值**之前**就已经是对的。
@@ -93,14 +97,10 @@ impl WindowState {
         Self {
             maximized: false,
             minimized: false,
-            // 建窗配置推不出可见性：`App::start_hidden()` 的窗口建出来就是藏着的，而这个
-            // 构造函数拿不到那个标志。平台会在首次 `push_window_state` 推来真值——在那
-            // 之前只有 `root.build` 期间的读取会看到这里的值，那段里没人问可见性。
             visible: true,
-            // 可最大化 == 可缩放：win32 建窗时 `resizable(false)` 一并剥掉 WS_MAXIMIZEBOX。
             maximizable: resizable,
-            // 最小化不受可缩放影响：不可缩放的对话框照样能最小化。
             minimizable: true,
+            fullscreen: false,
         }
     }
 }

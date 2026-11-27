@@ -1,11 +1,12 @@
 [package]
 name = "windui"
-version = "0.33.0"
+version = "0.32.0"
 edition = "2021"
 description = "轻量跨平台桌面 GUI：tiny-skia 渲染 + 平台原生窗口/文字（Windows: Win32+DirectWrite；macOS: Cocoa+CoreText；Linux: X11/Wayland+fontconfig）"
 authors = ["huanfeng <huanfengf@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/huanfeng/wind-ui-rust"
+homepage = "https://github.com/huanfeng/wind-ui-rust"
 documentation = "https://docs.rs/windui"
 readme = "README.md"
 keywords = ["gui", "desktop", "windows", "macos", "linux"]
@@ -284,6 +285,9 @@ objc2-core-text = { version = "0.3", features = [
     "CTParagraphStyle",
     "CTStringAttributes",
 ] }
+
+[[example]]
+name = "fullscreen_demo"
 
 # 这两个示例用到 svg feature 才有的 API（`icon_svg` / `image_svg`）。声明 required-features
 # 后，`--no-default-features` 下它们被跳过而非编译失败——其余示例仍自动发现，无需逐个声明。

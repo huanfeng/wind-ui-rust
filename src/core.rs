@@ -3758,6 +3758,12 @@ impl EventCtx<'_> {
     pub fn maximize(&mut self) {
         self.out.window_op = Some(WindowOp::Maximize);
     }
+    /// 请求全屏 / 退出全屏切换。
+    ///
+    /// 全屏覆盖所在显示器，隐藏标题栏与任务栏；退出后恢复进入前的窗口位置与样式。
+    pub fn toggle_fullscreen(&mut self) {
+        self.out.window_op = Some(WindowOp::ToggleFullscreen);
+    }
     /// 请求从最大化 / 最小化还原（本就是常规态则无操作）。
     pub fn restore(&mut self) {
         self.out.window_op = Some(WindowOp::Restore);

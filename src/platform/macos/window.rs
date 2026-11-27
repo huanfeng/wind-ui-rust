@@ -163,6 +163,8 @@ pub(super) fn apply_window_op(win: &NSWindow, op: WindowOp, mtm: MainThreadMarke
     match op {
         WindowOp::Minimize => win.miniaturize(None),
         WindowOp::ToggleMaximize => win.zoom(None),
+        // AppKit 自带全屏切换（含进入/退出动画与独立 Space）。
+        WindowOp::ToggleFullscreen => win.toggleFullScreen(None),
         // macOS 的 `zoom` 是开关式的，故"只最大化"必须先问状态——直接调会把已经放大的
         // 窗口缩回去，与本 op 的语义正好相反。
         WindowOp::Maximize => {
@@ -170,9 +172,12 @@ pub(super) fn apply_window_op(win: &NSWindow, op: WindowOp, mtm: MainThreadMarke
                 win.zoom(None);
             }
         }
-        // 还原覆盖两种"非常规态"：最小化优先（此时 `isZoomed` 的值没有意义）。
+        // 还原覆盖三种"非常规态"：全屏优先（退出全屏会回到原 Space），其次最小化
+        // （此时 `isZoomed` 的值没有意义）。
         WindowOp::Restore => {
-            if win.isMiniaturized() {
+            if win.styleMask().contains(NSWindowStyleMask::FullScreen) {
+                win.toggleFullScreen(None);
+            } else if win.isMiniaturized() {
                 win.deminiaturize(None);
             } else if win.isZoomed() {
                 win.zoom(None);

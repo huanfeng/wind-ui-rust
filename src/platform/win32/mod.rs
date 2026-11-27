@@ -64,10 +64,11 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetCaretBlinkTime, GetClientRect, GetCursorPos, GetMessageExtraInfo, GetMessageTime,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsIconic, IsWindow,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, IsIconic, IsWindow,
     IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, LoadIconW, MsgWaitForMultipleObjectsEx,
     PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    SetTimer, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, HWND_TOP, SWP_SHOWWINDOW, WINDOWPLACEMENT, WS_VISIBLE,
     CREATESTRUCTW, CW_USEDEFAULT, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, HTBOTTOM, HTBOTTOMLEFT,
     HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
     HWND_MESSAGE, IDC_ARROW, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENS, IDC_SIZEWE, MINMAXINFO,
@@ -75,17 +76,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYDOUBLECLK,
     SM_CYFRAME, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE,
-    WM_COPYDATA, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED,
-    WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN,
-    WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_TIMER, WM_TOUCH, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_ACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_DPICHANGED, WM_DROPFILES, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCALCSIZE, WM_NCCREATE,
+    WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCMBUTTONDOWN, WM_NCMOUSEMOVE, WM_NCRBUTTONDOWN,
+    WM_NCRBUTTONUP, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_TOUCH,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_THICKFRAME,
 };
 // 窗口图标（`App::icon`）：HICON 由 tray 那份 RGBA 转换复用，销毁归 WindowState::drop。
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -105,6 +106,9 @@ thread_local! {
     static ACTIVE_HWND: Cell<isize> = const { Cell::new(0) };
     /// 本线程上仍存活的 windui 窗口，见 [`LiveWindows`]。
     static LIVE_WINDOWS: RefCell<LiveWindows> = const { RefCell::new(LiveWindows::new()) };
+    /// 进入全屏前每个窗口的样式与 placement（按 HWND 区分，多窗口互不影响）。
+    static FULLSCREEN_SAVED: RefCell<std::collections::HashMap<isize, (isize, WINDOWPLACEMENT)>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// 供 platform::inject_parent 读取当前活跃窗口句柄（单线程，消息循环内保证有效）。
@@ -1035,10 +1039,6 @@ struct WindowState {
     touch: Touch,
     /// 无标题栏窗口：wnd_proc 据此处理 WM_NCCALCSIZE / WM_NCHITTEST。
     frameless: bool,
-    activate_on_show: bool,
-    /// 标题栏右键的 Down 已在 `WM_NCRBUTTONDOWN` 提前交出（「按下即弹」策略），
-    /// `WM_NCRBUTTONUP` 只需补 Up。
-    nc_down_sent: bool,
     /// 无边框且 DWM 不在客户区上画边框（Win10）：未最大化时由宿主自己画 1px 外框，
     /// 见 `AppHandler::set_window_outline`。建窗时按圆角属性设没设成判定。
     self_outline: bool,
@@ -1188,8 +1188,6 @@ impl WindowState {
             last_click: ClickTracker::default(),
             touch: Touch::default(),
             frameless: false,
-            activate_on_show: true,
-            nc_down_sent: false,
             mouse_tracked: false,
             pending_surrogate: None,
             ime_composing: false,
@@ -1347,7 +1345,6 @@ unsafe fn create_window(
     let hide_on_minimize = handler.hide_on_minimize();
     // 把 WindowState 装箱，指针随 CreateWindow 传入，在 WM_NCCREATE 挂到 HWND。
     let mut state = Box::new(WindowState::new(handler, cfg.bg));
-    state.activate_on_show = cfg.activate_on_show;
     state.min_w = cfg.min_width;
     state.min_h = cfg.min_height;
     let state_ptr = Box::into_raw(state);
@@ -1559,15 +1556,7 @@ unsafe fn create_window(
                 }
             }
         };
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
     }
 
     // 模态：禁用 owner 的输入直到本窗口关闭（见 `release_modal_owner`）。系统对被禁用
@@ -1660,7 +1649,6 @@ unsafe fn create_window(
             s.self_outline = !dwm_border;
         }
         push_window_state(hwnd);
-        // 建窗中的外框重算也会激活窗口；必须留到 show_window 按配置决定是否激活。
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -1668,7 +1656,7 @@ unsafe fn create_window(
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
     }
 
@@ -1677,8 +1665,7 @@ unsafe fn create_window(
 
 /// 显示窗口。与创建分开：主窗要照顾 `start_hidden`，子窗建好即显。
 unsafe fn show_window(hwnd: HWND) {
-    let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
-    let _ = ShowWindow(hwnd, if activate { SW_SHOW } else { SW_SHOWNOACTIVATE });
+    let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = UpdateWindow(hwnd);
 }
 
@@ -2179,22 +2166,9 @@ unsafe extern "system" fn wnd_proc(
         // DefWindowProc 对 WM_NCRBUTTONUP 的默认处理就是弹系统的灰色原生菜单，与自绘
         // 标题栏视觉割裂。非 HTCAPTION 的部位（缩放边框）同样吞掉、不弹任何东西——
         // 无边框窗口没有系统外框，那里本就不该有系统菜单。
-        WM_NCRBUTTONDOWN if is_frameless(hwnd) => {
-            // 策略是「按下即弹」时在这里就把 Down 交出去（菜单立刻出，且可按住滑选）；
-            // 否则等 `WM_NCRBUTTONUP` 一次补发完整的点击。
-            if wparam.0 as u32 == HTCAPTION && nc_menu_on_press(hwnd) {
-                nc_right_pointer(hwnd, lparam, PointerKind::Down);
-                if let Some(s) = state_from(hwnd) {
-                    s.nc_down_sent = true;
-                }
-            }
-            LRESULT(0)
-        }
+        WM_NCRBUTTONDOWN if is_frameless(hwnd) => LRESULT(0),
         WM_NCRBUTTONUP if is_frameless(hwnd) => {
-            let sent = state_from(hwnd).is_some_and(|s| std::mem::take(&mut s.nc_down_sent));
-            if sent {
-                nc_right_pointer(hwnd, lparam, PointerKind::Up);
-            } else if wparam.0 as u32 == HTCAPTION {
+            if wparam.0 as u32 == HTCAPTION {
                 nc_right_click(hwnd, lparam);
             }
             LRESULT(0)
@@ -2454,6 +2428,10 @@ unsafe extern "system" fn wnd_proc(
             if should_quit_on_last_window(RESIDENT.with(|r| r.get()), unregister_window(hwnd)) {
                 PostQuitMessage(0);
             }
+            // 销毁时清掉全屏保存状态，避免 HWND 被复用时读到旧值。
+            FULLSCREEN_SAVED.with(|m| {
+                m.borrow_mut().remove(&(hwnd.0 as isize));
+            });
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
             if !ptr.is_null() {
                 // **先清零指针再 drop**，顺序是承重的：模态循环（`TrackPopupMenu`）
@@ -2606,34 +2584,24 @@ unsafe fn is_frameless(hwnd: HWND) -> bool {
     state_from(hwnd).map(|s| s.frameless).unwrap_or(false)
 }
 
-/// 无边框窗口标题栏（HTCAPTION）上的右键：合成一次完整的客户区右键点击（`Down` + `Up`）。
+/// 无边框窗口标题栏（HTCAPTION）上的右键：转成客户区右键**按下**交给控件树。
 ///
-/// `WM_NCRBUTTONDOWN` 被吞掉了（见 `wnd_proc`），到 `WM_NCRBUTTONUP` 才一次性补发两下：
-/// - `Down` 给 `on_context_menu`（框架的上下文菜单统一在 `Down` 上开）；
-/// - `Up` 让宿主放行暂存的菜单（`defer_right_click_menu`），与 Windows 原生标题栏
-///   "抬起才出菜单"一致。
+/// **在抬起时才弹、合成的却是 `Down`**——这处不对称是刻意的，别顺手改齐：
+/// - 抬起时弹是 Windows 惯例（原生标题栏系统菜单就是 `WM_NCRBUTTONUP` 才出），而且
+///   "右键按住在标题栏上移动"没有任何别的语义，按下即弹只会让菜单跟着乱跑；
+/// - 合成 `Down` 是因为框架的上下文菜单统一在 `Down` 上开（`Tree::dispatch_pointer`
+///   只在「非左键 + Down」时才建 `MenuRequest`）。合成 `Up` 什么也不会发生。
 ///
 /// 坐标：NC 消息的 lParam 是**屏幕**坐标，客户区消息的是客户区坐标，两者不能混用。
 /// 转换后仍是物理像素，÷scale 由宿主 `on_pointer` 统一做——漏掉任一步的症状都是
 /// "高 DPI 下菜单弹在离光标几十像素的地方"。
 unsafe fn nc_right_click(hwnd: HWND, lparam: LPARAM) {
-    nc_right_pointer(hwnd, lparam, PointerKind::Down);
-    nc_right_pointer(hwnd, lparam, PointerKind::Up);
-}
-
-/// 把一条 NC 右键消息（lParam 为屏幕坐标）转成客户区的一次右键指针事件。
-unsafe fn nc_right_pointer(hwnd: HWND, lparam: LPARAM, kind: PointerKind) {
     let mut pt = POINT {
         x: (lparam.0 & 0xffff) as i16 as i32,
         y: ((lparam.0 >> 16) & 0xffff) as i16 as i32,
     };
     let _ = ScreenToClient(hwnd, &mut pt);
-    handle_pointer_at(hwnd, kind, MouseButton::Right, pt.x, pt.y);
-}
-
-/// 右键菜单策略是否为「按下即弹」。读完即放开 state 借用（调用方随后才会进 `handle_pointer_at`）。
-unsafe fn nc_menu_on_press(hwnd: HWND) -> bool {
-    state_from(hwnd).is_some_and(|s| s.handler.context_menu_on_press())
+    handle_pointer_at(hwnd, PointerKind::Down, MouseButton::Right, pt.x, pt.y);
 }
 
 /// 系统是否偏好暗色外观（见 [`crate::event::system_prefers_dark`]）。
@@ -2678,6 +2646,7 @@ unsafe fn push_window_state(hwnd: HWND) {
         visible: IsWindowVisible(hwnd).as_bool(),
         maximizable: style & WS_MAXIMIZEBOX.0 != 0,
         minimizable: style & WS_MINIMIZEBOX.0 != 0,
+        fullscreen: FULLSCREEN_SAVED.with(|m| m.borrow().contains_key(&(hwnd.0 as isize))),
     };
     if let Some(state) = state_from(hwnd) {
         state.handler.on_window_state(st);
@@ -2906,11 +2875,6 @@ unsafe fn apply_window_op(hwnd: HWND) {
     apply_hotkey_ops(hwnd);
     // 运行期托盘操作同点消费（TrayHandle 排队 → 此处落地）。
     apply_tray_ops();
-    // 应用通道也可能由可见窗口的一帧消费，指定键的关闭不能只在 AppHost 收尾时落地。
-    // 此处没有 WindowState 借用；先排关闭，再建新窗，与应用级回调的顺序一致。
-    for key in crate::event::take_callback_closes() {
-        close_single_window(&key);
-    }
     // 开窗请求同点消费（`ctx.open_window` 排队 → 此处落地）。
     open_pending_windows(hwnd);
     // 跨窗口状态：本次分发若写过信号，让其余窗口也重绘一次。
@@ -3126,6 +3090,62 @@ unsafe fn apply_hotkey_ops(hwnd: HWND) {
     }
 }
 
+/// 切换全屏：去掉标题栏与边框，把窗口铺满所在显示器；再切一次恢复原样式与位置。
+///
+/// 保存的是 `GWL_STYLE` 与 `WINDOWPLACEMENT`（后者一并记住最大化/最小化前的摆放），
+/// 故退出后能回到进入前的状态。按 HWND 存，多个窗口同时全屏不会串。
+unsafe fn toggle_fullscreen(hwnd: HWND) {
+    let key = hwnd.0 as isize;
+    let saved = FULLSCREEN_SAVED.with(|m| m.borrow_mut().remove(&key));
+    match saved {
+        None => {
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let mut placement = WINDOWPLACEMENT::default();
+            placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            let _ = GetWindowPlacement(hwnd, &mut placement);
+
+            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return;
+            }
+            let r = info.rcMonitor;
+            let fullscreen_style = (style & !(WS_OVERLAPPEDWINDOW.0 as isize))
+                | WS_POPUP.0 as isize
+                | WS_VISIBLE.0 as isize;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, fullscreen_style);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+            );
+            FULLSCREEN_SAVED.with(|m| {
+                m.borrow_mut().insert(key, (style, placement));
+            });
+        }
+        Some((style, placement)) => {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+            let _ = SetWindowPlacement(hwnd, &placement);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
 /// 执行一个窗口操作。**调用方须已释放 `WindowState` 借用**——此处的 OS 调用会同步
 /// 重入 `wnd_proc`（`ShowWindow` 派发 WM_SHOWWINDOW、`SetForegroundWindow` 派发
 /// WM_ACTIVATE），届时会再次 `state_from`。
@@ -3148,9 +3168,15 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
         Some(WindowOp::Maximize) => {
             let _ = ShowWindow(hwnd, SW_MAXIMIZE);
         }
+        Some(WindowOp::ToggleFullscreen) => toggle_fullscreen(hwnd),
         // SW_RESTORE 同时覆盖"从最大化还原"与"从最小化还原"，这正是本 op 的语义。
+        // 全屏中则先退出全屏（恢复原样式与位置），再走常规还原。
         Some(WindowOp::Restore) => {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            if FULLSCREEN_SAVED.with(|m| m.borrow().contains_key(&(hwnd.0 as isize))) {
+                toggle_fullscreen(hwnd);
+            } else {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
         }
         Some(WindowOp::Show) => show_and_activate(hwnd),
         Some(WindowOp::Hide) => {
@@ -3325,15 +3351,6 @@ unsafe fn run_tray_actions(main: Option<HWND>, actions: Vec<tray::TrayAction>) {
 /// 托盘点击同理（用户交互授予）。
 pub(crate) fn show_and_activate(hwnd: HWND) {
     unsafe {
-        let activate = state_from(hwnd).is_none_or(|s| s.activate_on_show);
-        if !activate {
-            let was_hidden = !IsWindowVisible(hwnd).as_bool();
-            show_window(hwnd);
-            if was_hidden {
-                notify_shown(hwnd);
-            }
-            return;
-        }
         // 先问再显示：`ShowWindow` 之后 `IsWindowVisible` 恒为真，跃迁就无从判断了。
         let was_hidden = !IsWindowVisible(hwnd).as_bool();
         // 隐藏与最小化是**两个独立的位**，可以同时为真——`hide_on_minimize` 就是这么

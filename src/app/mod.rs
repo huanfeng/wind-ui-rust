@@ -8095,6 +8095,34 @@ mod tests {
         }
     }
 
+    /// 全屏切换 + Restore 从全屏退出：控件请求应发出 ToggleFullscreen / Restore。
+    #[test]
+    fn toggle_fullscreen_and_restore_from_fullscreen() {
+        use crate::event::{MouseButton, PointerEvent, PointerKind};
+        use crate::geometry::Point;
+
+        // 切换全屏
+        let app = App::new("t", 200, 100).content(
+            Element::col().fill().clickable().on_click(|ctx| ctx.toggle_fullscreen()),
+        );
+        let mut host = app.into_handler_for_test();
+        layout_once(&mut host, 200, 100);
+        let at = Point::new(20, 20);
+        host.on_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left));
+        host.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+        assert_eq!(host.take_window_op(), Some(WindowOp::ToggleFullscreen));
+
+        // Restore 从全屏退出（含全屏分支）
+        let app2 = App::new("t2", 200, 100).content(
+            Element::col().fill().clickable().on_click(|ctx| ctx.restore()),
+        );
+        let mut host2 = app2.into_handler_for_test();
+        layout_once(&mut host2, 200, 100);
+        host2.on_pointer(PointerEvent::single(PointerKind::Down, at, MouseButton::Left));
+        host2.on_pointer(PointerEvent::single(PointerKind::Up, at, MouseButton::Left));
+        assert_eq!(host2.take_window_op(), Some(WindowOp::Restore));
+    }
+
     // ---- 标题栏系统菜单（P2） ----
 
     /// 弹出的菜单顶级面板的（标签, 可用）列表；未弹菜单则为空。分隔线记作 `---`。

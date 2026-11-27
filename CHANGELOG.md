@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`WindowOp::ToggleFullscreen` + `EventCtx::toggle_fullscreen()`**：四平台真全屏切换。
+  - Windows：保存 GWL_STYLE + WINDOWPLACEMENT，切换 WS_POPUP 覆盖显示器，退出恢复；按 HWND 区分多窗口。
+  - X11：EWMH `_NET_WM_STATE_FULLSCREEN` 客户端消息。
+  - Wayland：`xdg_toplevel.set_fullscreen` / `unset_fullscreen`。
+  - macOS：`NSWindow.toggleFullScreen:`（独立 Space 动画）。
+  - `WindowState` 新增 `fullscreen` 字段，平台层推送当前全屏状态。
+
 ## [0.33.0] - 2026-11-14
 
 ### 变更
