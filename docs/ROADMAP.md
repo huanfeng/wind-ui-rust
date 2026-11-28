@@ -168,3 +168,4 @@
 - **已交付（v0.4.0）**：Signals（`Signal<T>` 状态原语）、脏矩形局部重绘、GPU/D2D opt-in 后端。
 - **已记账待做**：可编辑富文本、字距与数字等宽（见「功能能力」表，来自下游 2026-10 需求 R3 / R4）。
 - **已记账待做（下游 2026-11 反馈，基于 0.33.0）**：外部 GPU 纹理接入（未实施）、滚动联动一期（`scroll_position` 绑定已交付，`scroll_link` 二期待做；设计见 docs/roadmap-three-designs.md）。查询主窗真实窗口状态的 P0 已交付（`main_window_state()` Win/macOS + `WM_SHOWWINDOW` 推送臂，随 Unreleased），Linux 同步查询与 macOS 推送待做。同批反馈里的其余项（Slider 修饰键与拖动态、`radio` / `switch` 的 `on_click`、`CursorShape::Hidden`、输入框内距、纯数字输入框、窗口圆角与 DWM 边框、浮层收起不穿透、ESC 兜底关窗开关、示例图标可选 feature）已在 0.34.0 交付。
+- **已记账待做（下游 2026-11-27 反馈，基于 0.38.0）**：已交付 `text_input` 折行中文禁则（默认行为）、`max_size`、`on_resize`（均随 Unreleased）。待做 / 暂缓：**窗口锁宽高比 `aspect_ratio`**（X11 `PAspect`、macOS `contentAspectRatio` 容易，Win32 要拦 `WM_SIZING`，Wayland 协议不支持约束比例，等有真实使用方再做）；**原生 GPU 纹理进画布 `draw_native_image`** 与上文「外部 GPU 纹理接入」是同一项——要暴露 D3D11 设备并跨 D2D / Skia / wgpu 三后端互操作、设备重建时句柄失效，维护面大且与「轻量」定位有张力，仅播放器一家需要，暂不排期，出现第二个使用方再评估。
