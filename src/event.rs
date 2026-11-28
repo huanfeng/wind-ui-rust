@@ -1556,6 +1556,8 @@ pub struct WindowRequest {
     /// 必须是**每个窗口自己的**：激活态是这个窗口的事，主窗那份（`App::on_window_activated`）
     /// 只归主窗——设置窗被关掉重建成子窗之后，「回到窗口就刷新」也得跟过去。
     pub activate_handler: Option<WindowActivateHandler>,
+    /// 本窗口的逻辑尺寸变化回调（`Window::on_resize`）。随窗口关闭一并消失。
+    pub resize_handler: Option<WindowResizeHandler>,
     /// 本窗口的周期回调（`Window::on_interval`）。随窗口关闭一并停止。
     pub intervals: Vec<(std::time::Duration, WindowIntervalFn)>,
     /// 窗口级快捷键回调（`Window::on_shortcut`）。返回 true = 已处理。
@@ -1595,6 +1597,9 @@ pub type WindowCloseHandler = Box<dyn FnMut(&mut crate::core::EventCtx) -> bool>
 
 /// 窗口激活态回调：参数为「是否激活（前台）」。与 `App::on_window_activated` 收的是同一种闭包。
 pub type WindowActivateHandler = Box<dyn FnMut(&mut crate::core::EventCtx, bool)>;
+
+/// 窗口逻辑尺寸变化回调：参数为新的客户区尺寸（逻辑 dp）。与 `App::on_resize` 收的是同一种闭包。
+pub type WindowResizeHandler = Box<dyn FnMut(&mut crate::core::EventCtx, crate::geometry::Size)>;
 
 /// 窗口周期回调，与 `App::on_interval` 同形。
 pub type WindowIntervalFn = Box<dyn FnMut(&mut crate::core::EventCtx)>;

@@ -167,6 +167,7 @@ impl Window {
                 content: crate::event::WindowContent::new(|| NoContent),
                 close_handler: None,
                 activate_handler: None,
+                resize_handler: None,
                 intervals: Vec::new(),
                 shortcut: None,
                 single: None,
@@ -278,6 +279,12 @@ impl Window {
     /// ```
     pub fn on_window_activated(mut self, f: impl FnMut(&mut EventCtx, bool) + 'static) -> Self {
         self.req.activate_handler = Some(Box::new(f));
+        self
+    }
+
+    /// 本窗口客户区逻辑尺寸变化的回调，语义同 [`App::on_resize`]，随本窗口关闭一并消失。
+    pub fn on_resize(mut self, f: impl FnMut(&mut EventCtx, Size) + 'static) -> Self {
+        self.req.resize_handler = Some(Box::new(f));
         self
     }
 
@@ -516,6 +523,9 @@ type SystemThemeHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
 /// 窗口激活态变化的回调（见 [`App::on_window_activated`]）。参数为「是否激活（前台）」。
 type ActivateHandler = Box<dyn FnMut(&mut EventCtx, bool)>;
 
+/// 窗口逻辑尺寸变化的回调（见 [`App::on_resize`]）。参数为新的客户区尺寸（逻辑 dp）。
+type ResizeHandler = Box<dyn FnMut(&mut EventCtx, Size)>;
+
 /// 运行期主题句柄：克隆到控件回调中，`set` 即可热切换主题（下一帧生效）。
 /// 控件 paint 期读 `theme::current()` 自动跟随；用 `Brush::Role`/`bg_role` 等
 /// 主题角色的背景/边框/文字也随之刷新，写死的 `bg(Color)` 定格色不变。
@@ -749,6 +759,7 @@ fn build_new_window(
     // （见 `AppHandler::take_window_title`）。子窗各有一份宿主，故各跟各的。
     host.title_src = req.title_src;
     host.activate_handler = req.activate_handler;
+    host.resize_handler = req.resize_handler;
     host.escape_closes_window = req.escape_closes_window;
     NewWindow::Create(Box::new(cfg), Box::new(host) as Box<dyn AppHandler>)
 }
@@ -1182,6 +1193,8 @@ pub struct App {
     show_handler: Option<ShowHandler>,
     /// 窗口激活态变化的回调（见 [`App::on_window_activated`]）。
     activate_handler: Option<ActivateHandler>,
+    /// 窗口逻辑尺寸变化的回调（见 [`App::on_resize`]）。
+    resize_handler: Option<ResizeHandler>,
     /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
     shortcut: Option<ShortcutHandler>,
     /// 常驻应用的截图目标窗口（见 [`App::screenshot_window`]）。
@@ -1266,6 +1279,7 @@ impl App {
             close_handler: None,
             show_handler: None,
             activate_handler: None,
+            resize_handler: None,
             shortcut: None,
             screenshot_window: None,
             start_window: None,
@@ -2257,6 +2271,33 @@ impl App {
         self
     }
 
+    /// 窗口客户区**逻辑尺寸变化**的回调，参数是新尺寸（逻辑 dp）。
+    ///
+    /// 用在「尺寸变了就做一次昂贵的事」：按新尺寸重配解码输出、重建离屏缓冲、换响应式布局的
+    /// 档位。比在 `paint` 里每帧读 `bounds` 自己比对干净，也不必挂 `on_interval` 轮询。
+    ///
+    /// 契约：
+    /// - **首帧报一次**（初始尺寸），之后只在尺寸真的变了才报；同尺寸重绘、仅位置移动不报。
+    /// - 在**布局与绘制之前**跑，所以回调里写的信号、请求的副作用本帧就生效。
+    /// - 拖拽缩放期间每个新尺寸都会报，回调要自己合并 / 去重高频变化（重配类操作建议只记下
+    ///   目标尺寸、到 `on_interval` 或松手后再落地）。
+    /// - DPI 变化也会改变逻辑尺寸，同样会报。
+    ///
+    /// 子窗用 [`Window::on_resize`]，各管各的。
+    ///
+    /// ```no_run
+    /// # use windui::prelude::*;
+    /// let narrow = signal(false);
+    /// App::new("响应式", 640, 480)
+    ///     .on_resize(move |_ctx, size| narrow.set(size.w < 480))
+    ///     .content(Element::col())
+    ///     .run();
+    /// ```
+    pub fn on_resize(mut self, f: impl FnMut(&mut EventCtx, Size) + 'static) -> Self {
+        self.resize_handler = Some(Box::new(f));
+        self
+    }
+
     /// 窗口级快捷键：焦点控件**没要**这个键时才轮到，返回 `true` 表示已处理。
     ///
     /// 为什么需要它：键盘事件只发给焦点节点，而「Ctrl+L 回到搜索框」「F5 刷新」这类
@@ -2577,6 +2618,7 @@ impl App {
             // 恒为 `None` 的参数只会让两处都更难读。
             host.title_src = self.title_src;
             host.activate_handler = self.activate_handler;
+            host.resize_handler = self.resize_handler;
             host.hide_on_minimize = self.hide_on_minimize;
             host.escape_closes_window = self.escape_closes_window;
             Box::new(host)
@@ -2610,6 +2652,7 @@ impl App {
         );
         host.title_src = self.title_src;
         host.activate_handler = self.activate_handler;
+        host.resize_handler = self.resize_handler;
         host.hide_on_minimize = self.hide_on_minimize;
         host.escape_closes_window = self.escape_closes_window;
         host
@@ -2824,6 +2867,10 @@ struct UiHost {
     ///
     /// 不进 `new` 的参数表（已有 12 个位置参数）：与 `title_src` 一样建完再塞。
     activate_handler: Option<ActivateHandler>,
+    /// 窗口逻辑尺寸变化的回调（见 [`App::on_resize`]）。与 `activate_handler` 一样建完再塞。
+    resize_handler: Option<ResizeHandler>,
+    /// 上一次报给 `resize_handler` 的逻辑尺寸；`None` = 还没报过（首帧要报）。
+    last_reported_size: Option<Size>,
     /// 窗口级快捷键回调（见 [`App::on_shortcut`]）。
     shortcut: Option<ShortcutHandler>,
     /// 系统外观偏好变化的回调（见 [`App::on_system_theme_changed`]）。
@@ -3025,6 +3072,26 @@ impl UiHost {
         self.activate_handler = Some(f);
     }
 
+    /// 逻辑尺寸变了就报给应用（`App::on_resize` / `Window::on_resize`），并落地它请求的副作用。
+    ///
+    /// 在 `render` 里、布局之前调用：回调写的信号本帧布局就读得到。副作用走与激活回调相同的
+    /// `apply_app_effects`（它会置重排，而尺寸变化本就要重排，不多花一次）。
+    /// 取出再放回的理由同 [`Self::run_show_handler`]。
+    fn report_resize(&mut self, logical: Size) {
+        if self.last_reported_size == Some(logical) {
+            return;
+        }
+        let Some(mut f) = self.resize_handler.take() else {
+            return;
+        };
+        self.last_reported_size = Some(logical);
+        if let Some(root) = self.tree.root {
+            let res = self.tree.run_detached(root, |ctx| f(ctx, logical));
+            self.apply_app_effects(res);
+        }
+        self.resize_handler = Some(f);
+    }
+
     /// 跑应用的唤起回调（`App::on_show`），并落地它请求的副作用。
     ///
     /// 借 ctx 走 `run_detached`，与菜单动作、`on_close_request` 同一条路——回调因此能
@@ -3136,6 +3203,8 @@ impl UiHost {
             close_handler,
             show_handler,
             activate_handler: None,
+            resize_handler: None,
+            last_reported_size: None,
             shortcut,
             system_theme,
             hide_on_close,
@@ -3806,6 +3875,7 @@ impl AppHandler for UiHost {
             (size.h as f32 / s).round().max(1.0) as i32,
         );
         self.logical_size = logical;
+        self.report_resize(logical);
 
         let laid_out = self.relayout_if_needed(logical);
         // 本帧重排过就刷新焦点——**不能只在全窗帧做**。结构变了而布局签名恰好没变
@@ -8509,6 +8579,52 @@ mod tests {
         host.render(
             &mut PixmapTarget { pixmap: &mut pm },
             Size::new(w as i32, h as i32),
+        );
+    }
+
+    /// `on_resize`：首帧报一次，之后只在逻辑尺寸真的变了才报；同尺寸重绘不重复。
+    /// 回调在**布局之前**跑，所以它写的信号本帧就生效。
+    #[test]
+    fn on_resize_reports_first_frame_and_only_real_changes() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(i32, i32)>::new()));
+        let sink = seen.clone();
+        let mut host = App::new("t", 200, 100)
+            .on_resize(move |_ctx, size| sink.borrow_mut().push((size.w, size.h)))
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        layout_once(&mut host, 200, 100);
+        layout_once(&mut host, 200, 100); // 同尺寸：不重复报
+        layout_once(&mut host, 320, 240);
+        layout_once(&mut host, 320, 240);
+        layout_once(&mut host, 200, 100); // 变回去也算变化
+        assert_eq!(*seen.borrow(), vec![(200, 100), (320, 240), (200, 100)]);
+    }
+
+    /// 回调里能写信号（与其它 App 级回调同一条副作用路径）。
+    #[test]
+    fn on_resize_callback_can_write_signals() {
+        let narrow = crate::signal::signal(false);
+        let mut host = App::new("t", 400, 100)
+            .on_resize(move |_ctx, size| narrow.set(size.w < 300))
+            .content(Element::col().fill())
+            .into_handler_for_test();
+        layout_once(&mut host, 400, 100);
+        assert!(!narrow.get());
+        layout_once(&mut host, 200, 100);
+        assert!(narrow.get(), "缩到 200 后回调写的信号要落地");
+    }
+
+    /// 子窗各带自己的 `on_resize`：随窗口关闭一并消失，不串到别的窗口。
+    #[test]
+    fn child_window_carries_its_own_resize_handler() {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0));
+        let s = seen.clone();
+        let req = Window::new("子", 300, 200)
+            .on_resize(move |_ctx, _size| s.set(s.get() + 1))
+            .content(|| Element::col().fill());
+        assert!(
+            req.resize_handler.is_some(),
+            "Window::on_resize 要落进 WindowRequest"
         );
     }
 
