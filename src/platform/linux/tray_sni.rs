@@ -625,6 +625,10 @@ impl TrayHost {
                 }
                 self.signal(SniCmd::NewIcon);
             }
+            // SNI 规范无标准「隐藏但保留宿主」语义（Status 只有 Active/Passive/
+            // NeedsAttention，且 Passive 仍占位）。Windows 侧走 NIS_HIDDEN 真正
+            // 移除槽位；Linux 这里暂为 no-op，保持穷举。
+            TrayOp::SetVisible(_) => {}
             // 退出由 x11 事件循环按 `split_at_quit` 处理，不会交到托盘宿主。
             TrayOp::Quit => {}
         }

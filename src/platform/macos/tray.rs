@@ -112,6 +112,11 @@ fn apply_ops_to_item(mtm: MainThreadMarker, ops: Vec<crate::platform::tray::Tray
                         button.setImage(Some(&img));
                     }
                 }
+                // macOS 的 NSStatusItem 无跨平台一致的「隐藏但保留槽位」语义：
+                // 真隐藏需要 removeStatusItem（不可恢复为同一 item）。为避免误伤
+                // 菜单/回调绑定，这里暂为 no-op；需要隐藏语义的应用应改用
+                // set_icon_rgba 传透明图标。Windows 侧走 NIS_HIDDEN 真正移除槽位。
+                crate::platform::tray::TrayOp::SetVisible(_) => {}
                 // 已由 `apply_tray_ops` 切走，不会到这里。
                 crate::platform::tray::TrayOp::Quit => {}
             }

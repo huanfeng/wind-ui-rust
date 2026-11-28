@@ -40,6 +40,14 @@ pub enum TrayOp {
     },
     /// 换图标。像素口径同 [`Tray::icon_rgba`]：非预乘 RGBA8，`rgba.len() == w*h*4`。
     SetIcon { w: u32, h: u32, rgba: Vec<u8> },
+    /// 运行期显示 / 隐藏托盘图标。`false` 时图标从通知区**彻底移除**（不留空白槽），
+    /// `true` 时恢复登记；反复调用幂等。
+    ///
+    /// 平台落地：Windows 用 `NIM_MODIFY + NIF_STATE + NIS_HIDDEN`；macOS 切换
+    /// `NSStatusItem` 的显隐；Linux（SNI）目前无标准 hidden 语义，为 no-op。
+    /// 隐藏期间图标属性（图标 / 提示 / 菜单 / 回调）全部保留，恢复后照旧生效。
+    /// Shell 重启后 windui 会按**当前** visible 重放：隐藏态仍隐藏，不会闪出图标。
+    SetVisible(bool),
     /// 退出应用。平台层执行与 [`TrayCtx::quit`] 完全相同的退出路径（销毁全部窗口、
     /// 移除托盘图标、绕过 `hide_on_close`）；排在它**之后**的意图一律丢弃。
     Quit,
@@ -184,6 +192,17 @@ impl TrayHandle {
             rgba: rgba.to_vec(),
         });
         // 踢一帧的理由同 `set_tooltip`：换图标多由应用状态变化触发，之后未必再有事件。
+        crate::anim::request_repaint();
+    }
+
+    /// 运行期显示 / 隐藏托盘图标。`false` 时图标从通知区彻底移除（不留空白槽），
+    /// `true` 时恢复；显隐状态会被记住，shell 重启重登记后仍按当前状态生效。
+    /// 下一次事件分发之后落地。没装托盘时该意图被丢弃。
+    ///
+    /// 典型用法：常驻工具只在真正进入后台时才显示托盘图标，前台隐藏。与
+    /// `set_icon_rgba` 一样由应用状态变化触发，故同样踢一帧保证被消费。
+    pub fn set_visible(&self, visible: bool) {
+        self.queue.borrow_mut().push(TrayOp::SetVisible(visible));
         crate::anim::request_repaint();
     }
 
@@ -713,6 +732,23 @@ mod tests {
                     body: "已上传 3 个文件".into(),
                     tag: None,
                 },
+            ]
+        );
+    }
+
+    /// `set_visible` 入队 `TrayOp::SetVisible`，真/假都按调用顺序排队，不合并。
+    #[test]
+    fn set_visible_queues_op_in_call_order() {
+        let handle = TrayHandle::detached();
+        handle.set_visible(false);
+        handle.set_tooltip("后台中");
+        handle.set_visible(true);
+        assert_eq!(
+            handle.pending_ops(),
+            vec![
+                TrayOp::SetVisible(false),
+                TrayOp::SetTooltip("后台中".into()),
+                TrayOp::SetVisible(true),
             ]
         );
     }

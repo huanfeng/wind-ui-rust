@@ -753,11 +753,16 @@ unsafe fn readd_tray() {
     let target = app_host()
         .and_then(|h| h.tray.as_ref())
         .map(|ts| ts.readd_target());
-    let Some((h, uid, hicon, tip)) = target else {
+    let Some((h, uid, hicon, tip, visible)) = target else {
         return;
     };
     if tray::readd(h, uid, hicon, &tip) {
         TRAY_READD_RETRIES.with(|c| c.set(0));
+        // `readd` 用 NIM_ADD / NIM_MODIFY 重登记，两者都会把图标恢复成可见态；
+        // 若当前刻意隐藏，紧接着补发一次 NIS_HIDDEN，避免 shell 重启后闪出图标。
+        if !visible {
+            let _ = tray::set_visible(h, uid, false);
+        }
         return;
     }
     let n = TRAY_READD_RETRIES.with(|c| {
@@ -3267,6 +3272,14 @@ unsafe fn apply_tray_ops_to(h: HWND, uid: u32, ops: Vec<crate::platform::tray::T
                     None => {
                         let _ = DestroyIcon(hicon);
                     }
+                }
+            }
+            crate::platform::tray::TrayOp::SetVisible(visible) => {
+                // 先 OS 调用，再借宿主记账，理由同 `SetTooltip`。返回值不看：shell
+                // 此刻不接受也要记下，TaskbarCreated 后按现值重放（见 `readd_tray`）。
+                let _ = tray::set_visible(h, uid, visible);
+                if let Some(ts) = app_host().and_then(|host| host.tray.as_mut()) {
+                    ts.remember_visible(visible);
                 }
             }
             // 已由 `apply_tray_ops` 切走，不会到这里。
