@@ -1164,7 +1164,8 @@ App::new("…", w, h).frameless().content(Element::col().fill().child(title_bar)
   })
   ```
   **Windows 与 Linux**（见 §11 平台表）：macOS 系统没有这个习惯，且平台层尚未推送窗口状态，故在 macOS 上默认接管不生效（`system_menu(true)` 也不生效）；`window_state()` 与 `system_menu_items()` 两个 API 仍可用。
-- 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
+- 想问窗口现在什么状态、能不能最大化，用 `EventCtx::window_state()`（或拿不到 `ctx` 时用自由函数 `windui::event::window_state()`，如菜单构建器里）；配套的窗口操作是 `ctx.minimize()` / `maximize()` / `restore()` / `toggle_maximize()` / `toggle_fullscreen()`——按钮用 toggle，「最大化」「还原」两个并列菜单项用后两个。
+- **全屏**：`ctx.toggle_fullscreen()` 覆盖所在显示器、隐藏标题栏与任务栏；`window_state().fullscreen` 读当前是否全屏。`ctx.restore()` 在全屏中等价于退出全屏，退出后回到进入前的位置、大小与最大化状态（Windows 换 `WS_POPUP` 并保存 placement，X11 走 EWMH `_NET_WM_STATE_FULLSCREEN`，Wayland 用 `xdg_toplevel.set_fullscreen`，macOS 用 `toggleFullScreen:` 进入独立 Space、带系统动画）。macOS 不向回调推送窗口状态（见上），那里 `fullscreen` 要用 `main_window_state()` 读。示例见 `examples/fullscreen.rs`。
   快照纪律：`window_state()` 仅事件回调 / 菜单构建 / `paint` 期间为真值，**事件期外（`on_interval`、托盘 / 热键回调、显隐转换瞬间）读 `windui::event::main_window_state()`**——平台层同步查询，任何时机成立；无主窗（常驻模式）返回 `None`（诚实语义；常驻模式下判显隐请用 `window_open(key)`）。Linux 暂未实现（恒 `None`），平台表见 §11。
 - 窗口四边/四角自动可缩放（平台在边缘 N px 内做缩放命中）。完整示例见 `examples/frameless.rs`。
 - **Win10 / Linux 的 1px 外框**：Win10 的无边框窗口没有 DWM 画的边，Linux 无边框窗口也没有，windui 在

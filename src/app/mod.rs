@@ -6577,6 +6577,7 @@ mod tests {
             visible: true,
             maximizable: true,
             minimizable: true,
+            fullscreen: false,
         });
         // 运行期换到暗色：句柄立刻变，但线程局部快照还是旧的。
         theme_src.set(Theme::dark());
@@ -8542,6 +8543,7 @@ mod tests {
             visible: true,
             maximizable: true,
             minimizable: true,
+            fullscreen: false,
         });
 
         let at = Point::new(20, 20);
@@ -8584,6 +8586,7 @@ mod tests {
             visible: true,
             maximizable: true,
             minimizable: true,
+            fullscreen: false,
         });
         // B 窗后构造 —— 构造期会把**自己的**状态注入线程局部，覆盖掉 A 的。
         let _b = App::new("b", 200, 100)
@@ -8606,21 +8609,23 @@ mod tests {
         );
     }
 
-    /// 「最大化」「还原」是两个并列的意图，不是一个开关——菜单里两项各自只做一件事。
+    /// 「最大化」「还原」「全屏切换」是三个独立的意图——菜单里各项各自只做一件事。
     #[test]
-    fn maximize_and_restore_are_separate_intents() {
+    fn maximize_restore_and_fullscreen_are_separate_intents() {
         use crate::event::{MouseButton, PointerEvent, PointerKind};
         use crate::geometry::Point;
         use crate::platform::AppHandler;
 
-        for (op, click) in [(WindowOp::Maximize, true), (WindowOp::Restore, false)] {
+        for op in [
+            WindowOp::Maximize,
+            WindowOp::Restore,
+            WindowOp::ToggleFullscreen,
+        ] {
             let app = App::new("t", 200, 100).content(Element::col().fill().clickable().on_click(
-                move |ctx| {
-                    if click {
-                        ctx.maximize()
-                    } else {
-                        ctx.restore()
-                    }
+                move |ctx| match op {
+                    WindowOp::Maximize => ctx.maximize(),
+                    WindowOp::ToggleFullscreen => ctx.toggle_fullscreen(),
+                    _ => ctx.restore(),
                 },
             ));
             let mut host = app.into_handler_for_test();
@@ -8962,6 +8967,7 @@ mod tests {
                 visible: true,
                 maximizable,
                 minimizable: true,
+                fullscreen: false,
             });
             let rows = crate::event::system_menu_items();
             assert_eq!(rows.len(), 5, "项数必须恒定");

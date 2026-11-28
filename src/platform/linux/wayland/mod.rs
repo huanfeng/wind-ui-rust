@@ -354,6 +354,8 @@ impl Role {
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 struct TopState {
     maximized: bool,
+    /// 合成器已把窗口置为全屏：没有外框、不画圆角、没有缩放边，且不能当作"浮动尺寸"记下。
+    fullscreen: bool,
     activated: bool,
     /// 贴边平铺（任一边，xdg_wm_base v2 起）：同最大化，没有缩放边。
     tiled: bool,
@@ -490,6 +492,7 @@ impl Win {
             visible: !self.hidden,
             maximizable: self.resizable && self.caps.maximize,
             minimizable: self.caps.minimize,
+            fullscreen: self.state.fullscreen,
         }
     }
 }
@@ -913,6 +916,10 @@ impl Wl {
             WindowOp::Maximize => top.set_maximized(),
             WindowOp::ToggleMaximize if w.state.maximized => top.unset_maximized(),
             WindowOp::ToggleMaximize => top.set_maximized(),
+            WindowOp::ToggleFullscreen if w.state.fullscreen => top.unset_fullscreen(),
+            WindowOp::ToggleFullscreen => top.set_fullscreen(None),
+            // 全屏中只退出全屏（回到进入前的状态，含此前的最大化），与 win32 / macOS 一致。
+            WindowOp::Restore if w.state.fullscreen => top.unset_fullscreen(),
             WindowOp::Restore => top.unset_maximized(),
             WindowOp::Show | WindowOp::Hide => {}
         }
@@ -957,7 +964,7 @@ impl Wl {
             let content = csd::rebar(w.logical.1, old_bar, bar);
             w.logical.1 = content;
             w.h = w.scale.to_physical(content);
-            if !w.state.maximized {
+            if !w.state.maximized && !w.state.fullscreen {
                 w.floating.1 = csd::rebar(w.floating.1, old_bar, bar);
             }
             w.handler.on_window_state(w.window_state());
@@ -984,11 +991,11 @@ impl Wl {
         w.logical = logical;
         w.w = w.scale.to_physical(logical.0);
         w.h = w.scale.to_physical(logical.1);
-        if !st.maximized {
+        if !st.maximized && !st.fullscreen {
             w.floating = logical;
         }
         let old = std::mem::replace(&mut w.state, st);
-        if old.maximized != st.maximized || first {
+        if old.maximized != st.maximized || old.fullscreen != st.fullscreen || first {
             w.handler.on_window_state(w.window_state());
         }
         if old.activated != st.activated {
@@ -1233,10 +1240,14 @@ impl Wl {
                         (cw, ch),
                         w.bg,
                         host::RimWant {
-                            outline: w.frameless && !w.state.maximized,
+                            outline: w.frameless && !w.state.maximized && !w.state.fullscreen,
                             // Wayland 的表面总是被合成，ARGB 缓冲的透明角直接生效；平铺时
                             // 与最大化一样贴着屏幕边或别的窗口，圆角留缝难看。
-                            radius: if w.frameless && !w.state.maximized && !w.state.tiled {
+                            radius: if w.frameless
+                                && !w.state.maximized
+                                && !w.state.fullscreen
+                                && !w.state.tiled
+                            {
                                 host::WINDOW_CORNER * w.scale.factor as f32
                             } else {
                                 0.0
@@ -1553,6 +1564,7 @@ fn parse_states(raw: &[u8]) -> TopState {
     for v in u32_list(raw) {
         match xdg_toplevel::State::try_from(v) {
             Ok(xdg_toplevel::State::Maximized) => st.maximized = true,
+            Ok(xdg_toplevel::State::Fullscreen) => st.fullscreen = true,
             Ok(xdg_toplevel::State::Activated) => st.activated = true,
             Ok(
                 xdg_toplevel::State::TiledLeft
@@ -1603,10 +1615,13 @@ mod tests {
             parse_states(&raw(&[4, 1, 3])),
             TopState {
                 maximized: true,
+                fullscreen: false,
                 activated: true,
                 tiled: false
             }
         );
+        // 全屏是 xdg_toplevel.state 的 2。
+        assert!(parse_states(&raw(&[2])).fullscreen);
         assert_eq!(parse_states(&[]), TopState::default());
     }
 

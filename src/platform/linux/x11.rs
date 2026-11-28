@@ -65,6 +65,7 @@ x11rb::atom_manager! {
         _NET_WM_STATE,
         _NET_WM_STATE_MAXIMIZED_VERT,
         _NET_WM_STATE_MAXIMIZED_HORZ,
+        _NET_WM_STATE_FULLSCREEN,
         _NET_WM_STATE_HIDDEN,
         _NET_WM_STATE_MODAL,
         _NET_WM_STATE_SKIP_TASKBAR,
@@ -120,6 +121,8 @@ struct Win {
     /// `on_window_shown`——契约是「隐藏→可见」的跃迁，不含首次显示与从最小化还原。
     hidden: bool,
     maximized: bool,
+    /// 是否已进入 EWMH 全屏（`_NET_WM_STATE_FULLSCREEN`）。全屏时不画外框与圆角、没有缩放边。
+    fullscreen: bool,
     minimized: bool,
     intervals: Intervals,
     capturing: bool,
@@ -581,6 +584,7 @@ impl X11 {
             mapped: false,
             hidden: false,
             maximized: false,
+            fullscreen: false,
             minimized: false,
             intervals,
             capturing: false,
@@ -787,6 +791,16 @@ impl X11 {
         );
     }
 
+    /// EWMH `_NET_WM_STATE` 全屏消息：`action` 0=remove、1=add、2=toggle。
+    fn set_fullscreen(&self, id: Window, action: u32) {
+        let a = self.atoms;
+        self.client_message(
+            id,
+            a._NET_WM_STATE,
+            [action, a._NET_WM_STATE_FULLSCREEN, 0, 1, 0],
+        );
+    }
+
     fn set_maximized(&self, id: Window, action: u32) {
         let a = self.atoms;
         self.client_message(
@@ -811,11 +825,18 @@ impl X11 {
             }
             WindowOp::ToggleMaximize => self.set_maximized(id, 2),
             WindowOp::Maximize => self.set_maximized(id, 1),
+            WindowOp::ToggleFullscreen => self.set_fullscreen(id, 2),
             WindowOp::Restore => {
                 if self.windows[i].minimized || !self.windows[i].mapped {
                     self.show(id);
                 } else {
-                    self.set_maximized(id, 0);
+                    // 全屏中只退出全屏（回到进入前的状态，含此前的最大化），与 win32 / macOS
+                    // 一致；同时发两条 remove，落点要看窗口管理器怎么排。
+                    if self.windows[i].fullscreen {
+                        self.set_fullscreen(id, 0);
+                    } else {
+                        self.set_maximized(id, 0);
+                    }
                 }
             }
             WindowOp::Show => self.show(id),
@@ -1034,8 +1055,8 @@ impl X11 {
             (w.w, w.h),
             w.bg,
             RimWant {
-                outline: w.frameless && !w.maximized,
-                radius: if w.argb && self.composited && !w.maximized {
+                outline: w.frameless && !w.maximized && !w.fullscreen,
+                radius: if w.argb && self.composited && !w.maximized && !w.fullscreen {
                     WINDOW_CORNER * self.scale
                 } else {
                     0.0
@@ -1979,13 +2000,15 @@ impl X11 {
         let atoms: Vec<u32> = r.value32().map(|v| v.collect()).unwrap_or_default();
         let maximized = atoms.contains(&a._NET_WM_STATE_MAXIMIZED_VERT)
             && atoms.contains(&a._NET_WM_STATE_MAXIMIZED_HORZ);
+        let fullscreen = atoms.contains(&a._NET_WM_STATE_FULLSCREEN);
         let minimized = atoms.contains(&a._NET_WM_STATE_HIDDEN);
         let w = &mut self.windows[i];
         let became_min = minimized && !w.minimized;
         w.maximized = maximized;
+        w.fullscreen = fullscreen;
         w.minimized = minimized;
         // 最大化后没有缩放边：停在边上的缩放光标要当场收掉，不等指针再动。
-        let clear_edge = maximized && w.edge_hover.is_some();
+        let clear_edge = (maximized || fullscreen) && w.edge_hover.is_some();
         if became_min && w.handler.hide_on_minimize() {
             w.hidden = true;
             let _ = self.conn.unmap_window(id);
@@ -2001,6 +2024,7 @@ impl X11 {
         let w = &mut self.windows[i];
         let st = crate::event::WindowState {
             maximized: w.maximized,
+            fullscreen: w.fullscreen,
             minimized: w.minimized,
             visible: w.mapped || w.minimized,
             maximizable: w.resizable,
@@ -2116,7 +2140,7 @@ fn cursor_index(s: CursorShape) -> usize {
 /// （`try_frameless_drag`）与悬停换光标共用。
 fn resize_edge_at(w: &Win, pos: Point, scale: f32) -> Option<u32> {
     host::frameless_resize_edge(
-        w.frameless && w.resizable && !w.maximized,
+        w.frameless && w.resizable && !w.maximized && !w.fullscreen,
         pos,
         (w.w, w.h),
         (RESIZE_BORDER * scale).round() as i32,

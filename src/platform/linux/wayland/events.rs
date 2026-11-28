@@ -718,7 +718,7 @@ impl Wl {
         let border = (RESIZE_BORDER * w.scale.factor).round() as i32;
         if w.frameless {
             return host::frameless_resize_edge(
-                w.resizable && !w.state.maximized,
+                w.resizable && !w.state.maximized && !w.state.fullscreen,
                 pos,
                 (w.w, w.h),
                 border,
@@ -729,7 +729,7 @@ impl Wl {
         if frame.bar == 0 {
             return None;
         }
-        let edges = w.resizable && !w.state.maximized && !w.state.tiled;
+        let edges = w.resizable && !w.state.maximized && !w.state.fullscreen && !w.state.tiled;
         let dir = frame.edge(pos, border, edges)?;
         // 与无边框窗口一致：缩放边落在可交互控件（按钮、输入框）上时让给控件。
         let interactive = match frame.locate(pos) {

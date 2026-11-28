@@ -23,8 +23,16 @@ pub enum WindowOp {
     /// 是一个能翻转的开关（toggle 正好），而系统菜单里「最大化」与「还原」是**两个并列
     /// 的项**、其中一个恒为禁用——toggle 表达不了"点这一项只会最大化"。
     Maximize,
-    /// 从最大化 / 最小化还原（本就是常规态时无操作）。
+    /// 从全屏 / 最大化 / 最小化还原（本就是常规态时无操作）。
+    ///
+    /// 全屏优先：全屏中先退出全屏，回到进入前的位置与样式。
     Restore,
+    /// 全屏 / 退出全屏切换：覆盖所在显示器，隐藏标题栏与任务栏。
+    ///
+    /// 平台实现：Windows 换成 `WS_POPUP` 样式铺满显示器（退出时还原样式与 placement）；
+    /// X11 发 EWMH `_NET_WM_STATE_FULLSCREEN`；Wayland 用 `xdg_toplevel.set_fullscreen`；
+    /// macOS 用 `NSWindow.toggleFullScreen:`（进入独立 Space，有系统动画）。
+    ToggleFullscreen,
     /// 显示并前置窗口（从隐藏态唤起）。
     Show,
     /// 隐藏窗口（进程继续存活）。配合托盘或全局热键使用；
@@ -69,6 +77,11 @@ pub struct WindowState {
     pub maximizable: bool,
     /// 可最小化。win32 下等价于窗口带 `WS_MINIMIZEBOX`。
     pub minimizable: bool,
+    /// 当前处于全屏（`WindowOp::ToggleFullscreen`，或用户经系统快捷键 / 菜单进入的全屏）。
+    ///
+    /// 与 [`maximized`](Self::maximized) 互不包含：全屏窗口的 `maximized` 取决于平台，
+    /// 判断「是否铺满屏」请先看本字段。⚠️ 快照纪律同 [`minimized`](Self::minimized)。
+    pub fullscreen: bool,
 }
 
 impl WindowState {
@@ -89,6 +102,7 @@ impl WindowState {
         visible: true,
         maximizable: false,
         minimizable: false,
+        fullscreen: false,
     };
 
     /// 建窗配置推导出的初始快照——平台推来真值**之前**就已经是对的。
@@ -109,6 +123,7 @@ impl WindowState {
             maximizable: resizable,
             // 最小化不受可缩放影响：不可缩放的对话框照样能最小化。
             minimizable: true,
+            fullscreen: false,
         }
     }
 }
@@ -1656,6 +1671,7 @@ mod tests {
             visible: false,
             maximizable: false,
             minimizable: true,
+            fullscreen: true,
         };
         set_window_state(st);
         assert_eq!(window_state(), st);

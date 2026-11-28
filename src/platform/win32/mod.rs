@@ -10,6 +10,7 @@ pub mod clipboard;
 pub(super) mod d2d;
 pub mod dragdrop;
 pub(crate) mod file_icon;
+mod fullscreen;
 pub mod hotkey;
 pub mod tray;
 mod tsf;
@@ -2543,6 +2544,8 @@ unsafe extern "system" fn wnd_proc(
             // 兜底：不经 `destroy_window` 的销毁（owner 关闭时系统级联销毁归属窗口）
             // 也要把 owner 的输入还回去；正常关窗路径这里已是空操作。
             release_modal_owner(hwnd);
+            // 全屏登记按 HWND 存，销毁时清掉，免得句柄被复用后读到旧状态。
+            fullscreen::forget(hwnd);
             // 关的是主窗本体：清 MAIN_HWND。AppHost::main 的悬空句柄清不了（它是启动时
             // 的 Option<HWND>，只写一次），MAIN_HWND 清掉后热键路径随之对已关窗口
             // no-op，查询返回 None——与 macOS windowWillClose 清 MAIN_WINDOW 同口径：
@@ -2833,6 +2836,7 @@ unsafe fn read_window_state(hwnd: HWND) -> crate::event::WindowState {
         visible: IsWindowVisible(hwnd).as_bool(),
         maximizable: style & WS_MAXIMIZEBOX.0 != 0,
         minimizable: style & WS_MINIMIZEBOX.0 != 0,
+        fullscreen: fullscreen::is_fullscreen(hwnd),
     }
 }
 
@@ -2900,7 +2904,8 @@ unsafe fn sync_outline(hwnd: HWND) {
     if !wanted || IsIconic(hwnd).as_bool() {
         return;
     }
-    let color = (!IsZoomed(hwnd).as_bool()).then(|| win10_outline_color(active));
+    let color = (!IsZoomed(hwnd).as_bool() && !fullscreen::is_fullscreen(hwnd))
+        .then(|| win10_outline_color(active));
     let changed = state_from(hwnd).is_some_and(|s| {
         let changed = std::mem::replace(&mut s.outline, color) != color;
         if changed {
@@ -2917,7 +2922,8 @@ unsafe fn sync_outline(hwnd: HWND) {
 /// 最大化时窗口会超出工作区一个边框厚度——按 DPI 内缩客户区，避免内容溢出屏幕/盖任务栏，
 /// 但**不重新插入标题栏**（这正是此前最大化露出系统标题栏的根因：当时误调了 DefWindowProc）。
 unsafe fn handle_nccalcsize(hwnd: HWND, lparam: LPARAM) -> LRESULT {
-    if IsZoomed(hwnd).as_bool() {
+    // 全屏时客户区就是整个显示器，不能再按最大化的外溢边框内缩。
+    if IsZoomed(hwnd).as_bool() && !fullscreen::is_fullscreen(hwnd) {
         let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
         let dpi = GetDpiForWindow(hwnd).max(96);
         let cx = GetSystemMetricsForDpi(SM_CXFRAME, dpi)
@@ -3326,9 +3332,13 @@ unsafe fn run_window_op(hwnd: HWND, op: Option<WindowOp>) {
         Some(WindowOp::Maximize) => {
             let _ = ShowWindow(hwnd, SW_MAXIMIZE);
         }
-        // SW_RESTORE 同时覆盖"从最大化还原"与"从最小化还原"，这正是本 op 的语义。
+        Some(WindowOp::ToggleFullscreen) => fullscreen::toggle(hwnd),
+        // SW_RESTORE 同时覆盖"从最大化还原"与"从最小化还原"；全屏中则先退出全屏
+        // （回到进入前的样式与摆放，其中已含「此前是否最大化」），不再叠一次 SW_RESTORE。
         Some(WindowOp::Restore) => {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            if !fullscreen::exit_if_fullscreen(hwnd) {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
         }
         Some(WindowOp::Show) => show_and_activate(hwnd),
         Some(WindowOp::Hide) => {
