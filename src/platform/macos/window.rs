@@ -2527,6 +2527,18 @@ fn create_window(
             height: cfg.min_height.max(0) as f64,
         });
     }
+    // 最大客户区尺寸，语义同上；AppKit 的「不限」是 `f64::MAX`（setContentMaxSize 的默认值），
+    // 某轴为 0 时取它。与最小值矛盾时由 `size_limits` 抬到最小值。不可缩放窗口没有拖拽缩放，
+    // 不设（其尺寸本就固定）。
+    if cfg.resizable {
+        if let Some((w, h)) = cfg.size_limits().max {
+            let axis = |v: i32| if v > 0 { v as f64 } else { f64::MAX };
+            window.setContentMaxSize(NSSize {
+                width: axis(w),
+                height: axis(h),
+            });
+        }
+    }
 
     // 无边框窗口：隐藏系统标题栏与三枚标准按钮（应用自绘标题栏与按钮），客户区铺满整窗，
     // 保留系统级吸附/阴影/缩放。拖动经 mouseDown→performWindowDragWithEvent 自管。

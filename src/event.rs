@@ -1539,6 +1539,9 @@ pub struct WindowRequest {
     /// 最小客户区尺寸（逻辑 dp，0=不限制）。
     pub min_width: i32,
     pub min_height: i32,
+    /// 最大客户区尺寸（逻辑 dp，每个轴 0=该轴不限制）。
+    pub max_width: i32,
+    pub max_height: i32,
     /// 窗口背景色。`None` 则随主题 `palette.bg`（同 `App` 未显式 `bg` 时的行为）。
     pub bg: Option<crate::geometry::Color>,
     /// 内容控件树（不透明，见 [`WindowContent`]）。

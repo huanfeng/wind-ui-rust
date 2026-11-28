@@ -2691,7 +2691,9 @@ Element::button("设置…").on_click(move |ctx| {
 
 `Window` 的构建器与 `App` 同形（`new(title, w, h)` 起手、链式配置、`content` 收尾），
 只有对子窗有意义的那几项：`resizable` / `centered` / `position` / `skip_taskbar` / `frameless` / `window_outline` /
-`min_size` / `bg`。
+`min_size` / `max_size` / `bg`。
+
+**窗口尺寸上下限**（`App` 与 `Window` 同名）：`min_size(w, h)` / `max_size(w, h)` 约束的是**客户区**（逻辑 dp），用户拖拽缩放与最大化都受限；`0` 表示该轴不限，所以 `max_size(900, 0)` 只限宽。两者矛盾（某轴上限小于下限）时下限优先——窗口宁可大于上限，也不能小到操作不到内容。`resizable(false)` 的窗口固定为创建尺寸，不看这两项。Windows 走 `WM_GETMINMAXINFO`，X11 / Wayland 走 WM 尺寸提示，macOS 走 `setContentMin/MaxSize`。锁定宽高比暂不支持。
 
 #### 指定位置与不进任务栏
 

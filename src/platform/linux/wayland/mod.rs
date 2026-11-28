@@ -582,13 +582,9 @@ impl Wl {
             .filter(|_| self.g.viewporter.is_some())
             .map(|m| m.get_fractional_scale(&surface, &self.qh, key));
         // 尺寸约束按表面坐标（逻辑像素）给；不可缩放即最小 = 最大 = 当前。
-        let (min_size, max_size) = if !cfg.resizable {
-            (Some((cfg.width, cfg.height)), Some((cfg.width, cfg.height)))
-        } else if cfg.min_width > 0 || cfg.min_height > 0 {
-            (Some((cfg.min_width.max(0), cfg.min_height.max(0))), None)
-        } else {
-            (None, None)
-        };
+        // xdg_toplevel.set_max_size 里某轴为 0 即「该轴不限」，与 `size_limits` 同口径。
+        let limits = cfg.size_limits();
+        let (min_size, max_size) = (limits.min, limits.max);
         if cfg.icon.is_some() {
             log::debug!("Wayland 后端尚未接窗口图标（xdg-toplevel-icon），图标被忽略");
         }

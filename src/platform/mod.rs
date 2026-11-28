@@ -787,6 +787,10 @@ pub struct WindowConfig {
     /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。限制后用户无法把窗口缩到操作不到按钮。
     pub min_width: i32,
     pub min_height: i32,
+    /// 窗口最大客户区尺寸（逻辑 dp，每个轴 0=该轴不限制）。与 `min_*` 对称；
+    /// 某轴的最大值小于最小值时以最小值为准（见 [`WindowConfig::size_limits`]）。
+    pub max_width: i32,
+    pub max_height: i32,
     /// 单例键（见 `crate::event::WindowRequest::single`）。`None` = 不去重。
     ///
     /// 只对 `ctx.open_window` 开出的子窗有意义：主窗本就唯一，`App` 不提供这个设置。
@@ -886,6 +890,42 @@ pub enum WindowCorner {
     Square,
 }
 
+/// [`WindowConfig::size_limits`] 的结果：窗口客户区的最小 / 最大尺寸（逻辑 dp），`None` = 不约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SizeLimits {
+    pub min: Option<(i32, i32)>,
+    /// 某个轴为 0 表示该轴不限，由各平台按自己的惯例表达「无穷」。
+    pub max: Option<(i32, i32)>,
+}
+
+impl WindowConfig {
+    /// 窗口尺寸约束（客户区，逻辑 dp）。
+    ///
+    /// - 不可缩放：最小 = 最大 = 当前尺寸。
+    /// - 可缩放：`min_size` 任一轴 > 0 才给最小；`max_size` 任一轴 > 0 才给最大，且最大值里
+    ///   **0 表示该轴不限**（调用方按各自平台的惯例表达「无穷」）。
+    /// - 某轴的最大值小于最小值时抬到最小值：约束互相矛盾时最小优先——窗口宁可大于上限，
+    ///   也不能小到操作不到内容。
+    ///
+    /// 各平台后端共用本函数，免得四处各写一份「0 是什么意思」的判断。
+    pub(crate) fn size_limits(&self) -> SizeLimits {
+        if !self.resizable {
+            let fixed = Some((self.width, self.height));
+            return SizeLimits {
+                min: fixed,
+                max: fixed,
+            };
+        }
+        let (min_w, min_h) = (self.min_width.max(0), self.min_height.max(0));
+        let min = (min_w > 0 || min_h > 0).then_some((min_w, min_h));
+        let max = (self.max_width > 0 || self.max_height > 0).then(|| {
+            let axis = |max: i32, min: i32| if max > 0 { max.max(min) } else { 0 };
+            (axis(self.max_width, min_w), axis(self.max_height, min_h))
+        });
+        SizeLimits { min, max }
+    }
+}
+
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
@@ -915,6 +955,8 @@ impl Default for WindowConfig {
             renderer: Renderer::default(),
             min_width: 0,
             min_height: 0,
+            max_width: 0,
+            max_height: 0,
             single: None,
             owned: false,
             modal: false,
@@ -1973,5 +2015,68 @@ mod touch_lock_tests {
             touch_lock_axis(20, 13, 12, |_| false),
             Some(Axis::Horizontal)
         );
+    }
+}
+
+#[cfg(test)]
+mod size_limits_tests {
+    use super::{SizeLimits, WindowConfig};
+
+    fn limits(min: Option<(i32, i32)>, max: Option<(i32, i32)>) -> SizeLimits {
+        SizeLimits { min, max }
+    }
+
+    fn cfg(min: (i32, i32), max: (i32, i32)) -> WindowConfig {
+        WindowConfig {
+            width: 400,
+            height: 300,
+            min_width: min.0,
+            min_height: min.1,
+            max_width: max.0,
+            max_height: max.1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_limits_by_default() {
+        assert_eq!(cfg((0, 0), (0, 0)).size_limits(), limits(None, None));
+    }
+
+    #[test]
+    fn min_and_max_are_reported_independently() {
+        assert_eq!(
+            cfg((200, 100), (0, 0)).size_limits(),
+            limits(Some((200, 100)), None)
+        );
+        assert_eq!(
+            cfg((0, 0), (800, 600)).size_limits(),
+            limits(None, Some((800, 600)))
+        );
+    }
+
+    /// 最大值里 0 是「该轴不限」，由调用方按平台惯例表达无穷，这里原样保留。
+    #[test]
+    fn zero_axis_of_max_means_unbounded_on_that_axis() {
+        assert_eq!(cfg((0, 0), (800, 0)).size_limits().max, Some((800, 0)));
+    }
+
+    /// 约束互相矛盾时最小优先：窗口宁可大于上限，也不能小到操作不到内容。
+    #[test]
+    fn min_wins_over_a_smaller_max() {
+        assert_eq!(
+            cfg((500, 400), (300, 200)).size_limits(),
+            limits(Some((500, 400)), Some((500, 400)))
+        );
+        // 只有一个轴矛盾：另一个轴照旧；未设上限的轴仍不限。
+        assert_eq!(cfg((500, 100), (300, 0)).size_limits().max, Some((500, 0)));
+    }
+
+    /// 不可缩放：最小 = 最大 = 当前尺寸，不受 min/max 设置影响。
+    #[test]
+    fn non_resizable_pins_to_current_size() {
+        let mut c = cfg((100, 100), (900, 900));
+        c.resizable = false;
+        assert_eq!(c.size_limits(), limits(Some((400, 300)), Some((400, 300))));
     }
 }

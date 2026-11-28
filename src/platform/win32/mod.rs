@@ -1082,6 +1082,10 @@ struct WindowState {
     /// 窗口最小客户区尺寸（逻辑 dp，0=不限制）。WM_GETMINMAXINFO 据此换算物理像素下限。
     min_w: i32,
     min_h: i32,
+    /// 窗口最大客户区尺寸（逻辑 dp，某轴 0=该轴不限制）。与最小值矛盾时已在建窗时按
+    /// [`WindowConfig::size_limits`] 抬到最小值。同样在 WM_GETMINMAXINFO 里换算物理像素。
+    max_w: i32,
+    max_h: i32,
     /// 是否处于交互式拖拽移动/缩放的模态循环内（WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE）。
     /// 据此在 WM_SIZE 里分流：拖拽中走异步重绘（免 vsync 节流拖累手感），
     /// 非拖拽的最大化/还原走同步重绘（避免 DWM 动画采样到旧尺寸缓冲被拉伸变形）。
@@ -1227,6 +1231,8 @@ impl WindowState {
             ime_pos: None,
             min_w: 0,
             min_h: 0,
+            max_w: 0,
+            max_h: 0,
             in_size_move: false,
             icons: [None, None],
             icon_src: None,
@@ -1379,6 +1385,7 @@ unsafe fn create_window(
     state.activate_on_show = cfg.activate_on_show;
     state.min_w = cfg.min_width;
     state.min_h = cfg.min_height;
+    (state.max_w, state.max_h) = cfg.size_limits().max.unwrap_or((0, 0));
     let state_ptr = Box::into_raw(state);
 
     let title: Vec<u16> = cfg.title.encode_utf16().chain(std::iter::once(0)).collect();
@@ -2097,28 +2104,39 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_GETMINMAXINFO => {
-            // 限制窗口最小尺寸：把逻辑 dp 下限按当前 DPI 换算为物理像素写入 ptMinTrackSize。
+            // 限制窗口尺寸：把逻辑 dp 的下限 / 上限按当前 DPI 换算为物理像素，下限写
+            // ptMinTrackSize，上限写 ptMaxTrackSize（拖拽缩放）与 ptMaxSize（最大化）。
             // 无边框窗口外框≈客户区，直接用 client×scale；带框窗口经 AdjustWindowRect 计入边框。
             if let Some(state) = state_from(hwnd) {
-                if state.min_w > 0 || state.min_h > 0 {
+                let limited =
+                    state.min_w > 0 || state.min_h > 0 || state.max_w > 0 || state.max_h > 0;
+                if limited {
                     let dpi = GetDpiForWindow(hwnd).max(96);
                     let scale = dpi as f32 / 96.0;
                     let ex_style = WINDOW_EX_STYLE(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32);
-                    let (pw, ph) = frame_size_for_client(
-                        state.min_w,
-                        state.min_h,
-                        scale,
-                        dpi,
-                        state.frameless,
-                        ex_style,
-                    );
+                    let frame = |w: i32, h: i32| {
+                        frame_size_for_client(w, h, scale, dpi, state.frameless, ex_style)
+                    };
+                    let (min_w, min_h) = (state.min_w, state.min_h);
+                    let (max_w, max_h) = (state.max_w, state.max_h);
                     let mmi = lparam.0 as *mut MINMAXINFO;
                     if !mmi.is_null() {
-                        if pw > 0 {
+                        let (pw, ph) = frame(min_w, min_h);
+                        if min_w > 0 && pw > 0 {
                             (*mmi).ptMinTrackSize.x = pw;
                         }
-                        if ph > 0 {
+                        if min_h > 0 && ph > 0 {
                             (*mmi).ptMinTrackSize.y = ph;
+                        }
+                        // 上限按轴生效：0 的那个轴保持系统给的默认（不限）。
+                        let (xw, xh) = frame(max_w, max_h);
+                        if max_w > 0 {
+                            (*mmi).ptMaxTrackSize.x = xw;
+                            (*mmi).ptMaxSize.x = xw.min((*mmi).ptMaxSize.x);
+                        }
+                        if max_h > 0 {
+                            (*mmi).ptMaxTrackSize.y = xh;
+                            (*mmi).ptMaxSize.y = xh.min((*mmi).ptMaxSize.y);
                         }
                     }
                     return LRESULT(0);

@@ -158,6 +158,8 @@ impl Window {
                 menu_trigger: Default::default(),
                 min_width: 0,
                 min_height: 0,
+                max_width: 0,
+                max_height: 0,
                 bg: None,
                 // 占位。取不走：`content` 是唯一产出 `WindowRequest` 的方法，
                 // 没调它就拿不到能交给 `open_window` 的值——类型上已经封死。
@@ -448,6 +450,13 @@ impl Window {
         self
     }
 
+    /// 最大客户区尺寸（逻辑 dp，某轴给 0 = 该轴不限）。语义同 [`App::max_size`]。
+    pub fn max_size(mut self, w: i32, h: i32) -> Self {
+        self.req.max_width = w;
+        self.req.max_height = h;
+        self
+    }
+
     /// 固定窗口背景色。不设则随主题 `palette.bg`（换暗色主题时子窗底色同步转暗）。
     pub fn bg(mut self, c: Color) -> Self {
         self.req.bg = Some(c);
@@ -680,6 +689,8 @@ fn build_new_window(
         menu_trigger: req.menu_trigger,
         min_width: req.min_width,
         min_height: req.min_height,
+        max_width: req.max_width,
+        max_height: req.max_height,
         single: req.single,
         owned: req.owned || req.modal,
         modal: req.modal,
@@ -1149,6 +1160,8 @@ fn merge_screenshot_cfg(mut win: WindowConfig, app: &WindowConfig) -> WindowConf
         win.height = app.height;
         win.min_width = 0;
         win.min_height = 0;
+        win.max_width = 0;
+        win.max_height = 0;
     }
     win
 }
@@ -1225,6 +1238,8 @@ impl App {
                 renderer: Renderer::default(),
                 min_width: 0,
                 min_height: 0,
+                max_width: 0,
+                max_height: 0,
                 // 默认不登记单例键：单窗应用没有"第二个自己"可谈。多窗应用要让子窗
                 // 能把主窗拉回前台时用 [`App::single_window`]。
                 single: None,
@@ -1359,6 +1374,16 @@ impl App {
     pub fn min_size(mut self, w: i32, h: i32) -> Self {
         self.cfg.min_width = w;
         self.cfg.min_height = h;
+        self
+    }
+
+    /// 窗口最大客户区尺寸（逻辑 dp，某轴给 0 = 该轴不限）。用户拖拽缩放时不能超过它，
+    /// 最大化也受它约束。与 [`min_size`](Self::min_size) 对称；两者矛盾（某轴最大值小于
+    /// 最小值）时以最小值为准——窗口宁可大于上限，也不能小到操作不到内容。
+    /// 不可缩放（`resizable(false)`）的窗口忽略它。
+    pub fn max_size(mut self, w: i32, h: i32) -> Self {
+        self.cfg.max_width = w;
+        self.cfg.max_height = h;
         self
     }
 
@@ -1787,6 +1812,8 @@ impl App {
                     self.cfg.height = h;
                     self.cfg.min_width = 0;
                     self.cfg.min_height = 0;
+                    self.cfg.max_width = 0;
+                    self.cfg.max_height = 0;
                 }
             }
         }
@@ -6966,6 +6993,7 @@ mod tests {
                 Window::new("设置", 420, 300)
                     .resizable(false)
                     .min_size(320, 240)
+                    .max_size(640, 0)
                     .content(|| Element::col().fill()),
             );
             ctx.open_window(Window::new("关于", 360, 200).content(|| Element::col().fill()));
@@ -6983,6 +7011,7 @@ mod tests {
         assert_eq!((cfg_a.width, cfg_a.height), (420, 300));
         assert!(!cfg_a.resizable);
         assert_eq!((cfg_a.min_width, cfg_a.min_height), (320, 240));
+        assert_eq!((cfg_a.max_width, cfg_a.max_height), (640, 0));
         // 应用级设施不得随子窗复制：托盘会变成两个图标、热键会重复注册。
         assert!(cfg_a.tray.is_none(), "子窗不得带托盘");
         assert!(cfg_a.hotkeys.is_empty(), "子窗不得带全局热键");
@@ -8238,8 +8267,14 @@ mod tests {
             .collect();
         let app = App::new("t", 920, 620)
             .min_size(800, 600)
+            .max_size(1000, 700)
             .screenshot_args(&args);
         assert_eq!((app.cfg.width, app.cfg.height), (720, 480));
+        assert_eq!(
+            (app.cfg.max_width, app.cfg.max_height),
+            (0, 0),
+            "上限同样放开，免得 --size 要的尺寸被钳回上限"
+        );
         assert_eq!(
             (app.cfg.min_width, app.cfg.min_height),
             (0, 0),

@@ -11,6 +11,7 @@
 
 ### 新增
 
+- **`App::max_size(w, h)` / `Window::max_size(w, h)` 窗口最大客户区尺寸**：与 `min_size` 对称，约束拖拽缩放与最大化；某轴给 `0` 表示该轴不限，上限小于下限时以下限为准。此前只有 Linux 后端内部在不可缩放窗口上用到。`--size` 截图覆盖会一并放开上限。
 - **窗口全屏 `EventCtx::toggle_fullscreen()` / `WindowOp::ToggleFullscreen` / `WindowState::fullscreen`**：四平台真全屏（Windows 换 `WS_POPUP` 铺满显示器并保存还原；X11 走 EWMH；Wayland 用 `xdg_toplevel.set_fullscreen`；macOS 用 `toggleFullScreen:`）。全屏中 `restore()` 即退出全屏，退出后回到进入前的位置、大小与最大化状态；全屏时不画无边框外框 / 圆角、没有缩放边。新增示例 `examples/fullscreen.rs`。(#33)
 - **`TrayHandle::set_visible(bool)` 运行期显隐托盘图标**：隐藏时图标从通知区 / 菜单栏彻底移除（不留
   空白槽），恢复后图标、提示、菜单与回调照旧；Windows 走 `NIS_HIDDEN`，shell 重启后按当前显隐重登记，

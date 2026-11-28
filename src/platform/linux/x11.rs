@@ -519,11 +519,14 @@ impl X11 {
         if !cfg.resizable {
             hints.min_size = Some((pw, ph));
             hints.max_size = Some((pw, ph));
-        } else if cfg.min_width > 0 || cfg.min_height > 0 {
-            hints.min_size = Some((
-                (cfg.min_width.max(0) as f32 * s).round() as i32,
-                (cfg.min_height.max(0) as f32 * s).round() as i32,
-            ));
+        } else {
+            let limits = cfg.size_limits();
+            let phys = |v: i32| (v.max(0) as f32 * s).round() as i32;
+            hints.min_size = limits.min.map(|(w, h)| (phys(w), phys(h)));
+            // WM_NORMAL_HINTS 的最大尺寸没有「某轴不限」：不限的轴给一个远超任何屏幕的值。
+            const UNBOUNDED: i32 = 1 << 24;
+            let axis = |v: i32| if v > 0 { phys(v) } else { UNBOUNDED };
+            hints.max_size = limits.max.map(|(w, h)| (axis(w), axis(h)));
         }
         let _ = hints.set_normal_hints(&*self.conn, id);
         if cfg.frameless {
