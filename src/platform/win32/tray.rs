@@ -20,8 +20,9 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
-    NIM_MODIFY, NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_STATE, NIF_TIP, NIIF_INFO, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NIN_BALLOONHIDE, NIN_BALLOONTIMEOUT, NIN_BALLOONUSERCLICK, NIS_HIDDEN,
+    NOTIFYICONDATAW, NOTIFY_ICON_STATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
@@ -126,6 +127,10 @@ pub(crate) struct TrayState {
     /// 局限：点击一条已被后续通知顶掉、却仍留在操作中心的旧通知，拿到的是**最新**那条的
     /// 标签（Shell 不告诉我们点的是哪条）；故回调只应激活界面，不做破坏性动作。
     notify_tag: Option<String>,
+    /// 当前是否应在通知区显示。`TrayHandle::set_visible` 改的是 Shell 侧状态，这里
+    /// 同步记一份，供 shell 重启后 `readd_target` 按现值重放——否则 `NIM_ADD` 会把
+    /// 一个刻意隐藏的图标重新显示出来。
+    visible: bool,
 }
 
 impl Drop for TrayState {
@@ -167,6 +172,7 @@ pub(crate) fn install(hwnd: HWND, tray: Tray) -> Option<TrayState> {
         owns_icon,
         tooltip: tray.tooltip.clone(),
         notify_tag: None,
+        visible: true,
         tray,
     })
 }
@@ -280,13 +286,27 @@ impl TrayState {
     /// 真正碰 OS 的是自由函数 [`readd`]。
     ///
     /// `hicon` 照旧取用而不重建：图标是**本进程**的 GDI 对象，explorer 死掉动不了它。
-    pub(crate) fn readd_target(&self) -> (HWND, u32, HICON, String) {
-        (self.hwnd, self.uid, self.hicon, self.tooltip.clone())
+    /// `visible` 一并带出，供 `readd_tray` 在 `NIM_ADD` 后按现值补发隐藏。
+    pub(crate) fn readd_target(&self) -> (HWND, u32, HICON, String, bool) {
+        (
+            self.hwnd,
+            self.uid,
+            self.hicon,
+            self.tooltip.clone(),
+            self.visible,
+        )
     }
 
     /// 记下已生效的新提示（`set_tooltip` 成功后调用），供 shell 重启时重放。
     pub(crate) fn remember_tooltip(&mut self, tip: String) {
         self.tooltip = tip;
+    }
+
+    /// 记下已生效的显隐状态（`set_visible` 之后调用，不论 shell 当时接不接受），
+    /// 供 shell 重启后按现值重放。与 `swap_icon` 同理：此刻不接受（explorer 正崩、
+    /// 等 TaskbarCreated）也要记下，重建时照此恢复。
+    pub(crate) fn remember_visible(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
     /// 换上新图标（`set_icon` 之后调用，不论 shell 当时接不接受），并销毁被换下的那个
@@ -320,9 +340,18 @@ impl TrayState {
 /// (hwnd, uid)，删除只是失败一下），但第二次广播时删掉的是一个**正在正常工作**的图标，
 /// 之后能否加回来全押在 `NIM_ADD` 上——而 `NIM_ADD` 恰恰是这条路上最会失败的一步
 /// （见 `readd_tray` 的重试）。那等于把「重复广播」从无害变成了可能亲手弄丢图标。
-pub(crate) fn readd(hwnd: HWND, uid: u32, hicon: HICON, tip: &str) -> bool {
+pub(crate) fn readd(hwnd: HWND, uid: u32, hicon: HICON, tip: &str, visible: bool) -> bool {
     unsafe {
-        let nid = add_nid(hwnd, uid, hicon, tip);
+        let mut nid = add_nid(hwnd, uid, hicon, tip);
+        // 显隐状态随登记一并带上：隐藏态的图标从一开始就不可见，没有「先 ADD 出来再
+        // 补发隐藏」的闪现窗口。
+        nid.uFlags |= NIF_STATE;
+        nid.dwStateMask = NIS_HIDDEN;
+        nid.dwState = if visible {
+            NOTIFY_ICON_STATE(0)
+        } else {
+            NIS_HIDDEN
+        };
         if Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool() {
             return true;
         }
@@ -371,6 +400,28 @@ pub(crate) fn set_icon(hwnd: HWND, uid: u32, hicon: HICON) -> bool {
         let mut nid = base_nid(hwnd, uid);
         nid.uFlags = NIF_ICON;
         nid.hIcon = hicon;
+        Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool()
+    }
+}
+
+/// 显示 / 隐藏托盘图标（`NIF_STATE` + `NIM_MODIFY`），返回 Shell 是否接受。
+///
+/// `NIS_HIDDEN` 让图标从通知区**彻底移除**（不留空白槽），而非换成透明图标；
+/// 图标句柄 / 提示 / 回调菜单全部保留，恢复时照旧生效。只带 `NIF_STATE`：
+/// `NIM_MODIFY` 只改 uFlags 声明的字段，不碰图标与提示。
+///
+/// **自由函数而非 `&TrayState` 方法**，理由同 `set_icon`：`Shell_NotifyIconW` 会
+/// 跨线程与 shell 通信，期间本线程泵入站消息，签名只收 hwnd/uid 让借用无处可藏。
+pub(crate) fn set_visible(hwnd: HWND, uid: u32, visible: bool) -> bool {
+    unsafe {
+        let mut nid = base_nid(hwnd, uid);
+        nid.uFlags = NIF_STATE;
+        nid.dwStateMask = NIS_HIDDEN;
+        nid.dwState = if visible {
+            NOTIFY_ICON_STATE(0)
+        } else {
+            NIS_HIDDEN
+        };
         Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool()
     }
 }

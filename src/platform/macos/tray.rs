@@ -112,6 +112,11 @@ fn apply_ops_to_item(mtm: MainThreadMarker, ops: Vec<crate::platform::tray::Tray
                         button.setImage(Some(&img));
                     }
                 }
+                // `NSStatusItem.isVisible`（10.12+）：隐藏时从菜单栏移除，item 与菜单/
+                // 回调绑定保持不变，恢复后照旧生效；重复设置同值幂等。
+                crate::platform::tray::TrayOp::SetVisible(visible) => {
+                    item.setVisible(visible);
+                }
                 // 已由 `apply_tray_ops` 切走，不会到这里。
                 crate::platform::tray::TrayOp::Quit => {}
             }

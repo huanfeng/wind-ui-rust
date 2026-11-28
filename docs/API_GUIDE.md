@@ -979,6 +979,11 @@ App::new("…", w, h).tray(
   图标上——录制中把圆点变红、同步出错打个角标，提示文字要悬停才看得见。排队与丢弃规则同
   上；尺寸为 0 或 `rgba.len() != w*h*4` 时这次改动被丢弃（打一行警告），图标保持原样。Windows 上 shell
   重启（explorer 崩溃 / 重启）后按**新**图标恢复。
+- **显隐图标**：`tray.set_visible(false)` 把托盘图标从通知区 / 菜单栏彻底移除（不留空白槽），
+  `true` 恢复；图标、提示、菜单与回调全部保留，反复调用幂等。适合只在后台工作时才露出托盘的常驻
+  工具。排队与丢弃规则同上。Windows（`NIS_HIDDEN`）与 macOS（`NSStatusItem.isVisible`）已实现；
+  Linux（SNI）无标准 hidden 语义，目前为 no-op。Windows 上 shell 重启后按**当前**显隐恢复，
+  隐藏态不会闪出图标。
 - **从外部请求退出**：`tray.quit()`。零窗口常驻模式下退出原本只能经托盘回调里的
   `TrayCtx::quit()`；守护进程收到外部关闭请求（IPC 关闭命令、SIGTERM 转发）时用它让
   `run_resident()` 正常返回 `true`，Drop 清理照常执行、托盘图标被移除（Windows 不留幽灵图标）。

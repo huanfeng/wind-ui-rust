@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`TrayHandle::set_visible(bool)` 运行期显隐托盘图标**：隐藏时图标从通知区 / 菜单栏彻底移除（不留
+  空白槽），恢复后图标、提示、菜单与回调照旧；Windows 走 `NIS_HIDDEN`，shell 重启后按当前显隐重登记，
+  macOS 走 `NSStatusItem.isVisible`，Linux（SNI）暂为 no-op。(#35)
+
 ## [0.38.0] - 2026-11-26
 
 ### 修复

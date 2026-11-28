@@ -753,10 +753,10 @@ unsafe fn readd_tray() {
     let target = app_host()
         .and_then(|h| h.tray.as_ref())
         .map(|ts| ts.readd_target());
-    let Some((h, uid, hicon, tip)) = target else {
+    let Some((h, uid, hicon, tip, visible)) = target else {
         return;
     };
-    if tray::readd(h, uid, hicon, &tip) {
+    if tray::readd(h, uid, hicon, &tip, visible) {
         TRAY_READD_RETRIES.with(|c| c.set(0));
         return;
     }
@@ -3267,6 +3267,14 @@ unsafe fn apply_tray_ops_to(h: HWND, uid: u32, ops: Vec<crate::platform::tray::T
                     None => {
                         let _ = DestroyIcon(hicon);
                     }
+                }
+            }
+            crate::platform::tray::TrayOp::SetVisible(visible) => {
+                // 先 OS 调用，再借宿主记账，理由同 `SetTooltip`。返回值不看：shell
+                // 此刻不接受也要记下，TaskbarCreated 后按现值重放（见 `readd_tray`）。
+                let _ = tray::set_visible(h, uid, visible);
+                if let Some(ts) = app_host().and_then(|host| host.tray.as_mut()) {
+                    ts.remember_visible(visible);
                 }
             }
             // 已由 `apply_tray_ops` 切走，不会到这里。
