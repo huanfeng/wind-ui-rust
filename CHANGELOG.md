@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **`text_input` 多行自动折行加中文禁则**：收尾标点不再落行首、起头标点不再落行尾，连续的 ASCII 字母数字串（含 `.` `-` `/` 等连接符）不再从中间劈开。空格断行仍优先；串比行宽还宽时按字符硬拆。默认行为变更，无开关。
+
 ### 新增
 
 - **窗口全屏 `EventCtx::toggle_fullscreen()` / `WindowOp::ToggleFullscreen` / `WindowState::fullscreen`**：四平台真全屏（Windows 换 `WS_POPUP` 铺满显示器并保存还原；X11 走 EWMH；Wayland 用 `xdg_toplevel.set_fullscreen`；macOS 用 `toggleFullScreen:`）。全屏中 `restore()` 即退出全屏，退出后回到进入前的位置、大小与最大化状态；全屏时不画无边框外框 / 圆角、没有缩放边。新增示例 `examples/fullscreen.rs`。(#33)

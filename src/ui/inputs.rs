@@ -2142,8 +2142,96 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 /// 把一个段落 [p,q)（不含换行符）按内框宽度切成视觉行，返回每行的
+/// 不能出现在行首的字符（收尾标点、省略号等，含常见 ASCII 对应物）。
+fn is_no_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '，' | '。'
+            | '、'
+            | '；'
+            | '：'
+            | '？'
+            | '！'
+            | '）'
+            | '】'
+            | '》'
+            | '」'
+            | '』'
+            | '〉'
+            | '〕'
+            | '”'
+            | '’'
+            | '…'
+            | '‥'
+            | '·'
+            | '％'
+            | '〜'
+            | ','
+            | '.'
+            | ';'
+            | ':'
+            | '?'
+            | '!'
+            | ')'
+            | ']'
+            | '}'
+            | '>'
+            | '%'
+    )
+}
+
+/// 不能出现在行尾的字符（起头标点）。
+fn is_no_line_end(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '【' | '《' | '「' | '『' | '〈' | '〔' | '“' | '‘' | '(' | '[' | '{' | '<'
+    )
+}
+
+/// 「词」内字符：ASCII 字母数字，以及把编号、版本号、网址、数值粘成一个整体的连接符。
+/// 这些串在没有空格的中文里本无断点，从中间劈开（`v1.2` / `3.14` / `a/b`）就读不了。
+fn is_ascii_word(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '.' | '_' | '-' | '\'' | '/' | ':' | '%' | '@' | '#' | '+' | '=' | '&' | '~' | '?'
+        )
+}
+
+/// 在默认落点 `brk`（下一行从 `chars[brk]` 起）上套中文排版的断行规则，只**回退**不前进：
+/// - 收尾标点不落行首：下一行首字符是收尾标点 ⇒ 把前一个字一起带下去；
+/// - 起头标点不落行尾；
+/// - 连续 ASCII 字母数字串（含 `.`/`-`/`/` 等连接符）不从中间劈开，整串退到下一行。
+///
+/// 回退会让本行空掉（串或标点堆比一行还宽）时放弃调整，返回原落点——宁可违规硬拆，
+/// 也不能造空行、死循环或丢字。返回值恒落在 `(ls, brk]` 内，故行首单调推进。
+fn kinsoku_break(chars: &[char], ls: usize, brk: usize) -> usize {
+    // 默认落点已经在空格之后：那是更强的天然断点，不动。
+    if brk > ls && chars[brk - 1] == ' ' {
+        return brk;
+    }
+    let mut b = brk;
+    while b > ls {
+        let (prev, next) = (chars[b - 1], chars[b]);
+        if is_no_line_start(next) && !is_ascii_word(prev) || is_no_line_end(prev) {
+            b -= 1;
+        } else if is_ascii_word(prev) && is_ascii_word(next) {
+            // 退到串首：串首之前那个字符不再属于词。
+            while b > ls && is_ascii_word(chars[b - 1]) {
+                b -= 1;
+            }
+        } else if is_no_line_start(next) {
+            b -= 1;
+        } else {
+            return b;
+        }
+    }
+    brk
+}
+
 /// `(start, end, hard)` 字符区间。`prefix[k-p]` 是 chars[p..k] 的累计宽度。
-/// `wrap=false` 时整段一行。优先在空格后断行（词换行），否则按字符断（含超宽单字符兜底）。
+/// `wrap=false` 时整段一行。优先在空格后断行（词换行），否则按字符断（含超宽单字符兜底），
+/// 并套 [`kinsoku_break`] 的中文禁则（标点不落错位置、ASCII 串不拆）。
 /// 末行 `hard=true`（段落以真实换行/文末结束）；软换行行 `hard=false`。
 fn wrap_paragraph(
     chars: &[char],
@@ -2178,6 +2266,7 @@ fn wrap_paragraph(
             if let Some(sp) = (ls..e).rev().find(|&k| chars[k] == ' ') {
                 brk = sp + 1;
             }
+            brk = kinsoku_break(chars, ls, brk);
         }
         let hard = brk == q;
         out.push((ls, brk, hard));
@@ -3832,6 +3921,77 @@ mod tests {
             wrap_paragraph(&chars, 3, 3, &[0], 50, true),
             vec![(3, 3, true)]
         );
+    }
+
+    /// 取每字 10 宽下 `chars` 的折行结果，`inner_w` 为行内可用宽度。
+    fn wrap10(text: &str, inner_w: i32) -> Vec<(usize, usize, bool)> {
+        let chars: Vec<char> = text.chars().collect();
+        let pre = prefix10(chars.len());
+        wrap_paragraph(&chars, 0, chars.len(), &pre, inner_w, true)
+    }
+
+    /// 禁则：收尾标点不落行首——默认会断成「甲乙 / 。丙」，应把「乙」连同「。」一起带下去。
+    #[test]
+    fn wrap_closing_punct_does_not_start_a_line() {
+        assert_eq!(
+            wrap10("甲乙。丙", 25),
+            vec![(0, 1, false), (1, 3, false), (3, 4, true)]
+        );
+    }
+
+    /// 禁则：起头标点不落行尾。
+    #[test]
+    fn wrap_opening_punct_does_not_end_a_line() {
+        assert_eq!(wrap10("甲乙（丙", 35), vec![(0, 2, false), (2, 4, true)]);
+    }
+
+    /// 连续的收尾标点要一路回退到不违规的位置，不能只退一格就停。
+    #[test]
+    fn wrap_stacked_closing_punct_backs_off_until_legal() {
+        // 默认 (0,2)|。」丙…：「乙。」整体回退无处可退时放弃调整，保证单调推进。
+        let lines = wrap10("甲乙。」丙", 25);
+        assert_eq!(lines, vec![(0, 1, false), (1, 3, false), (3, 5, true)]);
+    }
+
+    /// 连续 ASCII 字母数字串不被劈开：整串退到下一行。
+    #[test]
+    fn wrap_ascii_run_moves_to_next_line_whole() {
+        assert_eq!(wrap10("甲乙12", 35), vec![(0, 2, false), (2, 4, true)]);
+        assert_eq!(wrap10("甲乙v1.2.3", 65), vec![(0, 2, false), (2, 8, true)]);
+    }
+
+    /// 串本身比行宽还宽时无处可退：放弃调整，按字符硬拆（不死循环、不丢字）。
+    #[test]
+    fn wrap_overlong_ascii_run_is_hard_split() {
+        assert_eq!(
+            wrap10("甲12345", 35),
+            vec![(0, 1, false), (1, 4, false), (4, 6, true)]
+        );
+    }
+
+    /// 空格断行优先且不被禁则冲掉：落点已经是空格之后，不再回退。
+    #[test]
+    fn wrap_space_break_is_untouched_by_kinsoku() {
+        assert_eq!(
+            wrap10("ab cd ef", 45),
+            vec![(0, 3, false), (3, 6, false), (6, 8, true)]
+        );
+    }
+
+    /// 每个字符都恰好归入某一行：任何折行结果都无缝拼回原段落、行区间严格递增。
+    #[test]
+    fn wrap_is_a_partition_for_mixed_text() {
+        let text = "甲乙。」丙（丁）abc123，戊己 庚v1.2.3！？辛……壬癸、";
+        for w in [15, 25, 35, 45, 55, 85] {
+            let lines = wrap10(text, w);
+            let mut at = 0;
+            for &(s, e, _) in &lines {
+                assert_eq!(s, at, "宽 {w}：行必须首尾相接 {lines:?}");
+                assert!(e > s, "宽 {w}：每行至少一个字符 {lines:?}");
+                at = e;
+            }
+            assert_eq!(at, text.chars().count(), "宽 {w}：不丢字 {lines:?}");
+        }
     }
 
     fn dummy_input() -> TextInput {
